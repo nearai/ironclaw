@@ -36,8 +36,8 @@ use ironclaw_reborn_composition::{
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerCompletionPolicy, TriggerId,
-    TriggerPollerWorkerConfig, TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule,
-    TriggerSourceKind, TriggerState,
+    TriggerOwnershipScope, TriggerPollerWorkerConfig, TriggerRecord, TriggerRepository,
+    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use serde_json::{Value, json};
@@ -286,6 +286,7 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
         creator_user_id: user_id,
         agent_id: Some(agent_id),
         project_id: None,
+        ownership_scope: TriggerOwnershipScope::Personal,
         name: "trigger-e2e-test".to_string(),
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::cron("* * * * *").expect("valid cron expression"),
@@ -594,6 +595,7 @@ async fn trigger_poller_does_not_fire_trigger_with_future_next_run_at() {
         creator_user_id: user_id,
         agent_id: Some(agent_id),
         project_id: None,
+        ownership_scope: TriggerOwnershipScope::Personal,
         name: "trigger-e2e-future".to_string(),
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::cron("* * * * *").expect("valid cron expression"),
@@ -701,6 +703,7 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
         creator_user_id: user_id,
         agent_id: Some(agent_id),
         project_id: None,
+        ownership_scope: TriggerOwnershipScope::Personal,
         name: "trigger-e2e-unpaired".to_string(),
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::cron("* * * * *").expect("valid cron expression"),
@@ -757,6 +760,206 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
     );
 }
 
+/// A `Project`-scoped trigger must fire the full poller pipeline and
+/// produce a turn whose thread scope carries `owner_user_id = None`
+/// (explicitly project-owned, not creator-owned).
+/// `trusted_owner_scope_for_trigger_fire` in `trigger_poller_trusted_submit.rs`
+/// returns `TrustedOwnerScope::Project` for `TriggerOwnershipScope::Project`,
+/// which causes the binding to carry an explicit ownerless marker.
+/// `BindingRecord::resolution()` then emits `TurnScope::new_with_owner(..., None)`
+/// so the run-side `ThreadScopeResolver` reads the project thread, not the
+/// creator's personal subtree. This is the acceptance test for the blocking
+/// ownership-propagation fix described in the ownership-scope section of
+/// docs/plans/2026-06-05-trigger-delivery-default-outbound-e2e-plan.md.
+#[tokio::test]
+async fn trigger_poller_submits_project_turn_with_project_owned_scope() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let recording_gateway = Arc::new(RecordingGateway {
+        requests: Arc::new(TokioMutex::new(Vec::new())),
+    });
+
+    let runtime = build_runtime_with(
+        &root,
+        Arc::clone(&recording_gateway),
+        TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
+            TriggerPollerWorkerConfig {
+                poll_interval: Duration::from_millis(20),
+                ..Default::default()
+            },
+        ),
+    )
+    .await;
+
+    let repo = runtime
+        .trigger_repository()
+        .expect("local-dev runtime exposes trigger repository");
+    let pairing = runtime
+        .trigger_conversation_pairing()
+        .expect("trigger poller runtime exposes conversation pairing service");
+
+    let tenant_id = TenantId::new(TENANT).expect("tenant id");
+    let user_id = UserId::new(USER).expect("user id");
+    let agent_id = AgentId::new(AGENT).expect("agent id");
+    let trigger_id = TriggerId::new();
+
+    // Pair the external actor for the creator — the trusted trigger submission
+    // path still routes the conversation through the creator's external actor
+    // ref even for Project-scoped triggers. The difference is that the
+    // *binding ownership* produced by `trusted_owner_scope_for_trigger_fire`
+    // is `TrustedOwnerScope::Project` for `TriggerOwnershipScope::Project`,
+    // causing the binding and thread scope to be explicitly ownerless (project-owned).
+    pairing
+        .pair_external_actor(
+            tenant_id.clone(),
+            AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).expect("adapter kind"),
+            AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
+                .expect("installation id"),
+            ExternalActorRef::new(TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, user_id.as_str())
+                .expect("actor ref"),
+            user_id.clone(),
+        )
+        .await
+        .expect("pair external actor for project trigger creator");
+
+    let project_id = ironclaw_host_api::ProjectId::new("trigger-e2e-project").expect("project id");
+
+    // Project scope requires a project_id. trusted_owner_scope_for_trigger_fire
+    // returns TrustedOwnerScope::Project for this scope, producing an explicitly
+    // ownerless (project-owned) ThreadScope.
+    let record = TriggerRecord {
+        trigger_id,
+        tenant_id: tenant_id.clone(),
+        creator_user_id: user_id,
+        agent_id: Some(agent_id),
+        project_id: Some(project_id),
+        ownership_scope: TriggerOwnershipScope::Project,
+        name: "trigger-e2e-project".to_string(),
+        source: TriggerSourceKind::Schedule,
+        schedule: TriggerSchedule::cron("* * * * *").expect("valid cron expression"),
+        completion_policy: TriggerCompletionPolicy::CompleteAfterFirstFire,
+        prompt: TRIGGER_PROMPT.to_string(),
+        state: TriggerState::Scheduled,
+        next_run_at: Utc::now() - chrono::Duration::seconds(120),
+        last_run_at: None,
+        last_fired_slot: None,
+        last_status: None,
+        active_fire_slot: None,
+        active_run_ref: None,
+        created_at: Utc::now(),
+    };
+
+    // Confirm the seeded record carries the Project scope before the
+    // poller fires it — the ownership_scope field is what drives
+    // trusted_owner_scope_for_trigger_fire to return TrustedOwnerScope::Project.
+    assert_eq!(
+        record.ownership_scope,
+        TriggerOwnershipScope::Project,
+        "seeded trigger must carry Project scope to exercise the project-owned path"
+    );
+
+    repo.upsert_trigger(record.clone())
+        .await
+        .expect("upsert trigger record");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut record_was_mutated = false;
+    let mut prompt_seen = false;
+
+    while Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let current = repo
+            .get_trigger(tenant_id.clone(), record.trigger_id)
+            .await
+            .expect("get_trigger")
+            .expect("record present");
+
+        let mutated = current.last_fired_slot.is_some()
+            || current.last_run_at.is_some()
+            || current.last_status.is_some()
+            || current.active_fire_slot.is_some()
+            || current.state == TriggerState::Completed;
+
+        if mutated {
+            record_was_mutated = true;
+            let contents = recording_gateway.captured_message_contents().await;
+            if contents
+                .iter()
+                .any(|content| content.contains(TRIGGER_PROMPT))
+            {
+                prompt_seen = true;
+            }
+        }
+
+        if record_was_mutated && prompt_seen {
+            break;
+        }
+    }
+
+    // Wait for the settle writes to become visible before inspecting the
+    // final record (mirrors the pattern used in the happy-path test).
+    let final_record = wait_for_settled(
+        &repo,
+        &tenant_id,
+        record.trigger_id,
+        Duration::from_secs(5),
+        |r| r.last_fired_slot.is_some() && r.last_run_at.is_some(),
+    )
+    .await;
+
+    runtime.shutdown().await.expect("runtime shutdown");
+
+    let captured_contents = recording_gateway.captured_message_contents().await;
+
+    // The poller must have processed the record — project-owned scope must
+    // not cause a panic or unrecovered error before the turn is submitted.
+    assert!(
+        record_was_mutated,
+        "poller did not mutate Project-scoped trigger record within 15s \
+         — record: {final_record:?}"
+    );
+
+    // The LLM gateway must have received the trigger prompt, proving the
+    // full project-owned-scope thread-creation path ran: the binding was
+    // resolved with TrustedOwnerScope::Project, the thread was created with
+    // owner_user_id = None, and a turn was submitted against that project thread.
+    assert!(
+        prompt_seen,
+        "LLM gateway never received a request containing the trigger prompt for \
+         Project-scoped trigger — captured_messages: {captured_contents:?}, \
+         record: {final_record:?}"
+    );
+
+    // The settle writes must be visible, confirming the full fire path ran
+    // to completion under the project-owned scope.
+    assert!(
+        final_record.last_fired_slot.is_some(),
+        "Project scope: last_fired_slot should be set after fire \
+         — record: {final_record:?}",
+    );
+    assert!(
+        final_record.last_run_at.is_some(),
+        "Project scope: last_run_at should be set after fire \
+         — record: {final_record:?}",
+    );
+    assert_eq!(
+        final_record.last_status,
+        Some(TriggerRunStatus::Ok),
+        "Project scope: last_status should be Ok — the project-owned thread scope \
+         must be accepted by the full turn-submission stack \
+         — record: {final_record:?}",
+    );
+
+    // The persisted record must retain Project scope — not quietly
+    // rewritten to Personal — confirming the ownership field survives the
+    // full fire-and-settle round-trip.
+    assert_eq!(
+        final_record.ownership_scope,
+        TriggerOwnershipScope::Project,
+        "ownership_scope must remain Project after fire — record: {final_record:?}"
+    );
+}
+
 #[tokio::test]
 async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
     let root = tempfile::tempdir().expect("tempdir");
@@ -810,6 +1013,7 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
         creator_user_id: user_id,
         agent_id: Some(agent_id),
         project_id: None,
+        ownership_scope: TriggerOwnershipScope::Personal,
         name: "trigger-e2e-recurring".to_string(),
         source: TriggerSourceKind::Schedule,
         // Every minute — already at MIN_FIRE_CADENCE.

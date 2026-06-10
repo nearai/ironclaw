@@ -397,12 +397,12 @@ async fn communication_delivery_triggered_default_target_validates_preference_ta
 }
 
 #[tokio::test]
-async fn communication_delivery_triggered_shared_agent_scope_validates_shared_preference_target() {
+async fn communication_delivery_triggered_project_scope_validates_project_preference_target() {
     let store = InMemoryOutboundStateStore::default();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = FakeReplyTargetBindingValidator::default();
     let service = OutboundPolicyService::new(&store, &access_policy, &validator);
-    let scope = ownerless_agent_scope("thread-1");
+    let scope = ownerless_project_scope("thread-1");
     let request = run_notification_request_with_scope(
         scope.clone(),
         RunNotificationEventKind::FinalReplyReady,
@@ -410,7 +410,7 @@ async fn communication_delivery_triggered_shared_agent_scope_validates_shared_pr
             trigger: trigger_context(),
         },
     );
-    validator.allow(reply_ref("reply:shared-default"));
+    validator.allow(reply_ref("reply:project-default"));
     store
         .put_communication_preference(preference_record(
             Some("reply:personal-default"),
@@ -421,26 +421,26 @@ async fn communication_delivery_triggered_shared_agent_scope_validates_shared_pr
         .await
         .expect("seed personal preference");
     store
-        .put_communication_preference(shared_agent_preference_record(
-            Some("reply:shared-default"),
-            Some("reply:shared-progress"),
+        .put_communication_preference(project_preference_record(
+            Some("reply:project-default"),
+            Some("reply:project-progress"),
             None,
             None,
         ))
         .await
-        .expect("seed shared-agent preference");
+        .expect("seed project preference");
 
     let decision = service
         .prepare_communication_delivery_attempt(prepare_communication_request(request), &store)
         .await
-        .expect("shared-agent triggered default resolves and prepares")
-        .expect("shared-agent triggered default has a delivery target");
+        .expect("project triggered default resolves and prepares")
+        .expect("project triggered default has a delivery target");
 
     let OutboundDeliveryDecision::Authorized { attempt, target } = decision else {
         panic!("expected authorized delivery");
     };
-    assert_eq!(target.target(), &reply_ref("reply:shared-default"));
-    assert_eq!(attempt.candidate.target, reply_ref("reply:shared-default"));
+    assert_eq!(target.target(), &reply_ref("reply:project-default"));
+    assert_eq!(attempt.candidate.target, reply_ref("reply:project-default"));
     assert_eq!(attempt.candidate.kind, OutboundPushKind::FinalReply);
     assert_eq!(validator.calls(), 1);
     assert_eq!(
@@ -596,7 +596,7 @@ async fn communication_delivery_propagates_preference_repository_errors() {
 }
 
 #[tokio::test]
-async fn communication_delivery_triggered_from_source_route_final_reply_prefers_source_target() {
+async fn communication_delivery_triggered_from_source_route_final_reply_uses_preference_target() {
     let store = InMemoryOutboundStateStore::default();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = FakeReplyTargetBindingValidator::default();
@@ -610,7 +610,7 @@ async fn communication_delivery_triggered_from_source_route_final_reply_prefers_
             },
         },
     );
-    validator.allow(reply_ref("reply:source-route"));
+    validator.allow(reply_ref("reply:triggered-default"));
     store
         .put_communication_preference(preference_record(
             Some("reply:triggered-default"),
@@ -630,8 +630,11 @@ async fn communication_delivery_triggered_from_source_route_final_reply_prefers_
     let OutboundDeliveryDecision::Authorized { attempt, target } = decision else {
         panic!("expected authorized delivery");
     };
-    assert_eq!(target.target(), &reply_ref("reply:source-route"));
-    assert_eq!(attempt.candidate.target, reply_ref("reply:source-route"));
+    assert_eq!(target.target(), &reply_ref("reply:triggered-default"));
+    assert_eq!(
+        attempt.candidate.target,
+        reply_ref("reply:triggered-default")
+    );
     assert_eq!(validator.calls(), 1);
 }
 
@@ -1207,17 +1210,16 @@ fn preference_record(
     }
 }
 
-fn shared_agent_preference_record(
+fn project_preference_record(
     final_reply_target: Option<&str>,
     progress_target: Option<&str>,
     approval_prompt_target: Option<&str>,
     auth_prompt_target: Option<&str>,
 ) -> CommunicationPreferenceRecord {
     CommunicationPreferenceRecord {
-        scope: DeliveryDefaultScope::shared_agent(
+        scope: DeliveryDefaultScope::project(
             TenantId::new("tenant-a").expect("valid tenant"),
-            AgentId::new("agent-a").expect("valid agent"),
-            Some(ProjectId::new("project-a").expect("valid project")),
+            ProjectId::new("project-a").expect("valid project"),
         ),
         final_reply_target: final_reply_target.map(reply_ref),
         progress_target: progress_target.map(reply_ref),
@@ -1252,7 +1254,7 @@ fn turn_scope(thread: &str) -> TurnScope {
     )
 }
 
-fn ownerless_agent_scope(thread: &str) -> TurnScope {
+fn ownerless_project_scope(thread: &str) -> TurnScope {
     TurnScope::new_with_owner(
         TenantId::new("tenant-a").expect("valid tenant"),
         Some(AgentId::new("agent-a").expect("valid agent")),

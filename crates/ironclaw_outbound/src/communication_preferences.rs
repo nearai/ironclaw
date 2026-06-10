@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
+use ironclaw_host_api::{ProjectId, TenantId, Timestamp, UserId};
 use ironclaw_turns::ReplyTargetBindingRef;
 use serde::{Deserialize, Serialize};
 
@@ -13,11 +13,9 @@ pub enum DeliveryDefaultScope {
         tenant_id: TenantId,
         user_id: UserId,
     },
-    SharedAgent {
+    Project {
         tenant_id: TenantId,
-        agent_id: AgentId,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        project_id: Option<ProjectId>,
+        project_id: ProjectId,
     },
 }
 
@@ -26,21 +24,16 @@ impl DeliveryDefaultScope {
         Self::Personal { tenant_id, user_id }
     }
 
-    pub fn shared_agent(
-        tenant_id: TenantId,
-        agent_id: AgentId,
-        project_id: Option<ProjectId>,
-    ) -> Self {
-        Self::SharedAgent {
+    pub fn project(tenant_id: TenantId, project_id: ProjectId) -> Self {
+        Self::Project {
             tenant_id,
-            agent_id,
             project_id,
         }
     }
 
     pub fn tenant_id(&self) -> &TenantId {
         match self {
-            Self::Personal { tenant_id, .. } | Self::SharedAgent { tenant_id, .. } => tenant_id,
+            Self::Personal { tenant_id, .. } | Self::Project { tenant_id, .. } => tenant_id,
         }
     }
 }
@@ -62,13 +55,9 @@ impl CommunicationPreferenceKey {
         }
     }
 
-    pub fn shared_agent(
-        tenant_id: TenantId,
-        agent_id: AgentId,
-        project_id: Option<ProjectId>,
-    ) -> Self {
+    pub fn project(tenant_id: TenantId, project_id: ProjectId) -> Self {
         Self {
-            scope: DeliveryDefaultScope::shared_agent(tenant_id, agent_id, project_id),
+            scope: DeliveryDefaultScope::project(tenant_id, project_id),
         }
     }
 }
@@ -221,7 +210,7 @@ pub trait CommunicationPreferenceRepository: Send + Sync {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+    use ironclaw_host_api::{ProjectId, TenantId, UserId};
 
     use super::*;
 
@@ -237,10 +226,9 @@ mod tests {
     fn communication_preference_record_deserializes_scoped_and_legacy_payloads() {
         let updated_at = Utc::now();
         let scoped = CommunicationPreferenceRecord {
-            scope: DeliveryDefaultScope::shared_agent(
+            scope: DeliveryDefaultScope::project(
                 TenantId::new("tenant-pref-json").unwrap(),
-                AgentId::new("agent-pref-json").unwrap(),
-                Some(ProjectId::new("project-pref-json").unwrap()),
+                ProjectId::new("project-pref-json").unwrap(),
             ),
             final_reply_target: None,
             progress_target: None,

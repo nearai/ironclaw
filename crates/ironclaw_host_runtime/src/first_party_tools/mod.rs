@@ -218,6 +218,22 @@ pub fn builtin_first_party_handlers_with_trigger_create_hook(
     Ok(registry)
 }
 
+/// Create handlers for all built-in first-party capabilities with project
+/// trigger creation authority. Use only on trusted surfaces where the
+/// `project` ownership scope is permitted.
+pub fn builtin_first_party_handlers_with_project_trigger_authority(
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    trigger_create_hook: Arc<dyn TriggerCreateHook>,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    let mut registry = builtin_first_party_base_registry()?;
+    trigger_management::insert_handlers_with_project_authority(
+        &mut registry,
+        trigger_repository,
+        trigger_create_hook,
+    )?;
+    Ok(registry)
+}
+
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub fn builtin_first_party_handlers_with_trigger_clock(

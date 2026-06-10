@@ -15,9 +15,9 @@ use crate::{
     FireRetryableFailedRequest, FireTerminalFailedRequest, InMemoryTriggerRepository,
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerCompletionPolicy, TriggerError, TriggerFire,
-    TriggerId, TriggerInboundContentRef, TriggerMaterializedPrompt, TriggerPromptMaterializer,
-    TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunStatus, TriggerSchedule,
-    TriggerSourceKind, TriggerSourceProvider, TriggerState,
+    TriggerId, TriggerInboundContentRef, TriggerMaterializedPrompt, TriggerOwnershipScope,
+    TriggerPromptMaterializer, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus,
+    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerSourceProvider, TriggerState,
 };
 
 fn ts(seconds: i64) -> Timestamp {
@@ -49,6 +49,7 @@ fn sample_record(
         creator_user_id: user("user-a"),
         agent_id: Some(AgentId::new("agent-a").expect("valid agent")),
         project_id: Some(ProjectId::new("project-a").expect("valid project")),
+        ownership_scope: TriggerOwnershipScope::Personal,
         name: "daily summary".to_string(),
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::cron("0 8 * * *").expect("valid cron"),

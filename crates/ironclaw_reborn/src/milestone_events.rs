@@ -87,9 +87,21 @@ impl DurableLoopHostMilestoneScope {
         &self,
         milestone: &LoopHostMilestone,
     ) -> Result<ResourceScope, AgentLoopHostError> {
-        if milestone.scope.tenant_id != self.tenant_id
-            || milestone.scope.agent_id != self.agent_id
-            || milestone.scope.project_id != self.project_id
+        // Tenant is the hard authority boundary bound at construction time.
+        // Agent/project follow the milestone's run scope: one runtime serves
+        // runs across projects (e.g. project-owned trigger fires), so pinning
+        // them at composition time would reject legitimate cross-project runs.
+        if milestone.scope.tenant_id != self.tenant_id {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::ScopeMismatch,
+                "loop milestone scope does not match durable event scope",
+            ));
+        }
+        // A run-pinned sink (thread/run bound) keeps the strict agent check
+        // so per-run adapters cannot stitch events across runs.
+        if self.thread_id.is_some()
+            && self.agent_id.is_some()
+            && milestone.scope.agent_id != self.agent_id
         {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::ScopeMismatch,
@@ -114,11 +126,23 @@ impl DurableLoopHostMilestoneScope {
             }
             _ => {}
         }
+        // Event storage owner: the run's explicit thread owner wins; an
+        // ownerless (project-owned) run files under the run actor when one is
+        // bound, else the sink's composition-time fallback user. Mirrors
+        // `local_dev_resource_scope_for_run`. Membership-based projection
+        // (project principal storage) is the follow-up that replaces the
+        // actor fallback for project-owned runs.
+        let user_id = milestone
+            .scope
+            .explicit_owner_user_id()
+            .cloned()
+            .or_else(|| milestone.actor.as_ref().map(|actor| actor.user_id.clone()))
+            .unwrap_or_else(|| self.user_id.clone());
         Ok(ResourceScope {
             tenant_id: self.tenant_id.clone(),
-            user_id: self.user_id.clone(),
-            agent_id: self.agent_id.clone(),
-            project_id: self.project_id.clone(),
+            user_id,
+            agent_id: milestone.scope.agent_id.clone(),
+            project_id: milestone.scope.project_id.clone(),
             mission_id: self.mission_id.clone(),
             thread_id: Some(milestone.scope.thread_id.clone()),
             invocation_id: InvocationId::from_uuid(milestone.run_id.as_uuid()),
@@ -664,5 +688,120 @@ mod tests {
             Some("fail_closed")
         );
         assert_eq!(event.hook_id.as_deref(), Some(HOOK_HEX_ID));
+    }
+
+    fn composition_sink() -> DurableLoopHostMilestoneSink {
+        // Mirrors the runtime-composition sink: tenant + fallback user pinned,
+        // no thread/run pin, agent/project from the runtime identity.
+        let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+        let scope = DurableLoopHostMilestoneScope::new(
+            TenantId::new("tenant-hook-projection").unwrap(),
+            UserId::new("composition-fallback-user").unwrap(),
+            Some(AgentId::new("agent-hook-projection").unwrap()),
+            None,
+            None,
+        );
+        DurableLoopHostMilestoneSink::new(event_log, scope)
+    }
+
+    fn model_started_milestone_with_scope(scope: TurnScope) -> LoopHostMilestone {
+        LoopHostMilestone {
+            scope,
+            actor: None,
+            turn_id: TurnId::new(),
+            run_id: TurnRunId::new(),
+            loop_driver_id: LoopDriverId::new("hook-projection-driver").unwrap(),
+            kind: LoopHostMilestoneKind::ModelStarted {
+                requested_model_profile_id: None,
+            },
+        }
+    }
+
+    #[test]
+    fn composition_sink_rejects_cross_tenant_milestone() {
+        let sink = composition_sink();
+        let scope = TurnScope::new(
+            TenantId::new("other-tenant").unwrap(),
+            Some(AgentId::new("agent-hook-projection").unwrap()),
+            None,
+            ThreadId::new("thread-cross-tenant").unwrap(),
+        );
+        let error = sink
+            .runtime_event_for_milestone(&model_started_milestone_with_scope(scope))
+            .expect_err("cross-tenant milestone must be rejected");
+        assert_eq!(error.kind, AgentLoopHostErrorKind::ScopeMismatch);
+    }
+
+    #[test]
+    fn composition_sink_follows_run_project_and_explicit_owner() {
+        let sink = composition_sink();
+        let scope = TurnScope::new_with_owner(
+            TenantId::new("tenant-hook-projection").unwrap(),
+            Some(AgentId::new("agent-hook-projection").unwrap()),
+            Some(ProjectId::new("run-project").unwrap()),
+            ThreadId::new("thread-run-project").unwrap(),
+            Some(UserId::new("run-owner").unwrap()),
+        );
+        let event = sink
+            .runtime_event_for_milestone(&model_started_milestone_with_scope(scope))
+            .expect("projection succeeds")
+            .expect("model started milestone projects");
+        assert_eq!(
+            event.scope.project_id,
+            Some(ProjectId::new("run-project").unwrap())
+        );
+        assert_eq!(event.scope.user_id, UserId::new("run-owner").unwrap());
+    }
+
+    #[test]
+    fn composition_sink_project_owned_run_files_under_actor_then_fallback() {
+        let sink = composition_sink();
+        // Explicitly ownerless (project-owned) run scope.
+        let ownerless = TurnScope::new_with_owner(
+            TenantId::new("tenant-hook-projection").unwrap(),
+            Some(AgentId::new("agent-hook-projection").unwrap()),
+            Some(ProjectId::new("run-project").unwrap()),
+            ThreadId::new("thread-ownerless").unwrap(),
+            None,
+        );
+        let mut milestone = model_started_milestone_with_scope(ownerless);
+        milestone.actor = Some(ironclaw_turns::TurnActor::new(
+            UserId::new("run-actor").unwrap(),
+        ));
+        let event = sink
+            .runtime_event_for_milestone(&milestone)
+            .expect("projection succeeds")
+            .expect("milestone projects");
+        assert_eq!(event.scope.user_id, UserId::new("run-actor").unwrap());
+
+        let mut actorless = milestone.clone();
+        actorless.actor = None;
+        let event = sink
+            .runtime_event_for_milestone(&actorless)
+            .expect("projection succeeds")
+            .expect("milestone projects");
+        assert_eq!(
+            event.scope.user_id,
+            UserId::new("composition-fallback-user").unwrap()
+        );
+    }
+
+    #[test]
+    fn run_pinned_sink_still_rejects_agent_mismatch() {
+        let thread_id = ThreadId::new("thread-hook-projection").unwrap();
+        let run_id = TurnRunId::new();
+        let sink = projector_for(thread_id.clone(), run_id);
+        let scope = TurnScope::new(
+            TenantId::new("tenant-hook-projection").unwrap(),
+            Some(AgentId::new("other-agent").unwrap()),
+            Some(ProjectId::new("project-hook-projection").unwrap()),
+            thread_id,
+        );
+        let mut milestone = model_started_milestone_with_scope(scope);
+        milestone.run_id = run_id;
+        let error = sink
+            .runtime_event_for_milestone(&milestone)
+            .expect_err("agent mismatch on a run-pinned sink must be rejected");
+        assert_eq!(error.kind, AgentLoopHostErrorKind::ScopeMismatch);
     }
 }

@@ -6,6 +6,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ironclaw_conversations::TrustedOwnerScope;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_product_adapters::{
     AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ProductAdapterId,
@@ -585,6 +586,9 @@ impl ConversationBindingService for ProductConversationBindingService {
                         &resolution,
                     )?;
                     let owner_user_id = resolution.turn_scope.explicit_owner_user_id().cloned();
+                    let trusted_owner = owner_user_id
+                        .map(TrustedOwnerScope::User)
+                        .unwrap_or(TrustedOwnerScope::Unspecified);
                     let expected_user_id =
                         resolve_actor_user(&installation_scope, &request).await?;
                     if let Some(user_id) = expected_user_id.as_ref() {
@@ -597,7 +601,7 @@ impl ConversationBindingService for ProductConversationBindingService {
                             conversation_request,
                             installation_scope.default_agent_id.clone(),
                             installation_scope.default_project_id.clone(),
-                            owner_user_id,
+                            trusted_owner,
                         )
                         .await
                         .map_err(map_conversation_error)?;
@@ -624,13 +628,17 @@ impl ConversationBindingService for ProductConversationBindingService {
             self.apply_resolved_actor_binding(&installation_scope, &request, user_id)
                 .await?;
         }
+        let trusted_owner_for_subject = configured_subject_user_id
+            .clone()
+            .map(TrustedOwnerScope::User)
+            .unwrap_or(TrustedOwnerScope::Unspecified);
         let resolution = self
             .conversations
             .resolve_or_create_binding_with_trusted_scope(
                 conversation_request,
                 installation_scope.default_agent_id.clone(),
                 installation_scope.default_project_id.clone(),
-                configured_subject_user_id.clone(),
+                trusted_owner_for_subject,
             )
             .await
             .map_err(map_conversation_error)?;

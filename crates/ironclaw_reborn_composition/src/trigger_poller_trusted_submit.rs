@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use ironclaw_conversations::{
     AcceptedInboundMessage, AdapterInstallationId, AdapterKind, ConversationBindingResolution,
     ConversationBindingService, ConversationRouteKind, ExternalActorRef, ExternalConversationRef,
-    ExternalEventId, InboundTurnError, ResolveConversationRequest,
+    ExternalEventId, InboundTurnError, ResolveConversationRequest, TrustedOwnerScope,
 };
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
 use ironclaw_product_workflow::automation_trigger_thread_metadata_json;
@@ -16,8 +16,8 @@ use ironclaw_threads::{
     MessageContent, SessionThreadService as CanonicalSessionThreadService, ThreadScope,
 };
 use ironclaw_triggers::{
-    TriggerError, TriggerFire, TriggerId, TriggerMaterializedPrompt, TriggerPromptMaterializer,
-    TriggerTrustedInboundBinding,
+    TriggerError, TriggerFire, TriggerId, TriggerMaterializedPrompt, TriggerOwnershipScope,
+    TriggerPromptMaterializer, TriggerTrustedInboundBinding,
 };
 use ironclaw_turns::{AdmissionRejectionReason, TurnError};
 
@@ -181,24 +181,28 @@ where
             .map_err(trigger_prompt_safety_rejection)?;
         let trusted_inbound_binding = TriggerTrustedInboundBinding::for_fire(&fire);
         let resolve_request = trigger_resolve_request(&fire, &trusted_inbound_binding)?;
+        let trusted_owner = trusted_owner_scope_for_trigger_fire(&fire);
         let resolution = self
             .binding_service
             .resolve_or_create_binding_with_trusted_scope(
                 resolve_request,
                 fire.agent_id.clone(),
                 fire.project_id.clone(),
-                None,
+                trusted_owner,
             )
             .await
             .map_err(classify_materializer_inbound_error)?;
         let accepted = record_trigger_prompt(
             Arc::clone(&self.thread_service),
             &resolution,
-            fire.identity.trigger_id(),
-            &fire.prompt,
-            fire.identity.external_event_id().as_str(),
-            &self.default_agent_id,
-            None,
+            TriggerPromptRecording {
+                owner_user_id: owner_user_id_for_trigger_fire(&fire),
+                trigger_id: fire.identity.trigger_id(),
+                prompt: &fire.prompt,
+                external_event_id: fire.identity.external_event_id().as_str(),
+                default_agent_id: &self.default_agent_id,
+                accepted_message: None,
+            },
         )
         .await
         .map_err(classify_materializer_inbound_error)?;
@@ -268,15 +272,28 @@ fn trigger_resolve_request(
     })
 }
 
+struct TriggerPromptRecording<'a> {
+    owner_user_id: Option<UserId>,
+    trigger_id: TriggerId,
+    prompt: &'a str,
+    external_event_id: &'a str,
+    default_agent_id: &'a AgentId,
+    accepted_message: Option<&'a AcceptedInboundMessage>,
+}
+
 async fn record_trigger_prompt(
     thread_service: Arc<dyn CanonicalSessionThreadService>,
     resolution: &ConversationBindingResolution,
-    trigger_id: TriggerId,
-    prompt: &str,
-    external_event_id: &str,
-    default_agent_id: &AgentId,
-    accepted_message: Option<&AcceptedInboundMessage>,
+    recording: TriggerPromptRecording<'_>,
 ) -> Result<ironclaw_threads::AcceptedInboundMessage, InboundTurnError> {
+    let TriggerPromptRecording {
+        owner_user_id,
+        trigger_id,
+        prompt,
+        external_event_id,
+        default_agent_id,
+        accepted_message,
+    } = recording;
     let agent_id = resolution
         .turn_scope
         .agent_id
@@ -286,7 +303,7 @@ async fn record_trigger_prompt(
         tenant_id: resolution.turn_scope.tenant_id.clone(),
         agent_id,
         project_id: resolution.turn_scope.project_id.clone(),
-        owner_user_id: Some(resolution.actor.user_id.clone()),
+        owner_user_id,
         mission_id: None,
     };
     thread_service
@@ -325,6 +342,20 @@ async fn record_trigger_prompt(
         .map_err(|error| InboundTurnError::DurableState {
             reason: format!("trigger prompt thread record failed: {error}"),
         })
+}
+
+fn owner_user_id_for_trigger_fire(fire: &TriggerFire) -> Option<UserId> {
+    match fire.ownership_scope {
+        TriggerOwnershipScope::Personal => Some(fire.creator_user_id.clone()),
+        TriggerOwnershipScope::Project => None,
+    }
+}
+
+fn trusted_owner_scope_for_trigger_fire(fire: &TriggerFire) -> TrustedOwnerScope {
+    match fire.ownership_scope {
+        TriggerOwnershipScope::Personal => TrustedOwnerScope::User(fire.creator_user_id.clone()),
+        TriggerOwnershipScope::Project => TrustedOwnerScope::Project,
+    }
 }
 
 fn trigger_authorization_error(error: TriggerFireAuthError) -> TriggerError {
@@ -521,6 +552,7 @@ mod tests {
             creator_user_id: creator_user_id.clone(),
             agent_id: Some(agent_id.clone()),
             project_id: Some(project_id.clone()),
+            ownership_scope: TriggerOwnershipScope::Personal,
             prompt: "summarize unread mail".to_string(),
         };
         let auth_request = TriggerFireAuthRequest::for_fire(&fire);
@@ -605,7 +637,7 @@ mod tests {
             _request: ResolveConversationRequest,
             _trusted_agent_id: Option<AgentId>,
             _trusted_project_id: Option<ProjectId>,
-            _trusted_owner_user_id: Option<UserId>,
+            _trusted_owner: TrustedOwnerScope,
         ) -> Result<ConversationBindingResolution, InboundTurnError> {
             panic!("foreign-tenant materialization must reject before trusted binding resolution")
         }
@@ -649,6 +681,7 @@ mod tests {
             creator_user_id: input.creator_user_id,
             agent_id: input.agent_id,
             project_id: input.project_id,
+            ownership_scope: TriggerOwnershipScope::Personal,
             name: "worker test".to_string(),
             source: TriggerSourceKind::Schedule,
             schedule: TriggerSchedule::cron("0 8 * * *").expect("valid cron"),
@@ -678,6 +711,7 @@ mod tests {
             creator_user_id: creator_user_id.clone(),
             agent_id: Some(agent_id.clone()),
             project_id: Some(project_id.clone()),
+            ownership_scope: TriggerOwnershipScope::Personal,
             prompt: "summarize unread mail".to_string(),
         };
 
@@ -702,6 +736,7 @@ mod tests {
             creator_user_id,
             agent_id: None,
             project_id: None,
+            ownership_scope: TriggerOwnershipScope::Personal,
             prompt: "summarize unread mail".to_string(),
         };
 
@@ -722,6 +757,7 @@ mod tests {
             creator_user_id,
             agent_id: Some(agent_id),
             project_id: Some(project_id),
+            ownership_scope: TriggerOwnershipScope::Personal,
             prompt: "summarize unread mail".to_string(),
         };
         let request = TriggerFireAuthRequest::for_fire(&fire);
@@ -742,6 +778,7 @@ mod tests {
             creator_user_id,
             agent_id: None,
             project_id: None,
+            ownership_scope: TriggerOwnershipScope::Personal,
             prompt: "summarize unread mail".to_string(),
         };
         let request = TriggerFireAuthRequest::for_fire(&fire);
@@ -1509,22 +1546,28 @@ mod tests {
         record_trigger_prompt(
             thread_service.clone(),
             &resolution,
-            TriggerId::new(),
-            "summarize unread mail",
-            "event-trigger-hook",
-            &agent_id,
-            Some(&accepted_message),
+            TriggerPromptRecording {
+                owner_user_id: Some(resolution.actor.user_id.clone()),
+                trigger_id: TriggerId::new(),
+                prompt: "summarize unread mail",
+                external_event_id: "event-trigger-hook",
+                default_agent_id: &agent_id,
+                accepted_message: Some(&accepted_message),
+            },
         )
         .await
         .expect("prompt is recorded");
         record_trigger_prompt(
             thread_service.clone(),
             &resolution,
-            TriggerId::new(),
-            "summarize unread mail",
-            "event-trigger-hook",
-            &agent_id,
-            Some(&accepted_message),
+            TriggerPromptRecording {
+                owner_user_id: Some(resolution.actor.user_id.clone()),
+                trigger_id: TriggerId::new(),
+                prompt: "summarize unread mail",
+                external_event_id: "event-trigger-hook",
+                default_agent_id: &agent_id,
+                accepted_message: Some(&accepted_message),
+            },
         )
         .await
         .expect("prompt replay is idempotent");
@@ -1547,6 +1590,70 @@ mod tests {
         assert_eq!(
             history.messages[0].content.as_deref(),
             Some("summarize unread mail")
+        );
+    }
+
+    #[tokio::test]
+    async fn record_trigger_prompt_can_preserve_ownerless_project_scope() {
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let tenant_id = TenantId::new("trigger-shared-hook-tenant").expect("tenant id");
+        let agent_id = AgentId::new("trigger-shared-hook-agent").expect("agent id");
+        let project_id = ProjectId::new("trigger-shared-hook-project").expect("project id");
+        let actor_user_id = UserId::new("trigger-shared-hook-user").expect("user id");
+        let thread_id = ThreadId::new("trigger-shared-hook-thread").expect("thread id");
+        let source_binding_ref =
+            SourceBindingRef::new("trigger-shared-hook-source").expect("source binding");
+        let reply_target_binding_ref =
+            ReplyTargetBindingRef::new("trigger-shared-hook-reply").expect("reply binding");
+        let turn_scope = TurnScope::new_with_owner(
+            tenant_id.clone(),
+            Some(agent_id.clone()),
+            Some(project_id.clone()),
+            thread_id.clone(),
+            None,
+        );
+        let resolution = ConversationBindingResolution {
+            tenant_id: tenant_id.clone(),
+            actor: TurnActor::new(actor_user_id),
+            turn_scope,
+            source_binding_ref,
+            reply_target_binding_ref,
+            access: ThreadAccessDecision::Allowed,
+        };
+
+        record_trigger_prompt(
+            thread_service.clone(),
+            &resolution,
+            TriggerPromptRecording {
+                owner_user_id: None,
+                trigger_id: TriggerId::new(),
+                prompt: "summarize shared channel",
+                external_event_id: "event-trigger-shared-hook",
+                default_agent_id: &agent_id,
+                accepted_message: None,
+            },
+        )
+        .await
+        .expect("project-scoped prompt is recorded ownerless");
+
+        let history = thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: ThreadScope {
+                    tenant_id,
+                    agent_id,
+                    project_id: Some(project_id),
+                    owner_user_id: None,
+                    mission_id: None,
+                },
+                thread_id,
+            })
+            .await
+            .expect("ownerless shared-agent history loads");
+
+        assert_eq!(history.messages.len(), 1);
+        assert_eq!(
+            history.messages[0].content.as_deref(),
+            Some("summarize shared channel")
         );
     }
 
@@ -1583,6 +1690,7 @@ mod tests {
             creator_user_id: creator_user_id.clone(),
             agent_id: Some(agent_id.clone()),
             project_id: Some(project_id.clone()),
+            ownership_scope: TriggerOwnershipScope::Personal,
             name: "worker e2e".to_string(),
             source: TriggerSourceKind::Schedule,
             schedule: TriggerSchedule::cron("0 8 * * *").expect("valid cron"),
@@ -1715,6 +1823,7 @@ mod tests {
                 creator_user_id,
                 agent_id: Some(agent_id.clone()),
                 project_id: None,
+                ownership_scope: TriggerOwnershipScope::Personal,
                 prompt: "summarize unread mail".to_string(),
             })
             .await
@@ -1785,6 +1894,7 @@ mod tests {
                 creator_user_id,
                 agent_id: Some(agent_id.clone()),
                 project_id: None,
+                ownership_scope: TriggerOwnershipScope::Personal,
                 prompt: "summarize unread mail".to_string(),
             })
             .await

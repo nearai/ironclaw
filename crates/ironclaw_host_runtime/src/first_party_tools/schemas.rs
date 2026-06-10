@@ -316,7 +316,12 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                     "type": "string",
                     "description": "Prompt submitted when the trigger fires. Runtime validation caps UTF-8 content at 32768 bytes."
                 },
-                "cron": { "type": "string", "description": "Five-, six-, or seven-field cron expression; fire cadence must be at least one minute" }
+                "cron": { "type": "string", "description": "Five-, six-, or seven-field cron expression; fire cadence must be at least one minute" },
+                "ownership_scope": {
+                    "type": "string",
+                    "enum": ["personal", "project"],
+                    "description": "Delivery ownership for trigger fires. Defaults to personal. Use project only for project automation contexts where the trigger belongs to a project rather than an individual user."
+                }
             },
             "required": ["name", "prompt", "cron"],
             "additionalProperties": false

@@ -8,8 +8,8 @@ use ironclaw_host_api::{
     RuntimeDispatchErrorKind,
 };
 use ironclaw_triggers::{
-    TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
-    TriggerRunRecord, TriggerSchedule, TriggerSourceKind, TriggerState,
+    TriggerCompletionPolicy, TriggerError, TriggerId, TriggerOwnershipScope, TriggerRecord,
+    TriggerRepository, TriggerRunRecord, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -76,6 +76,23 @@ pub(super) fn insert_handlers_with_create_hook(
             repository,
             create_hook,
             clock: Arc::new(SystemTriggerManagementClock),
+            allow_project_ownership: false,
+        }),
+    )
+}
+
+pub(super) fn insert_handlers_with_project_authority(
+    registry: &mut FirstPartyCapabilityRegistry,
+    repository: Arc<dyn TriggerRepository>,
+    create_hook: Arc<dyn TriggerCreateHook>,
+) -> Result<(), HostApiError> {
+    insert_trigger_handlers(
+        registry,
+        Arc::new(TriggerManagementToolHandler {
+            repository,
+            create_hook,
+            clock: Arc::new(SystemTriggerManagementClock),
+            allow_project_ownership: true,
         }),
     )
 }
@@ -92,6 +109,7 @@ pub(super) fn insert_handlers_with_clock(
             repository,
             create_hook: Arc::new(NoopTriggerCreateHook),
             clock,
+            allow_project_ownership: false,
         }),
     )
 }
@@ -151,6 +169,7 @@ struct TriggerManagementToolHandler {
     repository: Arc<dyn TriggerRepository>,
     create_hook: Arc<dyn TriggerCreateHook>,
     clock: Arc<dyn TriggerManagementClock>,
+    allow_project_ownership: bool,
 }
 
 #[async_trait]
@@ -169,6 +188,7 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
                     &request.scope,
                     request.input,
                     self.clock.now(),
+                    self.allow_project_ownership,
                 )
                 .await?
             }
@@ -197,6 +217,8 @@ struct TriggerCreateInput {
     name: String,
     prompt: String,
     cron: String,
+    #[serde(default)]
+    ownership_scope: TriggerOwnershipScope,
 }
 
 #[derive(Deserialize)]
@@ -216,8 +238,12 @@ async fn create_trigger(
     scope: &ResourceScope,
     input: Value,
     now: DateTime<Utc>,
+    allow_project_ownership: bool,
 ) -> Result<Value, FirstPartyCapabilityError> {
     let input: TriggerCreateInput = serde_json::from_value(input).map_err(|_| input_error())?;
+    if input.ownership_scope == TriggerOwnershipScope::Project && !allow_project_ownership {
+        return Err(trigger_project_authority_error());
+    }
     let schedule = TriggerSchedule::cron(input.cron).map_err(trigger_input_error)?;
     let next_run_at = next_run_at_for_schedule(&schedule, now)?;
     let record = TriggerRecord {
@@ -226,6 +252,7 @@ async fn create_trigger(
         creator_user_id: scope.user_id.clone(),
         agent_id: scope.agent_id.clone(),
         project_id: scope.project_id.clone(),
+        ownership_scope: input.ownership_scope,
         name: input.name,
         source: TriggerSourceKind::Schedule,
         schedule,
@@ -335,6 +362,7 @@ fn trigger_output(record: &TriggerRecord, recent_runs: &[TriggerRunRecord]) -> V
         "trigger_id": record.trigger_id.to_string(),
         "agent_id": record.agent_id.as_ref().map(|id| id.as_str()),
         "project_id": record.project_id.as_ref().map(|id| id.as_str()),
+        "ownership_scope": record.ownership_scope.as_str(),
         "name": record.name,
         "source": record.source,
         "schedule": record.schedule,
@@ -375,6 +403,15 @@ fn next_run_at_for_schedule(
         .next_slot_after(now)
         .map_err(trigger_input_error)?
         .ok_or_else(input_error)
+}
+
+fn trigger_project_authority_error() -> FirstPartyCapabilityError {
+    tracing::debug!(
+        runtime_dispatch_error_kind = %RuntimeDispatchErrorKind::InputEncode,
+        rejection_reason = "project_ownership_authority_required",
+        "trigger_create rejected: project ownership requires a trusted shared-creation surface"
+    );
+    input_error()
 }
 
 fn trigger_input_error(error: TriggerError) -> FirstPartyCapabilityError {

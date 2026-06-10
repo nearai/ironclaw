@@ -3267,7 +3267,9 @@ async fn shared_lookup_binding_rejects_existing_binding_when_resolved_actor_diff
         },
         Some(AgentId::new("agent:alpha").expect("agent")),
         Some(ProjectId::new("project:alpha").expect("project")),
-        Some(UserId::new("user:subject").expect("subject")),
+        ironclaw_conversations::TrustedOwnerScope::User(
+            UserId::new("user:subject").expect("subject"),
+        ),
     )
     .await
     .expect("seed binding");
@@ -4400,7 +4402,7 @@ impl ironclaw_conversations::ConversationBindingService for CountingConversation
         request: ironclaw_conversations::ResolveConversationRequest,
         trusted_agent_id: Option<AgentId>,
         trusted_project_id: Option<ProjectId>,
-        trusted_owner_user_id: Option<UserId>,
+        trusted_owner: ironclaw_conversations::TrustedOwnerScope,
     ) -> Result<
         ironclaw_conversations::ConversationBindingResolution,
         ironclaw_conversations::InboundTurnError,
@@ -4411,7 +4413,7 @@ impl ironclaw_conversations::ConversationBindingService for CountingConversation
                 request,
                 trusted_agent_id,
                 trusted_project_id,
-                trusted_owner_user_id,
+                trusted_owner,
             )
             .await
     }

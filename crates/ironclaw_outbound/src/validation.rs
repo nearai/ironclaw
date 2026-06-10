@@ -189,9 +189,8 @@ pub(crate) fn validate_communication_preference(
                 });
             }
         }
-        DeliveryDefaultScope::SharedAgent {
+        DeliveryDefaultScope::Project {
             tenant_id,
-            agent_id,
             project_id,
         } => {
             if tenant_id.as_str().is_empty() {
@@ -199,17 +198,9 @@ pub(crate) fn validate_communication_preference(
                     reason: "communication preference tenant is required",
                 });
             }
-            if agent_id.as_str().is_empty() {
+            if project_id.as_str().is_empty() {
                 return Err(OutboundError::InvalidRequest {
-                    reason: "communication preference shared agent is required",
-                });
-            }
-            if project_id
-                .as_ref()
-                .is_some_and(|project_id| project_id.as_str().is_empty())
-            {
-                return Err(OutboundError::InvalidRequest {
-                    reason: "communication preference project is required when present",
+                    reason: "communication preference project is required",
                 });
             }
         }

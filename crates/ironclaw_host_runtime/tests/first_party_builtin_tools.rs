@@ -36,8 +36,8 @@ use ironclaw_host_runtime::{
     TIME_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
     TRIGGER_REMOVE_CAPABILITY_ID, TenantSandboxProcessPort, ToolCallHttpEgress, TriggerCreateHook,
     VisibleCapabilityAccess, VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID,
-    builtin_first_party_handlers, builtin_first_party_handlers_with_trigger_create_hook,
-    builtin_first_party_package,
+    builtin_first_party_handlers, builtin_first_party_handlers_with_project_trigger_authority,
+    builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
 };
 #[cfg(feature = "test-support")]
 use ironclaw_host_runtime::{
@@ -51,8 +51,8 @@ use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
 use ironclaw_secrets::InMemorySecretStore;
 use ironclaw_triggers::{
     ClaimDueFireRequest, ClearActiveFireRequest, FireAcceptedRequest, InMemoryTriggerRepository,
-    MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, TriggerError, TriggerRecord,
-    TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord,
+    MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, TriggerError, TriggerOwnershipScope,
+    TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -317,6 +317,196 @@ async fn builtin_trigger_create_stamps_caller_scope_and_persists_record() {
     assert_eq!(records[0].creator_user_id, context.resource_scope.user_id);
     assert_eq!(records[0].agent_id, context.resource_scope.agent_id);
     assert_eq!(records[0].project_id, context.resource_scope.project_id);
+    assert_eq!(records[0].ownership_scope, TriggerOwnershipScope::Personal);
+}
+
+#[tokio::test]
+async fn builtin_trigger_create_persists_project_ownership_scope() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_project_trigger_authority(repository.clone());
+    let context = execution_context_with_project_id(
+        [TRIGGER_CREATE_CAPABILITY_ID],
+        Some(ProjectId::new("proj-shared").unwrap()),
+    );
+
+    let output = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Project digest",
+            "prompt": "Summarize project queue",
+            "cron": "0 8 * * *",
+            "ownership_scope": "project"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["trigger"]["ownership_scope"], json!("project"));
+    let records = repository
+        .list_triggers(context.resource_scope.tenant_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].ownership_scope, TriggerOwnershipScope::Project);
+    assert_eq!(records[0].creator_user_id, context.resource_scope.user_id);
+    assert_eq!(records[0].project_id, context.resource_scope.project_id);
+}
+
+#[tokio::test]
+async fn builtin_trigger_create_rejects_project_ownership_without_project_scope() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_project_trigger_authority(repository.clone());
+    let mut context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+    // authority=true but project_id is None — TriggerRecord::validate() must reject
+    context.project_id = None;
+    context.resource_scope.project_id = None;
+
+    let error = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Project digest",
+            "prompt": "Summarize project queue",
+            "cron": "0 8 * * *",
+            "ownership_scope": "project"
+        }),
+        context.clone(),
+    )
+    .await
+    .expect_err("project trigger ownership requires project_id even when authority flag is set");
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    let records = repository
+        .list_triggers(context.resource_scope.tenant_id.clone())
+        .await
+        .unwrap();
+    assert!(records.is_empty());
+}
+
+#[tokio::test]
+async fn builtin_trigger_create_rejects_project_ownership_when_authority_flag_is_false() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    // runtime_with_trigger_repository uses builtin_first_party_handlers which has
+    // allow_project_ownership = false; project_id IS present to isolate the flag gate
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let error = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Project digest",
+            "prompt": "Summarize project queue",
+            "cron": "0 8 * * *",
+            "ownership_scope": "project"
+        }),
+        context.clone(),
+    )
+    .await
+    .expect_err("project ownership requires trusted shared-creation surface");
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    let records = repository
+        .list_triggers(context.resource_scope.tenant_id.clone())
+        .await
+        .unwrap();
+    assert!(records.is_empty());
+}
+
+#[tokio::test]
+async fn builtin_trigger_create_accepts_project_ownership_when_authority_flag_is_true_and_project_id_present()
+ {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_project_trigger_authority(repository.clone());
+    let context = execution_context_with_project_id(
+        [TRIGGER_CREATE_CAPABILITY_ID],
+        Some(ProjectId::new("proj-trusted").unwrap()),
+    );
+
+    let output = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Trusted project digest",
+            "prompt": "Summarize project queue",
+            "cron": "0 8 * * *",
+            "ownership_scope": "project"
+        }),
+        context.clone(),
+    )
+    .await
+    .expect("project ownership accepted on trusted surface");
+
+    assert_eq!(output["trigger"]["ownership_scope"], json!("project"));
+    let records = repository
+        .list_triggers(context.resource_scope.tenant_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].ownership_scope, TriggerOwnershipScope::Project);
+    assert_eq!(records[0].project_id, context.resource_scope.project_id);
+}
+
+#[tokio::test]
+async fn builtin_trigger_create_rejects_project_ownership_when_authority_is_true_but_project_id_missing()
+ {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    // authority=true but the resource scope has no project_id — TriggerRecord::validate() must reject
+    let runtime = runtime_with_project_trigger_authority(repository.clone());
+    let mut context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+    context.project_id = None;
+    context.resource_scope.project_id = None;
+
+    let error = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Project digest",
+            "prompt": "Summarize project queue",
+            "cron": "0 8 * * *",
+            "ownership_scope": "project"
+        }),
+        context.clone(),
+    )
+    .await
+    .expect_err("project trigger ownership requires project_id even when authority flag is set");
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    let records = repository
+        .list_triggers(context.resource_scope.tenant_id.clone())
+        .await
+        .unwrap();
+    assert!(records.is_empty());
+}
+
+#[tokio::test]
+async fn builtin_trigger_create_personal_ownership_unaffected_by_authority_flag() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    // Verify personal scope works on both authority variants
+    for runtime in [
+        Box::new(runtime_with_trigger_repository(repository.clone())) as Box<dyn HostRuntime>,
+        Box::new(runtime_with_project_trigger_authority(repository.clone()))
+            as Box<dyn HostRuntime>,
+    ] {
+        let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+        let output = invoke_with_context(
+            runtime.as_ref(),
+            TRIGGER_CREATE_CAPABILITY_ID,
+            json!({
+                "name": "Personal trigger",
+                "prompt": "Daily summary",
+                "cron": "0 8 * * *"
+            }),
+            context.clone(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(output["trigger"]["ownership_scope"], json!("personal"));
+    }
 }
 
 #[tokio::test]
@@ -6352,6 +6542,31 @@ fn runtime_with_trigger_repository_and_create_hook(
     .host_runtime_for_local_testing()
 }
 
+fn runtime_with_project_trigger_authority(
+    trigger_repository: Arc<dyn TriggerRepository>,
+) -> impl HostRuntime {
+    HostRuntimeServices::new(
+        Arc::new(registry()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers_with_project_trigger_authority(
+            trigger_repository,
+            Arc::new(NoopTriggerCreateHook),
+        )
+        .unwrap(),
+    ))
+    .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
+    .with_audit_sink(Arc::new(InMemoryAuditSink::new()))
+    .with_runtime_policy(local_dev_policy())
+    .with_trust_policy(Arc::new(trust_policy()))
+    .host_runtime_for_local_testing()
+}
+
 #[cfg(feature = "test-support")]
 fn runtime_with_trigger_repository_and_clock(
     trigger_repository: Arc<dyn TriggerRepository>,
@@ -6432,6 +6647,16 @@ impl TriggerCreateHook for PersistedRecordTriggerCreateHook {
             Some(record.trigger_id)
         );
         self.records.lock().unwrap().push(record.clone());
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct NoopTriggerCreateHook;
+
+#[async_trait]
+impl TriggerCreateHook for NoopTriggerCreateHook {
+    async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
         Ok(())
     }
 }
@@ -7625,6 +7850,20 @@ where
         MountView::default(),
     )
     .unwrap()
+}
+
+fn execution_context_with_project_id<I>(
+    grants: I,
+    project_id: Option<ProjectId>,
+) -> ExecutionContext
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
+    let mut ctx = execution_context(grants);
+    ctx.project_id = project_id.clone();
+    ctx.resource_scope.project_id = project_id;
+    ctx
 }
 
 fn execution_context_with_mounts<I>(grants: I, mounts: MountView) -> ExecutionContext

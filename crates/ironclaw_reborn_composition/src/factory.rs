@@ -2930,6 +2930,7 @@ mod tests {
             creator_user_id: UserId::new("pairing-test-user").expect("user id"),
             agent_id: None,
             project_id: None,
+            ownership_scope: ironclaw_triggers::TriggerOwnershipScope::Personal,
             name: "pairing test".to_string(),
             source: ironclaw_triggers::TriggerSourceKind::Schedule,
             schedule: ironclaw_triggers::TriggerSchedule::cron("* * * * *")

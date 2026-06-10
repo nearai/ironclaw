@@ -31,6 +31,14 @@ pub(crate) trait OutboundDeliveryTargetProvider: Send + Sync {
         caller: &WebUiAuthenticatedCaller,
     ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError>;
 
+    #[allow(dead_code, reason = "consumed by the project preference facade in the stacked surface PR")]
+    async fn list_project_delivery_targets(
+        &self,
+        _caller: &WebUiAuthenticatedCaller,
+    ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        Ok(Vec::new())
+    }
+
     async fn resolve_outbound_delivery_target(
         &self,
         caller: &WebUiAuthenticatedCaller,
@@ -53,6 +61,38 @@ pub(crate) trait OutboundDeliveryTargetProvider: Send + Sync {
     ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
         Ok(self
             .list_outbound_delivery_targets(caller)
+            .await?
+            .into_iter()
+            .find(|entry| {
+                entry.capabilities.final_replies
+                    && entry.reply_target_binding_ref.as_str() == target.as_str()
+            }))
+    }
+
+    #[allow(dead_code, reason = "consumed by the project preference facade in the stacked surface PR")]
+    async fn resolve_project_outbound_delivery_target(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        target_id: &RebornOutboundDeliveryTargetId,
+    ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        Ok(self
+            .list_project_delivery_targets(caller)
+            .await?
+            .into_iter()
+            .find(|entry| {
+                entry.capabilities.final_replies
+                    && entry.summary.target_id.as_str() == target_id.as_str()
+            }))
+    }
+
+    #[allow(dead_code, reason = "consumed by the project preference facade in the stacked surface PR")]
+    async fn resolve_project_reply_target_binding(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        target: &ReplyTargetBindingRef,
+    ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        Ok(self
+            .list_project_delivery_targets(caller)
             .await?
             .into_iter()
             .find(|entry| {

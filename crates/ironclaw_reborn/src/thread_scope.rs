@@ -44,6 +44,14 @@ impl ThreadScopeResolver {
         if turn_scope.has_explicit_thread_owner() {
             let mut scope = base.clone();
             scope.owner_user_id = turn_scope.explicit_owner_user_id().cloned();
+            // The turn scope carries the canonical project_id from the
+            // conversation binding. Override the base (which reflects the
+            // runtime's default project, possibly None) so the resolved
+            // ThreadScope matches the thread that was stored at materialize
+            // time — especially for project-scoped automation triggers
+            // where the trigger's project_id may differ from the runtime
+            // default.
+            scope.project_id = turn_scope.project_id.clone();
             return scope;
         }
         Self::resolve(base, actor)
@@ -113,5 +121,37 @@ mod tests {
             ThreadScopeResolver::resolve_for_turn(&base, &turn_scope, Some(&actor("alice")));
 
         assert_eq!(resolved.owner_user_id, None);
+    }
+
+    #[test]
+    fn explicit_ownerless_turn_with_project_id_overrides_base_project() {
+        // Trigger fires for project-scoped automations carry a project_id on
+        // the TurnScope that may differ from (or be absent on) the runtime
+        // base scope. resolve_for_turn must propagate the turn's project_id
+        // so the resolved ThreadScope matches the thread stored at
+        // materialize time.
+        use ironclaw_host_api::ProjectId;
+        let base = scope(Some("runtime-owner")); // base has project_id: None
+        let project_id = ProjectId::new("trigger-project").expect("project id");
+        let turn_scope = TurnScope::new_with_owner(
+            base.tenant_id.clone(),
+            Some(base.agent_id.clone()),
+            Some(project_id.clone()),
+            ironclaw_host_api::ThreadId::new("thread").unwrap(),
+            None, // Ownerless
+        );
+
+        let resolved =
+            ThreadScopeResolver::resolve_for_turn(&base, &turn_scope, Some(&actor("alice")));
+
+        assert_eq!(
+            resolved.owner_user_id, None,
+            "project-owned turn must be ownerless"
+        );
+        assert_eq!(
+            resolved.project_id.as_ref(),
+            Some(&project_id),
+            "project_id must come from turn_scope, not base"
+        );
     }
 }

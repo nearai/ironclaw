@@ -274,6 +274,37 @@ impl<'de> Deserialize<'de> for TriggerExternalEventId {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerOwnershipScope {
+    #[default]
+    Personal,
+    Project,
+}
+
+impl TriggerOwnershipScope {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Personal => "personal",
+            Self::Project => "project",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, TriggerError> {
+        match value {
+            "personal" => Ok(Self::Personal),
+            "project" => Ok(Self::Project),
+            _ => Err(TriggerError::InvalidRecord {
+                reason: format!("unknown trigger ownership scope: {value}"),
+            }),
+        }
+    }
+
+    pub fn is_project(&self) -> bool {
+        matches!(self, Self::Project)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TriggerRecord {
     pub trigger_id: TriggerId,
@@ -281,6 +312,8 @@ pub struct TriggerRecord {
     pub creator_user_id: UserId,
     pub agent_id: Option<AgentId>,
     pub project_id: Option<ProjectId>,
+    #[serde(default)]
+    pub ownership_scope: TriggerOwnershipScope,
     pub name: String,
     pub source: TriggerSourceKind,
     pub schedule: TriggerSchedule,
@@ -321,6 +354,11 @@ impl TriggerRecord {
         if self.active_run_ref.is_some() && self.active_fire_slot.is_none() {
             return Err(TriggerError::InvalidRecord {
                 reason: "active_run_ref requires active_fire_slot".to_string(),
+            });
+        }
+        if self.ownership_scope.is_project() && self.project_id.is_none() {
+            return Err(TriggerError::InvalidRecord {
+                reason: "project trigger ownership requires project_id".to_string(),
             });
         }
         self.schedule.validate()?;
@@ -505,6 +543,7 @@ pub struct TriggerFire {
     pub creator_user_id: UserId,
     pub agent_id: Option<AgentId>,
     pub project_id: Option<ProjectId>,
+    pub ownership_scope: TriggerOwnershipScope,
     pub prompt: String,
 }
 
@@ -656,6 +695,7 @@ impl TriggerSourceProvider for ScheduleTriggerSourceProvider {
             creator_user_id: record.creator_user_id.clone(),
             agent_id: record.agent_id.clone(),
             project_id: record.project_id.clone(),
+            ownership_scope: record.ownership_scope.clone(),
             prompt: record.prompt.clone(),
         }))
     }
@@ -1706,6 +1746,7 @@ mod tests {
             creator_user_id: user("user-a"),
             agent_id: Some(AgentId::new("agent-a").expect("valid agent")),
             project_id: Some(ProjectId::new("project-a").expect("valid project")),
+            ownership_scope: TriggerOwnershipScope::Personal,
             name: "daily summary".to_string(),
             source: TriggerSourceKind::Schedule,
             schedule: TriggerSchedule::cron("0 8 * * *").expect("valid cron"),
@@ -2425,5 +2466,60 @@ mod tests {
             .await
             .expect_err("poisoned mutex maps to backend through permanent-failure API");
         assert!(matches!(error, TriggerError::Backend { .. }));
+    }
+
+    // f-tst-4: validate() rejects Project without project_id, accepts it with project_id
+    #[test]
+    fn validate_rejects_project_scope_without_project_id() {
+        let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let mut record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_200));
+        record.ownership_scope = TriggerOwnershipScope::Project;
+        record.project_id = None;
+
+        let error = record
+            .validate()
+            .expect_err("project scope without project_id must fail");
+        assert!(
+            matches!(error, TriggerError::InvalidRecord { ref reason } if reason.contains("project_id")),
+            "expected InvalidRecord mentioning project_id, got {error}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_project_scope_with_project_id() {
+        let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let mut record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_200));
+        record.ownership_scope = TriggerOwnershipScope::Project;
+        record.project_id = Some(ProjectId::new("project-a").expect("valid project"));
+
+        record
+            .validate()
+            .expect("project scope with project_id must pass validation");
+    }
+
+    // f-tst-6: parse("bogus") returns Err with unknown-scope reason; round-trips for personal and project
+    #[test]
+    fn ownership_scope_parse_rejects_unknown_value() {
+        let error = TriggerOwnershipScope::parse("bogus").expect_err("unknown scope must fail");
+        assert!(
+            matches!(error, TriggerError::InvalidRecord { ref reason } if reason.contains("unknown trigger ownership scope")),
+            "expected InvalidRecord mentioning unknown scope, got {error}"
+        );
+    }
+
+    #[test]
+    fn ownership_scope_parse_and_as_str_round_trip_for_personal() {
+        let scope = TriggerOwnershipScope::parse("personal").expect("personal must parse");
+        assert_eq!(scope, TriggerOwnershipScope::Personal);
+        assert_eq!(scope.as_str(), "personal");
+        assert_eq!(TriggerOwnershipScope::Personal.as_str(), "personal");
+    }
+
+    #[test]
+    fn ownership_scope_parse_and_as_str_round_trip_for_project() {
+        let scope = TriggerOwnershipScope::parse("project").expect("project must parse");
+        assert_eq!(scope, TriggerOwnershipScope::Project);
+        assert_eq!(scope.as_str(), "project");
+        assert_eq!(TriggerOwnershipScope::Project.as_str(), "project");
     }
 }

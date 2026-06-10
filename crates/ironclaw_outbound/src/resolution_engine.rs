@@ -33,7 +33,7 @@ impl<'a> OutboundResolutionEngine<'a> {
     ) -> Result<CommunicationDeliveryResolution, OutboundError> {
         let CommunicationDeliveryResolutionRequest {
             scope,
-            actor,
+            actor: _,
             modality: _,
             intent,
         } = request;
@@ -44,8 +44,7 @@ impl<'a> OutboundResolutionEngine<'a> {
                 ))
             }
             CommunicationDeliveryIntent::RunNotification(context) => {
-                self.resolve_run_notification_context(scope, actor, context)
-                    .await
+                self.resolve_run_notification_context(scope, context).await
             }
         }
     }
@@ -64,7 +63,6 @@ impl<'a> OutboundResolutionEngine<'a> {
     async fn resolve_run_notification_context(
         &self,
         scope: &ironclaw_turns::TurnScope,
-        actor: &ironclaw_turns::TurnActor,
         context: &RunNotificationContext,
     ) -> Result<CommunicationDeliveryResolution, OutboundError> {
         let kind = context.delivery_kind();
@@ -73,16 +71,10 @@ impl<'a> OutboundResolutionEngine<'a> {
                 source_route.reply_target_binding_ref.clone()
             }
             RunNotificationOrigin::Triggered { .. } => {
-                self.resolve_triggered_target(scope, actor, kind).await?
+                self.resolve_triggered_target(scope, kind).await?
             }
-            RunNotificationOrigin::TriggeredFromSourceRoute { source_route, .. } => {
-                self.resolve_triggered_from_source_route_target(
-                    kind,
-                    &source_route.reply_target_binding_ref,
-                    scope,
-                    actor,
-                )
-                .await?
+            RunNotificationOrigin::TriggeredFromSourceRoute { .. } => {
+                self.resolve_triggered_target(scope, kind).await?
             }
             RunNotificationOrigin::SystemEvent { reason } => {
                 return Ok(CommunicationDeliveryResolution::NoDelivery { reason: *reason });
@@ -94,100 +86,86 @@ impl<'a> OutboundResolutionEngine<'a> {
         ))
     }
 
-    async fn resolve_triggered_from_source_route_target(
-        &self,
-        kind: CommunicationDeliveryKind,
-        source_route_target: &ReplyTargetBindingRef,
-        scope: &ironclaw_turns::TurnScope,
-        actor: &ironclaw_turns::TurnActor,
-    ) -> Result<ReplyTargetBindingRef, OutboundError> {
-        match kind {
-            CommunicationDeliveryKind::ApprovalPrompt => {
-                self.load_preference_target(scope, actor, PreferenceTargetKind::ApprovalPrompt)
-                    .await
-            }
-            CommunicationDeliveryKind::AuthPrompt => {
-                self.load_preference_target(scope, actor, PreferenceTargetKind::AuthPrompt)
-                    .await
-            }
-            CommunicationDeliveryKind::FinalReply
-            | CommunicationDeliveryKind::ProgressUpdate
-            | CommunicationDeliveryKind::DeliveryStatus => Ok(source_route_target.clone()),
-        }
-    }
-
     async fn resolve_triggered_target(
         &self,
         scope: &ironclaw_turns::TurnScope,
-        actor: &ironclaw_turns::TurnActor,
         kind: CommunicationDeliveryKind,
     ) -> Result<ReplyTargetBindingRef, OutboundError> {
+        let key = triggered_preference_key(scope)?;
+        let record = self
+            .communication_preferences
+            .load_communication_preference(key)
+            .await?;
+
         match kind {
             CommunicationDeliveryKind::FinalReply => {
-                self.load_preference_target(scope, actor, PreferenceTargetKind::FinalReply)
-                    .await
+                let record = record
+                    .ok_or_else(|| missing_preference_error(PreferenceTargetKind::FinalReply))?;
+                record
+                    .record
+                    .final_reply_target
+                    .ok_or_else(|| missing_preference_error(PreferenceTargetKind::FinalReply))
             }
             CommunicationDeliveryKind::ProgressUpdate
             | CommunicationDeliveryKind::DeliveryStatus => {
-                self.load_preference_target(scope, actor, PreferenceTargetKind::Progress)
-                    .await
+                let record = record
+                    .ok_or_else(|| missing_preference_error(PreferenceTargetKind::Progress))?;
+                record
+                    .record
+                    .progress_target
+                    .ok_or_else(|| missing_preference_error(PreferenceTargetKind::Progress))
             }
             CommunicationDeliveryKind::ApprovalPrompt => {
-                self.load_preference_target(scope, actor, PreferenceTargetKind::ApprovalPrompt)
-                    .await
+                let record = record.ok_or_else(|| {
+                    missing_preference_error(PreferenceTargetKind::ApprovalPrompt)
+                })?;
+                let targets = record.record;
+                targets
+                    .approval_prompt_target
+                    .or(targets.final_reply_target)
+                    .ok_or_else(|| missing_preference_error(PreferenceTargetKind::ApprovalPrompt))
             }
             CommunicationDeliveryKind::AuthPrompt => {
-                self.load_preference_target(scope, actor, PreferenceTargetKind::AuthPrompt)
-                    .await
+                let record = record
+                    .ok_or_else(|| missing_preference_error(PreferenceTargetKind::AuthPrompt))?;
+                let targets = record.record;
+                targets
+                    .auth_prompt_target
+                    .or(targets.final_reply_target)
+                    .ok_or_else(|| missing_preference_error(PreferenceTargetKind::AuthPrompt))
             }
         }
-    }
-
-    async fn load_preference_target(
-        &self,
-        scope: &ironclaw_turns::TurnScope,
-        actor: &ironclaw_turns::TurnActor,
-        kind: PreferenceTargetKind,
-    ) -> Result<ReplyTargetBindingRef, OutboundError> {
-        let key = default_preference_key(scope, actor);
-        let Some(record) = self
-            .communication_preferences
-            .load_communication_preference(key)
-            .await?
-        else {
-            return Err(missing_preference_error(kind));
-        };
-        let record = record.record;
-
-        let target = match kind {
-            PreferenceTargetKind::FinalReply => record.final_reply_target,
-            PreferenceTargetKind::Progress => record.progress_target,
-            PreferenceTargetKind::ApprovalPrompt => record.approval_prompt_target,
-            PreferenceTargetKind::AuthPrompt => record.auth_prompt_target,
-        };
-
-        target.ok_or_else(|| missing_preference_error(kind))
     }
 }
 
-fn default_preference_key(
+/// Resolve the preference key for triggered-origin runs.
+///
+/// Returns `Err` when ownership is ambiguous or insufficient:
+/// - no explicit owner and no explicit ownerless marker with a project id
+///   both fail closed, because silently falling back to the actor's personal
+///   default would deliver to the wrong recipient.
+fn triggered_preference_key(
     scope: &ironclaw_turns::TurnScope,
-    actor: &ironclaw_turns::TurnActor,
-) -> CommunicationPreferenceKey {
+) -> Result<CommunicationPreferenceKey, OutboundError> {
     match (
         scope.explicit_owner_user_id(),
         scope.has_explicit_thread_owner(),
-        scope.agent_id.clone(),
+        scope.project_id.clone(),
     ) {
-        (Some(owner_user_id), _, _) => {
-            CommunicationPreferenceKey::personal(scope.tenant_id.clone(), owner_user_id.clone())
-        }
-        (None, true, Some(agent_id)) => CommunicationPreferenceKey::shared_agent(
+        (Some(owner_user_id), _, _) => Ok(CommunicationPreferenceKey::personal(
             scope.tenant_id.clone(),
-            agent_id,
-            scope.project_id.clone(),
-        ),
-        _ => CommunicationPreferenceKey::personal(scope.tenant_id.clone(), actor.user_id.clone()),
+            owner_user_id.clone(),
+        )),
+        (None, true, Some(project_id)) => Ok(CommunicationPreferenceKey::project(
+            scope.tenant_id.clone(),
+            project_id,
+        )),
+        (None, true, None) => Err(OutboundError::InvalidRequest {
+            reason: "triggered run is explicitly ownerless but has no project id; cannot resolve delivery default",
+        }),
+        _ => Err(OutboundError::InvalidRequest {
+            reason: "triggered run has ambiguous ownership: no explicit owner marker; cannot resolve delivery default",
+        }),
     }
 }
 
@@ -444,27 +422,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn triggered_final_reply_actor_fallback_uses_actor_personal_default_even_with_agent() {
+    async fn triggered_ambiguous_ownership_with_agent_fails_closed() {
+        // Scope built with TurnScope::new (no explicit owner / no ownerless marker).
+        // For Triggered origin this must error rather than silently fall back to the
+        // actor's personal default, which would deliver to the wrong recipient.
         let store = InMemoryOutboundStateStore::default();
         let engine = OutboundResolutionEngine::new(&store);
 
         store
             .put_communication_preference(CommunicationPreferenceRecord {
-                scope: DeliveryDefaultScope::shared_agent(
+                scope: DeliveryDefaultScope::project(
                     TenantId::new("tenant-a").expect("valid tenant"),
-                    AgentId::new("agent-a").expect("valid agent"),
-                    Some(ProjectId::new("project-a").expect("valid project")),
+                    ProjectId::new("project-a").expect("valid project"),
                 ),
-                final_reply_target: Some(reply_ref("reply:shared-default")),
-                progress_target: Some(reply_ref("reply:shared-progress")),
-                approval_prompt_target: Some(reply_ref("reply:shared-approval")),
-                auth_prompt_target: Some(reply_ref("reply:shared-auth")),
+                final_reply_target: Some(reply_ref("reply:project-default")),
+                progress_target: Some(reply_ref("reply:project-progress")),
+                approval_prompt_target: Some(reply_ref("reply:project-approval")),
+                auth_prompt_target: Some(reply_ref("reply:project-auth")),
                 default_modality: Some(CommunicationModality::Text),
                 updated_at: now(),
                 updated_by: UserId::new("tenant-admin").expect("valid updater"),
             })
             .await
-            .expect("seed shared-agent preference");
+            .expect("seed project preference");
         store
             .put_communication_preference(preference_record(
                 Some("reply:personal-default"),
@@ -475,7 +455,7 @@ mod tests {
             .await
             .expect("seed personal preference");
 
-        let candidate = engine
+        let err = engine
             .resolve(&CommunicationDeliveryResolutionRequest {
                 scope: actor_fallback_agent_scope(),
                 actor: actor("user-a"),
@@ -488,15 +468,18 @@ mod tests {
                 }),
             })
             .await
-            .expect("actor-fallback triggered final reply resolves");
-        let candidate = expect_candidate(candidate);
+            .expect_err("ambiguous triggered ownership must fail closed");
 
-        assert_eq!(candidate.target, reply_ref("reply:personal-default"));
-        assert_eq!(candidate.kind, CommunicationDeliveryKind::FinalReply);
+        assert!(
+            matches!(err, OutboundError::InvalidRequest { .. }),
+            "expected InvalidRequest for ambiguous triggered ownership, got {err:?}"
+        );
     }
 
     #[tokio::test]
-    async fn triggered_final_reply_actor_fallback_without_agent_uses_actor_personal_default() {
+    async fn triggered_ambiguous_ownership_without_agent_fails_closed() {
+        // Scope built with TurnScope::new (no explicit owner / no ownerless marker),
+        // no agent. Must fail closed for Triggered origin.
         let store = InMemoryOutboundStateStore::default();
         let engine = OutboundResolutionEngine::new(&store);
 
@@ -510,7 +493,7 @@ mod tests {
             .await
             .expect("seed personal preference");
 
-        let candidate = engine
+        let err = engine
             .resolve(&CommunicationDeliveryResolutionRequest {
                 scope: actor_fallback_agentless_scope(),
                 actor: actor("user-a"),
@@ -523,35 +506,35 @@ mod tests {
                 }),
             })
             .await
-            .expect("actor-fallback triggered final reply resolves");
-        let candidate = expect_candidate(candidate);
+            .expect_err("ambiguous triggered ownership without agent must fail closed");
 
-        assert_eq!(candidate.target, reply_ref("reply:personal-default"));
-        assert_eq!(candidate.kind, CommunicationDeliveryKind::FinalReply);
+        assert!(
+            matches!(err, OutboundError::InvalidRequest { .. }),
+            "expected InvalidRequest for ambiguous triggered ownership, got {err:?}"
+        );
     }
 
     #[tokio::test]
-    async fn triggered_final_reply_ownerless_agent_scope_uses_shared_agent_default() {
+    async fn triggered_final_reply_ownerless_project_scope_uses_project_default() {
         let store = InMemoryOutboundStateStore::default();
         let engine = OutboundResolutionEngine::new(&store);
 
         store
             .put_communication_preference(CommunicationPreferenceRecord {
-                scope: DeliveryDefaultScope::shared_agent(
+                scope: DeliveryDefaultScope::project(
                     TenantId::new("tenant-a").expect("valid tenant"),
-                    AgentId::new("agent-a").expect("valid agent"),
-                    Some(ProjectId::new("project-a").expect("valid project")),
+                    ProjectId::new("project-a").expect("valid project"),
                 ),
-                final_reply_target: Some(reply_ref("reply:shared-default")),
-                progress_target: Some(reply_ref("reply:shared-progress")),
-                approval_prompt_target: Some(reply_ref("reply:shared-approval")),
-                auth_prompt_target: Some(reply_ref("reply:shared-auth")),
+                final_reply_target: Some(reply_ref("reply:project-default")),
+                progress_target: Some(reply_ref("reply:project-progress")),
+                approval_prompt_target: Some(reply_ref("reply:project-approval")),
+                auth_prompt_target: Some(reply_ref("reply:project-auth")),
                 default_modality: Some(CommunicationModality::Text),
                 updated_at: now(),
                 updated_by: UserId::new("tenant-admin").expect("valid updater"),
             })
             .await
-            .expect("seed shared-agent preference");
+            .expect("seed project preference");
         store
             .put_communication_preference(preference_record(
                 Some("reply:personal-default"),
@@ -564,7 +547,7 @@ mod tests {
 
         let candidate = engine
             .resolve(&CommunicationDeliveryResolutionRequest {
-                scope: ownerless_agent_scope(),
+                scope: ownerless_project_scope(),
                 actor: actor("user-a"),
                 modality: CommunicationModality::Text,
                 intent: CommunicationDeliveryIntent::RunNotification(RunNotificationContext {
@@ -575,15 +558,17 @@ mod tests {
                 }),
             })
             .await
-            .expect("shared-agent triggered final reply resolves");
+            .expect("project triggered final reply resolves");
         let candidate = expect_candidate(candidate);
 
-        assert_eq!(candidate.target, reply_ref("reply:shared-default"));
+        assert_eq!(candidate.target, reply_ref("reply:project-default"));
         assert_eq!(candidate.kind, CommunicationDeliveryKind::FinalReply);
     }
 
     #[tokio::test]
-    async fn triggered_final_reply_ownerless_without_agent_uses_actor_personal_default() {
+    async fn triggered_ownerless_with_agent_but_no_project_id_fails_closed() {
+        // Explicitly ownerless scope with an agent_id but no project_id must
+        // fail closed: the new project key requires project_id to be present.
         let store = InMemoryOutboundStateStore::default();
         let engine = OutboundResolutionEngine::new(&store);
 
@@ -597,9 +582,9 @@ mod tests {
             .await
             .expect("seed personal preference");
 
-        let candidate = engine
+        let err = engine
             .resolve(&CommunicationDeliveryResolutionRequest {
-                scope: ownerless_agentless_scope(),
+                scope: ownerless_agentful_no_project_scope(),
                 actor: actor("user-a"),
                 modality: CommunicationModality::Text,
                 intent: CommunicationDeliveryIntent::RunNotification(RunNotificationContext {
@@ -610,11 +595,51 @@ mod tests {
                 }),
             })
             .await
-            .expect("ownerless agentless triggered final reply resolves");
-        let candidate = expect_candidate(candidate);
+            .expect_err("ownerless with agent but no project_id must fail closed");
 
-        assert_eq!(candidate.target, reply_ref("reply:personal-default"));
-        assert_eq!(candidate.kind, CommunicationDeliveryKind::FinalReply);
+        assert!(
+            matches!(err, OutboundError::InvalidRequest { .. }),
+            "expected InvalidRequest for ownerless scope with agent but no project_id, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn triggered_ownerless_agentless_no_project_id_fails_closed() {
+        // Scope built with TurnScope::new_with_owner(..., None) and no agent, no
+        // project_id — explicitly ownerless but no project_id to resolve project key.
+        // Must fail closed for Triggered origin.
+        let store = InMemoryOutboundStateStore::default();
+        let engine = OutboundResolutionEngine::new(&store);
+
+        store
+            .put_communication_preference(preference_record(
+                Some("reply:personal-default"),
+                Some("reply:personal-progress"),
+                Some("reply:personal-approval"),
+                Some("reply:personal-auth"),
+            ))
+            .await
+            .expect("seed personal preference");
+
+        let err = engine
+            .resolve(&CommunicationDeliveryResolutionRequest {
+                scope: ownerless_no_project_scope(),
+                actor: actor("user-a"),
+                modality: CommunicationModality::Text,
+                intent: CommunicationDeliveryIntent::RunNotification(RunNotificationContext {
+                    event_kind: RunNotificationEventKind::FinalReplyReady,
+                    origin: RunNotificationOrigin::Triggered {
+                        trigger: trigger_context(),
+                    },
+                }),
+            })
+            .await
+            .expect_err("ownerless no-project triggered run must fail closed");
+
+        assert!(
+            matches!(err, OutboundError::InvalidRequest { .. }),
+            "expected InvalidRequest for ownerless no-project triggered run, got {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -708,6 +733,36 @@ mod tests {
             },
             "reply:approval",
             CommunicationDeliveryKind::ApprovalPrompt,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn triggered_from_source_route_final_reply_uses_the_final_reply_preference() {
+        let store = InMemoryOutboundStateStore::default();
+        let engine = OutboundResolutionEngine::new(&store);
+
+        store
+            .put_communication_preference(preference_record(
+                Some("reply:final"),
+                Some("reply:progress"),
+                Some("reply:approval"),
+                Some("reply:auth"),
+            ))
+            .await
+            .expect("seed preference");
+
+        assert_resolves_to(
+            &engine,
+            RunNotificationEventKind::FinalReplyReady,
+            RunNotificationOrigin::TriggeredFromSourceRoute {
+                trigger: trigger_context(),
+                source_route: SourceRouteContext {
+                    reply_target_binding_ref: reply_ref("reply:source-route"),
+                },
+            },
+            "reply:final",
+            CommunicationDeliveryKind::FinalReply,
         )
         .await;
     }
@@ -868,7 +923,7 @@ mod tests {
                     reply_target_binding_ref: reply_ref("reply:source-route"),
                 },
             },
-            "reply:source-route",
+            "reply:progress",
             CommunicationDeliveryKind::ProgressUpdate,
         )
         .await;
@@ -881,10 +936,239 @@ mod tests {
                     reply_target_binding_ref: reply_ref("reply:source-route"),
                 },
             },
-            "reply:source-route",
+            "reply:progress",
             CommunicationDeliveryKind::DeliveryStatus,
         )
         .await;
+    }
+
+    // ── Approval/auth final-reply fallback (product decision 9) ──────────────
+
+    #[tokio::test]
+    async fn triggered_approval_prompt_falls_back_to_final_reply_when_approval_slot_unset() {
+        // (a) explicit approval_prompt_target unset → falls back to final_reply_target
+        let store = InMemoryOutboundStateStore::default();
+        let engine = OutboundResolutionEngine::new(&store);
+
+        store
+            .put_communication_preference(preference_record(
+                Some("reply:final"),
+                None,
+                None, // approval_prompt_target unset
+                None,
+            ))
+            .await
+            .expect("seed preference with only final reply target");
+
+        assert_resolves_to(
+            &engine,
+            RunNotificationEventKind::ApprovalNeeded,
+            RunNotificationOrigin::Triggered {
+                trigger: trigger_context(),
+            },
+            "reply:final",
+            CommunicationDeliveryKind::ApprovalPrompt,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn triggered_explicit_approval_slot_wins_over_final_reply_fallback() {
+        // (b) explicit approval_prompt_target wins over final_reply_target
+        let store = InMemoryOutboundStateStore::default();
+        let engine = OutboundResolutionEngine::new(&store);
+
+        store
+            .put_communication_preference(preference_record(
+                Some("reply:final"),
+                None,
+                Some("reply:approval-explicit"),
+                None,
+            ))
+            .await
+            .expect("seed preference with both final reply and explicit approval target");
+
+        assert_resolves_to(
+            &engine,
+            RunNotificationEventKind::ApprovalNeeded,
+            RunNotificationOrigin::Triggered {
+                trigger: trigger_context(),
+            },
+            "reply:approval-explicit",
+            CommunicationDeliveryKind::ApprovalPrompt,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn triggered_approval_prompt_fails_closed_when_neither_slot_set() {
+        // (c) neither approval_prompt_target nor final_reply_target set → fail closed
+        let store = InMemoryOutboundStateStore::default();
+        let engine = OutboundResolutionEngine::new(&store);
+
+        store
+            .put_communication_preference(preference_record(
+                None, // final_reply_target also unset
+                None, None, // approval_prompt_target unset
+                None,
+            ))
+            .await
+            .expect("seed preference with no targets");
+
+        let err = engine
+            .resolve(&run_notification_request(
+                RunNotificationEventKind::ApprovalNeeded,
+                RunNotificationOrigin::Triggered {
+                    trigger: trigger_context(),
+                },
+            ))
+            .await
+            .expect_err("both slots unset must fail closed");
+
+        assert!(
+            matches!(err, OutboundError::InvalidRequest { .. }),
+            "expected InvalidRequest when neither approval nor final-reply target is set, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn triggered_auth_prompt_falls_back_to_final_reply_when_auth_slot_unset() {
+        // (d) auth_prompt_target unset → falls back to final_reply_target
+        let store = InMemoryOutboundStateStore::default();
+        let engine = OutboundResolutionEngine::new(&store);
+
+        store
+            .put_communication_preference(preference_record(
+                Some("reply:final"),
+                None,
+                None,
+                None, // auth_prompt_target unset
+            ))
+            .await
+            .expect("seed preference with only final reply target");
+
+        assert_resolves_to(
+            &engine,
+            RunNotificationEventKind::AuthRequired,
+            RunNotificationOrigin::Triggered {
+                trigger: trigger_context(),
+            },
+            "reply:final",
+            CommunicationDeliveryKind::AuthPrompt,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn triggered_progress_update_does_not_fall_back_to_final_reply() {
+        // (e) ProgressUpdate gets NO fallback to final_reply_target
+        let store = InMemoryOutboundStateStore::default();
+        let engine = OutboundResolutionEngine::new(&store);
+
+        store
+            .put_communication_preference(preference_record(
+                Some("reply:final"),
+                None, // progress_target unset
+                None,
+                None,
+            ))
+            .await
+            .expect("seed preference with only final reply target");
+
+        let err = engine
+            .resolve(&run_notification_request(
+                RunNotificationEventKind::ProgressUpdate,
+                RunNotificationOrigin::Triggered {
+                    trigger: trigger_context(),
+                },
+            ))
+            .await
+            .expect_err("ProgressUpdate must not fall back to final_reply_target");
+
+        assert!(
+            matches!(err, OutboundError::InvalidRequest { .. }),
+            "expected InvalidRequest when progress target is unset (no fallback), got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn triggered_from_source_route_ambiguous_ownership_fails_closed() {
+        // (f) TriggeredFromSourceRoute with ambiguous scope also fails closed
+        let store = InMemoryOutboundStateStore::default();
+        let engine = OutboundResolutionEngine::new(&store);
+
+        store
+            .put_communication_preference(preference_record(
+                Some("reply:personal-default"),
+                Some("reply:personal-progress"),
+                Some("reply:personal-approval"),
+                Some("reply:personal-auth"),
+            ))
+            .await
+            .expect("seed personal preference");
+
+        let err = engine
+            .resolve(&CommunicationDeliveryResolutionRequest {
+                scope: actor_fallback_agent_scope(),
+                actor: actor("user-a"),
+                modality: CommunicationModality::Text,
+                intent: CommunicationDeliveryIntent::RunNotification(RunNotificationContext {
+                    event_kind: RunNotificationEventKind::FinalReplyReady,
+                    origin: RunNotificationOrigin::TriggeredFromSourceRoute {
+                        trigger: trigger_context(),
+                        source_route: SourceRouteContext {
+                            reply_target_binding_ref: reply_ref("reply:source-route"),
+                        },
+                    },
+                }),
+            })
+            .await
+            .expect_err("TriggeredFromSourceRoute with ambiguous ownership must fail closed");
+
+        assert!(
+            matches!(err, OutboundError::InvalidRequest { .. }),
+            "expected InvalidRequest for ambiguous TriggeredFromSourceRoute ownership, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn triggered_from_source_route_ambiguous_ownership_agentless_fails_closed() {
+        // (f) TriggeredFromSourceRoute with ambiguous scope (no agent) also fails closed
+        let store = InMemoryOutboundStateStore::default();
+        let engine = OutboundResolutionEngine::new(&store);
+
+        store
+            .put_communication_preference(preference_record(
+                Some("reply:personal-default"),
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("seed personal preference");
+
+        let err = engine
+            .resolve(&CommunicationDeliveryResolutionRequest {
+                scope: actor_fallback_agentless_scope(),
+                actor: actor("user-a"),
+                modality: CommunicationModality::Text,
+                intent: CommunicationDeliveryIntent::RunNotification(RunNotificationContext {
+                    event_kind: RunNotificationEventKind::FinalReplyReady,
+                    origin: RunNotificationOrigin::TriggeredFromSourceRoute {
+                        trigger: trigger_context(),
+                        source_route: SourceRouteContext {
+                            reply_target_binding_ref: reply_ref("reply:source-route"),
+                        },
+                    },
+                }),
+            })
+            .await
+            .expect_err("TriggeredFromSourceRoute with agentless ambiguous scope must fail closed");
+
+        assert!(
+            matches!(err, OutboundError::InvalidRequest { .. }),
+            "expected InvalidRequest for agentless ambiguous TriggeredFromSourceRoute, got {err:?}"
+        );
     }
 
     fn requested_request(requested_target: &str) -> CommunicationDeliveryResolutionRequest {
@@ -974,7 +1258,7 @@ mod tests {
         )
     }
 
-    fn ownerless_agent_scope() -> TurnScope {
+    fn ownerless_project_scope() -> TurnScope {
         TurnScope::new_with_owner(
             TenantId::new("tenant-a").expect("valid tenant"),
             Some(AgentId::new("agent-a").expect("valid agent")),
@@ -984,11 +1268,23 @@ mod tests {
         )
     }
 
-    fn ownerless_agentless_scope() -> TurnScope {
+    /// Explicitly ownerless, has an agent, but no project_id — must fail closed.
+    fn ownerless_agentful_no_project_scope() -> TurnScope {
+        TurnScope::new_with_owner(
+            TenantId::new("tenant-a").expect("valid tenant"),
+            Some(AgentId::new("agent-a").expect("valid agent")),
+            None,
+            thread_id("thread-a"),
+            None,
+        )
+    }
+
+    /// Explicitly ownerless, no agent, no project_id — must fail closed.
+    fn ownerless_no_project_scope() -> TurnScope {
         TurnScope::new_with_owner(
             TenantId::new("tenant-a").expect("valid tenant"),
             None,
-            Some(ProjectId::new("project-a").expect("valid project")),
+            None,
             thread_id("thread-a"),
             None,
         )

@@ -49,7 +49,7 @@ use crate::{
     ConversationActorPairingService, ConversationBindingResolution, ConversationBindingService,
     ExternalActorRef, ExternalConversationIdentity, InMemoryConversationServices, InboundTurnError,
     LinkConversationRequest, LinkedConversationBinding, ReplyTargetBinding,
-    ResolveConversationRequest, SessionThreadService, ThreadMessageRecord,
+    ResolveConversationRequest, SessionThreadService, ThreadMessageRecord, TrustedOwnerScope,
     ValidateReplyTargetRequest,
     memory::{
         AcceptedMessageReplayKey, ActorKey, BindingKey, BindingRecord, ExternalEventRouteKey,
@@ -506,14 +506,14 @@ impl ConversationBindingService for RebornFilesystemConversationServices {
         request: ResolveConversationRequest,
         trusted_agent_id: Option<ironclaw_host_api::AgentId>,
         trusted_project_id: Option<ironclaw_host_api::ProjectId>,
-        trusted_owner_user_id: Option<ironclaw_host_api::UserId>,
+        trusted_owner: TrustedOwnerScope,
     ) -> Result<ConversationBindingResolution, InboundTurnError> {
         self.inner
             .resolve_or_create_binding_with_trusted_scope(
                 request,
                 trusted_agent_id,
                 trusted_project_id,
-                trusted_owner_user_id,
+                trusted_owner,
             )
             .await
     }

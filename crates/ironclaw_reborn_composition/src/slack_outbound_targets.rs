@@ -11,13 +11,18 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_outbound::{
+    CommunicationModality, OutboundError, ReplyTargetBindingClaim, ReplyTargetBindingValidator,
+    ReplyTargetValidationRequest, ValidatedReplyTargetBinding,
+};
 use ironclaw_product_adapters::{AdapterInstallationId, ExternalActorRef, ExternalConversationRef};
 #[cfg(test)]
 use ironclaw_product_adapters::{EgressCredentialHandle, ProtocolHttpEgress};
 use ironclaw_product_workflow::{
-    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
-    RebornOutboundDeliveryTargetSummary, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, WebUiAuthenticatedCaller,
+    ProductOutboundTargetResolver, ProductWorkflowError, RebornOutboundDeliveryTargetCapabilities,
+    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetSummary, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, VerifiedProductOutboundTargetMetadata,
+    WebUiAuthenticatedCaller,
 };
 use ironclaw_slack_v2_adapter::{SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID};
 use ironclaw_turns::ReplyTargetBindingRef;
@@ -382,12 +387,18 @@ impl SlackHostBetaOutboundTargetProvider {
             });
         }
         let (actor_kind, rest) = take_product_binding_segment(rest, "actor_kind")?;
+        let (user_id, rest) = take_product_binding_segment(rest, "user")?;
         let (actor_id, rest) = take_product_binding_segment(rest, "actor")?;
-        if actor_kind != SLACK_USER_ACTOR_KIND || actor_id.is_empty() || !rest.is_empty() {
+        if actor_kind != SLACK_USER_ACTOR_KIND
+            || actor_id.is_empty()
+            || user_id.is_empty()
+            || !rest.is_empty()
+        {
             return None;
         }
         Some(ParsedSlackReplyTarget::PersonalDm {
             dm_channel_id: conversation_id.to_string(),
+            user_id: UserId::new(user_id).ok()?,
             slack_user_id: SlackUserId::new(actor_id),
         })
     }
@@ -492,6 +503,7 @@ impl SlackHostBetaOutboundTargetProvider {
                 self.project_id.as_ref(),
                 &self.team_id,
                 &target.dm_channel_id,
+                &target.key.user_id,
                 &target.slack_user_id,
             )?,
         })
@@ -543,10 +555,16 @@ impl SlackHostBetaOutboundTargetProvider {
     async fn resolve_personal_dm_for_binding(
         &self,
         caller: &WebUiAuthenticatedCaller,
+        binding_user_id: &UserId,
         dm_channel_id: &str,
         slack_user_id: &SlackUserId,
     ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
         if caller.tenant_id != self.tenant_id {
+            return Ok(None);
+        }
+        // Defense-in-depth: reject if the binding's user_id differs from the
+        // authenticated caller even when the call site already checks this.
+        if binding_user_id != &caller.user_id {
             return Ok(None);
         }
         let key = SlackPersonalDmTargetKey::new(
@@ -568,6 +586,120 @@ impl SlackHostBetaOutboundTargetProvider {
             return Ok(None);
         }
         self.entry_for_personal_dm_target(&target).map(Some)
+    }
+
+    fn scope_matches(&self, request: &ReplyTargetValidationRequest) -> bool {
+        request.scope.tenant_id == self.tenant_id
+            && request.scope.agent_id.as_ref() == Some(&self.agent_id)
+            && request.scope.project_id == self.project_id
+            && request.modality == CommunicationModality::Text
+    }
+
+    async fn validate_shared_channel_target(
+        &self,
+        request: &ReplyTargetValidationRequest,
+        channel_id: &str,
+    ) -> Result<(), OutboundError> {
+        if !self.scope_matches(request) {
+            return Err(OutboundError::AccessDenied);
+        }
+        let route = self
+            .shared_channel_route_for_channel(channel_id)
+            .await
+            .map_err(reborn_services_error_to_outbound_error)?
+            .ok_or(OutboundError::AccessDenied)?;
+        if let Some(owner_user_id) = request.scope.explicit_owner_user_id()
+            && &route.subject_user_id != owner_user_id
+        {
+            return Err(OutboundError::AccessDenied);
+        }
+        Ok(())
+    }
+
+    async fn validate_personal_dm_target(
+        &self,
+        request: &ReplyTargetValidationRequest,
+        dm_channel_id: &str,
+        user_id: &UserId,
+        slack_user_id: &SlackUserId,
+    ) -> Result<(), OutboundError> {
+        if !self.scope_matches(request) {
+            return Err(OutboundError::AccessDenied);
+        }
+        let Some(owner_user_id) = request.scope.explicit_owner_user_id() else {
+            return Err(OutboundError::AccessDenied);
+        };
+        if owner_user_id != user_id {
+            return Err(OutboundError::AccessDenied);
+        }
+        let key = SlackPersonalDmTargetKey::new(
+            self.tenant_id.clone(),
+            self.installation_id.clone(),
+            self.team_id.as_str().to_string(),
+            user_id.clone(),
+        )
+        .map_err(personal_dm_error_to_outbound_error)?;
+        let target = self
+            .personal_dm_target_store
+            .load_personal_dm_target(&key)
+            .await
+            .map_err(personal_dm_error_to_outbound_error)?
+            .ok_or(OutboundError::AccessDenied)?;
+        if target.dm_channel_id != dm_channel_id || target.slack_user_id != *slack_user_id {
+            return Err(OutboundError::AccessDenied);
+        }
+        Ok(())
+    }
+
+    async fn metadata_for_shared_channel(
+        &self,
+        channel_id: &str,
+    ) -> Result<VerifiedProductOutboundTargetMetadata, ProductWorkflowError> {
+        self.shared_channel_route_for_channel(channel_id)
+            .await
+            .map_err(reborn_services_error_to_product_workflow_error)?
+            .ok_or(ProductWorkflowError::BindingAccessDenied)?;
+        let conversation =
+            ExternalConversationRef::new(Some(self.team_id.as_str()), channel_id, None, None)
+                .map_err(|_| ProductWorkflowError::BindingAccessDenied)?;
+        Ok(VerifiedProductOutboundTargetMetadata {
+            external_conversation_ref: conversation,
+            external_actor_ref: None,
+        })
+    }
+
+    async fn metadata_for_personal_dm(
+        &self,
+        dm_channel_id: &str,
+        user_id: &UserId,
+        slack_user_id: &SlackUserId,
+    ) -> Result<VerifiedProductOutboundTargetMetadata, ProductWorkflowError> {
+        let key = SlackPersonalDmTargetKey::new(
+            self.tenant_id.clone(),
+            self.installation_id.clone(),
+            self.team_id.as_str().to_string(),
+            user_id.clone(),
+        )
+        .map_err(personal_dm_error_to_product_workflow_error)?;
+        let target = self
+            .personal_dm_target_store
+            .load_personal_dm_target(&key)
+            .await
+            .map_err(personal_dm_error_to_product_workflow_error)?
+            .ok_or(ProductWorkflowError::BindingAccessDenied)?;
+        if target.dm_channel_id != dm_channel_id || target.slack_user_id != *slack_user_id {
+            return Err(ProductWorkflowError::BindingAccessDenied);
+        }
+        let conversation =
+            ExternalConversationRef::new(Some(self.team_id.as_str()), dm_channel_id, None, None)
+                .map_err(|_| ProductWorkflowError::BindingAccessDenied)?;
+        let actor =
+            ExternalActorRef::new(SLACK_USER_ACTOR_KIND, slack_user_id.as_str(), None::<&str>)
+                .map_err(|_| ProductWorkflowError::BindingAccessDenied)?;
+        Ok(VerifiedProductOutboundTargetMetadata {
+            external_conversation_ref: conversation,
+            external_actor_ref: Some(actor),
+        })
     }
 }
 
@@ -690,6 +822,59 @@ impl OutboundDeliveryTargetProvider for SlackHostBetaOutboundTargetProvider {
         Ok(targets)
     }
 
+    async fn list_project_delivery_targets(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+    ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        if caller.tenant_id != self.tenant_id {
+            return Ok(Vec::new());
+        }
+        // Paginate through all shared-channel routes (all subjects) for this
+        // installation so that project-level listings show every configured
+        // channel regardless of which user the store assigned it to.
+        let mut cursor = 0;
+        let mut routes: Vec<SlackConfiguredChannelRoute> = Vec::new();
+        loop {
+            let page = self
+                .channel_route_store
+                .list_routes(
+                    &self.tenant_id,
+                    &self.installation_id,
+                    self.team_id.as_str(),
+                    cursor,
+                    SLACK_OUTBOUND_TARGET_LIST_PAGE_SIZE,
+                )
+                .await
+                .map_err(map_slack_target_route_error)?;
+            if routes.len() + page.routes.len() > SLACK_OUTBOUND_TARGET_LIST_MAX_TOTAL_ROUTES {
+                return Err(map_slack_target_route_error(
+                    SlackChannelRouteError::StoreUnavailable,
+                ));
+            }
+            for route in page.routes {
+                routes.push(
+                    UserId::new(route.subject_user_id)
+                        .map_err(|_| slack_target_backend_error())
+                        .map(|uid| SlackConfiguredChannelRoute::new(route.channel_id, uid))?,
+                );
+            }
+            let Some(next_cursor) = page.next_cursor else {
+                break;
+            };
+            if next_cursor <= cursor {
+                return Err(map_slack_target_route_error(
+                    SlackChannelRouteError::StoreUnavailable,
+                ));
+            }
+            cursor = next_cursor;
+        }
+        routes.sort_by(|left, right| left.channel_id.cmp(&right.channel_id));
+        routes
+            .into_iter()
+            .map(|route| self.entry_for_shared_channel_route(&route))
+            .collect()
+    }
+
     async fn resolve_outbound_delivery_target(
         &self,
         caller: &WebUiAuthenticatedCaller,
@@ -704,6 +889,23 @@ impl OutboundDeliveryTargetProvider for SlackHostBetaOutboundTargetProvider {
         self.resolve_personal_dm_for_user(caller, &user_id).await
     }
 
+    async fn resolve_project_outbound_delivery_target(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        target_id: &RebornOutboundDeliveryTargetId,
+    ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        if let Some(channel_id) = self.channel_id_for_target_id(target_id) {
+            if caller.tenant_id != self.tenant_id {
+                return Ok(None);
+            }
+            let Some(route) = self.shared_channel_route_for_channel(channel_id).await? else {
+                return Ok(None);
+            };
+            return self.entry_for_shared_channel_route(&route).map(Some);
+        }
+        Ok(None)
+    }
+
     async fn resolve_reply_target_binding(
         &self,
         caller: &WebUiAuthenticatedCaller,
@@ -715,12 +917,94 @@ impl OutboundDeliveryTargetProvider for SlackHostBetaOutboundTargetProvider {
             }
             Some(ParsedSlackReplyTarget::PersonalDm {
                 dm_channel_id,
+                user_id,
                 slack_user_id,
             }) => {
-                self.resolve_personal_dm_for_binding(caller, &dm_channel_id, &slack_user_id)
-                    .await
+                if caller.user_id != user_id {
+                    return Ok(None);
+                }
+                self.resolve_personal_dm_for_binding(
+                    caller,
+                    &user_id,
+                    &dm_channel_id,
+                    &slack_user_id,
+                )
+                .await
             }
             None => Ok(None),
+        }
+    }
+
+    async fn resolve_project_reply_target_binding(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        target: &ReplyTargetBindingRef,
+    ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        match self.route_for_reply_target_binding_ref(target) {
+            Some(ParsedSlackReplyTarget::SharedChannel { channel_id }) => {
+                if caller.tenant_id != self.tenant_id {
+                    return Ok(None);
+                }
+                let Some(route) = self.shared_channel_route_for_channel(&channel_id).await? else {
+                    return Ok(None);
+                };
+                self.entry_for_shared_channel_route(&route).map(Some)
+            }
+            Some(ParsedSlackReplyTarget::PersonalDm { .. }) => Ok(None),
+            None => Ok(None),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ReplyTargetBindingValidator for SlackHostBetaOutboundTargetProvider {
+    async fn validate_reply_target(
+        &self,
+        request: ReplyTargetValidationRequest,
+    ) -> Result<ReplyTargetBindingClaim, OutboundError> {
+        match self.route_for_reply_target_binding_ref(&request.candidate.target) {
+            Some(ParsedSlackReplyTarget::SharedChannel { channel_id }) => {
+                self.validate_shared_channel_target(&request, &channel_id)
+                    .await?;
+            }
+            Some(ParsedSlackReplyTarget::PersonalDm {
+                dm_channel_id,
+                user_id,
+                slack_user_id,
+            }) => {
+                self.validate_personal_dm_target(
+                    &request,
+                    &dm_channel_id,
+                    &user_id,
+                    &slack_user_id,
+                )
+                .await?;
+            }
+            None => return Err(OutboundError::AccessDenied),
+        }
+        Ok(ReplyTargetBindingClaim::new(request.candidate.target))
+    }
+}
+
+#[async_trait::async_trait]
+impl ProductOutboundTargetResolver for SlackHostBetaOutboundTargetProvider {
+    async fn resolve_product_outbound_target_metadata(
+        &self,
+        target: &ValidatedReplyTargetBinding,
+    ) -> Result<VerifiedProductOutboundTargetMetadata, ProductWorkflowError> {
+        match self.route_for_reply_target_binding_ref(target.target()) {
+            Some(ParsedSlackReplyTarget::SharedChannel { channel_id }) => {
+                self.metadata_for_shared_channel(&channel_id).await
+            }
+            Some(ParsedSlackReplyTarget::PersonalDm {
+                dm_channel_id,
+                user_id,
+                slack_user_id,
+            }) => {
+                self.metadata_for_personal_dm(&dm_channel_id, &user_id, &slack_user_id)
+                    .await
+            }
+            None => Err(ProductWorkflowError::BindingAccessDenied),
         }
     }
 }
@@ -731,6 +1015,7 @@ enum ParsedSlackReplyTarget {
     },
     PersonalDm {
         dm_channel_id: String,
+        user_id: UserId,
         slack_user_id: SlackUserId,
     },
 }
@@ -761,6 +1046,7 @@ fn slack_personal_dm_reply_target_binding_ref(
     project_id: Option<&ProjectId>,
     team_id: &SlackTeamId,
     dm_channel_id: &str,
+    user_id: &UserId,
     slack_user_id: &SlackUserId,
 ) -> Result<ReplyTargetBindingRef, RebornServicesError> {
     let conversation =
@@ -769,13 +1055,14 @@ fn slack_personal_dm_reply_target_binding_ref(
     let actor = ExternalActorRef::new(SLACK_USER_ACTOR_KIND, slack_user_id.as_str(), None::<&str>)
         .map_err(|_| slack_target_backend_error())?;
     let raw = format!(
-        "{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}",
         product_binding_segment("adapter", SLACK_V2_ADAPTER_ID),
         product_binding_segment("installation", installation_id.as_str()),
         product_binding_segment("agent", agent_id.as_str()),
         product_binding_segment("project", project_id.map_or("", |id| id.as_str())),
         conversation.conversation_fingerprint(),
         product_binding_segment("actor_kind", actor.kind()),
+        product_binding_segment("user", user_id.as_str()),
         product_binding_segment("actor", actor.id())
     );
     slack_reply_target_binding_ref_from_raw(raw)
@@ -818,6 +1105,46 @@ fn map_slack_personal_dm_target_error(error: SlackPersonalDmTargetError) -> Rebo
         SlackPersonalDmTargetError::InvalidTarget => slack_target_not_found_error(),
         SlackPersonalDmTargetError::StoreUnavailable
         | SlackPersonalDmTargetError::ProvisioningFailed(_) => slack_target_backend_error(),
+    }
+}
+
+fn reborn_services_error_to_outbound_error(error: RebornServicesError) -> OutboundError {
+    if error.retryable {
+        OutboundError::Backend
+    } else {
+        OutboundError::AccessDenied
+    }
+}
+
+fn reborn_services_error_to_product_workflow_error(
+    error: RebornServicesError,
+) -> ProductWorkflowError {
+    if error.retryable {
+        ProductWorkflowError::Transient {
+            reason: "Slack outbound target lookup failed".to_string(),
+        }
+    } else {
+        ProductWorkflowError::BindingAccessDenied
+    }
+}
+
+fn personal_dm_error_to_outbound_error(error: SlackPersonalDmTargetError) -> OutboundError {
+    match error {
+        SlackPersonalDmTargetError::InvalidTarget => OutboundError::AccessDenied,
+        SlackPersonalDmTargetError::StoreUnavailable
+        | SlackPersonalDmTargetError::ProvisioningFailed(_) => OutboundError::Backend,
+    }
+}
+
+fn personal_dm_error_to_product_workflow_error(
+    error: SlackPersonalDmTargetError,
+) -> ProductWorkflowError {
+    match error {
+        SlackPersonalDmTargetError::InvalidTarget => ProductWorkflowError::BindingAccessDenied,
+        SlackPersonalDmTargetError::StoreUnavailable
+        | SlackPersonalDmTargetError::ProvisioningFailed(_) => ProductWorkflowError::Transient {
+            reason: "Slack personal DM target lookup failed".to_string(),
+        },
     }
 }
 
@@ -937,6 +1264,14 @@ mod tests {
 
     // ── validate_slack_id ─────────────────────────────────────────────────────
 
+    use ironclaw_host_api::ThreadId;
+    use ironclaw_outbound::{OutboundPushCandidate, OutboundPushKind, ProjectionUpdateRef};
+    use ironclaw_turns::{TurnActor, TurnScope};
+
+    const THREAD: &str = "thread:slack";
+    const SHARED_CHANNEL: &str = "C123";
+    const DM_CHANNEL: &str = "D123";
+
     #[test]
     fn validate_slack_id_accepts_128_char_id_and_rejects_129_char_id() {
         validate_slack_id("slack id", &"A".repeat(128)).expect("128 chars is valid");
@@ -997,12 +1332,14 @@ mod tests {
         let team_id = SlackTeamId::new(TEAM);
         let slack_user_id = SlackUserId::new(SLACK_USER);
 
+        let user_id = UserId::new(USER).expect("user");
         let binding_ref = slack_personal_dm_reply_target_binding_ref(
             &installation_id,
             &agent_id,
             Some(&project_id),
             &team_id,
             "D0HOST",
+            &user_id,
             &slack_user_id,
         )
         .expect("binding ref builds");
@@ -1015,6 +1352,7 @@ mod tests {
         match parsed {
             ParsedSlackReplyTarget::PersonalDm {
                 dm_channel_id,
+                user_id: _,
                 slack_user_id: parsed_slack_user_id,
             } => {
                 assert_eq!(dm_channel_id, "D0HOST", "dm_channel_id must round-trip");
@@ -1066,12 +1404,14 @@ mod tests {
         let team_id = SlackTeamId::new(TEAM);
         let slack_user_id = SlackUserId::new(SLACK_USER);
 
+        let user_id = UserId::new(USER).expect("user");
         let binding_ref = slack_personal_dm_reply_target_binding_ref(
             &installation_id,
             &agent_id,
             Some(&project_id),
             &team_id,
             "D0HOST",
+            &user_id,
             &slack_user_id,
         )
         .expect("binding ref builds");
@@ -1407,5 +1747,213 @@ mod tests {
             "cross-tenant caller must not resolve personal DM target; got: {:?}",
             result.map(|e| e.summary.target_id.as_str().to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn slack_reply_target_validator_accepts_ownerless_shared_channel_scope() {
+        let provider = provider_with_configured_channel_route(USER);
+        let target = slack_shared_channel_reply_target_binding_ref(
+            &installation_id(),
+            &agent_id(),
+            Some(&project_id()),
+            &SlackTeamId::new(TEAM),
+            SHARED_CHANNEL,
+        )
+        .expect("shared channel target");
+        let request = validation_request(ownerless_scope(), USER, target.clone());
+
+        let claim = ReplyTargetBindingValidator::validate_reply_target(&provider, request)
+            .await
+            .expect("shared channel target validates");
+
+        assert_eq!(claim.target, target);
+    }
+
+    #[tokio::test]
+    async fn slack_reply_target_validator_accepts_explicit_owner_personal_dm() {
+        let store = personal_dm_store_for(USER).await;
+        let provider = provider_with_personal_dm_store(store);
+        let target = slack_personal_dm_reply_target_binding_ref(
+            &installation_id(),
+            &agent_id(),
+            Some(&project_id()),
+            &SlackTeamId::new(TEAM),
+            DM_CHANNEL,
+            &UserId::new(USER).expect("user"),
+            &SlackUserId::new(SLACK_USER),
+        )
+        .expect("personal DM target");
+        let request = validation_request(explicit_owner_scope(USER), USER, target.clone());
+
+        let claim = ReplyTargetBindingValidator::validate_reply_target(&provider, request)
+            .await
+            .expect("personal DM target validates for explicit owner");
+
+        assert_eq!(claim.target, target);
+    }
+
+    #[tokio::test]
+    async fn slack_reply_target_validator_rejects_personal_dm_without_explicit_owner() {
+        let store = personal_dm_store_for(USER).await;
+        let provider = provider_with_personal_dm_store(store);
+        let target = slack_personal_dm_reply_target_binding_ref(
+            &installation_id(),
+            &agent_id(),
+            Some(&project_id()),
+            &SlackTeamId::new(TEAM),
+            DM_CHANNEL,
+            &UserId::new(USER).expect("user"),
+            &SlackUserId::new(SLACK_USER),
+        )
+        .expect("personal DM target");
+        let request = validation_request(actor_fallback_scope(), USER, target);
+
+        let error = ReplyTargetBindingValidator::validate_reply_target(&provider, request)
+            .await
+            .expect_err("personal DM target requires an explicit owner");
+
+        assert!(matches!(error, OutboundError::AccessDenied));
+    }
+
+    #[tokio::test]
+    async fn slack_reply_target_validator_rejects_mismatched_owner_personal_dm() {
+        let store = personal_dm_store_for(USER).await;
+        let provider = provider_with_personal_dm_store(store);
+        let target = slack_personal_dm_reply_target_binding_ref(
+            &installation_id(),
+            &agent_id(),
+            Some(&project_id()),
+            &SlackTeamId::new(TEAM),
+            DM_CHANNEL,
+            &UserId::new(USER).expect("user"),
+            &SlackUserId::new(SLACK_USER),
+        )
+        .expect("personal DM target");
+        let request = validation_request(explicit_owner_scope(OTHER_USER), OTHER_USER, target);
+
+        let error = ReplyTargetBindingValidator::validate_reply_target(&provider, request)
+            .await
+            .expect_err("personal DM target must match owner authority");
+
+        assert!(matches!(error, OutboundError::AccessDenied));
+    }
+
+    fn provider_with_configured_channel_route(
+        subject_user_id: &str,
+    ) -> SlackHostBetaOutboundTargetProvider {
+        let mut config = provider_config(Vec::new());
+        config
+            .configured_channel_routes
+            .push(SlackConfiguredChannelRoute::new(
+                SHARED_CHANNEL.to_string(),
+                UserId::new(subject_user_id).expect("subject user"),
+            ));
+        SlackHostBetaOutboundTargetProvider::new(
+            config,
+            Arc::new(InMemorySlackChannelRouteStore::new()),
+            Arc::new(InMemorySlackPersonalDmTargetStore::new()),
+        )
+    }
+
+    fn provider_with_personal_dm_store(
+        store: Arc<dyn SlackPersonalDmTargetStore>,
+    ) -> SlackHostBetaOutboundTargetProvider {
+        SlackHostBetaOutboundTargetProvider::new(
+            provider_config(Vec::new()),
+            Arc::new(InMemorySlackChannelRouteStore::new()),
+            store,
+        )
+    }
+
+    async fn personal_dm_store_for(user_id: &str) -> Arc<dyn SlackPersonalDmTargetStore> {
+        let store = Arc::new(InMemorySlackPersonalDmTargetStore::new());
+        let key = SlackPersonalDmTargetKey::new(
+            tenant_id(),
+            installation_id(),
+            TEAM.to_string(),
+            UserId::new(user_id).expect("user"),
+        )
+        .expect("personal target key");
+        let target =
+            SlackPersonalDmTarget::new(key, SlackUserId::new(SLACK_USER), DM_CHANNEL.to_string())
+                .expect("personal DM target");
+        store
+            .upsert_personal_dm_target(target)
+            .await
+            .expect("personal DM target stores");
+        store
+    }
+
+    fn validation_request(
+        scope: TurnScope,
+        actor_user_id: &str,
+        target: ReplyTargetBindingRef,
+    ) -> ReplyTargetValidationRequest {
+        ReplyTargetValidationRequest {
+            actor: TurnActor::new(UserId::new(actor_user_id).expect("actor")),
+            modality: CommunicationModality::Text,
+            candidate: OutboundPushCandidate {
+                tenant_id: tenant_id(),
+                agent_id: Some(agent_id()),
+                project_id: Some(project_id()),
+                thread_id: thread_id(),
+                turn_run_id: None,
+                target,
+                kind: OutboundPushKind::FinalReply,
+                projection_ref: ProjectionUpdateRef::new("projection:slack")
+                    .expect("projection ref"),
+                requires_reply_target_revalidation: true,
+            },
+            scope,
+        }
+    }
+
+    fn explicit_owner_scope(owner_user_id: &str) -> TurnScope {
+        TurnScope::new_with_owner(
+            tenant_id(),
+            Some(agent_id()),
+            Some(project_id()),
+            thread_id(),
+            Some(UserId::new(owner_user_id).expect("owner")),
+        )
+    }
+
+    fn ownerless_scope() -> TurnScope {
+        TurnScope::new_with_owner(
+            tenant_id(),
+            Some(agent_id()),
+            Some(project_id()),
+            thread_id(),
+            None,
+        )
+    }
+
+    fn actor_fallback_scope() -> TurnScope {
+        TurnScope::new(
+            tenant_id(),
+            Some(agent_id()),
+            Some(project_id()),
+            thread_id(),
+        )
+    }
+
+    fn tenant_id() -> TenantId {
+        TenantId::new(TENANT).expect("tenant")
+    }
+
+    fn installation_id() -> AdapterInstallationId {
+        AdapterInstallationId::new(INSTALLATION).expect("installation")
+    }
+
+    fn agent_id() -> AgentId {
+        AgentId::new(AGENT).expect("agent")
+    }
+
+    fn project_id() -> ProjectId {
+        ProjectId::new(PROJECT).expect("project")
+    }
+
+    fn thread_id() -> ThreadId {
+        ThreadId::new(THREAD).expect("thread")
     }
 }

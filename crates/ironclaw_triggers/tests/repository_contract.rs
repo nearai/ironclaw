@@ -4,8 +4,8 @@ use chrono::{TimeZone, Utc};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
 use ironclaw_triggers::{
     ActiveTriggerScanCursor, ClearActiveFireRequest, InMemoryTriggerRepository,
-    TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
-    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
+    TriggerCompletionPolicy, TriggerError, TriggerId, TriggerOwnershipScope, TriggerRecord,
+    TriggerRepository, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
 use ironclaw_turns::TurnRunId;
 
@@ -40,6 +40,7 @@ fn sample_record(
         creator_user_id: user("user-a"),
         agent_id: Some(AgentId::new("agent-a").expect("valid agent")),
         project_id: Some(ProjectId::new("project-a").expect("valid project")),
+        ownership_scope: TriggerOwnershipScope::Personal,
         name: "daily summary".to_string(),
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::cron("0 8 * * *").expect("valid cron"),
@@ -932,6 +933,30 @@ async fn assert_persists_trigger_state_fire_gate(repo: &impl TriggerRepository) 
     assert_eq!(due_records[0].trigger_id, trigger_id);
 }
 
+// f-tst-3: shared contract helper — Project ownership_scope survives persist and reload
+async fn assert_project_ownership_scope_survives_persist_and_reload(repo: &impl TriggerRepository) {
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+    let tenant_id = tenant("tenant-project");
+    let mut record = sample_record(trigger_id, tenant_id.clone(), ts(1_704_067_260));
+    record.ownership_scope = TriggerOwnershipScope::Project;
+    // Project requires project_id to pass validation
+    record.project_id = Some(ProjectId::new("project-shared").expect("valid project"));
+
+    repo.upsert_trigger(record.clone())
+        .await
+        .expect("insert project-scoped record");
+
+    let fetched = repo
+        .get_trigger(tenant_id, trigger_id)
+        .await
+        .expect("get project-scoped trigger")
+        .expect("record present");
+
+    assert_eq!(fetched.ownership_scope, TriggerOwnershipScope::Project);
+    assert_eq!(fetched.project_id, record.project_id);
+    assert_eq!(fetched, record);
+}
+
 #[cfg(feature = "libsql")]
 async fn build_libsql_repo_with_db() -> (
     tempfile::TempDir,
@@ -955,6 +980,13 @@ async fn build_libsql_repo_with_db() -> (
 async fn build_libsql_repo() -> (tempfile::TempDir, LibSqlTriggerRepository) {
     let (dir, _db, repo) = build_libsql_repo_with_db().await;
     (dir, repo)
+}
+
+// f-tst-3: in-memory backend — runs whenever the file is compiled (libsql or postgres feature)
+#[tokio::test]
+async fn in_memory_project_ownership_scope_survives_persist_and_reload() {
+    let repo = InMemoryTriggerRepository::default();
+    assert_project_ownership_scope_survives_persist_and_reload(&repo).await;
 }
 
 #[cfg(feature = "libsql")]
@@ -986,6 +1018,10 @@ async fn libsql_repository_contract_parity() {
 
     let (_dir, repo) = build_libsql_repo().await;
     assert_persists_trigger_state_fire_gate(&repo).await;
+
+    // f-tst-3: Project ownership_scope survives libsql persist and reload
+    let (_dir, repo) = build_libsql_repo().await;
+    assert_project_ownership_scope_survives_persist_and_reload(&repo).await;
 }
 
 #[cfg(feature = "libsql")]
@@ -1081,6 +1117,10 @@ async fn postgres_repository_contract_parity() {
 
     clear_postgres_triggers(&pool).await;
     assert_persists_trigger_state_fire_gate(&repo).await;
+
+    // f-tst-3: Project ownership_scope survives postgres persist and reload
+    clear_postgres_triggers(&pool).await;
+    assert_project_ownership_scope_survives_persist_and_reload(&repo).await;
 }
 
 #[cfg(feature = "postgres")]

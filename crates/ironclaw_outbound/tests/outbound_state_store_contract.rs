@@ -46,9 +46,9 @@ fn build_outbound_store_for_backend(
 async fn in_memory_defaults_policy_progress_opt_in_and_subscription_scope() {
     let store = InMemoryOutboundStateStore::default();
     communication_preferences_are_tenant_user_scoped(&store).await;
-    communication_preferences_are_shared_agent_scoped(&store).await;
+    communication_preferences_are_project_scoped(&store).await;
     communication_preferences_reject_empty_updated_by(&store).await;
-    communication_preferences_reject_empty_shared_agent_scope(&store).await;
+    communication_preferences_reject_empty_project_scope(&store).await;
     communication_preference_put_existing_conflicts_without_writing(&store).await;
     communication_preference_atomic_update_preserves_existing_slots(&store).await;
     communication_preference_update_inserts_absent_record(&store).await;
@@ -73,9 +73,9 @@ async fn filesystem_store_satisfies_outbound_contract_on_in_memory_backend() {
     let backend = std::sync::Arc::new(ironclaw_filesystem::InMemoryBackend::new());
     let store = build_outbound_store_for_backend(Arc::clone(&backend));
     communication_preferences_are_tenant_user_scoped(&store).await;
-    communication_preferences_are_shared_agent_scoped(&store).await;
+    communication_preferences_are_project_scoped(&store).await;
     communication_preferences_reject_empty_updated_by(&store).await;
-    communication_preferences_reject_empty_shared_agent_scope(&store).await;
+    communication_preferences_reject_empty_project_scope(&store).await;
     communication_preference_put_existing_conflicts_without_writing(&store).await;
     communication_preference_atomic_update_preserves_existing_slots(&store).await;
     communication_preference_update_inserts_absent_record(&store).await;
@@ -209,32 +209,23 @@ where
     );
 }
 
-async fn communication_preferences_are_shared_agent_scoped<S>(store: &S)
+async fn communication_preferences_are_project_scoped<S>(store: &S)
 where
     S: CommunicationPreferenceRepository + OutboundStateStore,
 {
-    let tenant_id = TenantId::new("tenant-outbound-shared").unwrap();
-    let agent_id = AgentId::new("agent-outbound-shared").unwrap();
-    let project_id = ProjectId::new("project-outbound-shared").unwrap();
-    let updated_by = UserId::new("tenant-admin-outbound-shared").unwrap();
-    let project_key = CommunicationPreferenceKey::shared_agent(
-        tenant_id.clone(),
-        agent_id.clone(),
-        Some(project_id.clone()),
-    );
+    let tenant_id = TenantId::new("tenant-outbound-project").unwrap();
+    let project_id = ProjectId::new("project-outbound-project").unwrap();
+    let updated_by = UserId::new("tenant-admin-outbound-project").unwrap();
+    let project_key = CommunicationPreferenceKey::project(tenant_id.clone(), project_id.clone());
     let project_record = CommunicationPreferenceRecord {
-        scope: DeliveryDefaultScope::shared_agent(
-            tenant_id.clone(),
-            agent_id.clone(),
-            Some(project_id.clone()),
-        ),
-        final_reply_target: Some(reply_ref("reply-pref-shared-project")),
+        scope: DeliveryDefaultScope::project(tenant_id.clone(), project_id.clone()),
+        final_reply_target: Some(reply_ref("reply-pref-project")),
         progress_target: None,
         approval_prompt_target: None,
         auth_prompt_target: None,
         default_modality: Some(CommunicationModality::Text),
         updated_at: now(),
-        updated_by: updated_by.clone(),
+        updated_by,
     };
     store
         .put_communication_preference(project_record.clone())
@@ -246,30 +237,9 @@ where
         Some(project_record)
     );
 
-    let projectless_key =
-        CommunicationPreferenceKey::shared_agent(tenant_id.clone(), agent_id.clone(), None);
-    let projectless_record = CommunicationPreferenceRecord {
-        scope: DeliveryDefaultScope::shared_agent(tenant_id.clone(), agent_id.clone(), None),
-        final_reply_target: Some(reply_ref("reply-pref-shared-projectless")),
-        progress_target: None,
-        approval_prompt_target: None,
-        auth_prompt_target: None,
-        default_modality: Some(CommunicationModality::Voice),
-        updated_at: now(),
-        updated_by,
-    };
-    store
-        .put_communication_preference(projectless_record.clone())
-        .await
-        .unwrap();
-    assert_eq!(
-        load_preference_record(store, projectless_key).await,
-        Some(projectless_record)
-    );
-
     let personal_key = CommunicationPreferenceKey::personal(
         tenant_id,
-        UserId::new("user-outbound-shared").unwrap(),
+        UserId::new("user-outbound-project").unwrap(),
     );
     assert!(
         store
@@ -280,10 +250,9 @@ where
     );
     assert!(
         store
-            .load_communication_preference(CommunicationPreferenceKey::shared_agent(
-                TenantId::new("tenant-outbound-shared-other").unwrap(),
-                agent_id,
-                Some(project_id),
+            .load_communication_preference(CommunicationPreferenceKey::project(
+                TenantId::new("tenant-outbound-project-other").unwrap(),
+                project_id,
             ))
             .await
             .unwrap()
@@ -331,48 +300,36 @@ where
     assert!(matches!(result, Err(OutboundError::InvalidRequest { .. })));
 }
 
-async fn communication_preferences_reject_empty_shared_agent_scope<S>(store: &S)
+async fn communication_preferences_reject_empty_project_scope<S>(store: &S)
 where
     S: CommunicationPreferenceRepository + OutboundStateStore,
 {
     let valid_record = CommunicationPreferenceRecord {
-        scope: DeliveryDefaultScope::shared_agent(
-            TenantId::new("tenant-outbound-shared-validation").unwrap(),
-            AgentId::new("agent-outbound-shared-validation").unwrap(),
-            None,
+        scope: DeliveryDefaultScope::project(
+            TenantId::new("tenant-outbound-project-validation").unwrap(),
+            ProjectId::new("project-outbound-project-validation").unwrap(),
         ),
-        final_reply_target: Some(reply_ref("reply-pref-shared-validation")),
+        final_reply_target: Some(reply_ref("reply-pref-project-validation")),
         progress_target: None,
         approval_prompt_target: None,
         auth_prompt_target: None,
         default_modality: Some(CommunicationModality::Text),
         updated_at: now(),
-        updated_by: UserId::new("tenant-admin-outbound-shared-validation").unwrap(),
+        updated_by: UserId::new("tenant-admin-outbound-project-validation").unwrap(),
     };
 
     let mut missing_tenant = valid_record.clone();
-    missing_tenant.scope = DeliveryDefaultScope::shared_agent(
+    missing_tenant.scope = DeliveryDefaultScope::project(
         TenantId::from_trusted(String::new()),
-        AgentId::new("agent-outbound-shared-validation").unwrap(),
-        None,
+        ProjectId::new("project-outbound-project-validation").unwrap(),
     );
     let result = store.put_communication_preference(missing_tenant).await;
     assert!(matches!(result, Err(OutboundError::InvalidRequest { .. })));
 
-    let mut missing_agent = valid_record.clone();
-    missing_agent.scope = DeliveryDefaultScope::shared_agent(
-        TenantId::new("tenant-outbound-shared-validation").unwrap(),
-        AgentId::from_trusted(String::new()),
-        None,
-    );
-    let result = store.put_communication_preference(missing_agent).await;
-    assert!(matches!(result, Err(OutboundError::InvalidRequest { .. })));
-
     let mut missing_project = valid_record;
-    missing_project.scope = DeliveryDefaultScope::shared_agent(
-        TenantId::new("tenant-outbound-shared-validation").unwrap(),
-        AgentId::new("agent-outbound-shared-validation").unwrap(),
-        Some(ProjectId::from_trusted(String::new())),
+    missing_project.scope = DeliveryDefaultScope::project(
+        TenantId::new("tenant-outbound-project-validation").unwrap(),
+        ProjectId::from_trusted(String::new()),
     );
     let result = store.put_communication_preference(missing_project).await;
     assert!(matches!(result, Err(OutboundError::InvalidRequest { .. })));
@@ -676,7 +633,7 @@ async fn filesystem_store_rejects_mismatched_communication_preference_identity(
 }
 
 #[tokio::test]
-async fn filesystem_store_personal_and_shared_agent_hashes_are_always_distinct() {
+async fn filesystem_store_personal_and_project_hashes_are_always_distinct() {
     let backend = Arc::new(InMemoryBackend::new());
     let store = build_outbound_store_for_backend(Arc::clone(&backend));
     let tenant_id = TenantId::new("tenant-outbound-hash-distinct").unwrap();
@@ -696,24 +653,24 @@ async fn filesystem_store_personal_and_shared_agent_hashes_are_always_distinct()
     let (_, personal_path) =
         put_preference_and_find_virtual_path(&backend, &store, personal_record.clone()).await;
 
-    let shared_key =
-        CommunicationPreferenceKey::shared_agent(tenant_id, AgentId::new(shared_id).unwrap(), None);
-    let shared_record = CommunicationPreferenceRecord {
-        scope: shared_key.scope.clone(),
-        final_reply_target: Some(reply_ref("reply-pref-hash-shared")),
+    let project_key =
+        CommunicationPreferenceKey::project(tenant_id, ProjectId::new(shared_id).unwrap());
+    let project_record = CommunicationPreferenceRecord {
+        scope: project_key.scope.clone(),
+        final_reply_target: Some(reply_ref("reply-pref-hash-project")),
         progress_target: None,
         approval_prompt_target: None,
         auth_prompt_target: None,
         default_modality: Some(CommunicationModality::Voice),
         updated_at: now(),
-        updated_by: UserId::new("tenant-admin-outbound-hash-shared").unwrap(),
+        updated_by: UserId::new("tenant-admin-outbound-hash-project").unwrap(),
     };
-    let (_, shared_path) =
-        put_preference_and_find_virtual_path(&backend, &store, shared_record.clone()).await;
+    let (_, project_path) =
+        put_preference_and_find_virtual_path(&backend, &store, project_record.clone()).await;
 
     assert_ne!(
-        personal_path, shared_path,
-        "personal and shared-agent preference scopes with the same id text must not share a v2 hash path",
+        personal_path, project_path,
+        "personal and project preference scopes with the same id text must not share a v2 hash path",
     );
     assert_eq!(
         communication_preference_virtual_paths(&backend).await.len(),
@@ -724,8 +681,8 @@ async fn filesystem_store_personal_and_shared_agent_hashes_are_always_distinct()
         Some(personal_record)
     );
     assert_eq!(
-        load_preference_record(&store, shared_key).await,
-        Some(shared_record)
+        load_preference_record(&store, project_key).await,
+        Some(project_record)
     );
 }
 
@@ -1887,18 +1844,18 @@ async fn filesystem_outbound_store_isolates_two_tenants_with_same_user_project_i
     // only thing that should keep them apart is the mount-time tenant
     // prefix. The TurnScope still carries each store's own tenant_id so
     // policy/cursor lookups validate end-to-end.
-    let shared_agent = AgentId::new("agent-shared").unwrap();
+    let agent_id = AgentId::new("agent-shared").unwrap();
     let shared_project = ProjectId::new("project-shared").unwrap();
     let shared_thread = ThreadId::new("thread-shared").unwrap();
     let scope_a = TurnScope::new(
         TenantId::new("tenant-a").unwrap(),
-        Some(shared_agent.clone()),
+        Some(agent_id.clone()),
         Some(shared_project.clone()),
         shared_thread.clone(),
     );
     let scope_b = TurnScope::new(
         TenantId::new("tenant-b").unwrap(),
-        Some(shared_agent),
+        Some(agent_id),
         Some(shared_project),
         shared_thread,
     );

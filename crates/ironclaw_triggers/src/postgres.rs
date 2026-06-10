@@ -11,16 +11,16 @@ use crate::{
     ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire,
     ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
     FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerCompletionPolicy, TriggerError,
-    TriggerId, TriggerRecord, TriggerRepository, TriggerRouteThreadId, TriggerRunHistoryStatus,
-    TriggerRunRecord, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
-    reject_failed_result_after_active_run, reject_non_future_next_run_at, reject_run_ref_rewrite,
-    trigger_run_history_status_text,
+    TriggerId, TriggerOwnershipScope, TriggerRecord, TriggerRepository, TriggerRouteThreadId,
+    TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus, TriggerSchedule,
+    TriggerSourceKind, TriggerState, reject_failed_result_after_active_run,
+    reject_non_future_next_run_at, reject_run_ref_rewrite, trigger_run_history_status_text,
 };
 
 const TRIGGER_TABLE: &str = "trigger_records";
 const TRIGGER_RUN_TABLE: &str = "trigger_run_history";
 const TRIGGER_COLUMNS: &str = "\
-    trigger_id, tenant_id, creator_user_id, agent_id, project_id, \
+    trigger_id, tenant_id, creator_user_id, agent_id, project_id, ownership_scope, \
     name, source, schedule_expression, completion_policy, prompt, \
     state, next_run_at, last_run_at, last_fired_slot, last_status, \
     active_fire_slot, active_run_ref, created_at";
@@ -76,6 +76,7 @@ impl TriggerRepository for PostgresTriggerRepository {
         let creator_user_id = record.creator_user_id.as_str();
         let agent_id = record.agent_id.as_ref().map(AgentId::as_str);
         let project_id = record.project_id.as_ref().map(ProjectId::as_str);
+        let ownership_scope = record.ownership_scope.as_str();
         let source = source_kind_text(record.source);
         let schedule_expression = schedule_expression_text(&record.schedule);
         let completion_policy = completion_policy_text(record.completion_policy);
@@ -92,20 +93,21 @@ impl TriggerRepository for PostgresTriggerRepository {
             .execute(
                 r#"
                 INSERT INTO trigger_records (
-                    trigger_id, tenant_id, creator_user_id, agent_id, project_id,
+                    trigger_id, tenant_id, creator_user_id, agent_id, project_id, ownership_scope,
                     name, source, schedule_expression, completion_policy, prompt,
                     state, next_run_at, last_run_at, last_fired_slot, last_status,
                     active_fire_slot, active_run_ref, created_at
                 ) VALUES (
-                    $1, $2, $3, $4, $5,
-                    $6, $7, $8, $9, $10,
-                    $11, $12, $13, $14, $15,
-                    $16, $17, $18
+                    $1, $2, $3, $4, $5, $6,
+                    $7, $8, $9, $10, $11,
+                    $12, $13, $14, $15, $16,
+                    $17, $18, $19
                 )
                 ON CONFLICT (tenant_id, trigger_id) DO UPDATE SET
                     creator_user_id = EXCLUDED.creator_user_id,
                     agent_id = EXCLUDED.agent_id,
                     project_id = EXCLUDED.project_id,
+                    ownership_scope = EXCLUDED.ownership_scope,
                     name = EXCLUDED.name,
                     source = EXCLUDED.source,
                     schedule_expression = EXCLUDED.schedule_expression,
@@ -125,6 +127,7 @@ impl TriggerRepository for PostgresTriggerRepository {
                     &creator_user_id,
                     &agent_id,
                     &project_id,
+                    &ownership_scope,
                     &record.name,
                     &source,
                     &schedule_expression,
@@ -1111,6 +1114,7 @@ fn row_to_record(row: &Row) -> Result<TriggerRecord, TriggerError> {
             ProjectId::new(value).map_err(|error| invalid_record("project_id", error.to_string()))
         })
         .transpose()?;
+    let ownership_scope = TriggerOwnershipScope::parse(&required_text(row, "ownership_scope")?)?;
     let schedule = TriggerSchedule::cron(required_text(row, "schedule_expression")?)?;
     let last_run_at = optional_text(row, "last_run_at")?
         .map(|value| parse_timestamp(&value, "last_run_at"))
@@ -1134,6 +1138,7 @@ fn row_to_record(row: &Row) -> Result<TriggerRecord, TriggerError> {
         creator_user_id,
         agent_id,
         project_id,
+        ownership_scope,
         name: required_text(row, "name")?,
         source: parse_source_kind(&required_text(row, "source")?)?,
         schedule,
@@ -1289,6 +1294,7 @@ CREATE TABLE IF NOT EXISTS trigger_records (
     creator_user_id TEXT NOT NULL,
     agent_id TEXT,
     project_id TEXT,
+    ownership_scope TEXT NOT NULL DEFAULT 'personal',
     name TEXT NOT NULL,
     source TEXT NOT NULL,
     schedule_expression TEXT NOT NULL,
@@ -1304,6 +1310,9 @@ CREATE TABLE IF NOT EXISTS trigger_records (
     created_at TEXT NOT NULL,
     PRIMARY KEY (tenant_id, trigger_id)
 );
+
+ALTER TABLE trigger_records
+    ADD COLUMN IF NOT EXISTS ownership_scope TEXT NOT NULL DEFAULT 'personal';
 
 CREATE INDEX IF NOT EXISTS trigger_records_state_next_run_at_idx
     ON trigger_records (state, next_run_at, tenant_id, trigger_id);

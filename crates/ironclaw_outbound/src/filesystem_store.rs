@@ -641,21 +641,13 @@ fn hash_delivery_default_scope(hasher: &mut Sha256, scope: &DeliveryDefaultScope
             update_hash_part(hasher, tenant_id.as_str());
             update_hash_part(hasher, user_id.as_str());
         }
-        DeliveryDefaultScope::SharedAgent {
+        DeliveryDefaultScope::Project {
             tenant_id,
-            agent_id,
             project_id,
         } => {
-            update_hash_part(hasher, "shared_agent");
+            update_hash_part(hasher, "project");
             update_hash_part(hasher, tenant_id.as_str());
-            update_hash_part(hasher, agent_id.as_str());
-            match project_id {
-                Some(project_id) => {
-                    update_hash_part(hasher, "project");
-                    update_hash_part(hasher, project_id.as_str());
-                }
-                None => update_hash_part(hasher, "no_project"),
-            }
+            update_hash_part(hasher, project_id.as_str());
         }
     }
 }
@@ -672,14 +664,12 @@ fn communication_preference_resource_scope(scope: &DeliveryDefaultScope) -> Reso
             resource_scope.tenant_id = tenant_id.clone();
             resource_scope.user_id = user_id.clone();
         }
-        DeliveryDefaultScope::SharedAgent {
+        DeliveryDefaultScope::Project {
             tenant_id,
-            agent_id,
             project_id,
         } => {
             resource_scope.tenant_id = tenant_id.clone();
-            resource_scope.agent_id = Some(agent_id.clone());
-            resource_scope.project_id = project_id.clone();
+            resource_scope.project_id = Some(project_id.clone());
         }
     }
     resource_scope

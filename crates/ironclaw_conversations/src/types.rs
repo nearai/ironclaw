@@ -11,6 +11,35 @@ use crate::{
     InboundMessageContentRef,
 };
 
+/// Host-owned authority over a binding's thread ownership that a trusted caller
+/// may supply when resolving or creating a conversation binding.
+///
+/// This enum is trusted-scope–only input. Raw adapter paths (i.e.
+/// `resolve_or_create_binding` without trusted scope) must not be able to
+/// express `Project`; they must always pass or receive `Unspecified`.
+///
+/// Variants:
+/// - `Unspecified` – the caller makes no ownership claim; existing stored
+///   ownership is unchanged and new bindings receive no stored owner.
+///   Equivalent to the former `trusted_owner_user_id: None` path.
+/// - `User(UserId)` – the binding is owned by the named user; stored on first
+///   bind and may be adopted on shared-route re-entry when the binding has no
+///   stored owner. Equivalent to the former `trusted_owner_user_id: Some(u)`.
+/// - `Project` – the caller explicitly asserts the binding has no personal
+///   owner (owned by the binding's project scope). The binding's ownerless
+///   state is stored and `BindingRecord::resolution()` emits
+///   `TurnScope::new_with_owner(..., None)`, carrying the explicit-ownerless
+///   marker through to the run's scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrustedOwnerScope {
+    /// No ownership claim from the caller; no stored-state change.
+    Unspecified,
+    /// Explicit personal ownership by the given user.
+    User(UserId),
+    /// Explicitly project-owned (no personal user owner).
+    Project,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationRouteKind {
@@ -170,6 +199,7 @@ pub(crate) struct TrustedInboundTurnRequest {
     request: InboundTurnRequest,
     trusted_agent_id: Option<AgentId>,
     trusted_project_id: Option<ProjectId>,
+    trusted_owner: TrustedOwnerScope,
 }
 
 impl TrustedInboundTurnRequest {
@@ -182,11 +212,45 @@ impl TrustedInboundTurnRequest {
             request,
             trusted_agent_id,
             trusted_project_id,
+            // Default to Unspecified when the caller (e.g. existing trigger
+            // materializer) does not yet supply an explicit owner scope.
+            trusted_owner: TrustedOwnerScope::Unspecified,
         }
     }
 
-    pub(crate) fn into_parts(self) -> (InboundTurnRequest, Option<AgentId>, Option<ProjectId>) {
-        (self.request, self.trusted_agent_id, self.trusted_project_id)
+    /// Construct a trusted request with an explicit owner scope.
+    ///
+    /// Called by the composition materializer (wave-2 workstream) to pass
+    /// `User(creator)` for personal fires and `Project` for project fires.
+    #[allow(dead_code)] // used by ironclaw_reborn_composition (wave 2)
+    pub(crate) fn new_with_owner(
+        request: InboundTurnRequest,
+        trusted_agent_id: Option<AgentId>,
+        trusted_project_id: Option<ProjectId>,
+        trusted_owner: TrustedOwnerScope,
+    ) -> Self {
+        Self {
+            request,
+            trusted_agent_id,
+            trusted_project_id,
+            trusted_owner,
+        }
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        InboundTurnRequest,
+        Option<AgentId>,
+        Option<ProjectId>,
+        TrustedOwnerScope,
+    ) {
+        (
+            self.request,
+            self.trusted_agent_id,
+            self.trusted_project_id,
+            self.trusted_owner,
+        )
     }
 }
 

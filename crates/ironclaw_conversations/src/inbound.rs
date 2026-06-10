@@ -17,7 +17,7 @@ use crate::{
     AdapterInstallationId, AdapterKind, ConversationBindingResolution, ConversationBindingService,
     ConversationRouteKind, ExternalActorRef, ExternalConversationRef, ExternalEventId,
     InboundMessageContentRef, InboundTurnError, InboundTurnRequest, InboundTurnResponse,
-    MessageIdempotencyStatus, ResolveConversationRequest, SessionThreadService,
+    MessageIdempotencyStatus, ResolveConversationRequest, SessionThreadService, TrustedOwnerScope,
 };
 
 #[derive(Clone)]
@@ -53,12 +53,13 @@ where
         &self,
         request: TrustedInboundTurnRequest,
     ) -> Result<InboundTurnResponse, InboundTurnError> {
-        let (request, trusted_agent_id, trusted_project_id) = request.into_parts();
+        let (request, trusted_agent_id, trusted_project_id, trusted_owner) = request.into_parts();
         self.handle_inbound_turn_inner(
             request,
             BindingResolutionPolicy::Trusted {
                 trusted_agent_id,
                 trusted_project_id,
+                trusted_owner,
             },
         )
         .await
@@ -126,13 +127,14 @@ where
             BindingResolutionPolicy::Trusted {
                 trusted_agent_id,
                 trusted_project_id,
+                trusted_owner,
             } => {
                 self.binding_service
                     .resolve_or_create_binding_with_trusted_scope(
                         resolve_request,
                         trusted_agent_id,
                         trusted_project_id,
-                        None,
+                        trusted_owner,
                     )
                     .await?
             }
@@ -350,6 +352,7 @@ enum BindingResolutionPolicy {
     Trusted {
         trusted_agent_id: Option<ironclaw_host_api::AgentId>,
         trusted_project_id: Option<ironclaw_host_api::ProjectId>,
+        trusted_owner: TrustedOwnerScope,
     },
 }
 
@@ -964,7 +967,7 @@ mod tests {
             request: crate::ResolveConversationRequest,
             trusted_agent_id: Option<AgentId>,
             trusted_project_id: Option<ProjectId>,
-            trusted_owner_user_id: Option<UserId>,
+            trusted_owner: crate::TrustedOwnerScope,
         ) -> Result<ConversationBindingResolution, InboundTurnError> {
             self.resolve_requests.lock().unwrap().push(request.clone());
             self.trusted_scopes
@@ -976,7 +979,7 @@ mod tests {
                     request,
                     trusted_agent_id,
                     trusted_project_id,
-                    trusted_owner_user_id,
+                    trusted_owner,
                 )
                 .await
         }
@@ -1040,7 +1043,7 @@ mod tests {
             request: crate::ResolveConversationRequest,
             trusted_agent_id: Option<AgentId>,
             trusted_project_id: Option<ProjectId>,
-            _trusted_owner_user_id: Option<UserId>,
+            _trusted_owner: crate::TrustedOwnerScope,
         ) -> Result<ConversationBindingResolution, InboundTurnError> {
             self.resolve_requests.lock().unwrap().push(request);
             self.trusted_scopes

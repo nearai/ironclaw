@@ -17,10 +17,10 @@ use crate::{
     ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire,
     ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
     FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerCompletionPolicy, TriggerError,
-    TriggerId, TriggerRecord, TriggerRepository, TriggerRouteThreadId, TriggerRunHistoryStatus,
-    TriggerRunRecord, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
-    reject_failed_result_after_active_run, reject_non_future_next_run_at, reject_run_ref_rewrite,
-    trigger_run_history_status_text,
+    TriggerId, TriggerOwnershipScope, TriggerRecord, TriggerRepository, TriggerRouteThreadId,
+    TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus, TriggerSchedule,
+    TriggerSourceKind, TriggerState, reject_failed_result_after_active_run,
+    reject_non_future_next_run_at, reject_run_ref_rewrite, trigger_run_history_status_text,
 };
 
 #[cfg(feature = "libsql")]
@@ -30,7 +30,7 @@ const TRIGGER_RUN_TABLE: &str = "trigger_run_history";
 
 #[cfg(feature = "libsql")]
 const TRIGGER_COLUMNS: &str = "\
-    trigger_id, tenant_id, creator_user_id, agent_id, project_id, \
+    trigger_id, tenant_id, creator_user_id, agent_id, project_id, ownership_scope, \
     name, source, schedule_expression, completion_policy, prompt, \
     state, next_run_at, last_run_at, last_fired_slot, last_status, \
     active_fire_slot, active_run_ref, created_at";
@@ -46,31 +46,33 @@ const AGENT_ID_COL: usize = 3;
 #[cfg(feature = "libsql")]
 const PROJECT_ID_COL: usize = 4;
 #[cfg(feature = "libsql")]
-const NAME_COL: usize = 5;
+const OWNERSHIP_SCOPE_COL: usize = 5;
 #[cfg(feature = "libsql")]
-const SOURCE_COL: usize = 6;
+const NAME_COL: usize = 6;
 #[cfg(feature = "libsql")]
-const SCHEDULE_EXPRESSION_COL: usize = 7;
+const SOURCE_COL: usize = 7;
 #[cfg(feature = "libsql")]
-const COMPLETION_POLICY_COL: usize = 8;
+const SCHEDULE_EXPRESSION_COL: usize = 8;
 #[cfg(feature = "libsql")]
-const PROMPT_COL: usize = 9;
+const COMPLETION_POLICY_COL: usize = 9;
 #[cfg(feature = "libsql")]
-const STATE_COL: usize = 10;
+const PROMPT_COL: usize = 10;
 #[cfg(feature = "libsql")]
-const NEXT_RUN_AT_COL: usize = 11;
+const STATE_COL: usize = 11;
 #[cfg(feature = "libsql")]
-const LAST_RUN_AT_COL: usize = 12;
+const NEXT_RUN_AT_COL: usize = 12;
 #[cfg(feature = "libsql")]
-const LAST_FIRED_SLOT_COL: usize = 13;
+const LAST_RUN_AT_COL: usize = 13;
 #[cfg(feature = "libsql")]
-const LAST_STATUS_COL: usize = 14;
+const LAST_FIRED_SLOT_COL: usize = 14;
 #[cfg(feature = "libsql")]
-const ACTIVE_FIRE_SLOT_COL: usize = 15;
+const LAST_STATUS_COL: usize = 15;
 #[cfg(feature = "libsql")]
-const ACTIVE_RUN_REF_COL: usize = 16;
+const ACTIVE_FIRE_SLOT_COL: usize = 16;
 #[cfg(feature = "libsql")]
-const CREATED_AT_COL: usize = 17;
+const ACTIVE_RUN_REF_COL: usize = 17;
+#[cfg(feature = "libsql")]
+const CREATED_AT_COL: usize = 18;
 
 #[cfg(feature = "libsql")]
 const TRIGGER_RUN_COLUMNS: &str = "\
@@ -119,6 +121,7 @@ impl LibSqlTriggerRepository {
                         creator_user_id TEXT NOT NULL,
                         agent_id TEXT,
                         project_id TEXT,
+                        ownership_scope TEXT NOT NULL DEFAULT 'personal',
                         name TEXT NOT NULL,
                         source TEXT NOT NULL,
                         schedule_expression TEXT NOT NULL,
@@ -139,6 +142,7 @@ impl LibSqlTriggerRepository {
             )
             .await
             .map_err(|error| backend_error("create trigger_records table", error))?;
+            ensure_trigger_ownership_scope_column(&conn).await?;
             conn.execute(
                 &format!(
                     "CREATE INDEX IF NOT EXISTS trigger_records_state_next_run_at_idx
@@ -238,6 +242,38 @@ impl LibSqlTriggerRepository {
             .map_err(|error| backend_error("set trigger repository busy_timeout", error))?;
         Ok(conn)
     }
+}
+
+#[cfg(feature = "libsql")]
+async fn ensure_trigger_ownership_scope_column(
+    conn: &libsql::Connection,
+) -> Result<(), TriggerError> {
+    let mut rows = conn
+        .query(&format!("PRAGMA table_info({TRIGGER_TABLE})"), ())
+        .await
+        .map_err(|error| backend_error("inspect trigger ownership_scope column", error))?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| backend_error("read trigger table_info row", error))?
+    {
+        let name: String = row
+            .get(1)
+            .map_err(|error| backend_error("read trigger table_info column name", error))?;
+        if name == "ownership_scope" {
+            return Ok(());
+        }
+    }
+    conn.execute(
+        &format!(
+            "ALTER TABLE {TRIGGER_TABLE}
+             ADD COLUMN ownership_scope TEXT NOT NULL DEFAULT 'personal'"
+        ),
+        (),
+    )
+    .await
+    .map_err(|error| backend_error("add trigger ownership_scope column", error))?;
+    Ok(())
 }
 
 #[cfg(feature = "libsql")]
@@ -1046,6 +1082,8 @@ fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
             ProjectId::new(value).map_err(|error| invalid_record("project_id", error.to_string()))
         })
         .transpose()?;
+    let ownership_scope =
+        TriggerOwnershipScope::parse(&required_text(row, OWNERSHIP_SCOPE_COL, "ownership_scope")?)?;
     let schedule = TriggerSchedule::cron(required_text(
         row,
         SCHEDULE_EXPRESSION_COL,
@@ -1073,6 +1111,7 @@ fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
         creator_user_id,
         agent_id,
         project_id,
+        ownership_scope,
         name: required_text(row, NAME_COL, "name")?,
         source: parse_source_kind(&required_text(row, SOURCE_COL, "source")?)?,
         schedule,
@@ -1170,15 +1209,16 @@ async fn write_record(
     conn.execute(
         &format!(
             "INSERT INTO {TRIGGER_TABLE} (
-                trigger_id, tenant_id, creator_user_id, agent_id, project_id,
+                trigger_id, tenant_id, creator_user_id, agent_id, project_id, ownership_scope,
                 name, source, schedule_expression, completion_policy, prompt,
                 state, next_run_at, last_run_at, last_fired_slot, last_status,
                 active_fire_slot, active_run_ref, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
             ON CONFLICT (tenant_id, trigger_id) DO UPDATE SET
                 creator_user_id = excluded.creator_user_id,
                 agent_id = excluded.agent_id,
                 project_id = excluded.project_id,
+                ownership_scope = excluded.ownership_scope,
                 name = excluded.name,
                 source = excluded.source,
                 schedule_expression = excluded.schedule_expression,
@@ -1198,6 +1238,7 @@ async fn write_record(
             record.creator_user_id.as_str(),
             opt_text(record.agent_id.as_ref().map(AgentId::as_str)),
             opt_text(record.project_id.as_ref().map(ProjectId::as_str)),
+            record.ownership_scope.as_str(),
             record.name.clone(),
             source_kind_text(record.source),
             schedule_expression_text(&record.schedule),

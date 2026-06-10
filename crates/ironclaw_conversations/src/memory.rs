@@ -21,7 +21,7 @@ use crate::{
     ConversationRouteKind, ExternalActorRef, ExternalConversationIdentity, ExternalConversationRef,
     InboundTurnError, LinkConversationRequest, LinkedConversationBinding, MessageIdempotencyStatus,
     ReplyTargetBinding, ResolveConversationRequest, SessionThreadService, ThreadAccessDecision,
-    ThreadMessageRecord, ValidateReplyTargetRequest,
+    ThreadMessageRecord, TrustedOwnerScope, ValidateReplyTargetRequest,
 };
 
 #[derive(Clone)]
@@ -234,7 +234,8 @@ impl ConversationBindingService for InMemoryConversationServices {
         &self,
         request: ResolveConversationRequest,
     ) -> Result<ConversationBindingResolution, InboundTurnError> {
-        self.resolve_or_create_binding_inner(request, None, None, None)
+        // Untrusted path never carries an ownership claim.
+        self.resolve_or_create_binding_inner(request, None, None, TrustedOwnerScope::Unspecified)
             .await
     }
 
@@ -243,13 +244,13 @@ impl ConversationBindingService for InMemoryConversationServices {
         request: ResolveConversationRequest,
         trusted_agent_id: Option<AgentId>,
         trusted_project_id: Option<ProjectId>,
-        trusted_owner_user_id: Option<UserId>,
+        trusted_owner: TrustedOwnerScope,
     ) -> Result<ConversationBindingResolution, InboundTurnError> {
         self.resolve_or_create_binding_inner(
             request,
             trusted_agent_id,
             trusted_project_id,
-            trusted_owner_user_id,
+            trusted_owner,
         )
         .await
     }
@@ -386,7 +387,7 @@ impl ConversationBindingService for InMemoryConversationServices {
                         request.target_thread_id,
                         target_thread.agent_id,
                         target_thread.project_id,
-                        None,
+                        TrustedOwnerScope::Unspecified,
                     ),
                 )?;
                 let linked = LinkedConversationBinding {
@@ -467,7 +468,7 @@ impl InMemoryConversationServices {
         request: ResolveConversationRequest,
         trusted_agent_id: Option<AgentId>,
         trusted_project_id: Option<ProjectId>,
-        trusted_owner_user_id: Option<UserId>,
+        trusted_owner: TrustedOwnerScope,
     ) -> Result<ConversationBindingResolution, InboundTurnError> {
         let _mutation = self.mutation_lock.lock().await;
         self.refresh_state_from_repository().await?;
@@ -520,10 +521,21 @@ impl InMemoryConversationServices {
                 )?;
                 if request.route_kind == ConversationRouteKind::Shared {
                     state.widen_binding_route_access(&binding_key)?;
-                    if binding.owner_user_id.is_none()
-                        && let Some(owner_user_id) = trusted_owner_user_id.clone()
-                    {
-                        state.set_binding_owner(&binding_key, owner_user_id)?;
+                    // Owner adoption: only for User; Project marks the
+                    // binding explicitly ownerless; Unspecified leaves state
+                    // unchanged.
+                    match &trusted_owner {
+                        TrustedOwnerScope::User(owner_user_id)
+                            if binding.owner_scope() == StoredOwnerScope::Unspecified =>
+                        {
+                            state.set_binding_owner(&binding_key, owner_user_id.clone())?;
+                        }
+                        TrustedOwnerScope::Project
+                            if binding.owner_scope() == StoredOwnerScope::Unspecified =>
+                        {
+                            state.set_binding_ownerless(&binding_key)?;
+                        }
+                        _ => {}
                     }
                 }
                 state.record_external_event_route(
@@ -565,7 +577,7 @@ impl InMemoryConversationServices {
                         thread_id,
                         trusted_agent_id,
                         trusted_project_id,
-                        trusted_owner_user_id,
+                        trusted_owner,
                     ),
                 )?;
                 let resolution =
@@ -909,11 +921,30 @@ impl InMemoryState {
             .get_mut(binding_key)
             .ok_or(InboundTurnError::StatePoisoned)?;
         binding.owner_user_id = Some(owner_user_id.clone());
+        binding.owner_explicitly_ownerless = false;
         if let Some(source_binding) = self
             .source_bindings
             .get_mut(binding.source_binding_ref.as_str())
         {
             source_binding.owner_user_id = Some(owner_user_id.clone());
+            source_binding.owner_explicitly_ownerless = false;
+        }
+        Ok(())
+    }
+
+    fn set_binding_ownerless(&mut self, binding_key: &BindingKey) -> Result<(), InboundTurnError> {
+        let binding = self
+            .bindings
+            .get_mut(binding_key)
+            .ok_or(InboundTurnError::StatePoisoned)?;
+        binding.owner_user_id = None;
+        binding.owner_explicitly_ownerless = true;
+        if let Some(source_binding) = self
+            .source_bindings
+            .get_mut(binding.source_binding_ref.as_str())
+        {
+            source_binding.owner_user_id = None;
+            source_binding.owner_explicitly_ownerless = true;
         }
         Ok(())
     }
@@ -1254,12 +1285,74 @@ impl ReplyTargetRecord {
     }
 }
 
+/// Stored tri-state for thread ownership on a [`BindingRecord`].
+///
+/// This is the persisted representation of [`TrustedOwnerScope`]. The serde
+/// design preserves backward-compat with pre-existing JSON blobs that only
+/// had `owner_user_id: Option<UserId>` and no `owner_explicitly_ownerless`
+/// field:
+///
+/// - Old record with `owner_user_id: Some(u)` → deserializes as `User(u)`
+///   (the `owner_explicitly_ownerless` field defaults to `false`, so the
+///   `Some` wins).
+/// - Old record with `owner_user_id` absent or `null` → deserializes as
+///   `Unspecified` (both fields at their defaults).
+/// - New record written as `Project` → `owner_user_id: null` (or absent)
+///   plus `owner_explicitly_ownerless: true`.
+///
+/// Invariant: `User(u)` always has `owner_explicitly_ownerless == false`.
+/// `Project` always has `owner_user_id == None`.  `Unspecified` has both
+/// at default.  The `from_fields` / `to_fields` helpers enforce this on
+/// every round-trip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StoredOwnerScope {
+    /// No ownership claim was stored (legacy default).
+    Unspecified,
+    /// Binding is owned by the given user.
+    User(UserId),
+    /// Binding is owned by its project scope (explicitly absent user owner).
+    Project,
+}
+
+impl StoredOwnerScope {
+    /// Decode from the two wire fields that persist on [`BindingRecord`] /
+    /// [`BindingTarget`].
+    fn from_fields(owner_user_id: Option<UserId>, explicitly_ownerless: bool) -> Self {
+        match (owner_user_id, explicitly_ownerless) {
+            (Some(u), _) => Self::User(u),
+            (None, true) => Self::Project,
+            (None, false) => Self::Unspecified,
+        }
+    }
+
+    /// Encode into the two wire fields.
+    fn to_fields(&self) -> (Option<UserId>, bool) {
+        match self {
+            Self::User(u) => (Some(u.clone()), false),
+            Self::Project => (None, true),
+            Self::Unspecified => (None, false),
+        }
+    }
+}
+
+impl From<TrustedOwnerScope> for StoredOwnerScope {
+    fn from(scope: TrustedOwnerScope) -> Self {
+        match scope {
+            TrustedOwnerScope::Unspecified => Self::Unspecified,
+            TrustedOwnerScope::User(u) => Self::User(u),
+            TrustedOwnerScope::Project => Self::Project,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct BindingTarget {
     pub(crate) thread_id: ThreadId,
     pub(crate) agent_id: Option<AgentId>,
     pub(crate) project_id: Option<ProjectId>,
     pub(crate) owner_user_id: Option<UserId>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) owner_explicitly_ownerless: bool,
 }
 
 impl BindingTarget {
@@ -1267,13 +1360,15 @@ impl BindingTarget {
         thread_id: ThreadId,
         agent_id: Option<AgentId>,
         project_id: Option<ProjectId>,
-        owner_user_id: Option<UserId>,
+        owner: TrustedOwnerScope,
     ) -> Self {
+        let (owner_user_id, owner_explicitly_ownerless) = StoredOwnerScope::from(owner).to_fields();
         Self {
             thread_id,
             agent_id,
             project_id,
             owner_user_id,
+            owner_explicitly_ownerless,
         }
     }
 }
@@ -1288,8 +1383,11 @@ pub(crate) struct BindingRecord {
     pub(crate) thread_id: ThreadId,
     pub(crate) agent_id: Option<AgentId>,
     pub(crate) project_id: Option<ProjectId>,
+    /// Stored as two legacy-compat wire fields; use `owner_scope()` to read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) owner_user_id: Option<UserId>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) owner_explicitly_ownerless: bool,
     pub(crate) route_access: ReplyRouteAccess,
     pub(crate) source_binding_ref: SourceBindingRef,
     pub(crate) reply_target_binding_ref: ReplyTargetBindingRef,
@@ -1320,10 +1418,16 @@ impl BindingRecord {
             agent_id: target.agent_id,
             project_id: target.project_id,
             owner_user_id: target.owner_user_id,
+            owner_explicitly_ownerless: target.owner_explicitly_ownerless,
             route_access,
             source_binding_ref,
             reply_target_binding_ref,
         })
+    }
+
+    /// The decoded tri-state ownership of this binding.
+    pub(crate) fn owner_scope(&self) -> StoredOwnerScope {
+        StoredOwnerScope::from_fields(self.owner_user_id.clone(), self.owner_explicitly_ownerless)
     }
 
     fn resolution(
@@ -1331,15 +1435,25 @@ impl BindingRecord {
         actor_user_id: UserId,
         tenant_id: TenantId,
     ) -> ConversationBindingResolution {
-        let turn_scope = match self.owner_user_id.clone() {
-            Some(owner_user_id) => TurnScope::new_with_owner(
+        // User    -> TurnScope::new_with_owner(..., Some(u))  — explicit personal owner
+        // Project -> TurnScope::new_with_owner(..., None)   — explicit project-owned (no user)
+        // Unspecified -> TurnScope::new(...)                  — legacy, no owner marker
+        let turn_scope = match self.owner_scope() {
+            StoredOwnerScope::User(owner_user_id) => TurnScope::new_with_owner(
                 tenant_id.clone(),
                 self.agent_id.clone(),
                 self.project_id.clone(),
                 self.thread_id.clone(),
                 Some(owner_user_id),
             ),
-            None => TurnScope::new(
+            StoredOwnerScope::Project => TurnScope::new_with_owner(
+                tenant_id.clone(),
+                self.agent_id.clone(),
+                self.project_id.clone(),
+                self.thread_id.clone(),
+                None,
+            ),
+            StoredOwnerScope::Unspecified => TurnScope::new(
                 tenant_id.clone(),
                 self.agent_id.clone(),
                 self.project_id.clone(),
@@ -1395,4 +1509,287 @@ pub(crate) struct MessageIdempotencyKey {
     pub(crate) tenant_id: TenantId,
     pub(crate) source_binding_ref: String,
     pub(crate) external_event_id: crate::ExternalEventId,
+}
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_host_api::{TenantId, ThreadId, UserId};
+
+    use super::{ActorKey, BindingRecord, BindingTarget, ReplyRouteAccess, StoredOwnerScope};
+    use crate::ids::ExternalConversationRef;
+    use crate::{AdapterInstallationId, AdapterKind, ExternalActorRef, TrustedOwnerScope};
+
+    // ── StoredOwnerScope codec round-trips ────────────────────────────────────
+
+    #[test]
+    fn stored_owner_scope_user_round_trips_through_fields() {
+        let user = UserId::new("alice").unwrap();
+        let scope = StoredOwnerScope::User(user.clone());
+        let (owner_user_id, explicitly_ownerless) = scope.to_fields();
+        assert_eq!(owner_user_id.as_ref().map(UserId::as_str), Some("alice"));
+        assert!(!explicitly_ownerless);
+        let decoded = StoredOwnerScope::from_fields(owner_user_id, explicitly_ownerless);
+        assert_eq!(decoded, StoredOwnerScope::User(user));
+    }
+
+    #[test]
+    fn stored_owner_scope_project_round_trips_through_fields() {
+        let scope = StoredOwnerScope::Project;
+        let (owner_user_id, explicitly_ownerless) = scope.to_fields();
+        assert!(owner_user_id.is_none());
+        assert!(explicitly_ownerless);
+        let decoded = StoredOwnerScope::from_fields(owner_user_id, explicitly_ownerless);
+        assert_eq!(decoded, StoredOwnerScope::Project);
+    }
+
+    #[test]
+    fn stored_owner_scope_unspecified_round_trips_through_fields() {
+        let scope = StoredOwnerScope::Unspecified;
+        let (owner_user_id, explicitly_ownerless) = scope.to_fields();
+        assert!(owner_user_id.is_none());
+        assert!(!explicitly_ownerless);
+        let decoded = StoredOwnerScope::from_fields(owner_user_id, explicitly_ownerless);
+        assert_eq!(decoded, StoredOwnerScope::Unspecified);
+    }
+
+    // ── Legacy serde compat ───────────────────────────────────────────────────
+
+    /// Legacy records with `owner_user_id: Some(u)` and no
+    /// `owner_explicitly_ownerless` field must deserialize as `User(u)`.
+    #[test]
+    fn legacy_binding_record_with_owner_user_id_deserializes_as_user() {
+        let json = serde_json::json!({
+            "tenant_id": "t1",
+            "adapter_kind": "telegram",
+            "adapter_installation_id": "install-1",
+            "external_conversation_ref": {
+                "space_id": null,
+                "conversation_id": "chat-1",
+                "thread_id": null,
+                "message_id": null
+            },
+            "external_conversation_identity": {
+                "space_id": null,
+                "conversation_id": "chat-1"
+            },
+            "thread_id": "thread-1",
+            "agent_id": null,
+            "project_id": null,
+            "owner_user_id": "alice",
+            // no owner_explicitly_ownerless field — legacy shape
+            "route_access": {
+                "owner_actor_key": {
+                    "tenant_id": "t1",
+                    "adapter_kind": "telegram",
+                    "adapter_installation_id": "install-1",
+                    "external_actor_ref": {
+                        "kind": "user",
+                        "id": "u1"
+                    }
+                },
+                "shared": false
+            },
+            "source_binding_ref": "source:test-1",
+            "reply_target_binding_ref": "reply:test-1"
+        });
+
+        let record: BindingRecord =
+            serde_json::from_value(json).expect("legacy binding must deserialize");
+        assert_eq!(
+            record.owner_scope(),
+            StoredOwnerScope::User(UserId::new("alice").unwrap()),
+            "legacy record with owner_user_id must decode as User"
+        );
+    }
+
+    /// Legacy records with no `owner_user_id` and no `owner_explicitly_ownerless`
+    /// must deserialize as `Unspecified`.
+    #[test]
+    fn legacy_binding_record_without_owner_user_id_deserializes_as_unspecified() {
+        let json = serde_json::json!({
+            "tenant_id": "t1",
+            "adapter_kind": "telegram",
+            "adapter_installation_id": "install-1",
+            "external_conversation_ref": {
+                "space_id": null,
+                "conversation_id": "chat-2",
+                "thread_id": null,
+                "message_id": null
+            },
+            "external_conversation_identity": {
+                "space_id": null,
+                "conversation_id": "chat-2"
+            },
+            "thread_id": "thread-2",
+            "agent_id": null,
+            "project_id": null,
+            // no owner_user_id, no owner_explicitly_ownerless — legacy shape
+            "route_access": {
+                "owner_actor_key": {
+                    "tenant_id": "t1",
+                    "adapter_kind": "telegram",
+                    "adapter_installation_id": "install-1",
+                    "external_actor_ref": {
+                        "kind": "user",
+                        "id": "u1"
+                    }
+                },
+                "shared": false
+            },
+            "source_binding_ref": "source:test-2",
+            "reply_target_binding_ref": "reply:test-2"
+        });
+
+        let record: BindingRecord =
+            serde_json::from_value(json).expect("legacy binding must deserialize");
+        assert_eq!(
+            record.owner_scope(),
+            StoredOwnerScope::Unspecified,
+            "legacy record without owner_user_id must decode as Unspecified"
+        );
+    }
+
+    /// New records with `owner_explicitly_ownerless: true` must decode as `Project`.
+    #[test]
+    fn new_binding_record_with_explicitly_ownerless_deserializes_as_project() {
+        let json = serde_json::json!({
+            "tenant_id": "t1",
+            "adapter_kind": "telegram",
+            "adapter_installation_id": "install-1",
+            "external_conversation_ref": {
+                "space_id": null,
+                "conversation_id": "chat-3",
+                "thread_id": null,
+                "message_id": null
+            },
+            "external_conversation_identity": {
+                "space_id": null,
+                "conversation_id": "chat-3"
+            },
+            "thread_id": "thread-3",
+            "agent_id": null,
+            "project_id": null,
+            "owner_explicitly_ownerless": true,
+            "route_access": {
+                "owner_actor_key": {
+                    "tenant_id": "t1",
+                    "adapter_kind": "telegram",
+                    "adapter_installation_id": "install-1",
+                    "external_actor_ref": {
+                        "kind": "user",
+                        "id": "u1"
+                    }
+                },
+                "shared": false
+            },
+            "source_binding_ref": "source:test-3",
+            "reply_target_binding_ref": "reply:test-3"
+        });
+
+        let record: BindingRecord =
+            serde_json::from_value(json).expect("ownerless binding must deserialize");
+        assert_eq!(
+            record.owner_scope(),
+            StoredOwnerScope::Project,
+            "record with owner_explicitly_ownerless:true must decode as Project"
+        );
+    }
+
+    // ── BindingRecord::resolution() TurnScope output ──────────────────────────
+
+    fn make_binding_record(target: BindingTarget) -> BindingRecord {
+        let actor_key = ActorKey::new(
+            &TenantId::new("t").unwrap(),
+            &AdapterKind::new("telegram").unwrap(),
+            &AdapterInstallationId::new("inst").unwrap(),
+            &ExternalActorRef::new("user", "u1").unwrap(),
+        );
+        BindingRecord::new(
+            TenantId::new("t").unwrap(),
+            AdapterKind::new("telegram").unwrap(),
+            AdapterInstallationId::new("inst").unwrap(),
+            ExternalConversationRef::new(None, "c1", None, None).unwrap(),
+            ReplyRouteAccess::new(actor_key, crate::ConversationRouteKind::Direct),
+            target,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn resolution_user_emits_turn_scope_with_explicit_owner() {
+        let record = make_binding_record(BindingTarget::new(
+            ThreadId::new("th1").unwrap(),
+            None,
+            None,
+            TrustedOwnerScope::User(UserId::new("alice").unwrap()),
+        ));
+        let resolution =
+            record.resolution(UserId::new("actor").unwrap(), TenantId::new("t").unwrap());
+
+        assert_eq!(
+            resolution
+                .turn_scope
+                .explicit_owner_user_id()
+                .map(UserId::as_str),
+            Some("alice")
+        );
+        assert!(resolution.turn_scope.has_explicit_thread_owner());
+    }
+
+    #[test]
+    fn resolution_project_emits_turn_scope_with_explicit_ownerless_marker() {
+        let record = make_binding_record(BindingTarget::new(
+            ThreadId::new("th2").unwrap(),
+            None,
+            None,
+            TrustedOwnerScope::Project,
+        ));
+        let resolution =
+            record.resolution(UserId::new("actor").unwrap(), TenantId::new("t").unwrap());
+
+        assert_eq!(resolution.turn_scope.explicit_owner_user_id(), None);
+        assert!(
+            resolution.turn_scope.has_explicit_thread_owner(),
+            "Project must produce has_explicit_thread_owner=true"
+        );
+    }
+
+    #[test]
+    fn resolution_unspecified_emits_turn_scope_without_owner_marker() {
+        let record = make_binding_record(BindingTarget::new(
+            ThreadId::new("th3").unwrap(),
+            None,
+            None,
+            TrustedOwnerScope::Unspecified,
+        ));
+        let resolution =
+            record.resolution(UserId::new("actor").unwrap(), TenantId::new("t").unwrap());
+
+        assert_eq!(resolution.turn_scope.explicit_owner_user_id(), None);
+        assert!(
+            !resolution.turn_scope.has_explicit_thread_owner(),
+            "Unspecified must produce has_explicit_thread_owner=false"
+        );
+    }
+
+    // ── from(TrustedOwnerScope) codec ─────────────────────────────────────────
+
+    #[test]
+    fn trusted_owner_scope_user_converts_to_stored_user() {
+        let user = UserId::new("bob").unwrap();
+        let stored = StoredOwnerScope::from(TrustedOwnerScope::User(user.clone()));
+        assert_eq!(stored, StoredOwnerScope::User(user));
+    }
+
+    #[test]
+    fn trusted_owner_scope_project_converts_to_stored_project() {
+        let stored = StoredOwnerScope::from(TrustedOwnerScope::Project);
+        assert_eq!(stored, StoredOwnerScope::Project);
+    }
+
+    #[test]
+    fn trusted_owner_scope_unspecified_converts_to_stored_unspecified() {
+        let stored = StoredOwnerScope::from(TrustedOwnerScope::Unspecified);
+        assert_eq!(stored, StoredOwnerScope::Unspecified);
+    }
 }
