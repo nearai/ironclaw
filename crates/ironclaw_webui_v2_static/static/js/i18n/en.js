@@ -633,6 +633,18 @@ registerPack("en", {
   "automations.filter.paused": "Paused",
   "automations.refresh": "Refresh automations",
   "automations.error.loadFailed": "Unable to load automations",
+  "automations.delivery.eyebrow": "Personal default delivery",
+  "automations.delivery.targetLabel": "Target",
+  "automations.delivery.none": "No default target",
+  "automations.delivery.noneDescription": "Personal automation replies stay in the run timeline.",
+  "automations.delivery.noTargetOption": "No default target",
+  "automations.delivery.save": "Save",
+  "automations.delivery.saving": "Saving",
+  "automations.delivery.clear": "Clear",
+  "automations.delivery.error": "Unable to update delivery defaults",
+  "automations.delivery.status.available": "Available",
+  "automations.delivery.status.unavailable": "Unavailable",
+  "automations.delivery.status.none_configured": "Not set",
   "automations.summary.scheduled": "Scheduled",
   "automations.summary.scheduledDetail":
     "Scheduled automations visible to this agent.",
@@ -770,8 +782,31 @@ registerPack("en", {
 
   // Admin — tabs
   "admin.tab.dashboard": "Dashboard",
+  "admin.tab.automations": "Automations",
   "admin.tab.users": "Users",
   "admin.tab.usage": "Usage",
+
+  // Admin — automations
+  "admin.automations.title": "Admin automations",
+  "admin.automations.description":
+    "Project automations and shared-channel delivery defaults.",
+  "admin.automations.sharedDefaults": "Shared delivery defaults",
+  "admin.automations.sharedDefaultsDescription":
+    "Project runs use admin-managed channel defaults, not personal DM defaults.",
+  "admin.automations.scope.project": "Project scope",
+  "admin.automations.scope.projectDescription":
+    "Background runs for project agents resolve delivery through project defaults.",
+  "admin.automations.scope.personal": "Personal scope",
+  "admin.automations.scope.personalDescription":
+    "Personal agent runs stay on the personal Automations page and resolve through the user's default.",
+  "admin.automations.scope.adminOnly": "Admin",
+  "admin.automations.scope.personalTab": "Personal tab",
+  "admin.automations.status.routePending": "Admin route pending",
+  "admin.automations.status.notConfigured": "Not configured",
+  "admin.automations.status.needsProjectApi": "Needs project API",
+  "admin.automations.empty.title": "No shared-channel defaults available",
+  "admin.automations.empty.description":
+    "The project preference route will provide the channel-scoped target list.",
 
   // Admin — dashboard
   "admin.dashboard.systemOverview": "System overview",

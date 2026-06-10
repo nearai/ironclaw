@@ -4,6 +4,7 @@ import { useT } from "../../../lib/i18n.js";
 
 const ADMIN_TABS = [
   { id: "dashboard", labelKey: "admin.tab.dashboard", icon: "pulse" },
+  { id: "automations", labelKey: "admin.tab.automations", icon: "calendar" },
   { id: "users", labelKey: "admin.tab.users", icon: "lock" },
   { id: "usage", labelKey: "admin.tab.usage", icon: "spark" },
 ];

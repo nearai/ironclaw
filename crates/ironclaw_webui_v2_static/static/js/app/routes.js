@@ -16,7 +16,7 @@ export const primaryRoutes = [
   { id: "missions", path: "/missions", labelKey: "nav.missions", hidden: true },
   { id: "extensions", path: "/extensions", labelKey: "nav.extensions" },
   { id: "settings", path: "/settings", labelKey: "nav.settings", hidden: false },
-  { id: "admin", path: "/admin", labelKey: "nav.admin", hidden: true },
+  { id: "admin", path: "/admin", labelKey: "nav.admin", hidden: false },
 ];
 
 export const routeSectionDefs = [
@@ -53,6 +53,7 @@ export const EXTENSIONS_SUB_ROUTES = [
 
 export const ADMIN_SUB_ROUTES = [
   { id: "dashboard", labelKey: "admin.tab.dashboard", icon: "pulse" },
+  { id: "automations", labelKey: "admin.tab.automations", icon: "calendar" },
   { id: "users", labelKey: "admin.tab.users", icon: "lock" },
   { id: "usage", labelKey: "admin.tab.usage", icon: "spark" },
 ];

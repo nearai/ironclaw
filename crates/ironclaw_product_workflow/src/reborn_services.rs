@@ -69,26 +69,28 @@ pub use llm_config::{
     NearAiWalletLoginResult, SetActiveLlmRequest, UpsertLlmProviderRequest,
 };
 pub use types::{
-    RebornAutomationInfo, RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus,
-    RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
-    RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornConnectableChannelInfo, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
-    RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
-    RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
-    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
+    RebornAutomationInfo, RebornAutomationOwnershipScope, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
+    RebornChannelConnectStrategy, RebornConnectableChannelInfo,
+    RebornConnectableChannelListResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
+    RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionCredentialSetup,
+    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionOnboardingPayload,
+    RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
+    RebornExtensionSetupField, RebornExtensionSetupSecret, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListProjectAutomationsResponse,
     RebornListThreadsResponse, RebornOutboundDeliveryModality,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetChannel,
     RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetDisplayName,
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
     RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornResumeGateResponse, RebornSetOutboundPreferencesRequest,
-    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
-    RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
-    RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    RebornProjectAutomationInfo, RebornResolveGateResponse, RebornResumeGateResponse,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
+    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse,
 };
 
 type SkillActivationRecorder =
@@ -213,6 +215,16 @@ pub trait OutboundPreferencesProductFacade: Send + Sync {
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError>;
 
+    /// Return the authenticated caller's project outbound preferences.
+    ///
+    /// Project defaults are scoped by `(tenant, project)` rather than the
+    /// caller's personal user id. The handler layer is responsible for only
+    /// exposing this surface to operator-authorized routes.
+    async fn get_project_outbound_preferences(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError>;
+
     /// Persist the caller's scoped outbound delivery preferences.
     ///
     /// Implementations must scope writes by the caller's tenant/user identity.
@@ -220,6 +232,13 @@ pub trait OutboundPreferencesProductFacade: Send + Sync {
     /// by default, which keeps Phase 1 mutation attempts fail-closed with a
     /// non-retryable service-unavailable response until a real facade is wired.
     async fn set_outbound_preferences(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornSetOutboundPreferencesRequest,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError>;
+
+    /// Persist the authenticated caller's project outbound defaults.
+    async fn set_project_outbound_preferences(
         &self,
         caller: WebUiAuthenticatedCaller,
         request: RebornSetOutboundPreferencesRequest,
@@ -233,6 +252,12 @@ pub trait OutboundPreferencesProductFacade: Send + Sync {
     /// Phase 1 target discovery fail-closed with a non-retryable
     /// service-unavailable response until a real facade is wired.
     async fn list_outbound_delivery_targets(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError>;
+
+    /// List delivery targets available to the authenticated caller's project scope.
+    async fn list_project_outbound_delivery_targets(
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError>;
@@ -256,6 +281,13 @@ impl OutboundPreferencesProductFacade for UnsupportedOutboundPreferencesProductF
         Ok(RebornOutboundPreferencesResponse::default())
     }
 
+    async fn get_project_outbound_preferences(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        Ok(RebornOutboundPreferencesResponse::default())
+    }
+
     async fn set_outbound_preferences(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -264,7 +296,22 @@ impl OutboundPreferencesProductFacade for UnsupportedOutboundPreferencesProductF
         Err(outbound_preferences_unavailable())
     }
 
+    async fn set_project_outbound_preferences(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: RebornSetOutboundPreferencesRequest,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        Err(outbound_preferences_unavailable())
+    }
+
     async fn list_outbound_delivery_targets(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
+        Err(outbound_preferences_unavailable())
+    }
+
+    async fn list_project_outbound_delivery_targets(
         &self,
         _caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
@@ -334,6 +381,21 @@ pub struct AutomationListRequest {
     pub run_limit: usize,
 }
 
+/// Request for listing project automations scoped by tenant/project.
+///
+/// Scope is derived from the authenticated caller — the handler layer must
+/// supply the resolved `tenant_id` and `project_id` from the
+/// operator-authenticated route context, never from browser request bodies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectAutomationListRequest {
+    pub tenant_id: ironclaw_host_api::TenantId,
+    /// Optional project scope. Callers must reject or fail closed before this
+    /// point if `project_id` is absent when project scope is required.
+    pub project_id: Option<ironclaw_host_api::ProjectId>,
+    pub limit: usize,
+    pub run_limit: usize,
+}
+
 #[async_trait]
 pub trait AutomationProductFacade: Send + Sync {
     async fn list_automations(
@@ -341,6 +403,38 @@ pub trait AutomationProductFacade: Send + Sync {
         caller: ProductAgentBoundCaller,
         request: AutomationListRequest,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError>;
+
+    /// List automations whose persisted `ownership_scope` is `project`,
+    /// scoped by `(tenant_id, project_id)`.
+    ///
+    /// **Never** filters by `creator_user_id`. Project automations are
+    /// tenant-wide resources owned by the project; any creator's automations
+    /// appear here if they were originally created as project-scoped.
+    ///
+    /// Scope is derived from the authenticated caller before this method is
+    /// called — implementors must not accept tenant/project authority from
+    /// elsewhere.
+    ///
+    /// Returns [`RebornProjectAutomationInfo`] rows where every row's
+    /// `ownership_scope` is `project`. The wrapper carries the discriminator
+    /// so the admin surface can assert the invariant without a breaking change
+    /// to the existing [`RebornAutomationInfo`] struct.
+    ///
+    /// The default implementation returns a not-implemented service-unavailable
+    /// error so out-of-crate implementations continue to compile when this
+    /// method is added.
+    async fn list_project_automations(
+        &self,
+        request: ProjectAutomationListRequest,
+    ) -> Result<Vec<RebornProjectAutomationInfo>, RebornServicesError> {
+        let _ = request;
+        // follow-up: wire a real repository query scoped by
+        // (tenant_id, project_id) with ownership_scope = project
+        // once the trigger repository abstraction exposes a project listing
+        // path. Until then this default preserves compilation for existing
+        // out-of-crate AutomationProductFacade implementors.
+        Err(automation_unavailable())
+    }
 }
 
 #[derive(Debug)]
@@ -486,6 +580,28 @@ pub trait RebornServicesApi: Send + Sync {
         request: WebUiListAutomationsRequest,
     ) -> Result<RebornListAutomationsResponse, RebornServicesError>;
 
+    /// List automations for the project/admin surface.
+    ///
+    /// Derives `(tenant_id, project_id)` from the authenticated operator caller
+    /// — the same derivation used by `get_project_outbound_preferences`. Returns
+    /// only rows whose persisted `ownership_scope` is `project` for the resolved
+    /// scope; never filters by `creator_user_id`.
+    ///
+    /// Returns [`RebornListProjectAutomationsResponse`] where every row carries
+    /// `ownership_scope = project`. Clients must not mix this with the personal
+    /// `list_automations` response.
+    ///
+    /// Returns a not-implemented service-unavailable error by default so
+    /// existing `RebornServicesApi` implementors keep compiling when this
+    /// method is added.
+    async fn list_project_automations(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: WebUiListAutomationsRequest,
+    ) -> Result<RebornListProjectAutomationsResponse, RebornServicesError> {
+        Err(automation_unavailable())
+    }
+
     async fn list_connectable_channels(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -505,6 +621,14 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError>;
 
+    /// Return project outbound preferences for the caller's current project scope.
+    async fn get_project_outbound_preferences(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        Err(outbound_preferences_unavailable())
+    }
+
     /// Persist the authenticated caller's outbound delivery preference.
     ///
     /// Implementations must scope mutations by the caller's tenant/user
@@ -516,6 +640,15 @@ pub trait RebornServicesApi: Send + Sync {
         request: RebornSetOutboundPreferencesRequest,
     ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError>;
 
+    /// Persist project outbound preferences for the caller's current project scope.
+    async fn set_project_outbound_preferences(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: RebornSetOutboundPreferencesRequest,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        Err(outbound_preferences_unavailable())
+    }
+
     /// List delivery targets available to the authenticated caller.
     ///
     /// Implementations must scope target inventory by the caller's tenant/user
@@ -525,6 +658,14 @@ pub trait RebornServicesApi: Send + Sync {
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError>;
+
+    /// List delivery targets available to the caller's current project scope.
+    async fn list_project_outbound_delivery_targets(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
+        Err(outbound_preferences_unavailable())
+    }
 
     async fn list_extensions(
         &self,
@@ -1346,6 +1487,39 @@ impl RebornServicesApi for RebornServices {
         Ok(RebornListAutomationsResponse { automations })
     }
 
+    /// List automations for the project/admin surface.
+    ///
+    /// Derives `(tenant_id, project_id)` from the operator-authenticated caller.
+    /// Fails closed when `project_id` is absent because project scope requires a
+    /// concrete project binding.
+    async fn list_project_automations(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiListAutomationsRequest,
+    ) -> Result<RebornListProjectAutomationsResponse, RebornServicesError> {
+        // Derive project scope from the authenticated caller.
+        // project_id is mandatory for project automation scope.
+        if caller.project_id.is_none() {
+            return Err(RebornServicesError::from_status(
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        };
+        let limit = clamp_automation_list_limit(request.limit);
+        let run_limit = clamp_automation_run_limit(request.run_limit);
+        let automations = self
+            .automation_facade
+            .list_project_automations(ProjectAutomationListRequest {
+                tenant_id: caller.tenant_id,
+                project_id: caller.project_id,
+                limit,
+                run_limit,
+            })
+            .await?;
+        Ok(RebornListProjectAutomationsResponse { automations })
+    }
+
     async fn list_connectable_channels(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -1364,6 +1538,15 @@ impl RebornServicesApi for RebornServices {
             .await
     }
 
+    async fn get_project_outbound_preferences(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        self.outbound_preferences_facade
+            .get_project_outbound_preferences(caller)
+            .await
+    }
+
     async fn set_outbound_preferences(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -1374,12 +1557,31 @@ impl RebornServicesApi for RebornServices {
             .await
     }
 
+    async fn set_project_outbound_preferences(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornSetOutboundPreferencesRequest,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        self.outbound_preferences_facade
+            .set_project_outbound_preferences(caller, request)
+            .await
+    }
+
     async fn list_outbound_delivery_targets(
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
         self.outbound_preferences_facade
             .list_outbound_delivery_targets(caller)
+            .await
+    }
+
+    async fn list_project_outbound_delivery_targets(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
+        self.outbound_preferences_facade
+            .list_project_outbound_delivery_targets(caller)
             .await
     }
 

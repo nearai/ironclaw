@@ -164,14 +164,38 @@ mod tests {
         let routes = asset_text("js/app/routes.js");
         assert!(routes.contains("nav.automations"));
         assert!(routes.contains("path: \"/automations\""));
+        assert!(routes.contains("admin.tab.automations"));
 
         let api = asset_text("js/lib/api.js");
         assert!(api.contains("listAutomations"));
         assert!(api.contains("/automations"));
+        assert!(api.contains("getOutboundPreferences"));
+        assert!(api.contains("setOutboundPreferences"));
+        assert!(api.contains("/outbound/preferences"));
+        assert!(api.contains("/outbound/targets"));
 
         let page = asset_text("js/pages/automations/automations-page.js");
         assert!(page.contains("AutomationsSummaryStrip"));
+        assert!(page.contains("AutomationDeliveryDefaultsPanel"));
+        assert!(page.contains("useOutboundDeliveryDefaults"));
         assert!(page.contains("AutomationsList"));
+
+        let defaults_panel =
+            asset_text("js/pages/automations/components/automation-delivery-defaults-panel.js");
+        assert!(defaults_panel.contains("finalReplyTargets"));
+        assert!(defaults_panel.contains("saveFinalReplyTarget"));
+
+        let defaults_hook = asset_text("js/pages/automations/hooks/useOutboundDeliveryDefaults.js");
+        assert!(defaults_hook.contains("listOutboundDeliveryTargets"));
+        assert!(defaults_hook.contains("setOutboundPreferences"));
+
+        let admin_page = asset_text("js/pages/admin/admin-page.js");
+        assert!(admin_page.contains("AdminAutomationsTab"));
+        assert!(admin_page.contains("automations:"));
+
+        let admin_automations = asset_text("js/pages/admin/components/automations-tab.js");
+        assert!(admin_automations.contains("admin.automations.sharedDefaults"));
+        assert!(admin_automations.contains("admin.automations.scope.project"));
 
         let presenter = asset_text("js/pages/automations/lib/automations-presenters.js");
         assert!(presenter.contains("source?.type === \"schedule\""));

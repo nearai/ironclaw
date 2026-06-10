@@ -1,5 +1,6 @@
 import { Navigate, useNavigate, useParams } from "react-router";
 import { React, html } from "../../lib/html.js";
+import { AdminAutomationsTab } from "./components/automations-tab.js";
 import { DashboardTab } from "./components/dashboard-tab.js";
 import { UsageTab } from "./components/usage-tab.js";
 import { UserDetail } from "./components/user-detail.js";
@@ -27,6 +28,7 @@ export function AdminPage() {
       onSelectUser=${handleSelectUser}
       onNavigateTab=${(id) => navigate("/admin/" + id)}
     />`,
+    automations: html`<${AdminAutomationsTab} />`,
     users: selectedUserId
       ? html`<${UserDetail} userId=${selectedUserId} onBack=${handleBack} />`
       : html`<${AdminUsersTab}

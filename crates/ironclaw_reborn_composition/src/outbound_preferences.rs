@@ -31,7 +31,6 @@ pub(crate) trait OutboundDeliveryTargetProvider: Send + Sync {
         caller: &WebUiAuthenticatedCaller,
     ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError>;
 
-    #[allow(dead_code, reason = "consumed by the project preference facade in the stacked surface PR")]
     async fn list_project_delivery_targets(
         &self,
         _caller: &WebUiAuthenticatedCaller,
@@ -69,7 +68,6 @@ pub(crate) trait OutboundDeliveryTargetProvider: Send + Sync {
             }))
     }
 
-    #[allow(dead_code, reason = "consumed by the project preference facade in the stacked surface PR")]
     async fn resolve_project_outbound_delivery_target(
         &self,
         caller: &WebUiAuthenticatedCaller,
@@ -85,7 +83,6 @@ pub(crate) trait OutboundDeliveryTargetProvider: Send + Sync {
             }))
     }
 
-    #[allow(dead_code, reason = "consumed by the project preference facade in the stacked surface PR")]
     async fn resolve_project_reply_target_binding(
         &self,
         caller: &WebUiAuthenticatedCaller,
@@ -173,6 +170,52 @@ impl OutboundDeliveryTargetProvider for OutboundDeliveryTargetRegistry {
             .flatten()
             .find(|entry| entry.capabilities.final_replies))
     }
+
+    async fn list_project_delivery_targets(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+    ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        let target_groups = try_join_all(
+            self.providers
+                .iter()
+                .map(|provider| provider.list_project_delivery_targets(caller)),
+        )
+        .await?;
+        Ok(target_groups.into_iter().flatten().collect())
+    }
+
+    async fn resolve_project_outbound_delivery_target(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        target_id: &RebornOutboundDeliveryTargetId,
+    ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        let target_groups =
+            try_join_all(self.providers.iter().map(|provider| {
+                provider.resolve_project_outbound_delivery_target(caller, target_id)
+            }))
+            .await?;
+        Ok(target_groups
+            .into_iter()
+            .flatten()
+            .find(|entry| entry.capabilities.final_replies))
+    }
+
+    async fn resolve_project_reply_target_binding(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        target: &ReplyTargetBindingRef,
+    ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        let target_groups = try_join_all(
+            self.providers
+                .iter()
+                .map(|provider| provider.resolve_project_reply_target_binding(caller, target)),
+        )
+        .await?;
+        Ok(target_groups
+            .into_iter()
+            .flatten()
+            .find(|entry| entry.capabilities.final_replies))
+    }
 }
 
 pub(crate) struct RebornOutboundPreferencesFacade {
@@ -206,9 +249,22 @@ impl RebornOutboundPreferencesFacade {
         caller: &WebUiAuthenticatedCaller,
         record: Option<&CommunicationPreferenceRecord>,
     ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        self.response_for_record_with_target_scope(caller, record, TargetScope::Personal)
+            .await
+    }
+
+    async fn response_for_record_with_target_scope(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        record: Option<&CommunicationPreferenceRecord>,
+        target_scope: TargetScope,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
         let (final_reply_target, final_reply_target_status) =
             match record.and_then(|record| record.final_reply_target.as_ref()) {
-                Some(target) => match self.summary_for_reply_target(caller, target).await? {
+                Some(target) => match self
+                    .summary_for_reply_target(caller, target, target_scope)
+                    .await?
+                {
                     Some(target) => (Some(target), RebornOutboundDeliveryTargetStatus::Available),
                     None => (None, RebornOutboundDeliveryTargetStatus::Unavailable),
                 },
@@ -241,58 +297,57 @@ impl RebornOutboundPreferencesFacade {
         &self,
         caller: &WebUiAuthenticatedCaller,
         target: &ReplyTargetBindingRef,
+        target_scope: TargetScope,
     ) -> Result<Option<RebornOutboundDeliveryTargetSummary>, RebornServicesError> {
-        Ok(self
-            .targets
-            .resolve_reply_target_binding(caller, target)
-            .await?
-            .map(|entry| entry.summary))
+        let resolved = match target_scope {
+            TargetScope::Personal => {
+                self.targets
+                    .resolve_reply_target_binding(caller, target)
+                    .await?
+            }
+            TargetScope::Project => {
+                self.targets
+                    .resolve_project_reply_target_binding(caller, target)
+                    .await?
+            }
+        };
+        Ok(resolved.map(|entry| entry.summary))
     }
 
     async fn resolve_final_reply_target(
         &self,
         caller: &WebUiAuthenticatedCaller,
         target_id: &RebornOutboundDeliveryTargetId,
+        target_scope: TargetScope,
     ) -> Result<OutboundDeliveryTargetEntry, RebornServicesError> {
-        self.targets
-            .resolve_outbound_delivery_target(caller, target_id)
-            .await?
-            .ok_or_else(outbound_target_not_found)
+        let resolved = match target_scope {
+            TargetScope::Personal => {
+                self.targets
+                    .resolve_outbound_delivery_target(caller, target_id)
+                    .await?
+            }
+            TargetScope::Project => {
+                self.targets
+                    .resolve_project_outbound_delivery_target(caller, target_id)
+                    .await?
+            }
+        };
+        resolved.ok_or_else(outbound_target_not_found)
     }
 
-    /// Invariant: `WebUiAuthenticatedCaller` must come from the authenticated
-    /// product/session boundary, never from request-body tenant/user fields.
-    /// This key and target-provider scope intentionally share the same
-    /// verified caller identity.
-    fn key(caller: &WebUiAuthenticatedCaller) -> CommunicationPreferenceKey {
-        CommunicationPreferenceKey::personal(caller.tenant_id.clone(), caller.user_id.clone())
-    }
-}
-
-#[async_trait]
-impl OutboundPreferencesProductFacade for RebornOutboundPreferencesFacade {
-    async fn get_outbound_preferences(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        let record = self
-            .preferences
-            .load_communication_preference(Self::key(&caller))
-            .await
-            .map_err(map_outbound_repository_error)?;
-        self.response_for_record(&caller, record.as_ref().map(|record| &record.record))
-            .await
-    }
-
-    async fn set_outbound_preferences(
+    async fn set_preferences_for_key(
         &self,
         caller: WebUiAuthenticatedCaller,
         request: RebornSetOutboundPreferencesRequest,
+        key: CommunicationPreferenceKey,
+        target_scope: TargetScope,
     ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        let key = Self::key(&caller);
         let scope = key.scope.clone();
         let resolved_final_reply_target = match request.final_reply_target_id.as_ref() {
-            Some(target_id) => Some(self.resolve_final_reply_target(&caller, target_id).await?),
+            Some(target_id) => Some(
+                self.resolve_final_reply_target(&caller, target_id, target_scope)
+                    .await?,
+            ),
             None => None,
         };
         let final_reply_target = resolved_final_reply_target
@@ -334,14 +389,16 @@ impl OutboundPreferencesProductFacade for RebornOutboundPreferencesFacade {
         ))
     }
 
-    async fn list_outbound_delivery_targets(
+    async fn list_targets_for_scope(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: &WebUiAuthenticatedCaller,
+        target_scope: TargetScope,
     ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
-        let targets = self
-            .targets
-            .list_outbound_delivery_targets(&caller)
-            .await?
+        let raw_targets = match target_scope {
+            TargetScope::Personal => self.targets.list_outbound_delivery_targets(caller).await?,
+            TargetScope::Project => self.targets.list_project_delivery_targets(caller).await?,
+        };
+        let targets = raw_targets
             .into_iter()
             .filter(|entry| entry.capabilities.final_replies)
             .map(|entry| RebornOutboundDeliveryTargetOption {
@@ -354,6 +411,102 @@ impl OutboundPreferencesProductFacade for RebornOutboundPreferencesFacade {
             next_cursor: None,
         })
     }
+
+    /// Invariant: `WebUiAuthenticatedCaller` must come from the authenticated
+    /// product/session boundary, never from request-body tenant/user fields.
+    /// This key and target-provider scope intentionally share the same
+    /// verified caller identity.
+    fn key(caller: &WebUiAuthenticatedCaller) -> CommunicationPreferenceKey {
+        CommunicationPreferenceKey::personal(caller.tenant_id.clone(), caller.user_id.clone())
+    }
+
+    fn project_key(
+        caller: &WebUiAuthenticatedCaller,
+    ) -> Result<CommunicationPreferenceKey, RebornServicesError> {
+        let Some(project_id) = caller.project_id.clone() else {
+            return Err(missing_project_scope());
+        };
+        Ok(CommunicationPreferenceKey::project(
+            caller.tenant_id.clone(),
+            project_id,
+        ))
+    }
+}
+
+#[async_trait]
+impl OutboundPreferencesProductFacade for RebornOutboundPreferencesFacade {
+    async fn get_outbound_preferences(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        let record = self
+            .preferences
+            .load_communication_preference(Self::key(&caller))
+            .await
+            .map_err(map_outbound_repository_error)?;
+        self.response_for_record(&caller, record.as_ref().map(|record| &record.record))
+            .await
+    }
+
+    async fn get_project_outbound_preferences(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        let key = Self::project_key(&caller)?;
+        let record = self
+            .preferences
+            .load_communication_preference(key)
+            .await
+            .map_err(map_outbound_repository_error)?;
+        self.response_for_record_with_target_scope(
+            &caller,
+            record.as_ref().map(|record| &record.record),
+            TargetScope::Project,
+        )
+        .await
+    }
+
+    async fn set_outbound_preferences(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornSetOutboundPreferencesRequest,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        let key = Self::key(&caller);
+        self.set_preferences_for_key(caller, request, key, TargetScope::Personal)
+            .await
+    }
+
+    async fn set_project_outbound_preferences(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornSetOutboundPreferencesRequest,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        let key = Self::project_key(&caller)?;
+        self.set_preferences_for_key(caller, request, key, TargetScope::Project)
+            .await
+    }
+
+    async fn list_outbound_delivery_targets(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
+        self.list_targets_for_scope(&caller, TargetScope::Personal)
+            .await
+    }
+
+    async fn list_project_outbound_delivery_targets(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
+        self.list_targets_for_scope(&caller, TargetScope::Project)
+            .await
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TargetScope {
+    Personal,
+    Project,
 }
 
 fn outbound_target_not_found() -> RebornServicesError {
@@ -363,6 +516,17 @@ fn outbound_target_not_found() -> RebornServicesError {
         status_code: 404,
         retryable: false,
         field: Some("final_reply_target_id".to_string()),
+        validation_code: None,
+    }
+}
+
+fn missing_project_scope() -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::InvalidRequest,
+        kind: RebornServicesErrorKind::Validation,
+        status_code: 400,
+        retryable: false,
+        field: Some("project_id".to_string()),
         validation_code: None,
     }
 }
@@ -1330,6 +1494,74 @@ mod tests {
         assert_unavailable_backend_error(serialization);
     }
 
+    #[tokio::test]
+    async fn get_project_preferences_without_project_id_returns_missing_scope_error() {
+        let facade = RebornOutboundPreferencesFacade::new(
+            Arc::new(InMemoryOutboundStateStore::default()),
+            Arc::new(FakeTargetProvider::default()),
+        );
+
+        // caller() constructs with project_id = None, which project_key rejects
+        let error = facade
+            .get_project_outbound_preferences(caller("tenant-alpha", "user-alpha"))
+            .await
+            .expect_err("missing project_id must produce an error");
+
+        assert_eq!(error.code, RebornServicesErrorCode::InvalidRequest);
+        assert_eq!(error.kind, RebornServicesErrorKind::Validation);
+        assert_eq!(error.status_code, 400);
+        assert!(!error.retryable);
+        assert_eq!(error.field.as_deref(), Some("project_id"));
+    }
+
+    #[tokio::test]
+    async fn set_project_preferences_without_project_id_returns_missing_scope_error() {
+        let facade = RebornOutboundPreferencesFacade::new(
+            Arc::new(InMemoryOutboundStateStore::default()),
+            Arc::new(FakeTargetProvider::default()),
+        );
+
+        // caller() constructs with project_id = None, which project_key rejects
+        let error = facade
+            .set_project_outbound_preferences(
+                caller("tenant-alpha", "user-alpha"),
+                RebornSetOutboundPreferencesRequest {
+                    final_reply_target_id: None,
+                },
+            )
+            .await
+            .expect_err("missing project_id must produce an error");
+
+        assert_eq!(error.code, RebornServicesErrorCode::InvalidRequest);
+        assert_eq!(error.kind, RebornServicesErrorKind::Validation);
+        assert_eq!(error.status_code, 400);
+        assert!(!error.retryable);
+        assert_eq!(error.field.as_deref(), Some("project_id"));
+    }
+
+    #[tokio::test]
+    async fn set_project_preferences_with_project_id_succeeds() {
+        let store = Arc::new(InMemoryOutboundStateStore::default());
+        let provider = Arc::new(FakeTargetProvider::default());
+        let facade = RebornOutboundPreferencesFacade::new(store.clone(), provider);
+
+        let response = facade
+            .set_project_outbound_preferences(
+                caller_with_project("tenant-alpha", "user-alpha", "project:shared"),
+                RebornSetOutboundPreferencesRequest {
+                    final_reply_target_id: None,
+                },
+            )
+            .await
+            .expect("project preference write with project_id succeeds");
+
+        assert!(response.final_reply_target.is_none());
+        assert_eq!(
+            response.final_reply_target_status,
+            RebornOutboundDeliveryTargetStatus::NoneConfigured
+        );
+    }
+
     fn assert_unavailable_backend_error(error: RebornServicesError) {
         assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
         assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
@@ -1398,6 +1630,19 @@ mod tests {
 
     fn caller(tenant_id: &str, user_id: &str) -> WebUiAuthenticatedCaller {
         WebUiAuthenticatedCaller::new(tenant(tenant_id), user(user_id), None, None)
+    }
+
+    fn caller_with_project(
+        tenant_id: &str,
+        user_id: &str,
+        project_id: &str,
+    ) -> WebUiAuthenticatedCaller {
+        WebUiAuthenticatedCaller::new(
+            tenant(tenant_id),
+            user(user_id),
+            None,
+            Some(ironclaw_host_api::ProjectId::new(project_id).expect("valid project")),
+        )
     }
 
     fn tenant(value: &str) -> TenantId {

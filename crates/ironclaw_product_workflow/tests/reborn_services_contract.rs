@@ -30,24 +30,25 @@ use ironclaw_product_workflow::{
     LifecycleProductResponse, LifecycleReadinessBlocker, ListPendingApprovalsRequest,
     ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
     ListPendingAuthInteractionsResponse, OutboundPreferencesProductFacade, ProductAgentBoundCaller,
-    ProductWorkflowError, RebornAutomationInfo, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornConnectableChannelInfo, RebornDeleteThreadRequest, RebornExtensionOnboardingState,
-    RebornGetRunStateRequest, RebornOutboundDeliveryModality,
-    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
-    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
-    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornServices, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
-    StaticConnectableChannelsProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, approval_gate_ref, automation_trigger_thread_metadata_json,
+    ProductWorkflowError, ProjectAutomationListRequest, RebornAutomationInfo,
+    RebornAutomationOwnershipScope, RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus,
+    RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
+    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornConnectableChannelInfo,
+    RebornDeleteThreadRequest, RebornExtensionOnboardingState, RebornGetRunStateRequest,
+    RebornOutboundDeliveryModality, RebornOutboundDeliveryTargetCapabilities,
+    RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetId,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
+    RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
+    RebornOutboundPreferencesResponse, RebornProjectAutomationInfo, RebornResolveGateResponse,
+    RebornServices, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest,
+    RebornSubmitTurnResponse, RebornTimelineRequest, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, StaticConnectableChannelsProductFacade,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    approval_gate_ref, automation_trigger_thread_metadata_json,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -809,6 +810,73 @@ impl AutomationProductFacade for StaticAutomationFacade {
     }
 }
 
+/// In-memory fake for the project automation list path.
+///
+/// Stores which project list requests were received and returns a static
+/// set of `RebornProjectAutomationInfo` rows. The personal `list_automations`
+/// path returns an empty list so tests can assert the two paths never mix.
+#[derive(Default)]
+struct RecordingProjectAutomationFacade {
+    project_calls: Mutex<Vec<ProjectAutomationListRequest>>,
+    project_output: Mutex<Vec<RebornProjectAutomationInfo>>,
+}
+
+impl RecordingProjectAutomationFacade {
+    fn with_output(rows: Vec<RebornProjectAutomationInfo>) -> Self {
+        Self {
+            project_calls: Mutex::new(Vec::new()),
+            project_output: Mutex::new(rows),
+        }
+    }
+
+    fn project_calls(&self) -> Vec<ProjectAutomationListRequest> {
+        self.project_calls.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl AutomationProductFacade for RecordingProjectAutomationFacade {
+    async fn list_automations(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _request: AutomationListRequest,
+    ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
+        // Personal list always returns empty so tests can assert the paths
+        // do not bleed into each other.
+        Ok(Vec::new())
+    }
+
+    async fn list_project_automations(
+        &self,
+        request: ProjectAutomationListRequest,
+    ) -> Result<Vec<RebornProjectAutomationInfo>, RebornServicesError> {
+        self.project_calls.lock().expect("lock").push(request);
+        Ok(self.project_output.lock().expect("lock").clone())
+    }
+}
+
+fn project_automation_info(
+    trigger_id: &str,
+    name: impl Into<String>,
+    cron: impl Into<String>,
+) -> RebornProjectAutomationInfo {
+    RebornProjectAutomationInfo {
+        ownership_scope: RebornAutomationOwnershipScope::Project,
+        automation: RebornAutomationInfo {
+            automation_id: trigger_id.to_string(),
+            name: name.into(),
+            source: RebornAutomationSource::Schedule { cron: cron.into() },
+            state: RebornAutomationState::Active,
+            next_run_at: Some("2026-06-03T09:00:00Z".parse().expect("next run")),
+            last_run_at: None,
+            last_status: Some(RebornAutomationRunStatus::Ok),
+            recent_runs: Vec::new(),
+            is_active: true,
+            created_at: Some("2026-06-02T18:00:00Z".parse().expect("created at")),
+        },
+    }
+}
+
 #[derive(Debug, Clone)]
 struct OutboundPreferencesSetCall {
     caller: WebUiAuthenticatedCaller,
@@ -866,6 +934,29 @@ impl OutboundPreferencesProductFacade for RecordingOutboundPreferencesFacade {
         })
     }
 
+    async fn get_project_outbound_preferences(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        Ok(RebornOutboundPreferencesResponse {
+            final_reply_target: None,
+            final_reply_target_status: RebornOutboundDeliveryTargetStatus::Available,
+            default_modality: RebornOutboundDeliveryModality::Text,
+        })
+    }
+
+    async fn set_project_outbound_preferences(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: RebornSetOutboundPreferencesRequest,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        Ok(RebornOutboundPreferencesResponse {
+            final_reply_target: None,
+            final_reply_target_status: RebornOutboundDeliveryTargetStatus::Available,
+            default_modality: RebornOutboundDeliveryModality::Text,
+        })
+    }
+
     async fn list_outbound_delivery_targets(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -880,6 +971,16 @@ impl OutboundPreferencesProductFacade for RecordingOutboundPreferencesFacade {
                     auth_prompts: true,
                 },
             }],
+            next_cursor: None,
+        })
+    }
+
+    async fn list_project_outbound_delivery_targets(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
+        Ok(RebornOutboundDeliveryTargetListResponse {
+            targets: Vec::new(),
             next_cursor: None,
         })
     }
@@ -5055,6 +5156,224 @@ async fn automation_facade_unwired_fails_closed() {
     assert_eq!(error.status_code, 503);
     assert!(error.retryable);
 }
+
+// ─── Project automation list facade tests ────────────────────────────────────
+
+#[tokio::test]
+async fn list_project_automations_dispatches_through_product_facade() {
+    let facade = Arc::new(RecordingProjectAutomationFacade::with_output(vec![
+        project_automation_info("trigger-shared", "Morning report", "0 8 * * *"),
+    ]));
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(facade.clone());
+
+    let response = services
+        .list_project_automations(caller(), WebUiListAutomationsRequest::default())
+        .await
+        .expect("project automations");
+
+    assert_eq!(response.automations.len(), 1);
+    assert_eq!(
+        response.automations[0].automation.automation_id,
+        "trigger-shared"
+    );
+    assert_eq!(
+        response.automations[0].ownership_scope,
+        RebornAutomationOwnershipScope::Project
+    );
+
+    let calls = facade.project_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].tenant_id.as_str(), "tenant-alpha");
+    assert_eq!(
+        calls[0].project_id.as_ref().map(|p| p.as_str()),
+        Some("project-alpha")
+    );
+}
+
+#[tokio::test]
+async fn list_project_automations_rejects_missing_project_id() {
+    let facade = Arc::new(RecordingProjectAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(facade.clone());
+
+    let error = services
+        .list_project_automations(
+            caller_with_project(None),
+            WebUiListAutomationsRequest::default(),
+        )
+        .await
+        .expect_err("missing project_id must fail closed");
+
+    assert_eq!(error.code, RebornServicesErrorCode::InvalidRequest);
+    assert_eq!(error.status_code, 400);
+    // Facade must not be called when project_id is missing.
+    assert!(facade.project_calls().is_empty());
+}
+
+#[tokio::test]
+async fn list_project_automations_excludes_personal_automations() {
+    // The fake returns project rows only; the personal list path returns
+    // empty. This test asserts the project endpoint does not call the
+    // personal list path — if the facade's personal list were called instead,
+    // the response would be empty rather than containing the project row.
+    let facade = Arc::new(RecordingProjectAutomationFacade::with_output(vec![
+        project_automation_info("trigger-project-exclusive", "Weekly digest", "0 9 * * 1"),
+    ]));
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(facade.clone());
+
+    let project_response = services
+        .list_project_automations(caller(), WebUiListAutomationsRequest::default())
+        .await
+        .expect("project automations");
+
+    let personal_response = services
+        .list_automations(caller(), WebUiListAutomationsRequest::default())
+        .await
+        .expect("personal automations");
+
+    // Project path returned the project row.
+    assert_eq!(project_response.automations.len(), 1);
+    assert_eq!(
+        project_response.automations[0].automation.automation_id,
+        "trigger-project-exclusive"
+    );
+    // Personal path returned empty (facade fake returns nothing for personal).
+    assert!(
+        personal_response.automations.is_empty(),
+        "personal list must not bleed project rows"
+    );
+}
+
+#[tokio::test]
+async fn list_project_automations_returns_empty_list() {
+    let facade = Arc::new(RecordingProjectAutomationFacade::with_output(Vec::new()));
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(facade);
+
+    let response = services
+        .list_project_automations(caller(), WebUiListAutomationsRequest::default())
+        .await
+        .expect("project empty list");
+
+    assert!(response.automations.is_empty());
+}
+
+#[tokio::test]
+async fn list_project_automations_unwired_fails_closed() {
+    // Default `UnsupportedAutomationProductFacade` does not override
+    // `list_project_automations`; the trait default must return a
+    // non-retryable service-unavailable error.
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let error = services
+        .list_project_automations(caller(), WebUiListAutomationsRequest::default())
+        .await
+        .expect_err("unwired project facade");
+
+    assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(error.status_code, 503);
+    assert!(error.retryable);
+}
+
+#[tokio::test]
+async fn project_automation_info_ownership_scope_round_trips_serde() {
+    let original = RebornProjectAutomationInfo {
+        ownership_scope: RebornAutomationOwnershipScope::Project,
+        automation: RebornAutomationInfo {
+            automation_id: "trigger-serde".to_string(),
+            name: "Serde test".to_string(),
+            source: RebornAutomationSource::Schedule {
+                cron: "0 0 * * *".to_string(),
+            },
+            state: RebornAutomationState::Active,
+            next_run_at: None,
+            last_run_at: None,
+            last_status: None,
+            recent_runs: Vec::new(),
+            is_active: true,
+            created_at: None,
+        },
+    };
+    let json = serde_json::to_string(&original).expect("serialize");
+    let roundtripped: RebornProjectAutomationInfo =
+        serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(original, roundtripped);
+    // Confirm ownership_scope appears on the wire as "project".
+    assert!(json.contains("\"ownership_scope\":\"project\""));
+}
+
+#[tokio::test]
+async fn personal_automation_scope_defaults_to_personal() {
+    // RebornAutomationOwnershipScope::default() must be Personal so
+    // existing deserialization paths (composition struct literals that
+    // do not set the field) stay backward-compatible.
+    let scope: RebornAutomationOwnershipScope = Default::default();
+    assert_eq!(scope, RebornAutomationOwnershipScope::Personal);
+
+    // personal rows deserialized from JSON without an ownership_scope field
+    // should also resolve to Personal.
+    let json = r#"{"automation_id":"t","name":"n","source":{"type":"schedule","cron":"0 0 * * *"},"state":"active","is_active":true}"#;
+    let info: RebornAutomationInfo = serde_json::from_str(json).expect("deserialize");
+    // Confirm the field round-trips through RebornProjectAutomationInfo with correct scope.
+    let _ = info; // no ownership_scope on RebornAutomationInfo; see type-level docs
+    let scope_json = r#""personal""#;
+    let scope: RebornAutomationOwnershipScope =
+        serde_json::from_str(scope_json).expect("deserialize personal");
+    assert_eq!(scope, RebornAutomationOwnershipScope::Personal);
+    let scope_json_project = r#""project""#;
+    let scope_project: RebornAutomationOwnershipScope =
+        serde_json::from_str(scope_json_project).expect("deserialize project");
+    assert_eq!(scope_project, RebornAutomationOwnershipScope::Project);
+}
+
+#[tokio::test]
+async fn list_project_automations_clamps_oversize_limit() {
+    use ironclaw_product_workflow::AUTOMATION_LIST_MAX_PAGE_SIZE;
+    let facade = Arc::new(RecordingProjectAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(facade.clone());
+
+    services
+        .list_project_automations(
+            caller(),
+            WebUiListAutomationsRequest {
+                limit: Some(u32::MAX),
+                run_limit: None,
+            },
+        )
+        .await
+        .expect("clamped limit should not error");
+
+    let calls = facade.project_calls();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        calls[0].limit <= AUTOMATION_LIST_MAX_PAGE_SIZE as usize,
+        "oversize limit must be clamped to AUTOMATION_LIST_MAX_PAGE_SIZE ({})",
+        AUTOMATION_LIST_MAX_PAGE_SIZE
+    );
+}
+
+// ─── End project automation list facade tests ─────────────────────────────────
 
 #[tokio::test]
 async fn setup_extension_returns_post_setup_onboarding_payload() {

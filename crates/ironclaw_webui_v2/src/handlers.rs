@@ -28,11 +28,13 @@ use ironclaw_product_workflow::{
     RebornCancelRunResponse, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
     RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
     RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
-    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    RebornListThreadsResponse, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundPreferencesResponse, RebornResolveGateResponse, RebornServicesApi,
+    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
+    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
+    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
     WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
@@ -457,6 +459,97 @@ pub struct ListAutomationsQuery {
     /// Optional maximum number of recent runs to return per automation row.
     #[serde(default)]
     pub run_limit: Option<u32>,
+}
+
+/// `GET /api/webchat/v2/outbound/preferences`
+pub async fn get_outbound_preferences(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornOutboundPreferencesResponse>, WebUiV2HttpError> {
+    let response = state.services().get_outbound_preferences(caller).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/outbound/project/preferences`
+pub async fn get_project_outbound_preferences(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornOutboundPreferencesResponse>, WebUiV2HttpError> {
+    ensure_operator_webui_config(&state)?;
+    let response = state
+        .services()
+        .get_project_outbound_preferences(caller)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/outbound/preferences`
+///
+/// Body shape: [`RebornSetOutboundPreferencesRequest`]. Sending
+/// `{"final_reply_target_id": null}` clears the configured final-reply target.
+pub async fn set_outbound_preferences(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<RebornSetOutboundPreferencesRequest>,
+) -> Result<Json<RebornOutboundPreferencesResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .set_outbound_preferences(caller, body)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/outbound/project/preferences`
+pub async fn set_project_outbound_preferences(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<RebornSetOutboundPreferencesRequest>,
+) -> Result<Json<RebornOutboundPreferencesResponse>, WebUiV2HttpError> {
+    ensure_operator_webui_config(&state)?;
+    let response = state
+        .services()
+        .set_project_outbound_preferences(caller, body)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/outbound/targets`
+pub async fn list_outbound_delivery_targets(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornOutboundDeliveryTargetListResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .list_outbound_delivery_targets(caller)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/outbound/project/targets`
+pub async fn list_project_outbound_delivery_targets(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornOutboundDeliveryTargetListResponse>, WebUiV2HttpError> {
+    ensure_operator_webui_config(&state)?;
+    let response = state
+        .services()
+        .list_project_outbound_delivery_targets(caller)
+        .await?;
+    Ok(Json(response))
+}
+
+fn ensure_operator_webui_config(state: &WebUiV2State) -> Result<(), WebUiV2HttpError> {
+    if state.capabilities().operator_webui_config {
+        return Ok(());
+    }
+    Err(WebUiV2HttpError::from(RebornServicesError {
+        code: RebornServicesErrorCode::Forbidden,
+        kind: RebornServicesErrorKind::ParticipantDenied,
+        status_code: 403,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    }))
 }
 
 /// `GET /api/webchat/v2/channels/connectable`

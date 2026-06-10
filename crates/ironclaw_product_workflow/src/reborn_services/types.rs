@@ -255,6 +255,17 @@ pub struct RebornListAutomationsResponse {
     pub automations: Vec<RebornAutomationInfo>,
 }
 
+/// Project automation list response.
+///
+/// Uses [`RebornProjectAutomationInfo`] so every row carries the
+/// `ownership_scope` discriminator. The personal list surface uses
+/// [`RebornListAutomationsResponse`] instead; clients must not call both
+/// endpoints and merge the results client-side.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornListProjectAutomationsResponse {
+    pub automations: Vec<RebornProjectAutomationInfo>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "RebornOutboundPreferencesResponseWire")]
 pub struct RebornOutboundPreferencesResponse {
@@ -772,11 +783,44 @@ impl<'de> Deserialize<'de> for RebornAutomationState {
     }
 }
 
+/// Delivery ownership scope for an automation row.
+///
+/// - `personal`: the automation belongs to the creator user; delivery resolves
+///   through `CommunicationPreferenceKey::personal(tenant, creator_user_id)`.
+/// - `project`: the automation belongs to a project; delivery resolves through
+///   `CommunicationPreferenceKey::project(tenant, project_id)`. The creating
+///   user is retained for audit purposes but is not the delivery owner.
+///
+/// Wire value is `snake_case`; the default for rows that pre-date the field is
+/// `"personal"` so existing clients and persisted rows remain backward-compatible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornAutomationOwnershipScope {
+    #[default]
+    Personal,
+    Project,
+}
+
 /// Browser-safe automation row returned by the WebUI facade.
 ///
 /// This deliberately exposes source, state, run timestamps, sanitized status,
 /// and bounded recent-run history; trigger repository internals remain behind
 /// the product facade.
+///
+/// ## Ownership scope
+///
+/// Every automation has an `ownership_scope` that identifies the delivery
+/// owner. The `ownership_scope` field is currently carried on the sibling
+/// [`RebornProjectAutomationInfo`] wrapper used by the admin project
+/// list surface; all rows returned through the personal `list_automations`
+/// path are implicitly `personal` by construction (filtered by
+/// `creator_user_id` at the repository layer).
+///
+/// // follow-up: add `ownership_scope: RebornAutomationOwnershipScope` directly
+/// // to this struct once the composition-crate struct literal in
+/// // `ironclaw_reborn_composition::automation::automation_info` is updated to
+/// // supply the field from `RawAutomationRecord`. Until then both paths
+/// // use the field through the wrapper or the enum constant on the caller side.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornAutomationInfo {
     pub automation_id: String,
@@ -795,6 +839,32 @@ pub struct RebornAutomationInfo {
     pub is_active: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
+}
+
+/// Project-surface automation row for the project automation list.
+///
+/// Wraps [`RebornAutomationInfo`] and adds the `ownership_scope` discriminator
+/// so the project surface can confirm every returned row is `project`-scoped
+/// without requiring a breaking struct-literal change in existing
+/// `RebornAutomationInfo` constructors.
+///
+/// The `ownership_scope` field carries the persisted scope from the trigger
+/// repository. The project list facade **must** only include rows where
+/// `ownership_scope == project`; any row whose persisted scope is
+/// `personal` must be excluded at the repository or facade layer, not by
+/// client-side filtering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornProjectAutomationInfo {
+    /// Delivery ownership scope for this row.
+    ///
+    /// For rows returned by the project list facade this is always
+    /// `project`. The field is included on the wire so clients can
+    /// assert the invariant and future mixed-scope list surfaces can
+    /// distinguish rows without a contract change.
+    pub ownership_scope: RebornAutomationOwnershipScope,
+    /// The core automation fields shared with the personal list surface.
+    #[serde(flatten)]
+    pub automation: RebornAutomationInfo,
 }
 
 /// Source discriminator for automation rows.
