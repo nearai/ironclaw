@@ -3,11 +3,13 @@ use std::sync::Arc;
 use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount,
     CredentialAccountId, CredentialAccountLookupRequest, CredentialAccountRecordSource,
-    CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
+    CredentialAccountService, CredentialAccountStatus, CredentialOwnership,
     CredentialRecoveryProjection, CredentialRefreshRequest, GOOGLE_PROVIDER_ID, ProviderScope,
 };
 use ironclaw_host_api::{ExtensionId, ResourceScope, SecretHandle};
 use thiserror::Error;
+
+use super::account_policy::gsuite_google_account_visible_to_requester;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GoogleCredential {
@@ -58,22 +60,27 @@ impl GoogleCredentialResolver {
     ) -> Result<GoogleCredential, GoogleCredentialError> {
         let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
         let provider = google_provider_id()?;
-        let account = self
-            .recoverable_result(
-                self.account_records
-                    .select_unique_configured_account_for_owner(
-                        CredentialAccountSelectionRequest::new(
-                            auth_scope.clone(),
-                            provider.clone(),
-                        )
-                        .for_extension(requester_extension.clone()),
-                    )
-                    .await,
-                scope,
+        let account = match self
+            .select_configured_account_for_gsuite_requester(
+                &auth_scope,
                 requester_extension,
                 &provider,
+                required_scopes,
             )
-            .await?;
+            .await
+        {
+            Ok(account) => account,
+            Err(GoogleCredentialError::Auth(
+                AuthProductError::CredentialMissing
+                | AuthProductError::CrossScopeDenied
+                | AuthProductError::AccountSelectionRequired,
+            )) => {
+                return self
+                    .recovery_required(scope, requester_extension, provider)
+                    .await;
+            }
+            Err(error) => return Err(error),
+        };
         self.credential_from_account(
             scope,
             requester_extension,
@@ -215,6 +222,42 @@ impl GoogleCredentialResolver {
         Ok(Some(account))
     }
 
+    async fn select_configured_account_for_gsuite_requester(
+        &self,
+        auth_scope: &AuthProductScope,
+        requester_extension: &ExtensionId,
+        provider: &AuthProviderId,
+        required_scopes: &[ProviderScope],
+    ) -> Result<CredentialAccount, GoogleCredentialError> {
+        let configured = self
+            .account_records
+            .accounts_for_owner(auth_scope)
+            .await?
+            .into_iter()
+            .filter(|account| {
+                account.provider == *provider
+                    && account.status == CredentialAccountStatus::Configured
+                    && gsuite_google_account_visible_to_requester(account, requester_extension)
+            })
+            .collect::<Vec<_>>();
+        if configured.is_empty() {
+            return Err(AuthProductError::CredentialMissing.into());
+        }
+        let scoped = configured
+            .iter()
+            .filter(|account| account_has_provider_scopes(account, required_scopes))
+            .cloned()
+            .collect::<Vec<_>>();
+        match scoped.as_slice() {
+            [] => Err(GoogleCredentialError::MissingScopes {
+                missing_scopes: required_scopes.to_vec(),
+            }),
+            [account] => Ok(account.clone()),
+            _ => select_latest_duplicate_user_reusable_account(&scoped)
+                .ok_or(AuthProductError::AccountSelectionRequired.into()),
+        }
+    }
+
     async fn recovery_required(
         &self,
         scope: &ResourceScope,
@@ -300,6 +343,34 @@ impl GoogleCredentialResolver {
 
 pub fn google_provider_id() -> Result<AuthProviderId, AuthProductError> {
     AuthProviderId::new(GOOGLE_PROVIDER_ID)
+}
+
+fn account_has_provider_scopes(
+    account: &CredentialAccount,
+    required_scopes: &[ProviderScope],
+) -> bool {
+    required_scopes
+        .iter()
+        .all(|required| account.scopes.iter().any(|scope| scope == required))
+}
+
+fn select_latest_duplicate_user_reusable_account(
+    accounts: &[CredentialAccount],
+) -> Option<CredentialAccount> {
+    let first = accounts.first()?;
+    if !accounts.iter().all(|account| {
+        account.provider == first.provider
+            && account.ownership == CredentialOwnership::UserReusable
+            && account.owner_extension.is_none()
+            && account.granted_extensions.is_empty()
+            && account.access_secret.is_some()
+    }) {
+        return None;
+    }
+    accounts
+        .iter()
+        .max_by_key(|account| (account.updated_at, account.created_at, account.id))
+        .cloned()
 }
 
 #[cfg(test)]
@@ -448,17 +519,14 @@ mod tests {
             ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
                 .unwrap();
         let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
-        let auth = InMemoryAuthProductServices::new();
-        let account = auth
-            .create_account(new_credential_account(
-                auth_scope,
-                CredentialAccountStatus::Configured,
-            ))
-            .await
-            .unwrap();
-        let account_service = Arc::new(FakeCredentialAccountService { account });
-        let resolver =
-            GoogleCredentialResolver::new(account_service.clone(), account_service.clone());
+        let auth = Arc::new(InMemoryAuthProductServices::new());
+        auth.create_account(new_credential_account(
+            auth_scope,
+            CredentialAccountStatus::Configured,
+        ))
+        .await
+        .unwrap();
+        let resolver = GoogleCredentialResolver::new(auth.clone(), auth.clone());
 
         let error = resolver
             .resolve(
@@ -511,6 +579,80 @@ mod tests {
             SecretHandle::new("google-access-token").unwrap()
         );
         assert!(credential.missing_scopes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_reuses_gsuite_owned_google_account_for_gsuite_requester() {
+        let scope =
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap();
+        let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+        let auth = InMemoryAuthProductServices::new();
+        let calendar_scope =
+            ProviderScope::new("https://www.googleapis.com/auth/calendar.readonly").unwrap();
+        let mut account = auth
+            .create_account(new_credential_account(
+                auth_scope,
+                CredentialAccountStatus::Configured,
+            ))
+            .await
+            .unwrap();
+        account.ownership = CredentialOwnership::ExtensionOwned;
+        account.owner_extension = Some(ExtensionId::new("google-drive").unwrap());
+        account.scopes = vec![calendar_scope.clone()];
+        let account_service = Arc::new(FakeCredentialAccountService {
+            account: account.clone(),
+        });
+        let resolver =
+            GoogleCredentialResolver::new(account_service.clone(), account_service.clone());
+
+        let credential = resolver
+            .resolve(
+                &scope,
+                &ExtensionId::new("google-calendar").unwrap(),
+                &[calendar_scope],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(credential.account_id, account.id);
+        assert_eq!(
+            credential.access_secret,
+            SecretHandle::new("google-access-token").unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_denies_unbound_google_account_to_third_party_requester() {
+        let scope =
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap();
+        let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+        let auth = InMemoryAuthProductServices::new();
+        let account = auth
+            .create_account(new_credential_account(
+                auth_scope,
+                CredentialAccountStatus::Configured,
+            ))
+            .await
+            .unwrap();
+        let account_service = Arc::new(FakeCredentialAccountService { account });
+        let resolver =
+            GoogleCredentialResolver::new(account_service.clone(), account_service.clone());
+
+        let error = resolver
+            .resolve(
+                &scope,
+                &ExtensionId::new("third-party").unwrap(),
+                &[ProviderScope::new("https://www.googleapis.com/auth/gmail.send").unwrap()],
+            )
+            .await
+            .unwrap_err();
+
+        let GoogleCredentialError::Recovery(recovery) = error else {
+            panic!("expected recovery error");
+        };
+        assert_eq!(recovery.kind(), CredentialRecoveryKind::Configured);
     }
 
     #[tokio::test]
