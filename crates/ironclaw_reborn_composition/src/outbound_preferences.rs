@@ -330,6 +330,7 @@ fn outbound_target_not_found() -> RebornServicesError {
 fn map_outbound_repository_error(error: OutboundError) -> RebornServicesError {
     match error {
         OutboundError::InvalidRequest { .. }
+        | OutboundError::PreferenceTargetMissing { .. }
         | OutboundError::SubscriptionScopeMismatch
         | OutboundError::DeliveryNotFound => RebornServicesError {
             code: RebornServicesErrorCode::InvalidRequest,

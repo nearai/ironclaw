@@ -806,6 +806,40 @@ fn take_product_binding_segment<'a>(raw: &'a str, name: &str) -> Option<(&'a str
     Some((value, raw))
 }
 
+/// Extract the Slack channel ID encoded in a Slack reply-target binding ref.
+///
+/// Parses the length-prefixed segment format produced by
+/// [`slack_shared_channel_reply_target_binding_ref`] /
+/// [`slack_personal_dm_reply_target_binding_ref`] without requiring the full
+/// config for validation. Used by the triggered-run delivery path to
+/// reconstruct the outbound `ExternalConversationRef` from a stored
+/// preference.
+///
+/// Returns `None` if the ref is not a Slack reply target or is malformed.
+pub(crate) fn slack_conversation_id_from_reply_target_binding_ref(
+    target: &ironclaw_turns::ReplyTargetBindingRef,
+) -> Option<(String, Option<String>)> {
+    let mut raw = target.as_str().strip_prefix("reply:")?;
+    // Skip adapter, installation, agent, project — we don't validate them here.
+    for name in &["adapter", "installation", "agent", "project"] {
+        let (_, rest) = take_product_binding_segment(raw, name)?;
+        raw = rest;
+    }
+    let (space_id, rest) = take_product_binding_segment(raw, "space")?;
+    let (conversation_id, _) = take_product_binding_segment(rest, "conversation")?;
+    if conversation_id.is_empty() {
+        return None;
+    }
+    Some((
+        conversation_id.to_string(),
+        if space_id.is_empty() {
+            None
+        } else {
+            Some(space_id.to_string())
+        },
+    ))
+}
+
 fn map_slack_target_route_error(error: SlackChannelRouteError) -> RebornServicesError {
     match error {
         SlackChannelRouteError::InvalidRoute => slack_target_not_found_error(),

@@ -291,6 +291,13 @@ pub struct RebornRuntimeInput {
     /// override skips).
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) model_cost_table_override: Option<Arc<dyn ironclaw_loop_support::ModelCostTable>>,
+    /// Optional post-submit hook for triggered-run delivery. When set, the
+    /// trigger poller calls this hook after each successfully submitted fire,
+    /// enabling background delivery of run results to the creator's
+    /// communication target (e.g. Slack DM). Only meaningful when the
+    /// trigger poller is enabled. Only available under `slack-v2-host-beta`.
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub trigger_post_submit_hook: Option<Arc<dyn crate::slack_delivery::PostSubmitDeliveryHook>>,
 }
 
 impl RebornRuntimeInput {
@@ -320,6 +327,8 @@ impl RebornRuntimeInput {
             model_gateway_override: None,
             #[cfg(any(test, feature = "test-support"))]
             model_cost_table_override: None,
+            #[cfg(feature = "slack-v2-host-beta")]
+            trigger_post_submit_hook: None,
         }
     }
 
@@ -417,6 +426,19 @@ impl RebornRuntimeInput {
 
     pub fn with_hooks_config(mut self, hooks: HooksActivationConfig) -> Self {
         self.hooks = hooks;
+        self
+    }
+
+    /// Inject a post-submit hook for triggered-run delivery. When set, the
+    /// trigger poller calls this hook after each successfully submitted fire.
+    /// Only takes effect when the trigger poller is enabled. Available only
+    /// under the `slack-v2-host-beta` feature.
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub fn with_trigger_post_submit_hook(
+        mut self,
+        hook: Arc<dyn crate::slack_delivery::PostSubmitDeliveryHook>,
+    ) -> Self {
+        self.trigger_post_submit_hook = Some(hook);
         self
     }
 

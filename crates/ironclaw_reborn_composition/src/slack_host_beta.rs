@@ -11,17 +11,20 @@ use std::time::Duration;
 
 use ironclaw_conversations::InMemoryConversationServices;
 use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, TenantId, UserId};
-use ironclaw_outbound::{FilesystemOutboundStateStore, OutboundStateStore};
+use ironclaw_outbound::{
+    FilesystemOutboundStateStore, OutboundStateStore, TriggeredRunDeliveryStore,
+};
 use ironclaw_product_adapters::{
     AdapterInstallationId, DeclaredEgressHost, DeclaredEgressTarget, DeliveryStatus,
     EgressCredentialHandle, ExternalActorRef, OutboundDeliverySink, ProductAdapter,
     ProductAdapterId, ProtocolHttpEgress,
 };
 use ironclaw_product_workflow::{
-    DefaultInboundTurnService, DefaultProductWorkflow, ProductActorUserResolutionRequest,
-    ProductActorUserResolver, ProductConversationBindingService, ProductConversationRouteKey,
-    ProductConversationSubjectRouteResolver, ProductInstallationKey, ProductInstallationScope,
-    ProductWorkflowError, StaticProductInstallationResolver,
+    ConversationBindingService, DefaultInboundTurnService, DefaultProductWorkflow,
+    ProductActorUserResolutionRequest, ProductActorUserResolver, ProductConversationBindingService,
+    ProductConversationRouteKey, ProductConversationSubjectRouteResolver, ProductInstallationKey,
+    ProductInstallationScope, ProductWorkflowError, ResolveBindingRequest, ResolvedBinding,
+    StaticProductInstallationResolver,
 };
 use ironclaw_product_workflow_storage::RebornFilesystemIdempotencyLedger;
 use ironclaw_slack_v2_adapter::{
@@ -42,8 +45,8 @@ use crate::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteStore, SlackChannelRouteSubjectResolver,
 };
 use crate::slack_delivery::{
-    SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
-    SlackFinalReplyDeliverySettings,
+    PostSubmitDeliveryHook, SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
+    SlackFinalReplyDeliverySettings, TriggeredRunDeliveryDriver,
 };
 use crate::slack_egress::{SlackProtocolHttpEgress, StaticSlackEgressCredentialProvider};
 use crate::slack_host_state::FilesystemSlackHostState;
@@ -80,6 +83,37 @@ struct NoopSlackDeliverySink;
 #[async_trait::async_trait]
 impl OutboundDeliverySink for NoopSlackDeliverySink {
     async fn record(&self, _status: DeliveryStatus) {}
+}
+
+/// No-op [`ConversationBindingService`] used by [`build_triggered_run_delivery_hook`].
+///
+/// The triggered-run delivery path never calls `resolve_binding` or
+/// `lookup_binding` — it receives the `TurnScope` directly from the poller.
+/// This stub satisfies the type system without introducing an unnecessary
+/// installation-level conversation registry.
+struct NoopConversationBindingService;
+
+#[async_trait::async_trait]
+impl ConversationBindingService for NoopConversationBindingService {
+    async fn resolve_binding(
+        &self,
+        _request: ResolveBindingRequest,
+    ) -> Result<ResolvedBinding, ProductWorkflowError> {
+        Err(ProductWorkflowError::BindingResolutionFailed {
+            reason: "NoopConversationBindingService is not supported in triggered delivery"
+                .to_string(),
+        })
+    }
+
+    async fn lookup_binding(
+        &self,
+        _request: ResolveBindingRequest,
+    ) -> Result<ResolvedBinding, ProductWorkflowError> {
+        Err(ProductWorkflowError::BindingResolutionFailed {
+            reason: "NoopConversationBindingService is not supported in triggered delivery"
+                .to_string(),
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -231,6 +265,56 @@ pub fn build_slack_events_route_mount(
     build_slack_host_beta_mounts(runtime, config).map(|mounts| mounts.events)
 }
 
+/// Build a [`PostSubmitDeliveryHook`] that delivers triggered-run results to
+/// the creator's personal Slack DM.
+///
+/// The hook shares the same egress and outbound-state infrastructure as the
+/// Slack events route: bot token, `FilesystemOutboundStateStore`, and
+/// `SlackV2Adapter`. The `delivery_store` is a separate store for recording
+/// per-run delivery outcomes (best-effort, personal scope only).
+pub fn build_triggered_run_delivery_hook(
+    runtime: &RebornRuntime,
+    config: &SlackHostBetaConfig,
+    delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
+) -> Result<Arc<dyn PostSubmitDeliveryHook>, SlackHostBetaBuildError> {
+    let local_runtime = runtime
+        .services()
+        .local_runtime
+        .as_ref()
+        .ok_or(SlackHostBetaBuildError::DurableHostStateUnavailable)?;
+    let token_handle = slack_bot_token_handle()?;
+    let adapter_id = ProductAdapterId::new(SLACK_V2_ADAPTER_ID)
+        .map_err(|reason| invalid_config("adapter_id", reason.to_string()))?;
+    let adapter: Arc<dyn ProductAdapter> = Arc::new(SlackV2Adapter::new(SlackV2AdapterConfig {
+        adapter_id,
+        installation_id: config.installation_id.clone(),
+        egress_credential_handle: token_handle.clone(),
+        auth_requirement: slack_request_signature_auth_requirement(),
+    }));
+    let egress = slack_protocol_egress(runtime, config, token_handle)?;
+    let outbound = Arc::new(FilesystemOutboundStateStore::new(Arc::clone(
+        &local_runtime.host_state_filesystem,
+    )));
+    let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
+    let preferences: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository> = outbound;
+    let delivery_sink: Arc<dyn OutboundDeliverySink> = Arc::new(NoopSlackDeliverySink);
+    let binding_service: Arc<dyn ConversationBindingService> =
+        Arc::new(NoopConversationBindingService);
+    let services = SlackFinalReplyDeliveryServices {
+        binding_service,
+        thread_service: runtime.webui_thread_service(),
+        turn_coordinator: runtime.webui_turn_coordinator(),
+        outbound_store,
+        communication_preferences: preferences,
+        adapter,
+        egress,
+        delivery_sink,
+        auth_challenges: runtime.auth_challenge_provider(),
+    };
+    let driver = TriggeredRunDeliveryDriver::new(services, delivery_store);
+    Ok(Arc::new(driver))
+}
+
 pub fn build_slack_host_beta_mounts(
     runtime: &RebornRuntime,
     config: SlackHostBetaConfig,
@@ -311,6 +395,29 @@ pub fn build_slack_host_beta_mounts(
         Arc::clone(&channel_route_store),
     )
     .with_allowed_subject_user_ids(allowed_route_subjects);
+
+    // Wire the triggered-run delivery hook. The delivery store lives on the
+    // same `host_state_filesystem` mount as every other outbound store, so it
+    // inherits tenant isolation for free. `set_trigger_post_submit_hook` is
+    // idempotent: a second call (if this function is called more than once) is
+    // silently ignored.
+    {
+        let delivery_store: Arc<dyn TriggeredRunDeliveryStore> = Arc::new(
+            FilesystemOutboundStateStore::new(Arc::clone(&local_runtime.host_state_filesystem)),
+        );
+        match build_triggered_run_delivery_hook(runtime, &config, delivery_store) {
+            Ok(hook) => {
+                runtime.set_trigger_post_submit_hook(hook);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target = "ironclaw::reborn::slack_host_beta",
+                    error = %err,
+                    "triggered-run delivery hook construction failed; trigger delivery will be disabled"
+                );
+            }
+        }
+    }
 
     Ok(SlackHostBetaMounts {
         events,
