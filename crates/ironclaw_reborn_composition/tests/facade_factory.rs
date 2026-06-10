@@ -36,7 +36,7 @@ use ironclaw_reborn_composition::RebornRuntimeProcessBinding;
 use ironclaw_reborn_composition::{RebornBuildError, RebornCompositionProfile, RebornServices};
 use ironclaw_reborn_composition::{
     RebornBuildInput, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
-    RebornReadinessState, build_reborn_services,
+    RebornReadinessDiagnostic, RebornReadinessState, build_reborn_services,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_secrets::SecretMaterial;
@@ -459,6 +459,10 @@ async fn disabled_returns_empty_services() {
     assert!(services.host_runtime.is_none());
     assert!(services.turn_coordinator.is_none());
     assert_eq!(services.readiness.state, RebornReadinessState::Disabled);
+    assert_eq!(
+        services.readiness.diagnostics,
+        vec![RebornReadinessDiagnostic::disabled()]
+    );
 }
 
 #[tokio::test]
@@ -1286,6 +1290,7 @@ async fn migration_dry_run_validates_libsql_shape() {
         services.readiness.state,
         RebornReadinessState::MigrationDryRunValidated
     );
+    assert!(services.readiness.diagnostics.is_empty());
     assert!(services.host_runtime.is_some());
     assert!(services.turn_coordinator.is_some());
 }

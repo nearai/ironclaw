@@ -300,12 +300,19 @@ impl RebornServicesApi for StubServices {
     }
 }
 
-/// Tag a request with `ConnectInfo` so descriptor-driven middleware
-/// (e.g. the PerIp rate limit) can resolve a peer address. Production
+/// Tag a request with a specific peer address. The per-IP rate limiter
+/// keys on the peer **IP** (port is ignored), so tests that need
+/// distinct buckets must vary the IP octets, not just the port. Host
 /// composition injects this via `into_make_service_with_connect_info`;
 /// the `oneshot` harness has to do it explicitly.
-pub fn with_peer(mut req: Request<Body>) -> Request<Body> {
-    req.extensions_mut()
-        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 1234))));
+pub fn with_peer_addr(mut req: Request<Body>, addr: SocketAddr) -> Request<Body> {
+    req.extensions_mut().insert(ConnectInfo(addr));
     req
+}
+
+/// Tag a request with `ConnectInfo` so descriptor-driven middleware
+/// (e.g. the PerIp rate limit) can resolve a peer address. Default fixed
+/// peer so a test keys every request to the same bucket.
+pub fn with_peer(req: Request<Body>) -> Request<Body> {
+    with_peer_addr(req, SocketAddr::from(([127, 0, 0, 1], 1234)))
 }
