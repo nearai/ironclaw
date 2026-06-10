@@ -18,14 +18,13 @@ import {
   recordAcceptedMessageRef,
   removePending,
 } from "../lib/pending-messages.js";
+import { toRenderAttachment, toWireAttachment } from "../lib/attachments.js";
 import { useHistory } from "./useHistory.js";
 import { useSSE } from "./useSSE.js";
 
 const AUTH_TOKEN_FLOW_TIMEOUT_MS = 30000;
 const AUTH_GATE_CREDENTIAL_STORED_ERROR =
   "credential_stored_gate_resolution_failed";
-const UNSUPPORTED_MULTIMODAL_PAYLOAD_ERROR =
-  "webui_v2_multimodal_payload_unsupported";
 const OAUTH_CALLBACK_CHANNEL = "ironclaw-product-auth";
 const OAUTH_CALLBACK_STORAGE_KEY = "ironclaw:product-auth:oauth-complete";
 const OAUTH_CALLBACK_MESSAGE_TYPE = "ironclaw:product-auth:oauth-complete";
@@ -53,12 +52,6 @@ function threadNeedsSidebarRefresh(threadId) {
   if (!Array.isArray(threads)) return true;
   const thread = threads.find((item) => item.thread_id === threadId || item.id === threadId);
   return !thread?.title;
-}
-
-function unsupportedMultimodalPayloadError() {
-  const error = new Error("webchat v2 multimodal payload unsupported");
-  error.safeErrorCode = UNSUPPORTED_MULTIMODAL_PAYLOAD_ERROR;
-  return error;
 }
 
 function submitResponseResumedTurnGate(response) {
@@ -265,10 +258,12 @@ export function useChat(threadId) {
     enabled: Boolean(threadId),
   });
 
-  // Accepts the fork's call shape `{ images, attachments, threadId,
-  // timezone }`. v2 SendMessage carries `content` only; image and
-  // file payloads are rejected until the v2 contract grows typed
-  // multimodal fields.
+  // Accepts the composer call shape `{ attachments, threadId }`. The
+  // `attachments` are staged objects from `lib/attachments.js`
+  // (`stageFiles`); we split them into the `WebUiInboundAttachment` wire
+  // shape for the send and the render shape for the optimistic bubble so
+  // cards/thumbnails appear immediately, matching what the timeline
+  // projection returns after the run.
   //
   // v2 send-message requires `thread_id` as a path parameter — the
   // facade refuses to implicitly create a missing thread. When the
@@ -278,15 +273,20 @@ export function useChat(threadId) {
   // hook can route to `/chat/<id>` after the first send.
   const send = React.useCallback(
     async (content, opts = {}) => {
-      const { threadId: targetThreadId, images = [], attachments = [] } = opts;
-      if (images.length > 0 || attachments.length > 0) {
-        throw unsupportedMultimodalPayloadError();
-      }
+      const { threadId: targetThreadId, attachments: stagedAttachments = [] } =
+        opts;
+      const wireAttachments = stagedAttachments.map(toWireAttachment);
+      const renderAttachments = stagedAttachments.map(toRenderAttachment);
 
-      const connectable = await resolveConnectAction(content);
-      if (connectable) {
-        setChannelConnectAction(connectable);
-        return { channel_connect_action: connectable };
+      // Channel-connect slash commands ("/connect telegram") never carry
+      // attachments; skip that detection when files are staged so an
+      // upload is never misread as a command and dropped.
+      if (stagedAttachments.length === 0) {
+        const connectable = await resolveConnectAction(content);
+        if (connectable) {
+          setChannelConnectAction(connectable);
+          return { channel_connect_action: connectable };
+        }
       }
       setChannelConnectAction(null);
 
@@ -306,6 +306,7 @@ export function useChat(threadId) {
         id: `pending-${pendingSeqRef.current++}`,
         role: "user",
         content,
+        attachments: renderAttachments,
         timestamp: new Date().toISOString(),
         isOptimistic: true,
       };
@@ -318,6 +319,7 @@ export function useChat(threadId) {
           id: optimisticId,
           role: "user",
           content,
+          attachments: renderAttachments,
           timestamp: pendingRecord.timestamp,
           isOptimistic: true,
         },
@@ -330,6 +332,7 @@ export function useChat(threadId) {
         const response = await sendMessage({
           threadId: sendThreadId,
           content,
+          attachments: wireAttachments,
         });
         // Refresh the sidebar only while the cached entry is missing
         // or title-less. Once the first-message title has appeared,
