@@ -924,6 +924,9 @@ fn operator_command_response(area: RebornOperatorArea) -> RebornOperatorCommandP
         area,
         status: RebornOperatorSurfaceStatus::Available,
         message: "operator route dispatched".to_string(),
+        operator_status: None,
+        logs: None,
+        service_lifecycle: None,
         diagnostics: Vec::new(),
     }
 }
