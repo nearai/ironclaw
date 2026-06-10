@@ -9,6 +9,7 @@
 //! `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
 #![warn(unreachable_pub)]
 
+mod attachment_context;
 mod capability_display_preview;
 mod contract;
 mod error;

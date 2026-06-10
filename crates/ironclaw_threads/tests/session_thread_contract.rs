@@ -2505,6 +2505,54 @@ async fn list_threads_for_scope_title_stays_none_when_user_message_is_whitespace
     );
 }
 
+#[tokio::test]
+async fn attachment_extracted_text_reaches_model_visible_context() {
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("attachments-context");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-attachments-context").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: Some("event-att-ctx".into()),
+            content: MessageContent::with_attachments("see attached", vec![sample_attachment_ref()]),
+        })
+        .await
+        .unwrap();
+
+    let window = service
+        .load_context_window(LoadContextWindowRequest {
+            scope,
+            thread_id: thread.thread_id,
+            max_messages: 10,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(window.messages.len(), 1);
+    let content = &window.messages[0].content;
+    // The user's text plus a rendered <attachments> block with the document's
+    // extracted text and stored project path are what the model sees.
+    assert!(content.starts_with("see attached"));
+    assert!(content.contains("<attachments>"));
+    assert!(content.contains("type=\"document\""));
+    assert!(content.contains("quarterly numbers"));
+    assert!(content.contains("project_path=\"attachments/2026-06-09/m1-report.pdf\""));
+}
+
 fn sample_attachment_ref() -> AttachmentRef {
     AttachmentRef {
         id: "att-1".into(),

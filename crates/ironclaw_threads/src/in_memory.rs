@@ -936,7 +936,10 @@ fn context_messages_with_summary_replacements(thread: &StoredThread) -> Vec<Cont
                 sequence: message.sequence,
                 kind: message.kind,
                 tool_result_provider_call: message.tool_result_provider_call.clone(),
-                content,
+                content: crate::attachment_context::augment_model_content(
+                    content,
+                    &message.attachments,
+                ),
             });
         }
     }
@@ -963,7 +966,10 @@ fn context_messages_by_id(
                 sequence: message.sequence,
                 kind: message.kind,
                 tool_result_provider_call: message.tool_result_provider_call.clone(),
-                content: message.content.clone()?,
+                content: crate::attachment_context::augment_model_content(
+                    message.content.clone()?,
+                    &message.attachments,
+                ),
             })
         })
         .collect()
