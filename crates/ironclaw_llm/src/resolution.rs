@@ -289,11 +289,14 @@ fn resolve_provider_definition(
         }
         None => None,
     };
-    let base_url = provider
-        .base_url_env
-        .as_deref()
-        .and_then(nonempty_env)
-        .or(base_url_override)
+    // Precedence: an explicit override (the operator's WebUI/config.toml
+    // selection) wins over the provider's ambient env var, which wins over
+    // the catalog default. The env-fallback path (`resolve_provider_*_from_env`)
+    // passes `None` overrides, so pure-env deployments keep env-first behavior.
+    // Putting the env var first here would let a startup `NEARAI_BASE_URL` /
+    // `NEARAI_MODEL` silently override what a user just picked in onboarding.
+    let base_url = base_url_override
+        .or_else(|| provider.base_url_env.as_deref().and_then(nonempty_env))
         .or_else(|| provider.default_base_url.clone())
         .unwrap_or_default();
     if provider.base_url_required && base_url.is_empty() {
@@ -301,8 +304,8 @@ fn resolve_provider_definition(
             provider: provider.id.clone(),
         });
     }
-    let model = nonempty_env(&provider.model_env)
-        .or(model_override)
+    let model = model_override
+        .or_else(|| nonempty_env(&provider.model_env))
         .or_else(|| {
             allow_llm_model_fallback
                 .then(|| nonempty_env("LLM_MODEL"))
@@ -872,5 +875,62 @@ mod tests {
             error,
             LlmError::AuthFailed { provider } if provider == "openai_codex"
         ));
+    }
+
+    /// Regression for the Reborn onboarding bug (#4079 introduced the
+    /// precedence, #4481's WebUI onboarding made it user-visible): an explicit
+    /// model/base_url the operator picked in the UI must win over the ambient
+    /// startup env vars (`NEARAI_MODEL` / `NEARAI_BASE_URL`), which a user
+    /// inherits verbatim from `.env.example`. Before the fix, a user who
+    /// selected DeepSeek + the cloud endpoint still got Qwen on the
+    /// session-token endpoint.
+    #[test]
+    fn explicit_selection_overrides_env_for_model_and_base_url() {
+        let _env_lock = ironclaw_common::env_helpers::lock_env();
+        let env = EnvGuard::clear(CHAIN_ENV_VARS);
+        env.set("NEARAI_MODEL", "Qwen/Qwen3.5-122B-A10B");
+        env.set("NEARAI_BASE_URL", "https://private.near.ai");
+
+        let registry =
+            ProviderRegistry::try_load_from_path(None).expect("builtin registry should load");
+
+        let resolved = resolve_provider_config_from_selection(
+            ProviderSelection {
+                provider_id: "nearai".to_string(),
+                api_key_env: None,
+                base_url: Some("https://cloud-api.near.ai".to_string()),
+                model: Some("deepseek-ai/DeepSeek-V4-Flash".to_string()),
+            },
+            &registry,
+        )
+        .expect("nearai selection should resolve");
+
+        let ResolvedProviderConfig::Dedicated(dedicated) = resolved else {
+            panic!("nearai must resolve as a dedicated provider config");
+        };
+        assert_eq!(dedicated.model, "deepseek-ai/DeepSeek-V4-Flash");
+        assert_eq!(dedicated.base_url, "https://cloud-api.near.ai");
+    }
+
+    /// The pure-env path (no explicit selection override) must keep its
+    /// env-first behavior so hosted/headless deployments that configure
+    /// everything through env vars are unaffected by the precedence fix.
+    #[test]
+    fn env_still_wins_when_no_explicit_selection_override() {
+        let _env_lock = ironclaw_common::env_helpers::lock_env();
+        let env = EnvGuard::clear(CHAIN_ENV_VARS);
+        env.set("LLM_BACKEND", "nearai");
+        env.set("NEARAI_MODEL", "Qwen/Qwen3.5-122B-A10B");
+        env.set("NEARAI_BASE_URL", "https://private.near.ai");
+
+        let resolved = resolve_provider_config_from_env(None)
+            .expect("env resolution should succeed")
+            .expect("nearai backend should resolve from env");
+
+        let ResolvedProviderConfig::Dedicated(dedicated) = resolved else {
+            panic!("nearai must resolve as a dedicated provider config");
+        };
+        assert_eq!(dedicated.model, "Qwen/Qwen3.5-122B-A10B");
+        assert_eq!(dedicated.base_url, "https://private.near.ai");
     }
 }

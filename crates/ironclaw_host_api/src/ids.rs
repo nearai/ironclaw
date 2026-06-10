@@ -147,6 +147,17 @@ macro_rules! string_id {
                 D: serde::Deserializer<'de>,
             {
                 let value = String::deserialize(deserializer)?;
+                // The reserved system sentinel ([`crate::SYSTEM_RESERVED_ID`]) is
+                // built via `from_trusted` precisely because it carries control
+                // bytes the validator rejects, so no caller-supplied id can
+                // collide with it. It must still round-trip through persistence
+                // (e.g. system-scoped secret entries via `ResourceScope::system`),
+                // so accept that one fixed sentinel on the trusted path. Without
+                // this, a system-scoped record serializes but fails to
+                // deserialize. No other control-bearing value passes.
+                if value == $crate::SYSTEM_RESERVED_ID {
+                    return Ok(Self::from_trusted(value));
+                }
                 Self::new(value).map_err(serde::de::Error::custom)
             }
         }
