@@ -124,6 +124,15 @@ fn dockerfile_reborn_builds_with_postgres_feature() {
         dockerfile.contains("config.production.toml"),
         "Dockerfile.reborn must ship the opt-in production config: {dockerfile}"
     );
+    let builder_stage = dockerfile
+        .split_once("FROM deps AS builder")
+        .map(|(_, stage)| stage)
+        .expect("Dockerfile.reborn should define a builder stage");
+    assert!(
+        builder_stage.contains("COPY migrations/ migrations/")
+            && dockerfile.matches("COPY migrations/ migrations/").count() == 1,
+        "Dockerfile.reborn must copy repo-level SQL migrations exactly once in the builder stage for postgres include_str! builds: {dockerfile}"
+    );
     assert!(
         !dockerfile.contains("IRONCLAW_REBORN_HOME=/data/ironclaw-reborn"),
         "Dockerfile.reborn must let the entrypoint resolve Railway volume mounts before falling back to /data: {dockerfile}"

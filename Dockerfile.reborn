@@ -48,6 +48,7 @@ FROM deps AS builder
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
+COPY migrations/ migrations/
 COPY skills/ skills/
 COPY tests/ tests/
 COPY wit/ wit/
