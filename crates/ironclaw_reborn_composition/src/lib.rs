@@ -757,6 +757,11 @@ pub(crate) fn slack_host_state_mount_view(
             MountPermissions::read_write_list_delete(),
         ),
         MountGrant::new(
+            MountAlias::new("/tenant-shared/slack-setup")?,
+            VirtualPath::new(format!("/tenants/{tenant_id}/shared/slack-setup"))?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
             MountAlias::new("/engine/product_workflow/idempotency")?,
             VirtualPath::new(format!(
                 "/tenants/{tenant_id}/shared/slack-product-workflow/idempotency"
@@ -1014,6 +1019,11 @@ mod mount_view_tests {
                 "/tenant-shared/slack-channel-routes",
                 "/tenant-shared/slack-channel-routes/install/team/route.json",
                 "slack-channel-routes/install/team/route.json",
+            ),
+            (
+                "/tenant-shared/slack-setup",
+                "/tenant-shared/slack-setup/installation.json",
+                "slack-setup/installation.json",
             ),
             (
                 "/engine/product_workflow/idempotency",
