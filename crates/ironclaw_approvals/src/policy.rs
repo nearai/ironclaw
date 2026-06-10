@@ -33,11 +33,9 @@ pub fn permission_mode_allows_persistent_approval(permission: PermissionMode) ->
 }
 
 pub fn persistent_approval_grant_issuer() -> Principal {
-    Principal::System(
-        SystemServiceId::new(PERSISTENT_APPROVAL_GRANT_ISSUER)
-            // Safety: static lowercase ASCII literal satisfies SystemServiceId validation.
-            .expect("persistent approval grant issuer literal is valid"),
-    )
+    Principal::System(SystemServiceId::from_trusted(
+        PERSISTENT_APPROVAL_GRANT_ISSUER.to_string(),
+    ))
 }
 
 #[derive(Debug, Error)]
