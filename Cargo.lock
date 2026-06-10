@@ -4451,6 +4451,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_harness"
+version = "0.1.0"
+dependencies = [
+ "ironclaw_blueprint",
+ "ironclaw_reborn_config",
+ "serde",
+ "thiserror 2.0.18",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "ironclaw_hooks"
 version = "0.1.0"
 dependencies = [
