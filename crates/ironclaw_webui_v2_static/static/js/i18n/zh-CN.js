@@ -273,6 +273,7 @@ registerPack("zh-CN", {
   "onboarding.nearaiWaiting": "等待在弹出的新标签页中完成 NEAR AI 授权…",
   "onboarding.nearaiTimeout": "NEAR AI 登录超时，请重试。",
   "onboarding.nearaiFailed": "NEAR AI 登录失败，请重试。",
+  "onboarding.nearaiLocalSso": "本地环境（localhost）不支持 NEAR AI 浏览器登录（GitHub、Google、NEAR 钱包）——NEAR AI 会拒绝本地回调地址。请改用 NEAR AI API key，或在公网地址下运行。",
   "onboarding.codexSignIn": "通过 ChatGPT 登录",
   "onboarding.codexEnterCode": "在打开的标签页中输入此代码以授权：",
   "onboarding.codexWaiting": "等待在当前新标签页中完成 ChatGPT 授权…",

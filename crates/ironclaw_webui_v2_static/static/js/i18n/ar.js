@@ -273,6 +273,7 @@ registerPack("ar", {
   "onboarding.nearaiWaiting": "في انتظار تسجيل الدخول إلى NEAR AI في علامة التبويب المفتوحة...",
   "onboarding.nearaiTimeout": "انتهت مهلة تسجيل الدخول إلى NEAR AI. يرجى المحاولة مرة أخرى.",
   "onboarding.nearaiFailed": "فشل تسجيل الدخول إلى NEAR AI. يرجى المحاولة مرة أخرى.",
+  "onboarding.nearaiLocalSso": "تسجيل الدخول إلى NEAR AI عبر المتصفح (GitHub وGoogle ومحفظة NEAR) غير مدعوم على localhost — لأن NEAR AI يرفض عناوين الاستدعاء المحلية. أضف بدلاً من ذلك مفتاح API لـ NEAR AI، أو شغّله خلف عنوان URL عام.",
   "onboarding.codexSignIn": "قم بتسجيل الدخول باستخدام ChatGPT",
   "onboarding.codexEnterCode": "أدخل هذا الرمز في علامة التبويب المفتوحة للتفويض:",
   "onboarding.codexWaiting": "في انتظار ترخيص ChatGPT في علامة التبويب المفتوحة...",

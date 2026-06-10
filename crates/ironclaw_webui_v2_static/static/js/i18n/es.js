@@ -273,6 +273,7 @@ registerPack("es", {
   "onboarding.nearaiWaiting": "Esperando el inicio de sesión de NEAR AI en la pestaña abierta...",
   "onboarding.nearaiTimeout": "Se agotó el tiempo de espera para el inicio de sesión de NEAR AI. Por favor inténtalo de nuevo.",
   "onboarding.nearaiFailed": "Error al iniciar sesión en NEAR AI. Por favor inténtalo de nuevo.",
+  "onboarding.nearaiLocalSso": "El inicio de sesión en NEAR AI desde el navegador (GitHub, Google, monedero NEAR) no es compatible en localhost: NEAR AI rechaza las URL de retorno locales. Añade en su lugar una clave de API de NEAR AI, o ejecútalo tras una URL pública.",
   "onboarding.codexSignIn": "Iniciar sesión con ChatGPT",
   "onboarding.codexEnterCode": "Ingrese este código en la pestaña abierta para autorizar:",
   "onboarding.codexWaiting": "Esperando la autorización de ChatGPT en la pestaña abierta...",

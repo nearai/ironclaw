@@ -273,6 +273,7 @@ registerPack("ja", {
   "onboarding.nearaiWaiting": "開いたタブで NEAR AI サインインを待機しています…",
   "onboarding.nearaiTimeout": "NEAR AI サインインがタイムアウトしました。もう一度試してください。",
   "onboarding.nearaiFailed": "NEAR AI サインインに失敗しました。もう一度試してください。",
+  "onboarding.nearaiLocalSso": "ブラウザでの NEAR AI サインイン（GitHub、Google、NEAR ウォレット）は localhost では利用できません。NEAR AI がローカルのコールバック URL を拒否するためです。代わりに NEAR AI の API キーを追加するか、公開 URL で実行してください。",
   "onboarding.codexSignIn": "ChatGPT でサインイン",
   "onboarding.codexEnterCode": "開いたタブに次のコードを入力して認証します:",
   "onboarding.codexWaiting": "開いたタブで ChatGPT 認証を待機しています…",
