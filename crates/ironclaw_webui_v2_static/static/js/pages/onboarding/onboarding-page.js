@@ -261,10 +261,7 @@ function OperatorOnboardingPage() {
           )}
         </div>
 
-        <${ProviderLoginStatus}
-          login=${login}
-          nearaiSsoAvailable=${featured.some(({ entry }) => entry.id === "nearai")}
-        />
+        <${ProviderLoginStatus} login=${login} />
 
         <div className="text-center text-xs text-[var(--v2-text-muted)]">
           ${t("onboarding.moreInSettings")}${" "}

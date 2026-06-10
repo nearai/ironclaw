@@ -10,6 +10,24 @@ import {
 
 const WALLET_LOGIN_TIMEOUT_MS = 300_000;
 
+// NEAR AI's hosted auth (private.near.ai) rejects `frontend_callback` URLs that
+// point at a loopback host, so its browser sign-in (GitHub / Google / NEAR
+// Wallet) cannot complete from a local dev origin. Detect that origin so we can
+// fail fast with a clear message on click — instead of opening a doomed tab and
+// polling for five minutes only to hit the opaque error (issue #4705).
+export function isLocalDevOrigin() {
+  if (typeof window === "undefined" || !window.location) return false;
+  const host = window.location.hostname;
+  return (
+    host === "localhost" ||
+    host === "127.0.0.1" ||
+    host === "0.0.0.0" ||
+    host === "::1" ||
+    host === "[::1]" ||
+    host.endsWith(".localhost")
+  );
+}
+
 function walletLoginChannelName() {
   const suffix =
     typeof window.crypto?.randomUUID === "function"
@@ -100,6 +118,10 @@ export function useProviderLogin({ onSuccess } = {}) {
   const startNearai = React.useCallback(
     async (provider) => {
       setNearaiError("");
+      if (isLocalDevOrigin()) {
+        setNearaiError(t("onboarding.nearaiLocalSso"));
+        return;
+      }
       setNearaiBusy(true);
       try {
         const { auth_url: authUrl } = await startNearaiLogin({
@@ -127,6 +149,10 @@ export function useProviderLogin({ onSuccess } = {}) {
   // session token, makes NEAR AI active, and hot-swaps the provider).
   const startNearaiWallet = React.useCallback(async () => {
     setNearaiError("");
+    if (isLocalDevOrigin()) {
+      setNearaiError(t("onboarding.nearaiLocalSso"));
+      return;
+    }
     setNearaiBusy(true);
     try {
       const channelName = walletLoginChannelName();

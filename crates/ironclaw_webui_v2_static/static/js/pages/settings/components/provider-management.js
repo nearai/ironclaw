@@ -39,12 +39,6 @@ export function ProviderManagement({ settings, gatewayStatus, searchQuery = "" }
   // refresh re-renders the now-active card in place (no navigation here).
   const login = useProviderLogin();
   const loginBusy = login.nearaiBusy || login.codexBusy;
-  // NEAR AI's browser sign-in buttons only render while NEAR AI is present and
-  // not the active provider; gate the localhost-unsupported notice on the same
-  // condition so it shows exactly when those buttons are actionable.
-  const nearaiSsoAvailable = actions.filteredProviders.some(
-    (provider) => provider.id === "nearai" && provider.id !== state.activeProviderId
-  );
 
   if (searchQuery && actions.filteredProviders.length === 0) {
     return html`<${SettingsSearchEmpty} query=${searchQuery} />`;
@@ -86,7 +80,7 @@ export function ProviderManagement({ settings, gatewayStatus, searchQuery = "" }
         </div>
       `}
 
-      <${ProviderLoginStatus} login=${login} nearaiSsoAvailable=${nearaiSsoAvailable} />
+      <${ProviderLoginStatus} login=${login} />
 
       ${state.isLoading
         ? html`<div className="text-sm text-[var(--v2-text-muted)]">${t("common.loading")}</div>`

@@ -197,36 +197,19 @@ function renderProviderManagement({ providers, activeProviderId = "nearai", sear
   const cardProps = findComponentNodes(rendered, ProviderCard).map((node) =>
     componentProps(node, ProviderCard)
   );
-  const loginStatusNode = findComponentNodes(rendered, "ProviderLoginStatus")[0];
-  const loginStatusProps = loginStatusNode
-    ? componentProps(loginStatusNode, "ProviderLoginStatus")
-    : null;
-  return { rendered, cardProps, loginStatusProps };
+  return { rendered, cardProps };
 }
 
-function renderProviderLoginStatus({ nearaiSsoAvailable, hostname }) {
-  const context = {
-    globalThis: {},
-    html,
-    useT: () => (key) => key,
-  };
+function evalIsLocalDevOrigin({ hostname }) {
+  const context = { globalThis: {} };
   if (hostname !== undefined) {
     context.window = { location: { hostname } };
   }
   vm.runInNewContext(
-    sourceForTest("./provider-login-status.js", ["ProviderLoginStatus"]),
+    sourceForTest("../hooks/useProviderLogin.js", ["isLocalDevOrigin"]),
     context
   );
-  return context.globalThis.__testExports.ProviderLoginStatus({
-    login: {
-      nearaiBusy: false,
-      nearaiError: "",
-      codexBusy: false,
-      codexError: "",
-      codexCode: null,
-    },
-    nearaiSsoAvailable,
-  });
+  return context.globalThis.__testExports.isLocalDevOrigin();
 }
 
 function groupLabels(rendered) {
@@ -624,60 +607,13 @@ test("NearAiSetupMenu closes the setup dropdown on Escape", () => {
   assert.equal(harness.state.open, false);
 });
 
-test("ProviderLoginStatus shows the localhost SSO notice only on a local origin with NEAR AI SSO available", () => {
-  const localWithSso = renderProviderLoginStatus({
-    nearaiSsoAvailable: true,
-    hostname: "localhost",
-  });
-  assert.ok(
-    collectScalars(localWithSso).includes("onboarding.nearaiLocalSso"),
-    "expected notice on localhost when NEAR AI SSO is available"
-  );
-
-  const loopbackWithSso = renderProviderLoginStatus({
-    nearaiSsoAvailable: true,
-    hostname: "127.0.0.1",
-  });
-  assert.ok(
-    collectScalars(loopbackWithSso).includes("onboarding.nearaiLocalSso"),
-    "expected notice on 127.0.0.1 too"
-  );
-
-  const localWithoutSso = renderProviderLoginStatus({
-    nearaiSsoAvailable: false,
-    hostname: "localhost",
-  });
-  assert.ok(
-    !collectScalars(localWithoutSso).includes("onboarding.nearaiLocalSso"),
-    "no notice when NEAR AI SSO is not on screen"
-  );
-
-  const publicWithSso = renderProviderLoginStatus({
-    nearaiSsoAvailable: true,
-    hostname: "app.example.com",
-  });
-  assert.ok(
-    !collectScalars(publicWithSso).includes("onboarding.nearaiLocalSso"),
-    "no notice on a public origin"
-  );
-});
-
-test("ProviderManagement enables the localhost SSO notice only when NEAR AI SSO is actionable", () => {
-  const notActive = renderProviderManagement({
-    providers: [builtinProvider("nearai", { adapter: "nearai" }), builtinProvider("openai")],
-    activeProviderId: "openai",
-  });
-  assert.equal(notActive.loginStatusProps.nearaiSsoAvailable, true);
-
-  const nearaiActive = renderProviderManagement({
-    providers: [builtinProvider("nearai", { adapter: "nearai" }), builtinProvider("openai")],
-    activeProviderId: "nearai",
-  });
-  assert.equal(nearaiActive.loginStatusProps.nearaiSsoAvailable, false);
-
-  const noNearai = renderProviderManagement({
-    providers: [builtinProvider("openai")],
-    activeProviderId: "openai",
-  });
-  assert.equal(noNearai.loginStatusProps.nearaiSsoAvailable, false);
+test("isLocalDevOrigin detects loopback origins so NEAR AI SSO fails fast there", () => {
+  assert.equal(evalIsLocalDevOrigin({ hostname: "localhost" }), true);
+  assert.equal(evalIsLocalDevOrigin({ hostname: "127.0.0.1" }), true);
+  assert.equal(evalIsLocalDevOrigin({ hostname: "::1" }), true);
+  assert.equal(evalIsLocalDevOrigin({ hostname: "api.localhost" }), true);
+  assert.equal(evalIsLocalDevOrigin({ hostname: "app.example.com" }), false);
+  assert.equal(evalIsLocalDevOrigin({ hostname: "192.168.1.50" }), false);
+  // No window (SSR / non-browser): never treat as local.
+  assert.equal(evalIsLocalDevOrigin({ hostname: undefined }), false);
 });
