@@ -1,4 +1,12 @@
-//! Format-specific text extraction routines.
+//! Type-aware text extraction: turn a file's bytes into plain text by format.
+//!
+//! [`extract_text`] is the single entry point — give it the bytes, a MIME type,
+//! and an optional filename and it dispatches to the right format extractor
+//! (PDF, OOXML word/slide/sheet, legacy Office, RTF, UTF-8 text/code). It is a
+//! pure function with no I/O and no knowledge of where the bytes came from, so
+//! it can be used for chat attachments, agent file reads, or any other file
+//! consumption path. ZIP-based formats are decompression-bomb safe (per-entry
+//! and cumulative caps).
 
 use std::io::Read;
 

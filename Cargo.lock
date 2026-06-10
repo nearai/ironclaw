@@ -3998,6 +3998,7 @@ dependencies = [
  "ironclaw_embeddings",
  "ironclaw_engine",
  "ironclaw_extensions",
+ "ironclaw_extractors",
  "ironclaw_filesystem",
  "ironclaw_gateway",
  "ironclaw_host_api",
@@ -4033,7 +4034,6 @@ dependencies = [
  "md-5 0.10.6",
  "mime_guess",
  "open",
- "pdf-extract",
  "pgvector",
  "postgres-types",
  "pretty_assertions",
@@ -4367,6 +4367,15 @@ dependencies = [
  "tokio",
  "toml 0.8.23",
  "url",
+]
+
+[[package]]
+name = "ironclaw_extractors"
+version = "0.1.0"
+dependencies = [
+ "pdf-extract",
+ "thiserror 2.0.18",
+ "zip",
 ]
 
 [[package]]
