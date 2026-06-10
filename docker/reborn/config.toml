@@ -25,6 +25,10 @@ model = "anthropic/claude-sonnet-4-5"
 api_key_env = "NEARAI_API_KEY"
 
 [slack]
-enabled = false
+enabled = true
+installation_id = "railway-qa-slack"
+team_id = "T0AQMKHM7LK"
+api_app_id = "A0BAJ5WQ0JU"
+user_id = "reborn-cli"
 signing_secret_env = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"
 bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"
