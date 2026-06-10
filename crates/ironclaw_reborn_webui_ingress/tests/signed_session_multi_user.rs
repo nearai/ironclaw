@@ -516,11 +516,11 @@ async fn session_payload(app: &axum::Router, bearer: &str) -> serde_json::Value 
     serde_json::from_slice(&bytes).expect("session json")
 }
 
-async fn llm_providers_status(app: &axum::Router, bearer: &str) -> StatusCode {
+async fn llm_providers_status(app: &axum::Router, bearer: &str, method: Method) -> StatusCode {
     app.clone()
         .oneshot(with_peer(
             Request::builder()
-                .method(Method::GET)
+                .method(method)
                 .uri("/api/webchat/v2/llm/providers")
                 .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
                 .body(Body::empty())
@@ -582,9 +582,14 @@ async fn sso_sessions_stay_non_operator_while_env_token_can_configure_operator_r
         "SSO session tokens must not inherit operator privileges"
     );
     assert_eq!(
-        llm_providers_status(&app, &sso_bearer).await,
+        llm_providers_status(&app, &sso_bearer, Method::GET).await,
         StatusCode::FORBIDDEN,
         "SSO session tokens must be denied on operator LLM config routes"
+    );
+    assert_eq!(
+        llm_providers_status(&app, &sso_bearer, Method::HEAD).await,
+        StatusCode::FORBIDDEN,
+        "SSO session tokens must be denied on operator LLM config routes before Axum routes HEAD through GET"
     );
 
     let operator_session = session_payload(&app, "env-operator-token").await;
@@ -593,7 +598,7 @@ async fn sso_sessions_stay_non_operator_while_env_token_can_configure_operator_r
         operator_session["capabilities"]["operator_webui_config"], true,
         "the env bearer token must keep operator capability when SSO is mounted"
     );
-    let operator_status = llm_providers_status(&app, "env-operator-token").await;
+    let operator_status = llm_providers_status(&app, "env-operator-token", Method::GET).await;
     assert_ne!(operator_status, StatusCode::UNAUTHORIZED);
     assert_ne!(operator_status, StatusCode::FORBIDDEN);
     assert_ne!(

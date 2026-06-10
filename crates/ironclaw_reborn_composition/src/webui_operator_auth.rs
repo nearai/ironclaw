@@ -52,10 +52,15 @@ impl OperatorWebuiConfigRouteState {
     pub(crate) fn requires_operator_webui_config(&self, request: &Request) -> bool {
         let method = request.method();
         let path = request.uri().path();
-        self.routes
-            .iter()
-            .any(|route| route.method == *method && segments_match(&route.segments, path))
+        self.routes.iter().any(|route| {
+            method_matches_route(&route.method, method) && segments_match(&route.segments, path)
+        })
     }
+}
+
+fn method_matches_route(route_method: &Method, request_method: &Method) -> bool {
+    route_method == request_method
+        || (request_method == &Method::HEAD && route_method == &Method::GET)
 }
 
 #[cfg(test)]
@@ -88,6 +93,10 @@ mod tests {
             "/api/webchat/v2/llm/providers",
         )));
         assert!(state.requires_operator_webui_config(&request(
+            Method::HEAD,
+            "/api/webchat/v2/llm/providers",
+        )));
+        assert!(state.requires_operator_webui_config(&request(
             Method::POST,
             "/api/webchat/v2/llm/providers/openai/delete",
         )));
@@ -98,6 +107,10 @@ mod tests {
         assert!(
             !state
                 .requires_operator_webui_config(&request(Method::POST, "/api/webchat/v2/threads",))
+        );
+        assert!(
+            !state
+                .requires_operator_webui_config(&request(Method::HEAD, "/api/webchat/v2/threads",))
         );
     }
 }
