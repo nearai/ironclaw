@@ -60,7 +60,7 @@ impl OperatorWebuiConfigRouteState {
 
 fn method_matches_route(route_method: &Method, request_method: &Method) -> bool {
     route_method == request_method
-        || (request_method == &Method::HEAD && route_method == &Method::GET)
+        || (request_method == Method::HEAD && route_method == Method::GET)
 }
 
 #[cfg(test)]
