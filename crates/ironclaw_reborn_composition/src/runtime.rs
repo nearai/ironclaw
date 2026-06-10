@@ -5958,19 +5958,30 @@ mod tests {
             thread_id: None,
             invocation_id,
         };
+        let constraints = GrantConstraints {
+            allowed_effects: github_search_allowed_effects(),
+            mounts: MountView::new(Vec::new()).expect("empty mounts"),
+            network: github_search_network_policy(),
+            secrets: vec![SecretHandle::new("github_runtime_token").expect("secret handle")],
+            resource_ceiling: None,
+            expires_at: None,
+            max_invocations: None,
+        };
         let grant = CapabilityGrant {
             id: CapabilityGrantId::new(),
             capability: capability_id.clone(),
             grantee: Principal::Extension(extension_id.clone()),
             issued_by: Principal::HostRuntime,
+            constraints: constraints.clone(),
+        };
+        let approval_grant = CapabilityGrant {
+            id: CapabilityGrantId::new(),
+            capability: capability_id.clone(),
+            grantee: Principal::Extension(extension_id.clone()),
+            issued_by: Principal::User(caller.user_id.clone()),
             constraints: GrantConstraints {
-                allowed_effects: github_search_allowed_effects(),
-                mounts: MountView::new(Vec::new()).expect("empty mounts"),
-                network: github_search_network_policy(),
-                secrets: vec![SecretHandle::new("github_runtime_token").expect("secret handle")],
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: None,
+                max_invocations: Some(1),
+                ..constraints
             },
         };
         let context = ExecutionContext {
@@ -5988,7 +5999,7 @@ mod tests {
             runtime: RuntimeKind::Wasm,
             trust: TrustClass::Sandbox,
             grants: CapabilitySet {
-                grants: vec![grant],
+                grants: vec![grant, approval_grant],
             },
             mounts: MountView::new(Vec::new()).expect("empty mounts"),
             resource_scope: scope,
