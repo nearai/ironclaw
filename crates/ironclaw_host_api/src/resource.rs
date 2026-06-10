@@ -29,7 +29,16 @@ pub const SYSTEM_RESERVED_ID: &str = "\x1fSYSTEM\x1f";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceScope {
+    // The system sentinel ([`SYSTEM_RESERVED_ID`]) carries control bytes that
+    // `TenantId`/`UserId` validation rejects, so [`ResourceScope::system`] builds
+    // it via `from_trusted`. A persisted system scope must therefore round-trip,
+    // but the trusted exception stays scoped to these two fields only — the
+    // shared id `Deserialize` keeps rejecting control bytes everywhere else, so
+    // untrusted input can never mint a sentinel-bearing id or collide with the
+    // reserved system identity on any other axis.
+    #[serde(deserialize_with = "deserialize_system_aware_tenant_id")]
     pub tenant_id: TenantId,
+    #[serde(deserialize_with = "deserialize_system_aware_user_id")]
     pub user_id: UserId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<AgentId>,
@@ -37,6 +46,30 @@ pub struct ResourceScope {
     pub mission_id: Option<MissionId>,
     pub thread_id: Option<ThreadId>,
     pub invocation_id: InvocationId,
+}
+
+fn deserialize_system_aware_tenant_id<'de, D>(deserializer: D) -> Result<TenantId, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    if raw == SYSTEM_RESERVED_ID {
+        Ok(TenantId::from_trusted(raw))
+    } else {
+        TenantId::new(raw).map_err(serde::de::Error::custom)
+    }
+}
+
+fn deserialize_system_aware_user_id<'de, D>(deserializer: D) -> Result<UserId, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    if raw == SYSTEM_RESERVED_ID {
+        Ok(UserId::from_trusted(raw))
+    } else {
+        UserId::new(raw).map_err(serde::de::Error::custom)
+    }
 }
 
 impl ResourceScope {
@@ -214,11 +247,31 @@ mod tests {
         assert_eq!(restored.user_id.as_str(), SYSTEM_RESERVED_ID);
     }
 
-    /// The trusted-sentinel exception must not widen into a general bypass:
-    /// an ordinary id carrying control characters is still rejected on the wire.
+    /// The trusted-sentinel exception must not widen into a general bypass. The
+    /// JSON is built via `serde_json::to_string` so the control byte becomes a
+    /// proper `\uXXXX` escape; a raw control byte would be rejected at JSON parse
+    /// time, before id validation runs, and pass the assertion for the wrong
+    /// reason. An ordinary control-bearing id is still rejected by the validator.
     #[test]
     fn other_control_character_ids_are_still_rejected() {
-        let json = "\"\u{1f}not-the-sentinel\u{1f}\"";
-        assert!(serde_json::from_str::<TenantId>(json).is_err());
+        let json = serde_json::to_string("\u{1f}not-the-sentinel\u{1f}").expect("encode");
+        assert!(serde_json::from_str::<TenantId>(&json).is_err());
+    }
+
+    /// The exception lives only on `ResourceScope`'s tenant/user fields, not on
+    /// the shared id `Deserialize`. The exact system sentinel must NOT deserialize
+    /// into a bare id type (here `TenantId` and `AgentId`), so it can never be
+    /// minted from untrusted input or collide with the system identity elsewhere.
+    #[test]
+    fn system_sentinel_is_rejected_for_bare_ids() {
+        let json = serde_json::to_string(SYSTEM_RESERVED_ID).expect("encode sentinel");
+        assert!(
+            serde_json::from_str::<TenantId>(&json).is_err(),
+            "bare TenantId must not accept the system sentinel"
+        );
+        assert!(
+            serde_json::from_str::<AgentId>(&json).is_err(),
+            "AgentId must not accept the system sentinel"
+        );
     }
 }
