@@ -52,8 +52,6 @@ const SLACK_CHANNEL_ROUTES_BODY_LIMIT_BYTES: NonZeroU64 = NonZeroU64::new(128 * 
 const SLACK_CHANNEL_ROUTES_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(60).unwrap(); // safety: 60 is non-zero.
 const SLACK_CHANNEL_ROUTES_RATE_WINDOW_SECONDS: NonZeroU32 = NonZeroU32::new(60).unwrap(); // safety: 60 is non-zero.
 const MANAGED_CHANNEL_SUBJECT_PREFIX: &str = "user:slack-channel:";
-const PENDING_SLACK_INSTALLATION_ID: &str = "slack_setup_pending";
-const PENDING_SLACK_TEAM_ID: &str = "slack_setup_pending";
 const DEFAULT_LIST_LIMIT: usize = 100;
 const MAX_LIST_LIMIT: usize = 500;
 
@@ -447,16 +445,27 @@ pub(crate) enum SlackChannelRouteError {
 
 #[derive(Clone)]
 pub struct SlackChannelRouteAdminRouteConfig {
-    tenant_id: TenantId,
-    installation_id: AdapterInstallationId,
-    team_id: String,
-    operator_user_id: UserId,
-    allowed_subject_user_ids: HashSet<UserId>,
-    routable_team_subjects: Vec<subjects::SlackRoutableTeamSubject>,
-    channel_subject_assigner: SlackChannelSubjectAssigner,
+    scope: SlackChannelRouteAdminScope,
     store: Arc<dyn SlackChannelRouteStore>,
     safety_layer: Arc<SafetyLayer>,
-    setup_service: Option<Arc<SlackSetupService>>,
+}
+
+#[derive(Clone)]
+enum SlackChannelRouteAdminScope {
+    Static {
+        tenant_id: TenantId,
+        installation_id: AdapterInstallationId,
+        team_id: String,
+        operator_user_id: UserId,
+        allowed_subject_user_ids: HashSet<UserId>,
+        routable_team_subjects: Vec<subjects::SlackRoutableTeamSubject>,
+        channel_subject_assigner: SlackChannelSubjectAssigner,
+    },
+    Dynamic {
+        tenant_id: TenantId,
+        operator_user_id: UserId,
+        setup_service: Arc<SlackSetupService>,
+    },
 }
 
 impl SlackChannelRouteAdminRouteConfig {
@@ -472,7 +481,7 @@ impl SlackChannelRouteAdminRouteConfig {
             installation_id.clone(),
             team_id.clone(),
         );
-        Self {
+        let scope = SlackChannelRouteAdminScope::Static {
             tenant_id,
             installation_id,
             team_id,
@@ -480,12 +489,14 @@ impl SlackChannelRouteAdminRouteConfig {
             routable_team_subjects: Vec::new(),
             operator_user_id,
             channel_subject_assigner,
+        };
+        Self {
+            scope,
             store,
             safety_layer: Arc::new(SafetyLayer::new(&SafetyConfig {
                 max_output_length: 16 * 1024,
                 injection_check_enabled: true,
             })),
-            setup_service: None,
         }
     }
 
@@ -495,76 +506,81 @@ impl SlackChannelRouteAdminRouteConfig {
         store: Arc<dyn SlackChannelRouteStore>,
         setup_service: Arc<SlackSetupService>,
     ) -> Self {
-        let installation_id = AdapterInstallationId::new(PENDING_SLACK_INSTALLATION_ID)
-            .expect("pending Slack installation id literal must be valid"); // safety: literal is non-empty and contains no control characters.
-        Self::new(
-            tenant_id,
-            installation_id,
-            PENDING_SLACK_TEAM_ID.to_string(),
-            operator_user_id,
+        Self {
+            scope: SlackChannelRouteAdminScope::Dynamic {
+                tenant_id,
+                operator_user_id,
+                setup_service,
+            },
             store,
-        )
-        .with_setup_service(setup_service)
+            safety_layer: Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 16 * 1024,
+                injection_check_enabled: true,
+            })),
+        }
     }
 
     fn setup_service(&self) -> Result<Arc<SlackSetupService>, SlackRouteError> {
-        self.setup_service
-            .as_ref()
-            .map(Arc::clone)
-            .ok_or(SlackRouteError::Unavailable)
-    }
-
-    fn with_setup_service(mut self, setup_service: Arc<SlackSetupService>) -> Self {
-        self.setup_service = Some(setup_service);
-        self
+        match &self.scope {
+            SlackChannelRouteAdminScope::Dynamic { setup_service, .. } => {
+                Ok(Arc::clone(setup_service))
+            }
+            SlackChannelRouteAdminScope::Static { .. } => Err(SlackRouteError::Unavailable),
+        }
     }
 
     pub(crate) fn with_allowed_subject_user_ids(
         mut self,
         subject_user_ids: impl IntoIterator<Item = UserId>,
     ) -> Self {
-        for subject_user_id in subject_user_ids {
-            self.add_allowed_subject_user(subject_user_id);
+        if let SlackChannelRouteAdminScope::Static {
+            operator_user_id,
+            allowed_subject_user_ids,
+            routable_team_subjects,
+            ..
+        } = &mut self.scope
+        {
+            for subject_user_id in subject_user_ids {
+                add_allowed_subject_user(
+                    operator_user_id,
+                    allowed_subject_user_ids,
+                    routable_team_subjects,
+                    subject_user_id,
+                );
+            }
         }
         self
     }
 
-    fn add_allowed_subject_user(&mut self, subject_user_id: UserId) {
-        self.allowed_subject_user_ids
-            .insert(subject_user_id.clone());
-        if subject_user_id != self.operator_user_id
-            && !self
-                .routable_team_subjects
-                .iter()
-                .any(|subject| subject.subject_user_id == subject_user_id.as_str())
-        {
-            self.routable_team_subjects
-                .push(subjects::SlackRoutableTeamSubject::from_user_id(
-                    subject_user_id,
-                ));
-            self.routable_team_subjects.sort_by(|left, right| {
-                left.display_name
-                    .cmp(&right.display_name)
-                    .then_with(|| left.subject_user_id.cmp(&right.subject_user_id))
-            });
-        }
-    }
-
     async fn route_context(&self) -> Result<SlackChannelRouteAdminContext, SlackRouteError> {
-        let Some(setup_service) = &self.setup_service else {
-            return Ok(SlackChannelRouteAdminContext {
-                tenant_id: self.tenant_id.clone(),
-                installation_id: self.installation_id.clone(),
-                team_id: self.team_id.clone(),
-                allowed_subject_user_ids: self.allowed_subject_user_ids.clone(),
-                routable_team_subjects: self.routable_team_subjects.clone(),
-                channel_subject_assigner: self.channel_subject_assigner.clone(),
-            });
-        };
-        let Some(setup) = setup_service.current_setup().await? else {
-            return Err(SlackRouteError::NotFound);
-        };
-        SlackChannelRouteAdminContext::from_setup(&self.tenant_id, &self.operator_user_id, setup)
+        match &self.scope {
+            SlackChannelRouteAdminScope::Static {
+                tenant_id,
+                installation_id,
+                team_id,
+                allowed_subject_user_ids,
+                routable_team_subjects,
+                channel_subject_assigner,
+                ..
+            } => Ok(SlackChannelRouteAdminContext {
+                tenant_id: tenant_id.clone(),
+                installation_id: installation_id.clone(),
+                team_id: team_id.clone(),
+                allowed_subject_user_ids: allowed_subject_user_ids.clone(),
+                routable_team_subjects: routable_team_subjects.clone(),
+                channel_subject_assigner: channel_subject_assigner.clone(),
+            }),
+            SlackChannelRouteAdminScope::Dynamic {
+                tenant_id,
+                operator_user_id,
+                setup_service,
+            } => {
+                let Some(setup) = setup_service.current_setup().await? else {
+                    return Err(SlackRouteError::NotFound);
+                };
+                SlackChannelRouteAdminContext::from_setup(tenant_id, operator_user_id, setup)
+            }
+        }
     }
 
     async fn key_for_channel(
@@ -587,6 +603,43 @@ impl SlackChannelRouteAdminRouteConfig {
             channel_id,
         )
         .map_err(|_| SlackRouteError::BadRequest)
+    }
+
+    fn tenant_id(&self) -> &TenantId {
+        match &self.scope {
+            SlackChannelRouteAdminScope::Static { tenant_id, .. }
+            | SlackChannelRouteAdminScope::Dynamic { tenant_id, .. } => tenant_id,
+        }
+    }
+
+    fn operator_user_id(&self) -> &UserId {
+        match &self.scope {
+            SlackChannelRouteAdminScope::Static {
+                operator_user_id, ..
+            }
+            | SlackChannelRouteAdminScope::Dynamic {
+                operator_user_id, ..
+            } => operator_user_id,
+        }
+    }
+}
+
+fn add_allowed_subject_user(
+    operator_user_id: &UserId,
+    allowed_subject_user_ids: &mut HashSet<UserId>,
+    routable_team_subjects: &mut Vec<subjects::SlackRoutableTeamSubject>,
+    subject_user_id: UserId,
+) {
+    allowed_subject_user_ids.insert(subject_user_id.clone());
+    if subject_user_id != *operator_user_id
+        && !routable_team_subjects
+            .iter()
+            .any(|subject| subject.subject_user_id == subject_user_id.as_str())
+    {
+        routable_team_subjects.push(subjects::SlackRoutableTeamSubject::from_user_id(
+            subject_user_id,
+        ));
+        sort_routable_team_subjects(routable_team_subjects);
     }
 }
 
@@ -621,11 +674,7 @@ impl SlackChannelRouteAdminContext {
             .cloned()
             .map(subjects::SlackRoutableTeamSubject::from_user_id)
             .collect::<Vec<_>>();
-        routable_team_subjects.sort_by(|left, right| {
-            left.display_name
-                .cmp(&right.display_name)
-                .then_with(|| left.subject_user_id.cmp(&right.subject_user_id))
-        });
+        sort_routable_team_subjects(&mut routable_team_subjects);
         Ok(Self {
             tenant_id: tenant_id.clone(),
             installation_id: installation_id.clone(),
@@ -639,6 +688,14 @@ impl SlackChannelRouteAdminContext {
             ),
         })
     }
+}
+
+fn sort_routable_team_subjects(subjects: &mut [subjects::SlackRoutableTeamSubject]) {
+    subjects.sort_by(|left, right| {
+        left.display_name
+            .cmp(&right.display_name)
+            .then_with(|| left.subject_user_id.cmp(&right.subject_user_id))
+    });
 }
 
 pub(crate) struct SlackChannelRouteAdminRouteMount {
@@ -828,7 +885,7 @@ fn scan_route_admin_field(
         );
         return Err(SlackRouteError::BadRequest);
     }
-    if field != "subject_user_id" {
+    if !is_route_identifier_field(field) {
         let sanitized = config.safety_layer.sanitize_tool_output(field, value);
         if !sanitized.warnings.is_empty() {
             tracing::warn!(
@@ -850,15 +907,22 @@ fn scan_route_admin_field(
     Ok(())
 }
 
+fn is_route_identifier_field(field: &str) -> bool {
+    matches!(
+        field,
+        "subject_user_id" | "user_id" | "shared_subject_user_id"
+    )
+}
+
 fn ensure_authorized_operator(
     config: &SlackChannelRouteAdminRouteConfig,
     caller: &WebUiAuthenticatedCaller,
 ) -> Result<(), SlackRouteError> {
     // 404 rather than 403 prevents tenant configuration enumeration.
-    if caller.tenant_id != config.tenant_id {
+    if &caller.tenant_id != config.tenant_id() {
         return Err(SlackRouteError::NotFound);
     }
-    if caller.user_id != config.operator_user_id {
+    if &caller.user_id != config.operator_user_id() {
         return Err(SlackRouteError::Forbidden);
     }
     Ok(())
@@ -931,8 +995,12 @@ mod tests {
 
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use ironclaw_host_api::AgentId;
     use ironclaw_product_adapters::ProductAdapterId;
+    use ironclaw_secrets::InMemorySecretStore;
     use tower::ServiceExt;
+
+    use crate::slack_setup::SlackInstallationSetupStore;
 
     use super::*;
 
@@ -1199,10 +1267,11 @@ mod tests {
             .await
             .expect("response");
 
-        assert_eq!(response.status(), StatusCode::OK);
+        let status = response.status();
         let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
             .await
             .expect("body");
+        assert_eq!(status, StatusCode::OK);
         let body: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(body["routes"], serde_json::json!([]));
         assert_eq!(body["next_cursor"], serde_json::Value::Null);
@@ -1232,10 +1301,11 @@ mod tests {
             .await
             .expect("response");
 
-        assert_eq!(response.status(), StatusCode::OK);
+        let status = response.status();
         let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
             .await
             .expect("body");
+        assert_eq!(status, StatusCode::OK);
         let body: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(body["team_id"], TEAM);
         assert_eq!(
@@ -1258,6 +1328,123 @@ mod tests {
                     "display_name": "Product"
                 }
             ])
+        );
+    }
+
+    #[tokio::test]
+    async fn setup_admin_saves_secrets_and_returns_redacted_status() {
+        let setup_store = Arc::new(InMemorySlackSetupStore::default());
+        let mount = slack_channel_route_admin_route_mount(dynamic_route_config(
+            Arc::new(InMemorySlackChannelRouteStore::new()),
+            setup_store.clone(),
+        ));
+
+        let response = mount
+            .protected
+            .clone()
+            .oneshot(request_to_path(
+                "PUT",
+                WEBUI_V2_CHANNELS_SLACK_SETUP_PATH,
+                r#"{
+                    "installation_id":"install_runtime",
+                    "team_id":"T0RUNTIME",
+                    "api_app_id":"A0RUNTIME",
+                    "user_id":"user:slack-operator",
+                    "shared_subject_user_id":"user:shared-agent",
+                    "bot_token":"xoxb-secret",
+                    "signing_secret":"slack-signing-secret"
+                }"#,
+                TENANT,
+                "user:admin",
+            ))
+            .await
+            .expect("setup save responds");
+
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "setup save body: {}",
+            String::from_utf8_lossy(&body)
+        );
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(body["configured"], true);
+        assert_eq!(body["installation_id"], "install_runtime");
+        assert_eq!(body["team_id"], "T0RUNTIME");
+        assert_eq!(body["api_app_id"], "A0RUNTIME");
+        assert_eq!(body["user_id"], "user:slack-operator");
+        assert_eq!(body["shared_subject_user_id"], "user:shared-agent");
+        assert_eq!(body["bot_token_configured"], true);
+        assert_eq!(body["signing_secret_configured"], true);
+        assert_eq!(body.get("bot_token"), None);
+        assert_eq!(body.get("signing_secret"), None);
+
+        let stored = setup_store
+            .get_slack_installation_setup()
+            .await
+            .expect("setup record")
+            .expect("stored setup");
+        assert_eq!(stored.bot_token_handle.as_str(), "slack_bot_token_v1");
+        assert_eq!(
+            stored.signing_secret_handle.as_str(),
+            "slack_signing_secret_v1"
+        );
+
+        let get_response = mount
+            .protected
+            .oneshot(request_to_path(
+                "GET",
+                WEBUI_V2_CHANNELS_SLACK_SETUP_PATH,
+                "",
+                TENANT,
+                "user:admin",
+            ))
+            .await
+            .expect("setup get responds");
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let get_body = axum::body::to_bytes(get_response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        let get_body: serde_json::Value = serde_json::from_slice(&get_body).expect("json");
+        assert_eq!(get_body["configured"], true);
+        assert_eq!(get_body.get("bot_token"), None);
+        assert_eq!(get_body.get("signing_secret"), None);
+    }
+
+    #[tokio::test]
+    async fn setup_admin_requires_initial_secrets_without_writing_setup() {
+        let setup_store = Arc::new(InMemorySlackSetupStore::default());
+        let mount = slack_channel_route_admin_route_mount(dynamic_route_config(
+            Arc::new(InMemorySlackChannelRouteStore::new()),
+            setup_store.clone(),
+        ));
+
+        let response = mount
+            .protected
+            .oneshot(request_to_path(
+                "PUT",
+                WEBUI_V2_CHANNELS_SLACK_SETUP_PATH,
+                r#"{
+                    "installation_id":"install_runtime",
+                    "team_id":"T0RUNTIME",
+                    "api_app_id":"A0RUNTIME"
+                }"#,
+                TENANT,
+                "user:admin",
+            ))
+            .await
+            .expect("setup save responds");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            setup_store
+                .get_slack_installation_setup()
+                .await
+                .expect("setup store")
+                .is_none()
         );
     }
 
@@ -1615,6 +1802,34 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct InMemorySlackSetupStore {
+        setup: RwLock<Option<SlackInstallationSetup>>,
+    }
+
+    #[async_trait]
+    impl SlackInstallationSetupStore for InMemorySlackSetupStore {
+        async fn get_slack_installation_setup(
+            &self,
+        ) -> Result<Option<SlackInstallationSetup>, SlackSetupError> {
+            self.setup
+                .read()
+                .map_err(|_| SlackSetupError::StoreUnavailable)
+                .map(|setup| setup.clone())
+        }
+
+        async fn put_slack_installation_setup(
+            &self,
+            setup: &SlackInstallationSetup,
+        ) -> Result<(), SlackSetupError> {
+            *self
+                .setup
+                .write()
+                .map_err(|_| SlackSetupError::StoreUnavailable)? = Some(setup.clone());
+            Ok(())
+        }
+    }
+
     fn route_config(store: Arc<dyn SlackChannelRouteStore>) -> SlackChannelRouteAdminRouteConfig {
         SlackChannelRouteAdminRouteConfig::new(
             TenantId::new(TENANT).expect("tenant"),
@@ -1626,14 +1841,49 @@ mod tests {
         .with_allowed_subject_user_ids([UserId::new("user:eng-team-agent").expect("subject user")])
     }
 
+    fn dynamic_route_config(
+        route_store: Arc<dyn SlackChannelRouteStore>,
+        setup_store: Arc<dyn SlackInstallationSetupStore>,
+    ) -> SlackChannelRouteAdminRouteConfig {
+        SlackChannelRouteAdminRouteConfig::dynamic(
+            TenantId::new(TENANT).expect("tenant"),
+            UserId::new("user:admin").expect("operator user"),
+            route_store,
+            Arc::new(SlackSetupService::new(
+                TenantId::new(TENANT).expect("tenant"),
+                AgentId::new("agent:slack-routes").expect("agent"),
+                None,
+                UserId::new("user:admin").expect("operator user"),
+                setup_store,
+                Arc::new(InMemorySecretStore::new()),
+            )),
+        )
+    }
+
     fn request(method: &str, body: &str, tenant_id: &str) -> Request<Body> {
         request_for_user(method, body, tenant_id, "user:admin")
     }
 
     fn request_for_user(method: &str, body: &str, tenant_id: &str, user_id: &str) -> Request<Body> {
+        request_to_path(
+            method,
+            WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
+            body,
+            tenant_id,
+            user_id,
+        )
+    }
+
+    fn request_to_path(
+        method: &str,
+        path: &str,
+        body: &str,
+        tenant_id: &str,
+        user_id: &str,
+    ) -> Request<Body> {
         let mut builder = Request::builder()
             .method(method)
-            .uri(WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH)
+            .uri(path)
             .header("content-type", "application/json")
             .extension(caller(tenant_id, user_id));
         if method == "GET" {
