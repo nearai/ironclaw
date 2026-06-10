@@ -198,6 +198,9 @@ fn operator_config_diagnostic_command_plane_response(
         area,
         status: RebornOperatorSurfaceStatus::Unavailable,
         message: "Operator config has unsupported or not-yet-wired settings.".to_string(),
+        operator_status: None,
+        logs: None,
+        service_lifecycle: None,
         diagnostics: vec![operator_config_surface_not_wired_diagnostic()],
     }
 }

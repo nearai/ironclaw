@@ -81,20 +81,24 @@ pub use types::{
     RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
     RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
     RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
+    RebornListThreadsResponse, RebornLogEntry, RebornLogLevel, RebornLogQueryRequest,
+    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
     RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
     RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
     RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
     RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
     RebornOperatorSetupRequest, RebornOperatorSetupResponse, RebornOperatorSetupStatus,
-    RebornOperatorSetupStep, RebornOperatorSetupStepStatus, RebornOperatorSurfaceStatus,
-    RebornOutboundDeliveryModality, RebornOutboundDeliveryTargetCapabilities,
-    RebornOutboundDeliveryTargetChannel, RebornOutboundDeliveryTargetDescription,
-    RebornOutboundDeliveryTargetDisplayName, RebornOutboundDeliveryTargetId,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
-    RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
-    RebornOutboundPreferencesResponse, RebornResolveGateResponse, RebornResumeGateResponse,
+    RebornOperatorSetupStep, RebornOperatorSetupStepStatus, RebornOperatorStatusCheck,
+    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
+    RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
+    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetChannel,
+    RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetDisplayName,
+    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
+    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
+    RebornResolveGateResponse, RebornResumeGateResponse, RebornServiceLifecycleAction,
+    RebornServiceLifecycleRequest, RebornServiceLifecycleResponse, RebornServiceLifecycleState,
     RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
     RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
     RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
@@ -107,6 +111,11 @@ type SkillActivationRecorder =
 type SkillActivationClearer =
     dyn Fn(&TurnScope, &AcceptedMessageRef) -> Result<(), RebornServicesError> + Send + Sync;
 type ThreadOperationLocks = StdMutex<HashMap<String, Weak<AsyncMutex<()>>>>;
+
+const OPERATOR_LOGS_DEFAULT_LIMIT: u32 = 100;
+const OPERATOR_LOGS_MAX_LIMIT: u32 = 500;
+const OPERATOR_LOGS_CURSOR_MAX_BYTES: usize = 512;
+const OPERATOR_LOGS_TARGET_MAX_BYTES: usize = 256;
 
 #[async_trait]
 pub trait ConnectableChannelsProductFacade: Send + Sync {
@@ -137,6 +146,102 @@ impl ConnectableChannelsProductFacade for StaticConnectableChannelsProductFacade
     ) -> Result<RebornConnectableChannelListResponse, RebornServicesError> {
         Ok(RebornConnectableChannelListResponse {
             channels: self.channels.iter().cloned().collect(),
+        })
+    }
+}
+
+#[async_trait]
+pub trait OperatorStatusService: Send + Sync {
+    async fn status(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorStatusResponse, RebornServicesError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct StaticOperatorStatusService {
+    response: RebornOperatorStatusResponse,
+}
+
+impl StaticOperatorStatusService {
+    pub fn new(response: RebornOperatorStatusResponse) -> Self {
+        Self { response }
+    }
+}
+
+#[async_trait]
+impl OperatorStatusService for StaticOperatorStatusService {
+    async fn status(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorStatusResponse, RebornServicesError> {
+        Ok(self.response.clone())
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct UnsupportedOperatorStatusService;
+
+#[async_trait]
+impl OperatorStatusService for UnsupportedOperatorStatusService {
+    async fn status(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorStatusResponse, RebornServicesError> {
+        Err(operator_surface_unavailable())
+    }
+}
+
+#[async_trait]
+pub trait OperatorLogsService: Send + Sync {
+    async fn query_logs(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornLogQueryRequest,
+    ) -> Result<RebornLogQueryResponse, RebornServicesError>;
+}
+
+#[derive(Debug, Default)]
+pub struct UnsupportedOperatorLogsService;
+
+#[async_trait]
+impl OperatorLogsService for UnsupportedOperatorLogsService {
+    async fn query_logs(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: RebornLogQueryRequest,
+    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
+        Err(operator_surface_unavailable())
+    }
+}
+
+#[async_trait]
+pub trait OperatorServiceLifecycleService: Send + Sync {
+    async fn control_service(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornServiceLifecycleRequest,
+    ) -> Result<RebornServiceLifecycleResponse, RebornServicesError>;
+}
+
+#[derive(Debug, Default)]
+pub struct UnsupportedOperatorServiceLifecycleService;
+
+#[async_trait]
+impl OperatorServiceLifecycleService for UnsupportedOperatorServiceLifecycleService {
+    async fn control_service(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornServiceLifecycleRequest,
+    ) -> Result<RebornServiceLifecycleResponse, RebornServicesError> {
+        Ok(RebornServiceLifecycleResponse {
+            action: request.action,
+            state: RebornServiceLifecycleState::Unsupported,
+            message: "local service lifecycle management is not wired for this runtime".to_string(),
+            remediation: Some(
+                "use the host process manager directly until a platform lifecycle backend is configured"
+                    .to_string(),
+            ),
         })
     }
 }
@@ -694,6 +799,9 @@ fn operator_config_diagnostic_command_plane_response(
         area,
         status: RebornOperatorSurfaceStatus::Unavailable,
         message: "Operator config has unsupported or not-yet-wired settings.".to_string(),
+        operator_status: None,
+        logs: None,
+        service_lifecycle: None,
         diagnostics: vec![operator_config_surface_not_wired_diagnostic()],
     }
 }
@@ -1099,6 +1207,9 @@ pub struct RebornServices {
     skills_facade: Arc<dyn SkillsProductFacade>,
     connectable_channels_facade: Arc<dyn ConnectableChannelsProductFacade>,
     outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade>,
+    operator_status: Arc<dyn OperatorStatusService>,
+    operator_logs: Arc<dyn OperatorLogsService>,
+    operator_service_lifecycle: Arc<dyn OperatorServiceLifecycleService>,
     approval_interactions: Arc<dyn ApprovalInteractionService>,
     auth_interactions: Arc<dyn AuthInteractionService>,
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
@@ -1126,6 +1237,9 @@ impl RebornServices {
             outbound_preferences_facade: Arc::new(
                 UnsupportedOutboundPreferencesProductFacade::new_static(),
             ),
+            operator_status: Arc::new(UnsupportedOperatorStatusService),
+            operator_logs: Arc::new(UnsupportedOperatorLogsService),
+            operator_service_lifecycle: Arc::new(UnsupportedOperatorServiceLifecycleService),
             approval_interactions: Arc::new(RejectingApprovalInteractionService),
             auth_interactions: Arc::new(RejectingAuthInteractionService),
             extension_credentials: None,
@@ -1183,6 +1297,30 @@ impl RebornServices {
         outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade>,
     ) -> Self {
         self.outbound_preferences_facade = outbound_preferences_facade;
+        self
+    }
+
+    pub fn with_operator_status_service(
+        mut self,
+        operator_status: Arc<dyn OperatorStatusService>,
+    ) -> Self {
+        self.operator_status = operator_status;
+        self
+    }
+
+    pub fn with_operator_logs_service(
+        mut self,
+        operator_logs: Arc<dyn OperatorLogsService>,
+    ) -> Self {
+        self.operator_logs = operator_logs;
+        self
+    }
+
+    pub fn with_operator_service_lifecycle_service(
+        mut self,
+        operator_service_lifecycle: Arc<dyn OperatorServiceLifecycleService>,
+    ) -> Self {
+        self.operator_service_lifecycle = operator_service_lifecycle;
         self
     }
 
@@ -1955,6 +2093,81 @@ impl RebornServicesApi for RebornServices {
         .await
     }
 
+    async fn get_operator_status(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let status = self.operator_status.status(caller).await?;
+        Ok(RebornOperatorCommandPlaneResponse {
+            area: RebornOperatorArea::Status,
+            status: RebornOperatorSurfaceStatus::Available,
+            message: "operator status is available".to_string(),
+            operator_status: Some(status),
+            logs: None,
+            service_lifecycle: None,
+            diagnostics: Vec::new(),
+        })
+    }
+
+    async fn query_operator_logs(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: RebornOperatorLogsQuery,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let request = bounded_operator_logs_query(query);
+        let logs = self.operator_logs.query_logs(caller, request).await?;
+        Ok(RebornOperatorCommandPlaneResponse {
+            area: RebornOperatorArea::Logs,
+            status: RebornOperatorSurfaceStatus::Available,
+            message: "operator logs query completed".to_string(),
+            operator_status: None,
+            logs: Some(logs),
+            service_lifecycle: None,
+            diagnostics: Vec::new(),
+        })
+    }
+
+    async fn run_operator_service_lifecycle(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornOperatorServiceLifecycleRequest,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let request = RebornServiceLifecycleRequest {
+            action: match request.action {
+                RebornOperatorServiceLifecycleAction::Install => {
+                    RebornServiceLifecycleAction::Install
+                }
+                RebornOperatorServiceLifecycleAction::Start => RebornServiceLifecycleAction::Start,
+                RebornOperatorServiceLifecycleAction::Stop => RebornServiceLifecycleAction::Stop,
+                RebornOperatorServiceLifecycleAction::Status => {
+                    RebornServiceLifecycleAction::Status
+                }
+            },
+        };
+        let service_lifecycle = self
+            .operator_service_lifecycle
+            .control_service(caller, request)
+            .await?;
+        let status = match service_lifecycle.state {
+            RebornServiceLifecycleState::Installed
+            | RebornServiceLifecycleState::Running
+            | RebornServiceLifecycleState::Stopped
+            | RebornServiceLifecycleState::Unknown => RebornOperatorSurfaceStatus::Available,
+            RebornServiceLifecycleState::Unsupported | RebornServiceLifecycleState::Failed => {
+                RebornOperatorSurfaceStatus::Unavailable
+            }
+        };
+        Ok(RebornOperatorCommandPlaneResponse {
+            area: RebornOperatorArea::ServiceLifecycle,
+            status,
+            message: service_lifecycle.message.clone(),
+            operator_status: None,
+            logs: None,
+            service_lifecycle: Some(service_lifecycle),
+            diagnostics: Vec::new(),
+        })
+    }
+
     async fn get_llm_config(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -2247,6 +2460,10 @@ fn is_automation_trigger_thread(thread: &SessionThreadRecord) -> bool {
 }
 
 fn outbound_preferences_unavailable() -> RebornServicesError {
+    RebornServicesError::service_unavailable(false)
+}
+
+fn operator_surface_unavailable() -> RebornServicesError {
     RebornServicesError::service_unavailable(false)
 }
 
@@ -3296,6 +3513,44 @@ fn create_thread_metadata_json(
         "client_action_id": client_action_id.as_str(),
     }))
     .map_err(|_| RebornServicesError::internal_invariant())
+}
+
+fn bounded_operator_logs_query(query: RebornOperatorLogsQuery) -> RebornLogQueryRequest {
+    RebornLogQueryRequest {
+        limit: Some(
+            query
+                .limit
+                .unwrap_or(OPERATOR_LOGS_DEFAULT_LIMIT)
+                .clamp(1, OPERATOR_LOGS_MAX_LIMIT),
+        ),
+        cursor: bounded_operator_logs_string(query.cursor, OPERATOR_LOGS_CURSOR_MAX_BYTES),
+        level: query.level,
+        target: bounded_operator_logs_string(query.target, OPERATOR_LOGS_TARGET_MAX_BYTES),
+        tail: false,
+    }
+}
+
+fn bounded_operator_logs_string(value: Option<String>, max_bytes: usize) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else if trimmed.len() <= max_bytes {
+            Some(trimmed.to_string())
+        } else {
+            Some(truncate_utf8_to_bytes(trimmed, max_bytes))
+        }
+    })
+}
+
+fn truncate_utf8_to_bytes(value: &str, max_bytes: usize) -> String {
+    let end = value
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= max_bytes)
+        .last()
+        .unwrap_or(0);
+    value[..end].to_string()
 }
 
 fn product_agent_bound_caller_from_webui(
