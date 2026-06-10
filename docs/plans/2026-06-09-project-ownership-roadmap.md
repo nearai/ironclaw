@@ -267,9 +267,12 @@ surfaces. Deliberately last: v1 sharing works with member-or-not.
 These ship against the companion plan and consume the phases above:
 
 - Trigger terminal delivery (companion plan PR F) requires Phase B for
-  fire-time authorization before external delivery is enabled. Gate
-  notifications embed the parseable `gate_ref` and a WebUI deep link
-  (`thread_id`/`run_id`/`gate_ref`): personal reply-to-approve then works
+  fire-time authorization before external delivery is enabled. Approval
+  notifications embed the parseable `gate_ref` and present exactly one
+  action — "Reply `approve <gate_ref>`" — with no WebUI link (decided
+  2026-06-09: keep the user in the channel; one obvious action). Auth
+  notifications are the exception and carry the WebUI link, since
+  credential consent never happens in chat. Reply-to-approve works
   through the existing Slack `approve <gate_ref>` ->
   `ApprovalInteractionService` seam with no new resolution machinery;
   project-member reply-to-approve activates when consumer 4 above lands.
