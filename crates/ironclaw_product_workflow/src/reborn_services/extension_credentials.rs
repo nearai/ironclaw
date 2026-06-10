@@ -122,26 +122,16 @@ async fn credential_readiness_for_requirement(
     extension_id: &ExtensionId,
     requirement: &LifecycleExtensionCredentialRequirement,
 ) -> Result<RequirementCredentialReadiness, RebornServicesError> {
-    let request = ExtensionCredentialStatusRequest {
-        scope,
-        provider: provider_for_requirement(requirement)?,
-        provider_scopes: provider_scopes_for_requirement(requirement)?,
-        requester_extension: extension_id.clone(),
-    };
+    let request = credential_status_request(scope, extension_id, requirement)?;
     match service.credential_status(request).await {
         Ok(Some(_)) => Ok(RequirementCredentialReadiness::Configured),
         Ok(None) => Ok(RequirementCredentialReadiness::Missing),
         Err(error) if is_retryable_status_failure(&error) => {
-            tracing::warn!(
-                target: "ironclaw::reborn::extension_credentials",
-                extension_id = %extension_id.as_str(),
-                provider = %requirement.provider,
-                requirement = %requirement.name,
-                code = ?error.code,
-                kind = ?error.kind,
-                status_code = error.status_code,
-                retryable = error.retryable,
-                "credential status unavailable during extension readiness projection; preserving lifecycle-derived state"
+            warn_retryable_status_failure(
+                extension_id,
+                requirement,
+                &error,
+                "readiness_projection",
             );
             Ok(RequirementCredentialReadiness::Unknown)
         }
@@ -155,26 +145,11 @@ pub(super) async fn credential_status_for_requirement(
     extension_id: &ExtensionId,
     requirement: &LifecycleExtensionCredentialRequirement,
 ) -> Result<Option<CredentialAccountProjection>, RebornServicesError> {
-    let request = ExtensionCredentialStatusRequest {
-        scope,
-        provider: provider_for_requirement(requirement)?,
-        provider_scopes: provider_scopes_for_requirement(requirement)?,
-        requester_extension: extension_id.clone(),
-    };
+    let request = credential_status_request(scope, extension_id, requirement)?;
     match service.credential_status(request).await {
         Ok(account) => Ok(account),
         Err(error) if is_retryable_status_failure(&error) => {
-            tracing::warn!(
-                target: "ironclaw::reborn::extension_credentials",
-                extension_id = %extension_id.as_str(),
-                provider = %requirement.provider,
-                requirement = %requirement.name,
-                code = ?error.code,
-                kind = ?error.kind,
-                status_code = error.status_code,
-                retryable = error.retryable,
-                "credential status unavailable during extension projection; treating credential as unconfigured"
-            );
+            warn_retryable_status_failure(extension_id, requirement, &error, "setup_projection");
             Ok(None)
         }
         Err(error) => Err(error),
@@ -187,13 +162,21 @@ pub(super) async fn credential_status_for_requirement_strict(
     extension_id: &ExtensionId,
     requirement: &LifecycleExtensionCredentialRequirement,
 ) -> Result<Option<CredentialAccountProjection>, RebornServicesError> {
-    let request = ExtensionCredentialStatusRequest {
+    let request = credential_status_request(scope, extension_id, requirement)?;
+    service.credential_status(request).await
+}
+
+fn credential_status_request(
+    scope: AuthProductScope,
+    extension_id: &ExtensionId,
+    requirement: &LifecycleExtensionCredentialRequirement,
+) -> Result<ExtensionCredentialStatusRequest, RebornServicesError> {
+    Ok(ExtensionCredentialStatusRequest {
         scope,
         provider: provider_for_requirement(requirement)?,
         provider_scopes: provider_scopes_for_requirement(requirement)?,
         requester_extension: extension_id.clone(),
-    };
-    service.credential_status(request).await
+    })
 }
 
 pub(super) fn provider_for_requirement(
@@ -221,4 +204,24 @@ fn is_retryable_status_failure(error: &RebornServicesError) -> bool {
     error.retryable
         && (error.code == RebornServicesErrorCode::Unavailable
             || error.kind == RebornServicesErrorKind::ServiceUnavailable)
+}
+
+fn warn_retryable_status_failure(
+    extension_id: &ExtensionId,
+    requirement: &LifecycleExtensionCredentialRequirement,
+    error: &RebornServicesError,
+    usage: &'static str,
+) {
+    tracing::warn!(
+        target: "ironclaw::reborn::extension_credentials",
+        extension_id = %extension_id.as_str(),
+        provider = %requirement.provider,
+        requirement = %requirement.name,
+        usage,
+        code = ?error.code,
+        kind = ?error.kind,
+        status_code = error.status_code,
+        retryable = error.retryable,
+        "credential status unavailable during extension credential projection"
+    );
 }
