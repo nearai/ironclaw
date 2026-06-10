@@ -326,6 +326,25 @@ async fn create_bedrock_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvid
     Ok(Arc::new(provider))
 }
 
+/// Build the reqwest client a rig-based provider should use for its requests to
+/// `base_url`, bypassing any system/env HTTP proxy when the target is loopback.
+///
+/// A proxy (macOS system proxy, `HTTP_PROXY`, …) cannot reach the caller's own
+/// loopback service and answers the forwarded request with `502 Bad Gateway`,
+/// which is why a self-hosted local provider (Ollama, vLLM, …) fails even
+/// though `curl` to the same URL works. Remote hosts keep default proxy
+/// behavior, so this is a no-op for hosted providers behind a corporate proxy.
+fn provider_http_client(provider_id: &str, base_url: &str) -> Result<reqwest::Client, LlmError> {
+    let mut builder = reqwest::Client::builder();
+    if crate::url_check::is_loopback_url(base_url) {
+        builder = builder.no_proxy();
+    }
+    builder.build().map_err(|e| LlmError::RequestFailed {
+        provider: provider_id.to_string(),
+        reason: format!("failed to build HTTP client: {e}"),
+    })
+}
+
 fn create_openai_compat_from_registry(
     config: &RegistryProviderConfig,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -382,7 +401,9 @@ fn create_openai_compat_from_registry(
         normalize_openai_base_url(&config.base_url)
     };
 
-    let mut builder = openai::Client::builder().api_key(&api_key);
+    let mut builder = openai::Client::<reqwest::Client>::builder()
+        .api_key(&api_key)
+        .http_client(provider_http_client(&config.provider_id, &config.base_url)?);
     if !config.base_url.is_empty() {
         builder = builder.base_url(&normalized_base_url);
     }
@@ -523,9 +544,10 @@ fn create_ollama_from_registry(
     use rig::client::Nothing;
     use rig::providers::ollama;
 
-    let client: ollama::Client = ollama::Client::builder()
+    let client: ollama::Client = ollama::Client::<reqwest::Client>::builder()
         .base_url(&config.base_url)
         .api_key(Nothing)
+        .http_client(provider_http_client(&config.provider_id, &config.base_url)?)
         .build()
         .map_err(|e| LlmError::RequestFailed {
             provider: config.provider_id.clone(),

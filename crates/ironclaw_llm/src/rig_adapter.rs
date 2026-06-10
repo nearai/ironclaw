@@ -105,13 +105,18 @@ impl ModelsEndpoint {
     async fn fetch_models(&self) -> Result<Vec<String>, LlmError> {
         crate::url_check::check_models_url(&self.provider_id, &self.url)?;
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| LlmError::RequestFailed {
-                provider: self.provider_id.clone(),
-                reason: format!("failed to build HTTP client: {e}"),
-            })?;
+        let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30));
+        // A loopback provider (self-hosted Ollama etc.) must not be routed
+        // through a system/env HTTP proxy: the proxy can't reach the caller's
+        // own loopback and returns 502. Remote hosts keep proxy support so
+        // corporate proxies still cover hosted providers.
+        if crate::url_check::is_loopback_url(&self.url) {
+            builder = builder.no_proxy();
+        }
+        let client = builder.build().map_err(|e| LlmError::RequestFailed {
+            provider: self.provider_id.clone(),
+            reason: format!("failed to build HTTP client: {e}"),
+        })?;
 
         let mut builder = client.get(&self.url).headers(self.extra_headers.clone());
         builder = match &self.auth {
