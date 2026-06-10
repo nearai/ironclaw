@@ -157,6 +157,30 @@ pub trait AuthProviderClient: Send + Sync {
     }
 }
 
+/// Provider client used when product-auth storage is available but no OAuth
+/// provider implementation is configured for the process.
+#[derive(Debug, Default)]
+pub struct UnavailableAuthProviderClient;
+
+#[async_trait]
+impl AuthProviderClient for UnavailableAuthProviderClient {
+    async fn exchange_callback(
+        &self,
+        _context: OAuthProviderExchangeContext,
+        request: OAuthProviderCallbackRequest,
+    ) -> Result<OAuthProviderExchange, AuthProductError> {
+        validate_provider_callback_request(&request)?;
+        Err(AuthProductError::BackendUnavailable)
+    }
+
+    async fn refresh_token(
+        &self,
+        _request: OAuthProviderRefreshRequest,
+    ) -> Result<OAuthProviderRefresh, AuthProductError> {
+        Err(AuthProductError::BackendUnavailable)
+    }
+}
+
 pub fn validate_provider_callback_request(
     request: &OAuthProviderCallbackRequest,
 ) -> Result<(), AuthProductError> {
@@ -166,4 +190,109 @@ pub fn validate_provider_callback_request(
         return Err(AuthProductError::MalformedCallback);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        AuthFlowId, AuthProviderId, AuthSurface, CredentialAccountId, CredentialAccountLabel,
+        OAuthAuthorizationCode, PkceVerifierSecret, ProviderScope, authorization_code_hash,
+        pkce_verifier_hash,
+    };
+    use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
+
+    fn auth_scope() -> crate::AuthProductScope {
+        crate::AuthProductScope::new(
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap(),
+            AuthSurface::Web,
+        )
+    }
+
+    #[tokio::test]
+    async fn unavailable_auth_provider_client_validates_before_returning_backend_unavailable() {
+        let client = UnavailableAuthProviderClient;
+        let ctx = OAuthProviderExchangeContext {
+            scope: auth_scope(),
+            flow_id: AuthFlowId::new(),
+        };
+        let authorization_code =
+            OAuthAuthorizationCode::new(secrecy::SecretString::from("real-code")).unwrap();
+        let pkce_verifier =
+            PkceVerifierSecret::new(secrecy::SecretString::from("real-verifier")).unwrap();
+        let authorization_code_hash = authorization_code_hash(&authorization_code).unwrap();
+        let pkce_verifier_hash = pkce_verifier_hash(&pkce_verifier).unwrap();
+        let valid = OAuthProviderCallbackRequest {
+            provider: AuthProviderId::new("google").unwrap(),
+            account_label: CredentialAccountLabel::new("Alice Google").unwrap(),
+            authorization_code,
+            authorization_code_hash,
+            pkce_verifier,
+            pkce_verifier_hash,
+            scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
+        };
+
+        let err = client.exchange_callback(ctx, valid).await.unwrap_err();
+        assert_eq!(err, AuthProductError::BackendUnavailable);
+
+        let refresh_err = client
+            .refresh_token(OAuthProviderRefreshRequest {
+                provider: AuthProviderId::new("google").unwrap(),
+                scope: auth_scope(),
+                account_id: CredentialAccountId::new(),
+                refresh_secret: SecretHandle::new("refresh").unwrap(),
+                scopes: vec![],
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(refresh_err, AuthProductError::BackendUnavailable);
+    }
+
+    #[tokio::test]
+    async fn unavailable_auth_provider_client_rejects_malformed_callback_before_backend_unavailable()
+     {
+        let client = UnavailableAuthProviderClient;
+        let ctx = OAuthProviderExchangeContext {
+            scope: auth_scope(),
+            flow_id: AuthFlowId::new(),
+        };
+        let authorization_code =
+            OAuthAuthorizationCode::new(secrecy::SecretString::from("real-code")).unwrap();
+        let pkce_verifier =
+            PkceVerifierSecret::new(secrecy::SecretString::from("real-verifier")).unwrap();
+        let authorization_code_hash = authorization_code_hash(&authorization_code).unwrap();
+        let pkce_verifier_hash = pkce_verifier_hash(&pkce_verifier).unwrap();
+        let malformed_code = OAuthProviderCallbackRequest {
+            provider: AuthProviderId::new("google").unwrap(),
+            account_label: CredentialAccountLabel::new("Alice Google").unwrap(),
+            authorization_code: OAuthAuthorizationCode(secrecy::SecretString::from("")),
+            authorization_code_hash: authorization_code_hash.clone(),
+            pkce_verifier,
+            pkce_verifier_hash: pkce_verifier_hash.clone(),
+            scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
+        };
+
+        let err = client
+            .exchange_callback(ctx.clone(), malformed_code)
+            .await
+            .unwrap_err();
+        assert_eq!(err, AuthProductError::MalformedCallback);
+
+        let malformed_pkce = OAuthProviderCallbackRequest {
+            provider: AuthProviderId::new("google").unwrap(),
+            account_label: CredentialAccountLabel::new("Alice Google").unwrap(),
+            authorization_code,
+            authorization_code_hash,
+            pkce_verifier: PkceVerifierSecret(secrecy::SecretString::from("")),
+            pkce_verifier_hash,
+            scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
+        };
+
+        let err = client
+            .exchange_callback(ctx, malformed_pkce)
+            .await
+            .unwrap_err();
+        assert_eq!(err, AuthProductError::MalformedCallback);
+    }
 }

@@ -4150,6 +4150,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_auth_storage"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "ironclaw_auth",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_secrets",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "ironclaw_authorization"
 version = "0.1.0"
 dependencies = [
@@ -4956,6 +4973,7 @@ dependencies = [
  "http-body-util",
  "ironclaw_approvals",
  "ironclaw_auth",
+ "ironclaw_auth_storage",
  "ironclaw_authorization",
  "ironclaw_capabilities",
  "ironclaw_common",

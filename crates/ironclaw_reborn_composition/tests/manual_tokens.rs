@@ -233,6 +233,96 @@ impl FailingManualTokenFlowManager {
     }
 }
 
+#[derive(Debug, Default)]
+struct RecordingCredentialAccountService {
+    status_updates: Mutex<Vec<(ironclaw_auth::CredentialAccountId, CredentialAccountStatus)>>,
+}
+
+impl RecordingCredentialAccountService {
+    fn status_updates(&self) -> Vec<(ironclaw_auth::CredentialAccountId, CredentialAccountStatus)> {
+        self.status_updates.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl CredentialAccountService for RecordingCredentialAccountService {
+    async fn create_account(
+        &self,
+        _request: NewCredentialAccount,
+    ) -> Result<ironclaw_auth::CredentialAccount, AuthProductError> {
+        unreachable!("manual-token completion compensation test does not create accounts")
+    }
+
+    async fn get_account(
+        &self,
+        _request: ironclaw_auth::CredentialAccountLookupRequest,
+    ) -> Result<Option<ironclaw_auth::CredentialAccount>, AuthProductError> {
+        unreachable!("manual-token completion compensation test does not get accounts")
+    }
+
+    async fn list_accounts(
+        &self,
+        _request: CredentialAccountListRequest,
+    ) -> Result<ironclaw_auth::CredentialAccountListPage, AuthProductError> {
+        unreachable!("manual-token completion compensation test does not list accounts")
+    }
+
+    async fn update_status(
+        &self,
+        scope: &AuthProductScope,
+        account_id: ironclaw_auth::CredentialAccountId,
+        status: CredentialAccountStatus,
+    ) -> Result<ironclaw_auth::CredentialAccount, AuthProductError> {
+        self.status_updates
+            .lock()
+            .unwrap()
+            .push((account_id, status));
+        Ok(ironclaw_auth::CredentialAccount {
+            id: account_id,
+            scope: scope.clone(),
+            provider: provider(),
+            label: label(),
+            status,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: None,
+            refresh_secret: None,
+            scopes: Vec::new(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        })
+    }
+
+    async fn select_unique_configured_account(
+        &self,
+        _request: ironclaw_auth::CredentialAccountSelectionRequest,
+    ) -> Result<ironclaw_auth::CredentialAccountProjection, AuthProductError> {
+        unreachable!("manual-token completion compensation test does not select accounts")
+    }
+
+    async fn project_credential_recovery(
+        &self,
+        _request: ironclaw_auth::CredentialRecoveryRequest,
+    ) -> Result<ironclaw_auth::CredentialRecoveryProjection, AuthProductError> {
+        unreachable!("manual-token completion compensation test does not project recovery")
+    }
+
+    async fn select_configured_account(
+        &self,
+        _request: ironclaw_auth::CredentialAccountChoiceRequest,
+    ) -> Result<ironclaw_auth::CredentialAccountProjection, AuthProductError> {
+        unreachable!("manual-token completion compensation test does not choose accounts")
+    }
+
+    async fn refresh_account(
+        &self,
+        _request: ironclaw_auth::CredentialRefreshRequest,
+    ) -> Result<ironclaw_auth::CredentialRefreshReport, AuthProductError> {
+        unreachable!("manual-token completion compensation test does not refresh accounts")
+    }
+}
+
 #[async_trait]
 impl AuthFlowManager for FailingManualTokenFlowManager {
     async fn create_flow(&self, _request: NewAuthFlow) -> Result<AuthFlowRecord, AuthProductError> {
@@ -355,6 +445,27 @@ fn auth_services_with_flow_and_interaction(
     let shared = Arc::new(InMemoryAuthProductServices::new());
     let credential_setup_service: Arc<dyn CredentialSetupService> = shared.clone();
     let credential_account_service: Arc<dyn CredentialAccountService> = shared.clone();
+    let provider_client: Arc<dyn AuthProviderClient> = shared.clone();
+    let cleanup_service: Arc<dyn SecretCleanupService> = shared;
+
+    RebornProductAuthServices::new(
+        flow_manager,
+        interaction_service,
+        credential_setup_service,
+        credential_account_service,
+        provider_client,
+        cleanup_service,
+        Arc::new(NoopContinuationDispatcher),
+    )
+}
+
+fn auth_services_with_flow_interaction_and_accounts(
+    flow_manager: Arc<dyn AuthFlowManager>,
+    interaction_service: Arc<dyn AuthInteractionService>,
+    credential_account_service: Arc<dyn CredentialAccountService>,
+) -> RebornProductAuthServices {
+    let shared = Arc::new(InMemoryAuthProductServices::new());
+    let credential_setup_service: Arc<dyn CredentialSetupService> = shared.clone();
     let provider_client: Arc<dyn AuthProviderClient> = shared.clone();
     let cleanup_service: Arc<dyn SecretCleanupService> = shared;
 
@@ -780,9 +891,11 @@ async fn manual_token_facade_cancels_flow_when_completion_fails() {
     let flow_manager = Arc::new(FailingManualTokenFlowManager::complete_fails(
         AuthProductError::BackendUnavailable,
     ));
-    let services = auth_services_with_flow_and_interaction(
+    let account_service = Arc::new(RecordingCredentialAccountService::default());
+    let services = auth_services_with_flow_interaction_and_accounts(
         flow_manager.clone(),
         Arc::new(SuccessfulManualTokenInteractionService::new(interaction_id)),
+        account_service.clone(),
     );
 
     let error = services
@@ -796,6 +909,14 @@ async fn manual_token_facade_cancels_flow_when_completion_fails() {
 
     assert_eq!(error.code, AuthErrorCode::BackendUnavailable);
     assert_eq!(flow_manager.canceled(), vec![interaction_id]);
+    assert_eq!(
+        account_service
+            .status_updates()
+            .into_iter()
+            .map(|(_, status)| status)
+            .collect::<Vec<_>>(),
+        vec![CredentialAccountStatus::Revoked]
+    );
 }
 
 #[tokio::test]

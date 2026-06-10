@@ -122,3 +122,22 @@ pub(super) fn fs_error(error: FilesystemError) -> AuthProductError {
         _ => AuthProductError::BackendUnavailable,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manual_token_secret_handle_is_uuid_derived_name_segment() {
+        let interaction_id = AuthInteractionId::new();
+        let account_id = CredentialAccountId::from_uuid(interaction_id.as_uuid());
+
+        let handle = manual_token_secret_handle(account_id, interaction_id)
+            .expect("UUID-derived handle should be a valid SecretHandle");
+
+        assert_eq!(
+            handle.as_str(),
+            format!("product-auth-manual-{account_id}-{interaction_id}")
+        );
+    }
+}

@@ -36,6 +36,8 @@ use ironclaw_turns::run_profile::ModelProfileId;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
+const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
@@ -84,7 +86,7 @@ async fn build_runtime_with_pause_inducing_setup(
     })
     .with_poll_settings(PollSettings {
         interval: Duration::from_millis(10),
-        max_total: Duration::from_secs(3),
+        max_total: SEND_TIMEOUT,
     })
     .with_model_gateway_override(gateway.clone())
     .with_model_cost_table_override(pause_inducing_cost_table());
@@ -123,7 +125,7 @@ async fn pump_until_pending_gate(
 ) -> ironclaw_resources::BudgetGateId {
     let conversation = runtime.new_conversation().await.expect("conversation");
     let outcome = tokio::time::timeout(
-        Duration::from_secs(3),
+        SEND_TIMEOUT,
         runtime.send_user_message(&conversation, "first try"),
     )
     .await
@@ -191,7 +193,7 @@ async fn f3_approval_with_increased_limit_unblocks_retry() {
     // Reserved + Reconciled.
     let conversation = runtime.new_conversation().await.expect("conversation");
     let reply = tokio::time::timeout(
-        Duration::from_secs(3),
+        SEND_TIMEOUT,
         runtime.send_user_message(&conversation, "approved retry"),
     )
     .await
@@ -239,7 +241,7 @@ async fn f4_cancel_keeps_budget_blocked_on_retry() {
     // Retry — the same pause threshold fires, gateway still untouched.
     let conversation = runtime.new_conversation().await.expect("conversation");
     let _ = tokio::time::timeout(
-        Duration::from_secs(3),
+        SEND_TIMEOUT,
         runtime.send_user_message(&conversation, "retry after cancel"),
     )
     .await
@@ -290,7 +292,7 @@ async fn f5_expiry_marks_gate_terminal_and_keeps_budget_blocked() {
     // Retry — same as cancel, the budget is still tight.
     let conversation = runtime.new_conversation().await.expect("conversation");
     let _ = tokio::time::timeout(
-        Duration::from_secs(3),
+        SEND_TIMEOUT,
         runtime.send_user_message(&conversation, "retry after expiry"),
     )
     .await

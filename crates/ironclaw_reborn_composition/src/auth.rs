@@ -379,9 +379,27 @@ impl RebornProductAuthServicePorts {
             + RebornManualTokenFlowService
             + 'static,
     {
+        let manual_token_flow_service: Arc<dyn RebornManualTokenFlowService> = services.clone();
+        let mut ports = Self::from_shared_ports_with_provider(services, provider_client);
+        ports.manual_token_flow_service = manual_token_flow_service;
+        ports
+    }
+
+    pub fn from_shared_ports_with_provider<T>(
+        services: Arc<T>,
+        provider_client: Arc<dyn AuthProviderClient>,
+    ) -> Self
+    where
+        T: AuthFlowManager
+            + AuthInteractionService
+            + CredentialSetupService
+            + CredentialAccountService
+            + CredentialAccountRecordSource
+            + SecretCleanupService
+            + 'static,
+    {
         let flow_manager: Arc<dyn AuthFlowManager> = services.clone();
         let interaction_service: Arc<dyn AuthInteractionService> = services.clone();
-        let manual_token_flow_service: Arc<dyn RebornManualTokenFlowService> = services.clone();
         let credential_setup_service: Arc<dyn CredentialSetupService> = services.clone();
         let credential_account_service: Arc<dyn CredentialAccountService> = services.clone();
         let credential_account_record_source: Arc<dyn CredentialAccountRecordSource> =
@@ -396,7 +414,6 @@ impl RebornProductAuthServicePorts {
             provider_client,
             cleanup_service,
         );
-        ports.manual_token_flow_service = manual_token_flow_service;
         ports.credential_account_record_source = credential_account_record_source;
         ports
     }

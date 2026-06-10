@@ -70,6 +70,7 @@ openai-compat-beta = [
 ]
 libsql = [
     "dep:libsql",
+    "ironclaw_auth_storage/libsql",
     "ironclaw_filesystem/libsql",
     "ironclaw_host_runtime/libsql",
     "ironclaw_reborn/filesystem-goal-store",
@@ -80,6 +81,7 @@ libsql = [
 ]
 postgres = [
     "dep:deadpool-postgres",
+    "ironclaw_auth_storage/postgres",
     "ironclaw_filesystem/postgres",
     "ironclaw_host_runtime/postgres",
     "ironclaw_reborn/filesystem-goal-store",
@@ -95,6 +97,7 @@ chrono = "0.4"
 deadpool-postgres = { version = "0.14", optional = true }
 futures = "0.3"
 ironclaw_auth = { path = "../ironclaw_auth" }
+ironclaw_auth_storage = { path = "../ironclaw_auth_storage" }
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }
 ironclaw_approvals = { path = "../ironclaw_approvals" }

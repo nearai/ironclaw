@@ -7,9 +7,6 @@ use ironclaw_auth::{
     CredentialAccountStatus, InMemoryAuthProductServices, ManualTokenCompletionInput,
     ManualTokenSetupRequest, NewAuthFlow, SecretSubmitRequest, SecretSubmitResult,
 };
-use ironclaw_filesystem::RootFilesystem;
-
-use crate::product_auth_durable::FilesystemAuthProductServices;
 
 #[async_trait]
 #[doc(hidden)]
@@ -99,35 +96,6 @@ impl RebornManualTokenFlowService for PortBackedManualTokenFlowService {
 
 #[async_trait]
 impl RebornManualTokenFlowService for InMemoryAuthProductServices {
-    async fn request_manual_token_flow(
-        &self,
-        request: ManualTokenSetupRequest,
-    ) -> Result<AuthChallenge, AuthProductError> {
-        request_manual_token_flow_with(self, self, request).await
-    }
-
-    async fn submit_manual_token_flow(
-        &self,
-        scope: &AuthProductScope,
-        request: SecretSubmitRequest,
-    ) -> Result<(SecretSubmitResult, AuthFlowRecord), AuthProductError> {
-        submit_manual_token_flow_with(self, self, self, scope, request).await
-    }
-
-    async fn abandon_manual_token_flow(
-        &self,
-        scope: &AuthProductScope,
-        interaction_id: AuthInteractionId,
-    ) -> Result<bool, AuthProductError> {
-        abandon_manual_token_flow_with(self, self, scope, interaction_id).await
-    }
-}
-
-#[async_trait]
-impl<F> RebornManualTokenFlowService for FilesystemAuthProductServices<F>
-where
-    F: RootFilesystem + 'static,
-{
     async fn request_manual_token_flow(
         &self,
         request: ManualTokenSetupRequest,

@@ -67,7 +67,8 @@ pub use oauth::{
 pub use provider::{
     AuthProviderClient, OAuthAuthorizationCode, OAuthProviderCallbackRequest,
     OAuthProviderExchange, OAuthProviderExchangeContext, OAuthProviderRefresh,
-    OAuthProviderRefreshRequest, PkceVerifierSecret, validate_provider_callback_request,
+    OAuthProviderRefreshRequest, PkceVerifierSecret, UnavailableAuthProviderClient,
+    validate_provider_callback_request,
 };
 pub use scope::{AuthProductScope, AuthSurface};
 

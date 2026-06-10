@@ -1,0 +1,36 @@
+[package]
+name = "ironclaw_auth_storage"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Durable storage adapters for IronClaw Reborn product auth"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[features]
+default = []
+libsql = ["ironclaw_filesystem/libsql"]
+postgres = ["ironclaw_filesystem/postgres"]
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
+ironclaw_auth = { path = "../ironclaw_auth" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem" }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_secrets = { path = "../ironclaw_secrets" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+secrecy = "0.10"
+tokio = { version = "1", features = ["sync"] }
+
+[dev-dependencies]
+ironclaw_secrets = { path = "../ironclaw_secrets" }
+tokio = { version = "1", features = ["macros", "rt", "sync"] }
+
+[lints]
+workspace = true
