@@ -4180,6 +4180,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_blueprint_apply"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "ironclaw_blueprint",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ironclaw_capabilities"
 version = "0.1.0"
 dependencies = [
