@@ -365,7 +365,7 @@ where
                 grant_id,
                 approved_by: input.approved_by.clone(),
                 constraints: input.constraints.clone(),
-                source_approval_request_id: input.source_approval_request_id.clone(),
+                source_approval_request_id: input.source_approval_request_id,
                 created_at,
                 updated_at: now,
                 revoked_at: None,
