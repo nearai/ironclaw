@@ -83,6 +83,7 @@ mod provider_admin_product_command;
 #[cfg(feature = "root-llm-provider")]
 mod provider_repo;
 mod readiness;
+mod legacy_tools;
 mod runtime;
 mod runtime_input;
 mod skill_listing;
@@ -208,6 +209,7 @@ pub use runtime::{
     RebornSkillExecutionResult, RebornSkillSourceKind, build_reborn_runtime,
 };
 pub use trajectory_observer::RebornTrajectoryObserver;
+pub use legacy_tools::{ExtraCapabilityDispatch, ExtraToolSpec};
 #[cfg(feature = "root-llm-provider")]
 pub use runtime_input::ResolvedRebornLlm;
 pub use runtime_input::{
