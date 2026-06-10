@@ -24,6 +24,10 @@ pub const WEBUI_V2_ROUTE_STREAM_EVENTS_WS: &str = "webui.v2.stream_events_ws";
 pub const WEBUI_V2_ROUTE_CANCEL_RUN: &str = "webui.v2.cancel_run";
 pub const WEBUI_V2_ROUTE_RESOLVE_GATE: &str = "webui.v2.resolve_gate";
 pub const WEBUI_V2_ROUTE_LIST_AUTOMATIONS: &str = "webui.v2.list_automations";
+pub const WEBUI_V2_ROUTE_GET_OUTBOUND_PREFERENCES: &str = "webui.v2.get_outbound_preferences";
+pub const WEBUI_V2_ROUTE_SET_OUTBOUND_PREFERENCES: &str = "webui.v2.set_outbound_preferences";
+pub const WEBUI_V2_ROUTE_LIST_OUTBOUND_DELIVERY_TARGETS: &str =
+    "webui.v2.list_outbound_delivery_targets";
 pub const WEBUI_V2_ROUTE_LIST_CONNECTABLE_CHANNELS: &str = "webui.v2.list_connectable_channels";
 pub const WEBUI_V2_ROUTE_LIST_EXTENSIONS: &str = "webui.v2.list_extensions";
 pub const WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY: &str = "webui.v2.list_extension_registry";
@@ -70,6 +74,8 @@ pub const WEBUI_V2_PATTERN_CANCEL_RUN: &str =
 pub const WEBUI_V2_PATTERN_RESOLVE_GATE: &str =
     "/api/webchat/v2/threads/{thread_id}/runs/{run_id}/gates/{gate_ref}/resolve";
 pub const WEBUI_V2_PATTERN_LIST_AUTOMATIONS: &str = "/api/webchat/v2/automations";
+pub const WEBUI_V2_PATTERN_OUTBOUND_PREFERENCES: &str = "/api/webchat/v2/outbound/preferences";
+pub const WEBUI_V2_PATTERN_OUTBOUND_DELIVERY_TARGETS: &str = "/api/webchat/v2/outbound/targets";
 pub const WEBUI_V2_PATTERN_LIST_CONNECTABLE_CHANNELS: &str = "/api/webchat/v2/channels/connectable";
 pub const WEBUI_V2_PATTERN_LIST_EXTENSIONS: &str = "/api/webchat/v2/extensions";
 pub const WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY: &str = "/api/webchat/v2/extensions/registry";
@@ -121,6 +127,9 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         cancel_run_descriptor(),
         resolve_gate_descriptor(),
         list_automations_descriptor(),
+        get_outbound_preferences_descriptor(),
+        set_outbound_preferences_descriptor(),
+        list_outbound_delivery_targets_descriptor(),
         list_connectable_channels_descriptor(),
         list_extensions_descriptor(),
         list_extension_registry_descriptor(),
@@ -340,6 +349,48 @@ fn list_automations_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_ROUTE_LIST_AUTOMATIONS,
         NetworkMethod::Get,
         WEBUI_V2_PATTERN_LIST_AUTOMATIONS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn get_outbound_preferences_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_GET_OUTBOUND_PREFERENCES,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_OUTBOUND_PREFERENCES,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn set_outbound_preferences_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SET_OUTBOUND_PREFERENCES,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_OUTBOUND_PREFERENCES,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn list_outbound_delivery_targets_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_LIST_OUTBOUND_DELIVERY_TARGETS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_OUTBOUND_DELIVERY_TARGETS,
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
