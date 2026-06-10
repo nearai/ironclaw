@@ -1,6 +1,7 @@
 //! Projection read/subscription contracts.
 
 use async_trait::async_trait;
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{TurnActor, TurnScope};
 use serde::{Deserialize, Serialize};
 
@@ -125,6 +126,26 @@ impl ProductProjectionSubject {
 
     pub fn canonical(actor: TurnActor, scope: TurnScope) -> Self {
         Self::CanonicalProjection { actor, scope }
+    }
+
+    pub fn canonical_thread_scope(
+        actor_user_id: UserId,
+        tenant_id: TenantId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        thread_id: ThreadId,
+        owner_user_id: Option<UserId>,
+    ) -> Self {
+        Self::CanonicalProjection {
+            actor: TurnActor::new(actor_user_id),
+            scope: TurnScope::new_with_owner(
+                tenant_id,
+                agent_id,
+                project_id,
+                thread_id,
+                owner_user_id,
+            ),
+        }
     }
 }
 

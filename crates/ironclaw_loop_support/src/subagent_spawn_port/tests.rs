@@ -486,6 +486,7 @@ impl LoopCapabilityPort for SuspendedBatchPort {
         Ok(CapabilityOutcome::ApprovalRequired {
             gate_ref: LoopGateRef::new("gate:inner-suspended").unwrap(),
             safe_summary: "approval required".to_string(),
+            approval_resume: None,
         })
     }
 
@@ -498,6 +499,7 @@ impl LoopCapabilityPort for SuspendedBatchPort {
             outcomes: vec![CapabilityOutcome::ApprovalRequired {
                 gate_ref: LoopGateRef::new("gate:inner-suspended").unwrap(),
                 safe_summary: "approval required".to_string(),
+                approval_resume: None,
             }],
             stopped_on_suspension: true,
         })
@@ -957,6 +959,7 @@ fn invocation(capability_id: &str) -> CapabilityInvocation {
         surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
         capability_id: CapabilityId::new(capability_id).unwrap(),
         input_ref: input_ref(),
+        approval_resume: None,
     }
 }
 
@@ -1159,6 +1162,7 @@ async fn invoke_spawn(port: &SubagentSpawnCapabilityPort) -> CapabilityOutcome {
         surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
         capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
         input_ref: input_ref(),
+        approval_resume: None,
     })
     .await
     .unwrap()
@@ -1588,6 +1592,7 @@ async fn spawn_provider_tool_call_registration_does_not_require_inner_spawn_name
             surface_version: candidate.surface_version.clone(),
             capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
             input_ref: candidate.input_ref.clone(),
+            approval_resume: None,
         })
         .await
         .expect("registered spawn invocation");
@@ -1695,6 +1700,7 @@ async fn invoke_spawn_fails_when_parent_record_is_missing() {
             surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
             input_ref: input_ref(),
+            approval_resume: None,
         })
         .await
         .unwrap_err();
@@ -2098,16 +2104,19 @@ async fn invoke_capability_batch_preserves_spawns_on_inner_batch_suspension() {
                     surface_version: surface_version.clone(),
                     capability_id: spawn_id.clone(),
                     input_ref: input_ref_a,
+                    approval_resume: None,
                 },
                 CapabilityInvocation {
                     surface_version: surface_version.clone(),
                     capability_id: spawn_id,
                     input_ref: input_ref_b,
+                    approval_resume: None,
                 },
                 CapabilityInvocation {
                     surface_version,
                     capability_id: inner_id,
                     input_ref: CapabilityInputRef::new("input:inner").unwrap(),
+                    approval_resume: None,
                 },
             ],
             stop_on_first_suspension: true,
@@ -2166,6 +2175,7 @@ async fn invoke_spawn_cancels_child_when_post_submit_thread_mark_fails() {
             surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
             input_ref: input_ref(),
+            approval_resume: None,
         })
         .await
         .unwrap_err();
@@ -2388,6 +2398,7 @@ async fn invoke_spawn_propagates_decode_rejection_before_side_effects() {
             surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
             input_ref: input_ref(),
+            approval_resume: None,
         })
         .await
         .unwrap_err();
@@ -2420,6 +2431,7 @@ async fn invoke_spawn_batch_propagates_decode_rejection_before_side_effects() {
                 surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
                 capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
                 input_ref: input_ref(),
+                approval_resume: None,
             }],
             stop_on_first_suspension: true,
         })
@@ -2614,6 +2626,7 @@ async fn invoke_batch_coalesces_blocking_spawns_under_single_gate() {
         surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
         capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
         input_ref,
+        approval_resume: None,
     };
     let batch_outcome = port
         .invoke_capability_batch(CapabilityBatchInvocation {
@@ -2706,16 +2719,19 @@ async fn invoke_batch_mixed_spawn_and_non_spawn_capabilities() {
                     surface_version: surface_version.clone(),
                     capability_id: spawn_id.clone(),
                     input_ref: input_ref_a,
+                    approval_resume: None,
                 },
                 CapabilityInvocation {
                     surface_version: surface_version.clone(),
                     capability_id: inner_id,
                     input_ref: input_ref_inner,
+                    approval_resume: None,
                 },
                 CapabilityInvocation {
                     surface_version,
                     capability_id: spawn_id,
                     input_ref: input_ref_b,
+                    approval_resume: None,
                 },
             ],
             stop_on_first_suspension: true,
@@ -2795,6 +2811,7 @@ async fn invoke_batch_skips_shared_gate_for_single_blocking_spawn() {
                 surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
                 capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
                 input_ref: input_ref(),
+                approval_resume: None,
             }],
             stop_on_first_suspension: true,
         })
@@ -3092,6 +3109,7 @@ async fn spawn_provider_tool_call_registration_accepts_subagent_type_wire_key() 
             surface_version: candidate.surface_version.clone(),
             capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
             input_ref: candidate.input_ref.clone(),
+            approval_resume: None,
         })
         .await
         .expect("invocation must succeed");

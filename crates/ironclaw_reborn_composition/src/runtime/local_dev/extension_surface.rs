@@ -15,20 +15,38 @@ use ironclaw_first_party_extensions::{
 use ironclaw_product_workflow::ProductWorkflowError;
 
 #[derive(Clone, Default)]
-pub(super) struct LocalDevExtensionSurfaceSource {
+pub(in crate::runtime) struct LocalDevExtensionSurfaceSource {
     extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
+    #[cfg(test)]
+    static_surface: Option<LocalDevExtensionSurface>,
 }
 
 impl LocalDevExtensionSurfaceSource {
-    pub(super) fn new(
+    pub(in crate::runtime) fn new(
         extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
     ) -> Self {
         Self {
             extension_management,
+            #[cfg(test)]
+            static_surface: None,
         }
     }
 
-    pub(super) async fn snapshot(&self) -> Result<LocalDevExtensionSurface, ProductWorkflowError> {
+    #[cfg(test)]
+    pub(in crate::runtime) fn from_surface(surface: LocalDevExtensionSurface) -> Self {
+        Self {
+            extension_management: None,
+            static_surface: Some(surface),
+        }
+    }
+
+    pub(in crate::runtime) async fn snapshot(
+        &self,
+    ) -> Result<LocalDevExtensionSurface, ProductWorkflowError> {
+        #[cfg(test)]
+        if let Some(surface) = &self.static_surface {
+            return Ok(surface.clone());
+        }
         let Some(extension_management) = self.extension_management.as_deref() else {
             return Ok(LocalDevExtensionSurface::default());
         };
@@ -37,11 +55,20 @@ impl LocalDevExtensionSurfaceSource {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(super) struct LocalDevExtensionSurface {
+pub(in crate::runtime) struct LocalDevExtensionSurface {
     active_capabilities: Vec<ActiveExtensionCapability>,
 }
 
 impl LocalDevExtensionSurface {
+    #[cfg(test)]
+    pub(in crate::runtime) fn from_active_capabilities(
+        active_capabilities: Vec<ActiveExtensionCapability>,
+    ) -> Self {
+        Self {
+            active_capabilities,
+        }
+    }
+
     pub(super) async fn from_extension_management(
         extension_management: &RebornLocalExtensionManagementPort,
     ) -> Result<Self, ProductWorkflowError> {
@@ -52,7 +79,7 @@ impl LocalDevExtensionSurface {
         })
     }
 
-    pub(super) fn grants(&self, grantee: &ExtensionId) -> Vec<CapabilityGrant> {
+    pub(in crate::runtime) fn grants(&self, grantee: &ExtensionId) -> Vec<CapabilityGrant> {
         self.active_capabilities
             .iter()
             .map(|capability| CapabilityGrant {

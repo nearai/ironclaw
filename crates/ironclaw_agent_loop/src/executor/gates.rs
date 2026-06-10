@@ -1,11 +1,14 @@
 use async_trait::async_trait;
 use ironclaw_turns::{
     LoopBlocked, LoopExit,
-    run_profile::{CapabilityCallCandidate, CapabilityResultMessage, LoopProgressEvent},
+    run_profile::{
+        CapabilityApprovalResume, CapabilityCallCandidate, CapabilityResultMessage,
+        LoopProgressEvent,
+    },
 };
 
 use crate::{
-    state::{CheckpointKind, LoopExecutionState},
+    state::{CheckpointKind, LoopExecutionState, PendingApprovalResume},
     strategies::{GateKind, GateOutcome},
 };
 
@@ -27,6 +30,7 @@ pub(super) struct GateInput {
     pub(super) kind: GateKind,
     pub(super) gate_ref: ironclaw_turns::LoopGateRef,
     pub(super) credential_requirements: Vec<ironclaw_host_api::RuntimeCredentialAuthRequirement>,
+    pub(super) approval_resume: Option<CapabilityApprovalResume>,
 }
 
 pub(super) struct AwaitDependentRunGateInput {
@@ -57,6 +61,20 @@ impl ExecutorStage<GateInput> for GateStage {
             GateOutcome::Block { gate } => {
                 state.gate_state = gate;
                 state.last_gate = Some(gate_ref.clone());
+                state.pending_approval_resume =
+                    input.approval_resume.map(|resume| PendingApprovalResume {
+                        gate_ref: gate_ref.clone(),
+                        capability_id: call.capability_id.clone(),
+                        approval_request_id: resume.approval_request_id,
+                        resume_token: resume.resume_token,
+                        correlation_id: resume.correlation_id,
+                        surface_version: call.surface_version.clone(),
+                        input_ref: resume.input_ref,
+                        effective_capability_ids: call.effective_capability_ids.clone(),
+                        provider_replay: call.provider_replay.clone(),
+                        input: resume.input,
+                        estimate: resume.estimate,
+                    });
                 match CheckpointStage.cancel_if_requested(ctx, state).await? {
                     CancelCheck::Continue(next) => state = *next,
                     CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),

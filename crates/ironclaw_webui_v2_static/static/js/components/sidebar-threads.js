@@ -1,5 +1,6 @@
 import { React, html } from "../lib/html.js";
 import { Icon } from "../design-system/icons.js";
+import { useT } from "../lib/i18n.js";
 import { THREAD_STATE, useThreadStates } from "../lib/thread-state.js";
 import {
   byActivityDesc,
@@ -41,6 +42,7 @@ function presentationFor(state) {
 }
 
 function ThreadItem({ thread, isActive, presentation, onSelect, onDelete }) {
+  const t = useT();
   const activityIso = threadActivityIso(thread);
   const timeLabel = formatThreadActivityLabel(activityIso);
   const timeTitle = formatThreadActivityTooltip(activityIso);
@@ -100,8 +102,8 @@ function ThreadItem({ thread, isActive, presentation, onSelect, onDelete }) {
       html`<button
         type="button"
         onClick=${handleDelete}
-        title="Delete chat"
-        aria-label="Delete chat"
+        title=${t("common.deleteChat")}
+        aria-label=${t("common.deleteChat")}
         className=${cn(
           "my-1 mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-[6px]",
           "opacity-0 transition group-hover:opacity-100 focus:opacity-100",
@@ -141,6 +143,7 @@ export function SidebarThreads({ threads, activeThreadId, onSelect, onDelete }) 
   const [collapsed, setCollapsed] = React.useState(false);
   const [query, setQuery] = React.useState("");
   const states = useThreadStates();
+  const t = useT();
 
   /* Two-group partition (replaces the previous date-bucketed layout):
    *   - Pinned: active thread + any thread with a non-idle state.
@@ -186,7 +189,7 @@ export function SidebarThreads({ threads, activeThreadId, onSelect, onDelete }) 
         <span
           className="flex-1 text-left text-[11px] font-semibold uppercase tracking-wider text-[var(--v2-text-faint)]"
         >
-          Conversations
+          ${t("chat.conversations")}
         </span>
         <${Icon}
           name="chevron"
@@ -209,7 +212,7 @@ export function SidebarThreads({ threads, activeThreadId, onSelect, onDelete }) 
             type="text"
             value=${query}
             onInput=${(event) => setQuery(event.currentTarget.value)}
-            placeholder="Search chats…"
+            placeholder=${t("common.searchChats")}
             className="h-8 w-full rounded-[8px] border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] pl-8 pr-2 text-[12px] text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)] focus:border-[var(--v2-accent)]"
           />
         </div>`}
@@ -218,16 +221,16 @@ export function SidebarThreads({ threads, activeThreadId, onSelect, onDelete }) 
         >
           ${threads.length === 0 &&
           html`<div className="px-3 py-2 text-[12px] text-[var(--v2-text-faint)]">
-            No conversations yet
+            ${t("chat.noConversations")}
           </div>`}
           ${threads.length > 0 &&
           totalMatches === 0 &&
           html`<div className="px-3 py-2 text-[12px] text-[var(--v2-text-faint)]">
-            No chats match “${query}”
+            ${t("common.noChatsMatch").replace("{query}", query)}
           </div>`}
 
           <${ThreadGroup}
-            label="Pinned"
+            label=${t("common.pinned")}
             items=${pinned}
             activeThreadId=${activeThreadId}
             states=${states}
@@ -235,7 +238,7 @@ export function SidebarThreads({ threads, activeThreadId, onSelect, onDelete }) 
             onDelete=${onDelete}
           />
           <${ThreadGroup}
-            label="Recent"
+            label=${t("common.recent")}
             items=${recent}
             activeThreadId=${activeThreadId}
             states=${states}
