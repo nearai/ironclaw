@@ -503,27 +503,21 @@ fn production_wiring_report_maps_through_public_readiness_entrypoint() {
             diagnostic.status == RebornReadinessDiagnosticStatus::Blocking
                 && diagnostic.blocks_production
         }));
-        assert!(
-            diagnostics.contains(&RebornReadinessDiagnostic::production_blocker(
-                profile,
-                RebornReadinessDiagnosticComponent::SecretStore,
-                RebornReadinessDiagnosticReason::Missing,
-            ))
-        );
-        assert!(
-            diagnostics.contains(&RebornReadinessDiagnostic::production_blocker(
-                profile,
-                RebornReadinessDiagnosticComponent::AuditSink,
-                RebornReadinessDiagnosticReason::Unverified,
-            ))
-        );
-        assert!(
-            diagnostics.contains(&RebornReadinessDiagnostic::production_blocker(
-                profile,
-                RebornReadinessDiagnosticComponent::RuntimeBackend,
-                RebornReadinessDiagnosticReason::Unsupported,
-            ))
-        );
+        assert!(diagnostics.contains(&production_blocker(
+            profile,
+            RebornReadinessDiagnosticComponent::SecretStore,
+            RebornReadinessDiagnosticReason::Missing,
+        )));
+        assert!(diagnostics.contains(&production_blocker(
+            profile,
+            RebornReadinessDiagnosticComponent::AuditSink,
+            RebornReadinessDiagnosticReason::Unverified,
+        )));
+        assert!(diagnostics.contains(&production_blocker(
+            profile,
+            RebornReadinessDiagnosticComponent::RuntimeBackend,
+            RebornReadinessDiagnosticReason::Unsupported,
+        )));
     }
 
     assert!(

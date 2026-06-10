@@ -312,14 +312,14 @@ impl RebornReadinessDiagnostic {
         report
             .issues()
             .iter()
-            .map(|issue| Self::from_production_wiring_issue(profile, issue))
+            .filter_map(|issue| Self::from_production_wiring_issue(profile, issue))
             .collect()
     }
 
     pub fn from_production_wiring_issue(
         profile: RebornCompositionProfile,
         issue: &ProductionWiringIssue,
-    ) -> Self {
+    ) -> Option<Self> {
         Self::production_blocker(profile, issue.component().into(), issue.kind().into())
     }
 }

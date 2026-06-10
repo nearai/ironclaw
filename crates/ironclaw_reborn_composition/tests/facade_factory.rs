@@ -921,19 +921,25 @@ async fn production_rejects_local_only_runtime_policy() {
         "production wiring reports should not produce production diagnostics for local-dev profiles"
     );
     assert!(
-        diagnostics.contains(&RebornReadinessDiagnostic::production_blocker(
-            RebornCompositionProfile::Production,
-            RebornReadinessDiagnosticComponent::RuntimePolicy,
-            RebornReadinessDiagnosticReason::LocalOnly,
-        )),
+        diagnostics.contains(
+            &RebornReadinessDiagnostic::production_blocker(
+                RebornCompositionProfile::Production,
+                RebornReadinessDiagnosticComponent::RuntimePolicy,
+                RebornReadinessDiagnosticReason::LocalOnly,
+            )
+            .expect("production profile should create a blocker")
+        ),
         "runtime policy local-only issue should map to readiness diagnostics: {diagnostics:?}"
     );
     assert!(
-        diagnostics.contains(&RebornReadinessDiagnostic::production_blocker(
-            RebornCompositionProfile::Production,
-            RebornReadinessDiagnosticComponent::RuntimeProcessPort,
-            RebornReadinessDiagnosticReason::LocalOnly,
-        )),
+        diagnostics.contains(
+            &RebornReadinessDiagnostic::production_blocker(
+                RebornCompositionProfile::Production,
+                RebornReadinessDiagnosticComponent::RuntimeProcessPort,
+                RebornReadinessDiagnosticReason::LocalOnly,
+            )
+            .expect("production profile should create a blocker")
+        ),
         "runtime process port local-only issue should map to readiness diagnostics: {diagnostics:?}"
     );
     assert!(
