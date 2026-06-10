@@ -3,8 +3,9 @@ use std::sync::Arc;
 use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount,
     CredentialAccountId, CredentialAccountLookupRequest, CredentialAccountRecordSource,
-    CredentialAccountService, CredentialAccountStatus, CredentialOwnership,
-    CredentialRecoveryProjection, CredentialRefreshRequest, GOOGLE_PROVIDER_ID, ProviderScope,
+    CredentialAccountService, CredentialAccountStatus, CredentialRecoveryProjection,
+    CredentialRefreshRequest, GOOGLE_PROVIDER_ID, ProviderScope,
+    select_latest_duplicate_user_reusable_account,
 };
 use ironclaw_host_api::{ExtensionId, ResourceScope, SecretHandle};
 use thiserror::Error;
@@ -216,7 +217,7 @@ impl GoogleCredentialResolver {
         if account.provider != provider {
             return Ok(None);
         }
-        if !account.is_authorized_for_requester(Some(&requester_extension)) {
+        if !gsuite_google_account_visible_to_requester(&account, &requester_extension) {
             return Err(AuthProductError::CrossScopeDenied);
         }
         Ok(Some(account))
@@ -352,25 +353,6 @@ fn account_has_provider_scopes(
     required_scopes
         .iter()
         .all(|required| account.scopes.iter().any(|scope| scope == required))
-}
-
-fn select_latest_duplicate_user_reusable_account(
-    accounts: &[CredentialAccount],
-) -> Option<CredentialAccount> {
-    let first = accounts.first()?;
-    if !accounts.iter().all(|account| {
-        account.provider == first.provider
-            && account.ownership == CredentialOwnership::UserReusable
-            && account.owner_extension.is_none()
-            && account.granted_extensions.is_empty()
-            && account.access_secret.is_some()
-    }) {
-        return None;
-    }
-    accounts
-        .iter()
-        .max_by_key(|account| (account.updated_at, account.created_at, account.id))
-        .cloned()
 }
 
 #[cfg(test)]
@@ -653,6 +635,45 @@ mod tests {
             panic!("expected recovery error");
         };
         assert_eq!(recovery.kind(), CredentialRecoveryKind::Configured);
+    }
+
+    #[tokio::test]
+    async fn resolve_account_reuses_gsuite_owned_google_account_for_gsuite_requester() {
+        let scope =
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap();
+        let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+        let auth = InMemoryAuthProductServices::new();
+        let calendar_scope =
+            ProviderScope::new("https://www.googleapis.com/auth/calendar.readonly").unwrap();
+        let mut account = auth
+            .create_account(new_credential_account(
+                auth_scope.clone(),
+                CredentialAccountStatus::Configured,
+            ))
+            .await
+            .unwrap();
+        account.ownership = CredentialOwnership::ExtensionOwned;
+        account.owner_extension = Some(ExtensionId::new("google-drive").unwrap());
+        account.scopes = vec![calendar_scope.clone()];
+        let account_service = Arc::new(FakeCredentialAccountService {
+            account: account.clone(),
+        });
+        let resolver =
+            GoogleCredentialResolver::new(account_service.clone(), account_service.clone());
+
+        let credential = resolver
+            .resolve_account(
+                &scope,
+                &auth_scope,
+                &ExtensionId::new("google-calendar").unwrap(),
+                account.id,
+                &[calendar_scope],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(credential.account_id, account.id);
     }
 
     #[tokio::test]
