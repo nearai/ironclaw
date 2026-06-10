@@ -33,7 +33,7 @@ use ironclaw_host_runtime::{
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn_composition::RebornRuntimeProcessBinding;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_reborn_composition::{RebornBuildError, RebornCompositionProfile};
+use ironclaw_reborn_composition::{RebornBuildError, RebornCompositionProfile, RebornServices};
 use ironclaw_reborn_composition::{
     RebornBuildInput, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
     RebornReadinessState, build_reborn_services,
@@ -327,6 +327,30 @@ fn live_wake_notifier() -> (Arc<SchedulerTurnRunWakeNotifier>, TurnRunSchedulerH
     let handle =
         TurnRunScheduler::new(transitions, executor, TurnRunSchedulerConfig::default()).start();
     (handle.wake_notifier(), handle)
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn assert_production_services_ready_with_first_party_runtime(services: &RebornServices) {
+    assert_eq!(
+        services.readiness.state,
+        RebornReadinessState::ProductionValidated
+    );
+    assert!(services.turn_coordinator.is_some());
+    assert!(services.product_auth.is_some());
+
+    let runtime = services
+        .host_runtime
+        .as_deref()
+        .expect("production services expose host runtime");
+    let health = runtime
+        .health()
+        .await
+        .expect("production host runtime health should resolve");
+    assert!(
+        health.ready,
+        "production host runtime should report first-party backend ready"
+    );
+    assert!(health.missing_runtime_backends.is_empty());
 }
 
 #[cfg(feature = "libsql")]
@@ -967,7 +991,9 @@ async fn production_libsql_services_wire_first_party_runtime_http_egress() {
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
-        .with_runtime_process_binding(test_sandbox_process_binding()),
+        .with_runtime_process_binding(test_sandbox_process_binding())
+        .with_required_runtime_backends([RuntimeKind::FirstParty])
+        .require_runtime_http_egress(),
     )
     .await;
 
@@ -975,13 +1001,7 @@ async fn production_libsql_services_wire_first_party_runtime_http_egress() {
 
     let services =
         result.expect("production libsql services should build with a sandbox process binding");
-    assert_eq!(
-        services.readiness.state,
-        RebornReadinessState::ProductionValidated
-    );
-    assert!(services.host_runtime.is_some());
-    assert!(services.turn_coordinator.is_some());
-    assert!(services.product_auth.is_some());
+    assert_production_services_ready_with_first_party_runtime(&services).await;
 }
 
 #[cfg(feature = "libsql")]
@@ -1132,10 +1152,34 @@ async fn production_postgres_services_migrate_trigger_repository_before_runtime_
 
 #[cfg(feature = "postgres")]
 #[tokio::test]
-#[ignore = "TODO(#3856): restore when tenant sandbox process-port wiring exists"]
 async fn production_postgres_services_wire_first_party_runtime_http_egress() {
-    // Restore the ProductionValidated readiness and host_runtime.health()
-    // happy-path assertions that are temporarily fail-closed below.
+    let Some((_container, pool, database_url)) = postgres_pool_or_skip().await else {
+        return;
+    };
+    let (notifier, handle) = live_wake_notifier();
+
+    let result = build_reborn_services(
+        RebornBuildInput::postgres(
+            RebornCompositionProfile::Production,
+            "test-owner",
+            pool,
+            SecretMaterial::from(database_url),
+            test_master_key(),
+        )
+        .with_production_trust_policy(production_trust_policy())
+        .with_runtime_policy(production_runtime_policy())
+        .with_turn_run_wake_notifier(notifier)
+        .with_runtime_process_binding(test_sandbox_process_binding())
+        .with_required_runtime_backends([RuntimeKind::FirstParty])
+        .require_runtime_http_egress(),
+    )
+    .await;
+
+    handle.shutdown().await;
+
+    let services =
+        result.expect("production postgres services should build with a sandbox process binding");
+    assert_production_services_ready_with_first_party_runtime(&services).await;
 }
 
 #[cfg(feature = "libsql")]

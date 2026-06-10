@@ -141,6 +141,31 @@ Important: `api_key_env` is the name of an environment variable, not the secret
 itself. Reborn rejects inline secret-shaped values in `config.toml` and
 `providers.json`.
 
+Production storage uses the same env-only pattern. A production Reborn config
+may name the PostgreSQL URL variable, but must not contain the raw URL:
+
+```toml
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+# Optional; defaults to 16. Keep below the PostgreSQL server's max_connections
+# after reserving capacity for migrations and operator sessions.
+pool_max_size = 16
+
+[policy]
+deployment_mode = "hosted_multi_tenant"
+default_profile = "secure_default"
+```
+
+Set `IRONCLAW_REBORN_POSTGRES_URL` in the process environment, and set
+`IRONCLAW_REBORN_SECRET_MASTER_KEY` to independent cryptographic key material.
+Managed remote PostgreSQL providers must use TLS, for example by appending
+`sslmode=require`.
+Production `run` also requires an explicit `[policy]` section. The first
+production launch slice supports runtime policies that do not require a
+tenant-sandbox process binding.
+
 Once `[llm.default]` exists, that config selects the provider. `LLM_BACKEND` is
 only an env fallback when no default LLM slot is configured. To switch providers
 after writing config, use `models set-provider <provider>` or edit
@@ -180,6 +205,8 @@ the current branch.
 | --- | --- |
 | `IRONCLAW_REBORN_HOME` | Absolute Reborn state root. Defaults to `$HOME/.ironclaw/reborn`. The resolver rejects unsafe paths and v1 state-root aliases such as `$HOME/.ironclaw`. |
 | `IRONCLAW_REBORN_PROFILE` | Boot profile selector. Supported values: `local-dev`, `local-dev-yolo`, `production`, `migration-dry-run`. |
+| `IRONCLAW_REBORN_POSTGRES_URL` | Production PostgreSQL storage URL when `[storage].backend = "postgres"` and `[storage].url_env` names this variable. Keep it out of `config.toml`; remote providers must use TLS. |
+| `IRONCLAW_REBORN_SECRET_MASTER_KEY` | Production Reborn secret master key when `[storage].secret_master_key_env` names this variable. Keep it independent from the database URL and out of `config.toml`. |
 | `IRONCLAW_REBORN_LOG` | Tracing filter for the Reborn binary, for example `debug,ironclaw_reborn=trace`. |
 
 `run` and `repl` currently support `local-dev` and `local-dev-yolo` runtime

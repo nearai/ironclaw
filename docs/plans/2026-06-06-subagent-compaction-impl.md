@@ -178,13 +178,6 @@ Goal/tombstone/idempotency-ledger likely fit (a) (file-shaped or key-value). Gat
 
 **Schema requirement (Reviewer 4 B2):** every durable table/file gets explicit `agent_id` column/field (nullable for non-agent runs) per `_contract-freeze-index.md` §2 + §8. Index on `(tenant_id, user_id, agent_id, ...)` for scoped queries.
 
-**Files modified:**
-
-- `crates/ironclaw_loop_support/src/capability_port.rs` — introduce `CapabilityResultStore` trait. Refactor `LoopCapabilityResultWriter` to call through it.
-- `crates/ironclaw_reborn_composition/src/product_live_adapters.rs` — wire libsql/postgres backend choice via config; keep in-memory as `local_dev` fallback only.
-- `crates/ironclaw_reborn_composition/src/runtime/local_dev.rs` — keep in-memory for dev; wire production-readiness check to require non-in-memory in prod.
-- `crates/ironclaw_reborn/src/composition/production_readiness.rs` — flip `SubagentRestartReconciler` from stub to required impl present.
-
 **Tests:** per-store CRUD + idempotency tests, dual-backend parity test, reconciler replay test (write settlement, drop in-memory state, boot, observe replay).
 
 **Estimate:** 2 dev-weeks.

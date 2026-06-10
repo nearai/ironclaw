@@ -1,23 +1,38 @@
 use std::path::PathBuf;
+#[cfg(feature = "postgres")]
+use std::str::FromStr;
 use std::sync::Arc;
 
 use ironclaw_auth::{AuthProductError, CredentialAccountLabel, OAuthClientId, OAuthRedirectUri};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::runtime_policy::ProcessBackendKind;
+#[cfg(feature = "postgres")]
+use ironclaw_host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
 use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, SecretMode,
 };
 #[cfg(all(test, feature = "slack-v2-host-beta"))]
 use ironclaw_host_runtime::HostRuntimeHttpEgressPort;
-use ironclaw_host_runtime::{SchedulerTurnRunWakeNotifier, TenantSandboxProcessPort};
+use ironclaw_host_runtime::TenantSandboxProcessPort;
 use ironclaw_trust::HostTrustPolicy;
+use ironclaw_turns::TurnRunWakeNotifier;
 use secrecy::SecretString;
 
+#[cfg(feature = "postgres")]
+use ironclaw_reborn_config::StorageBackend;
+
+#[cfg(feature = "postgres")]
+use crate::RebornBuildError;
 use crate::google_oauth::google_provider_spec;
 use crate::notion_oauth::notion_provider_spec;
 use crate::oauth_dcr::OAuthDcrProviderConfig;
 use crate::oauth_provider_client::HostOAuthProviderSpec;
 use crate::{RebornCompositionProfile, RebornProductAuthServicePorts};
+
+#[cfg(feature = "postgres")]
+const DEFAULT_REBORN_POSTGRES_URL_ENV: &str = "IRONCLAW_REBORN_POSTGRES_URL";
+#[cfg(feature = "postgres")]
+const DEFAULT_REBORN_SECRET_MASTER_KEY_ENV: &str = "IRONCLAW_REBORN_SECRET_MASTER_KEY";
 
 /// Composition-time OAuth client metadata.
 ///
@@ -149,7 +164,7 @@ pub struct RebornBuildInput {
     pub(crate) storage: RebornStorageInput,
     pub(crate) production_trust_policy: Option<Arc<HostTrustPolicy>>,
     pub(crate) runtime_policy: Option<EffectiveRuntimePolicy>,
-    pub(crate) turn_run_wake_notifier: Option<Arc<SchedulerTurnRunWakeNotifier>>,
+    pub(crate) turn_run_wake_notifier: Option<Arc<dyn TurnRunWakeNotifier>>,
     pub(crate) runtime_process_binding: RebornRuntimeProcessBinding,
     pub(crate) required_runtime_backends: Vec<ironclaw_host_api::RuntimeKind>,
     pub(crate) require_runtime_http_egress: bool,
@@ -353,6 +368,69 @@ impl RebornBuildInput {
         )
     }
 
+    #[cfg(feature = "postgres")]
+    pub fn postgres_from_config_and_env(
+        profile: RebornCompositionProfile,
+        owner_id: impl Into<String>,
+        config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+    ) -> Result<Self, RebornBuildError> {
+        let storage = config_file
+            .and_then(|file| file.storage.as_ref())
+            .ok_or_else(|| RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "profile={profile} requires [storage] backend = \"postgres\" with url_env naming \
+                     an environment variable such as {DEFAULT_REBORN_POSTGRES_URL_ENV}"
+                ),
+            })?;
+        match storage.backend.as_ref() {
+            Some(StorageBackend::Postgres) => {}
+            Some(StorageBackend::Unknown(backend)) => {
+                return Err(RebornBuildError::InvalidConfig {
+                    reason: format!(
+                        "production storage supports only [storage].backend = \"postgres\" in this slice; got `{backend}`"
+                    ),
+                });
+            }
+            None => {
+                return Err(RebornBuildError::InvalidConfig {
+                    reason: format!("profile={profile} requires [storage].backend = \"postgres\""),
+                });
+            }
+        }
+        let url_env = storage
+            .url_env
+            .as_deref()
+            .unwrap_or(DEFAULT_REBORN_POSTGRES_URL_ENV);
+        let secret_master_key_env = storage
+            .secret_master_key_env
+            .as_deref()
+            .unwrap_or(DEFAULT_REBORN_SECRET_MASTER_KEY_ENV);
+        let database_url = required_production_url_env(
+            url_env,
+            "Reborn production PostgreSQL URL",
+            "storage.url_env",
+        )?;
+        let secret_master_key = required_production_key_env(
+            secret_master_key_env,
+            "Reborn production secret master key",
+            "storage.secret_master_key_env",
+        )?;
+        let pool_max_size = storage
+            .pool_max_size
+            .unwrap_or(ironclaw_reborn_event_store::DEFAULT_POSTGRES_POOL_MAX_SIZE);
+        let pool =
+            crate::open_reborn_postgres_pool_with_max_size(database_url.clone(), pool_max_size)?;
+        let runtime_policy = resolve_production_runtime_policy(profile, config_file)?;
+        let trust_policy = crate::builtin_first_party_trust_policy()?;
+
+        Ok(
+            Self::postgres(profile, owner_id, pool, database_url, secret_master_key)
+                .with_production_trust_policy(Arc::new(trust_policy))
+                .with_runtime_policy(runtime_policy)
+                .with_runtime_process_binding(RebornRuntimeProcessBinding::none()),
+        )
+    }
+
     pub fn with_required_runtime_backends(
         mut self,
         backends: impl IntoIterator<Item = ironclaw_host_api::RuntimeKind>,
@@ -375,9 +453,17 @@ impl RebornBuildInput {
         self.runtime_policy.as_ref()
     }
 
-    pub fn with_turn_run_wake_notifier(
+    pub fn with_turn_run_wake_notifier<T>(mut self, notifier: Arc<T>) -> Self
+    where
+        T: TurnRunWakeNotifier + 'static,
+    {
+        self.turn_run_wake_notifier = Some(notifier);
+        self
+    }
+
+    pub fn with_turn_run_wake_notifier_dyn(
         mut self,
-        notifier: Arc<SchedulerTurnRunWakeNotifier>,
+        notifier: Arc<dyn TurnRunWakeNotifier>,
     ) -> Self {
         self.turn_run_wake_notifier = Some(notifier);
         self
@@ -511,6 +597,93 @@ impl RebornBuildInput {
             oauth_dcr_provider_configs: Vec::new(),
         }
     }
+}
+
+#[cfg(feature = "postgres")]
+fn resolve_production_runtime_policy(
+    profile: RebornCompositionProfile,
+    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+) -> Result<EffectiveRuntimePolicy, RebornBuildError> {
+    let policy = config_file
+        .and_then(|file| file.policy.as_ref())
+        .ok_or_else(|| RebornBuildError::InvalidConfig {
+            reason: format!(
+                "profile={profile} requires [policy].deployment_mode and [policy].default_profile"
+            ),
+        })?;
+    let deployment_mode =
+        policy
+            .deployment_mode
+            .as_deref()
+            .ok_or_else(|| RebornBuildError::InvalidConfig {
+                reason: format!("profile={profile} requires [policy].deployment_mode"),
+            })?;
+    let default_profile =
+        policy
+            .default_profile
+            .as_deref()
+            .ok_or_else(|| RebornBuildError::InvalidConfig {
+                reason: format!("profile={profile} requires [policy].default_profile"),
+            })?;
+    let deployment = DeploymentMode::from_str(deployment_mode).map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("invalid [policy].deployment_mode `{deployment_mode}`: {error}"),
+        }
+    })?;
+    let requested_profile = RuntimeProfile::from_str(default_profile).map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("invalid [policy].default_profile `{default_profile}`: {error}"),
+        }
+    })?;
+    crate::resolve_runtime_policy(crate::RuntimePolicyResolveRequest::new(
+        deployment,
+        requested_profile,
+    ))
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!(
+            "failed to resolve runtime policy for deployment_mode={deployment_mode} \
+             default_profile={default_profile}: {error}"
+        ),
+    })
+}
+
+#[cfg(feature = "postgres")]
+fn required_production_url_env(
+    env_name: &str,
+    description: &str,
+    config_field: &str,
+) -> Result<SecretString, RebornBuildError> {
+    let value = std::env::var(env_name).map_err(|_| RebornBuildError::InvalidConfig {
+        reason: format!(
+            "{env_name} must be set to the {description}; config.toml may only name this env var via [{config_field}], never contain the secret value"
+        ),
+    })?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(RebornBuildError::InvalidConfig {
+            reason: format!("{env_name} must not be empty"),
+        });
+    }
+    Ok(SecretString::from(trimmed.to_string()))
+}
+
+#[cfg(feature = "postgres")]
+fn required_production_key_env(
+    env_name: &str,
+    description: &str,
+    config_field: &str,
+) -> Result<SecretString, RebornBuildError> {
+    let value = std::env::var(env_name).map_err(|_| RebornBuildError::InvalidConfig {
+        reason: format!(
+            "{env_name} must be set to the {description}; config.toml may only name this env var via [{config_field}], never contain the secret value"
+        ),
+    })?;
+    if value.is_empty() {
+        return Err(RebornBuildError::InvalidConfig {
+            reason: format!("{env_name} must not be empty"),
+        });
+    }
+    Ok(SecretString::from(value))
 }
 
 #[cfg(test)]
