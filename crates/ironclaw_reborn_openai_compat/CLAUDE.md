@@ -53,6 +53,10 @@ handles Chat Completions create and optional projection-backed SSE streaming:
   composition-supplied `OpenAiChatCompletionProjectionReader`. Timeout returns
   a retryable sanitized API error and does not cancel or detach the underlying
   product turn.
+- Detached waits must remain bounded by the shared Reborn turn-admission
+  reservation held by `ProductWorkflow` / `TurnCoordinator`. Do not add a
+  route-local OpenAI-compatible quota, and do not release admission capacity
+  until the underlying turn reaches a terminal state.
 - The canonical projection read actor/scope must match the authenticated caller
   before the projection reader is invoked.
 - The requested public model string is carried as a composition/policy hint for
