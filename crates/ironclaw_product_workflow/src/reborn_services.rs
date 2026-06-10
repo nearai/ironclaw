@@ -54,6 +54,7 @@ use crate::{
 };
 
 mod error;
+mod extension_credentials;
 mod extension_onboarding;
 mod extension_setup_credentials;
 mod extensions;
@@ -79,7 +80,10 @@ pub use types::{
     RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
     RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
     RebornListThreadsResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigValidateRequest, RebornOperatorLogsQuery,
+    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
+    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
     RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
     RebornOperatorSetupRequest, RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetChannel,
@@ -725,8 +729,27 @@ pub trait RebornServicesApi: Send + Sync {
     async fn list_operator_config(
         &self,
         caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+    ) -> Result<RebornOperatorConfigListResponse, RebornServicesError> {
         let _ = caller;
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn get_operator_config_key(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        key: String,
+    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
+        let _ = (caller, key);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn set_operator_config_key(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        key: String,
+        request: RebornOperatorConfigSetRequest,
+    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
+        let _ = (caller, key, request);
         Err(RebornServicesError::service_unavailable(false))
     }
 
@@ -734,7 +757,7 @@ pub trait RebornServicesApi: Send + Sync {
         &self,
         caller: WebUiAuthenticatedCaller,
         request: RebornOperatorConfigValidateRequest,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+    ) -> Result<RebornOperatorConfigValidateResponse, RebornServicesError> {
         let _ = (caller, request);
         Err(RebornServicesError::service_unavailable(false))
     }
@@ -1458,7 +1481,12 @@ impl RebornServicesApi for RebornServices {
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornExtensionListResponse, RebornServicesError> {
-        extensions::list_extensions(self.lifecycle_facade.as_ref(), caller).await
+        extensions::list_extensions(
+            Arc::clone(&self.lifecycle_facade),
+            self.extension_credentials.clone(),
+            caller,
+        )
+        .await
     }
 
     async fn list_skills(

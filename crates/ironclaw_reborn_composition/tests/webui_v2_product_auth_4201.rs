@@ -37,7 +37,7 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_reborn_composition::{
     RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness,
-    RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig, webui_v2_app,
+    RebornWebuiBundle, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app,
 };
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -52,8 +52,9 @@ struct OnlyValidToken;
 
 #[async_trait]
 impl WebuiAuthenticator for OnlyValidToken {
-    async fn authenticate(&self, token: &str) -> Option<UserId> {
-        (token == VALID_TOKEN).then(|| UserId::new(USER).expect("user id"))
+    async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
+        (token == VALID_TOKEN)
+            .then(|| WebuiAuthentication::user(UserId::new(USER).expect("user id")))
     }
 }
 

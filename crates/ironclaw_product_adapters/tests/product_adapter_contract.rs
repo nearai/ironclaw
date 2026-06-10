@@ -216,8 +216,26 @@ fn verified_auth_evidence_only_constructible_for_tests_via_test_support() {
     let evidence = ProtocolAuthEvidence::test_verified(AuthRequirement::BearerToken, "alice");
     assert!(evidence.is_verified());
     assert_eq!(evidence.claim().expect("claim").subject(), "alice");
+    assert!(evidence.claim().expect("claim").tenant_id().is_none());
     let json = serde_json::to_string(&evidence).expect("serialize");
     assert!(serde_json::from_str::<ProtocolAuthEvidence>(&json).is_err());
+}
+
+#[test]
+fn verified_auth_evidence_can_carry_tenant_scope_for_host_minted_claims() {
+    let tenant_id = ironclaw_host_api::TenantId::new("tenant-a").expect("tenant");
+    let evidence = ProtocolAuthEvidence::test_verified_for_tenant(
+        AuthRequirement::BearerToken,
+        "alice",
+        tenant_id.clone(),
+    );
+
+    let claim = evidence.claim().expect("claim");
+    assert_eq!(claim.subject(), "alice");
+    assert_eq!(claim.tenant_id(), Some(&tenant_id));
+    let json = serde_json::to_value(&evidence).expect("serialize");
+    assert_eq!(json["claim"]["tenant_id"], "tenant-a");
+    assert!(serde_json::from_value::<ProtocolAuthEvidence>(json).is_err());
 }
 
 #[tokio::test]
