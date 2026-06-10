@@ -1155,14 +1155,6 @@ pub struct RebornOperatorConfigListResponse {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<RebornOperatorConfigDiagnostic>,
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RebornOperatorConfigListResponse {
-    pub entries: Vec<RebornOperatorConfigEntry>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub precedence: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub diagnostics: Vec<RebornOperatorConfigDiagnostic>,
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RebornOperatorConfigGetResponse {
