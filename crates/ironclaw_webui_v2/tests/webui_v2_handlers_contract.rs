@@ -148,6 +148,13 @@ impl StubServices {
         *self.next_list_automations_error.lock().expect("lock") = Some(error);
     }
 
+    fn fail_set_outbound_preferences(&self, error: RebornServicesError) {
+        *self
+            .next_set_outbound_preferences_error
+            .lock()
+            .expect("lock") = Some(error);
+    }
+
     fn fail_list_connectable_channels(&self, error: RebornServicesError) {
         *self
             .next_list_connectable_channels_error
@@ -1445,6 +1452,40 @@ async fn set_outbound_preferences_accepts_explicit_clear() {
         .expect("lock");
     assert_eq!(calls.len(), 1);
     assert!(calls[0].final_reply_target_id.is_none());
+}
+
+#[tokio::test]
+async fn set_outbound_preferences_error_maps_to_http_status() {
+    let services = Arc::new(StubServices::default());
+    services.fail_set_outbound_preferences(RebornServicesError {
+        code: RebornServicesErrorCode::NotFound,
+        kind: RebornServicesErrorKind::NotFound,
+        status_code: 404,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    });
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/outbound/preferences")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"final_reply_target_id":"target-does-not-exist"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "not_found");
+    assert_eq!(body["kind"], "not_found");
+    assert_eq!(body["retryable"], false);
 }
 
 #[tokio::test]

@@ -940,10 +940,146 @@ fn map_fs_error(error: FilesystemError) -> OutboundError {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
-    use ironclaw_turns::TurnScope;
+    use std::sync::Arc;
 
-    use super::{SCOPE_NONE_SENTINEL, thread_scope_key};
+    use chrono::Utc;
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::{
+        AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId,
+        ThreadId, UserId, VirtualPath,
+    };
+    use ironclaw_turns::{TurnRunId, TurnScope};
+
+    use super::{FilesystemOutboundStateStore, SCOPE_NONE_SENTINEL, thread_scope_key};
+    use crate::{DeliveredGateRouteRecord, DeliveredGateRouteStore};
+
+    /// Build a `ScopedFilesystem<InMemoryBackend>` with full permissions on the
+    /// `/outbound` alias, mapped to a fixed tenant+user-scoped virtual root.
+    /// The `target_root` mirrors how composition wires the outbound filesystem
+    /// mount.
+    fn build_scoped_fs_for_gate_routes(
+        backend: Arc<InMemoryBackend>,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+    ) -> Arc<ScopedFilesystem<InMemoryBackend>> {
+        let target_root = format!(
+            "/engine/tenants/{}/users/{}/outbound",
+            tenant_id.as_str(),
+            user_id.as_str()
+        );
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/outbound").expect("alias"),
+            VirtualPath::new(&target_root).expect("virtual path"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view");
+        Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
+    }
+
+    /// Build a `FilesystemOutboundStateStore` backed by an `InMemoryBackend`
+    /// for testing the `DeliveredGateRouteStore` implementation.
+    fn build_gate_route_store(
+        tenant_id: &TenantId,
+        user_id: &UserId,
+    ) -> FilesystemOutboundStateStore<InMemoryBackend> {
+        let backend = Arc::new(InMemoryBackend::new());
+        FilesystemOutboundStateStore::new(build_scoped_fs_for_gate_routes(
+            backend, tenant_id, user_id,
+        ))
+    }
+
+    /// Build a minimal `DeliveredGateRouteRecord` for the given identities.
+    fn gate_route_record(
+        tenant_id: TenantId,
+        user_id: UserId,
+        gate_ref: &str,
+        run_id: TurnRunId,
+        scope: TurnScope,
+    ) -> DeliveredGateRouteRecord {
+        DeliveredGateRouteRecord {
+            tenant_id,
+            user_id,
+            gate_ref: gate_ref.to_string(),
+            run_id,
+            scope,
+            recorded_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn filesystem_gate_route_store_round_trip_record_load_remove() {
+        // Test: record → load (hash-path + JSON round-trip) → remove → load returns None.
+        // Also verifies that removing a missing record is Ok (idempotent).
+        let tenant_id = TenantId::new("fs-gate-route-tenant").expect("tenant");
+        let user_id = UserId::new("fs-gate-route-user").expect("user");
+        let agent_id = AgentId::new("fs-gate-route-agent").expect("agent");
+        let thread_id = ThreadId::new("fs-gate-route-thread").expect("thread");
+        let gate_ref = "gate:fs-route-test-001";
+
+        let store = build_gate_route_store(&tenant_id, &user_id);
+
+        let run_id = TurnRunId::new();
+        // Use a TurnScope with explicit owner to mirror triggered-run delivery.
+        let scope = TurnScope::new_with_owner(
+            tenant_id.clone(),
+            Some(agent_id),
+            None,
+            thread_id,
+            Some(user_id.clone()),
+        );
+        let record = gate_route_record(
+            tenant_id.clone(),
+            user_id.clone(),
+            gate_ref,
+            run_id,
+            scope.clone(),
+        );
+
+        // 1. remove of a missing record must be Ok (idempotent).
+        store
+            .remove_delivered_gate_route(&tenant_id, &user_id, gate_ref)
+            .await
+            .expect("remove of absent record must be Ok");
+
+        // 2. Record → load round-trip (hash path + JSON encoding).
+        store
+            .record_delivered_gate_route(record.clone())
+            .await
+            .expect("record must succeed");
+
+        let loaded = store
+            .load_delivered_gate_route(&tenant_id, &user_id, gate_ref)
+            .await
+            .expect("load must not error")
+            .expect("record must be present after recording");
+
+        assert_eq!(loaded.tenant_id, tenant_id, "tenant_id round-trips");
+        assert_eq!(loaded.user_id, user_id, "user_id round-trips");
+        assert_eq!(loaded.gate_ref, gate_ref, "gate_ref round-trips");
+        assert_eq!(loaded.run_id, run_id, "run_id round-trips");
+        assert_eq!(
+            loaded.scope.thread_id, scope.thread_id,
+            "scope thread_id round-trips"
+        );
+
+        // 3. remove → load returns None.
+        store
+            .remove_delivered_gate_route(&tenant_id, &user_id, gate_ref)
+            .await
+            .expect("remove must succeed");
+
+        let after_remove = store
+            .load_delivered_gate_route(&tenant_id, &user_id, gate_ref)
+            .await
+            .expect("load after remove must not error");
+        assert!(after_remove.is_none(), "record must be absent after remove");
+
+        // 4. Idempotent second remove is also Ok.
+        store
+            .remove_delivered_gate_route(&tenant_id, &user_id, gate_ref)
+            .await
+            .expect("second remove of absent record must be Ok");
+    }
 
     fn tenant() -> TenantId {
         TenantId::new("tenant-scope-key").unwrap()

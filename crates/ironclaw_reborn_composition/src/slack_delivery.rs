@@ -2339,6 +2339,165 @@ mod tests {
         );
     }
 
+    // --- BlockedAuth / timeout driver tests ------------------------------------
+
+    /// BlockedAuth state: driver sends an auth-prompt notification (no http/https URL),
+    /// then continues polling, eventually receives Completed, and records Delivered.
+    #[tokio::test]
+    async fn driver_blocked_auth_prompt_body_contains_no_http_url_outcome_delivered() {
+        let install = "test-install";
+        let gate_ref_str = "gate:auth-test-001";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+        let binding_ref =
+            test_slack_binding_ref(install, scope.agent_id.as_ref().expect("agent").as_str());
+
+        // First poll → BlockedAuth with gate_ref; second poll → Completed.
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![
+            scripted_state(TurnStatus::BlockedAuth, Some(gate_ref_str)),
+            scripted_state(TurnStatus::Completed, None),
+        ]));
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        seed_finalized_assistant_message(
+            &thread_service,
+            &scope,
+            run_id,
+            "Run complete after auth.",
+        )
+        .await;
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        seed_personal_preference(&outbound, &scope, binding_ref).await;
+
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // Auth-prompt delivery response.
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D456", "1111.3333"),
+            )),
+        );
+        // Final reply response (after Completed).
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D456", "2222.4444"),
+            )),
+        );
+
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let services = make_services(
+            coordinator,
+            thread_service,
+            egress.clone(),
+            outbound,
+            install,
+        );
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        let fire = minimal_trigger_fire(None);
+        driver.on_trigger_submitted(fire, run_id, scope).await;
+
+        let record = wait_for_delivery_record(&delivery_store, run_id).await;
+
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert!(
+            !post_calls.is_empty(),
+            "expected at least one chat.postMessage egress call"
+        );
+
+        // Auth-prompt body must NOT contain an http/https URL.
+        let first_body = std::str::from_utf8(&post_calls[0].body).expect("utf8 body");
+        assert!(
+            !first_body.contains("http://") && !first_body.contains("https://"),
+            "auth-prompt body must not contain an http/https URL (got: {first_body})"
+        );
+
+        assert_eq!(
+            record.outcome,
+            TriggeredRunDeliveryOutcomeKind::Delivered,
+            "terminal outcome must be Delivered"
+        );
+    }
+
+    /// Timeout: coordinator always returns a non-terminal, non-blocked status.
+    /// With max_wait=1ms and poll_interval=0, the driver must time out and record Failed
+    /// without making any chat.postMessage egress calls.
+    #[tokio::test]
+    async fn driver_wait_timeout_records_failed_without_egress() {
+        let install = "test-install";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+
+        // Always Running — never terminal or blocked.
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::Running,
+        ));
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let services = make_services(
+            coordinator,
+            thread_service,
+            egress.clone(),
+            outbound,
+            install,
+        );
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_millis(1),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store,
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        let fire = minimal_trigger_fire(None);
+        driver.on_trigger_submitted(fire, run_id, scope).await;
+
+        let record = wait_for_delivery_record(&delivery_store, run_id).await;
+
+        assert_eq!(
+            record.outcome,
+            TriggeredRunDeliveryOutcomeKind::Failed,
+            "timed-out delivery must record Failed"
+        );
+        assert!(
+            !egress
+                .calls()
+                .iter()
+                .any(|c| c.path == "/api/chat.postMessage"),
+            "no chat.postMessage egress expected for timed-out run"
+        );
+    }
+
     // --- OnceLock slot behaviour tests ----------------------------------------
 
     #[tokio::test]

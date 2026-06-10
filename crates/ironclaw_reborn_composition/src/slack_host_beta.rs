@@ -3772,4 +3772,166 @@ mod tests {
                 .collect()
         }
     }
+
+    // ---------------------------------------------------------------------------
+    // Test 3 — hook wiring e2e
+    // ---------------------------------------------------------------------------
+    //
+    // Build a runtime with the trigger poller enabled, call
+    // `build_slack_host_beta_mounts` (which wires `set_trigger_post_submit_hook`
+    // internally), seed a due personal trigger, wait for the poller to fire it,
+    // then assert that a `TriggeredRunDeliveryRecord` was written to the
+    // host-state filesystem via the production hook → driver path.
+
+    async fn runtime_with_trigger_poller() -> (RebornRuntime, tempfile::TempDir) {
+        use ironclaw_triggers::TriggerPollerWorkerConfig;
+        let root = tempfile::tempdir().expect("tempdir");
+        let build_input = RebornBuildInput::local_dev(USER, root.path().join("local-dev"))
+            .with_runtime_policy(local_dev_runtime_policy().expect("local policy"));
+        let runtime = build_reborn_runtime(
+            RebornRuntimeInput::from_services(build_input)
+                .with_identity(RebornRuntimeIdentity {
+                    tenant_id: TENANT.to_string(),
+                    agent_id: AGENT.to_string(),
+                    source_binding_id: "hook-wiring-e2e-source".to_string(),
+                    reply_target_binding_id: "hook-wiring-e2e-reply".to_string(),
+                })
+                .with_model_gateway_override(Arc::new(StaticGateway))
+                .with_trigger_poller_settings(
+                    crate::TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test()
+                        .with_worker_config(TriggerPollerWorkerConfig {
+                            poll_interval: std::time::Duration::from_millis(20),
+                            ..TriggerPollerWorkerConfig::default()
+                        }),
+                ),
+        )
+        .await
+        .expect("runtime with trigger poller builds");
+        (runtime, root)
+    }
+
+    #[tokio::test]
+    async fn build_slack_host_beta_mounts_wires_trigger_delivery_hook_writes_record() {
+        use std::time::Instant;
+
+        use chrono::Utc;
+        use ironclaw_conversations::{AdapterInstallationId, AdapterKind, ExternalActorRef};
+        use ironclaw_outbound::{FilesystemOutboundStateStore, TriggeredRunDeliveryStore};
+        use ironclaw_triggers::{
+            TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
+            TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerCompletionPolicy, TriggerId,
+            TriggerRecord, TriggerSchedule, TriggerSourceKind, TriggerState,
+        };
+
+        let (runtime, _tmp) = runtime_with_trigger_poller().await;
+
+        // Wire the delivery hook by calling the production mount builder.
+        let _mounts =
+            build_slack_host_beta_mounts(&runtime, config()).expect("mounts should build");
+
+        // Pair the trigger actor so the trusted submitter can resolve the
+        // creator's user binding (fails closed for unpaired actors by design).
+        let tenant_id = TenantId::new(TENANT).expect("tenant");
+        let user_id = UserId::new(USER).expect("user");
+        let pairing = runtime
+            .trigger_conversation_pairing()
+            .expect("trigger conversation pairing service");
+        pairing
+            .pair_external_actor(
+                tenant_id.clone(),
+                AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).expect("adapter kind"),
+                AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
+                    .expect("installation id"),
+                ExternalActorRef::new(TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, user_id.as_str())
+                    .expect("actor ref"),
+                user_id.clone(),
+            )
+            .await
+            .expect("pair external actor for trigger creator");
+
+        // Seed a due trigger so the poller picks it up immediately.
+        let repo = runtime
+            .trigger_repository()
+            .expect("local-dev runtime exposes trigger repository");
+        let trigger_id = TriggerId::new();
+        repo.upsert_trigger(TriggerRecord {
+            trigger_id,
+            tenant_id: tenant_id.clone(),
+            creator_user_id: user_id.clone(),
+            agent_id: Some(AgentId::new(AGENT).expect("agent")),
+            project_id: None,
+            name: "hook-wiring-e2e".to_string(),
+            source: TriggerSourceKind::Schedule,
+            schedule: TriggerSchedule::cron("* * * * *").expect("valid cron"),
+            completion_policy: TriggerCompletionPolicy::CompleteAfterFirstFire,
+            prompt: "hook-wiring-e2e-prompt-marker".to_string(),
+            state: TriggerState::Scheduled,
+            next_run_at: Utc::now() - chrono::Duration::seconds(120),
+            last_run_at: None,
+            last_fired_slot: None,
+            last_status: None,
+            active_fire_slot: None,
+            active_run_ref: None,
+            created_at: Utc::now(),
+        })
+        .await
+        .expect("upsert trigger record");
+
+        // Wait for the poller to fire the trigger.  `mark_fire_accepted` sets
+        // both `last_fired_slot` and `active_run_ref` atomically, so if we see
+        // `last_fired_slot` we can also safely read the run_id.
+        let deadline = Instant::now() + std::time::Duration::from_secs(15);
+        let mut fired_run_id = None;
+        while Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let current = repo
+                .get_trigger(tenant_id.clone(), trigger_id)
+                .await
+                .expect("get_trigger")
+                .expect("record present");
+            if current.last_fired_slot.is_some() {
+                fired_run_id = current.active_run_ref;
+                break;
+            }
+        }
+
+        // Build a delivery store over the same host_state_filesystem the
+        // production hook uses.  `local_runtime` and `host_state_filesystem`
+        // are `pub(crate)` — accessible here because this test lives in the
+        // same crate.
+        let local_runtime = runtime
+            .services()
+            .local_runtime
+            .as_ref()
+            .expect("local-dev runtime has local_runtime services");
+        let delivery_store =
+            FilesystemOutboundStateStore::new(Arc::clone(&local_runtime.host_state_filesystem));
+
+        // Poll briefly for the delivery record.  The driver spawns a background
+        // task; for the `NoDefaultConfigured` fast-path it should complete well
+        // within 2 s.
+        let mut delivery_record = None;
+        if let Some(run_id) = fired_run_id {
+            let delivery_deadline = Instant::now() + std::time::Duration::from_secs(5);
+            while Instant::now() < delivery_deadline {
+                if let Ok(Some(rec)) = delivery_store.load_triggered_run_delivery(run_id).await {
+                    delivery_record = Some(rec);
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+
+        runtime.shutdown().await.expect("runtime shutdown");
+
+        assert!(
+            fired_run_id.is_some(),
+            "trigger did not fire within 15 s — hook wiring e2e stalled"
+        );
+        assert!(
+            delivery_record.is_some(),
+            "no TriggeredRunDeliveryRecord written after trigger fire — \
+             hook → driver wiring broken; fired_run_id={fired_run_id:?}"
+        );
+    }
 }

@@ -410,4 +410,202 @@ mod tests {
             .len();
         assert_eq!(list_calls, 1);
     }
+
+    // -------------------------------------------------------------------------
+    // Test 4 — wrapper through the workflow path
+    // -------------------------------------------------------------------------
+    //
+    // Drives `DefaultProductWorkflow::submit_inbound` with an
+    // `ApprovalResolution` envelope.  The workflow's approval port is
+    // `DeliveredGateRoutingApprovalService` wrapping a recording inner service.
+    // A route record is pre-seeded for (tenant, user, gate_ref) → run scope
+    // (different thread than the inbound DM conversation).  After the call:
+    //  - the recording inner service must have received the rewritten scope
+    //    (run thread) and `run_id_hint = Some(run_id)`.
+    //  - the route record must have been removed (best-effort cleanup after
+    //    successful inner resolve).
+
+    /// Variant of [`RecordingApprovalService`] that returns `Ok(Approved)`
+    /// so the routing wrapper performs its post-resolve cleanup.
+    #[derive(Default)]
+    struct AcceptingRecordingApprovalService {
+        resolve_calls: Mutex<Vec<ResolveApprovalInteractionRequest>>,
+    }
+
+    impl AcceptingRecordingApprovalService {
+        fn resolve_calls(&self) -> Vec<ResolveApprovalInteractionRequest> {
+            self.resolve_calls
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl ApprovalInteractionService for AcceptingRecordingApprovalService {
+        async fn list_pending(
+            &self,
+            _request: ListPendingApprovalsRequest,
+        ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
+            Ok(ListPendingApprovalsResponse {
+                approvals: Vec::new(),
+            })
+        }
+
+        async fn resolve(
+            &self,
+            request: ResolveApprovalInteractionRequest,
+        ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+            self.resolve_calls
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(request.clone());
+            let run_id = request.run_id_hint.unwrap_or_default();
+            Ok(ResolveApprovalInteractionResponse::Approved(
+                ironclaw_turns::ResumeTurnResponse {
+                    run_id,
+                    status: ironclaw_turns::TurnStatus::Queued,
+                    event_cursor: ironclaw_turns::EventCursor::default(),
+                },
+            ))
+        }
+    }
+
+    fn approval_envelope(gate_ref_str: &str) -> ironclaw_product_adapters::ProductInboundEnvelope {
+        use ironclaw_product_adapters::{
+            AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthRequirement,
+            ExternalActorRef, ExternalConversationRef, ExternalEventId, ParsedProductInbound,
+            ProductAdapterId, ProductInboundEnvelope, ProductInboundPayload, ProtocolAuthEvidence,
+            TrustedInboundContext,
+        };
+
+        let adapter_id = ProductAdapterId::new("test_adapter").expect("adapter id");
+        let installation_id = AdapterInstallationId::new("install_alpha").expect("install id");
+        let event_id =
+            ExternalEventId::new(format!("evt:approval:{gate_ref_str}")).expect("event id");
+        let actor_ref =
+            ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor ref");
+        let conv_ref = ExternalConversationRef::new(None, "conv-dm", None, None).expect("conv ref");
+        let payload = ProductInboundPayload::ApprovalResolution(
+            ApprovalResolutionPayload::new(gate_ref_str, ApprovalDecision::ApproveOnce)
+                .expect("approval payload"),
+        );
+        let parsed = ParsedProductInbound::new(event_id, actor_ref, conv_ref, payload)
+            .expect("parsed inbound");
+        let evidence = ProtocolAuthEvidence::test_verified(
+            AuthRequirement::SharedSecretHeader {
+                header_name: "X-Secret".into(),
+            },
+            installation_id.as_str(),
+        );
+        let context = TrustedInboundContext::from_verified_evidence(
+            adapter_id,
+            installation_id,
+            chrono::Utc::now(),
+            &evidence,
+        )
+        .expect("trusted context");
+        ProductInboundEnvelope::from_trusted_parse(context, parsed).expect("envelope")
+    }
+
+    #[tokio::test]
+    async fn routing_wrapper_through_workflow_rewrites_scope_and_removes_route_record() {
+        use ironclaw_product_adapters::ProductWorkflow;
+        use ironclaw_product_workflow::{
+            DefaultProductWorkflow, FakeConversationBindingService, FakeIdempotencyLedger,
+            FakeInboundTurnService,
+        };
+
+        // 1. The gate_ref and run to be resolved.
+        let run_id = TurnRunId::new();
+        let gate_ref_str = "gate:workflow-routing-001";
+
+        // 2. Binding service: default fake generates tenant/user from envelope
+        //    fields.  For install_alpha + actor user1:
+        //      tenant_id = "tenant:install_alpha"
+        //      user_id   = "user:user1"
+        //      thread_id = "thread:install_alpha:conv-dm"  (the DM thread)
+        let binding = Arc::new(FakeConversationBindingService::new());
+
+        // 3. Pre-seed the route record: same tenant/user, different (run) thread.
+        let route_tenant = TenantId::new("tenant:install_alpha").expect("tenant");
+        let route_user = UserId::new("user:user1").expect("user");
+        let run_thread = ThreadId::new("thread:run-001").expect("thread id");
+        let run_scope = TurnScope::new_with_owner(
+            route_tenant.clone(),
+            Some(AgentId::new("agent:fake").expect("agent")),
+            None,
+            run_thread.clone(),
+            Some(route_user.clone()),
+        );
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        route_store
+            .record_delivered_gate_route(DeliveredGateRouteRecord {
+                tenant_id: route_tenant.clone(),
+                user_id: route_user.clone(),
+                gate_ref: gate_ref_str.to_string(),
+                run_id,
+                scope: run_scope.clone(),
+                recorded_at: chrono::Utc::now(),
+            })
+            .await
+            .expect("record delivered gate route");
+
+        // 4. Wrap a recording acceptance service with the routing wrapper.
+        let inner = Arc::new(AcceptingRecordingApprovalService::default());
+        let routed_approval = Arc::new(DeliveredGateRoutingApprovalService::new(
+            Arc::clone(&inner) as _,
+            Arc::clone(&route_store) as _,
+        ));
+
+        // 5. Wire everything into DefaultProductWorkflow.
+        let workflow = DefaultProductWorkflow::new(
+            Arc::new(FakeInboundTurnService::new()),
+            Arc::new(FakeIdempotencyLedger::new()),
+            binding,
+        )
+        .with_approval_interaction_service(routed_approval);
+
+        // 6. Submit an approval resolution envelope.
+        let envelope = approval_envelope(gate_ref_str);
+        let ack = workflow
+            .submit_inbound(envelope)
+            .await
+            .expect("submit_inbound should succeed");
+        assert!(
+            matches!(
+                ack,
+                ironclaw_product_adapters::ProductInboundAck::Accepted { .. }
+            ),
+            "expected Accepted ack, got {ack:?}"
+        );
+
+        // 7. Assert inner service received rewritten scope and run_id_hint.
+        let calls = inner.resolve_calls();
+        assert_eq!(
+            calls.len(),
+            1,
+            "inner should have received exactly one resolve call"
+        );
+        let forwarded = &calls[0];
+        assert_eq!(
+            forwarded.scope.thread_id, run_thread,
+            "scope must be rewritten to run thread, not DM thread"
+        );
+        assert_eq!(
+            forwarded.run_id_hint,
+            Some(run_id),
+            "run_id_hint must be set from route record"
+        );
+
+        // 8. Assert route record was removed after successful resolve.
+        let still_present = route_store
+            .load_delivered_gate_route(&route_tenant, &route_user, gate_ref_str)
+            .await
+            .expect("load after resolve");
+        assert!(
+            still_present.is_none(),
+            "route record should be removed after successful resolve; still present: {still_present:?}"
+        );
+    }
 }

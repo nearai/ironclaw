@@ -704,4 +704,270 @@ mod tests {
             },
         }
     }
+
+    // ── PostSubmitHookWrappedSubmitter tests ────────────────────────────────
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    mod hook_wrapper {
+        use std::sync::{Arc, Mutex, OnceLock};
+        use std::time::Duration;
+
+        use async_trait::async_trait;
+        use chrono::Utc;
+        use ironclaw_host_api::{AgentId, TenantId, ThreadId, Timestamp, UserId};
+        use ironclaw_triggers::{
+            InMemoryTriggerRepository, TriggerActiveRunLookup, TriggerActiveRunState,
+            TriggerActiveRunStateRequest, TriggerCompletionPolicy, TriggerError, TriggerFire,
+            TriggerId, TriggerInboundContentRef, TriggerMaterializedPrompt, TriggerPollerWorker,
+            TriggerPollerWorkerConfig, TriggerPollerWorkerDeps, TriggerPromptMaterializer,
+            TriggerRecord, TriggerRepository, TriggerSchedule, TriggerSourceKind, TriggerState,
+            TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter,
+            TrustedTriggerSubmitRequest,
+        };
+        use ironclaw_turns::{TurnRunId, TurnScope};
+
+        use super::super::PostSubmitHookWrappedSubmitter;
+        use crate::slack_delivery::PostSubmitDeliveryHook;
+
+        // ── shared fakes ─────────────────────────────────────────────────────
+
+        /// Materializer that always succeeds with a fixed content ref.
+        struct FixedMaterializer;
+
+        #[async_trait]
+        impl TriggerPromptMaterializer for FixedMaterializer {
+            async fn materialize_prompt(
+                &self,
+                fire: TriggerFire,
+            ) -> Result<TriggerMaterializedPrompt, TriggerError> {
+                let content_ref = TriggerInboundContentRef::new("content:hook-wrapper-test")
+                    .expect("content ref");
+                Ok(TriggerMaterializedPrompt::for_fire(&fire, content_ref))
+            }
+        }
+
+        /// Active-run lookup that always reports `Missing` (no concurrent run).
+        struct AlwaysMissingLookup;
+
+        #[async_trait]
+        impl TriggerActiveRunLookup for AlwaysMissingLookup {
+            async fn active_run_state(
+                &self,
+                _request: TriggerActiveRunStateRequest,
+            ) -> Result<TriggerActiveRunState, TriggerError> {
+                Ok(TriggerActiveRunState::Missing)
+            }
+        }
+
+        /// Inner submitter that always returns `Accepted` with a pre-set run_id
+        /// and scope. Used to exercise the wrapper without going through the
+        /// real submission pipeline.
+        struct FixedAcceptedSubmitter {
+            run_id: TurnRunId,
+            scope: TurnScope,
+        }
+
+        #[async_trait]
+        impl TrustedTriggerFireSubmitter for FixedAcceptedSubmitter {
+            async fn submit_trusted_trigger_fire(
+                &self,
+                _request: TrustedTriggerSubmitRequest,
+            ) -> Result<TrustedTriggerFireSubmitOutcome, TriggerError> {
+                Ok(TrustedTriggerFireSubmitOutcome::Accepted {
+                    run_id: self.run_id,
+                    submitted_at: Utc::now(),
+                    turn_scope: self.scope.clone(),
+                })
+            }
+        }
+
+        /// Hook that records every invocation.
+        #[derive(Default)]
+        struct RecordingHook {
+            calls: Mutex<Vec<(TriggerFire, TurnRunId, TurnScope)>>,
+        }
+
+        impl RecordingHook {
+            fn calls(&self) -> Vec<(TriggerFire, TurnRunId, TurnScope)> {
+                self.calls.lock().unwrap_or_else(|p| p.into_inner()).clone()
+            }
+        }
+
+        #[async_trait]
+        impl PostSubmitDeliveryHook for RecordingHook {
+            async fn on_trigger_submitted(
+                &self,
+                fire: TriggerFire,
+                run_id: TurnRunId,
+                scope: TurnScope,
+            ) {
+                self.calls
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push((fire, run_id, scope));
+            }
+        }
+
+        // ── helpers ───────────────────────────────────────────────────────────
+
+        fn wrapper_tenant() -> TenantId {
+            TenantId::new("hook-wrapper-tenant").expect("tenant")
+        }
+
+        fn wrapper_scope(run_id: TurnRunId) -> TurnScope {
+            let agent = AgentId::new("hook-wrapper-agent").expect("agent");
+            let thread = ThreadId::new(format!("hook-wrapper-thread-{run_id}")).expect("thread");
+            TurnScope::new(wrapper_tenant(), Some(agent), None, thread)
+        }
+
+        /// Seed one due trigger in `repo` and return the fire slot timestamp.
+        async fn seed_due_trigger(
+            repo: &InMemoryTriggerRepository,
+            fire_slot: Timestamp,
+        ) -> TriggerId {
+            let trigger_id = TriggerId::new();
+            let record = TriggerRecord {
+                trigger_id,
+                tenant_id: wrapper_tenant(),
+                creator_user_id: UserId::new("hook-wrapper-user").expect("user"),
+                agent_id: None,
+                project_id: None,
+                name: "hook-wrapper-trigger".to_string(),
+                source: TriggerSourceKind::Schedule,
+                schedule: TriggerSchedule::cron("* * * * *").expect("cron"),
+                completion_policy: TriggerCompletionPolicy::Recurring,
+                prompt: "hook wrapper test prompt".to_string(),
+                state: TriggerState::Scheduled,
+                next_run_at: fire_slot,
+                last_run_at: None,
+                last_fired_slot: None,
+                last_status: None,
+                active_fire_slot: None,
+                active_run_ref: None,
+                created_at: fire_slot,
+            };
+            repo.upsert_trigger(record).await.expect("upsert trigger");
+            trigger_id
+        }
+
+        /// Build a `TriggerPollerWorker` backed by the supplied repo, with the
+        /// given `trusted_submitter`. The caller must seed triggers into `repo`
+        /// before calling `tick_once`.
+        fn build_worker_with_repo(
+            repo: Arc<InMemoryTriggerRepository>,
+            trusted_submitter: Arc<dyn TrustedTriggerFireSubmitter>,
+        ) -> TriggerPollerWorker {
+            TriggerPollerWorker::new(
+                TriggerPollerWorkerConfig {
+                    poll_interval: Duration::from_millis(50),
+                    fires_per_tick: 1,
+                    max_concurrent_fires_per_trigger: 1,
+                },
+                TriggerPollerWorkerDeps {
+                    repository: repo,
+                    source_provider: Arc::new(ironclaw_triggers::ScheduleTriggerSourceProvider),
+                    materializer: Arc::new(FixedMaterializer),
+                    trusted_submitter,
+                    active_run_lookup: Arc::new(AlwaysMissingLookup),
+                },
+            )
+            .expect("valid worker")
+        }
+
+        // ── tests ─────────────────────────────────────────────────────────────
+
+        /// Empty hook slot: poller fires the trigger, inner submitter accepts,
+        /// but the hook is never invoked.
+        #[tokio::test]
+        async fn empty_slot_submit_succeeds_hook_does_not_fire() {
+            let repo = Arc::new(InMemoryTriggerRepository::default());
+            let fire_slot = Utc::now() - chrono::Duration::seconds(1);
+            seed_due_trigger(&repo, fire_slot).await;
+
+            let run_id = TurnRunId::new();
+            let scope = wrapper_scope(run_id);
+            let inner = Arc::new(FixedAcceptedSubmitter {
+                run_id,
+                scope: scope.clone(),
+            });
+            let hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>> =
+                Arc::new(OnceLock::new());
+
+            // Wrap the inner submitter; hook slot is empty.
+            let wrapper = Arc::new(PostSubmitHookWrappedSubmitter {
+                inner: inner as Arc<dyn TrustedTriggerFireSubmitter>,
+                hook_slot: Arc::clone(&hook_slot),
+            });
+
+            let worker =
+                build_worker_with_repo(repo, wrapper as Arc<dyn TrustedTriggerFireSubmitter>);
+            let report = worker
+                .tick_once(Utc::now())
+                .await
+                .expect("tick_once succeeds");
+
+            // The trigger was processed.
+            assert_eq!(
+                report.due_records, 1,
+                "one due trigger should have been processed"
+            );
+            // Hook slot is still empty — nothing wired it up.
+            assert!(
+                hook_slot.get().is_none(),
+                "hook slot must remain empty when no hook was set"
+            );
+        }
+
+        /// Filled hook slot: poller fires the trigger, inner submitter accepts,
+        /// hook receives the accepted run_id and scope.
+        #[tokio::test]
+        async fn filled_slot_accepted_submit_invokes_hook_with_run_id_and_scope() {
+            let repo = Arc::new(InMemoryTriggerRepository::default());
+            let fire_slot = Utc::now() - chrono::Duration::seconds(1);
+            seed_due_trigger(&repo, fire_slot).await;
+
+            let run_id = TurnRunId::new();
+            let scope = wrapper_scope(run_id);
+            let inner = Arc::new(FixedAcceptedSubmitter {
+                run_id,
+                scope: scope.clone(),
+            });
+            let hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>> =
+                Arc::new(OnceLock::new());
+
+            // Pre-fill the slot with a recording hook.
+            let recording = Arc::new(RecordingHook::default());
+            hook_slot
+                .set(Arc::clone(&recording) as Arc<dyn PostSubmitDeliveryHook>)
+                .unwrap_or_else(|_| panic!("slot set should succeed on first call"));
+
+            let wrapper = Arc::new(PostSubmitHookWrappedSubmitter {
+                inner: inner as Arc<dyn TrustedTriggerFireSubmitter>,
+                hook_slot: Arc::clone(&hook_slot),
+            });
+
+            let worker =
+                build_worker_with_repo(repo, wrapper as Arc<dyn TrustedTriggerFireSubmitter>);
+            let report = worker
+                .tick_once(Utc::now())
+                .await
+                .expect("tick_once succeeds");
+
+            assert_eq!(report.due_records, 1, "one due trigger must be processed");
+
+            // Hook was invoked exactly once.
+            let calls = recording.calls();
+            assert_eq!(calls.len(), 1, "hook must fire exactly once");
+
+            let (_, called_run_id, called_scope) = &calls[0];
+            assert_eq!(
+                *called_run_id, run_id,
+                "hook must receive the accepted run_id"
+            );
+            assert_eq!(
+                called_scope.thread_id, scope.thread_id,
+                "hook must receive the accepted turn_scope thread_id"
+            );
+        }
+    }
 }
