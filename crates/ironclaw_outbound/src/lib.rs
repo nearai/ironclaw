@@ -14,6 +14,7 @@ mod memory;
 mod resolution_engine;
 mod service;
 mod store;
+mod triggered_run_delivery;
 mod types;
 mod validation;
 
@@ -40,6 +41,10 @@ pub use service::{
     OutboundPolicyService, ReplyTargetBindingValidator, ThreadProjectionAccessPolicy,
 };
 pub use store::OutboundStateStore;
+pub use triggered_run_delivery::{
+    InMemoryTriggeredRunDeliveryStore, TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryRecord,
+    TriggeredRunDeliveryStore,
+};
 pub use types::{
     AdvanceSubscriptionCursorRequest, DeliveryFailureKind, LoadSubscriptionCursorRequest,
     OutboundDeliveryAttempt, OutboundDeliveryDecision, OutboundDeliveryStatus,
