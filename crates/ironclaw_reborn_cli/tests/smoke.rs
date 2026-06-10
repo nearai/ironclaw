@@ -83,9 +83,17 @@ fn fake_bin_path(bin_dir: &Path) -> String {
 #[cfg(unix)]
 fn write_reborn_config(reborn_home: &Path, profile: &str) {
     std::fs::create_dir_all(reborn_home).expect("reborn home");
+    let production_sections = match profile {
+        "production" | "migration-dry-run" => {
+            "\n[policy]\ndeployment_mode = \"hosted_multi_tenant\"\ndefault_profile = \"secure_default\"\n\n[storage]\nbackend = \"postgres\"\nurl_env = \"IRONCLAW_REBORN_POSTGRES_URL\"\nsecret_master_key_env = \"IRONCLAW_REBORN_SECRET_MASTER_KEY\"\n"
+        }
+        _ => "",
+    };
     std::fs::write(
         reborn_home.join("config.toml"),
-        format!("api_version = \"ironclaw.runtime/v1\"\n\n[boot]\nprofile = \"{profile}\"\n"),
+        format!(
+            "api_version = \"ironclaw.runtime/v1\"\n\n[boot]\nprofile = \"{profile}\"\n{production_sections}"
+        ),
     )
     .expect("config");
 }
@@ -105,6 +113,10 @@ fn dockerfile_reborn_builds_with_postgres_feature() {
     assert!(
         dockerfile.contains("config.production.toml"),
         "Dockerfile.reborn must ship the opt-in production config: {dockerfile}"
+    );
+    assert!(
+        !dockerfile.contains("IRONCLAW_REBORN_HOME=/data/ironclaw-reborn"),
+        "Dockerfile.reborn must let the entrypoint resolve Railway volume mounts before falling back to /data: {dockerfile}"
     );
 }
 
@@ -267,6 +279,36 @@ fn docker_reborn_entrypoint_allows_railway_production_without_volume() {
         "stdout: {stdout}"
     );
     assert!(stdout.contains("args=--help"), "stdout: {stdout}");
+}
+
+#[cfg(unix)]
+#[test]
+fn docker_reborn_entrypoint_rejects_stale_local_dev_config_for_production() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let bin_dir = temp.path().join("bin");
+    fake_reborn_bin(&bin_dir);
+    let reborn_home = temp.path().join("reborn-home");
+    write_reborn_config(&reborn_home, "local-dev");
+
+    let output = Command::new("/bin/sh")
+        .arg(workspace_root().join("docker/reborn/entrypoint.sh"))
+        .arg("--help")
+        .env_clear()
+        .env("PATH", fake_bin_path(&bin_dir))
+        .env("HOME", temp.path().join("home"))
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("IRONCLAW_REBORN_PROFILE", "production")
+        .env("RAILWAY_ENVIRONMENT", "production")
+        .output()
+        .expect("entrypoint should run");
+
+    assert!(!output.status.success(), "entrypoint should fail closed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("IRONCLAW_REBORN_PROFILE=production requires"),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("stale local-dev seed"), "stderr: {stderr}");
 }
 
 #[test]

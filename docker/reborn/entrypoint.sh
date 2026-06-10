@@ -68,6 +68,18 @@ if [ -z "$effective_profile" ]; then
   effective_profile="$(sed -n 's/^[[:space:]]*profile[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$config_path" | sed -n '1p')"
 fi
 
+case "$effective_profile" in
+  production|migration-dry-run)
+    if ! grep -q '^[[:space:]]*\[storage\][[:space:]]*$' "$config_path" \
+      || ! grep -q '^[[:space:]]*\[policy\][[:space:]]*$' "$config_path"
+    then
+      echo "IRONCLAW_REBORN_PROFILE=$effective_profile requires $config_path to contain [storage] and [policy]." >&2
+      echo "The existing config looks like a stale local-dev seed; remove it to let the entrypoint install $default_config, or migrate it manually." >&2
+      exit 1
+    fi
+    ;;
+esac
+
 if railway_runtime_detected \
   && [ -z "${RAILWAY_VOLUME_MOUNT_PATH:-}" ] \
   && ! is_truthy "${IRONCLAW_REBORN_ALLOW_EPHEMERAL_RAILWAY:-}"
