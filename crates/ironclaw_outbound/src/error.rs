@@ -9,8 +9,8 @@ pub enum OutboundError {
     #[error("outbound state request rejected: {reason}")]
     InvalidRequest { reason: &'static str },
     /// The creator's communication preference does not include a delivery
-    /// target for the requested notification kind. Channel-neutral vocabulary:
-    /// does not mention Slack or any specific transport.
+    /// target for the requested notification kind. Kept channel-neutral:
+    /// callers map this to transport-specific handling.
     #[error("communication preference target is missing: {kind}")]
     PreferenceTargetMissing { kind: &'static str },
     #[error("subscription cursor scope mismatch")]
