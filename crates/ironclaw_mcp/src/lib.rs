@@ -343,7 +343,9 @@ pub struct McpHostHttpEgressPlanRequest<'a> {
 /// its credential sources, then threads that plan into the later `tools/call`
 /// transport send. Planner-visible headers are stable policy headers only; the
 /// dynamic MCP session header is added by the protocol client after planning.
-/// Handshake requests are planned independently and remain credential-free.
+/// Hosted MCP providers may require authentication for the entire JSON-RPC
+/// session, including initialization, so staged credentials must remain scoped
+/// to the invocation until the capability dispatch completes.
 pub trait McpHostHttpEgressPlanner: Send + Sync {
     fn plan(&self, request: McpHostHttpEgressPlanRequest<'_>) -> McpHostHttpEgressPlan;
 }
@@ -1619,6 +1621,14 @@ mod tests {
         assert!(!is_supported_mcp_tool_name("search..issues", 128));
         assert!(!is_supported_mcp_tool_name("Search", 128));
         assert!(!is_supported_mcp_tool_name("search._private", 128));
+    }
+
+    #[test]
+    fn mcp_tool_name_strips_provider_prefix_for_canonical_tool_name() {
+        let provider = ExtensionId::new("nearai").unwrap();
+        let capability_id = CapabilityId::new("nearai.web_search").unwrap();
+
+        assert_eq!(mcp_tool_name(&provider, &capability_id), "web_search");
     }
 
     #[test]

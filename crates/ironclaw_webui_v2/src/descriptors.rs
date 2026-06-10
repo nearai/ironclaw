@@ -160,10 +160,13 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
     ]
 }
 
-/// Returns whether a route id belongs to the operator-wide LLM config surface.
-/// Host composition uses this to keep route mounting and descriptor policy
-/// filtering in sync when non-operator authenticators leave those routes
-/// unmounted.
+/// Returns whether a route id belongs to the legacy operator-wide LLM config surface.
+///
+/// Prefer [`is_webui_v2_operator_webui_config_route_id`] for host route gating;
+/// this older predicate intentionally excludes newer `operator/*` routes.
+#[deprecated(
+    note = "Use `is_webui_v2_operator_webui_config_route_id`; this predicate misses the operator/* routes."
+)]
 pub fn is_webui_v2_llm_config_route_id(route_id: &str) -> bool {
     matches!(
         route_id,
@@ -180,6 +183,7 @@ pub fn is_webui_v2_llm_config_route_id(route_id: &str) -> bool {
 }
 
 /// Returns whether a route id belongs to any operator-wide WebUI config surface.
+#[allow(deprecated)]
 pub fn is_webui_v2_operator_webui_config_route_id(route_id: &str) -> bool {
     is_webui_v2_llm_config_route_id(route_id)
         || matches!(

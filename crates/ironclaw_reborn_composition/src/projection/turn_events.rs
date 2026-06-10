@@ -548,6 +548,9 @@ fn failure_summary_for_category(category: &str) -> &'static str {
         "no_progress_detected" => {
             "The run stopped because it repeated the same step without making progress."
         }
+        "iteration_limit" => {
+            "The run stopped after reaching its iteration limit before producing a reply."
+        }
         "unknown_failure" => "The run failed for an unknown reason.",
         _ => "The run failed before producing a reply.",
     }

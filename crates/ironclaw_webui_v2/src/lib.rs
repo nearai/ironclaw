@@ -54,6 +54,8 @@ mod schema;
 #[cfg(feature = "webui-v2-beta")]
 mod sse_capacity;
 
+#[allow(deprecated)]
+pub use descriptors::is_webui_v2_llm_config_route_id;
 #[cfg(feature = "webui-v2-beta")]
 pub use descriptors::{
     WEBUI_V2_ROUTE_ACTIVATE_EXTENSION, WEBUI_V2_ROUTE_CANCEL_RUN,

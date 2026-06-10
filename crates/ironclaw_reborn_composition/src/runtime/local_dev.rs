@@ -43,7 +43,7 @@ use crate::{
     runtime::LocalDevSelectableSkillContextSource,
 };
 
-mod extension_surface;
+pub(super) mod extension_surface;
 #[cfg(test)]
 mod shell_tests;
 mod skill_activation;

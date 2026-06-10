@@ -158,9 +158,11 @@ Transport-specific policy is a host adapter responsibility:
 - Planner-visible headers exclude the dynamic MCP session header. The protocol
   client appends `Mcp-Session-Id` after planning when the server establishes a
   session.
-- `initialize` and `notifications/initialized` remain credential-free even
-  when the host-planned `tools/call` or `tools/list` carries staged
-  credentials.
+- Hosted providers may require authentication on the whole JSON-RPC session,
+  including `initialize`, `notifications/initialized`, `tools/list`, and
+  `tools/call`. Staged credentials for MCP runtime egress therefore remain
+  reusable for the scoped capability invocation and are discarded by the normal
+  capability completion/abort cleanup.
 - MCP protocol code consumes `RuntimeCredentialInjection` plans only; product
   auth account selection belongs to composition, not to the MCP crate.
 

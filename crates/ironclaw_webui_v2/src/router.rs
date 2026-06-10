@@ -50,6 +50,8 @@ impl WebUiV2RouteOptions {
         }
     }
 
+    // Also suppresses `operator/*` routes because the legacy LLM config
+    // surface and the operator command plane share one trusted-operator gate.
     pub const fn without_llm_config_routes() -> Self {
         Self::without_operator_routes()
     }
@@ -73,7 +75,6 @@ impl WebUiV2RouteOptions {
 pub struct WebUiV2State {
     services: Arc<dyn RebornServicesApi>,
     sse_capacity: Arc<SseCapacity>,
-    capabilities: WebUiV2Capabilities,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -84,13 +85,11 @@ pub struct WebUiV2Capabilities {
 impl WebUiV2State {
     pub fn new(
         services: Arc<dyn RebornServicesApi>,
-        capabilities: WebUiV2Capabilities,
         max_concurrent_streams_per_caller: usize,
     ) -> Self {
         Self {
             services,
             sse_capacity: Arc::new(SseCapacity::new(max_concurrent_streams_per_caller)),
-            capabilities,
         }
     }
 
@@ -100,10 +99,6 @@ impl WebUiV2State {
 
     pub(crate) fn sse_capacity(&self) -> &Arc<SseCapacity> {
         &self.sse_capacity
-    }
-
-    pub(crate) fn capabilities(&self) -> WebUiV2Capabilities {
-        self.capabilities
     }
 }
 
@@ -236,7 +231,8 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             )
             .route(
                 WEBUI_V2_PATTERN_OPERATOR_CONFIG_VALIDATE,
-                post(handlers::validate_operator_config),
+                get(handlers::reject_reserved_operator_config_key)
+                    .post(handlers::validate_operator_config),
             )
             .route(
                 WEBUI_V2_PATTERN_OPERATOR_CONFIG_KEY,

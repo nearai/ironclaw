@@ -493,6 +493,44 @@ async fn create_thread(app: &axum::Router, bearer: &str) -> StatusCode {
         .status()
 }
 
+async fn session_payload(app: &axum::Router, bearer: &str) -> serde_json::Value {
+    let response = app
+        .clone()
+        .oneshot(with_peer(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .body(Body::empty())
+                .expect("request"),
+        ))
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    serde_json::from_slice(&bytes).expect("session json")
+}
+
+async fn llm_providers_status(app: &axum::Router, bearer: &str, method: Method) -> StatusCode {
+    app.clone()
+        .oneshot(with_peer(
+            Request::builder()
+                .method(method)
+                .uri("/api/webchat/v2/llm/providers")
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .body(Body::empty())
+                .expect("request"),
+        ))
+        .await
+        .expect("oneshot")
+        .status()
+}
+
 // ─── test ─────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -528,6 +566,46 @@ async fn two_oauth_users_reach_protected_routes_as_distinct_callers() {
     );
     // Both callers carry the host-trusted tenant, never a browser value.
     assert!(callers.iter().all(|c| c.tenant_id.as_str() == TENANT));
+}
+
+#[tokio::test]
+async fn sso_sessions_stay_non_operator_while_env_token_can_configure_operator_routes() {
+    // This mirrors the Railway deployment shape: SSO login is enabled,
+    // but the env bearer remains the separate operator credential.
+    let (app, _services) = build_app(vec![profile("alice-sub", "alice@example.com")]);
+    let sso_bearer = login(&app).await;
+
+    let sso_session = session_payload(&app, &sso_bearer).await;
+    assert_eq!(sso_session["user_id"], "user-alice-sub");
+    assert_eq!(
+        sso_session["capabilities"]["operator_webui_config"], false,
+        "SSO session tokens must not inherit operator privileges"
+    );
+    assert_eq!(
+        llm_providers_status(&app, &sso_bearer, Method::GET).await,
+        StatusCode::FORBIDDEN,
+        "SSO session tokens must be denied on operator LLM config routes"
+    );
+    assert_eq!(
+        llm_providers_status(&app, &sso_bearer, Method::HEAD).await,
+        StatusCode::FORBIDDEN,
+        "SSO session tokens must be denied on operator LLM config routes before Axum routes HEAD through GET"
+    );
+
+    let operator_session = session_payload(&app, "env-operator-token").await;
+    assert_eq!(operator_session["user_id"], "operator");
+    assert_eq!(
+        operator_session["capabilities"]["operator_webui_config"], true,
+        "the env bearer token must keep operator capability when SSO is mounted"
+    );
+    let operator_status = llm_providers_status(&app, "env-operator-token", Method::GET).await;
+    assert_ne!(operator_status, StatusCode::UNAUTHORIZED);
+    assert_ne!(operator_status, StatusCode::FORBIDDEN);
+    assert_ne!(
+        operator_status,
+        StatusCode::NOT_FOUND,
+        "operator routes must be mounted when the composite authenticator contains an env operator token"
+    );
 }
 
 #[tokio::test]

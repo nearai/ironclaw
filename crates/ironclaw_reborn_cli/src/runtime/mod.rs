@@ -394,35 +394,45 @@ pub(crate) fn build_services_input_with_options(
     // CLI-shaped default baked into composition).
     let config_file = read_config_file(config)?;
 
-    reject_unsupported_runtime_sections(config_file.as_ref(), caller)?;
-
     let owner_id = default_owner_id(config_file.as_ref());
 
-    let local_dev_root: PathBuf = config.home().path().join("local-dev");
-
-    let workspace_root = std::env::current_dir()
-        .context("failed to resolve current directory for local-dev workspace")?;
     let profile = effective_profile(config, config_file.as_ref())?;
-    let mut services_input = local_runtime_build_input_with_options(
-        composition_profile(profile),
-        owner_id,
-        local_dev_root,
-        RebornLocalRuntimeProfileOptions {
-            confirm_host_access: options.confirm_host_access,
-        },
-    )
-    .with_context(|| {
-        format!(
-            "ironclaw-reborn run currently supports profile=local-dev or profile=local-dev-yolo; \
-                     got profile={profile}. Production wiring lands in a follow-up slice."
-        )
-    })?
-    .with_local_dev_workspace_root(workspace_root);
-    if services_input.requires_local_dev_confirmed_host_home_root() {
-        let host_home_root =
-            confirmed_host_home_root(options).context("local-dev-yolo host access")?;
-        services_input = services_input.with_local_dev_confirmed_host_home_root(host_home_root);
-    }
+    reject_unsupported_runtime_sections(config_file.as_ref(), caller, profile)?;
+    let mut services_input = match profile {
+        RebornProfile::LocalDev | RebornProfile::LocalDevYolo => {
+            let local_dev_root: PathBuf = config.home().path().join("local-dev");
+            let workspace_root = std::env::current_dir()
+                .context("failed to resolve current directory for local-dev workspace")?;
+            let mut services_input = local_runtime_build_input_with_options(
+                composition_profile(profile),
+                owner_id,
+                local_dev_root,
+                RebornLocalRuntimeProfileOptions {
+                    confirm_host_access: options.confirm_host_access,
+                },
+            )
+            .with_context(|| {
+                format!(
+                    "ironclaw-reborn run currently supports profile=local-dev or profile=local-dev-yolo; \
+                     got profile={profile}."
+                )
+            })?
+            .with_local_dev_workspace_root(workspace_root);
+            if services_input.requires_local_dev_confirmed_host_home_root() {
+                let host_home_root =
+                    confirmed_host_home_root(options).context("local-dev-yolo host access")?;
+                services_input =
+                    services_input.with_local_dev_confirmed_host_home_root(host_home_root);
+            }
+            services_input
+        }
+        RebornProfile::Production | RebornProfile::MigrationDryRun => {
+            // MigrationDryRun needs production storage handles so follow-up migration
+            // code can inspect durable schema state; this branch only constructs
+            // those handles and does not execute migration writes.
+            build_production_services_input(profile, owner_id, config_file.as_ref())?
+        }
+    };
     if let Some(ResolvedGoogleOAuthConfig {
         client,
         hosted_domain_hint: _hosted_domain_hint,
@@ -435,6 +445,31 @@ pub(crate) fn build_services_input_with_options(
         services_input,
         config_file,
     })
+}
+
+#[cfg(feature = "postgres")]
+fn build_production_services_input(
+    profile: RebornProfile,
+    owner_id: &str,
+    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+) -> anyhow::Result<RebornBuildInput> {
+    RebornBuildInput::postgres_from_config_and_env(
+        composition_profile(profile),
+        owner_id,
+        config_file,
+    )
+    .map_err(anyhow::Error::from)
+}
+#[cfg(not(feature = "postgres"))]
+fn build_production_services_input(
+    profile: RebornProfile,
+    _owner_id: &str,
+    _config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+) -> anyhow::Result<RebornBuildInput> {
+    anyhow::bail!(
+        "profile={profile} requires a binary built with the `postgres` feature for production \
+         storage; the default PostgreSQL URL env var is IRONCLAW_REBORN_POSTGRES_URL"
+    )
 }
 
 pub(crate) fn resolve_google_oauth_config_from_env()
@@ -614,6 +649,7 @@ pub(crate) fn effective_profile(
 fn reject_unsupported_runtime_sections(
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
     caller: RuntimeInputCaller,
+    profile: RebornProfile,
 ) -> anyhow::Result<()> {
     let Some(file) = config_file else {
         return Ok(());
@@ -635,7 +671,12 @@ fn reject_unsupported_runtime_sections(
     }
 
     let mut sections = Vec::new();
-    if file.policy.is_some() {
+    if file.policy.is_some()
+        && !matches!(
+            profile,
+            RebornProfile::Production | RebornProfile::MigrationDryRun
+        )
+    {
         sections.push("[policy]");
     }
     if file.drivers.is_some() {
@@ -832,6 +873,559 @@ regex_activation_enabled = false
             "host_workspace_and_home"
         );
         assert_eq!(policy.secret_mode.as_str(), "inherited_env");
+    }
+
+    #[cfg(feature = "postgres")]
+    fn boot_config_with_config_toml(
+        profile: &str,
+        config_toml: &str,
+    ) -> (tempfile::TempDir, RebornBootConfig) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        std::fs::write(reborn_home.join("config.toml"), config_toml).expect("write config");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            Some(profile.into()),
+        )
+        .expect("boot config");
+        (temp, config)
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn build_runtime_input_for_local_dev_rejects_policy_section() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let (_temp, config) = boot_config_with_config_toml(
+            "local-dev",
+            r#"
+[policy]
+deployment_mode = "hosted_multi_tenant"
+default_profile = "secure_default"
+"#,
+        );
+
+        let err = build_runtime_input(&config, RuntimeInputCaller::Run)
+            .err()
+            .expect("local-dev must reject policy section");
+
+        assert!(
+            err.to_string().contains("[policy]"),
+            "error must mention policy section, got: {err:#}"
+        );
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn build_runtime_input_production_requires_storage_section() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _postgres_url = EnvGuard::clear("IRONCLAW_REBORN_POSTGRES_URL");
+        let _secret_master_key = EnvGuard::clear("IRONCLAW_REBORN_SECRET_MASTER_KEY");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            Some("production".into()),
+        )
+        .expect("boot config");
+
+        let err = build_runtime_input(&config, RuntimeInputCaller::Run)
+            .err()
+            .expect("production requires explicit storage config");
+
+        assert!(
+            err.to_string().contains("[storage]"),
+            "error must mention storage config, got: {err:#}"
+        );
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn build_runtime_input_production_requires_postgres_url_env_value() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _postgres_url = EnvGuard::clear("IRONCLAW_REBORN_POSTGRES_URL");
+        let _secret_master_key = EnvGuard::clear("IRONCLAW_REBORN_SECRET_MASTER_KEY");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        std::fs::write(
+            reborn_home.join("config.toml"),
+            r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+
+[policy]
+deployment_mode = "hosted_multi_tenant"
+default_profile = "secure_default"
+"#,
+        )
+        .expect("write config");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            Some("production".into()),
+        )
+        .expect("boot config");
+
+        let err = build_runtime_input(&config, RuntimeInputCaller::Run)
+            .err()
+            .expect("missing Postgres URL env must fail closed");
+
+        assert!(
+            err.to_string().contains("IRONCLAW_REBORN_POSTGRES_URL"),
+            "error must mention missing env var name, got: {err:#}"
+        );
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn build_runtime_input_production_storage_section_missing_backend_field() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _postgres_url = EnvGuard::clear("IRONCLAW_REBORN_POSTGRES_URL");
+        let _secret_master_key = EnvGuard::clear("IRONCLAW_REBORN_SECRET_MASTER_KEY");
+        let (_temp, config) = boot_config_with_config_toml(
+            "production",
+            r#"
+[storage]
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+"#,
+        );
+
+        let err = build_runtime_input(&config, RuntimeInputCaller::Run)
+            .err()
+            .expect("missing backend must fail closed");
+        assert!(
+            err.to_string().contains("backend"),
+            "error must mention missing backend field, got: {err:#}"
+        );
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn build_runtime_input_production_requires_policy_section() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _postgres_url = EnvGuard::set(
+            "IRONCLAW_REBORN_POSTGRES_URL",
+            "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=require",
+        );
+        let _secret_master_key = EnvGuard::set(
+            "IRONCLAW_REBORN_SECRET_MASTER_KEY",
+            "test-secret-master-key",
+        );
+        let (_temp, config) = boot_config_with_config_toml(
+            "production",
+            r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+"#,
+        );
+
+        let err = build_runtime_input(&config, RuntimeInputCaller::Run)
+            .err()
+            .expect("production requires policy config");
+
+        assert!(
+            err.to_string().contains("[policy]"),
+            "error must mention policy config, got: {err:#}"
+        );
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn build_runtime_input_production_rejects_invalid_policy_deployment_mode() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _postgres_url = EnvGuard::set(
+            "IRONCLAW_REBORN_POSTGRES_URL",
+            "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=require",
+        );
+        let _secret_master_key = EnvGuard::set(
+            "IRONCLAW_REBORN_SECRET_MASTER_KEY",
+            "test-secret-master-key",
+        );
+        let (_temp, config) = boot_config_with_config_toml(
+            "production",
+            r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+
+[policy]
+deployment_mode = "not_a_deployment"
+default_profile = "secure_default"
+"#,
+        );
+
+        let err = build_runtime_input(&config, RuntimeInputCaller::Run)
+            .err()
+            .expect("invalid deployment mode must fail closed");
+
+        assert!(
+            format!("{err:#}").contains("deployment_mode"),
+            "error must mention deployment_mode, got: {err:#}"
+        );
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn build_runtime_input_production_rejects_invalid_policy_default_profile() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _postgres_url = EnvGuard::set(
+            "IRONCLAW_REBORN_POSTGRES_URL",
+            "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=require",
+        );
+        let _secret_master_key = EnvGuard::set(
+            "IRONCLAW_REBORN_SECRET_MASTER_KEY",
+            "test-secret-master-key",
+        );
+        let (_temp, config) = boot_config_with_config_toml(
+            "production",
+            r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+
+[policy]
+deployment_mode = "hosted_multi_tenant"
+default_profile = "not_a_profile"
+"#,
+        );
+
+        let err = build_runtime_input(&config, RuntimeInputCaller::Run)
+            .err()
+            .expect("invalid default profile must fail closed");
+
+        assert!(
+            format!("{err:#}").contains("default_profile"),
+            "error must mention default_profile, got: {err:#}"
+        );
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn build_runtime_input_production_rejects_unsupported_backend() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let (_temp, config) = boot_config_with_config_toml(
+            "production",
+            r#"
+[storage]
+backend = "libsql"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+"#,
+        );
+
+        let err = build_runtime_input(&config, RuntimeInputCaller::Run)
+            .err()
+            .expect("unsupported backend must fail closed");
+        assert!(
+            err.to_string().contains("postgres") && err.to_string().contains("libsql"),
+            "error must mention supported and bad backend values, got: {err:#}"
+        );
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn build_runtime_input_production_rejects_whitespace_only_postgres_url() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _postgres_url = EnvGuard::set("IRONCLAW_REBORN_POSTGRES_URL", "   ");
+        let _secret_master_key =
+            EnvGuard::set("IRONCLAW_REBORN_SECRET_MASTER_KEY", "test-master-key");
+        let (_temp, config) = boot_config_with_config_toml(
+            "production",
+            r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+"#,
+        );
+
+        let err = build_runtime_input(&config, RuntimeInputCaller::Run)
+            .err()
+            .expect("whitespace-only URL env must fail closed");
+        assert!(
+            err.to_string().contains("empty"),
+            "error must mention empty URL env var, got: {err:#}"
+        );
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn build_runtime_input_production_preserves_whitespace_secret_master_key() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _postgres_url = EnvGuard::set(
+            "IRONCLAW_REBORN_POSTGRES_URL",
+            "postgres://localhost/ironclaw_reborn_cli_test",
+        );
+        let _secret_master_key = EnvGuard::set("IRONCLAW_REBORN_SECRET_MASTER_KEY", "   ");
+        let (_temp, config) = boot_config_with_config_toml(
+            "production",
+            r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+
+[policy]
+deployment_mode = "hosted_multi_tenant"
+default_profile = "secure_default"
+"#,
+        );
+
+        let runtime_input =
+            build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+        let services = runtime_input.services.expect("services input");
+        assert_eq!(services.profile(), RebornCompositionProfile::Production);
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn build_runtime_input_production_uses_custom_url_env_name() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _default_postgres_url = EnvGuard::clear("IRONCLAW_REBORN_POSTGRES_URL");
+        let _custom_postgres_url = EnvGuard::set(
+            "IRONCLAW_REBORN_CUSTOM_POSTGRES_URL",
+            "postgres://localhost/ironclaw_reborn_cli_test",
+        );
+        let _secret_master_key =
+            EnvGuard::set("IRONCLAW_REBORN_SECRET_MASTER_KEY", "test-master-key");
+        let (_temp, config) = boot_config_with_config_toml(
+            "production",
+            r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_CUSTOM_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+
+[policy]
+deployment_mode = "hosted_multi_tenant"
+default_profile = "secure_default"
+"#,
+        );
+
+        let runtime_input =
+            build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+        let services = runtime_input.services.expect("services input");
+        assert_eq!(services.profile(), RebornCompositionProfile::Production);
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn build_runtime_input_production_constructs_migration_dry_run_services_input() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _postgres_url = EnvGuard::set(
+            "IRONCLAW_REBORN_POSTGRES_URL",
+            "postgres://localhost/ironclaw_reborn_cli_test",
+        );
+        let _secret_master_key =
+            EnvGuard::set("IRONCLAW_REBORN_SECRET_MASTER_KEY", "test-master-key");
+        let (_temp, config) = boot_config_with_config_toml(
+            "migration-dry-run",
+            r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+
+[policy]
+deployment_mode = "hosted_multi_tenant"
+default_profile = "secure_default"
+"#,
+        );
+
+        let runtime_input =
+            build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+        let services = runtime_input.services.expect("services input");
+        assert_eq!(
+            services.profile(),
+            RebornCompositionProfile::MigrationDryRun
+        );
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn build_runtime_input_production_requires_secret_master_key_env_value() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _postgres_url = EnvGuard::set(
+            "IRONCLAW_REBORN_POSTGRES_URL",
+            "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=require",
+        );
+        let _secret_master_key = EnvGuard::clear("IRONCLAW_REBORN_SECRET_MASTER_KEY");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        std::fs::write(
+            reborn_home.join("config.toml"),
+            r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+
+[policy]
+deployment_mode = "hosted_multi_tenant"
+default_profile = "secure_default"
+"#,
+        )
+        .expect("write config");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            Some("production".into()),
+        )
+        .expect("boot config");
+
+        let err = build_runtime_input(&config, RuntimeInputCaller::Run)
+            .err()
+            .expect("missing secret master key env must fail closed");
+        let rendered = format!("{err:#}");
+
+        assert!(
+            rendered.contains("IRONCLAW_REBORN_SECRET_MASTER_KEY"),
+            "error must mention missing secret master key env var, got: {rendered}"
+        );
+        assert!(!rendered.contains("RAW_PASSWORD_SENTINEL_3162"));
+        assert!(!rendered.contains("postgres://"));
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn build_runtime_input_production_rejects_remote_postgres_sslmode_disable_redacted() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _postgres_url = EnvGuard::set(
+            "IRONCLAW_REBORN_POSTGRES_URL",
+            "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=disable",
+        );
+        let _secret_master_key =
+            EnvGuard::set("IRONCLAW_REBORN_SECRET_MASTER_KEY", "test-master-key");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        std::fs::write(
+            reborn_home.join("config.toml"),
+            r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+
+[policy]
+deployment_mode = "hosted_multi_tenant"
+default_profile = "secure_default"
+"#,
+        )
+        .expect("write config");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            Some("production".into()),
+        )
+        .expect("boot config");
+
+        let err = build_runtime_input(&config, RuntimeInputCaller::Run)
+            .err()
+            .expect("sslmode=disable must fail closed before connecting");
+        let rendered = format!("{err:#}");
+
+        assert!(
+            rendered.contains("sslmode=require") && rendered.contains("sslmode=disable"),
+            "error should explain TLS requirement, got: {rendered}"
+        );
+        assert!(!rendered.contains("RAW_PASSWORD_SENTINEL_3162"));
+        assert!(!rendered.contains("postgres://"));
+        assert!(!rendered.contains("db.example.com"));
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn build_runtime_input_production_constructs_postgres_services_input() {
+        let lock = lock_trigger_env();
+        let (enabled, interval) = clear_trigger_poller_env();
+        let postgres_url = EnvGuard::set(
+            "IRONCLAW_REBORN_POSTGRES_URL",
+            "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=require",
+        );
+        let secret_master_key =
+            EnvGuard::set("IRONCLAW_REBORN_SECRET_MASTER_KEY", "test-master-key");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        std::fs::write(
+            reborn_home.join("config.toml"),
+            r#"
+[identity]
+default_owner = "prod-owner"
+
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+
+[policy]
+deployment_mode = "hosted_multi_tenant"
+default_profile = "secure_default"
+"#,
+        )
+        .expect("write config");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            Some("production".into()),
+        )
+        .expect("boot config");
+
+        let runtime_input =
+            build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+        let services = runtime_input.services.expect("services input");
+
+        assert_eq!(services.profile(), RebornCompositionProfile::Production);
+        assert_eq!(services.owner_id(), "prod-owner");
+        let runtime_policy = services
+            .runtime_policy()
+            .expect("production CLI input wires runtime policy");
+        assert_eq!(runtime_policy.deployment.as_str(), "hosted_multi_tenant");
+        assert_eq!(runtime_policy.resolved_profile.as_str(), "secure_default");
+
+        drop(postgres_url);
+        drop(secret_master_key);
+        drop(interval);
+        drop(enabled);
+        drop(lock);
     }
 
     // Regression for the review point that `serve` rejected legitimate

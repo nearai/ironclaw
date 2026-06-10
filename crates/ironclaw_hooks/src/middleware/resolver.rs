@@ -113,6 +113,7 @@ mod tests {
             surface_version: CapabilitySurfaceVersion::new("v1").expect("ok"),
             capability_id: CapabilityId::new("cap.x").expect("ok"),
             input_ref: CapabilityInputRef::new("input:x").expect("ok"),
+            approval_resume: None,
         };
         assert!(resolver.resolve(&invocation).await.is_none());
     }
