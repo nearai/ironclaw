@@ -32,8 +32,8 @@ use ironclaw_reborn_traces::client::{
 };
 use ironclaw_reborn_traces::contribution::{self as trace, read_trace_policy_for_scope};
 use ironclaw_threads::{
-    MessageKind, MessageStatus, SessionThreadError, SessionThreadService, ThreadHistoryRequest,
-    ThreadMessageRecord, ThreadScope,
+    ContextWindow, LoadContextWindowRequest, MessageKind, MessageStatus, SessionThreadError,
+    SessionThreadService, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
 };
 use ironclaw_turns::{TurnError, TurnEventKind, TurnEventSink, TurnLifecycleEvent};
 use tokio::task::JoinHandle;
@@ -75,9 +75,48 @@ impl TraceCaptureHistorySource for SessionThreadHistorySource {
         &self,
         request: ThreadHistoryRequest,
     ) -> Result<Vec<ThreadMessageRecord>, SessionThreadError> {
-        let history = self.thread_service.list_thread_history(request).await?;
-        Ok(history.messages)
+        // Read the model-context (replay) view, NOT list_thread_history: the
+        // history projection nulls `tool_result_provider_call` for product
+        // display, which would strip every tool call from the captured trace
+        // and force a text-only (low-value, sub-threshold) envelope.
+        let window = self
+            .thread_service
+            .load_context_window(LoadContextWindowRequest {
+                scope: request.scope,
+                thread_id: request.thread_id,
+                max_messages: CAPTURE_MESSAGE_LIMIT,
+            })
+            .await?;
+        Ok(context_window_to_records(window))
     }
+}
+
+/// Map context-window messages back into the record shape the capture adapter
+/// consumes, preserving `tool_result_provider_call`. Context-window messages
+/// are already model-context-filtered and committed, so the synthesized
+/// `status` is `Finalized`.
+fn context_window_to_records(window: ContextWindow) -> Vec<ThreadMessageRecord> {
+    let thread_id = window.thread_id;
+    window
+        .messages
+        .into_iter()
+        .map(|message| ThreadMessageRecord {
+            message_id: message.message_id.unwrap_or_else(ThreadMessageId::new),
+            thread_id: thread_id.clone(),
+            sequence: message.sequence,
+            kind: message.kind,
+            status: MessageStatus::Finalized,
+            actor_id: None,
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            turn_id: None,
+            turn_run_id: None,
+            tool_result_ref: None,
+            tool_result_provider_call: message.tool_result_provider_call,
+            content: Some(message.content),
+            redaction_ref: None,
+        })
+        .collect()
 }
 
 pub(crate) struct TraceCaptureTurnEventSink {
@@ -571,6 +610,22 @@ mod tests {
         assert_eq!(messages[1].content, "hi");
     }
 
+    fn provider_call_reference(tool_name: &str) -> ProviderToolCallReferenceEnvelope {
+        ProviderToolCallReferenceEnvelope {
+            provider_id: "openai".to_string(),
+            provider_model_id: "gpt".to_string(),
+            provider_turn_id: "turn-1".to_string(),
+            provider_call_id: "call-1".to_string(),
+            provider_tool_name: tool_name.to_string(),
+            capability_id: CapabilityId::new(format!("builtin.{tool_name}"))
+                .expect("capability id"),
+            arguments: serde_json::json!({ "url": "https://example.com" }),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        }
+    }
+
     fn tool_result_record(tool_name: &str, result: &str) -> ThreadMessageRecord {
         ThreadMessageRecord {
             message_id: ThreadMessageId::new(),
@@ -584,22 +639,76 @@ mod tests {
             turn_id: None,
             turn_run_id: None,
             tool_result_ref: Some("ref-1".to_string()),
-            tool_result_provider_call: Some(ProviderToolCallReferenceEnvelope {
-                provider_id: "openai".to_string(),
-                provider_model_id: "gpt".to_string(),
-                provider_turn_id: "turn-1".to_string(),
-                provider_call_id: "call-1".to_string(),
-                provider_tool_name: tool_name.to_string(),
-                capability_id: CapabilityId::new(format!("builtin.{tool_name}"))
-                    .expect("capability id"),
-                arguments: serde_json::json!({ "url": "https://example.com" }),
-                response_reasoning: None,
-                reasoning: None,
-                signature: None,
-            }),
+            tool_result_provider_call: Some(provider_call_reference(tool_name)),
             content: Some(result.to_string()),
             redaction_ref: None,
         }
+    }
+
+    #[tokio::test]
+    async fn capture_history_source_preserves_tool_call_provider_metadata() {
+        use ironclaw_threads::{
+            AppendToolResultReferenceRequest, EnsureThreadRequest, InMemorySessionThreadService,
+            ToolResultSafeSummary,
+        };
+
+        // The capture history source must read through a metadata-preserving
+        // path (load_context_window), NOT list_thread_history — the latter
+        // nulls tool_result_provider_call for product display, which starves
+        // the capture adapter of every tool call and forces a text-only trace.
+        let service: Arc<dyn SessionThreadService> =
+            Arc::new(InMemorySessionThreadService::default());
+        let scope = ThreadScope {
+            tenant_id: ironclaw_host_api::TenantId::new("trace-cap-src-tenant").expect("tenant"),
+            agent_id: ironclaw_host_api::AgentId::new("trace-cap-src-agent").expect("agent"),
+            project_id: None,
+            owner_user_id: Some(UserId::new("trace-cap-src-user").expect("user")),
+            mission_id: None,
+        };
+        let thread = service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(
+                    ironclaw_host_api::ThreadId::new("trace-cap-src-thread").expect("thread"),
+                ),
+                created_by_actor_id: "actor".into(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .expect("ensure thread");
+        service
+            .append_tool_result_reference(AppendToolResultReferenceRequest {
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                turn_run_id: "run-1".into(),
+                result_ref: "result:demo".into(),
+                safe_summary: ToolResultSafeSummary::new("safe tool result").expect("summary"),
+                provider_call: Some(provider_call_reference("web_fetch")),
+                model_observation: None,
+            })
+            .await
+            .expect("append tool result");
+
+        let source = SessionThreadHistorySource {
+            thread_service: Arc::clone(&service),
+        };
+        let records = source
+            .thread_history_messages(ThreadHistoryRequest {
+                scope,
+                thread_id: thread.thread_id,
+            })
+            .await
+            .expect("history read");
+
+        let tool_row = records
+            .iter()
+            .find(|r| matches!(r.kind, MessageKind::ToolResultReference))
+            .expect("tool-result row must be present in capture history");
+        assert!(
+            tool_row.tool_result_provider_call.is_some(),
+            "capture history must preserve tool_result_provider_call"
+        );
     }
 
     #[test]
