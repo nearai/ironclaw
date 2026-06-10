@@ -898,6 +898,11 @@ pub struct TriggeredRunDeliveryDriver {
     delivery_permits: Arc<Semaphore>,
     delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
     route_store: Arc<dyn DeliveredGateRouteStore>,
+    /// Fallback agent id used when the submitted `TurnScope::agent_id` is
+    /// `None`. Must match the `default_agent_id` that
+    /// `ConversationContentRefMaterializer` (and `record_trigger_prompt`)
+    /// uses so the thread-scope key aligns with where the run was stored.
+    fallback_agent_id: ironclaw_host_api::AgentId,
 }
 
 impl TriggeredRunDeliveryDriver {
@@ -905,12 +910,14 @@ impl TriggeredRunDeliveryDriver {
         services: SlackFinalReplyDeliveryServices,
         delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
         route_store: Arc<dyn DeliveredGateRouteStore>,
+        fallback_agent_id: ironclaw_host_api::AgentId,
     ) -> Self {
         Self::with_settings(
             services,
             SlackFinalReplyDeliverySettings::default(),
             delivery_store,
             route_store,
+            fallback_agent_id,
         )
     }
 
@@ -919,6 +926,7 @@ impl TriggeredRunDeliveryDriver {
         settings: SlackFinalReplyDeliverySettings,
         delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
         route_store: Arc<dyn DeliveredGateRouteStore>,
+        fallback_agent_id: ironclaw_host_api::AgentId,
     ) -> Self {
         let delivery_permits = Arc::new(Semaphore::new(settings.max_concurrent_deliveries.get()));
         Self {
@@ -927,6 +935,7 @@ impl TriggeredRunDeliveryDriver {
             delivery_permits,
             delivery_store,
             route_store,
+            fallback_agent_id,
         }
     }
 }
@@ -961,6 +970,7 @@ impl PostSubmitDeliveryHook for TriggeredRunDeliveryDriver {
         let settings = self.settings;
         let delivery_store = Arc::clone(&self.delivery_store);
         let route_store = Arc::clone(&self.route_store);
+        let fallback_agent_id = self.fallback_agent_id.clone();
 
         tokio::spawn(async move {
             let Ok(_permit) = permits.clone().acquire_owned().await else {
@@ -986,6 +996,7 @@ impl PostSubmitDeliveryHook for TriggeredRunDeliveryDriver {
                 scope,
                 &*delivery_store,
                 &*route_store,
+                &fallback_agent_id,
             )
             .await;
             tracing::debug!(
@@ -1014,6 +1025,7 @@ async fn deliver_triggered_run(
     scope: TurnScope,
     delivery_store: &dyn TriggeredRunDeliveryStore,
     route_store: &dyn DeliveredGateRouteStore,
+    fallback_agent_id: &ironclaw_host_api::AgentId,
 ) -> TriggeredRunDeliveryOutcomeKind {
     // The actor is the trigger creator.
     let actor = TurnActor::new(fire.creator_user_id.clone());
@@ -1036,13 +1048,16 @@ async fn deliver_triggered_run(
 
     // Build a thread scope for reading the finalized assistant message.
     // The turn scope's thread_id is the canonical thread for this trigger session.
+    // Use the scope's agent_id when present; otherwise fall back to the configured
+    // fallback_agent_id — the same value record_trigger_prompt uses — so the key
+    // matches the thread that was stored at submit time.
     let _thread_id = scope.thread_id.clone();
     let thread_scope = ThreadScope {
         tenant_id: scope.tenant_id.clone(),
-        agent_id: scope.agent_id.clone().unwrap_or_else(|| {
-            ironclaw_host_api::AgentId::new("triggered-delivery-default")
-                .expect("static valid agent id")
-        }),
+        agent_id: scope
+            .agent_id
+            .clone()
+            .unwrap_or_else(|| fallback_agent_id.clone()),
         project_id: scope.project_id.clone(),
         owner_user_id: scope.explicit_owner_user_id().cloned(),
         mission_id: None,
@@ -1184,7 +1199,7 @@ async fn deliver_triggered_run(
                     TriggeredNotificationFailure::NoDefaultConfigured => {
                         TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
                     }
-                    TriggeredNotificationFailure::Denied => TriggeredRunDeliveryOutcomeKind::Failed,
+                    TriggeredNotificationFailure::Denied => TriggeredRunDeliveryOutcomeKind::Denied,
                     TriggeredNotificationFailure::Other(_) => {
                         TriggeredRunDeliveryOutcomeKind::Failed
                     }
@@ -1369,6 +1384,8 @@ async fn deliver_triggered_notification(
     let SlackActionableNotification {
         event_kind,
         payload,
+        // The caller extracts gate_ref_for_routing before this call and records
+        // the delivered-gate route record on success; it is not needed here.
         gate_ref_for_routing: _,
     } = notification;
 
@@ -1989,6 +2006,31 @@ mod tests {
             .expect("finalize message");
     }
 
+    /// Poll `delivery_store` until a record for `run_id` exists, then return it.
+    ///
+    /// The record is written as the very last step of every delivery path, so
+    /// once it is present the spawned task has fully completed. Times out after
+    /// 5 s to prevent hangs in broken test scenarios.
+    async fn wait_for_delivery_record(
+        delivery_store: &InMemoryTriggeredRunDeliveryStore,
+        run_id: TurnRunId,
+    ) -> TriggeredRunDeliveryRecord {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(record) = delivery_store
+                    .load_triggered_run_delivery(run_id)
+                    .await
+                    .expect("load record")
+                {
+                    return record;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("delivery record appeared within 5 s")
+    }
+
     // --- Tests ----------------------------------------------------------------
 
     #[tokio::test]
@@ -2038,13 +2080,14 @@ mod tests {
             settings,
             delivery_store.clone(),
             route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
         );
 
         let fire = minimal_trigger_fire(None);
         driver.on_trigger_submitted(fire, run_id, scope).await;
 
-        // Wait for the spawned task to complete.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Poll until the spawned delivery task writes its outcome record.
+        let record = wait_for_delivery_record(&delivery_store, run_id).await;
 
         // Egress should have been called for chat.postMessage.
         assert!(
@@ -2056,11 +2099,6 @@ mod tests {
         );
 
         // Outcome should be Delivered.
-        let record = delivery_store
-            .load_triggered_run_delivery(run_id)
-            .await
-            .expect("load record")
-            .expect("record exists");
         assert_eq!(record.outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
     }
 
@@ -2108,11 +2146,14 @@ mod tests {
             settings,
             delivery_store.clone(),
             route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
         );
 
         let fire = minimal_trigger_fire(None);
         driver.on_trigger_submitted(fire, run_id, scope).await;
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Poll until the spawned delivery task writes its outcome record.
+        let record = wait_for_delivery_record(&delivery_store, run_id).await;
 
         // No chat.postMessage expected.
         assert!(
@@ -2123,11 +2164,6 @@ mod tests {
             "expected no chat.postMessage call"
         );
 
-        let record = delivery_store
-            .load_triggered_run_delivery(run_id)
-            .await
-            .expect("load record")
-            .expect("record exists");
         assert_eq!(
             record.outcome,
             TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
@@ -2198,11 +2234,15 @@ mod tests {
             settings,
             delivery_store.clone(),
             route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
         );
 
         let fire = minimal_trigger_fire(None);
         driver.on_trigger_submitted(fire, run_id, scope).await;
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        // Poll until the spawned delivery task writes its outcome record (record
+        // is written last, so its presence implies delivery is fully finished).
+        let record = wait_for_delivery_record(&delivery_store, run_id).await;
 
         let calls = egress.calls();
         let post_calls: Vec<_> = calls
@@ -2226,11 +2266,6 @@ mod tests {
             "approval prompt must not contain http(s) URL"
         );
 
-        let record = delivery_store
-            .load_triggered_run_delivery(run_id)
-            .await
-            .expect("load record")
-            .expect("record exists");
         assert_eq!(record.outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
 
         // The delivered approval prompt must record a gate route so a DM
@@ -2272,7 +2307,12 @@ mod tests {
             outbound,
             install,
         );
-        let driver = TriggeredRunDeliveryDriver::new(services, delivery_store.clone(), route_store);
+        let driver = TriggeredRunDeliveryDriver::new(
+            services,
+            delivery_store.clone(),
+            route_store,
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
 
         // project_id is set → non-personal scope → denied immediately (no spawn).
         let project_id = ironclaw_host_api::ProjectId::new("some-project").expect("project");

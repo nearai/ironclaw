@@ -140,6 +140,12 @@ impl TrustedTriggerFireSubmitter for PostSubmitHookWrappedSubmitter {
             // doesn't fire — the poller is not restarted.
             if let Some(hook) = self.hook_slot.get() {
                 hook.on_trigger_submitted(fire, run_id, scope.clone()).await;
+            } else {
+                tracing::warn!(
+                    target = "ironclaw::reborn::trigger_poller",
+                    %run_id,
+                    "triggered run accepted but post-submit hook slot not yet set (startup window); delivery skipped for this fire"
+                );
             }
         }
         Ok(outcome)

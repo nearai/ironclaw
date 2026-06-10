@@ -313,7 +313,14 @@ pub fn build_triggered_run_delivery_hook(
         delivery_sink,
         auth_challenges: runtime.auth_challenge_provider(),
     };
-    let driver = TriggeredRunDeliveryDriver::new(services, delivery_store, route_store);
+    // Pass config.agent_id as the fallback so the ThreadScope key matches the
+    // value ConversationContentRefMaterializer uses (same runtime default_agent_id).
+    let driver = TriggeredRunDeliveryDriver::new(
+        services,
+        delivery_store,
+        route_store,
+        config.agent_id.clone(),
+    );
     Ok(Arc::new(driver))
 }
 

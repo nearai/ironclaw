@@ -50,13 +50,13 @@ use ironclaw_product_workflow::{
 /// service.
 ///
 /// See the module-level documentation for security invariants.
-pub struct DeliveredGateRoutingApprovalService {
+pub(crate) struct DeliveredGateRoutingApprovalService {
     inner: Arc<dyn ApprovalInteractionService>,
     routes: Arc<dyn DeliveredGateRouteStore>,
 }
 
 impl DeliveredGateRoutingApprovalService {
-    pub fn new(
+    pub(crate) fn new(
         inner: Arc<dyn ApprovalInteractionService>,
         routes: Arc<dyn DeliveredGateRouteStore>,
     ) -> Self {
