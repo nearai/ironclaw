@@ -129,12 +129,19 @@ fn automation_info_from_record(
 ) -> Option<RebornAutomationInfo> {
     let source = automation_source_from_record(&record)?;
     let is_active = record.has_active_fire();
+    // Completed is terminal: the stored next_run_at is a stale past slot and
+    // would render as a misleading "next run" date. Paused keeps its slot so
+    // the panel can show when a resumed trigger would next fire.
+    let next_run_at = match record.state {
+        TriggerState::Completed => None,
+        TriggerState::Scheduled | TriggerState::Paused => Some(record.next_run_at),
+    };
     Some(RebornAutomationInfo {
         automation_id: record.trigger_id.to_string(),
         name: record.name,
         source,
         state: map_trigger_state(record.state),
-        next_run_at: Some(record.next_run_at),
+        next_run_at,
         last_run_at: record.last_run_at,
         last_status: record.last_status.map(map_trigger_run_status),
         recent_runs: runs.iter().filter_map(map_recent_run).collect(),
@@ -579,13 +586,23 @@ mod tests {
         let repo = Arc::new(InMemoryTriggerRepository::default());
         let c = caller();
 
+        // Completed is terminal, so its stale next_run_at slot is suppressed
+        // on the wire; Scheduled and Paused keep theirs.
         let states = [
-            (TriggerState::Scheduled, RebornAutomationState::Scheduled),
-            (TriggerState::Paused, RebornAutomationState::Paused),
-            (TriggerState::Completed, RebornAutomationState::Completed),
+            (
+                TriggerState::Scheduled,
+                RebornAutomationState::Scheduled,
+                true,
+            ),
+            (TriggerState::Paused, RebornAutomationState::Paused, true),
+            (
+                TriggerState::Completed,
+                RebornAutomationState::Completed,
+                false,
+            ),
         ];
 
-        for (trigger_state, expected_state) in &states {
+        for (trigger_state, expected_state, expect_next_run_at) in &states {
             let id = TriggerId::new();
             let record = make_record(id, &c, *trigger_state, "Test trigger", "0 9 * * *");
             repo.upsert_trigger(record).await.expect("upsert");
@@ -601,6 +618,11 @@ mod tests {
                 .find(|a| a.automation_id == id.to_string())
                 .expect("record present");
             assert_eq!(found.state, *expected_state);
+            assert_eq!(
+                found.next_run_at.is_some(),
+                *expect_next_run_at,
+                "next_run_at presence mismatch for {trigger_state:?}"
+            );
         }
     }
 
