@@ -48,6 +48,7 @@ FROM deps AS builder
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
+COPY migrations/ migrations/
 COPY skills/ skills/
 COPY tests/ tests/
 COPY wit/ wit/
@@ -81,8 +82,6 @@ RUN useradd -m -d /home/ironclaw -u 1000 ironclaw \
     && mkdir -p /data/ironclaw-reborn /workspace \
     && chown -R ironclaw:ironclaw /home/ironclaw /data/ironclaw-reborn /workspace \
     && chmod +x /usr/local/bin/ironclaw-reborn-entrypoint
-
-VOLUME ["/data/ironclaw-reborn"]
 
 WORKDIR /workspace
 

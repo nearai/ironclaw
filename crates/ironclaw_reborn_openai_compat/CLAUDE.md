@@ -70,7 +70,9 @@ handles Chat Completions create and optional projection-backed SSE streaming:
   cursors, product refs, or backend details.
 - The route requires a verified `OpenAiCompatAuthenticatedCaller` extension
   minted by host auth middleware. Do not mint auth evidence in this crate's
-  production feature set.
+  production feature set. The verified auth evidence must carry the same
+  tenant id and user subject as `OpenAiCompatActorScope`; unscoped or
+  cross-tenant claims fail closed before product workflow access.
 - Streaming create consumes a composition-supplied projection streamer and must
   suppress keepalive/control frames, internal refs, projection cursors, and
   sanitized backend details.

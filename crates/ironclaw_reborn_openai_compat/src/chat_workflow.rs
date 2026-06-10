@@ -71,6 +71,14 @@ impl OpenAiCompatAuthenticatedCaller {
                 None,
             ));
         }
+        if claim.tenant_id() != Some(scope.tenant_id()) {
+            return Err(OpenAiCompatHttpError::from_kind(
+                403,
+                false,
+                crate::OpenAiCompatErrorKind::PermissionDenied,
+                None,
+            ));
+        }
         Ok(Self {
             scope,
             auth_evidence,

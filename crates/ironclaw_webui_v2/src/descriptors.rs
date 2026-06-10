@@ -51,6 +51,8 @@ pub const WEBUI_V2_ROUTE_START_CODEX_LOGIN: &str = "webui.v2.start_codex_login";
 pub const WEBUI_V2_ROUTE_OPERATOR_GET_SETUP: &str = "webui.v2.operator.get_setup";
 pub const WEBUI_V2_ROUTE_OPERATOR_RUN_SETUP: &str = "webui.v2.operator.run_setup";
 pub const WEBUI_V2_ROUTE_OPERATOR_LIST_CONFIG: &str = "webui.v2.operator.list_config";
+pub const WEBUI_V2_ROUTE_OPERATOR_GET_CONFIG_KEY: &str = "webui.v2.operator.get_config_key";
+pub const WEBUI_V2_ROUTE_OPERATOR_SET_CONFIG_KEY: &str = "webui.v2.operator.set_config_key";
 pub const WEBUI_V2_ROUTE_OPERATOR_VALIDATE_CONFIG: &str = "webui.v2.operator.validate_config";
 pub const WEBUI_V2_ROUTE_OPERATOR_DIAGNOSTICS: &str = "webui.v2.operator.diagnostics";
 pub const WEBUI_V2_ROUTE_OPERATOR_STATUS: &str = "webui.v2.operator.status";
@@ -95,6 +97,7 @@ pub const WEBUI_V2_PATTERN_COMPLETE_NEARAI_WALLET_LOGIN: &str = "/api/webchat/v2
 pub const WEBUI_V2_PATTERN_START_CODEX_LOGIN: &str = "/api/webchat/v2/llm/codex/login";
 pub const WEBUI_V2_PATTERN_OPERATOR_SETUP: &str = "/api/webchat/v2/operator/setup";
 pub const WEBUI_V2_PATTERN_OPERATOR_CONFIG: &str = "/api/webchat/v2/operator/config";
+pub const WEBUI_V2_PATTERN_OPERATOR_CONFIG_KEY: &str = "/api/webchat/v2/operator/config/{key}";
 pub const WEBUI_V2_PATTERN_OPERATOR_CONFIG_VALIDATE: &str =
     "/api/webchat/v2/operator/config/validate";
 pub const WEBUI_V2_PATTERN_OPERATOR_DIAGNOSTICS: &str = "/api/webchat/v2/operator/diagnostics";
@@ -147,6 +150,8 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         operator_get_setup_descriptor(),
         operator_run_setup_descriptor(),
         operator_list_config_descriptor(),
+        operator_get_config_key_descriptor(),
+        operator_set_config_key_descriptor(),
         operator_validate_config_descriptor(),
         operator_diagnostics_descriptor(),
         operator_status_descriptor(),
@@ -186,6 +191,8 @@ pub fn is_webui_v2_operator_webui_config_route_id(route_id: &str) -> bool {
             WEBUI_V2_ROUTE_OPERATOR_GET_SETUP
                 | WEBUI_V2_ROUTE_OPERATOR_RUN_SETUP
                 | WEBUI_V2_ROUTE_OPERATOR_LIST_CONFIG
+                | WEBUI_V2_ROUTE_OPERATOR_GET_CONFIG_KEY
+                | WEBUI_V2_ROUTE_OPERATOR_SET_CONFIG_KEY
                 | WEBUI_V2_ROUTE_OPERATOR_VALIDATE_CONFIG
                 | WEBUI_V2_ROUTE_OPERATOR_DIAGNOSTICS
                 | WEBUI_V2_ROUTE_OPERATOR_STATUS
@@ -709,6 +716,34 @@ fn operator_list_config_descriptor() -> IngressRouteDescriptor {
             AuditTraceClass::UserAction,
             AllowedEffectPath::ProjectionOnly,
             StreamingMode::None,
+        ),
+    )
+}
+
+fn operator_get_config_key_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_OPERATOR_GET_CONFIG_KEY,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_OPERATOR_CONFIG_KEY,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn operator_set_config_key_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_OPERATOR_SET_CONFIG_KEY,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_OPERATOR_CONFIG_KEY,
+        mutation_policy(
+            body_limit_kib(16),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
         ),
     )
 }

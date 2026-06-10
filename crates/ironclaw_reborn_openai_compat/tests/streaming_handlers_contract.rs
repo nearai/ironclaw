@@ -780,7 +780,11 @@ fn caller() -> OpenAiCompatAuthenticatedCaller {
             None,
             None,
         ),
-        ProtocolAuthEvidence::test_verified(AuthRequirement::BearerToken, "user-a"),
+        ProtocolAuthEvidence::test_verified_for_tenant(
+            AuthRequirement::BearerToken,
+            "user-a",
+            TenantId::new("tenant-a").expect("tenant"),
+        ),
     )
     .expect("caller")
 }
