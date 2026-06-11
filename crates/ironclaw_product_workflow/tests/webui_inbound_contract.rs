@@ -391,14 +391,14 @@ fn decode_attachments_decodes_metadata_kind_and_bytes() {
         .expect("valid attachments decode");
     assert_eq!(decoded.len(), 2);
 
+    // `kind`/`fallback_extension` are derived from `mime_type` inside the
+    // landing bridge, so the decoded DTO carries only the raw upload fields.
     assert_eq!(decoded[0].mime_type, "application/pdf");
     assert_eq!(decoded[0].filename.as_deref(), Some("report.pdf"));
-    assert_eq!(decoded[0].fallback_extension, "pdf");
     assert_eq!(decoded[0].bytes, b"%PDF-1.7 body");
 
     assert_eq!(decoded[1].mime_type, "image/png");
     assert!(decoded[1].filename.is_none());
-    assert_eq!(decoded[1].fallback_extension, "png");
 }
 
 #[test]

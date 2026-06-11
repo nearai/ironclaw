@@ -4,7 +4,7 @@ use ironclaw_host_api::{
     HostApiError, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, VirtualPath,
 };
 
-const WORKSPACE_ALIAS: &str = "/workspace";
+pub(crate) const WORKSPACE_ALIAS: &str = "/workspace";
 const WORKSPACE_TARGET: &str = "/projects/workspace";
 const HOST_ALIAS: &str = "/host";
 const HOST_TARGET: &str = "/projects/host";

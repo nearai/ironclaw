@@ -136,7 +136,7 @@ impl WebUiSendMessageRequest {
 
         let mut decoded = Vec::with_capacity(self.attachments.len());
         let mut total_bytes = 0usize;
-        for attachment in &self.attachments {
+        for (index, attachment) in self.attachments.iter().enumerate() {
             let mime = normalize_attachment_mime(&attachment.mime_type);
             if !ironclaw_common::is_supported_mime(&mime) {
                 return Err(WebUiInboundValidationError::new(
@@ -181,15 +181,13 @@ impl WebUiSendMessageRequest {
                 ));
             }
 
-            let fallback_extension = ironclaw_common::canonical_extension(&mime)
-                .unwrap_or("bin")
-                .to_string();
+            // `kind` and the fallback filename extension are derived from
+            // `mime_type` inside the landing bridge, so the DTO carries only the
+            // raw upload fields here.
             decoded.push(InboundAttachment {
-                id: format!("webui-attachment-{}", decoded.len()),
-                kind: ironclaw_common::kind_for_mime(&mime),
+                id: format!("webui-attachment-{index}"),
                 mime_type: mime,
                 filename: filename.map(str::to_string),
-                fallback_extension,
                 bytes,
             });
         }

@@ -25,8 +25,8 @@ use ironclaw_product_adapters::{
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, AttachmentRef, EnsureThreadRequest,
     MessageContent, MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError,
-    SessionThreadRecord, SessionThreadService, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
-    ThreadScope,
+    SessionThreadRecord, SessionThreadService, ThreadHistory, ThreadHistoryRequest,
+    ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
@@ -1726,14 +1726,10 @@ impl RebornServicesApi for RebornServices {
             let message_content = if attachments.is_empty() {
                 MessageContent::text(content.clone())
             } else {
-                let lander = self.inbound_attachments.as_ref().ok_or_else(|| {
-                    RebornServicesError::from_status_kind(
-                        RebornServicesErrorCode::Unavailable,
-                        RebornServicesErrorKind::ServiceUnavailable,
-                        503,
-                        false,
-                    )
-                })?;
+                let lander = self
+                    .inbound_attachments
+                    .as_ref()
+                    .ok_or_else(|| RebornServicesError::service_unavailable(false))?;
                 let refs = lander
                     .land(&thread_scope, &external_event_id, attachments)
                     .await?;

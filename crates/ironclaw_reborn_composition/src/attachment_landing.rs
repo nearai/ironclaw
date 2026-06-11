@@ -11,14 +11,12 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_attachments::{
-    DEFAULT_PROJECT_MOUNT_ALIAS, InboundAttachment, land_inbound_attachments,
-};
+use ironclaw_attachments::{InboundAttachment, land_inbound_attachments};
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
-use ironclaw_product_workflow::{
-    InboundAttachmentLander, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-};
+use ironclaw_product_workflow::{InboundAttachmentLander, RebornServicesError};
 use ironclaw_threads::{AttachmentRef, ThreadScope};
+
+use crate::local_dev_mounts::WORKSPACE_ALIAS;
 
 /// Lands inbound attachments through a project-scoped workspace filesystem.
 pub(crate) struct ProjectScopedAttachmentLander<F: RootFilesystem> {
@@ -30,7 +28,7 @@ impl<F: RootFilesystem> ProjectScopedAttachmentLander<F> {
     pub(crate) fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self {
             filesystem,
-            project_alias: DEFAULT_PROJECT_MOUNT_ALIAS.to_string(),
+            project_alias: WORKSPACE_ALIAS.to_string(),
         }
     }
 }
@@ -57,13 +55,12 @@ impl<F: RootFilesystem> InboundAttachmentLander for ProjectScopedAttachmentLande
             attachments,
         )
         .await
-        .map_err(|_| RebornServicesError {
-            code: RebornServicesErrorCode::Internal,
-            kind: RebornServicesErrorKind::Internal,
-            status_code: 500,
-            retryable: false,
-            field: None,
-            validation_code: None,
+        .map_err(|error| {
+            // The user-facing error stays a sanitized 500; log the underlying
+            // landing failure (invalid mount path vs. write/permission denied)
+            // so an operator can tell a misconfigured mount from a full disk.
+            tracing::warn!(%error, message_id, "failed to land inbound attachments");
+            RebornServicesError::internal()
         })
     }
 }
@@ -76,11 +73,11 @@ mod tests {
     use ironclaw_host_api::{
         AgentId, MountAlias, MountGrant, MountPermissions, MountView, TenantId, UserId, VirtualPath,
     };
-    use ironclaw_threads::AttachmentKind;
+    use ironclaw_product_workflow::RebornServicesErrorCode;
 
     fn workspace_fs(permissions: MountPermissions) -> Arc<ScopedFilesystem<InMemoryBackend>> {
         let view = MountView::new(vec![MountGrant::new(
-            MountAlias::new(DEFAULT_PROJECT_MOUNT_ALIAS).unwrap(),
+            MountAlias::new(WORKSPACE_ALIAS).unwrap(),
             VirtualPath::new("/projects/workspace").unwrap(),
             permissions,
         )])
@@ -111,10 +108,8 @@ mod tests {
                 "msg1",
                 vec![InboundAttachment {
                     id: "att-0".to_string(),
-                    kind: AttachmentKind::Document,
                     mime_type: "application/pdf".to_string(),
                     filename: Some("report.pdf".to_string()),
-                    fallback_extension: "pdf".to_string(),
                     bytes: b"%PDF-1.7".to_vec(),
                 }],
             )
@@ -139,10 +134,8 @@ mod tests {
                 "msg1",
                 vec![InboundAttachment {
                     id: "att-0".to_string(),
-                    kind: AttachmentKind::Document,
                     mime_type: "application/pdf".to_string(),
                     filename: Some("report.pdf".to_string()),
-                    fallback_extension: "pdf".to_string(),
                     bytes: b"%PDF".to_vec(),
                 }],
             )

@@ -7997,7 +7997,8 @@ impl InboundAttachmentLander for RecordingLander {
             .enumerate()
             .map(|(index, attachment)| AttachmentRef {
                 id: attachment.id.clone(),
-                kind: attachment.kind,
+                // The real bridge derives kind from the MIME type; mirror that.
+                kind: ironclaw_common::kind_for_mime(&attachment.mime_type),
                 mime_type: attachment.mime_type.clone(),
                 filename: attachment.filename.clone(),
                 size_bytes: Some(attachment.bytes.len() as u64),
