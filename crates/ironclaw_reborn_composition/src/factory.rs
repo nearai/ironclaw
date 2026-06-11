@@ -60,13 +60,16 @@ use ironclaw_host_runtime::{
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_loop_support::FilesystemCheckpointStateStore;
 use ironclaw_outbound::CommunicationPreferenceRepository;
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_outbound::FilesystemOutboundStateStore;
-#[cfg(not(feature = "libsql"))]
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
 use ironclaw_outbound::InMemoryOutboundStateStore;
 #[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRunDeliveryStore};
-#[cfg(all(not(feature = "libsql"), feature = "slack-v2-host-beta"))]
+#[cfg(all(
+    not(any(feature = "libsql", feature = "postgres")),
+    feature = "slack-v2-host-beta"
+))]
 use ironclaw_outbound::{InMemoryDeliveredGateRouteStore, InMemoryTriggeredRunDeliveryStore};
 use ironclaw_processes::ProcessServices;
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
@@ -1955,10 +1958,10 @@ fn local_dev_scoped_filesystem(
 /// Unified bundle of outbound store handles returned by both cfg variants of
 /// [`local_dev_outbound_store`].
 ///
-/// All four trait roles must be satisfied on construction.  In the libsql
-/// build every role is an `Arc` clone of a single
+/// All four trait roles must be satisfied on construction.  In the durable
+/// build (libsql or postgres) every role is an `Arc` clone of a single
 /// `FilesystemOutboundStateStore`, so the WebUI delivery-defaults facade and
-/// the Slack delivery path share one backing tree.  In the non-libsql build
+/// the Slack delivery path share one backing tree.  In the non-durable build
 /// `InMemoryOutboundStateStore` covers the preference and state roles;
 /// `DeliveredGateRouteStore` and `TriggeredRunDeliveryStore` use separate
 /// in-memory instances — the cross-store invariant that matters (WebUI-written
@@ -1975,7 +1978,7 @@ pub(crate) struct LocalDevOutboundStores {
     pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
 }
 
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn local_dev_outbound_store(filesystem: Arc<LocalDevRootFilesystem>) -> LocalDevOutboundStores {
     // One store instance over the composition-owned per-user scoped filesystem
     // (`/outbound` → `/tenants/<t>/users/<u>/outbound`). All four outbound
@@ -1998,7 +2001,7 @@ fn local_dev_outbound_store(filesystem: Arc<LocalDevRootFilesystem>) -> LocalDev
     }
 }
 
-#[cfg(not(feature = "libsql"))]
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
 fn local_dev_outbound_store(_filesystem: Arc<LocalDevRootFilesystem>) -> LocalDevOutboundStores {
     // In the non-filesystem (no libsql/postgres) profile, InMemoryOutboundStateStore
     // implements both CommunicationPreferenceRepository and OutboundStateStore, so a
@@ -2006,9 +2009,9 @@ fn local_dev_outbound_store(_filesystem: Arc<LocalDevRootFilesystem>) -> LocalDe
     // TriggeredRunDeliveryStore) are not implemented by InMemoryOutboundStateStore and
     // therefore use separate in-memory instances; this is acceptable because the
     // cross-store invariant that matters — WebUI-written preferences being visible to
-    // the Slack triggered-delivery hook — only involves the preference role.  The libsql
-    // build avoids this gap entirely by sharing one FilesystemOutboundStateStore across
-    // all four roles.
+    // the Slack triggered-delivery hook — only involves the preference role.  The durable
+    // build (libsql or postgres) avoids this gap entirely by sharing one
+    // FilesystemOutboundStateStore across all four roles.
     let outbound = Arc::new(InMemoryOutboundStateStore::default());
     LocalDevOutboundStores {
         outbound_preferences: Arc::clone(&outbound) as Arc<dyn CommunicationPreferenceRepository>,
@@ -4775,16 +4778,20 @@ mod tests {
         format!("---\nname: {name}\ndescription: {description}\n---\n{prompt}\n")
     }
 
-    /// Verify that the libsql `local_dev_outbound_store` bundle shares a single
-    /// `FilesystemOutboundStateStore` allocation across all four trait-object roles.
+    /// Verify that the durable `local_dev_outbound_store` bundle (libsql or postgres)
+    /// shares a single `FilesystemOutboundStateStore` allocation across all four
+    /// trait-object roles.
     ///
     /// The assertion reads the four trait-object pointers from the built
     /// `RebornLocalRuntimeServices` and compares their data halves via
     /// `std::ptr::addr_eq` (trait objects of different traits cannot be compared
     /// with `Arc::ptr_eq` directly).
-    #[cfg(all(feature = "libsql", feature = "slack-v2-host-beta"))]
+    #[cfg(all(
+        any(feature = "libsql", feature = "postgres"),
+        feature = "slack-v2-host-beta"
+    ))]
     #[tokio::test]
-    async fn local_dev_outbound_store_libsql_shares_one_allocation_across_all_roles() {
+    async fn local_dev_outbound_store_durable_shares_one_allocation_across_all_roles() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = build_reborn_services(RebornBuildInput::local_dev(
             "outbound-store-alloc-owner",

@@ -3993,5 +3993,7 @@ mod tests {
              triggered-delivery hook; the hook must use \
              Arc::clone(&local_runtime.outbound_preferences) as `communication_preferences`"
         );
+
+        runtime.shutdown().await.expect("runtime shuts down");
     }
 }
