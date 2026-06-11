@@ -84,6 +84,8 @@ registerPack("uk", {
   "chat.modeAutoReview": "Авторевʼю",
   "chat.runtimeLocal": "Працювати локально",
   "chat.statusWorking": "Працює",
+  "chat.identityUser": "Ви",
+  "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "Перейти до останнього",
   "shortcuts.title": "Комбінації клавіш",
   "shortcuts.send": "Надіслати повідомлення",

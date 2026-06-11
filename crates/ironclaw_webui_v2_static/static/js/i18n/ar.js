@@ -84,6 +84,8 @@ registerPack("ar", {
   "chat.modeAutoReview": "مراجعة تلقائية",
   "chat.runtimeLocal": "العمل محليًا",
   "chat.statusWorking": "جارٍ العمل",
+  "chat.identityUser": "أنت",
+  "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "انتقل إلى الأحدث",
   "shortcuts.title": "اختصارات لوحة المفاتيح",
   "shortcuts.send": "أرسل رسالة",

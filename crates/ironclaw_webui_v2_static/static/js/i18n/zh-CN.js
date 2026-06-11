@@ -84,6 +84,8 @@ registerPack("zh-CN", {
   "chat.modeAutoReview": "自动审查",
   "chat.runtimeLocal": "本地工作",
   "chat.statusWorking": "正在工作",
+  "chat.identityUser": "你",
+  "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "跳转至最新",
   "shortcuts.title": "快捷键",
   "shortcuts.send": "发送消息",

@@ -84,6 +84,8 @@ registerPack("ja", {
   "chat.modeAutoReview": "自動レビュー",
   "chat.runtimeLocal": "ローカルで作業",
   "chat.statusWorking": "作業中",
+  "chat.identityUser": "あなた",
+  "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "最新にジャンプ",
   "shortcuts.title": "キーボード ショートカット",
   "shortcuts.send": "メッセージの送信",

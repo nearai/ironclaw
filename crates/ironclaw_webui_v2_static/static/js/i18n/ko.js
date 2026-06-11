@@ -84,6 +84,8 @@ registerPack("ko", {
   "chat.modeAutoReview": "자동 리뷰",
   "chat.runtimeLocal": "로컬에서 작업",
   "chat.statusWorking": "작업 중",
+  "chat.identityUser": "나",
+  "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "최신 항목으로 이동",
   "shortcuts.title": "키보드 단축키",
   "shortcuts.send": "메시지 보내기",

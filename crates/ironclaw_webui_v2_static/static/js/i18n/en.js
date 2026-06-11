@@ -89,6 +89,8 @@ registerPack("en", {
   "chat.modeAutoReview": "Auto-review",
   "chat.runtimeLocal": "Work locally",
   "chat.statusWorking": "Working",
+  "chat.identityUser": "You",
+  "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "Jump to latest",
   "shortcuts.title": "Keyboard shortcuts",
   "shortcuts.send": "Send message",

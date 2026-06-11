@@ -84,6 +84,8 @@ registerPack("hi", {
   "chat.modeAutoReview": "ऑटो-रिव्यू",
   "chat.runtimeLocal": "स्थानीय रूप से काम करें",
   "chat.statusWorking": "काम हो रहा है",
+  "chat.identityUser": "आप",
+  "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "नवीनतम पर जाएं",
   "shortcuts.title": "कीबोर्ड शॉर्टकट",
   "shortcuts.send": "संदेश भेजें",
