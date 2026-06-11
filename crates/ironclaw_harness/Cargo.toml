@@ -1,0 +1,30 @@
+[package]
+name = "ironclaw_harness"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Harness manifest format and parser — use-case composition mode for IronClaw Reborn (epic #3036)"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.dist]
+dist = false
+
+[dependencies]
+# Reuse the blueprint crate's shared sub-shapes (capability surface, prompt
+# overlay, required-ref) and its file-ref/lockfile machinery rather than
+# redefining parallel types — a harness is the same building blocks composed
+# at a higher level.
+ironclaw_blueprint = { path = "../ironclaw_blueprint" }
+# Shared inline-secret guard.
+ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
+
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+toml = "0.8"
+
+[lints]
+workspace = true
