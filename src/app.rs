@@ -522,7 +522,9 @@ impl AppBuilder {
         } else {
             crate::tools::EngineVersion::V1
         };
-        let mut registry = ToolRegistry::new().with_engine_version(engine_version);
+        let mut registry = ToolRegistry::new()
+            .with_engine_version(engine_version)
+            .with_disabled_tools(self.config.agent.disabled_tools.iter().cloned());
         if let Some(ref db) = self.db {
             registry = registry.with_database(Arc::clone(db));
         }
@@ -1235,6 +1237,12 @@ impl AppBuilder {
                 Arc::clone(&ownership_cache),
             )
             .await?;
+
+        // DISABLE_TOOLS_LIST enforcement is registry-resident
+        // (`ToolRegistry::with_disabled_tools` above): every register*/get*
+        // path consults the deny-list, so a later extension install or MCP
+        // hot-reload cannot silently re-introduce a blocked tool, and any
+        // call attempt is denied at dispatch with a distinct audit row.
 
         // Load bootstrap-completed flag from settings so that existing users
         // who already completed onboarding don't re-get bootstrap injection.
