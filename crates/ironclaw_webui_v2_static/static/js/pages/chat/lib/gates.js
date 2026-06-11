@@ -11,22 +11,26 @@ export function gateFromEvent(eventType, prompt) {
     const approvalDetails = approvalContext
       ? approvalDetailsFromContext(approvalContext)
       : [];
-    return {
+    const gate = {
       kind: "gate",
       runId: prompt.turn_run_id,
       gateRef: prompt.gate_ref,
       headline: prompt.headline,
       body: prompt.body,
-      toolName: approvalContext?.tool_name || null,
-      description: approvalContext?.reason || prompt.body,
-      actionLabel: approvalContext?.action?.label || null,
-      destination: approvalContext?.destination || null,
-      approvalScope: approvalContext?.scope || null,
+      allowAlways: prompt.allow_always === true,
+    };
+    if (!approvalContext) return gate;
+    return {
+      ...gate,
+      toolName: approvalContext.tool_name || null,
+      description: approvalContext.reason || prompt.body,
+      actionLabel: approvalContext.action?.label || null,
+      destination: approvalContext.destination || null,
+      approvalScope: approvalContext.scope || null,
       approvalDetails,
       parameters: approvalDetails.length
         ? approvalDetails.map((detail) => `${detail.label}: ${detail.value}`).join("\n")
         : null,
-      allowAlways: prompt.allow_always === true,
     };
   }
   if (eventType === "auth_required") {

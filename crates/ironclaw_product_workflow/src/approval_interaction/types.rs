@@ -1,4 +1,6 @@
-use ironclaw_host_api::{Action, ApprovalRequest, ApprovalRequestId, CapabilityId, ResourceScope};
+use ironclaw_host_api::{
+    Action, ApprovalRequest, ApprovalRequestId, CapabilityId, InvocationId, ResourceScope,
+};
 use ironclaw_product_adapters::ProductWorkflowRejectionKind;
 use ironclaw_run_state::ApprovalStatus;
 use ironclaw_turns::{
@@ -103,6 +105,18 @@ impl ApprovalInteractionScope {
             agent_id: scope.agent_id.clone(),
             project_id: scope.project_id.clone(),
             thread_id: scope.thread_id.clone(),
+        }
+    }
+
+    pub fn to_resource_scope(&self) -> ResourceScope {
+        ResourceScope {
+            tenant_id: self.tenant_id.clone(),
+            user_id: self.user_id.clone(),
+            agent_id: self.agent_id.clone(),
+            project_id: self.project_id.clone(),
+            mission_id: None,
+            thread_id: Some(self.thread_id.clone()),
+            invocation_id: InvocationId::new(),
         }
     }
 }

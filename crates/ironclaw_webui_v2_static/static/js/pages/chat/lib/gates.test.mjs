@@ -63,7 +63,7 @@ test("gateFromEvent defaults missing always-allow affordance to false", () => {
 test("gateFromEvent maps approval context into readable approval card props", () => {
   const { gateFromEvent } = loadGates();
 
-  const gate = gateFromEvent("gate", {
+  const gate = plain(gateFromEvent("gate", {
     turn_run_id: "run-1",
     gate_ref: "gate:approval-1",
     headline: "Approval required",
@@ -84,7 +84,7 @@ test("gateFromEvent maps approval context into readable approval card props", ()
         { label: "Estimated network egress", value: "4096 bytes" },
       ],
     },
-  });
+  }));
 
   assert.equal(gate.allowAlways, true);
   assert.equal(gate.toolName, "builtin.http");

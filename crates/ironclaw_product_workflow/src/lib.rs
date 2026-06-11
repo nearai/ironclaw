@@ -60,7 +60,7 @@ pub use approval_interaction::{
     DefaultApprovalInteractionService, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
     PendingApprovalInteractionView, ResolveApprovalInteractionRequest,
     ResolveApprovalInteractionResponse, RunStateApprovalInteractionReadModel, approval_gate_ref,
-    is_approval_gate_ref,
+    approval_request_id_from_gate_ref, is_approval_gate_ref,
 };
 /// Concrete turn-gate resume dispatcher used by the Reborn composition crate to
 /// bridge product-auth continuations into the workflow-owned turn boundary.

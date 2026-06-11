@@ -5,21 +5,20 @@ use std::{
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
-use ironclaw_host_api::{
-    Action, ApprovalRequest, ApprovalRequestId, InvocationId, NetworkMethod, NetworkScheme,
-    ResourceScope, UserId,
-};
+use ironclaw_host_api::{Action, ApprovalRequest, NetworkMethod, NetworkScheme, UserId};
 use ironclaw_product_adapters::{
     ApprovalPromptActionView, ApprovalPromptContextView, ApprovalPromptDestinationView,
     ApprovalPromptDetailView, ApprovalPromptScopeView, GatePromptView, ProductAdapterError,
     ProductOutboundPayload, ProductProjectionItem, ProductProjectionState,
     ProductWorkflowRejectionKind, RedactedString,
 };
-use ironclaw_product_workflow::is_approval_gate_ref;
+use ironclaw_product_workflow::{
+    ApprovalInteractionScope, approval_request_id_from_gate_ref, is_approval_gate_ref,
+};
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_turns::{
-    GateRef, GetRunStateRequest, SanitizedFailure, TurnCoordinator, TurnError, TurnEventKind,
-    TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
+    GateRef, GetRunStateRequest, SanitizedFailure, TurnActor, TurnCoordinator, TurnError,
+    TurnEventKind, TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
     TurnEventProjectionService, TurnEventProjectionSource, TurnLifecycleEvent, TurnRunId,
     TurnScope, TurnStatus,
     run_profile::{
@@ -413,8 +412,6 @@ async fn blocked_prompt_payload(
     }
 }
 
-const APPROVAL_GATE_PREFIX: &str = "gate:approval-";
-
 async fn approval_gate_prompt(
     caller_user_id: &UserId,
     approval_requests: Option<&dyn ApprovalRequestStore>,
@@ -422,11 +419,15 @@ async fn approval_gate_prompt(
     gate_ref: &GateRef,
     gate_ref_string: String,
 ) -> ProductOutboundPayload {
-    let context = approval_requests.zip(approval_request_id_from_gate_ref(gate_ref));
+    let context = approval_requests.zip(approval_request_id_from_gate_ref(gate_ref).ok());
     let context = match context {
         Some((store, request_id)) => {
             let owner_user_id = event.owner_user_id.as_ref().unwrap_or(caller_user_id);
-            let scope = approval_lookup_scope(owner_user_id, &event.scope);
+            let scope = ApprovalInteractionScope::from_turn(
+                &event.scope,
+                &TurnActor::new(owner_user_id.clone()),
+            )
+            .to_resource_scope();
             match store.get(&scope, request_id).await {
                 Ok(Some(record)) => approval_context_for_request(&record.request),
                 Ok(None) => None,
@@ -449,23 +450,6 @@ async fn approval_gate_prompt(
         is_approval_gate_ref(gate_ref),
         context,
     )
-}
-
-fn approval_request_id_from_gate_ref(gate_ref: &GateRef) -> Option<ApprovalRequestId> {
-    let value = gate_ref.as_str().strip_prefix(APPROVAL_GATE_PREFIX)?;
-    ApprovalRequestId::parse(value).ok()
-}
-
-fn approval_lookup_scope(caller_user_id: &UserId, scope: &TurnScope) -> ResourceScope {
-    ResourceScope {
-        tenant_id: scope.tenant_id.clone(),
-        user_id: caller_user_id.clone(),
-        agent_id: scope.agent_id.clone(),
-        project_id: scope.project_id.clone(),
-        mission_id: None,
-        thread_id: Some(scope.thread_id.clone()),
-        invocation_id: InvocationId::new(),
-    }
 }
 
 fn approval_context_for_request(request: &ApprovalRequest) -> Option<ApprovalPromptContextView> {
