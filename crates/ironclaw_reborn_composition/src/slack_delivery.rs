@@ -1209,6 +1209,7 @@ async fn deliver_triggered_run(
                         run_id,
                         scope: scope.clone(),
                         recorded_at: Utc::now(),
+                        delivered_conversation_refs: Vec::new(),
                     };
                     if let Err(error) = route_store.record_delivered_gate_route(record).await {
                         tracing::debug!(

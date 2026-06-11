@@ -298,6 +298,7 @@ mod tests {
             run_id,
             scope: run_scope(),
             recorded_at: chrono::Utc::now(),
+            delivered_conversation_refs: Vec::new(),
         };
 
         let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
@@ -364,6 +365,7 @@ mod tests {
             run_id,
             scope: run_scope(),
             recorded_at: chrono::Utc::now(),
+            delivered_conversation_refs: Vec::new(),
         };
 
         let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
@@ -565,6 +567,7 @@ mod tests {
                 run_id,
                 scope: run_scope.clone(),
                 recorded_at: chrono::Utc::now(),
+                delivered_conversation_refs: Vec::new(),
             })
             .await
             .expect("record delivered gate route");
@@ -699,6 +702,14 @@ mod tests {
             Err("boom".into())
         }
 
+        async fn load_delivered_gate_route_by_conversation(
+            &self,
+            _tenant_id: &ironclaw_host_api::TenantId,
+            _conversation_ref: &ironclaw_conversations::ExternalConversationRef,
+        ) -> Result<Option<DeliveredGateRouteRecord>, String> {
+            Ok(None)
+        }
+
         async fn remove_delivered_gate_route(
             &self,
             _tenant_id: &ironclaw_host_api::TenantId,
@@ -734,6 +745,7 @@ mod tests {
             scope: run_scope(),
             // Record is 49 hours old — past the 48-hour TTL.
             recorded_at: chrono::Utc::now() - DELIVERED_GATE_ROUTE_TTL - chrono::Duration::hours(1),
+            delivered_conversation_refs: Vec::new(),
         };
 
         let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());

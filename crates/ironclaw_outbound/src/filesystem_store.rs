@@ -97,6 +97,7 @@ const POLICIES_ROOT: &str = "/outbound/policies";
 const SUBSCRIPTIONS_ROOT: &str = "/outbound/subscriptions";
 const TRIGGERED_RUN_DELIVERY_ROOT: &str = "/outbound/triggered-run-delivery";
 const DELIVERED_GATE_ROUTES_ROOT: &str = "/outbound/delivered-gate-routes";
+const DELIVERED_GATE_ROUTES_CONV_IDX_ROOT: &str = "/outbound/delivered-gate-routes/conv-idx";
 
 /// Filesystem-backed outbound store. Construct with a [`ScopedFilesystem`]
 /// over any [`RootFilesystem`] implementation (libSQL, Postgres, in-memory,
@@ -243,6 +244,51 @@ where
             .get_versioned_json::<T>(scope, path)
             .await?
             .map(|(value, _)| value))
+    }
+
+    async fn write_delivered_gate_route_conversation_indexes(
+        &self,
+        record: &DeliveredGateRouteRecord,
+        primary_filename: &str,
+    ) -> Result<(), String> {
+        let resource_scope = ResourceScope::system();
+        let body = serde_json::to_vec(&primary_filename)
+            .map_err(|e| format!("delivered gate route conversation index serialize: {e}"))?;
+        for conversation_ref in &record.delivered_conversation_refs {
+            let idx_path = delivered_gate_route_conv_idx_path(
+                &record.tenant_id,
+                &conversation_ref.conversation_fingerprint(),
+            )
+            .map_err(|e| format!("delivered gate route conversation index path: {e}"))?;
+            let entry = Entry::bytes(body.clone()).with_content_type(ContentType::json());
+            self.put_with_byte_fallback(&resource_scope, &idx_path, entry, CasExpectation::Any)
+                .await
+                .map_err(|e| format!("delivered gate route conversation index write: {e}"))?;
+        }
+        Ok(())
+    }
+
+    async fn delete_delivered_gate_route_conversation_indexes(
+        &self,
+        record: &DeliveredGateRouteRecord,
+    ) -> Result<(), String> {
+        let resource_scope = ResourceScope::system();
+        for conversation_ref in &record.delivered_conversation_refs {
+            let idx_path = delivered_gate_route_conv_idx_path(
+                &record.tenant_id,
+                &conversation_ref.conversation_fingerprint(),
+            )
+            .map_err(|e| format!("delivered gate route conversation index path: {e}"))?;
+            match self.filesystem.delete(&resource_scope, &idx_path).await {
+                Ok(()) | Err(FilesystemError::NotFound { .. }) => {}
+                Err(e) => {
+                    return Err(format!(
+                        "delivered gate route conversation index delete: {e}"
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Writes preference records with versioned CAS only.
@@ -646,6 +692,29 @@ fn delivered_gate_route_path(
         .map_err(|_| OutboundError::Backend)
 }
 
+fn delivered_gate_route_conv_idx_path(
+    tenant_id: &TenantId,
+    conversation_fingerprint: &str,
+) -> Result<ScopedPath, OutboundError> {
+    let mut hasher = Sha256::new();
+    update_hash_part(&mut hasher, tenant_id.as_str());
+    update_hash_part(&mut hasher, conversation_fingerprint);
+    let digest = hex::encode(hasher.finalize());
+    ScopedPath::new(format!(
+        "{DELIVERED_GATE_ROUTES_CONV_IDX_ROOT}/{digest}.json"
+    ))
+    .map_err(|_| OutboundError::Backend)
+}
+
+fn delivered_gate_route_primary_filename(path: &ScopedPath) -> Result<String, OutboundError> {
+    path.as_str()
+        .rsplit('/')
+        .next()
+        .filter(|filename| !filename.is_empty())
+        .map(str::to_string)
+        .ok_or(OutboundError::Backend)
+}
+
 fn communication_preference_path(
     key: &CommunicationPreferenceKey,
 ) -> Result<ScopedPath, OutboundError> {
@@ -822,12 +891,24 @@ where
             .map_err(|e| format!("delivered gate route path: {e}"))?;
         let resource_scope =
             delivered_gate_route_resource_scope(&record.tenant_id, &record.user_id);
+        if let Some(old_record) = self
+            .get_json::<DeliveredGateRouteRecord>(&resource_scope, &path)
+            .await
+            .map_err(|e| format!("delivered gate route read old record: {e}"))?
+        {
+            self.delete_delivered_gate_route_conversation_indexes(&old_record)
+                .await?;
+        }
         let body = serde_json::to_vec(&record)
             .map_err(|e| format!("delivered gate route serialize: {e}"))?;
         let entry = Entry::bytes(body).with_content_type(ContentType::json());
         self.put_with_byte_fallback(&resource_scope, &path, entry, CasExpectation::Any)
             .await
-            .map_err(|e| format!("delivered gate route write: {e}"))
+            .map_err(|e| format!("delivered gate route write: {e}"))?;
+        let primary_filename = delivered_gate_route_primary_filename(&path)
+            .map_err(|e| format!("delivered gate route primary filename: {e}"))?;
+        self.write_delivered_gate_route_conversation_indexes(&record, &primary_filename)
+            .await
     }
 
     async fn load_delivered_gate_route(
@@ -855,6 +936,33 @@ where
         }
     }
 
+    async fn load_delivered_gate_route_by_conversation(
+        &self,
+        tenant_id: &TenantId,
+        conversation_ref: &ironclaw_conversations::ExternalConversationRef,
+    ) -> Result<Option<DeliveredGateRouteRecord>, String> {
+        let idx_path = delivered_gate_route_conv_idx_path(
+            tenant_id,
+            &conversation_ref.conversation_fingerprint(),
+        )
+        .map_err(|e| format!("delivered gate route conversation index path: {e}"))?;
+        let resource_scope = ResourceScope::system();
+        let primary_filename = match self
+            .get_json::<String>(&resource_scope, &idx_path)
+            .await
+            .map_err(|e| format!("delivered gate route conversation index read: {e}"))?
+        {
+            Some(primary_filename) => primary_filename,
+            None => return Ok(None),
+        };
+        let primary_path =
+            ScopedPath::new(format!("{DELIVERED_GATE_ROUTES_ROOT}/{primary_filename}"))
+                .map_err(|e| format!("delivered gate route primary path: {e}"))?;
+        self.get_json::<DeliveredGateRouteRecord>(&resource_scope, &primary_path)
+            .await
+            .map_err(|e| format!("delivered gate route conversation primary read: {e}"))
+    }
+
     async fn remove_delivered_gate_route(
         &self,
         tenant_id: &TenantId,
@@ -864,6 +972,14 @@ where
         let path = delivered_gate_route_path(tenant_id, user_id, gate_ref)
             .map_err(|e| format!("delivered gate route path: {e}"))?;
         let resource_scope = delivered_gate_route_resource_scope(tenant_id, user_id);
+        if let Some(old_record) = self
+            .get_json::<DeliveredGateRouteRecord>(&resource_scope, &path)
+            .await
+            .map_err(|e| format!("delivered gate route read before delete: {e}"))?
+        {
+            self.delete_delivered_gate_route_conversation_indexes(&old_record)
+                .await?;
+        }
         match self.filesystem.delete(&resource_scope, &path).await {
             Ok(()) => Ok(()),
             Err(FilesystemError::NotFound { .. }) => Ok(()),
@@ -951,6 +1067,17 @@ where
                 };
             if !record.is_expired(now) {
                 continue;
+            }
+            if let Err(e) = self
+                .delete_delivered_gate_route_conversation_indexes(&record)
+                .await
+            {
+                tracing::debug!(
+                    target = "ironclaw::outbound::filesystem_store",
+                    name = %entry.name,
+                    error = %e,
+                    "delivered gate route sweep: failed to delete conversation indexes (best-effort)"
+                );
             }
             // Delete the expired file.
             match self.filesystem.delete(&resource_scope, &file_path).await {
@@ -1105,6 +1232,7 @@ mod tests {
             run_id,
             scope,
             recorded_at: Utc::now(),
+            delivered_conversation_refs: Vec::new(),
         }
     }
 
