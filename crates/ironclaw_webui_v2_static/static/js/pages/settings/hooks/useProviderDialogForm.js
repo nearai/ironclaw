@@ -1,6 +1,7 @@
 import { React } from "../../../lib/html.js";
 import {
   isValidProviderId,
+  nextModelAfterFetch,
   providerEffectiveBaseUrl,
   providerIdFromName,
   providerDefaultModel,
@@ -110,14 +111,10 @@ export function useProviderDialogForm({
         setMessage({ tone: "error", text: result.message || t("llm.modelsFetchFailed") });
       } else {
         setModels(result.models);
-        // The model field is a controlled <Select>; when it is empty (or holds a
-        // value no longer in the fetched list) the browser shows the first
-        // <option> while form.model stays stale, and re-picking that already-shown
-        // option fires no change event — so Save would persist an empty/wrong
-        // model. Commit a valid choice so what's displayed is what gets saved.
-        if (!form.model.trim() || !result.models.includes(form.model.trim())) {
-          update("model", result.models[0]);
-        }
+        // Commit a valid model so the controlled <Select> shows what will save
+        // (see nextModelAfterFetch for the empty/stale-selection rationale).
+        const pick = nextModelAfterFetch(form.model, result.models);
+        if (pick !== null) update("model", pick);
         setMessage({ tone: "success", text: t("llm.modelsFetched", { count: result.models.length }) });
       }
     } catch (err) {

@@ -5,6 +5,7 @@ import {
   importSettings as importSettingsPayload,
   updateSetting,
 } from "../lib/settings-api.js";
+import { throwIfApiFailed } from "../lib/api-result.js";
 import { RESTART_REQUIRED_KEYS } from "../lib/settings-schema.js";
 
 export function useSettings() {
@@ -24,13 +25,8 @@ export function useSettings() {
     // A resolved response with `success: false` is a failed save, not a
     // success — surface it so the UI shows the error rather than a fake
     // "Saved" indicator (and never flips `needsRestart`).
-    mutationFn: async ({ key, value }) => {
-      const data = await updateSetting(key, value);
-      if (data && data.success === false) {
-        throw new Error(data.message || "Save failed");
-      }
-      return data;
-    },
+    mutationFn: async ({ key, value }) =>
+      throwIfApiFailed(await updateSetting(key, value), "Save failed"),
     onSuccess: (_data, { key, value }) => {
       queryClient.setQueryData(["settings-export"], (old) => {
         if (!old) return old;

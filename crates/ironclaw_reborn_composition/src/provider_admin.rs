@@ -577,4 +577,29 @@ mod tests {
         assert_eq!(active.provider_id.as_deref(), Some("not-a-real-provider"));
         assert!(active.canonical_provider_id.is_none());
     }
+
+    #[test]
+    fn active_selection_prefers_config_slot_over_env() {
+        use std::collections::BTreeMap;
+        let registry = ProviderRegistry::try_load_from_path(None).expect("builtin registry");
+        let config = RebornConfigFile {
+            llm: Some(BTreeMap::from([(
+                "default".to_string(),
+                LlmSlotSelection {
+                    provider_id: Some("anthropic".to_string()),
+                    model: Some("claude-pinned-by-config".to_string()),
+                    ..Default::default()
+                },
+            )])),
+            ..Default::default()
+        };
+        // An explicit [llm.default] slot is authoritative: the selection comes
+        // from the slot and never consults the environment. The distinctive
+        // pinned model could not come from env resolution, so a regression
+        // dropping the early return (falling through to env) would lose it.
+        let active =
+            active_llm_selection(Some(&config), &registry, None).expect("slot selection present");
+        assert_eq!(active.provider_id.as_deref(), Some("anthropic"));
+        assert_eq!(active.model.as_deref(), Some("claude-pinned-by-config"));
+    }
 }

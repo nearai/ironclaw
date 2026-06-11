@@ -18,12 +18,14 @@ const WALLET_LOGIN_TIMEOUT_MS = 300_000;
 export function isLocalDevOrigin() {
   if (typeof window === "undefined" || !window.location) return false;
   const host = window.location.hostname;
+  // `window.location.hostname` exposes IPv6 hosts without brackets (e.g.
+  // `http://[::1]:3000/` -> `"::1"`), so a bracketed `"[::1]"` form never
+  // appears here.
   return (
     host === "localhost" ||
     host === "127.0.0.1" ||
     host === "0.0.0.0" ||
     host === "::1" ||
-    host === "[::1]" ||
     host.endsWith(".localhost")
   );
 }

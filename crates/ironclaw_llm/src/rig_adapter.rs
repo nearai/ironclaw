@@ -105,18 +105,18 @@ impl ModelsEndpoint {
     async fn fetch_models(&self) -> Result<Vec<String>, LlmError> {
         crate::url_check::check_models_url(&self.provider_id, &self.url)?;
 
-        let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30));
-        // A loopback provider (self-hosted Ollama etc.) must not be routed
-        // through a system/env HTTP proxy: the proxy can't reach the caller's
-        // own loopback and returns 502. Remote hosts keep proxy support so
-        // corporate proxies still cover hosted providers.
-        if crate::url_check::is_loopback_url(&self.url) {
-            builder = builder.no_proxy();
-        }
-        let client = builder.build().map_err(|e| LlmError::RequestFailed {
-            provider: self.provider_id.clone(),
-            reason: format!("failed to build HTTP client: {e}"),
-        })?;
+        // `check_models_url` validates only the initial URL. Disable redirect
+        // following so a host that passes the guard cannot 3xx-redirect the
+        // request to a blocked target (e.g. the cloud-metadata IP) — a 3xx is
+        // surfaced as a non-success status below instead of being chased. The
+        // shared builder also bypasses the proxy for loopback providers.
+        let client = crate::url_check::build_http_client(
+            &self.provider_id,
+            &self.url,
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::none()),
+        )?;
 
         let mut builder = client.get(&self.url).headers(self.extra_headers.clone());
         builder = match &self.auth {
@@ -145,13 +145,35 @@ impl ModelsEndpoint {
             });
         }
 
-        let body = response
-            .bytes()
-            .await
-            .map_err(|e| LlmError::InvalidResponse {
+        // Bound the body: a model list is a few KB, but an operator-configured
+        // (or compromised) endpoint could slow-drip megabytes within the 30s
+        // timeout. Reject a declared oversize length up front, then stream with
+        // a hard cap so memory stays bounded even when content-length is absent.
+        use futures::StreamExt;
+        const MAX_MODELS_BODY_BYTES: usize = 4 * 1024 * 1024;
+        if let Some(len) = response.content_length()
+            && len > MAX_MODELS_BODY_BYTES as u64
+        {
+            return Err(LlmError::InvalidResponse {
+                provider: self.provider_id.clone(),
+                reason: format!("models response too large ({len} bytes)"),
+            });
+        }
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| LlmError::InvalidResponse {
                 provider: self.provider_id.clone(),
                 reason: format!("could not read models response: {e}"),
             })?;
+            if body.len() + chunk.len() > MAX_MODELS_BODY_BYTES {
+                return Err(LlmError::InvalidResponse {
+                    provider: self.provider_id.clone(),
+                    reason: "models response exceeded 4 MiB cap".to_string(),
+                });
+            }
+            body.extend_from_slice(&chunk);
+        }
         parse_models_response(&self.provider_id, self.shape, &body)
     }
 }
@@ -1056,6 +1078,67 @@ mod tests {
         let err = parse_models_response("openai", ModelsShape::OpenAiData, b"not json")
             .expect_err("rejects");
         assert!(matches!(err, LlmError::InvalidResponse { .. }));
+    }
+
+    // Serve one canned HTTP response on a loopback port and return the endpoint
+    // pointed at it. The response is written verbatim, so callers control the
+    // status line and headers.
+    async fn endpoint_against_canned_response(raw_response: &'static str) -> ModelsEndpoint {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock.write_all(raw_response.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+        ModelsEndpoint {
+            provider_id: "p".to_string(),
+            url: format!("http://{addr}/models"),
+            auth: ModelsAuth::Bearer("k".to_string()),
+            shape: ModelsShape::OpenAiData,
+            extra_headers: reqwest::header::HeaderMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_models_maps_401_to_auth_failed() {
+        let endpoint = endpoint_against_canned_response(
+            "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n",
+        )
+        .await;
+        let err = endpoint.fetch_models().await.expect_err("401 is an error");
+        assert!(matches!(err, LlmError::AuthFailed { .. }), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn fetch_models_maps_403_to_auth_failed() {
+        let endpoint =
+            endpoint_against_canned_response("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+                .await;
+        let err = endpoint.fetch_models().await.expect_err("403 is an error");
+        assert!(matches!(err, LlmError::AuthFailed { .. }), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn fetch_models_does_not_follow_redirects() {
+        // A host that passed the SSRF guard must not be able to 3xx-redirect the
+        // request elsewhere (e.g. the metadata IP). With redirects disabled the
+        // 301 surfaces as a non-success status, not a followed hop.
+        let endpoint = endpoint_against_canned_response(
+            "HTTP/1.1 301 Moved Permanently\r\nLocation: http://169.254.169.254/\r\nContent-Length: 0\r\n\r\n",
+        )
+        .await;
+        let err = endpoint
+            .fetch_models()
+            .await
+            .expect_err("redirect is not followed");
+        assert!(matches!(err, LlmError::RequestFailed { .. }), "got {err:?}");
     }
 
     #[derive(Clone)]

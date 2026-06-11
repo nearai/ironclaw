@@ -335,14 +335,7 @@ async fn create_bedrock_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvid
 /// though `curl` to the same URL works. Remote hosts keep default proxy
 /// behavior, so this is a no-op for hosted providers behind a corporate proxy.
 fn provider_http_client(provider_id: &str, base_url: &str) -> Result<reqwest::Client, LlmError> {
-    let mut builder = reqwest::Client::builder();
-    if crate::url_check::is_loopback_url(base_url) {
-        builder = builder.no_proxy();
-    }
-    builder.build().map_err(|e| LlmError::RequestFailed {
-        provider: provider_id.to_string(),
-        reason: format!("failed to build HTTP client: {e}"),
-    })
+    crate::url_check::build_http_client(provider_id, base_url, reqwest::Client::builder())
 }
 
 fn create_openai_compat_from_registry(

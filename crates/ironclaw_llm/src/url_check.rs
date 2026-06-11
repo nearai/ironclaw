@@ -84,6 +84,33 @@ pub(crate) fn is_loopback_url(url: &str) -> bool {
         || normalized_host.to_ascii_lowercase().ends_with(".localhost")
 }
 
+/// Apply the shared loopback-proxy-bypass policy to a `reqwest::ClientBuilder`
+/// and build the client.
+///
+/// A system/env HTTP proxy cannot reach the caller's own loopback service and
+/// answers the forwarded request with `502 Bad Gateway`, so a self-hosted local
+/// provider (Ollama, vLLM, …) must go direct — see [`is_loopback_url`]. Remote
+/// hosts keep default proxy behavior so corporate proxies still cover hosted
+/// providers. Callers pass a pre-configured builder so each can set its own
+/// timeout / redirect policy (the model-discovery client disables redirects as
+/// an SSRF guard; the chat client must keep them) without duplicating the
+/// proxy-bypass-and-build boilerplate.
+pub(crate) fn build_http_client(
+    provider_id: &str,
+    url: &str,
+    builder: reqwest::ClientBuilder,
+) -> Result<reqwest::Client, LlmError> {
+    let builder = if is_loopback_url(url) {
+        builder.no_proxy()
+    } else {
+        builder
+    };
+    builder.build().map_err(|e| LlmError::RequestFailed {
+        provider: provider_id.to_string(),
+        reason: format!("failed to build HTTP client: {e}"),
+    })
+}
+
 fn is_always_blocked(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
