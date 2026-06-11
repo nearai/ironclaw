@@ -321,6 +321,21 @@ impl FakeTurnCoordinator {
             .last()
             .map(|request| request.scope.clone())
     }
+
+    /// Returns the `TurnScope` from the most recent `get_run_state` call.
+    ///
+    /// Used by trigger-thread tests to assert that `resolve_gate`,
+    /// `cancel_run`, and `get_run_state` receive the trigger-owned scope
+    /// (with `owner_user_id = Some(creator_user_id)`) rather than the
+    /// WebUI caller's session scope.  This distinction is what #4754 ("Part A")
+    /// and the `check_automation_trigger_access` reconstruction guarantee.
+    fn last_run_state_scope(&self) -> Option<TurnScope> {
+        self.run_state_requests
+            .lock()
+            .expect("lock")
+            .last()
+            .map(|request| request.scope.clone())
+    }
 }
 
 #[async_trait]
@@ -5390,6 +5405,14 @@ async fn setup_trigger_thread(
 async fn resolve_gate_approval_succeeds_for_own_automation_trigger_thread() {
     // The caller owns the automation that produced the trigger thread. Approval
     // of a gate on that thread must succeed via the automation fallback.
+    //
+    // Post-#4754 ("Part A") verification: `check_automation_trigger_access`
+    // must forward the trigger-owned `TurnScope` (with
+    // `owner_user_id = Some(TRIGGER_CREATOR_USER_ID)`) — not the WebUI
+    // caller's user_id — to the turn coordinator's `get_run_state` call.
+    // The fake coordinator is configured to return `BlockedApproval` only
+    // for any scope it receives; this assertion proves the coordinator
+    // actually gets the trigger-owned scope, not the caller's session scope.
     let caller = caller();
     let thread_service = Arc::new(InMemorySessionThreadService::default());
     let trigger_thread_id =
@@ -5410,7 +5433,7 @@ async fn resolve_gate_approval_succeeds_for_own_automation_trigger_thread() {
 
     let response = services
         .resolve_gate(
-            caller,
+            caller.clone(),
             serde_json::from_value::<WebUiResolveGateRequest>(json!({
                 "client_action_id": "approval-trigger-1",
                 "thread_id": trigger_thread_id.as_str(),
@@ -5431,6 +5454,25 @@ async fn resolve_gate_approval_succeeds_for_own_automation_trigger_thread() {
         approval_interactions.resolution_count(),
         1,
         "approval interaction should have been called"
+    );
+
+    // Part A scope assertion: the coordinator must receive the trigger-owned
+    // scope (owner = TRIGGER_CREATOR_USER_ID), not the WebUI caller's scope
+    // (owner = "user-alpha"). This confirms `check_automation_trigger_access`
+    // reconstructs the scope from `TriggerRunThreadScope.creator_user_id` and
+    // that the reconstructed scope flows through to the turn coordinator.
+    let expected_trigger_scope = TurnScope::new_with_owner(
+        caller.tenant_id.clone(),
+        caller.agent_id.clone(),
+        caller.project_id.clone(),
+        trigger_thread_id.clone(),
+        Some(UserId::new(TRIGGER_CREATOR_USER_ID).expect("valid creator user id")),
+    );
+    assert_eq!(
+        coordinator.last_run_state_scope(),
+        Some(expected_trigger_scope),
+        "get_run_state must receive the trigger-owned scope (owner = TRIGGER_CREATOR_USER_ID), \
+         not the WebUI caller's session scope (owner = user-alpha)"
     );
 }
 

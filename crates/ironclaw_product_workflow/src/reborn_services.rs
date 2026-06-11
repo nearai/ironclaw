@@ -2726,18 +2726,40 @@ async fn replay_accepted_message(
 // collapses both UnknownThread and ThreadScopeMismatch into NotFound so the
 // response cannot be used as an existence oracle.
 //
-// Automation-trigger threads are an exception: they are stored with
-// `owner_user_id = None` under the trigger's scope, so the user-scoped probe
-// always misses them. `resolve_thread_access_for_caller` handles that case via
-// the shared automation fallback path; all interaction endpoints (stream,
-// cancel, gate resolve, run-state) route through it so the unscoped `TurnScope`
-// is returned to callers that need to act on a trigger run.
+// Automation-trigger threads are an exception: they are stored by
+// `record_trigger_prompt` (trigger_poller_trusted_submit.rs) with
+// `owner_user_id = Some(creator_user_id)` — the actor that fired the trigger
+// — not the WebUI caller's user_id. The user-scoped probe therefore misses
+// them. `resolve_thread_access_for_caller` handles that case via the shared
+// automation fallback path; all interaction endpoints (stream, cancel, gate
+// resolve, run-state) route through it so the reconstructed `TurnScope` (with
+// `owner_user_id = Some(creator_user_id)`) is returned to callers that need
+// to act on a trigger run.
+//
+// Scope reconstruction field-by-field match against `record_trigger_prompt`
+// (trigger_poller_trusted_submit.rs:285-291):
+//   tenant_id    : resolution.turn_scope.tenant_id == caller's tenant_id (same installation)
+//   agent_id     : resolution.turn_scope.agent_id OR default_agent_id
+//                → trigger_scope.agent_id OR bound_caller.agent_id  (same fallback shape)
+//   project_id   : resolution.turn_scope.project_id == trigger_scope.project_id
+//   owner_user_id: Some(resolution.actor.user_id)
+//                == Some(trigger_scope.creator_user_id)
+//                == Some(fire.creator_user_id) [post-#4754: new first-fire bindings
+//                   persist creator; legacy (pre-#4754) bindings remain owner-None
+//                   and will not match — accepted breakage; recreate trigger to fix].
 impl RebornServices {
     /// Shared authorization check for automation-trigger threads.
     ///
     /// Checks whether `scope.thread_id` belongs to one of the authenticated
     /// caller's automation triggers and, if so, returns a `TurnScope` with the
-    /// TRUE stored scope (agent_id, project_id, and owner_user_id = creator).
+    /// TRUE stored scope (agent_id, project_id, and owner_user_id = creator_user_id).
+    ///
+    /// Requires #4754 ("Part A"): `record_trigger_prompt` stores threads with
+    /// `owner_user_id = Some(fire.creator_user_id)` only for new first-fire
+    /// bindings created after #4754 landed. Pre-#4754 (legacy) runs were stored
+    /// with `owner_user_id = None`; their gate/cancel/run-state will NOT match
+    /// the reconstructed scope — this is accepted breakage; recreating the
+    /// trigger creates a fresh owner-bearing binding.
     ///
     /// Delegates to `AutomationProductFacade::resolve_run_thread_scope` which
     /// is caller-scoped: authorization is embedded in the repository lookup.
