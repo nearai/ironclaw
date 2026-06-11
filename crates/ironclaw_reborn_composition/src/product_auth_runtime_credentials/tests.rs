@@ -103,6 +103,97 @@ async fn resolver_refreshes_oauth_account_before_staging_access_secret() {
 }
 
 #[tokio::test]
+async fn resolver_stages_oauth_access_secret_when_refresh_secret_is_absent() {
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let scope =
+        ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
+    let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+    let access_secret = SecretHandle::new("google_access_without_refresh").unwrap();
+    let drive_scope = ProviderScope::new("https://www.googleapis.com/auth/drive.readonly").unwrap();
+    accounts
+        .create_account(NewCredentialAccount {
+            scope: auth_scope,
+            provider: AuthProviderId::new("google").unwrap(),
+            label: CredentialAccountLabel::new("google").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(access_secret.clone()),
+            refresh_secret: None,
+            scopes: vec![drive_scope.clone()],
+        })
+        .await
+        .unwrap();
+    let resolver = ProductAuthRuntimeCredentialResolver::new(Arc::new(
+        ProductAuthRuntimeCredentialAccountSelector::new_with_refresh(
+            accounts.clone(),
+            accounts.clone(),
+        ),
+    ));
+
+    let resolved = resolver
+        .resolve_access_secret(RuntimeCredentialAccountRequest {
+            scope: &scope,
+            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+            provider_scopes: &[drive_scope.as_str().to_string()],
+            requester_extension: &ExtensionId::new("google-drive").unwrap(),
+        })
+        .await
+        .expect("configured OAuth access token should still stage without a refresh token");
+
+    assert_eq!(resolved.handle, access_secret);
+    assert_eq!(resolved.scope, scope);
+}
+
+#[tokio::test]
+async fn resolver_stages_oauth_access_secret_when_proactive_refresh_backend_is_unavailable() {
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let scope =
+        ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
+    let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+    let access_secret = SecretHandle::new("google_access_refresh_backend_down").unwrap();
+    let drive_scope = ProviderScope::new("https://www.googleapis.com/auth/drive.readonly").unwrap();
+    let account = accounts
+        .create_account(NewCredentialAccount {
+            scope: auth_scope,
+            provider: AuthProviderId::new("google").unwrap(),
+            label: CredentialAccountLabel::new("google").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(access_secret.clone()),
+            refresh_secret: Some(SecretHandle::new("google_refresh").unwrap()),
+            scopes: vec![drive_scope.clone()],
+        })
+        .await
+        .unwrap();
+    accounts.fail_next_refresh_backend_for_tests(account.id);
+    let resolver = ProductAuthRuntimeCredentialResolver::new(Arc::new(
+        ProductAuthRuntimeCredentialAccountSelector::new_with_refresh(
+            accounts.clone(),
+            accounts.clone(),
+        ),
+    ));
+
+    let resolved = resolver
+        .resolve_access_secret(RuntimeCredentialAccountRequest {
+            scope: &scope,
+            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+            provider_scopes: &[drive_scope.as_str().to_string()],
+            requester_extension: &ExtensionId::new("google-drive").unwrap(),
+        })
+        .await
+        .expect("proactive refresh backend outage should not fail configured token staging");
+
+    assert_eq!(resolved.handle, access_secret);
+    assert_eq!(resolved.scope, scope);
+}
+
+#[tokio::test]
 async fn resolver_maps_oauth_refresh_failure_to_auth_required() {
     let accounts = Arc::new(InMemoryAuthProductServices::new());
     let scope =

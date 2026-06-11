@@ -188,6 +188,9 @@ impl RuntimeCredentialAccountSelectionService for ProductAuthRuntimeCredentialAc
         if !matches!(request.setup, RuntimeCredentialAccountSetup::OAuth { .. }) {
             return Ok(account);
         }
+        if account.refresh_secret.is_none() {
+            return Ok(account);
+        }
         let Some(refresh_accounts) = &self.refresh_accounts else {
             return Ok(account);
         };
@@ -200,8 +203,15 @@ impl RuntimeCredentialAccountSelectionService for ProductAuthRuntimeCredentialAc
         if let Some(requester_extension) = request.lookup.requester_extension.clone() {
             refresh_request = refresh_request.for_extension(requester_extension);
         }
-        refresh_accounts.refresh_account(refresh_request).await?;
-        self.select_unique_configured_runtime_account(request).await
+        match refresh_accounts.refresh_account(refresh_request).await {
+            Ok(_) => self.select_unique_configured_runtime_account(request).await,
+            Err(
+                AuthProductError::BackendUnavailable
+                | AuthProductError::BackendConflict
+                | AuthProductError::MalformedConfig,
+            ) => Ok(account),
+            Err(error) => Err(error),
+        }
     }
 }
 
