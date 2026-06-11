@@ -2762,12 +2762,6 @@ struct ResolvedThreadAccess {
     run_actor: TurnActor,
 }
 
-#[derive(Clone)]
-struct AutomationTriggerAccess {
-    scope: TurnScope,
-    run_actor: TurnActor,
-}
-
 // Owner-bound thread resolution shared by the WebUI-facing methods that
 // only need to prove a browser thread id belongs to the authenticated actor.
 // The actor is pinned as `owner_user_id` so a caller sharing (tenant, agent,
@@ -2834,7 +2828,7 @@ impl RebornServices {
         caller: WebUiAuthenticatedCaller,
         scope: &TurnScope,
         original_not_found_error: RebornServicesError,
-    ) -> Result<AutomationTriggerAccess, RebornServicesError> {
+    ) -> Result<ResolvedThreadAccess, RebornServicesError> {
         let Some(bound_caller) = product_agent_bound_caller_from_webui(caller) else {
             return Err(original_not_found_error);
         };
@@ -2852,7 +2846,7 @@ impl RebornServices {
             .agent_id
             .or_else(|| Some(bound_caller.agent_id.clone()));
         let run_actor = TurnActor::new(trigger_scope.creator_user_id.clone());
-        Ok(AutomationTriggerAccess {
+        Ok(ResolvedThreadAccess {
             scope: TurnScope::new_with_owner(
                 scope.tenant_id.clone(),
                 true_agent_id,

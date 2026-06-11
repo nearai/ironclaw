@@ -953,6 +953,47 @@ impl AutomationProductFacade for RevocableAutomationFacade {
     }
 }
 
+/// An automation facade whose `resolve_run_thread_scope` always returns a
+/// backend error (503 Unavailable, retryable). Used to verify that the timeline
+/// call surfaces the backend error rather than masking it as a 404.
+struct ErroringAutomationFacade {
+    error: RebornServicesError,
+}
+
+impl ErroringAutomationFacade {
+    fn unavailable() -> Self {
+        Self {
+            error: RebornServicesError {
+                code: RebornServicesErrorCode::Unavailable,
+                kind: RebornServicesErrorKind::ServiceUnavailable,
+                status_code: 503,
+                retryable: true,
+                field: None,
+                validation_code: None,
+            },
+        }
+    }
+}
+
+#[async_trait]
+impl AutomationProductFacade for ErroringAutomationFacade {
+    async fn list_automations(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _request: AutomationListRequest,
+    ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
+        Ok(Vec::new())
+    }
+
+    async fn resolve_run_thread_scope(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<TriggerRunThreadScope>, RebornServicesError> {
+        Err(self.error.clone())
+    }
+}
+
 #[derive(Debug, Clone)]
 struct OutboundPreferencesSetCall {
     caller: WebUiAuthenticatedCaller,
@@ -5436,6 +5477,135 @@ async fn get_timeline_rejects_other_users_automation_trigger_thread() {
 
     assert_eq!(err.code, RebornServicesErrorCode::NotFound);
     assert_eq!(err.status_code, 404);
+}
+
+// Contract: backend errors from `resolve_run_thread_scope` must surface as 503
+// Unavailable, not be masked as 404 NotFound.  A backend outage should never
+// look like an authorization miss to the caller.
+#[tokio::test]
+async fn get_timeline_surfaces_trigger_scope_lookup_backend_error() {
+    // The primary user-scoped lookup will miss (thread stored under trigger
+    // creator scope), then the automation fallback fires.  The facade returns
+    // a 503 Unavailable error — the service must propagate that error rather
+    // than converting it to 404.
+    let caller = caller();
+    let trigger_thread_id =
+        ThreadId::new("thread-trigger-backend-err").expect("valid trigger thread id");
+
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    // Store the thread under the external creator's scope so the user-scoped
+    // lookup misses and the automation fallback is invoked.
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: trigger_thread_scope_for(&caller),
+            thread_id: Some(trigger_thread_id.clone()),
+            created_by_actor_id: "system".to_string(),
+            title: Some("Trigger backend error test thread".to_string()),
+            metadata_json: Some(automation_trigger_thread_metadata_json(
+                "trigger-backend-err-automation",
+            )),
+        })
+        .await
+        .expect("trigger thread stored");
+
+    // The automation facade returns a 503 backend error from resolve_run_thread_scope.
+    let automation_facade = Arc::new(ErroringAutomationFacade::unavailable());
+
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(automation_facade);
+
+    let err = services
+        .get_timeline(
+            caller,
+            RebornTimelineRequest {
+                thread_id: trigger_thread_id.as_str().to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("backend error from facade must propagate, not become 404");
+
+    assert_eq!(
+        err.code,
+        RebornServicesErrorCode::Unavailable,
+        "backend lookup error must surface as Unavailable, not NotFound"
+    );
+    assert_eq!(err.status_code, 503);
+    assert!(err.retryable, "backend outage error must be retryable");
+}
+
+// Contract: when `TriggerRunThreadScope.agent_id` is `None` the fallback must
+// substitute the bound caller's `agent_id` so the reconstructed `TurnScope`
+// can locate the thread in storage.
+#[tokio::test]
+async fn get_timeline_uses_caller_agent_when_trigger_scope_omits_agent_id() {
+    // `TriggerRunThreadScope.agent_id` is `Option<AgentId>`.  When it is
+    // `None` (e.g. the trigger record was stored without an explicit agent),
+    // `check_automation_trigger_access` falls back to `bound_caller.agent_id`.
+    // This test seeds the thread under the scope that fallback should produce
+    // (caller's agent, trigger's project, creator's owner) and verifies that
+    // the timeline resolves — proving the fallback actually runs.
+    let caller = caller();
+    let trigger_thread_id =
+        ThreadId::new("thread-trigger-no-agent").expect("valid trigger thread id");
+
+    // The thread is stored under the scope the fallback reconstructs:
+    //   agent_id    = bound_caller.agent_id  (falls back from None)
+    //   project_id  = trigger_scope.project_id
+    //   owner_user_id = Some(creator_user_id)
+    let fallback_scope = ThreadScope {
+        tenant_id: caller.tenant_id.clone(),
+        agent_id: caller.agent_id.clone().expect("test caller has agent"),
+        project_id: caller.project_id.clone(),
+        owner_user_id: Some(
+            UserId::new(TRIGGER_CREATOR_USER_ID).expect("valid trigger creator user id"),
+        ),
+        mission_id: None,
+    };
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: fallback_scope,
+            thread_id: Some(trigger_thread_id.clone()),
+            created_by_actor_id: "system".to_string(),
+            title: Some("Agent-omitted trigger run".to_string()),
+            metadata_json: Some(automation_trigger_thread_metadata_json(
+                "trigger-no-agent-automation",
+            )),
+        })
+        .await
+        .expect("trigger thread stored");
+
+    // The trigger scope has agent_id = None, exercising the fallback branch.
+    let scope_with_no_agent = TriggerRunThreadScope {
+        agent_id: None,
+        project_id: caller.project_id.clone(),
+        creator_user_id: UserId::new(TRIGGER_CREATOR_USER_ID)
+            .expect("valid trigger creator user id"),
+    };
+    let automation_facade = Arc::new(
+        StaticAutomationFacade::new(vec![])
+            .with_resolve_scope_for_thread(trigger_thread_id.clone(), scope_with_no_agent),
+    );
+
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(automation_facade);
+
+    let response = services
+        .get_timeline(
+            caller,
+            RebornTimelineRequest {
+                thread_id: trigger_thread_id.as_str().to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("timeline must resolve when agent_id is None via caller fallback");
+
+    assert_eq!(
+        response.thread.thread_id, trigger_thread_id,
+        "fallback to caller agent_id must locate the trigger-owned thread"
+    );
 }
 
 // Regression tests for the automation-trigger gate/approval interaction
