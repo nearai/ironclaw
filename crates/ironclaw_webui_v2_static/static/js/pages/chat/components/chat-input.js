@@ -141,7 +141,10 @@ export function ChatInput({
     ? "w-full"
     : "px-4 py-3 sm:px-5 lg:px-8";
   const composerClass = [
-    "relative mx-auto w-full max-w-5xl rounded-[20px] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] shadow-[var(--v2-card-shadow)] p-2.5",
+    "relative mx-auto w-full max-w-5xl rounded-[20px] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] shadow-[var(--v2-card-shadow)] p-2.5 transition-colors",
+    // Highlight the full rounded container on focus (not just the
+    // leaking textarea ring), mirroring the global input:focus accent.
+    "focus-within:border-[var(--v2-accent)] focus-within:shadow-[0_0_0_3px_color-mix(in_srgb,var(--v2-accent)_28%,transparent)]",
     isHero ? "min-h-[120px]" : "",
     disabled ? "opacity-70" : "",
   ].join(" ");
