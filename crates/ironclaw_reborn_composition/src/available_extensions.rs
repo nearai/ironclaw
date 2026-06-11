@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use ironclaw_extensions::{
     CapabilityDeclV2, CapabilityVisibility, ExtensionAssetPath, ExtensionManifest,
     ExtensionPackage, ExtensionRuntime, ManifestSource,
@@ -228,7 +230,16 @@ fn can_merge_credential_setup(
     existing: &LifecycleExtensionCredentialSetup,
     candidate: &LifecycleExtensionCredentialSetup,
 ) -> bool {
-    existing == candidate
+    matches!(
+        (existing, candidate),
+        (
+            LifecycleExtensionCredentialSetup::ManualToken,
+            LifecycleExtensionCredentialSetup::ManualToken
+        ) | (
+            LifecycleExtensionCredentialSetup::OAuth { .. },
+            LifecycleExtensionCredentialSetup::OAuth { .. }
+        )
+    )
 }
 
 fn merge_credential_setup(
@@ -240,12 +251,14 @@ fn merge_credential_setup(
         LifecycleExtensionCredentialSetup::OAuth { scopes: candidate },
     ) = (existing, candidate)
     {
-        for scope in candidate {
-            if !existing.contains(&scope) {
-                existing.push(scope);
-            }
-        }
+        merge_scope_strings(existing, candidate);
     }
+}
+
+fn merge_scope_strings(existing: &mut Vec<String>, candidate: Vec<String>) {
+    let mut scopes = existing.iter().cloned().collect::<BTreeSet<_>>();
+    scopes.extend(candidate);
+    *existing = scopes.into_iter().collect();
 }
 
 struct CredentialRequirementGroup {
@@ -1630,7 +1643,7 @@ mod tests {
     }
 
     #[test]
-    fn bundled_google_credentials_project_oauth_setup_per_declared_scope_set() {
+    fn bundled_google_credentials_project_single_oauth_setup_with_scope_union() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
 
         for extension_id in [
@@ -1652,7 +1665,7 @@ mod tests {
                 .collect::<Vec<_>>();
 
             let mut credential_count = 0;
-            let mut expected_setup_scopes: Vec<String> = Vec::new();
+            let mut expected_setup_scopes = BTreeSet::new();
             for capability in &package.package.manifest.capabilities {
                 for credential in &capability.runtime_credentials {
                     let RuntimeCredentialRequirementSource::ProductAuthAccount { provider, setup } =
@@ -1676,32 +1689,25 @@ mod tests {
                         "{extension_id} capability {} OAuth setup scopes should match requested provider scopes",
                         capability.id
                     );
-                    for scope in scopes {
-                        if !expected_setup_scopes.contains(scope) {
-                            expected_setup_scopes.push(scope.clone());
-                        }
-                    }
+                    expected_setup_scopes.extend(scopes.iter().cloned());
                     credential_count += 1;
                 }
             }
 
             assert_eq!(
                 google_requirements.len(),
-                expected_setup_scopes.len(),
-                "{extension_id} lifecycle setup should show one Google OAuth request per distinct scope set"
+                1,
+                "{extension_id} lifecycle setup should show one Google OAuth request"
             );
-            for (requirement, expected_scope) in
-                google_requirements.iter().zip(expected_setup_scopes.iter())
-            {
-                let LifecycleExtensionCredentialSetup::OAuth { scopes } = &requirement.setup else {
-                    panic!("{extension_id} should expose Google OAuth setup");
-                };
-                assert_eq!(
-                    scopes.as_slice(),
-                    std::slice::from_ref(expected_scope),
-                    "{extension_id} lifecycle setup should preserve each capability OAuth scope set"
-                );
-            }
+            let LifecycleExtensionCredentialSetup::OAuth { scopes } = &google_requirements[0].setup
+            else {
+                panic!("{extension_id} should expose Google OAuth setup");
+            };
+            assert_eq!(
+                scopes.iter().cloned().collect::<BTreeSet<_>>(),
+                expected_setup_scopes,
+                "{extension_id} lifecycle setup should include every capability OAuth scope"
+            );
             assert!(
                 credential_count > 0,
                 "{extension_id} should declare runtime credentials"

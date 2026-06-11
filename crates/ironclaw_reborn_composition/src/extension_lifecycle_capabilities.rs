@@ -262,7 +262,7 @@ fn lifecycle_error(error: ProductWorkflowError) -> FirstPartyCapabilityError {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use ironclaw_auth::{
         AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
@@ -545,12 +545,83 @@ mod tests {
         assert_eq!(requirement.provider.as_str(), "google");
         assert_eq!(requirement.requester_extension.as_str(), "google-calendar");
         assert_eq!(
-            requirement.provider_scopes,
-            vec!["https://www.googleapis.com/auth/calendar.events".to_string()]
+            requirement
+                .provider_scopes
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "https://www.googleapis.com/auth/calendar.events".to_string(),
+                "https://www.googleapis.com/auth/calendar.readonly".to_string(),
+            ])
         );
 
         let active = active_extension_capability_ids(&extension_management).await;
         assert!(!active.iter().any(|id| id == "google-calendar.create_event"));
+    }
+
+    #[tokio::test]
+    async fn local_dev_extension_activate_coalesces_gmail_oauth_scopes_into_one_auth_gate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "extension-tools-gmail-scope-union-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let extension_management = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate")
+            .extension_management
+            .as_ref()
+            .expect("extension management")
+            .clone();
+
+        invoke_json(
+            &services,
+            EXTENSION_INSTALL_CAPABILITY_ID,
+            serde_json::json!({"extension_id": "gmail"}),
+        )
+        .await
+        .expect("install succeeds");
+
+        let outcome = invoke_outcome(
+            &services,
+            EXTENSION_ACTIVATE_CAPABILITY_ID,
+            serde_json::json!({"extension_id": "gmail"}),
+        )
+        .await;
+        let RuntimeCapabilityOutcome::AuthRequired(gate) = outcome else {
+            panic!("expected Gmail activation to request auth, got {outcome:?}");
+        };
+        assert_eq!(
+            gate.capability_id.as_str(),
+            EXTENSION_ACTIVATE_CAPABILITY_ID
+        );
+        assert_eq!(
+            gate.credential_requirements.len(),
+            1,
+            "Gmail activation should ask for one Google OAuth gate"
+        );
+        let requirement = &gate.credential_requirements[0];
+        assert_eq!(requirement.provider.as_str(), "google");
+        assert_eq!(requirement.requester_extension.as_str(), "gmail");
+        assert_eq!(
+            requirement
+                .provider_scopes
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "https://www.googleapis.com/auth/gmail.modify".to_string(),
+                "https://www.googleapis.com/auth/gmail.readonly".to_string(),
+                "https://www.googleapis.com/auth/gmail.send".to_string(),
+            ])
+        );
+
+        let active = active_extension_capability_ids(&extension_management).await;
+        assert!(!active.iter().any(|id| id == "gmail.list_messages"));
     }
 
     #[tokio::test]

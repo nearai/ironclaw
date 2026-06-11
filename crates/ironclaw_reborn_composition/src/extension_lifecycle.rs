@@ -9,8 +9,8 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, CredentialStageError, EffectKind, ExtensionId,
-    PermissionMode, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement,
-    RuntimeHttpEgress, VirtualPath, sha256_digest_token,
+    PermissionMode, ResourceScope, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement,
+    RuntimeCredentialRequirement, RuntimeHttpEgress, VirtualPath, sha256_digest_token,
 };
 use ironclaw_product_workflow::{
     LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
@@ -1029,29 +1029,94 @@ fn package_runtime_credential_auth_requirements(
             else {
                 continue;
             };
-            let provider_scopes = normalized_provider_scopes(&requirement.provider_scopes);
-            if requirements.iter().any(|seen| {
-                seen.provider == requirement.provider
-                    && seen.setup == requirement.setup
-                    && seen.requester_extension == package.manifest.id
-                    && normalized_provider_scopes(&seen.provider_scopes) == provider_scopes
-            }) {
-                continue;
-            }
             let requirement = RuntimeCredentialAuthRequirement {
-                provider_scopes,
+                provider_scopes: normalized_provider_scopes(&requirement.provider_scopes),
+                setup: normalized_runtime_credential_setup(requirement.setup),
                 ..requirement
             };
+            if let Some(seen) = requirements
+                .iter_mut()
+                .find(|seen| can_merge_runtime_credential_auth_requirement(seen, &requirement))
+            {
+                merge_runtime_credential_auth_requirement(seen, requirement);
+                continue;
+            }
             requirements.push(requirement);
         }
     }
     requirements
 }
 
+fn can_merge_runtime_credential_auth_requirement(
+    existing: &RuntimeCredentialAuthRequirement,
+    candidate: &RuntimeCredentialAuthRequirement,
+) -> bool {
+    existing.provider == candidate.provider
+        && existing.requester_extension == candidate.requester_extension
+        && can_merge_runtime_credential_setup(&existing.setup, &candidate.setup)
+}
+
+fn can_merge_runtime_credential_setup(
+    existing: &RuntimeCredentialAccountSetup,
+    candidate: &RuntimeCredentialAccountSetup,
+) -> bool {
+    matches!(
+        (existing, candidate),
+        (
+            RuntimeCredentialAccountSetup::ManualToken,
+            RuntimeCredentialAccountSetup::ManualToken
+        ) | (
+            RuntimeCredentialAccountSetup::OAuth { .. },
+            RuntimeCredentialAccountSetup::OAuth { .. }
+        )
+    )
+}
+
+fn merge_runtime_credential_auth_requirement(
+    existing: &mut RuntimeCredentialAuthRequirement,
+    candidate: RuntimeCredentialAuthRequirement,
+) {
+    existing.provider_scopes = merged_provider_scopes(
+        existing
+            .provider_scopes
+            .iter()
+            .cloned()
+            .chain(candidate.provider_scopes),
+    );
+    merge_runtime_credential_setup(&mut existing.setup, candidate.setup);
+}
+
+fn merge_runtime_credential_setup(
+    existing: &mut RuntimeCredentialAccountSetup,
+    candidate: RuntimeCredentialAccountSetup,
+) {
+    if let (
+        RuntimeCredentialAccountSetup::OAuth { scopes: existing },
+        RuntimeCredentialAccountSetup::OAuth { scopes: candidate },
+    ) = (existing, candidate)
+    {
+        *existing = merged_provider_scopes(existing.iter().cloned().chain(candidate));
+    }
+}
+
+fn normalized_runtime_credential_setup(
+    setup: RuntimeCredentialAccountSetup,
+) -> RuntimeCredentialAccountSetup {
+    match setup {
+        RuntimeCredentialAccountSetup::OAuth { scopes } => RuntimeCredentialAccountSetup::OAuth {
+            scopes: normalized_provider_scopes(&scopes),
+        },
+        RuntimeCredentialAccountSetup::ManualToken => RuntimeCredentialAccountSetup::ManualToken,
+    }
+}
+
 fn normalized_provider_scopes(scopes: &[String]) -> Vec<String> {
+    merged_provider_scopes(scopes.iter().cloned())
+}
+
+fn merged_provider_scopes(scopes: impl IntoIterator<Item = String>) -> Vec<String> {
     scopes
-        .iter()
-        .cloned()
+        .into_iter()
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
@@ -1477,37 +1542,60 @@ mod tests {
     }
 
     #[test]
-    fn activation_credential_requirements_keep_distinct_provider_scope_sets() {
+    fn activation_credential_requirements_coalesce_google_oauth_scope_sets() {
         let catalog =
             AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets");
-        let package_ref =
-            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "google-calendar")
-                .expect("valid package ref");
-        let package = catalog
-            .resolve(&package_ref)
-            .expect("google-calendar bundled");
+        for (extension_id, expected_scopes) in [
+            (
+                "google-calendar",
+                vec![
+                    "https://www.googleapis.com/auth/calendar.events",
+                    "https://www.googleapis.com/auth/calendar.readonly",
+                ],
+            ),
+            (
+                "gmail",
+                vec![
+                    "https://www.googleapis.com/auth/gmail.modify",
+                    "https://www.googleapis.com/auth/gmail.readonly",
+                    "https://www.googleapis.com/auth/gmail.send",
+                ],
+            ),
+        ] {
+            let package_ref =
+                LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id)
+                    .expect("valid package ref");
+            let package = catalog
+                .resolve(&package_ref)
+                .expect("bundled Google package");
 
-        let requirements = package_runtime_credential_auth_requirements(&package.package);
+            let requirements = package_runtime_credential_auth_requirements(&package.package);
 
-        let scope_sets = requirements
-            .iter()
-            .map(|requirement| {
-                assert_eq!(requirement.provider.as_str(), "google");
-                assert_eq!(requirement.requester_extension.as_str(), "google-calendar");
+            assert_eq!(
+                requirements.len(),
+                1,
+                "{extension_id} should activate with one Google OAuth requirement"
+            );
+            let requirement = &requirements[0];
+            assert_eq!(requirement.provider.as_str(), "google");
+            assert_eq!(requirement.requester_extension.as_str(), extension_id);
+            let expected = expected_scopes
+                .into_iter()
+                .map(str::to_string)
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
                 requirement
                     .provider_scopes
                     .iter()
                     .cloned()
-                    .collect::<BTreeSet<_>>()
-            })
-            .collect::<BTreeSet<_>>();
-        assert_eq!(
-            scope_sets,
-            BTreeSet::from([
-                BTreeSet::from(["https://www.googleapis.com/auth/calendar.readonly".to_string()]),
-                BTreeSet::from(["https://www.googleapis.com/auth/calendar.events".to_string()]),
-            ])
-        );
+                    .collect::<BTreeSet<_>>(),
+                expected
+            );
+            let RuntimeCredentialAccountSetup::OAuth { scopes } = &requirement.setup else {
+                panic!("{extension_id} should use OAuth setup");
+            };
+            assert_eq!(scopes.iter().cloned().collect::<BTreeSet<_>>(), expected);
+        }
     }
 
     #[tokio::test]
