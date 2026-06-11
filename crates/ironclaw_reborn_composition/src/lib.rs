@@ -38,6 +38,7 @@ mod extension_lifecycle;
 mod extension_lifecycle_capabilities;
 mod extension_lifecycle_command;
 mod factory;
+mod failure_summary;
 mod google_oauth;
 mod gsuite;
 mod hooks;
@@ -81,6 +82,8 @@ mod profile;
 mod profile_approval_authorization;
 mod projection;
 pub use auth_prompt::{AuthChallengeProvider, AuthChallengeView};
+#[cfg(feature = "slack-v2-host-beta")]
+mod delivered_gate_routing;
 #[cfg(feature = "root-llm-provider")]
 mod provider_admin;
 #[cfg(feature = "root-llm-provider")]
@@ -160,6 +163,7 @@ pub use extension_lifecycle_command::{
 #[cfg(feature = "test-support")]
 pub use factory::RebornLocalDevApprovalTestParts;
 pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
+pub use failure_summary::reborn_failure_summary_for_category;
 pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
 pub use hooks::{
     HOOKS_ENABLED_ENV, HOOKS_THIRD_PARTY_ENABLED_ENV, HookDispatcherBuilderFactory,
@@ -198,6 +202,9 @@ pub use local_runtime_profile::{
     RebornLocalRuntimeProfileError, RebornLocalRuntimeProfileOptions, local_dev_runtime_policy,
     local_dev_yolo_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options,
+};
+pub use nearai_mcp::{
+    NearAiMcpBootstrapConfig, NearAiMcpBootstrapConfigError, nearai_mcp_bootstrap_config_from_env,
 };
 #[cfg(feature = "openai-compat-beta")]
 pub use openai_compat_serve::build_openai_compat_route_mount;
@@ -254,6 +261,10 @@ pub use slack_connectable_channel::{
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_delivery::{
+    NoopPostSubmitDeliveryHook, PostSubmitDeliveryHook, TriggeredRunDeliveryDriver,
+};
+#[cfg(feature = "slack-v2-host-beta")]
+pub use slack_delivery::{
     SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
     SlackFinalReplyDeliverySettings,
 };
@@ -267,6 +278,7 @@ pub use slack_host_beta::{
     SlackHostBetaBuildError, SlackHostBetaChannelRoute, SlackHostBetaConfig,
     SlackHostBetaConfigInput, SlackHostBetaMounts, build_slack_events_route_mount,
     build_slack_events_route_mount_with_actor_user_resolver, build_slack_host_beta_mounts,
+    build_triggered_run_delivery_hook,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_personal_binding::{

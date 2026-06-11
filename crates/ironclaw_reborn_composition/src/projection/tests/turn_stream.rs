@@ -151,7 +151,7 @@ async fn webui_event_stream_resumes_mixed_batch_without_skipping_turn_event() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_projects_approval_gate_prompt() {
+async fn webui_event_stream_offers_always_for_typed_approval_gate() {
     let tenant_id = TenantId::new("webui-events-approval-tenant").unwrap();
     let user_id = UserId::new("webui-events-approval-user").unwrap();
     let agent_id = AgentId::new("webui-events-approval-agent").unwrap();
@@ -215,6 +215,77 @@ async fn webui_event_stream_projects_approval_gate_prompt() {
                     && prompt.gate_ref == gate_ref.as_str()
                     && prompt.headline == "Approval required"
                     && prompt.body == "capability requires approval"
+                    && prompt.allow_always
+        )
+    }));
+}
+
+#[tokio::test]
+async fn webui_event_stream_does_not_offer_always_for_generic_approval_gate() {
+    let tenant_id = TenantId::new("webui-events-generic-approval-tenant").unwrap();
+    let user_id = UserId::new("webui-events-generic-approval-user").unwrap();
+    let agent_id = AgentId::new("webui-events-generic-approval-agent").unwrap();
+    let thread_id = ThreadId::new("webui-events-generic-approval-thread").unwrap();
+    let turn_run = TurnRunId::new();
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let gate_ref = GateRef::new("gate:generic-approval").unwrap();
+    let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let actor = TurnActor::new(user_id.clone());
+    let services = build_reborn_projection_services(
+        event_log_dyn,
+        ReplyTargetBindingRef::new("webui-events-generic-approval-reply").unwrap(),
+    )
+    .with_turn_events(
+        Arc::new(FakeTurnEventSource {
+            events: vec![TurnLifecycleEvent {
+                cursor: TurnEventCursor(1),
+                scope: scope.clone(),
+                occurred_at: Some(chrono::Utc::now()),
+                owner_user_id: Some(user_id.clone()),
+                run_id: turn_run,
+                status: TurnStatus::BlockedApproval,
+                kind: TurnEventKind::Blocked,
+                blocked_gate: Some(TurnBlockedGateMetadata {
+                    gate_ref: gate_ref.clone(),
+                    gate_kind: TurnBlockedGateKind::Approval,
+                    credential_requirements: Vec::new(),
+                }),
+                sanitized_reason: Some("generic approval required".to_string()),
+            }],
+        }),
+        Arc::new(FakeTurnCoordinator {
+            state: TurnRunState {
+                status: TurnStatus::BlockedApproval,
+                gate_ref: Some(gate_ref.clone()),
+                ..turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(1))
+            },
+        }),
+    );
+
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor,
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event.payload(),
+            ProductOutboundPayload::GatePrompt(prompt)
+                if prompt.turn_run_id == turn_run
+                    && prompt.gate_ref == gate_ref.as_str()
+                    && prompt.headline == "Approval required"
+                    && prompt.body == "generic approval required"
+                    && !prompt.allow_always
         )
     }));
 }

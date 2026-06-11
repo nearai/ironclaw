@@ -11,7 +11,9 @@ use ironclaw_product_workflow::{
 };
 use toml::Value;
 
-use crate::nearai_mcp::{NearAiMcpEndpoint, nearai_mcp_endpoint_from_env};
+use crate::nearai_mcp::{
+    NearAiMcpBootstrapConfig, NearAiMcpEndpoint, nearai_mcp_endpoint_from_env,
+};
 
 const GITHUB_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/github/manifest.toml");
@@ -281,12 +283,19 @@ impl AvailableExtensionCatalog {
         Self { packages }
     }
 
+    #[cfg(test)]
     pub(crate) fn from_first_party_assets() -> Result<Self, ProductWorkflowError> {
+        Self::from_first_party_assets_with_nearai_mcp_config(None)
+    }
+
+    pub(crate) fn from_first_party_assets_with_nearai_mcp_config(
+        nearai_mcp_config: Option<&NearAiMcpBootstrapConfig>,
+    ) -> Result<Self, ProductWorkflowError> {
         Ok(Self::from_packages(vec![
             github_package()?,
             notion_mcp_package()?,
             web_access_package()?,
-            nearai_mcp_package()?,
+            nearai_mcp_package(nearai_mcp_config)?,
             google_calendar_package()?,
             google_docs_package()?,
             google_drive_package()?,
@@ -386,8 +395,10 @@ fn web_access_package() -> Result<AvailableExtensionPackage, ProductWorkflowErro
     )
 }
 
-fn nearai_mcp_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    let manifest = nearai_mcp_manifest_toml()?;
+fn nearai_mcp_package(
+    config: Option<&NearAiMcpBootstrapConfig>,
+) -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    let manifest = nearai_mcp_manifest_toml_for_config(config)?;
     bundled_extension_package("nearai", "NEAR AI", &manifest, nearai_mcp_assets(&manifest))
 }
 
@@ -472,8 +483,13 @@ pub(crate) fn web_access_manifest_digest() -> String {
     sha256_digest_token(WEB_ACCESS_MANIFEST.as_bytes())
 }
 
-pub(crate) fn nearai_mcp_manifest_toml() -> Result<String, ProductWorkflowError> {
-    let endpoint = nearai_mcp_endpoint_from_env().map_err(map_binding_error)?;
+pub(crate) fn nearai_mcp_manifest_toml_for_config(
+    config: Option<&NearAiMcpBootstrapConfig>,
+) -> Result<String, ProductWorkflowError> {
+    let endpoint = match config {
+        Some(config) => config.endpoint().map_err(map_binding_error)?,
+        None => nearai_mcp_endpoint_from_env().map_err(map_binding_error)?,
+    };
     nearai_mcp_manifest_toml_for_endpoint(&endpoint)
 }
 

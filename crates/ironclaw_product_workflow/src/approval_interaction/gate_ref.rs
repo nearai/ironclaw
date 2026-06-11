@@ -51,3 +51,19 @@ pub(super) fn approval_reply_binding_ref(
     )
     .map_err(|_| approval_rejected(ApprovalInteractionRejectionKind::InvalidBindingRef))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_approval_gate_ref_accepts_only_typed_approval_prefix() {
+        let typed = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate");
+        let generic = GateRef::new("gate:approve-slack").expect("generic gate");
+        let adjacent = GateRef::new("gate:approvalish-test").expect("adjacent gate");
+
+        assert!(is_approval_gate_ref(&typed));
+        assert!(!is_approval_gate_ref(&generic));
+        assert!(!is_approval_gate_ref(&adjacent));
+    }
+}

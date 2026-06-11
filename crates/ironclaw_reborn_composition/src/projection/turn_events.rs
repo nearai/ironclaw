@@ -9,6 +9,7 @@ use ironclaw_product_adapters::{
     GatePromptView, ProductAdapterError, ProductOutboundPayload, ProductProjectionItem,
     ProductProjectionState, ProductWorkflowRejectionKind, RedactedString,
 };
+use ironclaw_product_workflow::is_approval_gate_ref;
 use ironclaw_turns::{
     GetRunStateRequest, SanitizedFailure, TurnCoordinator, TurnError, TurnEventKind,
     TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
@@ -22,10 +23,11 @@ use ironclaw_turns::{
 };
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 
-use ironclaw_reborn::failure_categories::MODEL_CREDITS_EXHAUSTED_CATEGORY;
-
 use crate::AuthChallengeProvider;
 use crate::auth_prompt::auth_prompt_view_for_blocked_auth;
+use crate::failure_summary::{
+    pinned_failure_summary_for_category, reborn_failure_summary_for_category,
+};
 
 pub(super) const WEBUI_TURN_EVENT_PAGE_LIMIT: usize = 256;
 const FAILURE_EXPLANATION_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
@@ -348,13 +350,17 @@ async fn blocked_prompt_payload(
             .await?;
             Ok(Some(ProductOutboundPayload::AuthPrompt(view)))
         }
-        TurnStatus::BlockedApproval => {
-            Ok(Some(gate_prompt(event, gate_ref_str, "Approval required")))
-        }
+        TurnStatus::BlockedApproval => Ok(Some(gate_prompt(
+            event,
+            gate_ref_str,
+            "Approval required",
+            is_approval_gate_ref(gate_ref),
+        ))),
         TurnStatus::BlockedResource => Ok(Some(gate_prompt(
             event,
             gate_ref_str,
             "Resource unavailable",
+            false,
         ))),
         // Non-blocked statuses: no prompt payload. Exhaustive match so a new
         // TurnStatus variant forces a compile error and an explicit decision.
@@ -373,6 +379,7 @@ fn gate_prompt(
     event: &TurnLifecycleEvent,
     gate_ref: String,
     headline: &'static str,
+    allow_always: bool,
 ) -> ProductOutboundPayload {
     ProductOutboundPayload::GatePrompt(GatePromptView {
         turn_run_id: event.run_id,
@@ -382,6 +389,7 @@ fn gate_prompt(
             .sanitized_reason
             .clone()
             .unwrap_or_else(|| "Resolve this gate to continue the run.".to_string()),
+        allow_always,
     })
 }
 
@@ -467,7 +475,7 @@ async fn failure_details_for_turn_event(
     let Some(category) = failure_category_for_turn_event(event) else {
         return FailureProjectionDetails::default();
     };
-    let fallback_summary = failure_summary_for_category(&category).to_string();
+    let fallback_summary = reborn_failure_summary_for_category(Some(&category)).to_string();
     let cache_key = FailureExplanationCacheKey {
         run_id: event.run_id,
         category: category.clone(),
@@ -500,8 +508,8 @@ async fn failure_summary_for_turn_event(
     category: &str,
     fallback_summary: String,
 ) -> String {
-    if category == MODEL_CREDITS_EXHAUSTED_CATEGORY {
-        return fallback_summary;
+    if let Some(summary) = pinned_failure_summary_for_category(category) {
+        return summary.to_string();
     }
     failure_explainer
         .explain_failure(FailureExplanationInput {
@@ -519,41 +527,6 @@ fn failure_category_for_turn_event(event: &TurnLifecycleEvent) -> Option<String>
     )
     .then(|| event.sanitized_reason.clone())
     .flatten()
-}
-
-fn failure_summary_for_category(category: &str) -> &'static str {
-    match category {
-        "driver_not_found" => {
-            "The run failed because the configured execution driver was not available."
-        }
-        "driver_unavailable" => {
-            "The run failed because the execution driver was temporarily unavailable."
-        }
-        "driver_failed" => "The run failed because the execution driver reported an error.",
-        "driver_invalid_request" => {
-            "The run failed because the execution driver rejected the request."
-        }
-        "driver_panic" => "The run failed because the execution driver stopped unexpectedly.",
-        "host_creation_failed" => "The run failed while preparing the runtime host.",
-        "route_snapshot_persistence_failed" => {
-            "The run failed while saving the selected model route."
-        }
-        MODEL_CREDITS_EXHAUSTED_CATEGORY => {
-            "The AI provider account is out of credits. Add credits or switch providers and try again."
-        }
-        "heartbeat_failed" => "The run failed after the runner heartbeat could not be recorded.",
-        "exit_application_failed" => "The run failed while recording its final result.",
-        "lease_expired" => "The run failed because its runner lease expired.",
-        "interrupted_unexpectedly" => "The run stopped before it could complete cleanly.",
-        "no_progress_detected" => {
-            "The run stopped because it repeated the same step without making progress."
-        }
-        "iteration_limit" => {
-            "The run stopped after reaching its iteration limit before producing a reply."
-        }
-        "unknown_failure" => "The run failed for an unknown reason.",
-        _ => "The run failed before producing a reply.",
-    }
 }
 
 fn failure_explanation_request(input: &FailureExplanationInput) -> Option<SystemInferenceRequest> {

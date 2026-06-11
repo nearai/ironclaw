@@ -1,15 +1,21 @@
 use std::sync::Arc;
 
+use chrono::Utc;
+
 use async_trait::async_trait;
 use ironclaw_host_api::{InvocationId, ResourceScope};
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
-    ConnectableChannelsProductFacade, RebornServices as ProductRebornServices, RebornServicesApi,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
-    RebornSkillTrustLevel, SkillsProductFacade, WebUiAuthenticatedCaller,
+    ConnectableChannelsProductFacade, OperatorStatusService, RebornOperatorStatusCheck,
+    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
+    RebornServices as ProductRebornServices, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSkillActionResponse,
+    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel, SkillsProductFacade,
+    WebUiAuthenticatedCaller,
 };
+
+use ironclaw_triggers::TriggerRepository;
 
 use crate::{
     RebornAutomationProductFacade, RebornBuildError, RebornProductAuthServices, RebornReadiness,
@@ -73,10 +79,6 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     outbound_delivery_target_providers: Vec<Arc<dyn OutboundDeliveryTargetProvider>>,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
     let services = runtime.services();
-    let automation_facade = services
-        .host_runtime
-        .as_ref()
-        .map(|host_runtime| Arc::new(RebornAutomationProductFacade::new(Arc::clone(host_runtime))));
 
     let mut api = ProductRebornServices::new(
         runtime.webui_thread_service(),
@@ -137,8 +139,26 @@ pub(crate) fn build_webui_services_with_connectable_channels(
             Arc::clone(product_auth),
         )));
     }
-    if let Some(automation_facade) = automation_facade {
-        api = api.with_automation_product_facade(automation_facade);
+    // Local-dev and production graphs both carry a trigger repository; whichever
+    // is wired backs the automations panel.
+    let automation_repository: Option<Arc<dyn TriggerRepository>> = {
+        let from_local = services
+            .local_runtime
+            .as_ref()
+            .map(|local_runtime| Arc::clone(&local_runtime.trigger_repository));
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        let from_local = from_local.or_else(|| {
+            services
+                .production_runtime
+                .as_ref()
+                .map(|production_runtime| production_runtime.trigger_repository())
+        });
+        from_local
+    };
+    if let Some(repository) = automation_repository {
+        api = api.with_automation_product_facade(Arc::new(RebornAutomationProductFacade::new(
+            repository,
+        )));
     }
     if let Some(local_runtime) = &services.local_runtime {
         api = api.with_outbound_preferences_facade(Arc::new(RebornOutboundPreferencesFacade::new(
@@ -156,6 +176,9 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         api = api.with_connectable_channels_facade(connectable_channels);
     }
     api = api.with_event_stream(event_stream.unwrap_or_else(|| runtime.webui_event_stream()));
+    api = api.with_operator_status_service(Arc::new(ReadinessOperatorStatusService::new(
+        services.readiness.clone(),
+    )));
 
     // Compose the operator LLM-config settings service when the runtime was
     // assembled with a boot config. The secret store stays private to this
@@ -181,6 +204,26 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         product_auth: services.product_auth.clone(),
         readiness: services.readiness.clone(),
     })
+}
+
+struct ReadinessOperatorStatusService {
+    readiness: RebornReadiness,
+}
+
+impl ReadinessOperatorStatusService {
+    fn new(readiness: RebornReadiness) -> Self {
+        Self { readiness }
+    }
+}
+
+#[async_trait]
+impl OperatorStatusService for ReadinessOperatorStatusService {
+    async fn status(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorStatusResponse, RebornServicesError> {
+        Ok(status_response_from_readiness(&self.readiness))
+    }
 }
 
 struct LocalSkillsProductFacade {
@@ -433,6 +476,151 @@ fn internal_skill_error() -> RebornServicesError {
     }
 }
 
+fn status_response_from_readiness(readiness: &RebornReadiness) -> RebornOperatorStatusResponse {
+    let mut checks = Vec::new();
+    let (runtime_status, runtime_severity, runtime_remediation) = match readiness.state {
+        crate::RebornReadinessState::Disabled => (
+            RebornOperatorStatusState::NotConfigured,
+            RebornOperatorStatusSeverity::Warning,
+            Some("finish Reborn runtime setup before production use".to_string()),
+        ),
+        crate::RebornReadinessState::DevOnly => (
+            RebornOperatorStatusState::Degraded,
+            RebornOperatorStatusSeverity::Warning,
+            Some("finish Reborn runtime setup before production use".to_string()),
+        ),
+        crate::RebornReadinessState::ProductionValidated => (
+            RebornOperatorStatusState::Ready,
+            RebornOperatorStatusSeverity::Info,
+            None,
+        ),
+        crate::RebornReadinessState::MigrationDryRunValidated => (
+            RebornOperatorStatusState::Ready,
+            RebornOperatorStatusSeverity::Info,
+            None,
+        ),
+    };
+    checks.push(status_check(
+        "runtime",
+        runtime_status,
+        runtime_severity,
+        format!(
+            "Reborn profile {:?} is {:?}",
+            readiness.profile, readiness.state
+        ),
+        runtime_remediation,
+    ));
+    checks.push(bool_check(
+        "storage",
+        readiness.facades.turn_coordinator,
+        "turn coordinator facade is ready",
+        "turn coordinator facade is not wired",
+    ));
+    checks.push(bool_check(
+        "secrets",
+        readiness.facades.product_auth,
+        "product auth and secret-backed flows are ready",
+        "product auth facade is not wired",
+    ));
+    checks.push(bool_check(
+        "provider_model",
+        readiness.facades.host_runtime,
+        "host runtime is ready for model-backed execution",
+        "host runtime is not wired",
+    ));
+    checks.push(status_check(
+        "webui",
+        RebornOperatorStatusState::Ready,
+        RebornOperatorStatusSeverity::Info,
+        "WebUI v2 route facade is mounted".to_string(),
+        None,
+    ));
+    checks.push(bool_check(
+        "trigger_poller",
+        readiness.workers.trigger_poller,
+        "trigger poller worker is ready",
+        "trigger poller worker is not running",
+    ));
+    checks.push(status_check(
+        "channels",
+        RebornOperatorStatusState::Unsupported,
+        RebornOperatorStatusSeverity::Info,
+        "channel-specific readiness probes are not wired yet".to_string(),
+        Some("consult channel setup diagnostics for adapter-specific status".to_string()),
+    ));
+    checks.push(status_check(
+        "extensions",
+        RebornOperatorStatusState::Unsupported,
+        RebornOperatorStatusSeverity::Info,
+        "extension readiness probes are not wired yet".to_string(),
+        Some("use extension inventory and setup endpoints for per-extension status".to_string()),
+    ));
+    let overall = if checks
+        .iter()
+        .any(|check| check.status == RebornOperatorStatusState::Blocked)
+    {
+        RebornOperatorStatusState::Blocked
+    } else if checks.iter().any(|check| {
+        matches!(
+            check.status,
+            RebornOperatorStatusState::Degraded | RebornOperatorStatusState::NotConfigured
+        )
+    }) {
+        RebornOperatorStatusState::Degraded
+    } else {
+        RebornOperatorStatusState::Ready
+    };
+    RebornOperatorStatusResponse {
+        generated_at: Utc::now(),
+        overall,
+        checks,
+    }
+}
+
+fn bool_check(
+    id: &str,
+    ready: bool,
+    ready_summary: &str,
+    missing_summary: &str,
+) -> RebornOperatorStatusCheck {
+    status_check(
+        id,
+        if ready {
+            RebornOperatorStatusState::Ready
+        } else {
+            RebornOperatorStatusState::NotConfigured
+        },
+        if ready {
+            RebornOperatorStatusSeverity::Info
+        } else {
+            RebornOperatorStatusSeverity::Warning
+        },
+        if ready {
+            ready_summary
+        } else {
+            missing_summary
+        }
+        .to_string(),
+        (!ready).then(|| format!("wire the {id} subsystem in Reborn composition")),
+    )
+}
+
+fn status_check(
+    id: &str,
+    status: RebornOperatorStatusState,
+    severity: RebornOperatorStatusSeverity,
+    summary: String,
+    remediation: Option<String>,
+) -> RebornOperatorStatusCheck {
+    RebornOperatorStatusCheck {
+        id: id.to_string(),
+        status,
+        severity,
+        summary,
+        remediation,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,7 +629,27 @@ mod tests {
         HostPath, MountAlias, MountGrant, MountPermissions, MountView, TenantId, UserId,
         VirtualPath,
     };
-    use std::path::Path;
+    use std::{path::Path, time::Duration};
+
+    #[tokio::test]
+    async fn readiness_operator_status_service_generates_timestamp_per_call() {
+        let service = ReadinessOperatorStatusService::new(RebornReadiness::disabled());
+
+        let first = service
+            .status(caller("runtime-owner"))
+            .await
+            .expect("first status response");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        let second = service
+            .status(caller("runtime-owner"))
+            .await
+            .expect("second status response");
+
+        assert_ne!(
+            first.generated_at, second.generated_at,
+            "status generated_at must be refreshed for each operator status request"
+        );
+    }
 
     #[tokio::test]
     async fn skills_product_facade_hides_owner_user_skills_from_other_callers() {

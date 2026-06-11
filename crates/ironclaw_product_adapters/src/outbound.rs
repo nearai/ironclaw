@@ -564,6 +564,8 @@ pub struct GatePromptView {
     pub gate_ref: String,
     pub headline: String,
     pub body: String,
+    #[serde(default)]
+    pub allow_always: bool,
 }
 
 /// Discriminator for the kind of auth challenge surfaced in an `AuthPromptView`.
@@ -653,6 +655,8 @@ pub enum ProductProjectionItem {
     Gate {
         gate_ref: String,
         headline: String,
+        #[serde(default)]
+        allow_always: bool,
     },
     SkillActivation {
         id: String,
@@ -698,7 +702,9 @@ impl ProductProjectionItem {
                 }
                 Ok(())
             }
-            Self::Gate { gate_ref, headline } => {
+            Self::Gate {
+                gate_ref, headline, ..
+            } => {
                 validate_bounded_text(
                     "projection_gate_ref",
                     gate_ref,
@@ -785,6 +791,8 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
             Gate {
                 gate_ref: String,
                 headline: String,
+                #[serde(default)]
+                allow_always: bool,
             },
             SkillActivation {
                 id: String,
@@ -826,7 +834,15 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                     .map_err(serde::de::Error::custom)?,
                 failure_summary,
             },
-            Wire::Gate { gate_ref, headline } => ProductProjectionItem::Gate { gate_ref, headline },
+            Wire::Gate {
+                gate_ref,
+                headline,
+                allow_always,
+            } => ProductProjectionItem::Gate {
+                gate_ref,
+                headline,
+                allow_always,
+            },
             Wire::SkillActivation {
                 id,
                 run_id,
@@ -1141,6 +1157,51 @@ mod tests {
                 status: "failed".to_string(),
                 failure_category: None,
                 failure_summary: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn projection_state_round_trips_gate_item_with_allow_always() {
+        let state = ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::Gate {
+                gate_ref: "gate:approval-test".to_string(),
+                headline: "Approval required".to_string(),
+                allow_always: true,
+            }],
+        )
+        .expect("valid gate projection");
+        let value = serde_json::to_value(&state).expect("serialize");
+
+        assert_eq!(value["items"][0]["gate"]["gate_ref"], "gate:approval-test");
+        assert_eq!(value["items"][0]["gate"]["headline"], "Approval required");
+        assert_eq!(value["items"][0]["gate"]["allow_always"], true);
+        let decoded: ProductProjectionState =
+            serde_json::from_value(value).expect("deserialize gate projection");
+        assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn projection_state_accepts_legacy_gate_item_without_allow_always() {
+        let json = serde_json::json!({
+            "thread_id": "thread-1",
+            "items": [{
+                "gate": {
+                    "gate_ref": "gate:approval-test",
+                    "headline": "Approval required"
+                }
+            }]
+        });
+
+        let decoded: ProductProjectionState =
+            serde_json::from_value(json).expect("deserialize legacy gate projection");
+        assert_eq!(
+            decoded.items,
+            vec![ProductProjectionItem::Gate {
+                gate_ref: "gate:approval-test".to_string(),
+                headline: "Approval required".to_string(),
+                allow_always: false,
             }]
         );
     }

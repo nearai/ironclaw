@@ -249,6 +249,7 @@ test("useChatEvents: cleared non-auth gates are not restored by later projection
     gateRef: "gate:resource",
     headline: "Resource unavailable",
     body: "",
+    allowAlways: false,
   });
 
   harness.handleEvent({
@@ -279,6 +280,38 @@ test("useChatEvents: cleared non-auth gates are not restored by later projection
   });
 
   assert.equal(harness.pendingGate, null);
+});
+
+test("useChatEvents: projection approval gate preserves always-allow affordance", () => {
+  const runId = "run-approval";
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: runId, status: "blocked_approval" } },
+          {
+            gate: {
+              gate_ref: "gate:approval",
+              headline: "Approval required",
+              allow_always: true,
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(plain(harness.pendingGate), {
+    kind: "gate",
+    runId,
+    gateRef: "gate:approval",
+    headline: "Approval required",
+    body: "",
+    allowAlways: true,
+  });
 });
 
 test("useChatEvents: failed terminal projection appends visible error", () => {

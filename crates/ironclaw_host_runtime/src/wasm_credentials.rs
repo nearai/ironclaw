@@ -151,7 +151,7 @@ impl RuntimeCredentialRestager {
         request: &WasmRuntimeCredentialRequest,
         credential: &HostWasmRuntimeCredential,
     ) -> Result<(), CredentialStageError> {
-        let RuntimeCredentialRequirementSource::ProductAuthAccount { provider, .. } =
+        let RuntimeCredentialRequirementSource::ProductAuthAccount { provider, setup } =
             &credential.source
         else {
             return Ok(());
@@ -161,6 +161,7 @@ impl RuntimeCredentialRestager {
             .resolve_access_secret(RuntimeCredentialAccountRequest {
                 scope: &request.scope,
                 provider,
+                setup,
                 provider_scopes: &credential.provider_scopes,
                 requester_extension: &credential.requester_extension,
             })

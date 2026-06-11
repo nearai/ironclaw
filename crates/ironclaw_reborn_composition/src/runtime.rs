@@ -108,8 +108,8 @@ use crate::trigger_poller::{
     spawn_trigger_poller,
 };
 use crate::{
-    RebornBuildError, RebornCompositionProfile, RebornProductAuthServices, RebornServices,
-    build_reborn_services,
+    RebornBuildError, RebornCompositionProfile, RebornProductAuthServices, RebornReadiness,
+    RebornReadinessState, RebornServices, build_reborn_services,
 };
 use production::{
     EmptyCapabilitySurfaceResolver, EmptyIdentityContextSource,
@@ -184,6 +184,46 @@ where
             &graph.scoped_filesystem,
         ))) as Arc<dyn RuntimeSubagentGoalStore>,
         trigger_repository: Some(Arc::clone(&graph.trigger_repository)),
+    }
+}
+
+fn enforce_runtime_cutover_gate(
+    profile: RebornCompositionProfile,
+    readiness: &RebornReadiness,
+) -> Result<(), RebornRuntimeError> {
+    match profile {
+        RebornCompositionProfile::Production => {
+            if readiness.state != RebornReadinessState::ProductionValidated {
+                return Err(RebornRuntimeError::InvalidArgument {
+                    reason: format!(
+                        "profile=production cannot start Reborn runtime before production readiness is validated; state={:?}",
+                        readiness.state
+                    ),
+                });
+            }
+            if let Some(diagnostic) = readiness
+                .diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic.blocks_production)
+            {
+                return Err(RebornRuntimeError::InvalidArgument {
+                    reason: format!(
+                        "profile=production cannot start Reborn runtime while readiness diagnostic blocks production: component={:?}, reason={:?}",
+                        diagnostic.component, diagnostic.reason
+                    ),
+                });
+            }
+            Ok(())
+        }
+        RebornCompositionProfile::MigrationDryRun => Err(RebornRuntimeError::InvalidArgument {
+            reason:
+                "profile=migration-dry-run validates production-shaped wiring but must not start live Reborn runtime traffic"
+                    .to_string(),
+        }),
+        RebornCompositionProfile::Disabled => Err(RebornRuntimeError::InvalidArgument {
+            reason: "profile=disabled must not start live Reborn runtime traffic".to_string(),
+        }),
+        RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo => Ok(()),
     }
 }
 
@@ -300,6 +340,12 @@ pub struct RebornRuntime {
     worker_handle: JoinHandle<()>,
     worker_cancel: CancellationToken,
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
+    /// Late-binding slot shared with the poller's `PostSubmitHookWrappedSubmitter`.
+    /// `set_trigger_post_submit_hook` fills this after `build_reborn_runtime` returns.
+    /// `None` when the trigger poller is not enabled.
+    #[cfg(feature = "slack-v2-host-beta")]
+    post_submit_hook_slot:
+        Option<Arc<std::sync::OnceLock<Arc<dyn crate::slack_delivery::PostSubmitDeliveryHook>>>>,
     #[cfg(any(test, feature = "test-support"))]
     trigger_conversation_pairing:
         Option<Arc<dyn ironclaw_conversations::ConversationActorPairingService>>,
@@ -345,6 +391,13 @@ type LocalDevSkillExecutionAdapter =
 struct TriggerPollerServices {
     materializer: Arc<dyn ironclaw_triggers::TriggerPromptMaterializer>,
     trusted_submitter: Arc<dyn ironclaw_triggers::TrustedTriggerFireSubmitter>,
+    /// Late-binding slot for the post-submit hook. Created here and shared with
+    /// the poller wrapper; filled later by `RebornRuntime::set_trigger_post_submit_hook`
+    /// so `build_slack_host_beta_mounts` (called after runtime build) can wire the
+    /// hook without restarting the poller.
+    #[cfg(feature = "slack-v2-host-beta")]
+    post_submit_hook_slot:
+        Arc<std::sync::OnceLock<Arc<dyn crate::slack_delivery::PostSubmitDeliveryHook>>>,
     /// Test-support handle on the SAME conversation services instance the
     /// poller-side materializer/submitter use, so integration tests can call
     /// the production `pair_external_actor` API to seed the trigger
@@ -392,6 +445,8 @@ async fn build_trigger_poller_services(
         Ok(TriggerPollerServices {
             materializer,
             trusted_submitter,
+            #[cfg(feature = "slack-v2-host-beta")]
+            post_submit_hook_slot: Arc::new(std::sync::OnceLock::new()),
             #[cfg(any(test, feature = "test-support"))]
             pairing_service,
         })
@@ -417,6 +472,8 @@ async fn build_trigger_poller_services(
         Ok(TriggerPollerServices {
             materializer,
             trusted_submitter,
+            #[cfg(feature = "slack-v2-host-beta")]
+            post_submit_hook_slot: Arc::new(std::sync::OnceLock::new()),
             #[cfg(any(test, feature = "test-support"))]
             pairing_service,
         })
@@ -971,6 +1028,33 @@ impl RebornRuntime {
             .product_auth
             .as_ref()
             .and_then(|product_auth| product_auth.as_auth_challenge_provider())
+    }
+
+    /// Wire the triggered-run delivery hook into the already-spawned trigger
+    /// poller. Must be called after [`build_reborn_runtime`] returns and after
+    /// the hook itself is constructed (e.g. inside
+    /// [`crate::slack_host_beta::build_slack_host_beta_mounts`]). The hook is
+    /// idempotent: a second call is silently ignored. Returns `false` when the
+    /// trigger poller is not enabled (slot is `None`) or the slot is already
+    /// occupied, `true` on first successful set.
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub fn set_trigger_post_submit_hook(
+        &self,
+        hook: Arc<dyn crate::slack_delivery::PostSubmitDeliveryHook>,
+    ) -> bool {
+        let Some(slot) = self.post_submit_hook_slot.as_ref() else {
+            tracing::debug!("set_trigger_post_submit_hook: trigger poller not enabled, ignoring");
+            return false;
+        };
+        match slot.set(hook) {
+            Ok(()) => true,
+            Err(_) => {
+                tracing::debug!(
+                    "set_trigger_post_submit_hook: slot already occupied, ignoring (idempotent)"
+                );
+                false
+            }
+        }
     }
 
     #[cfg(test)]
@@ -1616,12 +1700,11 @@ impl RebornRuntime {
 /// On return, the turn-runner worker is already running in the background and
 /// the returned `RebornRuntime` is ready to accept `send_user_message` calls.
 ///
-/// **Currently supported profiles:** `RebornCompositionProfile::LocalDev` and
-/// `RebornCompositionProfile::LocalDevYolo` are wired end-to-end here;
-/// production profiles will follow in a later slice (they currently return
-/// their substrate-only `RebornServices` and need durable thread/checkpoint
-/// stores wired before being driven). Passing a production profile returns a
-/// "not yet wired" error rather than partially starting an agent.
+/// **Currently supported profiles:** `RebornCompositionProfile::LocalDev`,
+/// `RebornCompositionProfile::LocalDevYolo`, and
+/// `RebornCompositionProfile::Production` are wired end-to-end here. Production
+/// starts only after readiness diagnostics validate that live traffic can be
+/// exposed without a partial cutover.
 pub async fn build_reborn_runtime(
     input: RebornRuntimeInput,
 ) -> Result<RebornRuntime, RebornRuntimeError> {
@@ -1686,6 +1769,7 @@ pub async fn build_reborn_runtime(
     let trusted_laptop_access = services_input.grants_trusted_laptop_access();
     let owner_id = services_input.owner_id().to_string();
     let mut services = build_reborn_services(services_input).await?;
+    enforce_runtime_cutover_gate(profile, &services.readiness)?;
 
     let runtime_parts = match profile {
         RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo => {
@@ -2203,13 +2287,17 @@ pub async fn build_reborn_runtime(
     };
     services.turn_coordinator = Some(Arc::clone(&planned_turn_coordinator));
 
-    // Both `trigger_poller_handle` and the test-support
+    // `trigger_poller_handle`, `post_submit_hook_slot`, and the test-support
     // `trigger_conversation_pairing_value` are produced atomically inside
     // a single `if trigger_poller.enabled` expression. Avoid a
     // `let mut … = None` sentinel pattern flagged by code review
     // (review f-ptr-3): the `let X;` deferred-init form is single-assign
     // per branch and Rust's borrow checker prevents reads before init.
     let trigger_poller_handle: Option<TriggerPollerRuntimeHandle>;
+    #[cfg(feature = "slack-v2-host-beta")]
+    let runtime_post_submit_hook_slot: Option<
+        Arc<std::sync::OnceLock<Arc<dyn crate::slack_delivery::PostSubmitDeliveryHook>>>,
+    >;
     #[cfg(any(test, feature = "test-support"))]
     let trigger_conversation_pairing_value: Option<
         Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
@@ -2239,6 +2327,12 @@ pub async fn build_reborn_runtime(
             trigger_conversation_pairing_value =
                 Some(Arc::clone(&trigger_poller_services.pairing_service));
         }
+        #[cfg(feature = "slack-v2-host-beta")]
+        let hook_slot = Arc::clone(&trigger_poller_services.post_submit_hook_slot);
+        #[cfg(feature = "slack-v2-host-beta")]
+        {
+            runtime_post_submit_hook_slot = Some(Arc::clone(&hook_slot));
+        }
         trigger_poller_handle = spawn_trigger_poller(
             trigger_poller,
             TriggerPollerCompositionDeps {
@@ -2246,6 +2340,8 @@ pub async fn build_reborn_runtime(
                 materializer: trigger_poller_services.materializer,
                 trusted_submitter: trigger_poller_services.trusted_submitter,
                 active_run_lookup,
+                #[cfg(feature = "slack-v2-host-beta")]
+                post_submit_hook_slot: hook_slot,
             },
         )
         .map_err(|error| RebornRuntimeError::InvalidArgument {
@@ -2253,6 +2349,10 @@ pub async fn build_reborn_runtime(
         })?;
     } else {
         trigger_poller_handle = None;
+        #[cfg(feature = "slack-v2-host-beta")]
+        {
+            runtime_post_submit_hook_slot = None;
+        }
         #[cfg(any(test, feature = "test-support"))]
         {
             trigger_conversation_pairing_value = None;
@@ -2296,6 +2396,8 @@ pub async fn build_reborn_runtime(
         worker_handle,
         worker_cancel,
         trigger_poller_handle,
+        #[cfg(feature = "slack-v2-host-beta")]
+        post_submit_hook_slot: runtime_post_submit_hook_slot,
         #[cfg(any(test, feature = "test-support"))]
         trigger_conversation_pairing: trigger_conversation_pairing_value,
         budget_event_projection,
@@ -2760,6 +2862,95 @@ mod tests {
             "local-dev Reborn skill activation should match the legacy 6000-token skill budget"
         );
     }
+
+    fn readiness_for_runtime_gate(
+        profile: RebornCompositionProfile,
+        state: RebornReadinessState,
+        diagnostics: Vec<crate::RebornReadinessDiagnostic>,
+    ) -> RebornReadiness {
+        RebornReadiness {
+            profile,
+            state,
+            facades: crate::RebornFacadeReadiness {
+                host_runtime: true,
+                turn_coordinator: true,
+                product_auth: true,
+            },
+            workers: crate::RebornWorkerReadiness {
+                turn_runner: true,
+                trigger_poller: false,
+            },
+            diagnostics,
+        }
+    }
+
+    #[test]
+    fn runtime_cutover_gate_allows_validated_production_readiness() {
+        let readiness = readiness_for_runtime_gate(
+            RebornCompositionProfile::Production,
+            RebornReadinessState::ProductionValidated,
+            Vec::new(),
+        );
+
+        super::enforce_runtime_cutover_gate(RebornCompositionProfile::Production, &readiness)
+            .expect("validated production runtime can start");
+    }
+
+    #[test]
+    fn runtime_cutover_gate_rejects_blocking_production_diagnostic() {
+        let readiness = readiness_for_runtime_gate(
+            RebornCompositionProfile::Production,
+            RebornReadinessState::ProductionValidated,
+            vec![
+                crate::RebornReadinessDiagnostic::production_blocker(
+                    RebornCompositionProfile::Production,
+                    crate::RebornReadinessDiagnosticComponent::RuntimePolicy,
+                    crate::RebornReadinessDiagnosticReason::LocalOnly,
+                )
+                .expect("production profile should create a blocker"),
+            ],
+        );
+
+        let error =
+            super::enforce_runtime_cutover_gate(RebornCompositionProfile::Production, &readiness)
+                .expect_err("blocking production diagnostic prevents runtime start");
+        let RebornRuntimeError::InvalidArgument { reason } = error else {
+            panic!("expected invalid argument, got {error:?}");
+        };
+        assert!(reason.contains("RuntimePolicy"), "reason: {reason}");
+        assert!(reason.contains("LocalOnly"), "reason: {reason}");
+    }
+
+    #[test]
+    fn runtime_cutover_gate_rejects_migration_dry_run_runtime_start() {
+        let readiness = readiness_for_runtime_gate(
+            RebornCompositionProfile::MigrationDryRun,
+            RebornReadinessState::MigrationDryRunValidated,
+            Vec::new(),
+        );
+
+        let error = super::enforce_runtime_cutover_gate(
+            RebornCompositionProfile::MigrationDryRun,
+            &readiness,
+        )
+        .expect_err("migration-dry-run cannot start live runtime");
+        let RebornRuntimeError::InvalidArgument { reason } = error else {
+            panic!("expected invalid argument, got {error:?}");
+        };
+        assert!(reason.contains("migration-dry-run"), "reason: {reason}");
+    }
+
+    #[test]
+    fn runtime_cutover_gate_allows_local_dev_readiness() {
+        let readiness = readiness_for_runtime_gate(
+            RebornCompositionProfile::LocalDev,
+            RebornReadinessState::DevOnly,
+            vec![crate::RebornReadinessDiagnostic::local_dev()],
+        );
+
+        super::enforce_runtime_cutover_gate(RebornCompositionProfile::LocalDev, &readiness)
+            .expect("local-dev runtime is not production traffic");
+    }
     use ironclaw_authorization::CapabilityLeaseStore;
     use ironclaw_events::{EventStreamKey, ReadScope};
     use ironclaw_host_api::{
@@ -2807,6 +2998,8 @@ mod tests {
     use rust_decimal_macros::dec;
 
     #[cfg(feature = "libsql")]
+    use crate::RebornRuntimeProcessBinding;
+    #[cfg(feature = "libsql")]
     use crate::hooks::HooksActivationConfig;
     use crate::input::RebornBuildInput;
     use crate::runtime_input::{
@@ -2815,7 +3008,9 @@ mod tests {
         TriggerPollerSettings,
     };
     use crate::webui::build_webui_services;
-    use crate::{RebornReadinessState, RebornRuntimeProcessBinding};
+    use crate::{
+        RebornCompositionProfile, RebornReadiness, RebornReadinessState, RebornRuntimeError,
+    };
 
     use super::{
         RebornSkillSourceKind, TRUSTED_LAPTOP_ACCESS_AUDIT_KIND,
@@ -3513,9 +3708,77 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn build_reborn_runtime_allows_validated_production_readiness() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Arc::new(
+            libsql::Builder::new_local(dir.path().join("reborn.db"))
+                .build()
+                .await
+                .expect("libsql db"),
+        );
+        let gateway = Arc::new(RecordingGateway {
+            reply: "validated production runtime".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::libsql(
+                crate::RebornCompositionProfile::Production,
+                "runtime-production-cutover-owner",
+                db,
+                dir.path().join("events.db").to_string_lossy(),
+                None,
+                ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
+            )
+            .with_production_trust_policy(Arc::new(
+                crate::builtin_first_party_trust_policy().expect("trust policy"),
+            ))
+            .with_runtime_policy(EffectiveRuntimePolicy {
+                deployment: DeploymentMode::HostedMultiTenant,
+                requested_profile: RuntimeProfile::SecureDefault,
+                resolved_profile: RuntimeProfile::SecureDefault,
+                filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+                process_backend: ProcessBackendKind::TenantSandbox,
+                network_mode: NetworkMode::Deny,
+                secret_mode: SecretMode::BrokeredHandles,
+                approval_policy: ApprovalPolicy::AskAlways,
+                audit_mode: AuditMode::Standard,
+            })
+            .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
+                ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(
+                    RecordingSandboxTransport,
+                )),
+            ))),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-production-cutover-tenant".to_string(),
+            agent_id: "runtime-production-cutover-agent".to_string(),
+            source_binding_id: "runtime-production-cutover-source".to_string(),
+            reply_target_binding_id: "runtime-production-cutover-reply".to_string(),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input)
+            .await
+            .expect("validated production readiness should start runtime");
+
+        assert_eq!(
+            runtime.services().readiness.state,
+            RebornReadinessState::ProductionValidated
+        );
+        assert!(runtime.services().readiness.diagnostics.is_empty());
+        assert!(runtime.services().readiness.workers.turn_runner);
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[cfg(feature = "libsql")]
     #[derive(Debug)]
     struct RecordingSandboxTransport;
 
+    #[cfg(feature = "libsql")]
     #[async_trait]
     impl ironclaw_host_runtime::SandboxCommandTransport for RecordingSandboxTransport {
         async fn run_command(
@@ -5618,7 +5881,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_webui_services_without_host_runtime_returns_503_on_list_automations() {
+    async fn build_webui_services_without_local_runtime_returns_503_on_list_automations() {
         let root = tempfile::tempdir().expect("tempdir");
         let gateway = Arc::new(RecordingGateway {
             reply: "unused".to_string(),
@@ -5644,7 +5907,7 @@ mod tests {
         .with_model_gateway_override(gateway);
 
         let mut runtime = build_reborn_runtime(input).await.expect("runtime builds");
-        runtime.services.host_runtime = None;
+        runtime.services.local_runtime = None;
         let bundle = build_webui_services(&runtime, None).expect("webui bundle");
         let caller = WebUiAuthenticatedCaller::new(
             TenantId::new("runtime-webui-no-host-tenant").unwrap(),

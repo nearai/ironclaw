@@ -104,7 +104,7 @@ export function automationSummary(automations) {
   };
 }
 
-export function scheduleLabel(cron) {
+export function scheduleLabel(cron, timezone) {
   if (!cron || typeof cron !== "string") return "Custom schedule";
   const parts = cronFields(cron);
   if (!parts) return "Custom schedule";
@@ -113,13 +113,16 @@ export function scheduleLabel(cron) {
   const time = formatCronTime(hour, minute);
   if (!time) return "Custom schedule";
 
+  const tz = timezone && typeof timezone === "string" ? timezone : null;
+  const tzSuffix = tz ? ` (${tz})` : "";
+
   if (year === "*" && dayOfMonth === "*" && month === "*" && dayOfWeek === "*") {
-    return `Every day at ${time}`;
+    return `Every day at ${time}${tzSuffix}`;
   }
   const normalizedDayOfWeek = normalizeDayOfWeek(dayOfWeek);
 
   if (year === "*" && dayOfMonth === "*" && month === "*" && normalizedDayOfWeek === "1-5") {
-    return `Weekdays at ${time}`;
+    return `Weekdays at ${time}${tzSuffix}`;
   }
   if (
     year === "*" &&
@@ -127,7 +130,7 @@ export function scheduleLabel(cron) {
     month === "*" &&
     isSingleNumber(normalizedDayOfWeek, 0, 7)
   ) {
-    return `${WEEKDAYS[Number(normalizedDayOfWeek) % 7]} at ${time}`;
+    return `${WEEKDAYS[Number(normalizedDayOfWeek) % 7]} at ${time}${tzSuffix}`;
   }
   if (
     year === "*" &&
@@ -135,7 +138,7 @@ export function scheduleLabel(cron) {
     month === "*" &&
     dayOfWeek === "*"
   ) {
-    return `${ordinal(Number(dayOfMonth))} day of each month at ${time}`;
+    return `${ordinal(Number(dayOfMonth))} day of each month at ${time}${tzSuffix}`;
   }
   if (
     isSingleNumber(dayOfMonth, 1, 31) &&
@@ -144,7 +147,9 @@ export function scheduleLabel(cron) {
     (year === "*" || isSingleNumber(year, 1970, 9999))
   ) {
     const date = `${MONTHS[Number(month) - 1]} ${Number(dayOfMonth)}`;
-    return year === "*" ? `${date} at ${time}` : `${date}, ${year} at ${time}`;
+    return year === "*"
+      ? `${date} at ${time}${tzSuffix}`
+      : `${date}, ${year} at ${time}${tzSuffix}`;
   }
 
   return "Custom schedule";
@@ -199,7 +204,8 @@ function normalizeAutomation(automation) {
   return {
     ...automation,
     display_name: automation.name || "Untitled automation",
-    schedule_label: scheduleLabel(automation.source?.cron),
+    schedule_timezone: automation.source?.timezone || "UTC",
+    schedule_label: scheduleLabel(automation.source?.cron, automation.source?.timezone || "UTC"),
     state_label: stateLabel(automation.state),
     state_tone: stateTone(automation.state),
     next_run_timestamp: parseTimestamp(automation.next_run_at),

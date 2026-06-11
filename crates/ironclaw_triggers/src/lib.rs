@@ -14,6 +14,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
+use chrono_tz::Tz;
 use cron::Schedule;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
 use ironclaw_turns::TurnRunId;
@@ -339,13 +340,26 @@ impl TriggerRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum TriggerSchedule {
-    Cron { expression: String },
+    Cron {
+        expression: String,
+        timezone: String,
+    },
 }
 
 impl TriggerSchedule {
+    /// Create a cron schedule evaluated in UTC.
     pub fn cron(expression: impl Into<String>) -> Result<Self, TriggerError> {
+        Self::cron_with_timezone(expression, "UTC")
+    }
+
+    /// Create a cron schedule evaluated in the given IANA timezone.
+    pub fn cron_with_timezone(
+        expression: impl Into<String>,
+        timezone: impl Into<String>,
+    ) -> Result<Self, TriggerError> {
         let schedule = Self::Cron {
             expression: expression.into(),
+            timezone: timezone.into(),
         };
         schedule.validate()?;
         Ok(schedule)
@@ -353,7 +367,11 @@ impl TriggerSchedule {
 
     pub fn validate(&self) -> Result<(), TriggerError> {
         match self {
-            Self::Cron { expression } => {
+            Self::Cron {
+                expression,
+                timezone,
+            } => {
+                parse_timezone(timezone)?;
                 parse_cron_schedule(expression)?;
                 Ok(())
             }
@@ -362,7 +380,21 @@ impl TriggerSchedule {
 
     pub fn next_slot_after(&self, after: Timestamp) -> Result<Option<Timestamp>, TriggerError> {
         match self {
-            Self::Cron { expression } => Ok(parse_cron_schedule(expression)?.after(&after).next()),
+            Self::Cron {
+                expression,
+                timezone,
+            } => {
+                let tz = parse_timezone(timezone)?;
+                let next = if tz == Tz::UTC {
+                    parse_cron_schedule(expression)?.after(&after).next()
+                } else {
+                    parse_cron_schedule(expression)?
+                        .after(&after.with_timezone(&tz))
+                        .next()
+                        .map(|dt| dt.with_timezone(&Utc))
+                };
+                Ok(next)
+            }
         }
     }
 }
@@ -1546,6 +1578,14 @@ pub(crate) fn reject_failed_result_after_active_run(
     })
 }
 
+fn parse_timezone(timezone: &str) -> Result<Tz, TriggerError> {
+    timezone.parse::<Tz>().map_err(|_| TriggerError::InvalidSchedule {
+        reason: format!(
+            "invalid timezone '{timezone}': must be a valid IANA timezone name (e.g. 'America/New_York', 'UTC')"
+        ),
+    })
+}
+
 fn normalize_cron_expression(expression: &str) -> Result<String, TriggerError> {
     let trimmed = expression.trim();
     if trimmed.is_empty() {
@@ -2425,5 +2465,46 @@ mod tests {
             .await
             .expect_err("poisoned mutex maps to backend through permanent-failure API");
         assert!(matches!(error, TriggerError::Backend { .. }));
+    }
+
+    #[test]
+    fn cron_schedule_rejects_invalid_timezone() {
+        let error = TriggerSchedule::cron_with_timezone("0 9 * * *", "Not/A/Timezone")
+            .expect_err("invalid timezone rejected");
+        assert!(
+            error.to_string().contains("invalid timezone"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn cron_schedule_evaluates_in_named_timezone() {
+        // "0 9 * * *" = 9am local time
+        // America/New_York is UTC-5 in winter (no DST in January)
+        // 9am New York = 14:00 UTC
+        let schedule = TriggerSchedule::cron_with_timezone("0 9 * * *", "America/New_York")
+            .expect("valid schedule");
+        let after = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(); // midnight UTC, Jan 1
+        let next = schedule
+            .next_slot_after(after)
+            .expect("next slot")
+            .expect("future slot");
+        // 9am NY on 2026-01-01 = 14:00 UTC (EST = UTC-5)
+        assert_eq!(next, Utc.with_ymd_and_hms(2026, 1, 1, 14, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn cron_schedule_dst_spring_forward_does_not_panic() {
+        // US clocks spring forward 2nd Sunday of March at 2am
+        // 2026-03-08 is the second Sunday in March 2026
+        // "0 2 * * *" = 2am NY — this hour is skipped on spring-forward day
+        let schedule = TriggerSchedule::cron_with_timezone("0 2 * * *", "America/New_York")
+            .expect("valid schedule");
+        // just before spring forward: 2026-03-08 06:59:00 UTC = 1:59am EST
+        let before_gap = Utc.with_ymd_and_hms(2026, 3, 8, 6, 59, 0).unwrap();
+        // Should not panic; result may be None or next day
+        let _ = schedule
+            .next_slot_after(before_gap)
+            .expect("no error during DST gap");
     }
 }
