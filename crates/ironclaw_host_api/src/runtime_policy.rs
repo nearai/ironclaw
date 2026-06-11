@@ -282,6 +282,28 @@ impl RuntimeProfile {
             | Self::Experiment => false,
         }
     }
+
+    /// `true` for profiles whose resolved runtime boundary allows
+    /// `ApprovalPolicy::Minimal` to bypass approval gates.
+    ///
+    /// Exhaustive `match` for the same reason as [`Self::is_local`]: a new
+    /// profile variant must be classified at compile time before it can affect
+    /// Minimal approval bypass.
+    pub const fn allows_minimal_approval_bypass(&self) -> bool {
+        match self {
+            Self::LocalYolo | Self::HostedYoloTenantScoped => true,
+            Self::SecureDefault
+            | Self::LocalSafe
+            | Self::LocalDev
+            | Self::HostedSafe
+            | Self::HostedDev
+            | Self::EnterpriseSafe
+            | Self::EnterpriseDev
+            | Self::EnterpriseYoloDedicated
+            | Self::Sandboxed
+            | Self::Experiment => false,
+        }
+    }
 }
 
 impl std::fmt::Display for RuntimeProfile {
@@ -742,6 +764,38 @@ mod tests {
         }
         for profile in non_yolo {
             assert!(!profile.is_yolo(), "{profile:?} must not be yolo");
+        }
+    }
+
+    #[test]
+    fn minimal_approval_bypass_is_limited_to_local_and_hosted_yolo() {
+        let bypass = [
+            RuntimeProfile::LocalYolo,
+            RuntimeProfile::HostedYoloTenantScoped,
+        ];
+        let gated = [
+            RuntimeProfile::SecureDefault,
+            RuntimeProfile::LocalSafe,
+            RuntimeProfile::LocalDev,
+            RuntimeProfile::HostedSafe,
+            RuntimeProfile::HostedDev,
+            RuntimeProfile::EnterpriseSafe,
+            RuntimeProfile::EnterpriseDev,
+            RuntimeProfile::EnterpriseYoloDedicated,
+            RuntimeProfile::Sandboxed,
+            RuntimeProfile::Experiment,
+        ];
+        for profile in bypass {
+            assert!(
+                profile.allows_minimal_approval_bypass(),
+                "{profile:?} must allow Minimal approval bypass"
+            );
+        }
+        for profile in gated {
+            assert!(
+                !profile.allows_minimal_approval_bypass(),
+                "{profile:?} must keep approval gates under Minimal"
+            );
         }
     }
 

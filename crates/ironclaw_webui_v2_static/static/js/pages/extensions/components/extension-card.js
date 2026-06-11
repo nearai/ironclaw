@@ -1,4 +1,5 @@
 import { React, html } from "../../../lib/html.js";
+import { useT } from "../../../lib/i18n.js";
 import { Badge } from "../../../design-system/badge.js";
 import { Button } from "../../../design-system/button.js";
 import { Icon } from "../../../design-system/icons.js";
@@ -28,6 +29,7 @@ function packageId(item) {
 
 /* Lightweight overflow menu. Real <button>s; closes on outside click. */
 function OverflowMenu({ actions, isBusy }) {
+  const t = useT();
   const [open, setOpen] = React.useState(false);
   const ref = React.useRef(null);
 
@@ -44,7 +46,7 @@ function OverflowMenu({ actions, isBusy }) {
     <div ref=${ref} className="relative shrink-0">
       <button
         type="button"
-        aria-label="More actions"
+        aria-label=${t("extensions.moreActions")}
         aria-haspopup="true"
         aria-expanded=${open ? "true" : "false"}
         disabled=${isBusy}
@@ -98,10 +100,11 @@ function ChipGrid({ items }) {
 }
 
 export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }) {
+  const t = useT();
   const state = ext.onboarding_state || ext.activation_status || (ext.active ? "active" : "installed");
   const tone = STATE_TONES[state] || "muted";
-  const label = STATE_LABELS[state] || state;
-  const kindLabel = KIND_LABELS[ext.kind] || ext.kind;
+  const label = t(`extensions.state.${state}`) || STATE_LABELS[state] || state;
+  const kindLabel = t(`extensions.kind.${ext.kind}`) || KIND_LABELS[ext.kind] || ext.kind;
   const displayName = ext.display_name || packageId(ext);
   const canManage = Boolean(ext.package_ref);
   const tools = ext.tools || [];
@@ -123,7 +126,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   if (primaryAction === "configure") {
     primaryActions.push({
       id: "configure",
-      label: ext.authenticated ? "Reconfigure" : "Configure",
+      label: ext.authenticated ? t("extensions.reconfigure") : t("extensions.configure"),
       run: () => onConfigure(configurePayload),
     });
   } else if (primaryAction === "activate") {
@@ -136,7 +139,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   if (canManage && (ext.needs_setup || ext.has_auth) && primaryAction !== "configure") {
     overflowActions.push({
       id: "configure",
-      label: ext.authenticated ? "Reconfigure" : "Configure",
+      label: ext.authenticated ? t("extensions.reconfigure") : t("extensions.configure"),
       icon: "settings",
       run: () => onConfigure(configurePayload),
     });
@@ -164,7 +167,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   if (canManage) {
     overflowActions.push({
       id: "remove",
-      label: "Remove",
+      label: t("common.remove") || "Remove",
       icon: "trash",
       danger: true,
       run: () => onRemove(configurePayload),
@@ -217,7 +220,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
                 className=${DISCLOSURE}
               >
                 <${Icon} name="layers" className="h-3.5 w-3.5" />
-                <span>${tools.length} ${tools.length === 1 ? "capability" : "capabilities"}</span>
+                <span>${tools.length === 1 ? t("extensions.oneCapability") : t("extensions.pluralCapabilities", {count: tools.length})}</span>
                 <${Icon}
                   name="chevron"
                   className=${["h-3 w-3", capsOpen ? "rotate-180" : ""].join(" ")}
@@ -240,7 +243,8 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
 }
 
 export function RegistryCard({ entry, onInstall, isBusy }) {
-  const kindLabel = KIND_LABELS[entry.kind] || entry.kind;
+  const t = useT();
+  const kindLabel = t(`extensions.kind.${entry.kind}`) || KIND_LABELS[entry.kind] || entry.kind;
   const displayName = entry.display_name || packageId(entry);
   const canInstall = Boolean(entry.package_ref);
   const keywords = entry.keywords || [];
@@ -249,7 +253,7 @@ export function RegistryCard({ entry, onInstall, isBusy }) {
   return html`
     <div className=${CARD}>
       <div className="flex items-start gap-2">
-        <${Badge} tone="muted" label="available" size="sm" />
+        <${Badge} tone="muted" label=${t("extensions.state.available") || "available"} size="sm" />
         <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--v2-text-strong)]">
           ${displayName}
         </span>
@@ -272,7 +276,7 @@ export function RegistryCard({ entry, onInstall, isBusy }) {
                 className=${DISCLOSURE}
               >
                 <${Icon} name="list" className="h-3.5 w-3.5" />
-                <span>${keywords.length} ${keywords.length === 1 ? "keyword" : "keywords"}</span>
+                <span>${keywords.length === 1 ? t("extensions.oneKeyword") : t("extensions.pluralKeywords", {count: keywords.length})}</span>
                 <${Icon}
                   name="chevron"
                   className=${["h-3 w-3", kwOpen ? "rotate-180" : ""].join(" ")}

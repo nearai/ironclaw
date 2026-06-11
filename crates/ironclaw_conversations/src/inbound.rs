@@ -53,12 +53,18 @@ where
         &self,
         request: TrustedInboundTurnRequest,
     ) -> Result<InboundTurnResponse, InboundTurnError> {
-        let (request, trusted_agent_id, trusted_project_id) = request.into_parts();
+        let TrustedInboundTurnRequest {
+            request,
+            trusted_agent_id,
+            trusted_project_id,
+            trusted_owner_user_id,
+        } = request;
         self.handle_inbound_turn_inner(
             request,
             BindingResolutionPolicy::Trusted {
                 trusted_agent_id,
                 trusted_project_id,
+                trusted_owner_user_id,
             },
         )
         .await
@@ -126,13 +132,14 @@ where
             BindingResolutionPolicy::Trusted {
                 trusted_agent_id,
                 trusted_project_id,
+                trusted_owner_user_id,
             } => {
                 self.binding_service
                     .resolve_or_create_binding_with_trusted_scope(
                         resolve_request,
                         trusted_agent_id,
                         trusted_project_id,
-                        None,
+                        trusted_owner_user_id,
                     )
                     .await?
             }
@@ -341,6 +348,7 @@ fn trusted_inbound_request_from_trigger(
         },
         fire.agent_id,
         fire.project_id,
+        Some(fire.creator_user_id),
     ))
 }
 
@@ -350,6 +358,7 @@ enum BindingResolutionPolicy {
     Trusted {
         trusted_agent_id: Option<ironclaw_host_api::AgentId>,
         trusted_project_id: Option<ironclaw_host_api::ProjectId>,
+        trusted_owner_user_id: Option<ironclaw_host_api::UserId>,
     },
 }
 
@@ -391,6 +400,7 @@ fn submit_trusted_trigger_outcome(
     Ok(TrustedTriggerFireSubmitOutcome::Accepted {
         run_id,
         submitted_at,
+        turn_scope: response.resolution.turn_scope.clone(),
     })
 }
 
@@ -447,7 +457,9 @@ mod tests {
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
     use ironclaw_triggers::{
         TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
-        TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TrustedTriggerFireSubmitOutcome,
+        TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerFire, TriggerFireIdentity, TriggerId,
+        TriggerInboundContentRef, TriggerMaterializedPrompt, TrustedTriggerFireSubmitOutcome,
+        TrustedTriggerSubmitRequest,
     };
     use ironclaw_turns::{
         AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
@@ -457,7 +469,10 @@ mod tests {
         TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
     };
 
-    use super::{classify_trusted_trigger_inbound_error, submit_trusted_trigger_outcome};
+    use super::{
+        classify_trusted_trigger_inbound_error, submit_trusted_trigger_outcome,
+        trusted_trigger_fire_submitter,
+    };
     use crate::types::TrustedInboundTurnRequest;
     use crate::{
         AcceptedInboundMessage, AdapterInstallationId, AdapterKind, ConversationBindingResolution,
@@ -472,19 +487,7 @@ mod tests {
     #[tokio::test]
     async fn trusted_inbound_with_real_services_creates_binding_records_message_and_replays_submission()
      {
-        let services = InMemoryConversationServices::default();
-        services
-            .pair_external_actor(
-                tenant(),
-                trigger_adapter(),
-                trigger_installation(),
-                external_actor("alice"),
-                user("alice"),
-            )
-            .await;
-        let coordinator = Arc::new(RecordingTurnCoordinator::default());
-        let inbound =
-            InboundTurnService::new(services.clone(), services.clone(), coordinator.clone());
+        let (inbound, services, coordinator) = trusted_inbound_service().await;
         let request = trusted_inbound_request(Some(agent()), Some(project()));
 
         let first = inbound
@@ -547,7 +550,7 @@ mod tests {
         assert_eq!(binding.trusted_calls(), 1);
         assert_eq!(
             binding.trusted_scopes(),
-            vec![(Some(agent()), Some(project()))]
+            vec![(Some(agent()), Some(project()), None)]
         );
         let resolve_requests = binding.resolve_requests();
         assert_eq!(resolve_requests.len(), 1);
@@ -585,7 +588,7 @@ mod tests {
         assert!(matches!(err, InboundTurnError::BindingRequired { .. }));
         assert_eq!(
             binding.trusted_scopes(),
-            vec![(Some(agent()), Some(project()))]
+            vec![(Some(agent()), Some(project()), None)]
         );
         let resolve_requests = binding.resolve_requests();
         assert_eq!(resolve_requests.len(), 1);
@@ -617,11 +620,128 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(binding.trusted_scopes(), vec![(None, None)]);
+        assert_eq!(binding.trusted_scopes(), vec![(None, None, None)]);
         let resolve_requests = binding.resolve_requests();
         assert_eq!(resolve_requests.len(), 1);
         assert_eq!(resolve_requests[0].requested_agent_id, None);
         assert_eq!(resolve_requests[0].requested_project_id, None);
+    }
+
+    #[tokio::test]
+    async fn trusted_inbound_with_owner_resolves_explicit_user_turn_scope() {
+        let (facade, _services, _coordinator) = trusted_inbound_service().await;
+        let creator = UserId::new("user-creator").expect("user id");
+
+        let request = TrustedInboundTurnRequest::new(
+            base_inbound_request(),
+            Some(agent()),
+            Some(project()),
+            Some(creator.clone()),
+        );
+
+        let response = facade
+            .handle_inbound_turn_with_trusted_scope(request)
+            .await
+            .expect("trusted inbound turn succeeds");
+
+        assert_eq!(
+            response
+                .resolution
+                .turn_scope
+                .explicit_owner_user_id()
+                .map(|u| u.as_str()),
+            Some("user-creator"),
+            "trusted owner must surface as ExplicitUser on the resolved TurnScope"
+        );
+    }
+
+    #[tokio::test]
+    async fn trusted_inbound_does_not_backfill_owner_on_existing_direct_binding() {
+        let (facade, _services, _coordinator) = trusted_inbound_service().await;
+        let creator = UserId::new("user-creator").expect("user id");
+
+        // First fire: no owner (legacy-shaped binding).
+        let first = TrustedInboundTurnRequest::new(
+            base_inbound_request(),
+            Some(agent()),
+            Some(project()),
+            None,
+        );
+        facade
+            .handle_inbound_turn_with_trusted_scope(first)
+            .await
+            .expect("first trusted turn succeeds");
+
+        // Second fire on the same external conversation: owner now supplied.
+        // Must use a DIFFERENT external_event_id (same id replays the first
+        // submission instead of re-resolving the binding).
+        let mut second_request = base_inbound_request();
+        second_request.external_event_id =
+            ExternalEventId::new("trusted-event-2").expect("event id");
+        let second = TrustedInboundTurnRequest::new(
+            second_request,
+            Some(agent()),
+            Some(project()),
+            Some(creator),
+        );
+        let response = facade
+            .handle_inbound_turn_with_trusted_scope(second)
+            .await
+            .expect("second trusted turn succeeds");
+
+        assert_eq!(
+            response.resolution.turn_scope.explicit_owner_user_id(),
+            None,
+            "Direct-route bindings must not retro-upgrade owner (legacy compat; recreate the trigger to fix delivery)"
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_trusted_trigger_fire_surfaces_creator_as_explicit_turn_scope_owner() {
+        let (_inbound, services, coordinator) = trusted_inbound_service().await;
+
+        // Pair the trigger creator so the trusted binding resolution succeeds.
+        let creator = UserId::new("user-trigger-creator").expect("user id");
+        services
+            .pair_external_actor(
+                tenant(),
+                trigger_adapter(),
+                trigger_installation(),
+                external_actor(creator.as_str()),
+                creator.clone(),
+            )
+            .await;
+
+        let submitter = trusted_trigger_fire_submitter(services.clone(), services, coordinator);
+
+        let fire_slot = Utc.with_ymd_and_hms(2026, 6, 1, 9, 0, 0).unwrap();
+        let identity = TriggerFireIdentity::new(tenant(), TriggerId::new(), fire_slot);
+        let fire = TriggerFire {
+            identity: identity.clone(),
+            creator_user_id: creator.clone(),
+            agent_id: Some(agent()),
+            project_id: Some(project()),
+            prompt: "test trigger prompt".to_string(),
+        };
+        let content_ref =
+            TriggerInboundContentRef::new("content:test-trigger-creator").expect("content ref");
+        let materialized_prompt = TriggerMaterializedPrompt::for_fire(&fire, content_ref);
+        let request =
+            TrustedTriggerSubmitRequest::new_for_test(fire, materialized_prompt, fire_slot);
+
+        let outcome = submitter
+            .submit_trusted_trigger_fire(request)
+            .await
+            .expect("submit_trusted_trigger_fire succeeds");
+
+        let TrustedTriggerFireSubmitOutcome::Accepted { turn_scope, .. } = outcome else {
+            panic!("expected accepted trigger fire");
+        };
+        assert_eq!(
+            turn_scope.explicit_owner_user_id(),
+            Some(&creator),
+            "submit_trusted_trigger_fire must surface the creator as explicit turn-scope owner"
+        );
     }
 
     #[test]
@@ -636,6 +756,7 @@ mod tests {
             TrustedTriggerFireSubmitOutcome::Accepted {
                 run_id: observed_run_id,
                 submitted_at: observed_submitted_at,
+                ..
             } if observed_run_id == run_id && observed_submitted_at == submitted_at
         ));
 
@@ -658,6 +779,7 @@ mod tests {
             TrustedTriggerFireSubmitOutcome::Accepted {
                 run_id: observed_run_id,
                 submitted_at: observed_submitted_at,
+                ..
             } if observed_run_id == run_id && observed_submitted_at == submitted_at
         ));
     }
@@ -863,31 +985,65 @@ mod tests {
         trusted_agent_id: Option<AgentId>,
         trusted_project_id: Option<ProjectId>,
     ) -> TrustedInboundTurnRequest {
-        let fire_slot = Utc.with_ymd_and_hms(2026, 5, 6, 12, 0, 0).unwrap();
         TrustedInboundTurnRequest::new(
-            InboundTurnRequest {
-                tenant_id: tenant(),
-                adapter_kind: trigger_adapter(),
-                adapter_installation_id: trigger_installation(),
-                external_actor_ref: external_actor("alice"),
-                external_conversation_ref: ExternalConversationRef::new(
-                    None,
-                    "trigger-test",
-                    Some("route-trigger-test"),
-                    None,
-                )
-                .unwrap(),
-                external_event_id: ExternalEventId::new("external-event-trigger-test").unwrap(),
-                route_kind: ConversationRouteKind::Direct,
-                content_ref: InboundMessageContentRef::new("content:trigger-test").unwrap(),
-                requested_agent_id: None,
-                requested_project_id: None,
-                received_at: fire_slot,
-                requested_run_profile: None,
-            },
+            base_inbound_request(),
             trusted_agent_id,
             trusted_project_id,
+            None,
         )
+    }
+
+    fn base_inbound_request() -> InboundTurnRequest {
+        let fire_slot = Utc.with_ymd_and_hms(2026, 5, 6, 12, 0, 0).unwrap();
+        InboundTurnRequest {
+            tenant_id: tenant(),
+            adapter_kind: trigger_adapter(),
+            adapter_installation_id: trigger_installation(),
+            external_actor_ref: external_actor("alice"),
+            external_conversation_ref: ExternalConversationRef::new(
+                None,
+                "trigger-test",
+                Some("route-trigger-test"),
+                None,
+            )
+            .unwrap(),
+            external_event_id: ExternalEventId::new("external-event-trigger-test").unwrap(),
+            route_kind: ConversationRouteKind::Direct,
+            content_ref: InboundMessageContentRef::new("content:trigger-test").unwrap(),
+            requested_agent_id: None,
+            requested_project_id: None,
+            received_at: fire_slot,
+            requested_run_profile: None,
+        }
+    }
+
+    /// Returns `(facade, services, coordinator)` — a paired `InboundTurnService`
+    /// backed by `InMemoryConversationServices` with "alice" already paired so
+    /// trusted binding resolution succeeds, plus the underlying services and
+    /// coordinator for post-call inspection.
+    async fn trusted_inbound_service() -> (
+        InboundTurnService<
+            InMemoryConversationServices,
+            InMemoryConversationServices,
+            RecordingTurnCoordinator,
+        >,
+        InMemoryConversationServices,
+        Arc<RecordingTurnCoordinator>,
+    ) {
+        let services = InMemoryConversationServices::default();
+        services
+            .pair_external_actor(
+                tenant(),
+                trigger_adapter(),
+                trigger_installation(),
+                external_actor("alice"),
+                user("alice"),
+            )
+            .await;
+        let coordinator = Arc::new(RecordingTurnCoordinator::default());
+        let facade =
+            InboundTurnService::new(services.clone(), services.clone(), coordinator.clone());
+        (facade, services, coordinator)
     }
 
     fn tenant() -> TenantId {
@@ -918,7 +1074,7 @@ mod tests {
         ProjectId::new("project").unwrap()
     }
 
-    type TrustedScopeRecord = (Option<AgentId>, Option<ProjectId>);
+    type TrustedScopeRecord = (Option<AgentId>, Option<ProjectId>, Option<UserId>);
     type TrustedScopeRecords = Arc<Mutex<Vec<TrustedScopeRecord>>>;
 
     #[derive(Clone)]
@@ -945,7 +1101,7 @@ mod tests {
             self.resolve_requests.lock().unwrap().clone()
         }
 
-        fn trusted_scopes(&self) -> Vec<(Option<AgentId>, Option<ProjectId>)> {
+        fn trusted_scopes(&self) -> Vec<(Option<AgentId>, Option<ProjectId>, Option<UserId>)> {
             self.trusted_scopes.lock().unwrap().clone()
         }
     }
@@ -967,10 +1123,11 @@ mod tests {
             trusted_owner_user_id: Option<UserId>,
         ) -> Result<ConversationBindingResolution, InboundTurnError> {
             self.resolve_requests.lock().unwrap().push(request.clone());
-            self.trusted_scopes
-                .lock()
-                .unwrap()
-                .push((trusted_agent_id.clone(), trusted_project_id.clone()));
+            self.trusted_scopes.lock().unwrap().push((
+                trusted_agent_id.clone(),
+                trusted_project_id.clone(),
+                trusted_owner_user_id.clone(),
+            ));
             self.inner
                 .resolve_or_create_binding_with_trusted_scope(
                     request,
@@ -1017,7 +1174,7 @@ mod tests {
             }
         }
 
-        fn trusted_scopes(&self) -> Vec<(Option<AgentId>, Option<ProjectId>)> {
+        fn trusted_scopes(&self) -> Vec<(Option<AgentId>, Option<ProjectId>, Option<UserId>)> {
             self.trusted_scopes.lock().unwrap().clone()
         }
 
@@ -1040,13 +1197,14 @@ mod tests {
             request: crate::ResolveConversationRequest,
             trusted_agent_id: Option<AgentId>,
             trusted_project_id: Option<ProjectId>,
-            _trusted_owner_user_id: Option<UserId>,
+            trusted_owner_user_id: Option<UserId>,
         ) -> Result<ConversationBindingResolution, InboundTurnError> {
             self.resolve_requests.lock().unwrap().push(request);
-            self.trusted_scopes
-                .lock()
-                .unwrap()
-                .push((trusted_agent_id, trusted_project_id));
+            self.trusted_scopes.lock().unwrap().push((
+                trusted_agent_id,
+                trusted_project_id,
+                trusted_owner_user_id,
+            ));
             Err(InboundTurnError::BindingRequired {
                 adapter_kind: "trusted".to_string(),
                 external_actor_id: "trusted".to_string(),

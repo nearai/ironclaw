@@ -125,10 +125,11 @@ tracked follow-up.
 - Expand public modality support in a dedicated API phase before surfacing
   non-text defaults. The outbound repository can store more modalities than
   the current product response DTO intentionally exposes.
-- Add a product-safe stale-target representation before UI treats unavailable
-  targets as first-class state. Preferred low-churn shape: keep the current
-  selected-target summary field and add a sibling status such as
-  `none_configured`, `available`, or `unavailable`.
+- Phase 3 adds a product-safe stale-target status DTO surface through
+  `RebornOutboundDeliveryTargetStatus`. The low-churn response shape keeps the
+  current selected-target summary field and adds the sibling
+  `final_reply_target_status` value: `none_configured`, `available`, or
+  `unavailable`.
 - Keep route/UI state out of backend DTOs. Backend status may describe target
   availability and validation errors; it must not encode Automations panel
   layout, button labels, saved/loading state, or WebUI copy.
@@ -498,21 +499,61 @@ Exit criteria:
 Goal: implement Slack as the first channel using the channel-neutral target
 provider and authority resolver.
 
+Current implementation status:
+
+- PR C1 is merged: shared-agent Slack channel targets are backed by
+  admin-managed Slack channel routes.
+- PR C1 treats persisted admin routes as authoritative over static seeded
+  Slack channel fallback when the same channel has a stored owner.
+- PR C2 implements provider-side personal Slack DM target authority:
+  `conversations.open` provisions the concrete `D...` conversation id, the
+  Slack host-state store persists it under the Slack personal-binding mount,
+  and the outbound target provider lists a personal DM target only after that
+  durable authority exists.
+- Static seeded Slack channel deletion needs explicit tombstone/disabled-route
+  state before delete can override startup fallback. PR C1 does not invent that
+  persistence contract; keep it as a follow-up if static seeded routes must be
+  revocable from the admin UI.
+- PR C2 moves Slack outbound target authority into
+  `slack_outbound_targets.rs`, keeping shared-channel and personal-DM Slack
+  details out of core outbound preference logic.
+- PR C1 pages through the existing route-store API for shared-channel target
+  inventory so stored routes past the first page still override static fallback.
+  Follow up with a subject-scoped route-store query if route inventory scans
+  become too expensive for tenants with many Slack channel routes.
+- PR C2 keeps the Slack reply-target binding formatter inside the Slack
+  outbound-target module. Follow up with a shared bounded binding-ref helper
+  only if another provider needs the same formatter shape.
+- Slack pairing-code redemption remains identity-only. It must not synthesize a
+  personal default, write preferences, or treat a paired Slack user id as a
+  deliverable DM target.
+
 Deliverables:
 
 - Shared-agent Slack channel target backed by admin-managed Slack channel
-  routes.
-- Personal Slack DM target backed by durable Slack identity/DM target
-  authority.
-- Slack route deletion/owner-change tests.
+  routes. Implemented in PR C1.
+- Personal Slack DM target backed by durable Slack identity/DM target authority.
+  Implemented in PR C2 at provider/storage level; user-facing provisioning and
+  default-selection routes remain Phase 5.
+- Slack route deletion/owner-change tests. Covered in PR C1 for admin-managed
+  shared-channel targets, plus persisted-owner override for static seeded
+  channels. Static seeded delete-over-fallback needs tombstone state.
+- Subject-scoped shared-route listing and shared binding-ref helper extraction
+  remain follow-ups, not Phase 4 blockers.
 - Pairing-code redemption tests proving it remains identity-only.
 - First-inbound/DM target tests proving only a concrete target can become a
-  personal default.
+  personal default. PR C2 covers explicit DM provisioning plus "no provisioned
+  authority means no personal target"; first-inbound prompt routing remains
+  Phase 5.
 
 Exit criteria:
 
-- Shared tenant agents can target an admin-configured Slack channel.
+- Shared tenant agents can target an admin-configured Slack channel. PR C1
+  covers listing, preference selection, deletion revocation, and owner-change
+  authority movement.
 - Personal agents can target the owner's Slack DM after DM authority exists.
+  PR C2 implements provider-side target inventory after authority exists;
+  selecting it as a default through user-facing routes remains Phase 5.
 - No target is synthesized from arbitrary client input.
 - Slack final reply delivery still uses `chat.postMessage`.
 
@@ -603,8 +644,10 @@ Exit criteria:
 
 If Slack authority exposes unexpected storage gaps, split PR C into:
 
-- PR C1: Slack shared-channel target authority
-- PR C2: Slack personal DM target authority
+- PR C1: Slack shared-channel target authority. Active/current slice.
+- PR C2: Slack personal DM target authority. Required follow-up because current
+  pairing persists identity only and does not persist a concrete Slack DM
+  conversation target.
 
 ## Implementation Plan
 

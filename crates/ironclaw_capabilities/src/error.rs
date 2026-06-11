@@ -309,6 +309,9 @@ mod tests {
     fn from_dispatch_auth_required_round_trips_credential_requirements() {
         let requirement = RuntimeCredentialAuthRequirement {
             provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
+            },
             requester_extension: ExtensionId::new("gmail").unwrap(),
             provider_scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
         };

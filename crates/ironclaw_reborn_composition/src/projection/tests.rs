@@ -11,13 +11,18 @@ use ironclaw_event_projections::{
 };
 use ironclaw_events::{InMemoryDurableEventLog, RuntimeEvent};
 use ironclaw_host_api::{
-    AgentId, CapabilityId, ExtensionId, InvocationId, NetworkMethod, ResourceScope,
-    RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
-    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, TenantId, ThreadId, UserId,
+    Action, AgentId, ApprovalRequest, ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId,
+    InvocationId, NetworkMethod, NetworkScheme, NetworkTarget, Principal, ResourceEstimate,
+    ResourceScope, RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement,
+    RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, TenantId,
+    ThreadId, UserId,
 };
 use ironclaw_product_adapters::{
     AuthPromptChallengeKind, CapabilityActivityStatusView, ProductOutboundEnvelope,
     ProductOutboundPayload, ProductProjectionItem,
+};
+use ironclaw_run_state::{
+    ApprovalRecord, ApprovalRequestStore, InMemoryApprovalRequestStore, RunStateError,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor as TurnEventCursor,
@@ -127,6 +132,60 @@ impl TurnEventProjectionSource for FakeTurnEventSource {
 
 struct RebaseTurnEventSource {
     cursor: TurnEventCursor,
+}
+
+struct FailingApprovalRequestStore;
+
+#[async_trait]
+impl ApprovalRequestStore for FailingApprovalRequestStore {
+    async fn save_pending(
+        &self,
+        _scope: ResourceScope,
+        _request: ApprovalRequest,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        Err(RunStateError::Backend(
+            "approval store unavailable".to_string(),
+        ))
+    }
+
+    async fn get(
+        &self,
+        _scope: &ResourceScope,
+        _request_id: ApprovalRequestId,
+    ) -> Result<Option<ApprovalRecord>, RunStateError> {
+        Err(RunStateError::Backend(
+            "approval store unavailable".to_string(),
+        ))
+    }
+
+    async fn approve(
+        &self,
+        _scope: &ResourceScope,
+        _request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        Err(RunStateError::Backend(
+            "approval store unavailable".to_string(),
+        ))
+    }
+
+    async fn deny(
+        &self,
+        _scope: &ResourceScope,
+        _request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        Err(RunStateError::Backend(
+            "approval store unavailable".to_string(),
+        ))
+    }
+
+    async fn records_for_scope(
+        &self,
+        _scope: &ResourceScope,
+    ) -> Result<Vec<ApprovalRecord>, RunStateError> {
+        Err(RunStateError::Backend(
+            "approval store unavailable".to_string(),
+        ))
+    }
 }
 
 #[async_trait]

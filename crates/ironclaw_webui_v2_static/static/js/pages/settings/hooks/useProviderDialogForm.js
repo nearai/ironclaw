@@ -1,6 +1,7 @@
 import { React } from "../../../lib/html.js";
 import {
   isValidProviderId,
+  nextModelAfterFetch,
   providerEffectiveBaseUrl,
   providerIdFromName,
   providerDefaultModel,
@@ -99,7 +100,12 @@ export function useProviderDialogForm({
   }, [apiKey, builtinOverrides, form, onTest, provider, t]);
 
   const fetchModels = React.useCallback(async () => {
-    if (!form.baseUrl.trim()) {
+    // Built-in providers like OpenAI/Anthropic default an empty base URL to
+    // their official endpoint server-side, so don't force a base URL there.
+    // Custom providers (and built-ins that require a base URL) still need one
+    // before we know where to fetch.
+    const requiresBaseUrl = isBuiltin ? provider?.base_url_required === true : true;
+    if (requiresBaseUrl && !form.baseUrl.trim()) {
       setMessage({ tone: "error", text: t("llm.baseUrlRequired") });
       return;
     }
@@ -110,6 +116,10 @@ export function useProviderDialogForm({
         setMessage({ tone: "error", text: result.message || t("llm.modelsFetchFailed") });
       } else {
         setModels(result.models);
+        // Commit a valid model so the controlled <Select> shows what will save
+        // (see nextModelAfterFetch for the empty/stale-selection rationale).
+        const pick = nextModelAfterFetch(form.model, result.models);
+        if (pick !== null) update("model", pick);
         setMessage({ tone: "success", text: t("llm.modelsFetched", { count: result.models.length }) });
       }
     } catch (err) {
@@ -117,7 +127,7 @@ export function useProviderDialogForm({
     } finally {
       setBusy("");
     }
-  }, [apiKey, builtinOverrides, form, onListModels, provider, t]);
+  }, [apiKey, builtinOverrides, form, isBuiltin, onListModels, provider, t, update]);
 
   return {
     form,

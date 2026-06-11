@@ -13,11 +13,36 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use ironclaw_host_api::ThreadId;
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelRequest, HostManagedModelResponse,
 };
-use ironclaw_turns::run_profile::{LoopCapabilityPort, LoopModelUsage};
+use ironclaw_turns::{
+    TurnRunId, TurnStatus,
+    run_profile::{LoopCapabilityPort, LoopModelUsage},
+};
+
+use crate::runtime::{AssistantReply, ConversationId};
+
+/// Build a terminal/no-text assistant reply for CLI and product-surface tests.
+///
+/// Kept behind `test-support` so downstream crates can exercise presentation
+/// paths without depending directly on lower-level turn/thread crates.
+pub fn assistant_reply_without_text_for_test(
+    status: TurnStatus,
+    failure_category: Option<&str>,
+) -> AssistantReply {
+    AssistantReply {
+        conversation: ConversationId(
+            ThreadId::new("test-assistant-reply").expect("static test thread id"), // safety: static test helper id is a valid thread id literal.
+        ),
+        run_id: TurnRunId::new(),
+        status,
+        failure_category: failure_category.map(str::to_owned),
+        text: None,
+    }
+}
 
 /// One scripted reply from the mock LLM.
 ///

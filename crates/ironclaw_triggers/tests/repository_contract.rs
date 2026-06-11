@@ -881,6 +881,7 @@ async fn assert_rejects_validation_failures_before_persistence(repo: &impl Trigg
     let mut schedule_error = sample_record(trigger_id, tenant_id, next_run_at);
     schedule_error.schedule = TriggerSchedule::Cron {
         expression: "*/30 * * * * *".to_string(),
+        timezone: "UTC".to_string(),
     };
     assert!(matches!(
         repo.upsert_trigger(schedule_error).await,
@@ -1318,6 +1319,171 @@ async fn clear_postgres_triggers(pool: &deadpool_postgres::Pool) {
         .execute("DELETE FROM trigger_records", &[])
         .await
         .expect("clear trigger records");
+}
+
+// ---------------------------------------------------------------------------
+// Timezone round-trip parity (Comment 3a)
+// ---------------------------------------------------------------------------
+
+async fn assert_round_trip_preserves_named_timezone(repo: &impl TriggerRepository) {
+    let trigger_id = TriggerId::parse("01J00000000000000000000099").expect("ulid");
+    let tenant_id = tenant("tenant-tz");
+    let next_run_at = ts(1_704_067_200);
+
+    let mut record = sample_record(trigger_id, tenant_id.clone(), next_run_at);
+    record.schedule =
+        TriggerSchedule::cron_with_timezone("0 9 * * *", "America/New_York").expect("valid tz");
+
+    repo.upsert_trigger(record.clone())
+        .await
+        .expect("insert record with named timezone");
+
+    let fetched = repo
+        .get_trigger(tenant_id, trigger_id)
+        .await
+        .expect("get trigger")
+        .expect("record present");
+
+    assert_eq!(
+        fetched.schedule, record.schedule,
+        "named timezone must survive a full round-trip"
+    );
+    match &fetched.schedule {
+        TriggerSchedule::Cron { timezone, .. } => {
+            assert_eq!(
+                timezone, "America/New_York",
+                "timezone must be preserved verbatim"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_timezone_round_trip() {
+    let (_dir, repo) = build_libsql_repo().await;
+    assert_round_trip_preserves_named_timezone(&repo).await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_timezone_round_trip() {
+    let Some((_container, pool)) = postgres_pool_or_skip().await else {
+        return;
+    };
+    let repo = PostgresTriggerRepository::new(pool.clone());
+    repo.run_migrations().await.expect("run migrations");
+    assert_round_trip_preserves_named_timezone(&repo).await;
+}
+
+// ---------------------------------------------------------------------------
+// Migration regression: legacy row without schedule_timezone gets "UTC" (Comment 3b)
+//
+// Simulates a pre-migration table that lacks the schedule_timezone column.
+// The libsql migration adds the column via ALTER TABLE ... ADD COLUMN with a
+// NOT NULL DEFAULT 'UTC' — so any row inserted before the migration exists
+// must read back with timezone == "UTC" after migration runs.
+//
+// Postgres already uses ADD COLUMN IF NOT EXISTS (idempotent SQL) and the
+// NOT NULL DEFAULT 'UTC' fills existing rows identically; we cover it via the
+// postgres_timezone_round_trip test above (which seeds through upsert_trigger,
+// not a pre-migration raw insert, so it tests the migration-complete state).
+// A true pre-migration raw-insert scenario would require running without
+// run_migrations first, which the postgres harness does not support without
+// a separate DDL setup step; that coverage is deferred. See comment below.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_utc_backfill_on_legacy_row_without_schedule_timezone() {
+    // Build the database without the schedule_timezone column — simulate the
+    // schema state before the migration that adds it.
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("triggers-legacy.db");
+    let db = Arc::new(
+        libsql::Builder::new_local(db_path.display().to_string())
+            .build()
+            .await
+            .expect("build libsql db"),
+    );
+
+    // Create the table WITHOUT schedule_timezone (pre-migration schema).
+    let conn = db.connect().expect("raw libsql connect for schema setup");
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS trigger_records (
+            trigger_id TEXT NOT NULL,
+            tenant_id TEXT NOT NULL,
+            creator_user_id TEXT NOT NULL,
+            agent_id TEXT,
+            project_id TEXT,
+            name TEXT NOT NULL,
+            source TEXT NOT NULL,
+            schedule_expression TEXT NOT NULL,
+            completion_policy TEXT NOT NULL,
+            prompt TEXT NOT NULL,
+            state TEXT NOT NULL,
+            next_run_at TEXT NOT NULL,
+            last_run_at TEXT,
+            last_fired_slot TEXT,
+            last_status TEXT,
+            active_fire_slot TEXT,
+            active_run_ref TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, trigger_id)
+        )",
+        (),
+    )
+    .await
+    .expect("create pre-migration table");
+
+    // Insert a legacy row that has no schedule_timezone column value.
+    conn.execute(
+        "INSERT INTO trigger_records (
+            trigger_id, tenant_id, creator_user_id, name, source,
+            schedule_expression, completion_policy, prompt, state,
+            next_run_at, created_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            "01J00000000000000000000098",
+            "tenant-migration",
+            "user-a",
+            "legacy trigger",
+            "schedule",
+            "0 8 * * *",
+            "recurring",
+            "daily task",
+            "scheduled",
+            "2024-01-01T00:00:00Z",
+            "2024-01-01T00:00:00Z",
+        ],
+    )
+    .await
+    .expect("insert legacy row without schedule_timezone");
+
+    // Run migrations — this adds schedule_timezone NOT NULL DEFAULT 'UTC',
+    // which backfills the existing row with "UTC".
+    let repo = LibSqlTriggerRepository::new(db);
+    repo.run_migrations()
+        .await
+        .expect("migration must succeed on pre-existing table");
+
+    // Read back the legacy row and assert timezone was backfilled to "UTC".
+    let trigger_id = TriggerId::parse("01J00000000000000000000098").expect("ulid");
+    let tenant_id = TenantId::new("tenant-migration").expect("valid tenant");
+    let fetched = repo
+        .get_trigger(tenant_id, trigger_id)
+        .await
+        .expect("get trigger after migration")
+        .expect("legacy row must be readable after migration");
+
+    match &fetched.schedule {
+        TriggerSchedule::Cron { timezone, .. } => {
+            assert_eq!(
+                timezone, "UTC",
+                "legacy row without schedule_timezone must read back as UTC after migration"
+            );
+        }
+    }
 }
 
 mod fire_claim_contract {

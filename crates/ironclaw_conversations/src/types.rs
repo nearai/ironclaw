@@ -167,9 +167,10 @@ pub struct InboundTurnRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TrustedInboundTurnRequest {
-    request: InboundTurnRequest,
-    trusted_agent_id: Option<AgentId>,
-    trusted_project_id: Option<ProjectId>,
+    pub(crate) request: InboundTurnRequest,
+    pub(crate) trusted_agent_id: Option<AgentId>,
+    pub(crate) trusted_project_id: Option<ProjectId>,
+    pub(crate) trusted_owner_user_id: Option<UserId>,
 }
 
 impl TrustedInboundTurnRequest {
@@ -177,16 +178,14 @@ impl TrustedInboundTurnRequest {
         request: InboundTurnRequest,
         trusted_agent_id: Option<AgentId>,
         trusted_project_id: Option<ProjectId>,
+        trusted_owner_user_id: Option<UserId>,
     ) -> Self {
         Self {
             request,
             trusted_agent_id,
             trusted_project_id,
+            trusted_owner_user_id,
         }
-    }
-
-    pub(crate) fn into_parts(self) -> (InboundTurnRequest, Option<AgentId>, Option<ProjectId>) {
-        (self.request, self.trusted_agent_id, self.trusted_project_id)
     }
 }
 

@@ -31,7 +31,7 @@ const TRIGGER_RUN_TABLE: &str = "trigger_run_history";
 #[cfg(feature = "libsql")]
 const TRIGGER_COLUMNS: &str = "\
     trigger_id, tenant_id, creator_user_id, agent_id, project_id, \
-    name, source, schedule_expression, completion_policy, prompt, \
+    name, source, schedule_expression, schedule_timezone, completion_policy, prompt, \
     state, next_run_at, last_run_at, last_fired_slot, last_status, \
     active_fire_slot, active_run_ref, created_at";
 
@@ -52,25 +52,27 @@ const SOURCE_COL: usize = 6;
 #[cfg(feature = "libsql")]
 const SCHEDULE_EXPRESSION_COL: usize = 7;
 #[cfg(feature = "libsql")]
-const COMPLETION_POLICY_COL: usize = 8;
+const SCHEDULE_TIMEZONE_COL: usize = 8;
 #[cfg(feature = "libsql")]
-const PROMPT_COL: usize = 9;
+const COMPLETION_POLICY_COL: usize = 9;
 #[cfg(feature = "libsql")]
-const STATE_COL: usize = 10;
+const PROMPT_COL: usize = 10;
 #[cfg(feature = "libsql")]
-const NEXT_RUN_AT_COL: usize = 11;
+const STATE_COL: usize = 11;
 #[cfg(feature = "libsql")]
-const LAST_RUN_AT_COL: usize = 12;
+const NEXT_RUN_AT_COL: usize = 12;
 #[cfg(feature = "libsql")]
-const LAST_FIRED_SLOT_COL: usize = 13;
+const LAST_RUN_AT_COL: usize = 13;
 #[cfg(feature = "libsql")]
-const LAST_STATUS_COL: usize = 14;
+const LAST_FIRED_SLOT_COL: usize = 14;
 #[cfg(feature = "libsql")]
-const ACTIVE_FIRE_SLOT_COL: usize = 15;
+const LAST_STATUS_COL: usize = 15;
 #[cfg(feature = "libsql")]
-const ACTIVE_RUN_REF_COL: usize = 16;
+const ACTIVE_FIRE_SLOT_COL: usize = 16;
 #[cfg(feature = "libsql")]
-const CREATED_AT_COL: usize = 17;
+const ACTIVE_RUN_REF_COL: usize = 17;
+#[cfg(feature = "libsql")]
+const CREATED_AT_COL: usize = 18;
 
 #[cfg(feature = "libsql")]
 const TRIGGER_RUN_COLUMNS: &str = "\
@@ -205,6 +207,23 @@ impl LibSqlTriggerRepository {
             )
             .await
             .map_err(|error| backend_error("create trigger run history list index", error))?;
+            // Add schedule_timezone column if it doesn't already exist (idempotent migration).
+            // SQLite does not support ADD COLUMN IF NOT EXISTS, so we attempt the ALTER and
+            // ignore the "duplicate column" error that indicates it was already applied.
+            if let Err(error) = conn
+                .execute(
+                    &format!(
+                        "ALTER TABLE {TRIGGER_TABLE} ADD COLUMN schedule_timezone TEXT NOT NULL DEFAULT 'UTC'"
+                    ),
+                    (),
+                )
+                .await
+            {
+                let msg = error.to_string();
+                if !msg.contains("duplicate column") && !msg.contains("already exists") {
+                    return Err(backend_error("add schedule_timezone column", error));
+                }
+            }
             Ok::<(), TriggerError>(())
         }
         .await;
@@ -1046,11 +1065,9 @@ fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
             ProjectId::new(value).map_err(|error| invalid_record("project_id", error.to_string()))
         })
         .transpose()?;
-    let schedule = TriggerSchedule::cron(required_text(
-        row,
-        SCHEDULE_EXPRESSION_COL,
-        "schedule_expression",
-    )?)?;
+    let schedule_expression = required_text(row, SCHEDULE_EXPRESSION_COL, "schedule_expression")?;
+    let schedule_timezone = required_text(row, SCHEDULE_TIMEZONE_COL, "schedule_timezone")?;
+    let schedule = TriggerSchedule::cron_with_timezone(schedule_expression, schedule_timezone)?;
     let last_run_at = optional_text(row, LAST_RUN_AT_COL, "last_run_at")?
         .map(|value| parse_timestamp(&value, "last_run_at"))
         .transpose()?;
@@ -1171,10 +1188,10 @@ async fn write_record(
         &format!(
             "INSERT INTO {TRIGGER_TABLE} (
                 trigger_id, tenant_id, creator_user_id, agent_id, project_id,
-                name, source, schedule_expression, completion_policy, prompt,
+                name, source, schedule_expression, schedule_timezone, completion_policy, prompt,
                 state, next_run_at, last_run_at, last_fired_slot, last_status,
                 active_fire_slot, active_run_ref, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
             ON CONFLICT (tenant_id, trigger_id) DO UPDATE SET
                 creator_user_id = excluded.creator_user_id,
                 agent_id = excluded.agent_id,
@@ -1182,6 +1199,7 @@ async fn write_record(
                 name = excluded.name,
                 source = excluded.source,
                 schedule_expression = excluded.schedule_expression,
+                schedule_timezone = excluded.schedule_timezone,
                 completion_policy = excluded.completion_policy,
                 prompt = excluded.prompt,
                 state = excluded.state,
@@ -1201,6 +1219,7 @@ async fn write_record(
             record.name.clone(),
             source_kind_text(record.source),
             schedule_expression_text(&record.schedule),
+            schedule_timezone_text(&record.schedule),
             completion_policy_text(record.completion_policy),
             record.prompt.clone(),
             state_text(record.state),
@@ -1665,7 +1684,14 @@ fn parse_run_history_status(value: &str) -> Result<TriggerRunHistoryStatus, Trig
 #[cfg(feature = "libsql")]
 fn schedule_expression_text(schedule: &TriggerSchedule) -> String {
     match schedule {
-        TriggerSchedule::Cron { expression } => expression.clone(),
+        TriggerSchedule::Cron { expression, .. } => expression.clone(),
+    }
+}
+
+#[cfg(feature = "libsql")]
+fn schedule_timezone_text(schedule: &TriggerSchedule) -> String {
+    match schedule {
+        TriggerSchedule::Cron { timezone, .. } => timezone.clone(),
     }
 }
 

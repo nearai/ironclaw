@@ -26,7 +26,7 @@ pub(super) struct SlackRoutableTeamSubject {
 
 impl SlackRoutableTeamSubject {
     pub(super) fn from_user_id(subject_user_id: UserId) -> Self {
-        let display_name = display_name_for_subject_user_id(&subject_user_id);
+        let display_name = display_name_for_subject_user_id(subject_user_id.as_str());
         Self {
             subject_user_id: subject_user_id.to_string(),
             display_name,
@@ -67,25 +67,45 @@ async fn list_handler(
     }))
 }
 
-fn display_name_for_subject_user_id(subject_user_id: &UserId) -> String {
+pub(super) fn display_name_for_subject_user_id(subject_user_id: &str) -> String {
     let raw = subject_user_id
-        .as_str()
         .strip_prefix("user:")
-        .unwrap_or(subject_user_id.as_str());
-    let words = raw
+        .unwrap_or(subject_user_id);
+    let mut words = raw
         .replace([':', '_', '-'], " ")
         .split_whitespace()
-        .map(|word| {
+        .filter(|word| !word.eq_ignore_ascii_case("user"))
+        .map(display_name_word)
+        .collect::<Vec<_>>();
+    if words.len() > 1
+        && words
+            .last()
+            .is_some_and(|word| word.eq_ignore_ascii_case("Agent"))
+    {
+        words.pop();
+        if words
+            .last()
+            .is_some_and(|word| word.eq_ignore_ascii_case("Team"))
+        {
+            words.pop();
+        }
+    }
+    if words.is_empty() {
+        subject_user_id.to_string()
+    } else {
+        words.join(" ")
+    }
+}
+
+fn display_name_word(word: &str) -> String {
+    match word.to_ascii_lowercase().as_str() {
+        "ai" | "hr" | "it" | "ml" | "qa" | "sre" => word.to_ascii_uppercase(),
+        _ => {
             let mut chars = word.chars();
             match chars.next() {
                 Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
                 None => String::new(),
             }
-        })
-        .collect::<Vec<_>>();
-    if words.is_empty() {
-        subject_user_id.to_string()
-    } else {
-        words.join(" ")
+        }
     }
 }

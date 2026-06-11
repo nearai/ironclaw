@@ -1,29 +1,39 @@
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use chrono::{DateTime, Utc};
-use ironclaw_host_api::{
-    CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, CorrelationId, EffectKind,
-    ExecutionContext, ExtensionId, GrantConstraints, InvocationId, MountView, NetworkPolicy,
-    Principal, ResourceEstimate, ResourceScope, RuntimeKind, TrustClass,
-};
-use ironclaw_host_runtime::{
-    HostRuntime, HostRuntimeError, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeFailureKind, TRIGGER_LIST_CAPABILITY_ID,
-};
+use ironclaw_host_api::ThreadId;
 use ironclaw_product_workflow::{
     AutomationListRequest, AutomationProductFacade, ProductAgentBoundCaller, RebornAutomationInfo,
-    RebornAutomationRecentRunInfo, RebornAutomationRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
+    RebornAutomationSource, RebornAutomationState, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind,
 };
-use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
-use serde::Deserialize;
-use serde_json::{Value, json};
+use ironclaw_triggers::{
+    TriggerError, TriggerId, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus,
+    TriggerRunRecord, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
+};
 
 const AUTOMATION_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// WebUI panel facade for automation (trigger) listing.
+///
+/// ## Dual-access design
+///
+/// The model/agent-loop path uses the `builtin.trigger_list` capability with
+/// the full pipeline (trust evaluation, approval gates) in
+/// `ironclaw_host_runtime` first_party_tools::trigger_management. The panel
+/// path (this facade) calls scoped repository methods directly, which is
+/// correct for a user-direct fetch-and-render surface where the approval
+/// pipeline would be wrong by design. Both paths converge on the same scoping
+/// contract: tenant + creator_user + agent + project.
+///
+/// ## Future panel mutations
+///
+/// Any panel mutation added here must append an audit `RuntimeEvent` before
+/// returning (precedent: `RebornRuntime::append_webui_loop_cancelled` in
+/// `runtime.rs`).
 #[derive(Clone)]
 pub struct RebornAutomationProductFacade {
-    host_runtime: Arc<dyn HostRuntime>,
+    trigger_repository: Arc<dyn TriggerRepository>,
     backend_timeout: Duration,
 }
 
@@ -31,87 +41,27 @@ impl std::fmt::Debug for RebornAutomationProductFacade {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("RebornAutomationProductFacade")
-            .field("host_runtime", &"Arc<dyn HostRuntime>")
+            .field("trigger_repository", &"Arc<dyn TriggerRepository>")
             .finish()
     }
 }
 
 impl RebornAutomationProductFacade {
-    pub(crate) fn new(host_runtime: Arc<dyn HostRuntime>) -> Self {
+    pub(crate) fn new(trigger_repository: Arc<dyn TriggerRepository>) -> Self {
         Self {
-            host_runtime,
+            trigger_repository,
             backend_timeout: AUTOMATION_BACKEND_TIMEOUT,
         }
     }
 
     #[cfg(test)]
-    fn with_backend_timeout(host_runtime: Arc<dyn HostRuntime>, backend_timeout: Duration) -> Self {
+    fn with_backend_timeout(
+        trigger_repository: Arc<dyn TriggerRepository>,
+        backend_timeout: Duration,
+    ) -> Self {
         Self {
-            host_runtime,
+            trigger_repository,
             backend_timeout,
-        }
-    }
-
-    async fn invoke_trigger(
-        &self,
-        caller: ProductAgentBoundCaller,
-        capability_id: &'static str,
-        input: Value,
-    ) -> Result<Value, RebornServicesError> {
-        let context = trigger_execution_context(&caller, capability_id)?;
-        let request = RuntimeCapabilityRequest::new(
-            context,
-            CapabilityId::new(capability_id).map_err(|_| internal_invariant())?,
-            ResourceEstimate::default(),
-            input,
-            trigger_trust_decision(),
-        );
-
-        match tokio::time::timeout(
-            self.backend_timeout,
-            self.host_runtime.invoke_capability(request),
-        )
-        .await
-        {
-            Err(_) => Err(services_error(
-                RebornServicesErrorCode::Unavailable,
-                RebornServicesErrorKind::ServiceUnavailable,
-                503,
-                true,
-            )),
-            Ok(Ok(RuntimeCapabilityOutcome::Completed(completed))) => Ok(completed.output),
-            Ok(Ok(RuntimeCapabilityOutcome::ApprovalRequired(_))) => Err(services_error(
-                RebornServicesErrorCode::Conflict,
-                RebornServicesErrorKind::BlockedApproval,
-                409,
-                false,
-            )),
-            Ok(Ok(RuntimeCapabilityOutcome::AuthRequired(_))) => Err(services_error(
-                RebornServicesErrorCode::Forbidden,
-                RebornServicesErrorKind::BlockedAuthentication,
-                403,
-                false,
-            )),
-            Ok(Ok(RuntimeCapabilityOutcome::ResourceBlocked(_))) => Err(services_error(
-                RebornServicesErrorCode::Unavailable,
-                RebornServicesErrorKind::BlockedResource,
-                503,
-                true,
-            )),
-            Ok(Ok(RuntimeCapabilityOutcome::SpawnedProcess(_))) => Err(services_error(
-                RebornServicesErrorCode::Unavailable,
-                RebornServicesErrorKind::ServiceUnavailable,
-                503,
-                true,
-            )),
-            Ok(Ok(RuntimeCapabilityOutcome::Failed(failure))) => Err(map_runtime_failure(failure)),
-            Ok(Ok(RuntimeCapabilityOutcome::Unknown(_))) => Err(services_error(
-                RebornServicesErrorCode::Internal,
-                RebornServicesErrorKind::Internal,
-                500,
-                false,
-            )),
-            Ok(Err(error)) => Err(map_host_runtime_error(error)),
         }
     }
 }
@@ -123,272 +73,176 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
         caller: ProductAgentBoundCaller,
         request: AutomationListRequest,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
-        let output = self
-            .invoke_trigger(
-                caller,
-                TRIGGER_LIST_CAPABILITY_ID,
-                json!({
-                    "limit": request.limit,
-                    "run_limit": request.run_limit,
-                }),
+        // Both repository calls share one deadline so the panel read budget is
+        // backend_timeout total, not per call.
+        let deadline = tokio::time::Instant::now() + self.backend_timeout;
+        let records = tokio::time::timeout_at(
+            deadline,
+            self.trigger_repository.list_scoped_triggers(
+                caller.tenant_id.clone(),
+                caller.user_id.clone(),
+                Some(caller.agent_id.clone()),
+                caller.project_id.clone(),
+                request.limit,
+            ),
+        )
+        .await
+        .map_err(|_| backend_timeout_error())?
+        .map_err(map_trigger_error)?;
+
+        if records.is_empty() || request.run_limit == 0 {
+            return Ok(records
+                .into_iter()
+                .filter_map(|record| automation_info_from_record(record, &[]))
+                .collect());
+        }
+
+        let trigger_ids: Vec<TriggerId> = records.iter().map(|r| r.trigger_id).collect();
+        let mut runs_by_trigger: HashMap<TriggerId, Vec<TriggerRunRecord>> =
+            tokio::time::timeout_at(
+                deadline,
+                self.trigger_repository.list_trigger_run_history_batch(
+                    caller.tenant_id.clone(),
+                    &trigger_ids,
+                    request.run_limit,
+                ),
             )
-            .await?;
-        parse_list_automations_output(output)
+            .await
+            .map_err(|_| backend_timeout_error())?
+            .map_err(map_trigger_error)?;
+
+        Ok(records
+            .into_iter()
+            .filter_map(|record| {
+                let runs = runs_by_trigger
+                    .remove(&record.trigger_id)
+                    .unwrap_or_default();
+                automation_info_from_record(record, &runs)
+            })
+            .collect())
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct RawAutomationListEnvelope {
-    triggers: Vec<RawAutomationRecord>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawAutomationRecord {
-    trigger_id: String,
-    name: String,
-    schedule: RawAutomationSchedule,
-    state: RebornAutomationState,
-    #[serde(default)]
-    next_run_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    last_run_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    last_status: Option<RebornAutomationRunStatus>,
-    #[serde(default)]
-    recent_runs: Vec<RebornAutomationRecentRunInfo>,
-    #[serde(default)]
-    is_active: bool,
-    #[serde(default)]
-    created_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-enum RawAutomationSchedule {
-    Cron {
-        expression: String,
-    },
-    #[serde(other)]
-    Unknown,
-}
-
-fn parse_list_automations_output(
-    mut output: Value,
-) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
-    sanitize_automation_list_output(&mut output);
-    let envelope: RawAutomationListEnvelope = serde_json::from_value(output).map_err(|error| {
-        tracing::debug!(
-            error = %error,
-            "malformed automation list output from host runtime"
-        );
-        internal_invariant()
-    })?;
-    Ok(envelope
-        .triggers
-        .into_iter()
-        .filter_map(automation_info)
-        .collect())
-}
-
-fn automation_info(record: RawAutomationRecord) -> Option<RebornAutomationInfo> {
+fn automation_info_from_record(
+    record: TriggerRecord,
+    runs: &[TriggerRunRecord],
+) -> Option<RebornAutomationInfo> {
+    let source = automation_source_from_record(&record)?;
+    let is_active = record.has_active_fire();
+    // Completed is terminal: the stored next_run_at is a stale past slot and
+    // would render as a misleading "next run" date. Paused keeps its slot so
+    // the panel can show when a resumed trigger would next fire.
+    let next_run_at = match record.state {
+        TriggerState::Completed => None,
+        TriggerState::Scheduled | TriggerState::Paused => Some(record.next_run_at),
+    };
     Some(RebornAutomationInfo {
-        automation_id: record.trigger_id,
+        automation_id: record.trigger_id.to_string(),
         name: record.name,
-        source: automation_source(record.schedule)?,
-        state: record.state,
-        next_run_at: record.next_run_at,
+        source,
+        state: map_trigger_state(record.state),
+        next_run_at,
         last_run_at: record.last_run_at,
-        last_status: record.last_status,
-        recent_runs: record.recent_runs,
-        is_active: record.is_active,
-        created_at: record.created_at,
+        last_status: record.last_status.map(map_trigger_run_status),
+        recent_runs: runs.iter().filter_map(map_recent_run).collect(),
+        is_active,
+        created_at: Some(record.created_at),
     })
 }
 
-fn automation_source(schedule: RawAutomationSchedule) -> Option<RebornAutomationSource> {
-    match schedule {
-        RawAutomationSchedule::Cron { expression } => {
-            Some(RebornAutomationSource::Schedule { cron: expression })
-        }
-        RawAutomationSchedule::Unknown => None,
-    }
-}
-
-fn sanitize_automation_list_output(output: &mut Value) {
-    let Some(triggers) = output.get_mut("triggers").and_then(Value::as_array_mut) else {
-        return;
-    };
-    for trigger in triggers {
-        let Some(trigger_object) = trigger.as_object_mut() else {
-            continue;
-        };
-        let status = match trigger_object.get("last_status").and_then(Value::as_str) {
-            Some("ok") => Value::String("ok".to_string()),
-            Some("error") => Value::String("error".to_string()),
-            _ => Value::Null,
-        };
-        let state = match trigger_object.get("state").and_then(Value::as_str) {
-            Some(state) => Value::String(state.to_string()),
-            None => Value::String("unknown".to_string()),
-        };
-        trigger_object.insert("last_status".to_string(), status);
-        trigger_object.insert("state".to_string(), state);
-        sanitize_recent_run_statuses(trigger_object);
-    }
-}
-
-fn sanitize_recent_run_statuses(trigger_object: &mut serde_json::Map<String, Value>) {
-    let Some(recent_runs) = trigger_object
-        .get_mut("recent_runs")
-        .and_then(Value::as_array_mut)
-    else {
-        return;
-    };
-    for run in recent_runs {
-        let Some(run_object) = run.as_object_mut() else {
-            continue;
-        };
-        let status = match run_object.get("status").and_then(Value::as_str) {
-            Some("running") => Value::String("running".to_string()),
-            Some("ok") => Value::String("ok".to_string()),
-            Some("error") => Value::String("error".to_string()),
-            _ => Value::String("unknown".to_string()),
-        };
-        run_object.insert("status".to_string(), status);
-    }
-}
-
-fn trigger_execution_context(
-    caller: &ProductAgentBoundCaller,
-    capability_id: &str,
-) -> Result<ExecutionContext, RebornServicesError> {
-    let extension_id = automation_extension_id()?;
-    let invocation_id = InvocationId::new();
-    let resource_scope = ResourceScope {
-        tenant_id: caller.tenant_id.clone(),
-        user_id: caller.user_id.clone(),
-        agent_id: Some(caller.agent_id.clone()),
-        project_id: caller.project_id.clone(),
-        mission_id: None,
-        thread_id: None,
-        invocation_id,
-    };
-    let grants = CapabilitySet {
-        grants: vec![CapabilityGrant {
-            id: CapabilityGrantId::new(),
-            capability: CapabilityId::new(capability_id).map_err(|_| internal_invariant())?,
-            grantee: Principal::Extension(extension_id.clone()),
-            issued_by: Principal::HostRuntime,
-            constraints: GrantConstraints {
-                allowed_effects: trigger_allowed_effects(),
-                mounts: MountView::new(Vec::new()).map_err(|_| internal_invariant())?,
-                network: NetworkPolicy::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: None,
-            },
-        }],
-    };
-    let context = ExecutionContext {
-        invocation_id,
-        correlation_id: CorrelationId::new(),
-        process_id: None,
-        parent_process_id: None,
-        tenant_id: caller.tenant_id.clone(),
-        user_id: caller.user_id.clone(),
-        agent_id: Some(caller.agent_id.clone()),
-        project_id: caller.project_id.clone(),
-        mission_id: None,
-        thread_id: None,
-        extension_id,
-        runtime: RuntimeKind::FirstParty,
-        trust: TrustClass::UserTrusted,
-        grants,
-        mounts: MountView::new(Vec::new()).map_err(|_| internal_invariant())?,
-        resource_scope,
-    };
-    context.validate().map_err(|_| internal_invariant())?;
-    Ok(context)
-}
-
-fn trigger_trust_decision() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: trigger_allowed_effects(),
-            max_resource_ceiling: None,
+/// Maps a trigger record's source kind + schedule to the wire DTO source.
+///
+/// This match is exhaustive on purpose: if `TriggerSourceKind` gains a new
+/// variant, this function must be updated rather than silently returning
+/// `None` for an unknown variant.
+fn automation_source_from_record(record: &TriggerRecord) -> Option<RebornAutomationSource> {
+    match record.source {
+        TriggerSourceKind::Schedule => match &record.schedule {
+            TriggerSchedule::Cron {
+                expression,
+                timezone,
+            } => Some(RebornAutomationSource::Schedule {
+                cron: expression.clone(),
+                timezone: timezone.clone(),
+            }),
         },
-        provenance: TrustProvenance::Default,
-        evaluated_at: chrono::Utc::now(),
     }
 }
 
-fn trigger_allowed_effects() -> Vec<EffectKind> {
-    vec![EffectKind::DispatchCapability]
-}
-
-fn map_runtime_failure(failure: RuntimeCapabilityFailure) -> RebornServicesError {
-    match failure.kind {
-        RuntimeFailureKind::InvalidInput => services_error(
-            RebornServicesErrorCode::InvalidRequest,
-            RebornServicesErrorKind::Validation,
-            400,
-            false,
-        ),
-        RuntimeFailureKind::Authorization | RuntimeFailureKind::PolicyDenied => services_error(
-            RebornServicesErrorCode::Forbidden,
-            RebornServicesErrorKind::ParticipantDenied,
-            403,
-            false,
-        ),
-        RuntimeFailureKind::Cancelled => services_error(
-            RebornServicesErrorCode::Conflict,
-            RebornServicesErrorKind::Conflict,
-            409,
-            false,
-        ),
-        RuntimeFailureKind::Unavailable
-        | RuntimeFailureKind::Backend
-        | RuntimeFailureKind::Dispatcher
-        | RuntimeFailureKind::Internal
-        | RuntimeFailureKind::MissingRuntime
-        | RuntimeFailureKind::Network
-        | RuntimeFailureKind::Process
-        | RuntimeFailureKind::Resource
-        | RuntimeFailureKind::Transient
-        | RuntimeFailureKind::Unknown
-        | RuntimeFailureKind::OperationFailed
-        | RuntimeFailureKind::OutputTooLarge
-        | RuntimeFailureKind::InvalidOutput
-        | _ => services_error(
-            RebornServicesErrorCode::Unavailable,
-            RebornServicesErrorKind::ServiceUnavailable,
-            503,
-            true,
-        ),
+/// Maps the repository trigger state to the wire DTO state.
+///
+/// Exhaustive — no wildcard arm so a new `TriggerState` variant is a compile
+/// error here rather than a silent mapping gap.
+fn map_trigger_state(state: TriggerState) -> RebornAutomationState {
+    match state {
+        TriggerState::Scheduled => RebornAutomationState::Scheduled,
+        TriggerState::Paused => RebornAutomationState::Paused,
+        TriggerState::Completed => RebornAutomationState::Completed,
     }
 }
 
-fn map_host_runtime_error(error: HostRuntimeError) -> RebornServicesError {
+/// Maps the repository run status to the wire DTO run status.
+///
+/// Exhaustive — no wildcard arm so a new `TriggerRunStatus` variant is a
+/// compile error here rather than a silent mapping gap.
+fn map_trigger_run_status(status: TriggerRunStatus) -> RebornAutomationRunStatus {
+    match status {
+        TriggerRunStatus::Ok => RebornAutomationRunStatus::Ok,
+        TriggerRunStatus::Error => RebornAutomationRunStatus::Error,
+    }
+}
+
+fn map_recent_run(run: &TriggerRunRecord) -> Option<RebornAutomationRecentRunInfo> {
+    let status = match run.status {
+        TriggerRunHistoryStatus::Running => RebornAutomationRecentRunStatus::Running,
+        TriggerRunHistoryStatus::Ok => RebornAutomationRecentRunStatus::Ok,
+        TriggerRunHistoryStatus::Error => RebornAutomationRecentRunStatus::Error,
+    };
+    // TriggerRouteThreadId is a validated lower-hex string; ThreadId accepts
+    // any non-empty value without path separators or control chars, so this
+    // conversion cannot fail for constructible repository rows.
+    let thread_id = ThreadId::new(run.thread_id.as_str()).ok()?; // silent-ok: structurally unreachable; defensive drop if ThreadId validation ever tightens
+    Some(RebornAutomationRecentRunInfo {
+        run_id: run.run_id,
+        thread_id,
+        fire_slot: Some(run.fire_slot),
+        status,
+        submitted_at: run.submitted_at,
+        completed_at: run.completed_at,
+    })
+}
+
+/// Shared 503 for repository calls that exceed the panel read deadline.
+fn backend_timeout_error() -> RebornServicesError {
+    services_error(
+        RebornServicesErrorCode::Unavailable,
+        RebornServicesErrorKind::ServiceUnavailable,
+        503,
+        true,
+    )
+}
+
+fn map_trigger_error(error: TriggerError) -> RebornServicesError {
     match error {
-        HostRuntimeError::InvalidRequest { .. } => services_error(
-            RebornServicesErrorCode::Internal,
-            RebornServicesErrorKind::Internal,
-            500,
-            false,
-        ),
-        HostRuntimeError::Unavailable { .. } => services_error(
+        TriggerError::Backend { .. } => services_error(
             RebornServicesErrorCode::Unavailable,
             RebornServicesErrorKind::ServiceUnavailable,
             503,
             true,
         ),
+        TriggerError::NotFound => services_error(
+            RebornServicesErrorCode::NotFound,
+            RebornServicesErrorKind::NotFound,
+            404,
+            false,
+        ),
+        TriggerError::InvalidTriggerId { .. }
+        | TriggerError::InvalidFireIdentityComponent { .. }
+        | TriggerError::InvalidRecord { .. }
+        | TriggerError::InvalidPollerConfig { .. }
+        | TriggerError::InvalidSchedule { .. }
+        | TriggerError::InvalidMaterialization { .. } => internal_invariant(),
     }
-}
-
-fn automation_extension_id() -> Result<ExtensionId, RebornServicesError> {
-    ExtensionId::new("reborn.product.automation").map_err(|_| internal_invariant())
 }
 
 fn services_error(
@@ -423,509 +277,26 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use ironclaw_host_api::{
-        AgentId, ApprovalRequestId, ProcessId, ProjectId, SecretHandle, TenantId, TrustClass,
-        UserId,
-    };
-    use ironclaw_host_runtime::{
-        HostRuntime, HostRuntimeError, RuntimeApprovalGate, RuntimeAuthGate, RuntimeBlockedReason,
-        RuntimeCapabilityCompleted, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
-        RuntimeCapabilityRequest, RuntimeCapabilityUnknown, RuntimeFailureKind, RuntimeGateId,
-        RuntimeProcessHandle, RuntimeResourceGate, TRIGGER_LIST_CAPABILITY_ID,
-    };
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
     use ironclaw_product_workflow::{
         AutomationListRequest, AutomationProductFacade, ProductAgentBoundCaller,
         RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
         RebornAutomationState, RebornServicesErrorCode, RebornServicesErrorKind,
     };
-    use serde_json::{Value, json};
-    use tokio::sync::Mutex;
+    use ironclaw_triggers::{
+        ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClearActiveFireRequest,
+        FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
+        FireRetryableFailedRequest, FireTerminalFailedRequest, InMemoryTriggerRepository,
+        TriggerError, TriggerId, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus,
+        TriggerRunRecord, TriggerSchedule, TriggerSourceKind, TriggerState,
+    };
+    use ironclaw_turns::TurnRunId;
 
     use super::RebornAutomationProductFacade;
 
-    #[tokio::test]
-    async fn automation_facade_preserves_caller_scope_and_capability_path() {
-        let runtime = Arc::new(RecordingHostRuntime::default());
-        let facade = RebornAutomationProductFacade::new(runtime.clone());
-        let caller = caller();
-
-        let automations = facade
-            .list_automations(caller.clone(), automation_list_request(25, 10))
-            .await
-            .expect("trigger list output");
-
-        assert_eq!(automations.len(), 1);
-        assert_eq!(automations[0].automation_id, "trigger-listed");
-        assert_eq!(
-            automations[0].source,
-            RebornAutomationSource::Schedule {
-                cron: "0 9 * * *".to_string()
-            }
-        );
-        assert_eq!(
-            automations[0].last_status,
-            Some(RebornAutomationRunStatus::Ok)
-        );
-        assert_eq!(automations[0].recent_runs.len(), 1);
-        assert_eq!(
-            automations[0].recent_runs[0]
-                .run_id
-                .map(|run_id| run_id.to_string())
-                .as_deref(),
-            Some("11111111-1111-1111-1111-111111111111")
-        );
-        assert_eq!(
-            automations[0].recent_runs[0].thread_id.as_str(),
-            "thread-listed"
-        );
-        assert_eq!(
-            automations[0].recent_runs[0].status,
-            RebornAutomationRecentRunStatus::Running
-        );
-        let request = runtime
-            .requests
-            .lock()
-            .await
-            .pop()
-            .expect("runtime request");
-        assert_eq!(request.capability_id.as_str(), TRIGGER_LIST_CAPABILITY_ID);
-        assert_eq!(request.context.tenant_id, caller.tenant_id);
-        assert_eq!(request.context.user_id, caller.user_id);
-        assert_eq!(request.context.agent_id, Some(caller.agent_id.clone()));
-        assert_eq!(request.context.project_id, caller.project_id);
-        assert_eq!(request.context.resource_scope.tenant_id, caller.tenant_id);
-        assert_eq!(request.context.resource_scope.user_id, caller.user_id);
-        assert_eq!(
-            request.context.resource_scope.agent_id,
-            Some(caller.agent_id)
-        );
-        assert_eq!(request.context.resource_scope.project_id, caller.project_id);
-        assert_eq!(request.context.trust, TrustClass::UserTrusted);
-        assert_eq!(request.input["limit"], 25);
-        assert_eq!(request.input["run_limit"], 10);
-    }
-
-    #[tokio::test]
-    async fn automation_facade_rejects_malformed_trigger_list_output() {
-        let facade = RebornAutomationProductFacade::new(Arc::new(OutputHostRuntime::new(json!({
-            "unexpected": true
-        }))));
-
-        let error = facade
-            .list_automations(caller(), automation_list_request(50, 10))
-            .await
-            .expect_err("malformed automation output should fail closed");
-
-        assert_eq!(error.code, RebornServicesErrorCode::Internal);
-        assert_eq!(error.status_code, 500);
-    }
-
-    #[tokio::test]
-    async fn automation_facade_rejects_non_array_trigger_list_output() {
-        let facade = RebornAutomationProductFacade::new(Arc::new(OutputHostRuntime::new(json!({
-            "triggers": {
-                "trigger_id": "trigger-listed"
-            }
-        }))));
-
-        let error = facade
-            .list_automations(caller(), automation_list_request(50, 10))
-            .await
-            .expect_err("malformed automation output should fail closed");
-
-        assert_eq!(error.code, RebornServicesErrorCode::Internal);
-        assert_eq!(error.status_code, 500);
-    }
-
-    #[tokio::test]
-    async fn automation_facade_drops_unallowlisted_status_payloads() {
-        let mut trigger =
-            raw_automation("trigger-listed", "Daily status", "0 9 * * *", Some("error"))
-                .as_object()
-                .cloned()
-                .expect("object trigger");
-        trigger.insert(
-            "last_status".to_string(),
-            json!({"trace": "internal details", "secret": "token"}),
-        );
-        let facade = RebornAutomationProductFacade::new(Arc::new(OutputHostRuntime::new(json!({
-            "triggers": [Value::Object(trigger)]
-        }))));
-
-        let automations = facade
-            .list_automations(caller(), automation_list_request(50, 10))
-            .await
-            .expect("list automations");
-
-        assert_eq!(automations.len(), 1);
-        assert_eq!(automations[0].last_status, None);
-    }
-
-    #[tokio::test]
-    async fn automation_facade_sanitizes_malformed_recent_run_status_payloads() {
-        let mut unknown_status = raw_automation(
-            "trigger-unknown-status",
-            "Unknown run status",
-            "0 9 * * *",
-            Some("ok"),
-        )
-        .as_object()
-        .cloned()
-        .expect("object trigger");
-        unknown_status["recent_runs"][0]["status"] = json!("future_state");
-        let mut non_string_status = raw_automation(
-            "trigger-non-string-status",
-            "Non-string run status",
-            "0 10 * * *",
-            Some("ok"),
-        )
-        .as_object()
-        .cloned()
-        .expect("object trigger");
-        non_string_status["recent_runs"][0]["status"] = json!({"raw": "backend-only"});
-        let facade = RebornAutomationProductFacade::new(Arc::new(OutputHostRuntime::new(json!({
-            "triggers": [
-                Value::Object(unknown_status),
-                Value::Object(non_string_status)
-            ]
-        }))));
-
-        let automations = facade
-            .list_automations(caller(), automation_list_request(50, 10))
-            .await
-            .expect("list automations");
-
-        assert_eq!(automations.len(), 2);
-        assert_eq!(
-            automations[0].recent_runs[0].status,
-            RebornAutomationRecentRunStatus::Unknown
-        );
-        assert_eq!(
-            automations[1].recent_runs[0].status,
-            RebornAutomationRecentRunStatus::Unknown
-        );
-    }
-
-    #[tokio::test]
-    async fn automation_facade_parses_known_and_unknown_states() {
-        let mut paused = raw_automation("trigger-paused", "Paused status", "0 9 * * *", Some("ok"))
-            .as_object()
-            .cloned()
-            .expect("object trigger");
-        paused.insert("state".to_string(), json!("paused"));
-        let mut scheduled = raw_automation(
-            "trigger-scheduled",
-            "Scheduled status",
-            "0 10 * * *",
-            Some("ok"),
-        )
-        .as_object()
-        .cloned()
-        .expect("object trigger");
-        scheduled.insert("state".to_string(), json!("scheduled"));
-        let mut completed = raw_automation(
-            "trigger-completed",
-            "Completed status",
-            "0 11 * * *",
-            Some("ok"),
-        )
-        .as_object()
-        .cloned()
-        .expect("object trigger");
-        completed.insert("state".to_string(), json!("completed"));
-        let mut non_string = raw_automation(
-            "trigger-non-string",
-            "Malformed state",
-            "0 12 * * *",
-            Some("ok"),
-        )
-        .as_object()
-        .cloned()
-        .expect("object trigger");
-        non_string.insert("state".to_string(), json!({"raw": "backend-only"}));
-        let future = json!({
-            "trigger_id": "trigger-future",
-            "name": "Future status",
-            "schedule": {"kind": "cron", "expression": "0 13 * * *"},
-            "state": "future_state",
-            "next_run_at": "2026-06-03T09:00:00Z",
-            "last_run_at": null,
-            "last_status": "ok",
-            "is_active": true,
-            "created_at": "2026-06-02T18:00:00Z"
-        });
-        let facade = RebornAutomationProductFacade::new(Arc::new(OutputHostRuntime::new(json!({
-            "triggers": [
-                Value::Object(paused),
-                Value::Object(scheduled),
-                Value::Object(completed),
-                Value::Object(non_string),
-                future
-            ]
-        }))));
-
-        let automations = facade
-            .list_automations(caller(), automation_list_request(50, 10))
-            .await
-            .expect("list automations");
-
-        assert_eq!(automations.len(), 5);
-        assert_eq!(automations[0].state, RebornAutomationState::Paused);
-        assert_eq!(automations[1].state, RebornAutomationState::Scheduled);
-        assert_eq!(automations[2].state, RebornAutomationState::Completed);
-        assert_eq!(automations[3].state, RebornAutomationState::Unknown);
-        assert_eq!(automations[4].state, RebornAutomationState::Unknown);
-    }
-
-    #[tokio::test]
-    async fn automation_facade_filters_unknown_future_sources() {
-        let facade = RebornAutomationProductFacade::new(Arc::new(OutputHostRuntime::new(json!({
-            "triggers": [
-                raw_automation("trigger-schedule", "Daily status", "0 9 * * *", Some("ok")),
-                {
-                    "trigger_id": "trigger-webhook",
-                    "name": "Future webhook",
-                    "schedule": {"kind": "webhook"},
-                    "state": "active",
-                    "last_status": "ok",
-                    "is_active": false
-                }
-            ]
-        }))));
-
-        let automations = facade
-            .list_automations(caller(), automation_list_request(50, 10))
-            .await
-            .expect("list automations");
-
-        assert_eq!(automations.len(), 1);
-        assert_eq!(automations[0].automation_id, "trigger-schedule");
-    }
-
-    #[tokio::test]
-    async fn automation_facade_rejects_malformed_trigger_records() {
-        let facade = RebornAutomationProductFacade::new(Arc::new(OutputHostRuntime::new(json!({
-            "triggers": [{
-                "name": "Missing trigger id",
-                "schedule": {"kind": "cron", "expression": "0 9 * * *"},
-                "state": "active",
-                "last_status": "ok",
-                "is_active": true
-            }]
-        }))));
-
-        let error = facade
-            .list_automations(caller(), automation_list_request(50, 10))
-            .await
-            .expect_err("malformed record should fail closed");
-
-        assert_eq!(error.code, RebornServicesErrorCode::Internal);
-        assert_eq!(error.status_code, 500);
-        assert!(!error.retryable);
-    }
-
-    #[tokio::test]
-    async fn automation_facade_redacts_runtime_failure_messages() {
-        let runtime = Arc::new(FailingHostRuntime::new(RuntimeFailureKind::Internal));
-        let facade = RebornAutomationProductFacade::new(runtime);
-        let caller = caller();
-
-        let error = facade
-            .list_automations(caller, automation_list_request(10, 5))
-            .await
-            .expect_err("runtime failure should map to services error");
-
-        assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
-        assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
-        assert_eq!(error.status_code, 503);
-        assert!(error.retryable);
-        assert!(!format!("{error:?}").contains("redacted runtime details"));
-    }
-
-    #[tokio::test]
-    async fn automation_facade_times_out_stalled_runtime() {
-        let facade = RebornAutomationProductFacade::with_backend_timeout(
-            Arc::new(HangingHostRuntime),
-            std::time::Duration::from_millis(1),
-        );
-
-        let error = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            facade.list_automations(caller(), automation_list_request(10, 5)),
-        )
-        .await
-        .expect("facade timeout should complete promptly")
-        .expect_err("stalled runtime should time out");
-
-        assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
-        assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
-        assert_eq!(error.status_code, 503);
-        assert!(error.retryable);
-    }
-
-    #[tokio::test]
-    async fn automation_facade_maps_blocked_and_unknown_outcomes() {
-        let capability_id =
-            ironclaw_host_api::CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID).expect("capability");
-        let cases = [
-            (
-                RuntimeCapabilityOutcome::ApprovalRequired(RuntimeApprovalGate {
-                    approval_request_id: ApprovalRequestId::new(),
-                    capability_id: capability_id.clone(),
-                    reason: RuntimeBlockedReason::ApprovalRequired,
-                }),
-                RebornServicesErrorCode::Conflict,
-                RebornServicesErrorKind::BlockedApproval,
-                409,
-                false,
-            ),
-            (
-                RuntimeCapabilityOutcome::AuthRequired(RuntimeAuthGate {
-                    gate_id: RuntimeGateId::new(),
-                    capability_id: capability_id.clone(),
-                    reason: RuntimeBlockedReason::AuthRequired,
-                    required_secrets: vec![SecretHandle::new("automation_token").expect("secret")],
-                    credential_requirements: Vec::new(),
-                }),
-                RebornServicesErrorCode::Forbidden,
-                RebornServicesErrorKind::BlockedAuthentication,
-                403,
-                false,
-            ),
-            (
-                RuntimeCapabilityOutcome::ResourceBlocked(RuntimeResourceGate {
-                    gate_id: RuntimeGateId::new(),
-                    capability_id: capability_id.clone(),
-                    reason: RuntimeBlockedReason::ResourceLimit,
-                    estimate: ironclaw_host_api::ResourceEstimate::default(),
-                }),
-                RebornServicesErrorCode::Unavailable,
-                RebornServicesErrorKind::BlockedResource,
-                503,
-                true,
-            ),
-            (
-                RuntimeCapabilityOutcome::SpawnedProcess(RuntimeProcessHandle {
-                    process_id: ProcessId::new(),
-                    capability_id: capability_id.clone(),
-                }),
-                RebornServicesErrorCode::Unavailable,
-                RebornServicesErrorKind::ServiceUnavailable,
-                503,
-                true,
-            ),
-            (
-                RuntimeCapabilityOutcome::Unknown(RuntimeCapabilityUnknown {
-                    capability_id,
-                    kind: "future_outcome".to_string(),
-                    message: Some("internal details".to_string()),
-                }),
-                RebornServicesErrorCode::Internal,
-                RebornServicesErrorKind::Internal,
-                500,
-                false,
-            ),
-        ];
-
-        for (outcome, code, kind, status_code, retryable) in cases {
-            let facade =
-                RebornAutomationProductFacade::new(Arc::new(OutcomeHostRuntime::new(outcome)));
-
-            let error = facade
-                .list_automations(caller(), automation_list_request(50, 10))
-                .await
-                .expect_err("outcome should map to services error");
-
-            assert_eq!(error.code, code);
-            assert_eq!(error.kind, kind);
-            assert_eq!(error.status_code, status_code);
-            assert_eq!(error.retryable, retryable);
-        }
-    }
-
-    #[tokio::test]
-    async fn automation_facade_maps_runtime_failure_branches() {
-        let cases = [
-            (
-                RuntimeFailureKind::InvalidInput,
-                RebornServicesErrorCode::InvalidRequest,
-                RebornServicesErrorKind::Validation,
-                400,
-                false,
-            ),
-            (
-                RuntimeFailureKind::Authorization,
-                RebornServicesErrorCode::Forbidden,
-                RebornServicesErrorKind::ParticipantDenied,
-                403,
-                false,
-            ),
-            (
-                RuntimeFailureKind::PolicyDenied,
-                RebornServicesErrorCode::Forbidden,
-                RebornServicesErrorKind::ParticipantDenied,
-                403,
-                false,
-            ),
-            (
-                RuntimeFailureKind::Cancelled,
-                RebornServicesErrorCode::Conflict,
-                RebornServicesErrorKind::Conflict,
-                409,
-                false,
-            ),
-        ];
-
-        for (failure_kind, code, kind, status_code, retryable) in cases {
-            let facade =
-                RebornAutomationProductFacade::new(Arc::new(FailingHostRuntime::new(failure_kind)));
-
-            let error = facade
-                .list_automations(caller(), automation_list_request(10, 5))
-                .await
-                .expect_err("runtime failure should map to services error");
-
-            assert_eq!(error.code, code);
-            assert_eq!(error.kind, kind);
-            assert_eq!(error.status_code, status_code);
-            assert_eq!(error.retryable, retryable);
-        }
-    }
-
-    #[tokio::test]
-    async fn automation_facade_maps_host_runtime_errors() {
-        let cases = [
-            (
-                HostRuntimeError::invalid_request("bad runtime request"),
-                RebornServicesErrorCode::Internal,
-                RebornServicesErrorKind::Internal,
-                500,
-                false,
-            ),
-            (
-                HostRuntimeError::unavailable("runtime down"),
-                RebornServicesErrorCode::Unavailable,
-                RebornServicesErrorKind::ServiceUnavailable,
-                503,
-                true,
-            ),
-        ];
-
-        for (host_error, code, kind, status_code, retryable) in cases {
-            let facade =
-                RebornAutomationProductFacade::new(Arc::new(ErrorHostRuntime::new(host_error)));
-
-            let error = facade
-                .list_automations(caller(), automation_list_request(10, 5))
-                .await
-                .expect_err("host runtime error should map to services error");
-
-            assert_eq!(error.code, code);
-            assert_eq!(error.kind, kind);
-            assert_eq!(error.status_code, status_code);
-            assert_eq!(error.retryable, retryable);
-        }
-    }
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
 
     fn caller() -> ProductAgentBoundCaller {
         ProductAgentBoundCaller {
@@ -940,379 +311,567 @@ mod tests {
         AutomationListRequest { limit, run_limit }
     }
 
-    fn raw_automation(
-        trigger_id: &str,
-        name: impl Into<String>,
-        cron: impl Into<String>,
-        last_status: Option<&str>,
-    ) -> Value {
-        json!({
-            "trigger_id": trigger_id,
-            "name": name.into(),
-            "schedule": {
-                "kind": "cron",
-                "expression": cron.into()
+    fn now() -> Timestamp {
+        chrono::Utc::now()
+    }
+
+    fn make_record(
+        trigger_id: TriggerId,
+        caller: &ProductAgentBoundCaller,
+        state: TriggerState,
+        name: &str,
+        cron: &str,
+    ) -> TriggerRecord {
+        TriggerRecord {
+            trigger_id,
+            tenant_id: caller.tenant_id.clone(),
+            creator_user_id: caller.user_id.clone(),
+            agent_id: Some(caller.agent_id.clone()),
+            project_id: caller.project_id.clone(),
+            name: name.to_string(),
+            source: TriggerSourceKind::Schedule,
+            schedule: TriggerSchedule::Cron {
+                expression: cron.to_string(),
+                timezone: "UTC".to_string(),
             },
-            "state": "active",
-            "next_run_at": "2026-06-03T09:00:00Z",
-            "last_run_at": null,
-            "last_status": last_status,
-            "is_active": true,
-            "created_at": "2026-06-02T18:00:00Z",
-            "recent_runs": [{
-                "run_id": "11111111-1111-1111-1111-111111111111",
-                "thread_id": "thread-listed",
-                "fire_slot": "2026-06-03T09:00:00Z",
-                "status": "running",
-                "submitted_at": "2026-06-03T09:00:01Z",
-                "completed_at": null
-            }]
-        })
+            completion_policy: ironclaw_triggers::TriggerCompletionPolicy::Recurring,
+            prompt: "run the daily task".to_string(),
+            state,
+            next_run_at: now(),
+            last_run_at: None,
+            last_fired_slot: None,
+            last_status: None,
+            active_fire_slot: None,
+            active_run_ref: None,
+            created_at: now(),
+        }
     }
 
-    struct RecordingHostRuntime {
-        requests: Mutex<Vec<RuntimeCapabilityRequest>>,
+    fn make_run_record(trigger_id: TriggerId, status: TriggerRunHistoryStatus) -> TriggerRunRecord {
+        use ironclaw_triggers::TriggerFireIdentity;
+        let tenant_id = TenantId::new("tenant-alpha").expect("valid tenant");
+        let fire_slot = now();
+        let identity = TriggerFireIdentity::new(tenant_id.clone(), trigger_id, fire_slot);
+        TriggerRunRecord {
+            tenant_id,
+            trigger_id,
+            fire_slot,
+            run_id: Some(TurnRunId::new()),
+            thread_id: identity.route_thread_id,
+            status,
+            submitted_at: now(),
+            completed_at: None,
+        }
     }
 
-    impl Default for RecordingHostRuntime {
-        fn default() -> Self {
-            Self {
-                requests: Mutex::new(Vec::new()),
+    // -------------------------------------------------------------------------
+    // Failing repository for error-path tests
+    // -------------------------------------------------------------------------
+
+    /// Single configurable mock covering every error/hang path the facade
+    /// exercises. `scoped` scripts `list_scoped_triggers`; `batch` scripts
+    /// `list_trigger_run_history_batch`. All other trait methods are never
+    /// called by the facade and return a backend error.
+    enum ScriptedOutcome {
+        Records(Vec<TriggerRecord>),
+        FailBackend,
+        NotFound,
+        Hang,
+    }
+
+    struct ScriptedRepository {
+        scoped: ScriptedOutcome,
+        batch: ScriptedOutcome,
+    }
+
+    impl ScriptedRepository {
+        fn backend_error() -> TriggerError {
+            TriggerError::Backend {
+                reason: "internal details".to_string(),
             }
         }
     }
 
     #[async_trait]
-    impl HostRuntime for RecordingHostRuntime {
-        async fn invoke_capability(
-            &self,
-            request: RuntimeCapabilityRequest,
-        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-            self.requests.lock().await.push(request.clone());
-            Ok(RuntimeCapabilityOutcome::Completed(Box::new(
-                RuntimeCapabilityCompleted {
-                    capability_id: request.capability_id,
-                    output: json!({
-                        "triggers": [
-                            raw_automation(
-                                "trigger-listed",
-                                "Daily status",
-                                "0 9 * * *",
-                                Some("ok"),
-                            )
-                        ]
-                    }),
-                    display_preview: None,
-                    usage: ironclaw_host_api::ResourceUsage::default(),
-                },
-            )))
+    impl TriggerRepository for ScriptedRepository {
+        async fn upsert_trigger(&self, _: TriggerRecord) -> Result<(), TriggerError> {
+            Err(Self::backend_error())
         }
 
-        async fn resume_capability(
+        async fn get_trigger(
             &self,
-            _request: ironclaw_host_runtime::RuntimeCapabilityResumeRequest,
-        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-            unreachable!("resume capability is not used in automation facade tests")
+            _: TenantId,
+            _: TriggerId,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            Err(Self::backend_error())
         }
 
-        async fn visible_capabilities(
-            &self,
-            _request: ironclaw_host_runtime::VisibleCapabilityRequest,
-        ) -> Result<ironclaw_host_runtime::VisibleCapabilitySurface, HostRuntimeError> {
-            unreachable!("visible capabilities are not used in automation facade tests")
+        async fn list_triggers(&self, _: TenantId) -> Result<Vec<TriggerRecord>, TriggerError> {
+            Err(Self::backend_error())
         }
 
-        async fn cancel_work(
+        async fn list_scoped_triggers(
             &self,
-            _request: ironclaw_host_runtime::CancelRuntimeWorkRequest,
-        ) -> Result<ironclaw_host_runtime::CancelRuntimeWorkOutcome, HostRuntimeError> {
-            unreachable!("cancel work is not used in automation facade tests")
+            _: TenantId,
+            _: UserId,
+            _: Option<AgentId>,
+            _: Option<ProjectId>,
+            _: usize,
+        ) -> Result<Vec<TriggerRecord>, TriggerError> {
+            match &self.scoped {
+                ScriptedOutcome::Records(records) => Ok(records.clone()),
+                ScriptedOutcome::FailBackend => Err(Self::backend_error()),
+                ScriptedOutcome::NotFound => Err(TriggerError::NotFound),
+                ScriptedOutcome::Hang => std::future::pending().await,
+            }
         }
 
-        async fn runtime_status(
+        async fn list_trigger_run_history_batch(
             &self,
-            _request: ironclaw_host_runtime::RuntimeStatusRequest,
-        ) -> Result<ironclaw_host_runtime::HostRuntimeStatus, HostRuntimeError> {
-            unreachable!("runtime status is not used in automation facade tests")
+            _: TenantId,
+            _: &[TriggerId],
+            _: usize,
+        ) -> Result<std::collections::HashMap<TriggerId, Vec<TriggerRunRecord>>, TriggerError>
+        {
+            match &self.batch {
+                ScriptedOutcome::Records(_) => Ok(std::collections::HashMap::new()),
+                ScriptedOutcome::FailBackend => Err(Self::backend_error()),
+                ScriptedOutcome::NotFound => Err(TriggerError::NotFound),
+                ScriptedOutcome::Hang => std::future::pending().await,
+            }
         }
 
-        async fn health(
+        async fn remove_trigger(
             &self,
-        ) -> Result<ironclaw_host_runtime::HostRuntimeHealth, HostRuntimeError> {
-            unreachable!("health is not used in automation facade tests")
+            _: TenantId,
+            _: TriggerId,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            Err(Self::backend_error())
+        }
+
+        async fn remove_scoped_trigger(
+            &self,
+            _: TenantId,
+            _: UserId,
+            _: Option<AgentId>,
+            _: Option<ProjectId>,
+            _: TriggerId,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            Err(Self::backend_error())
+        }
+
+        async fn list_due_triggers(
+            &self,
+            _: Timestamp,
+            _: usize,
+        ) -> Result<Vec<TriggerRecord>, TriggerError> {
+            Err(Self::backend_error())
+        }
+
+        async fn list_active_triggers(&self, _: usize) -> Result<Vec<TriggerRecord>, TriggerError> {
+            Err(Self::backend_error())
+        }
+
+        async fn list_active_triggers_after(
+            &self,
+            _: Option<ActiveTriggerScanCursor>,
+            _: usize,
+        ) -> Result<Vec<TriggerRecord>, TriggerError> {
+            Err(Self::backend_error())
+        }
+
+        async fn claim_due_fire(
+            &self,
+            _: ClaimDueFireRequest,
+        ) -> Result<ClaimDueFireOutcome, TriggerError> {
+            Err(Self::backend_error())
+        }
+
+        async fn mark_fire_accepted(
+            &self,
+            _: FireAcceptedRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            Err(Self::backend_error())
+        }
+
+        async fn mark_fire_replayed(
+            &self,
+            _: FireReplayedRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            Err(Self::backend_error())
+        }
+
+        async fn mark_fire_retryable_failed(
+            &self,
+            _: FireRetryableFailedRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            Err(Self::backend_error())
+        }
+
+        async fn mark_fire_permanently_failed(
+            &self,
+            _: FirePermanentFailedRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            Err(Self::backend_error())
+        }
+
+        async fn mark_fire_terminally_failed(
+            &self,
+            _: FireTerminalFailedRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            Err(Self::backend_error())
+        }
+
+        async fn clear_active_fire(
+            &self,
+            _: ClearActiveFireRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            Err(Self::backend_error())
         }
     }
 
-    struct OutputHostRuntime {
-        output: Value,
+    // -------------------------------------------------------------------------
+    // Tests
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn automation_facade_forwards_caller_scope_to_repository() {
+        let repo = Arc::new(InMemoryTriggerRepository::default());
+        let c = caller();
+
+        // Matching record
+        let matching_id = TriggerId::new();
+        let matching = make_record(
+            matching_id,
+            &c,
+            TriggerState::Scheduled,
+            "Daily task",
+            "0 9 * * *",
+        );
+        repo.upsert_trigger(matching)
+            .await
+            .expect("upsert matching");
+
+        // Non-matching record (different agent_id)
+        let other_agent = AgentId::new("agent-beta").expect("valid agent");
+        let non_matching_id = TriggerId::new();
+        let mut non_matching = make_record(
+            non_matching_id,
+            &c,
+            TriggerState::Scheduled,
+            "Other task",
+            "0 10 * * *",
+        );
+        non_matching.agent_id = Some(other_agent);
+        repo.upsert_trigger(non_matching)
+            .await
+            .expect("upsert non-matching");
+
+        let facade = RebornAutomationProductFacade::new(repo);
+        let result = facade
+            .list_automations(c, automation_list_request(25, 0))
+            .await
+            .expect("list automations");
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].automation_id, matching_id.to_string());
+        assert_eq!(
+            result[0].source,
+            RebornAutomationSource::Schedule {
+                cron: "0 9 * * *".to_string(),
+                timezone: "UTC".to_string(),
+            }
+        );
+        assert_eq!(result[0].state, RebornAutomationState::Scheduled);
+        assert!(result[0].next_run_at.is_some());
+        assert!(!result[0].is_active);
     }
 
-    impl OutputHostRuntime {
-        fn new(output: Value) -> Self {
-            Self { output }
-        }
-    }
+    #[tokio::test]
+    async fn automation_facade_maps_all_trigger_states() {
+        let repo = Arc::new(InMemoryTriggerRepository::default());
+        let c = caller();
 
-    #[async_trait]
-    impl HostRuntime for OutputHostRuntime {
-        async fn invoke_capability(
-            &self,
-            request: RuntimeCapabilityRequest,
-        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-            Ok(RuntimeCapabilityOutcome::Completed(Box::new(
-                RuntimeCapabilityCompleted {
-                    capability_id: request.capability_id,
-                    output: self.output.clone(),
-                    display_preview: None,
-                    usage: ironclaw_host_api::ResourceUsage::default(),
-                },
-            )))
-        }
+        // Completed is terminal, so its stale next_run_at slot is suppressed
+        // on the wire; Scheduled and Paused keep theirs.
+        let states = [
+            (
+                TriggerState::Scheduled,
+                RebornAutomationState::Scheduled,
+                true,
+            ),
+            (TriggerState::Paused, RebornAutomationState::Paused, true),
+            (
+                TriggerState::Completed,
+                RebornAutomationState::Completed,
+                false,
+            ),
+        ];
 
-        async fn resume_capability(
-            &self,
-            _request: ironclaw_host_runtime::RuntimeCapabilityResumeRequest,
-        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-            unreachable!("resume capability is not used in automation facade tests")
-        }
+        for (trigger_state, expected_state, expect_next_run_at) in &states {
+            let id = TriggerId::new();
+            let record = make_record(id, &c, *trigger_state, "Test trigger", "0 9 * * *");
+            repo.upsert_trigger(record).await.expect("upsert");
 
-        async fn visible_capabilities(
-            &self,
-            _request: ironclaw_host_runtime::VisibleCapabilityRequest,
-        ) -> Result<ironclaw_host_runtime::VisibleCapabilitySurface, HostRuntimeError> {
-            unreachable!("visible capabilities are not used in automation facade tests")
-        }
+            let facade = RebornAutomationProductFacade::new(repo.clone());
+            let result = facade
+                .list_automations(c.clone(), automation_list_request(100, 0))
+                .await
+                .expect("list automations");
 
-        async fn cancel_work(
-            &self,
-            _request: ironclaw_host_runtime::CancelRuntimeWorkRequest,
-        ) -> Result<ironclaw_host_runtime::CancelRuntimeWorkOutcome, HostRuntimeError> {
-            unreachable!("cancel work is not used in automation facade tests")
-        }
-
-        async fn runtime_status(
-            &self,
-            _request: ironclaw_host_runtime::RuntimeStatusRequest,
-        ) -> Result<ironclaw_host_runtime::HostRuntimeStatus, HostRuntimeError> {
-            unreachable!("runtime status is not used in automation facade tests")
-        }
-
-        async fn health(
-            &self,
-        ) -> Result<ironclaw_host_runtime::HostRuntimeHealth, HostRuntimeError> {
-            unreachable!("health is not used in automation facade tests")
-        }
-    }
-
-    struct FailingHostRuntime {
-        kind: RuntimeFailureKind,
-    }
-
-    impl FailingHostRuntime {
-        fn new(kind: RuntimeFailureKind) -> Self {
-            Self { kind }
-        }
-    }
-
-    struct OutcomeHostRuntime {
-        outcome: RuntimeCapabilityOutcome,
-    }
-
-    impl OutcomeHostRuntime {
-        fn new(outcome: RuntimeCapabilityOutcome) -> Self {
-            Self { outcome }
-        }
-    }
-
-    #[async_trait]
-    impl HostRuntime for OutcomeHostRuntime {
-        async fn invoke_capability(
-            &self,
-            _request: RuntimeCapabilityRequest,
-        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-            Ok(self.outcome.clone())
-        }
-
-        async fn resume_capability(
-            &self,
-            _request: ironclaw_host_runtime::RuntimeCapabilityResumeRequest,
-        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-            unreachable!("resume capability is not used in automation facade tests")
-        }
-
-        async fn visible_capabilities(
-            &self,
-            _request: ironclaw_host_runtime::VisibleCapabilityRequest,
-        ) -> Result<ironclaw_host_runtime::VisibleCapabilitySurface, HostRuntimeError> {
-            unreachable!("visible capabilities are not used in automation facade tests")
-        }
-
-        async fn cancel_work(
-            &self,
-            _request: ironclaw_host_runtime::CancelRuntimeWorkRequest,
-        ) -> Result<ironclaw_host_runtime::CancelRuntimeWorkOutcome, HostRuntimeError> {
-            unreachable!("cancel work is not used in automation facade tests")
-        }
-
-        async fn runtime_status(
-            &self,
-            _request: ironclaw_host_runtime::RuntimeStatusRequest,
-        ) -> Result<ironclaw_host_runtime::HostRuntimeStatus, HostRuntimeError> {
-            unreachable!("runtime status is not used in automation facade tests")
-        }
-
-        async fn health(
-            &self,
-        ) -> Result<ironclaw_host_runtime::HostRuntimeHealth, HostRuntimeError> {
-            unreachable!("health is not used in automation facade tests")
+            let found = result
+                .iter()
+                .find(|a| a.automation_id == id.to_string())
+                .expect("record present");
+            assert_eq!(found.state, *expected_state);
+            assert_eq!(
+                found.next_run_at.is_some(),
+                *expect_next_run_at,
+                "next_run_at presence mismatch for {trigger_state:?}"
+            );
         }
     }
 
-    struct ErrorHostRuntime {
-        error: HostRuntimeError,
+    #[tokio::test]
+    async fn automation_facade_maps_run_history_and_skips_batch_when_run_limit_zero() {
+        let repo = Arc::new(InMemoryTriggerRepository::default());
+        let c = caller();
+        let id = TriggerId::new();
+
+        let record = make_record(id, &c, TriggerState::Scheduled, "Test trigger", "0 9 * * *");
+        repo.upsert_trigger(record).await.expect("upsert");
+
+        // run_limit=0 -> empty recent_runs even if runs exist
+        let facade = RebornAutomationProductFacade::new(repo.clone());
+        let result_zero = facade
+            .list_automations(c.clone(), automation_list_request(10, 0))
+            .await
+            .expect("list automations run_limit=0");
+
+        assert_eq!(result_zero.len(), 1);
+        assert!(
+            result_zero[0].recent_runs.is_empty(),
+            "run_limit=0 must produce empty recent_runs"
+        );
+
+        // run_limit>=1 -> runs are fetched. Since InMemoryTriggerRepository
+        // populates runs only through lifecycle methods (claim_due_fire etc.),
+        // we assert the call succeeds and returns the record (run count may be 0
+        // because we have no fired history yet).
+        let result_with_runs = facade
+            .list_automations(c.clone(), automation_list_request(10, 5))
+            .await
+            .expect("list automations run_limit=5");
+
+        assert_eq!(result_with_runs.len(), 1);
+        // No fires were submitted, so runs is empty — but the facade must still
+        // return the automation record (not filter it out on empty runs).
+        assert_eq!(result_with_runs[0].automation_id, id.to_string());
+
+        // Verify mapped run fields by constructing a run record directly and
+        // using the private mapping helper.
+        let run = make_run_record(id, TriggerRunHistoryStatus::Ok);
+        let mapped = super::map_recent_run(&run).expect("map_recent_run");
+        assert_eq!(mapped.status, RebornAutomationRecentRunStatus::Ok);
+        assert!(mapped.run_id.is_some());
+        assert!(mapped.submitted_at <= chrono::Utc::now());
+        assert!(mapped.completed_at.is_none());
+        let _ = mapped.thread_id; // valid ThreadId produced
     }
 
-    impl ErrorHostRuntime {
-        fn new(error: HostRuntimeError) -> Self {
-            Self { error }
-        }
+    #[tokio::test]
+    async fn automation_facade_maps_trigger_run_status_and_last_status() {
+        let repo = Arc::new(InMemoryTriggerRepository::default());
+        let c = caller();
+        let id = TriggerId::new();
+
+        let mut record = make_record(id, &c, TriggerState::Scheduled, "Status test", "0 9 * * *");
+        record.last_status = Some(ironclaw_triggers::TriggerRunStatus::Ok);
+        repo.upsert_trigger(record).await.expect("upsert");
+
+        let facade = RebornAutomationProductFacade::new(repo);
+        let result = facade
+            .list_automations(c, automation_list_request(10, 0))
+            .await
+            .expect("list automations");
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].last_status, Some(RebornAutomationRunStatus::Ok));
+
+        // Verify Running status mapping via run record helper
+        let run = make_run_record(id, TriggerRunHistoryStatus::Running);
+        let mapped = super::map_recent_run(&run).expect("map_recent_run");
+        assert_eq!(mapped.status, RebornAutomationRecentRunStatus::Running);
     }
 
-    #[async_trait]
-    impl HostRuntime for ErrorHostRuntime {
-        async fn invoke_capability(
-            &self,
-            _request: RuntimeCapabilityRequest,
-        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-            Err(self.error.clone())
-        }
+    #[tokio::test]
+    async fn automation_facade_maps_backend_error_to_unavailable() {
+        let repo = Arc::new(ScriptedRepository {
+            scoped: ScriptedOutcome::FailBackend,
+            batch: ScriptedOutcome::FailBackend,
+        });
+        let facade = RebornAutomationProductFacade::new(repo);
 
-        async fn resume_capability(
-            &self,
-            _request: ironclaw_host_runtime::RuntimeCapabilityResumeRequest,
-        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-            unreachable!("resume capability is not used in automation facade tests")
-        }
+        let error = facade
+            .list_automations(caller(), automation_list_request(10, 5))
+            .await
+            .expect_err("backend error should propagate as 503");
 
-        async fn visible_capabilities(
-            &self,
-            _request: ironclaw_host_runtime::VisibleCapabilityRequest,
-        ) -> Result<ironclaw_host_runtime::VisibleCapabilitySurface, HostRuntimeError> {
-            unreachable!("visible capabilities are not used in automation facade tests")
-        }
+        assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
+        assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
+        assert_eq!(error.status_code, 503);
+        assert!(error.retryable);
 
-        async fn cancel_work(
-            &self,
-            _request: ironclaw_host_runtime::CancelRuntimeWorkRequest,
-        ) -> Result<ironclaw_host_runtime::CancelRuntimeWorkOutcome, HostRuntimeError> {
-            unreachable!("cancel work is not used in automation facade tests")
-        }
-
-        async fn runtime_status(
-            &self,
-            _request: ironclaw_host_runtime::RuntimeStatusRequest,
-        ) -> Result<ironclaw_host_runtime::HostRuntimeStatus, HostRuntimeError> {
-            unreachable!("runtime status is not used in automation facade tests")
-        }
-
-        async fn health(
-            &self,
-        ) -> Result<ironclaw_host_runtime::HostRuntimeHealth, HostRuntimeError> {
-            unreachable!("health is not used in automation facade tests")
-        }
+        // The backend reason string must not leak into the rendered error.
+        let debug_repr = format!("{error:?}");
+        assert!(
+            !debug_repr.contains("internal details"),
+            "backend reason must not appear in rendered error: {debug_repr}"
+        );
     }
 
-    struct HangingHostRuntime;
+    #[tokio::test]
+    async fn automation_facade_times_out_stalled_repository() {
+        let facade = RebornAutomationProductFacade::with_backend_timeout(
+            Arc::new(ScriptedRepository {
+                scoped: ScriptedOutcome::Hang,
+                batch: ScriptedOutcome::Hang,
+            }),
+            std::time::Duration::from_millis(10),
+        );
 
-    #[async_trait]
-    impl HostRuntime for HangingHostRuntime {
-        async fn invoke_capability(
-            &self,
-            _request: RuntimeCapabilityRequest,
-        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-            std::future::pending().await
-        }
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            facade.list_automations(caller(), automation_list_request(10, 5)),
+        )
+        .await
+        .expect("facade timeout should complete promptly")
+        .expect_err("stalled repository should time out");
 
-        async fn resume_capability(
-            &self,
-            _request: ironclaw_host_runtime::RuntimeCapabilityResumeRequest,
-        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-            unreachable!("resume capability is not used in automation facade tests")
-        }
-
-        async fn visible_capabilities(
-            &self,
-            _request: ironclaw_host_runtime::VisibleCapabilityRequest,
-        ) -> Result<ironclaw_host_runtime::VisibleCapabilitySurface, HostRuntimeError> {
-            unreachable!("visible capabilities are not used in automation facade tests")
-        }
-
-        async fn cancel_work(
-            &self,
-            _request: ironclaw_host_runtime::CancelRuntimeWorkRequest,
-        ) -> Result<ironclaw_host_runtime::CancelRuntimeWorkOutcome, HostRuntimeError> {
-            unreachable!("cancel work is not used in automation facade tests")
-        }
-
-        async fn runtime_status(
-            &self,
-            _request: ironclaw_host_runtime::RuntimeStatusRequest,
-        ) -> Result<ironclaw_host_runtime::HostRuntimeStatus, HostRuntimeError> {
-            unreachable!("runtime status is not used in automation facade tests")
-        }
-
-        async fn health(
-            &self,
-        ) -> Result<ironclaw_host_runtime::HostRuntimeHealth, HostRuntimeError> {
-            unreachable!("health is not used in automation facade tests")
-        }
+        assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
+        assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
+        assert_eq!(error.status_code, 503);
+        assert!(error.retryable);
     }
 
-    #[async_trait]
-    impl HostRuntime for FailingHostRuntime {
-        async fn invoke_capability(
-            &self,
-            request: RuntimeCapabilityRequest,
-        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-            Ok(RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure {
-                capability_id: request.capability_id,
-                kind: self.kind,
-                message: Some("redacted runtime details".to_string()),
-            }))
-        }
+    #[tokio::test]
+    async fn automation_facade_maps_backend_error_on_run_history_batch_to_unavailable() {
+        let c = caller();
+        let record = make_record(
+            TriggerId::new(),
+            &c,
+            TriggerState::Scheduled,
+            "Daily task",
+            "0 9 * * *",
+        );
+        let facade = RebornAutomationProductFacade::new(Arc::new(ScriptedRepository {
+            scoped: ScriptedOutcome::Records(vec![record]),
+            batch: ScriptedOutcome::FailBackend,
+        }));
 
-        async fn resume_capability(
-            &self,
-            _request: ironclaw_host_runtime::RuntimeCapabilityResumeRequest,
-        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-            unreachable!("resume capability is not used in automation facade tests")
-        }
+        let error = facade
+            .list_automations(c, automation_list_request(10, 5))
+            .await
+            .expect_err("batch backend error should propagate as 503");
 
-        async fn visible_capabilities(
-            &self,
-            _request: ironclaw_host_runtime::VisibleCapabilityRequest,
-        ) -> Result<ironclaw_host_runtime::VisibleCapabilitySurface, HostRuntimeError> {
-            unreachable!("visible capabilities are not used in automation facade tests")
-        }
+        assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
+        assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
+        assert_eq!(error.status_code, 503);
+        assert!(error.retryable);
 
-        async fn cancel_work(
-            &self,
-            _request: ironclaw_host_runtime::CancelRuntimeWorkRequest,
-        ) -> Result<ironclaw_host_runtime::CancelRuntimeWorkOutcome, HostRuntimeError> {
-            unreachable!("cancel work is not used in automation facade tests")
-        }
+        let debug_repr = format!("{error:?}");
+        assert!(
+            !debug_repr.contains("internal details"),
+            "backend reason must not appear in rendered error: {debug_repr}"
+        );
+    }
 
-        async fn runtime_status(
-            &self,
-            _request: ironclaw_host_runtime::RuntimeStatusRequest,
-        ) -> Result<ironclaw_host_runtime::HostRuntimeStatus, HostRuntimeError> {
-            unreachable!("runtime status is not used in automation facade tests")
-        }
+    #[tokio::test]
+    async fn automation_facade_times_out_stalled_run_history_batch() {
+        let c = caller();
+        let record = make_record(
+            TriggerId::new(),
+            &c,
+            TriggerState::Scheduled,
+            "Daily task",
+            "0 9 * * *",
+        );
+        let facade = RebornAutomationProductFacade::with_backend_timeout(
+            Arc::new(ScriptedRepository {
+                scoped: ScriptedOutcome::Records(vec![record]),
+                batch: ScriptedOutcome::Hang,
+            }),
+            std::time::Duration::from_millis(10),
+        );
 
-        async fn health(
-            &self,
-        ) -> Result<ironclaw_host_runtime::HostRuntimeHealth, HostRuntimeError> {
-            unreachable!("health is not used in automation facade tests")
-        }
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            facade.list_automations(c, automation_list_request(10, 5)),
+        )
+        .await
+        .expect("facade timeout should complete promptly")
+        .expect_err("stalled batch call should time out");
+
+        assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
+        assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
+        assert_eq!(error.status_code, 503);
+        assert!(error.retryable);
+    }
+
+    #[tokio::test]
+    async fn automation_facade_maps_not_found_trigger_error_to_404() {
+        let facade = RebornAutomationProductFacade::new(Arc::new(ScriptedRepository {
+            scoped: ScriptedOutcome::NotFound,
+            batch: ScriptedOutcome::NotFound,
+        }));
+
+        let error = facade
+            .list_automations(caller(), automation_list_request(10, 5))
+            .await
+            .expect_err("not-found error should propagate as 404");
+
+        assert_eq!(error.code, RebornServicesErrorCode::NotFound);
+        assert_eq!(error.kind, RebornServicesErrorKind::NotFound);
+        assert_eq!(error.status_code, 404);
+        assert!(!error.retryable);
+    }
+
+    #[tokio::test]
+    async fn automation_source_from_record_maps_cron_schedule() {
+        let c = caller();
+        let id = TriggerId::new();
+        let record = make_record(id, &c, TriggerState::Scheduled, "Cron test", "*/5 * * * *");
+
+        let source = super::automation_source_from_record(&record)
+            .expect("cron schedule must map to Schedule source");
+
+        assert_eq!(
+            source,
+            RebornAutomationSource::Schedule {
+                cron: "*/5 * * * *".to_string(),
+                timezone: "UTC".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn automation_source_from_record_includes_non_utc_timezone() {
+        use ironclaw_triggers::TriggerSchedule;
+        let c = caller();
+        let id = TriggerId::new();
+        let mut record = make_record(id, &c, TriggerState::Scheduled, "TZ test", "0 9 * * *");
+        record.schedule = TriggerSchedule::cron_with_timezone("0 9 * * *", "America/New_York")
+            .expect("valid tz schedule");
+
+        let source = super::automation_source_from_record(&record)
+            .expect("cron schedule must map to Schedule source");
+
+        assert_eq!(
+            source,
+            RebornAutomationSource::Schedule {
+                cron: "0 9 * * *".to_string(),
+                timezone: "America/New_York".to_string(),
+            }
+        );
     }
 }

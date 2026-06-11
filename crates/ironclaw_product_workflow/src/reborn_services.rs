@@ -6,6 +6,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::{Arc, Mutex as StdMutex, Weak},
 };
 
@@ -32,6 +33,7 @@ use ironclaw_turns::{
 };
 use secrecy::SecretString;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
+use url::Url;
 use uuid::Uuid;
 
 use crate::{
@@ -54,6 +56,7 @@ use crate::{
 };
 
 mod error;
+mod extension_credentials;
 mod extension_onboarding;
 mod extension_setup_credentials;
 mod extensions;
@@ -78,12 +81,24 @@ pub use types::{
     RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
     RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
     RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornOutboundDeliveryModality,
+    RebornListThreadsResponse, RebornLogEntry, RebornLogLevel, RebornLogQueryRequest,
+    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
+    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
+    RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
+    RebornOperatorSetupRequest, RebornOperatorSetupResponse, RebornOperatorSetupStatus,
+    RebornOperatorSetupStep, RebornOperatorSetupStepStatus, RebornOperatorStatusCheck,
+    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
+    RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetChannel,
     RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetDisplayName,
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetSummary,
-    RebornOutboundPreferencesResponse, RebornResolveGateResponse, RebornResumeGateResponse,
+    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
+    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
+    RebornResolveGateResponse, RebornResumeGateResponse, RebornServiceLifecycleAction,
+    RebornServiceLifecycleRequest, RebornServiceLifecycleResponse, RebornServiceLifecycleState,
     RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
     RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
     RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
@@ -96,6 +111,11 @@ type SkillActivationRecorder =
 type SkillActivationClearer =
     dyn Fn(&TurnScope, &AcceptedMessageRef) -> Result<(), RebornServicesError> + Send + Sync;
 type ThreadOperationLocks = StdMutex<HashMap<String, Weak<AsyncMutex<()>>>>;
+
+const OPERATOR_LOGS_DEFAULT_LIMIT: u32 = 100;
+const OPERATOR_LOGS_MAX_LIMIT: u32 = 500;
+const OPERATOR_LOGS_CURSOR_MAX_BYTES: usize = 512;
+const OPERATOR_LOGS_TARGET_MAX_BYTES: usize = 256;
 
 #[async_trait]
 pub trait ConnectableChannelsProductFacade: Send + Sync {
@@ -126,6 +146,102 @@ impl ConnectableChannelsProductFacade for StaticConnectableChannelsProductFacade
     ) -> Result<RebornConnectableChannelListResponse, RebornServicesError> {
         Ok(RebornConnectableChannelListResponse {
             channels: self.channels.iter().cloned().collect(),
+        })
+    }
+}
+
+#[async_trait]
+pub trait OperatorStatusService: Send + Sync {
+    async fn status(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorStatusResponse, RebornServicesError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct StaticOperatorStatusService {
+    response: RebornOperatorStatusResponse,
+}
+
+impl StaticOperatorStatusService {
+    pub fn new(response: RebornOperatorStatusResponse) -> Self {
+        Self { response }
+    }
+}
+
+#[async_trait]
+impl OperatorStatusService for StaticOperatorStatusService {
+    async fn status(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorStatusResponse, RebornServicesError> {
+        Ok(self.response.clone())
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct UnsupportedOperatorStatusService;
+
+#[async_trait]
+impl OperatorStatusService for UnsupportedOperatorStatusService {
+    async fn status(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorStatusResponse, RebornServicesError> {
+        Err(operator_surface_unavailable())
+    }
+}
+
+#[async_trait]
+pub trait OperatorLogsService: Send + Sync {
+    async fn query_logs(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornLogQueryRequest,
+    ) -> Result<RebornLogQueryResponse, RebornServicesError>;
+}
+
+#[derive(Debug, Default)]
+pub struct UnsupportedOperatorLogsService;
+
+#[async_trait]
+impl OperatorLogsService for UnsupportedOperatorLogsService {
+    async fn query_logs(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: RebornLogQueryRequest,
+    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
+        Err(operator_surface_unavailable())
+    }
+}
+
+#[async_trait]
+pub trait OperatorServiceLifecycleService: Send + Sync {
+    async fn control_service(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornServiceLifecycleRequest,
+    ) -> Result<RebornServiceLifecycleResponse, RebornServicesError>;
+}
+
+#[derive(Debug, Default)]
+pub struct UnsupportedOperatorServiceLifecycleService;
+
+#[async_trait]
+impl OperatorServiceLifecycleService for UnsupportedOperatorServiceLifecycleService {
+    async fn control_service(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornServiceLifecycleRequest,
+    ) -> Result<RebornServiceLifecycleResponse, RebornServicesError> {
+        Ok(RebornServiceLifecycleResponse {
+            action: request.action,
+            state: RebornServiceLifecycleState::Unsupported,
+            message: "local service lifecycle management is not wired for this runtime".to_string(),
+            remediation: Some(
+                "use the host process manager directly until a platform lifecycle backend is configured"
+                    .to_string(),
+            ),
         })
     }
 }
@@ -276,6 +392,7 @@ impl OutboundPreferencesProductFacade for UnsupportedOutboundPreferencesProductF
 pub struct ExtensionCredentialStatusRequest {
     pub scope: AuthProductScope,
     pub provider: AuthProviderId,
+    pub setup: crate::LifecycleExtensionCredentialSetup,
     pub provider_scopes: Vec<ProviderScope>,
     pub requester_extension: ExtensionId,
 }
@@ -418,6 +535,296 @@ impl GateResolutionRoute {
 }
 
 /// Stable WebUI-facing facade surface for beta Reborn routes.
+fn operator_setup_diagnostic(
+    key: &str,
+    severity: RebornOperatorConfigDiagnosticSeverity,
+    reason_code: &str,
+    message: &str,
+    remediation: &str,
+) -> RebornOperatorConfigDiagnostic {
+    RebornOperatorConfigDiagnostic {
+        key: key.to_string(),
+        severity,
+        reason_code: reason_code.to_string(),
+        message: message.to_string(),
+        owning_area: RebornOperatorArea::Setup,
+        remediation: remediation.to_string(),
+    }
+}
+
+fn operator_setup_info_diagnostic(
+    key: &str,
+    reason_code: &str,
+    message: &str,
+    remediation: &str,
+) -> RebornOperatorConfigDiagnostic {
+    operator_setup_diagnostic(
+        key,
+        RebornOperatorConfigDiagnosticSeverity::Info,
+        reason_code,
+        message,
+        remediation,
+    )
+}
+
+fn operator_setup_validation_error(field: &str) -> RebornServicesError {
+    WebUiInboundValidationError {
+        field: field.to_string(),
+        code: WebUiInboundValidationCode::InvalidValue,
+    }
+    .into()
+}
+
+fn setup_response_from_llm_snapshot(
+    snapshot: LlmConfigSnapshot,
+    mut diagnostics: Vec<RebornOperatorConfigDiagnostic>,
+) -> RebornOperatorSetupResponse {
+    diagnostics.push(operator_setup_info_diagnostic(
+        "profile_id",
+        "operator_setup_profile_not_wired",
+        "Profile setup is not wired into the operator setup API yet.",
+        "Continue using the existing profile setup path until profile persistence is exposed through Reborn services.",
+    ));
+    diagnostics.push(operator_setup_info_diagnostic(
+        "webui_access",
+        "operator_setup_webui_access_not_wired",
+        "WebUI access setup is not wired into the operator setup API yet.",
+        "Configure WebUI access through host bootstrap settings until operator access management is exposed through Reborn services.",
+    ));
+
+    let active_provider_id = snapshot
+        .active
+        .as_ref()
+        .map(|active| active.provider_id.clone());
+    let active_model = snapshot
+        .active
+        .as_ref()
+        .and_then(|active| active.model.clone());
+    let provider_complete = active_provider_id.is_some();
+    let model_complete = active_model.is_some();
+    let status = if provider_complete && model_complete {
+        RebornOperatorSetupStatus::Complete
+    } else {
+        RebornOperatorSetupStatus::Incomplete
+    };
+
+    RebornOperatorSetupResponse {
+        area: RebornOperatorArea::Setup,
+        status,
+        message: if provider_complete {
+            "Provider setup is available through the operator setup API.".to_string()
+        } else {
+            "Provider setup is incomplete.".to_string()
+        },
+        active_provider_id,
+        active_model,
+        steps: vec![
+            RebornOperatorSetupStep {
+                name: "provider".to_string(),
+                status: if provider_complete {
+                    RebornOperatorSetupStepStatus::Complete
+                } else {
+                    RebornOperatorSetupStepStatus::Required
+                },
+                message: if provider_complete {
+                    "An active provider is configured.".to_string()
+                } else {
+                    "Select a provider before first use.".to_string()
+                },
+            },
+            RebornOperatorSetupStep {
+                name: "model".to_string(),
+                status: if model_complete {
+                    RebornOperatorSetupStepStatus::Complete
+                } else {
+                    RebornOperatorSetupStepStatus::Required
+                },
+                message: if model_complete {
+                    "An active model is configured.".to_string()
+                } else {
+                    "Select a model for the active provider.".to_string()
+                },
+            },
+            RebornOperatorSetupStep {
+                name: "profile".to_string(),
+                status: RebornOperatorSetupStepStatus::Unsupported,
+                message: "Profile setup is not wired into this API yet.".to_string(),
+            },
+            RebornOperatorSetupStep {
+                name: "webui_access".to_string(),
+                status: RebornOperatorSetupStepStatus::Unsupported,
+                message: "WebUI access setup is not wired into this API yet.".to_string(),
+            },
+        ],
+        diagnostics,
+    }
+}
+
+const LLM_BASE_URL_MAX_BYTES: usize = 2048;
+
+/// Validate an operator-supplied LLM `base_url` before it is persisted or
+/// probed.
+///
+/// Mirrors the `AllowPrivateNetwork` posture used at the model-discovery egress
+/// point (`ironclaw_llm`'s `check_models_url`) and the binary's
+/// `validate_operator_base_url`: a self-hosted provider on a loopback or private
+/// address (Ollama, vLLM) is the primary local use case and must be allowed.
+/// Only the never-legitimate classes — cloud metadata / link-local, multicast,
+/// and the unspecified address — are rejected here. DNS-name hosts are resolved,
+/// re-validated, and pinned by the egress guard; this syntactic check only
+/// screens literal IPs.
+fn validate_llm_base_url(base_url: Option<&str>) -> Result<(), RebornServicesError> {
+    let Some(raw) = base_url else {
+        return Ok(());
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > LLM_BASE_URL_MAX_BYTES {
+        return Err(operator_setup_validation_error("base_url"));
+    }
+    let parsed = Url::parse(trimmed).map_err(|_| operator_setup_validation_error("base_url"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(operator_setup_validation_error("base_url"));
+    }
+    let Some(host) = parsed.host_str() else {
+        return Err(operator_setup_validation_error("base_url"));
+    };
+    // `localhost` and loopback/private literals are intentionally allowed —
+    // pointing the operator's provider at a self-hosted endpoint is the main
+    // reason this field exists. Only literal IPs in the always-blocked classes
+    // are rejected.
+    let normalized_host = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = normalized_host.parse::<IpAddr>()
+        && forbidden_llm_base_url_ip(ip)
+    {
+        return Err(operator_setup_validation_error("base_url"));
+    }
+    Ok(())
+}
+
+fn forbidden_llm_base_url_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => forbidden_llm_base_url_ipv4(ip),
+        IpAddr::V6(ip) => forbidden_llm_base_url_ipv6(ip),
+    }
+}
+
+/// Always-blocked IPv4 classes: the unspecified address, multicast, and
+/// link-local (which includes the cloud-metadata endpoint 169.254.169.254).
+/// Loopback and private ranges are allowed so self-hosted providers work.
+fn forbidden_llm_base_url_ipv4(ip: Ipv4Addr) -> bool {
+    ip.is_unspecified() || ip.is_multicast() || ip.is_link_local()
+}
+
+/// Always-blocked IPv6 classes: unspecified, multicast, and link-local.
+/// Loopback (`::1`) and unique-local are allowed so self-hosted providers work.
+/// Embedded-IPv4 forms (`::ffff:a.b.c.d` and `::a.b.c.d`) are unwrapped so an
+/// IPv4-compatible metadata address can't slip through as a "plain" v6 host.
+fn forbidden_llm_base_url_ipv6(ip: Ipv6Addr) -> bool {
+    if ip.is_unspecified() || ip.is_multicast() || ip.is_unicast_link_local() {
+        return true;
+    }
+    if let Some(v4) = ip.to_ipv4() {
+        return forbidden_llm_base_url_ipv4(v4);
+    }
+    false
+}
+
+fn operator_config_surface_not_wired_diagnostic() -> RebornOperatorConfigDiagnostic {
+    RebornOperatorConfigDiagnostic {
+        key: "*".to_string(),
+        severity: RebornOperatorConfigDiagnosticSeverity::Error,
+        reason_code: "operator_config_service_not_wired".to_string(),
+        message: "Operator config diagnostics are available, but the effective config service is not wired yet.".to_string(),
+        owning_area: RebornOperatorArea::Config,
+        remediation: "Use bootstrap config, environment variables, or existing CLI setup until the operator config service is enabled.".to_string(),
+    }
+}
+
+fn operator_config_validation_diagnostics(
+    keys: Vec<String>,
+) -> Vec<RebornOperatorConfigDiagnostic> {
+    let keys = if keys.is_empty() {
+        vec!["*".to_string()]
+    } else {
+        keys
+    };
+
+    keys.into_iter()
+        .map(operator_config_key_diagnostic)
+        .collect()
+}
+
+fn operator_config_key_diagnostic(key: String) -> RebornOperatorConfigDiagnostic {
+    let normalized = key.to_ascii_lowercase();
+    let is_secret = ["api_key", "credential", "password", "secret", "token"]
+        .iter()
+        .any(|marker| normalized.contains(marker));
+
+    let (reason_code, message, remediation) = if key == "*" {
+        (
+            "operator_config_service_not_wired",
+            "Operator config validation is available, but the effective config service is not wired yet.",
+            "Use bootstrap config, environment variables, or existing CLI setup until the operator config service is enabled.",
+        )
+    } else if is_secret {
+        (
+            "operator_config_secret_not_wired",
+            "Secret-backed operator config is not writable through the operator API yet.",
+            "Store secrets through the configured secret provider or bootstrap environment until the operator secrets flow is enabled.",
+        )
+    } else if normalized.starts_with("deprecated.") || normalized.starts_with("legacy.") {
+        (
+            "operator_config_deprecated",
+            "This operator config key is deprecated and is not applied by the Reborn runtime.",
+            "Move the setting to the current config key before relying on operator-managed startup.",
+        )
+    } else if normalized.starts_with("bootstrap.") {
+        (
+            "operator_config_immutable",
+            "Bootstrap config is immutable from the browser operator API.",
+            "Change this setting in bootstrap config and restart the host process.",
+        )
+    } else if matches!(
+        normalized.as_str(),
+        "provider.default" | "model.default" | "profile.default"
+    ) {
+        (
+            "operator_config_not_wired",
+            "This parsed operator config key is not wired into runtime behavior yet.",
+            "Keep using the existing setup path for this setting until effective config persistence is enabled.",
+        )
+    } else {
+        (
+            "operator_config_unknown_key",
+            "This operator config key is not recognized by the current Reborn runtime.",
+            "Remove the key or rename it to a documented operator config key.",
+        )
+    };
+
+    RebornOperatorConfigDiagnostic {
+        key,
+        severity: RebornOperatorConfigDiagnosticSeverity::Error,
+        reason_code: reason_code.to_string(),
+        message: message.to_string(),
+        owning_area: RebornOperatorArea::Config,
+        remediation: remediation.to_string(),
+    }
+}
+
+fn operator_config_diagnostic_command_plane_response(
+    area: RebornOperatorArea,
+) -> RebornOperatorCommandPlaneResponse {
+    RebornOperatorCommandPlaneResponse {
+        area,
+        status: RebornOperatorSurfaceStatus::Unavailable,
+        message: "Operator config has unsupported or not-yet-wired settings.".to_string(),
+        operator_status: None,
+        logs: None,
+        service_lifecycle: None,
+        diagnostics: vec![operator_config_surface_not_wired_diagnostic()],
+    }
+}
+
 #[async_trait]
 pub trait RebornServicesApi: Send + Sync {
     async fn create_thread(
@@ -701,6 +1108,111 @@ pub trait RebornServicesApi: Send + Sync {
         let _ = caller;
         Err(llm_config::llm_config_unavailable())
     }
+
+    async fn get_operator_setup(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
+        let _ = caller;
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn run_operator_setup(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornOperatorSetupRequest,
+    ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Return the effective operator config projection.
+    ///
+    /// Until the effective config backend is wired, read-only operator config/status/diagnostic
+    /// surfaces intentionally return typed diagnostic payloads so the browser can explain
+    /// what is unsupported. Mutating or side-effecting operator routes remain fail-closed
+    /// with sanitized service-unavailable errors until their owning service is wired.
+    async fn list_operator_config(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorConfigListResponse, RebornServicesError> {
+        let _ = caller;
+        Ok(RebornOperatorConfigListResponse {
+            entries: Vec::new(),
+            precedence: Vec::new(),
+            diagnostics: vec![operator_config_surface_not_wired_diagnostic()],
+        })
+    }
+
+    async fn get_operator_config_key(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        key: String,
+    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
+        let _ = (caller, key);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn set_operator_config_key(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        key: String,
+        request: RebornOperatorConfigSetRequest,
+    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
+        let _ = (caller, key, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn validate_operator_config(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornOperatorConfigValidateRequest,
+    ) -> Result<RebornOperatorConfigValidateResponse, RebornServicesError> {
+        let _ = caller;
+        let diagnostics = operator_config_validation_diagnostics(request.keys);
+        Ok(RebornOperatorConfigValidateResponse {
+            valid: diagnostics.is_empty(),
+            diagnostics,
+        })
+    }
+
+    async fn get_operator_diagnostics(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let _ = caller;
+        Ok(operator_config_diagnostic_command_plane_response(
+            RebornOperatorArea::Diagnostics,
+        ))
+    }
+
+    async fn get_operator_status(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let _ = caller;
+        Ok(operator_config_diagnostic_command_plane_response(
+            RebornOperatorArea::Status,
+        ))
+    }
+
+    async fn query_operator_logs(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: RebornOperatorLogsQuery,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let _ = (caller, query);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn run_operator_service_lifecycle(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornOperatorServiceLifecycleRequest,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
 }
 
 /// Default facade implementation composed at the WebUI boundary.
@@ -714,6 +1226,9 @@ pub struct RebornServices {
     skills_facade: Arc<dyn SkillsProductFacade>,
     connectable_channels_facade: Arc<dyn ConnectableChannelsProductFacade>,
     outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade>,
+    operator_status: Arc<dyn OperatorStatusService>,
+    operator_logs: Arc<dyn OperatorLogsService>,
+    operator_service_lifecycle: Arc<dyn OperatorServiceLifecycleService>,
     approval_interactions: Arc<dyn ApprovalInteractionService>,
     auth_interactions: Arc<dyn AuthInteractionService>,
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
@@ -741,6 +1256,9 @@ impl RebornServices {
             outbound_preferences_facade: Arc::new(
                 UnsupportedOutboundPreferencesProductFacade::new_static(),
             ),
+            operator_status: Arc::new(UnsupportedOperatorStatusService),
+            operator_logs: Arc::new(UnsupportedOperatorLogsService),
+            operator_service_lifecycle: Arc::new(UnsupportedOperatorServiceLifecycleService),
             approval_interactions: Arc::new(RejectingApprovalInteractionService),
             auth_interactions: Arc::new(RejectingAuthInteractionService),
             extension_credentials: None,
@@ -798,6 +1316,30 @@ impl RebornServices {
         outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade>,
     ) -> Self {
         self.outbound_preferences_facade = outbound_preferences_facade;
+        self
+    }
+
+    pub fn with_operator_status_service(
+        mut self,
+        operator_status: Arc<dyn OperatorStatusService>,
+    ) -> Self {
+        self.operator_status = operator_status;
+        self
+    }
+
+    pub fn with_operator_logs_service(
+        mut self,
+        operator_logs: Arc<dyn OperatorLogsService>,
+    ) -> Self {
+        self.operator_logs = operator_logs;
+        self
+    }
+
+    pub fn with_operator_service_lifecycle_service(
+        mut self,
+        operator_service_lifecycle: Arc<dyn OperatorServiceLifecycleService>,
+    ) -> Self {
+        self.operator_service_lifecycle = operator_service_lifecycle;
         self
     }
 
@@ -878,6 +1420,83 @@ impl RebornServices {
 
 #[async_trait]
 impl RebornServicesApi for RebornServices {
+    async fn get_operator_setup(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
+        let Some(llm_config) = &self.llm_config else {
+            return Err(llm_config::llm_config_unavailable());
+        };
+        let snapshot = llm_config
+            .snapshot(caller)
+            .await
+            .map_err(llm_config::map_llm_config_error)?;
+        Ok(setup_response_from_llm_snapshot(snapshot, Vec::new()))
+    }
+
+    async fn run_operator_setup(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornOperatorSetupRequest,
+    ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
+        let Some(llm_config) = &self.llm_config else {
+            return Err(llm_config::llm_config_unavailable());
+        };
+
+        if request.model.is_some() && request.provider_id.is_none() {
+            return Err(operator_setup_validation_error("model"));
+        }
+        if request.provider_id.is_none()
+            && (request.adapter.is_some()
+                || request.base_url.is_some()
+                || request.api_key.is_some())
+        {
+            return Err(operator_setup_validation_error("provider_id"));
+        }
+        if request.base_url.is_some() && request.adapter.is_none() {
+            return Err(operator_setup_validation_error("base_url"));
+        }
+        if request.api_key.is_some() && request.adapter.is_none() {
+            return Err(operator_setup_validation_error("api_key"));
+        }
+        validate_llm_base_url(request.base_url.as_deref())?;
+
+        let snapshot = match (request.provider_id, request.adapter) {
+            (Some(provider_id), Some(adapter)) => llm_config
+                .upsert_provider(
+                    caller,
+                    UpsertLlmProviderRequest {
+                        id: provider_id,
+                        name: None,
+                        adapter,
+                        base_url: request.base_url,
+                        default_model: request.model.clone(),
+                        api_key: request.api_key,
+                        set_active: true,
+                        model: request.model,
+                    },
+                )
+                .await
+                .map_err(llm_config::map_llm_config_error)?,
+            (Some(provider_id), None) => llm_config
+                .set_active(
+                    caller,
+                    SetActiveLlmRequest {
+                        provider_id,
+                        model: request.model,
+                    },
+                )
+                .await
+                .map_err(llm_config::map_llm_config_error)?,
+            (None, _) => llm_config
+                .snapshot(caller)
+                .await
+                .map_err(llm_config::map_llm_config_error)?,
+        };
+
+        Ok(setup_response_from_llm_snapshot(snapshot, Vec::new()))
+    }
+
     /// `requested_thread_id` makes the caller's choice authoritative.
     /// Without it, `client_action_id` deterministically derives the thread id
     /// so a retry of the same create maps back to the same thread.
@@ -1387,7 +2006,12 @@ impl RebornServicesApi for RebornServices {
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornExtensionListResponse, RebornServicesError> {
-        extensions::list_extensions(self.lifecycle_facade.as_ref(), caller).await
+        extensions::list_extensions(
+            Arc::clone(&self.lifecycle_facade),
+            self.extension_credentials.clone(),
+            caller,
+        )
+        .await
     }
 
     async fn list_skills(
@@ -1488,6 +2112,81 @@ impl RebornServicesApi for RebornServices {
         .await
     }
 
+    async fn get_operator_status(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let status = self.operator_status.status(caller).await?;
+        Ok(RebornOperatorCommandPlaneResponse {
+            area: RebornOperatorArea::Status,
+            status: RebornOperatorSurfaceStatus::Available,
+            message: "operator status is available".to_string(),
+            operator_status: Some(status),
+            logs: None,
+            service_lifecycle: None,
+            diagnostics: Vec::new(),
+        })
+    }
+
+    async fn query_operator_logs(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: RebornOperatorLogsQuery,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let request = bounded_operator_logs_query(query);
+        let logs = self.operator_logs.query_logs(caller, request).await?;
+        Ok(RebornOperatorCommandPlaneResponse {
+            area: RebornOperatorArea::Logs,
+            status: RebornOperatorSurfaceStatus::Available,
+            message: "operator logs query completed".to_string(),
+            operator_status: None,
+            logs: Some(logs),
+            service_lifecycle: None,
+            diagnostics: Vec::new(),
+        })
+    }
+
+    async fn run_operator_service_lifecycle(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornOperatorServiceLifecycleRequest,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let request = RebornServiceLifecycleRequest {
+            action: match request.action {
+                RebornOperatorServiceLifecycleAction::Install => {
+                    RebornServiceLifecycleAction::Install
+                }
+                RebornOperatorServiceLifecycleAction::Start => RebornServiceLifecycleAction::Start,
+                RebornOperatorServiceLifecycleAction::Stop => RebornServiceLifecycleAction::Stop,
+                RebornOperatorServiceLifecycleAction::Status => {
+                    RebornServiceLifecycleAction::Status
+                }
+            },
+        };
+        let service_lifecycle = self
+            .operator_service_lifecycle
+            .control_service(caller, request)
+            .await?;
+        let status = match service_lifecycle.state {
+            RebornServiceLifecycleState::Installed
+            | RebornServiceLifecycleState::Running
+            | RebornServiceLifecycleState::Stopped
+            | RebornServiceLifecycleState::Unknown => RebornOperatorSurfaceStatus::Available,
+            RebornServiceLifecycleState::Unsupported | RebornServiceLifecycleState::Failed => {
+                RebornOperatorSurfaceStatus::Unavailable
+            }
+        };
+        Ok(RebornOperatorCommandPlaneResponse {
+            area: RebornOperatorArea::ServiceLifecycle,
+            status,
+            message: service_lifecycle.message.clone(),
+            operator_status: None,
+            logs: None,
+            service_lifecycle: Some(service_lifecycle),
+            diagnostics: Vec::new(),
+        })
+    }
+
     async fn get_llm_config(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -1511,6 +2210,7 @@ impl RebornServicesApi for RebornServices {
             .llm_config
             .as_ref()
             .ok_or_else(llm_config::llm_config_unavailable)?;
+        validate_llm_base_url(request.base_url.as_deref())?;
         service
             .upsert_provider(caller, request)
             .await
@@ -1556,6 +2256,7 @@ impl RebornServicesApi for RebornServices {
             .llm_config
             .as_ref()
             .ok_or_else(llm_config::llm_config_unavailable)?;
+        validate_llm_base_url(request.base_url.as_deref())?;
         service
             .test_connection(caller, request)
             .await
@@ -1571,6 +2272,7 @@ impl RebornServicesApi for RebornServices {
             .llm_config
             .as_ref()
             .ok_or_else(llm_config::llm_config_unavailable)?;
+        validate_llm_base_url(request.base_url.as_deref())?;
         service
             .list_models(caller, request)
             .await
@@ -1782,6 +2484,10 @@ fn outbound_preferences_unavailable() -> RebornServicesError {
     RebornServicesError::service_unavailable(false)
 }
 
+fn operator_surface_unavailable() -> RebornServicesError {
+    RebornServicesError::service_unavailable(false)
+}
+
 struct AcceptedWebUiMessage {
     thread_id: ThreadId,
     message_id: ThreadMessageId,
@@ -1968,13 +2674,11 @@ impl RebornServices {
     ) -> Result<RebornResolveGateResponse, RebornServicesError> {
         let decision = match resolution {
             WebUiGateResolution::Approved { always } => {
-                // `always: true` requests a *persistent* approval but this
-                // facade has only one-shot approval interaction routing and no
-                // approval-policy port. Fail loud rather than silently downgrade.
                 if always {
-                    return Err(persistent_approval_unavailable());
+                    ApprovalInteractionDecision::AlwaysAllow
+                } else {
+                    ApprovalInteractionDecision::ApproveOnce
                 }
-                ApprovalInteractionDecision::ApproveOnce
             }
             WebUiGateResolution::Denied | WebUiGateResolution::Cancelled => {
                 ApprovalInteractionDecision::Deny
@@ -2100,9 +2804,8 @@ impl RebornServices {
             WebUiGateResolution::Approved { always } => {
                 reject_generic_auth_gate_resolution(self.turn_coordinator.as_ref(), &scope, run_id)
                     .await?;
-                // `always: true` requests a *persistent* approval but this
-                // facade has only one-shot `resume_turn` and no approval-policy
-                // port. Fail loud rather than silently downgrade.
+                // Generic fallback has only one-shot `resume_turn`; persistent
+                // approval must go through the typed approval interaction path.
                 if always {
                     return Err(persistent_approval_unavailable());
                 }
@@ -2831,6 +3534,44 @@ fn create_thread_metadata_json(
         "client_action_id": client_action_id.as_str(),
     }))
     .map_err(|_| RebornServicesError::internal_invariant())
+}
+
+fn bounded_operator_logs_query(query: RebornOperatorLogsQuery) -> RebornLogQueryRequest {
+    RebornLogQueryRequest {
+        limit: Some(
+            query
+                .limit
+                .unwrap_or(OPERATOR_LOGS_DEFAULT_LIMIT)
+                .clamp(1, OPERATOR_LOGS_MAX_LIMIT),
+        ),
+        cursor: bounded_operator_logs_string(query.cursor, OPERATOR_LOGS_CURSOR_MAX_BYTES),
+        level: query.level,
+        target: bounded_operator_logs_string(query.target, OPERATOR_LOGS_TARGET_MAX_BYTES),
+        tail: false,
+    }
+}
+
+fn bounded_operator_logs_string(value: Option<String>, max_bytes: usize) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else if trimmed.len() <= max_bytes {
+            Some(trimmed.to_string())
+        } else {
+            Some(truncate_utf8_to_bytes(trimmed, max_bytes))
+        }
+    })
+}
+
+fn truncate_utf8_to_bytes(value: &str, max_bytes: usize) -> String {
+    let end = value
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= max_bytes)
+        .last()
+        .unwrap_or(0);
+    value[..end].to_string()
 }
 
 fn product_agent_bound_caller_from_webui(

@@ -4,6 +4,8 @@
 //! authorization leases. It does not prompt users, execute capabilities, or
 //! dispatch runtime work.
 
+mod policy;
+
 use ironclaw_authorization::{CapabilityLease, CapabilityLeaseError, CapabilityLeaseStore};
 use ironclaw_events::AuditSink;
 use ironclaw_host_api::{
@@ -13,6 +15,14 @@ use ironclaw_host_api::{
 };
 use ironclaw_run_state::{ApprovalRecord, ApprovalRequestStore, ApprovalStatus, RunStateError};
 use thiserror::Error;
+
+pub use policy::{
+    FilesystemPersistentApprovalPolicyStore, InMemoryPersistentApprovalPolicyStore,
+    PersistentApprovalAction, PersistentApprovalPolicy, PersistentApprovalPolicyError,
+    PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+    PersistentApprovalScope, permission_mode_allows_persistent_approval,
+    persistent_approval_grant_issuer,
+};
 
 pub struct ApprovalResolver<'a, A, L>
 where

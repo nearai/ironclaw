@@ -25,9 +25,9 @@ use super::{
     append_capability_result_ref, append_capability_safe_summary_ref, batch_policy_kind,
     cancelled_exit, capability_batch_counts, capability_call_signature, capability_error_class,
     capability_failure_kind, capability_host_error, capability_invocation_from_candidate,
-    capability_is_visible, capability_summary, failed_exit, honor_retry_alteration,
-    model_visible_capability_failure_observation, push_call_signature_once, push_completed_result,
-    sanitized_strategy_summary,
+    capability_is_visible, capability_summary, clear_matching_pending_auth_resume, failed_exit,
+    honor_retry_alteration, model_visible_capability_failure_observation, push_call_signature_once,
+    push_completed_result, sanitized_strategy_summary,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -128,13 +128,28 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             )
             .await;
 
+        let mut pending_approval_resume = state.pending_approval_resume.clone();
         let batch = ctx
             .host
             .invoke_capability_batch(CapabilityBatchInvocation {
                 invocations: visible_calls
                     .iter()
                     .cloned()
-                    .map(capability_invocation_from_candidate)
+                    .map(|call| {
+                        let resume = pending_approval_resume
+                            .take_if(|resume| resume.capability_id == call.capability_id)
+                            .map(
+                                |resume| ironclaw_turns::run_profile::CapabilityApprovalResume {
+                                    approval_request_id: resume.approval_request_id,
+                                    resume_token: resume.resume_token,
+                                    correlation_id: resume.correlation_id,
+                                    input_ref: resume.input_ref,
+                                    input: resume.input,
+                                    estimate: resume.estimate,
+                                },
+                            );
+                        capability_invocation_from_candidate(call, resume)
+                    })
                     .collect(),
                 stop_on_first_suspension,
             })
@@ -186,6 +201,8 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                 match outcome {
                     CapabilityOutcome::Completed(result) => {
                         push_call_signature_once(&mut state, &mut signatures, &call)?;
+                        clear_matching_pending_approval_resume(&mut state, &call);
+                        clear_matching_pending_auth_resume(&mut state, &call);
                         append_completed_capability_result(
                             ctx.host,
                             &mut state,
@@ -202,6 +219,8 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         ..
                     } => {
                         push_call_signature_once(&mut state, &mut signatures, &call)?;
+                        clear_matching_pending_approval_resume(&mut state, &call);
+                        clear_matching_pending_auth_resume(&mut state, &call);
                         append_spawned_child_result(
                             ctx.host,
                             &mut state,
@@ -223,6 +242,8 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         .is_some_and(|(gate, _)| gate == &gate_ref) =>
                     {
                         push_call_signature_once(&mut state, &mut signatures, &call)?;
+                        clear_matching_pending_approval_resume(&mut state, &call);
+                        clear_matching_pending_auth_resume(&mut state, &call);
                         let result = CapabilityResultMessage {
                             result_ref,
                             safe_summary,
@@ -272,6 +293,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                             kind: GateKind::AwaitDependentRun,
                             gate_ref: shared_gate_ref,
                             credential_requirements: Vec::new(),
+                            approval_resume: None,
                         },
                     )
                     .await?
@@ -379,6 +401,8 @@ impl CapabilityStage {
     ) -> Result<BatchStep, AgentLoopExecutorError> {
         match outcome {
             CapabilityOutcome::Completed(result) => {
+                clear_matching_pending_approval_resume(&mut state, &call);
+                clear_matching_pending_auth_resume(&mut state, &call);
                 append_completed_capability_result(
                     ctx.host,
                     &mut state,
@@ -395,6 +419,8 @@ impl CapabilityStage {
                 byte_len,
                 ..
             } => {
+                clear_matching_pending_approval_resume(&mut state, &call);
+                clear_matching_pending_auth_resume(&mut state, &call);
                 append_spawned_child_result(
                     ctx.host,
                     &mut state,
@@ -407,7 +433,11 @@ impl CapabilityStage {
                 .await?;
                 Ok(BatchStep::Continue(Box::new(state)))
             }
-            CapabilityOutcome::ApprovalRequired { gate_ref, .. } => {
+            CapabilityOutcome::ApprovalRequired {
+                gate_ref,
+                approval_resume,
+                ..
+            } => {
                 GateStage
                     .process(
                         ctx,
@@ -417,6 +447,7 @@ impl CapabilityStage {
                             kind: GateKind::Approval,
                             gate_ref,
                             credential_requirements: Vec::new(),
+                            approval_resume,
                         },
                     )
                     .await
@@ -426,6 +457,10 @@ impl CapabilityStage {
                 credential_requirements,
                 ..
             } => {
+                // Clearing here keeps the clear-on-every-outcome invariant; for auth
+                // outcomes GateStage re-populates the record when it blocks.
+                clear_matching_pending_approval_resume(&mut state, &call);
+                clear_matching_pending_auth_resume(&mut state, &call);
                 GateStage
                     .process(
                         ctx,
@@ -435,6 +470,7 @@ impl CapabilityStage {
                             kind: GateKind::Auth,
                             gate_ref,
                             credential_requirements,
+                            approval_resume: None,
                         },
                     )
                     .await
@@ -449,6 +485,7 @@ impl CapabilityStage {
                             kind: GateKind::Resource,
                             gate_ref,
                             credential_requirements: Vec::new(),
+                            approval_resume: None,
                         },
                     )
                     .await
@@ -536,6 +573,8 @@ impl CapabilityStage {
         mut model_observation: Option<ironclaw_turns::run_profile::ModelVisibleToolObservation>,
         capability_batch: &mut CapabilityBatchTurnSummary,
     ) -> Result<BatchStep, AgentLoopExecutorError> {
+        clear_matching_pending_approval_resume(&mut state, &call);
+        clear_matching_pending_auth_resume(&mut state, &call);
         for _ in 0..MAX_CAPABILITY_RETRIES {
             match ctx
                 .planner
@@ -545,12 +584,13 @@ impl CapabilityStage {
             {
                 RecoveryOutcome::ToolErrorResult { recovery } => {
                     state.recovery_state = recovery;
-                    append_capability_error_ref(
+                    append_blocked_capability_error_result(
                         ctx.host,
                         &mut state,
                         &call,
                         &summary,
                         model_observation.clone(),
+                        capability_batch,
                     )
                     .await?;
                     match CheckpointStage.cancel_if_requested(ctx, state).await? {
@@ -564,12 +604,13 @@ impl CapabilityStage {
                     failure_kind,
                 } => {
                     state.recovery_state = recovery;
-                    append_capability_error_ref(
+                    append_blocked_capability_error_result(
                         ctx.host,
                         &mut state,
                         &call,
                         &summary,
                         model_observation.clone(),
+                        capability_batch,
                     )
                     .await?;
                     match CheckpointStage.cancel_if_requested(ctx, state).await? {
@@ -611,7 +652,7 @@ impl CapabilityStage {
                         .await;
                     let retry = ctx
                         .host
-                        .invoke_capability(capability_invocation_from_candidate(call.clone()))
+                        .invoke_capability(capability_invocation_from_candidate(call.clone(), None))
                         .await
                         .map_err(capability_host_error)?;
                     match retry {
@@ -645,8 +686,15 @@ impl CapabilityStage {
             }
         }
 
-        append_capability_error_ref(ctx.host, &mut state, &call, &summary, model_observation)
-            .await?;
+        append_blocked_capability_error_result(
+            ctx.host,
+            &mut state,
+            &call,
+            &summary,
+            model_observation,
+            capability_batch,
+        )
+        .await?;
         let checked = CheckpointStage
             .write(ctx, state, CheckpointKind::Final)
             .await?;
@@ -706,6 +754,19 @@ impl CapabilityStage {
     }
 }
 
+fn clear_matching_pending_approval_resume(
+    state: &mut LoopExecutionState,
+    call: &CapabilityCallCandidate,
+) {
+    if state
+        .pending_approval_resume
+        .as_ref()
+        .is_some_and(|resume| resume.capability_id == call.capability_id)
+    {
+        state.pending_approval_resume = None;
+    }
+}
+
 async fn append_spawned_child_result(
     host: &(dyn ironclaw_turns::run_profile::AgentLoopDriverHost + Send + Sync),
     state: &mut LoopExecutionState,
@@ -724,6 +785,24 @@ async fn append_spawned_child_result(
         byte_len,
     };
     append_completed_capability_result(host, state, call, result, capability_batch).await
+}
+
+async fn append_blocked_capability_error_result(
+    host: &(dyn ironclaw_turns::run_profile::AgentLoopDriverHost + Send + Sync),
+    state: &mut LoopExecutionState,
+    call: &CapabilityCallCandidate,
+    summary: &CapabilityErrorSummary,
+    model_observation: Option<ironclaw_turns::run_profile::ModelVisibleToolObservation>,
+    capability_batch: &mut CapabilityBatchTurnSummary,
+) -> Result<(), AgentLoopExecutorError> {
+    append_capability_error_ref(host, state, call, summary, model_observation).await?;
+    if capability_batch.invocation_count > 0
+        && call.provider_replay.is_some()
+        && let Ok(signature) = capability_call_signature(call)
+    {
+        capability_batch.record_result(signature, CapabilityProgress::Blocked, false);
+    }
+    Ok(())
 }
 
 async fn append_completed_capability_result(
@@ -857,6 +936,7 @@ mod tests {
             CapabilityOutcome::ApprovalRequired {
                 gate_ref: LoopGateRef::new("gate:approval").unwrap(),
                 safe_summary: "approval".to_string(),
+                approval_resume: None,
             },
         ];
         assert!(shared_await_dependent_gate(&calls, &outcomes).is_none());

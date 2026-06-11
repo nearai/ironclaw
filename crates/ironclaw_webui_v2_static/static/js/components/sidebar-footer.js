@@ -24,7 +24,7 @@ export function SidebarFooter({ theme, toggleTheme, profile, onSignOut }) {
   const t = useT();
   const accountPopover = useAccountPopover();
   const name = profileName(profile);
-  const detail = profile?.email || profile?.role || "Gateway session";
+  const detail = profile?.email || profile?.role || t("common.gatewaySession");
 
   return html`
     <div

@@ -127,3 +127,16 @@ export function providerIdFromName(name) {
 export function isValidProviderId(id) {
   return /^[a-z0-9_-]+$/.test(id);
 }
+
+// After a model-discovery fetch, decide which model to commit to the form.
+// The model field is a controlled <Select>: when it is empty (or holds a value
+// no longer in the fetched list) the browser shows the first <option> while the
+// form value stays stale, and re-picking that already-shown option fires no
+// change event — so a save would persist an empty/wrong model. Returns the
+// model to commit, or `null` to keep the current selection (already valid).
+export function nextModelAfterFetch(currentModel, fetchedModels) {
+  if (!Array.isArray(fetchedModels) || fetchedModels.length === 0) return null;
+  const trimmed = (currentModel || "").trim();
+  if (!trimmed || !fetchedModels.includes(trimmed)) return fetchedModels[0];
+  return null;
+}

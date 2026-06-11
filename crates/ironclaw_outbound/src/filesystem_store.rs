@@ -30,16 +30,22 @@
 //!   scoped communication preference row keyed by a hashed
 //!   `CommunicationPreferenceKey`. Reply-target refs remain candidates and do
 //!   not grant send authority.
+//! - `/outbound/delivered-gate-routes/<sha256(tenant|user|gate_ref)>.json` —
+//!   cross-thread approval routing record keyed by `(tenant_id, user_id,
+//!   gate_ref)`. Written when an approval prompt is delivered to a personal
+//!   target on a different thread from the run; used by the routing wrapper to
+//!   rewrite DM replies to the correct run scope.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use ironclaw_event_projections::{ProjectionCursor, ProjectionScope};
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FilesystemError, Filter, IndexKey, IndexKind, IndexName,
-    IndexSpec, IndexValue, Page, RootFilesystem, ScopedFilesystem, VersionedEntry,
+    CasExpectation, ContentType, Entry, FileType, FilesystemError, Filter, IndexKey, IndexKind,
+    IndexName, IndexSpec, IndexValue, Page, RootFilesystem, ScopedFilesystem, VersionedEntry,
 };
-use ironclaw_host_api::{ResourceScope, ScopedPath, TenantId, ThreadId};
+use ironclaw_host_api::{ResourceScope, ScopedPath, TenantId, ThreadId, UserId};
 use ironclaw_turns::{TurnActor, TurnScope};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -51,11 +57,12 @@ use crate::validation::{
 };
 use crate::{
     AdvanceSubscriptionCursorRequest, CommunicationPreferenceKey, CommunicationPreferenceRecord,
-    CommunicationPreferenceRepository, CommunicationPreferenceVersion, DeliveryDefaultScope,
-    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundDeliveryId, OutboundError,
-    OutboundStateStore, ProjectionSubscriptionId, ProjectionSubscriptionRecord,
-    ThreadNotificationPolicy, UpdateDeliveryStatusRequest, VersionedCommunicationPreferenceRecord,
-    WriteCommunicationPreferenceRequest,
+    CommunicationPreferenceRepository, CommunicationPreferenceVersion, DeliveredGateRouteRecord,
+    DeliveredGateRouteStore, DeliveryDefaultScope, LoadSubscriptionCursorRequest,
+    OutboundDeliveryAttempt, OutboundDeliveryId, OutboundError, OutboundStateStore,
+    ProjectionSubscriptionId, ProjectionSubscriptionRecord, ThreadNotificationPolicy,
+    TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore, UpdateDeliveryStatusRequest,
+    VersionedCommunicationPreferenceRecord, WriteCommunicationPreferenceRequest,
 };
 
 /// Maximum number of compare-and-swap retries on a read-then-write path
@@ -88,6 +95,8 @@ const TENANT_ID_INDEX_KEY: &str = "tenant_id";
 const TENANT_ID_INDEX_NAME: &str = "outbound_by_tenant";
 const POLICIES_ROOT: &str = "/outbound/policies";
 const SUBSCRIPTIONS_ROOT: &str = "/outbound/subscriptions";
+const TRIGGERED_RUN_DELIVERY_ROOT: &str = "/outbound/triggered-run-delivery";
+const DELIVERED_GATE_ROUTES_ROOT: &str = "/outbound/delivered-gate-routes";
 
 /// Filesystem-backed outbound store. Construct with a [`ScopedFilesystem`]
 /// over any [`RootFilesystem`] implementation (libSQL, Postgres, in-memory,
@@ -623,6 +632,20 @@ fn delivery_path(delivery_id: &OutboundDeliveryId) -> Result<ScopedPath, Outboun
         .map_err(|_| OutboundError::Backend)
 }
 
+fn delivered_gate_route_path(
+    tenant_id: &TenantId,
+    user_id: &UserId,
+    gate_ref: &str,
+) -> Result<ScopedPath, OutboundError> {
+    let mut hasher = Sha256::new();
+    update_hash_part(&mut hasher, tenant_id.as_str());
+    update_hash_part(&mut hasher, user_id.as_str());
+    update_hash_part(&mut hasher, gate_ref);
+    let digest = hex::encode(hasher.finalize());
+    ScopedPath::new(format!("{DELIVERED_GATE_ROUTES_ROOT}/{digest}.json"))
+        .map_err(|_| OutboundError::Backend)
+}
+
 fn communication_preference_path(
     key: &CommunicationPreferenceKey,
 ) -> Result<ScopedPath, OutboundError> {
@@ -737,6 +760,229 @@ fn delivery_scope_index_key() -> IndexKey {
     .clone()
 }
 
+#[async_trait]
+impl<F> TriggeredRunDeliveryStore for FilesystemOutboundStateStore<F>
+where
+    F: RootFilesystem,
+{
+    async fn record_triggered_run_delivery(
+        &self,
+        record: TriggeredRunDeliveryRecord,
+    ) -> Result<(), String> {
+        let run_id_str = record.run_id.to_string();
+        let path = ScopedPath::new(format!("{TRIGGERED_RUN_DELIVERY_ROOT}/{run_id_str}.json"))
+            .map_err(|e| format!("triggered run delivery path: {e}"))?;
+        // Delivery records are written once per run and are tenant-scoped by
+        // the filesystem mount. Use system scope so the put is always
+        // authorized regardless of which user-scoped mount is active.
+        let resource_scope = ResourceScope::system();
+        let body = serde_json::to_vec(&record)
+            .map_err(|e| format!("triggered run delivery serialize: {e}"))?;
+        let entry = Entry::bytes(body).with_content_type(ContentType::json());
+        self.put_with_byte_fallback(&resource_scope, &path, entry, CasExpectation::Any)
+            .await
+            .map_err(|e| format!("triggered run delivery write: {e}"))
+    }
+
+    async fn load_triggered_run_delivery(
+        &self,
+        run_id: ironclaw_turns::TurnRunId,
+    ) -> Result<Option<TriggeredRunDeliveryRecord>, String> {
+        let run_id_str = run_id.to_string();
+        let path = ScopedPath::new(format!("{TRIGGERED_RUN_DELIVERY_ROOT}/{run_id_str}.json"))
+            .map_err(|e| format!("triggered run delivery path: {e}"))?;
+        let resource_scope = ResourceScope::system();
+        match self
+            .filesystem
+            .get(&resource_scope, &path)
+            .await
+            .map_err(|e| format!("triggered run delivery read: {e}"))?
+        {
+            Some(versioned) => {
+                let record: TriggeredRunDeliveryRecord =
+                    serde_json::from_slice(&versioned.entry.body)
+                        .map_err(|e| format!("triggered run delivery deserialize: {e}"))?;
+                Ok(Some(record))
+            }
+            None => Ok(None),
+        }
+    }
+}
+
+#[async_trait]
+impl<F> DeliveredGateRouteStore for FilesystemOutboundStateStore<F>
+where
+    F: RootFilesystem,
+{
+    async fn record_delivered_gate_route(
+        &self,
+        record: DeliveredGateRouteRecord,
+    ) -> Result<(), String> {
+        let path = delivered_gate_route_path(&record.tenant_id, &record.user_id, &record.gate_ref)
+            .map_err(|e| format!("delivered gate route path: {e}"))?;
+        let resource_scope =
+            delivered_gate_route_resource_scope(&record.tenant_id, &record.user_id);
+        let body = serde_json::to_vec(&record)
+            .map_err(|e| format!("delivered gate route serialize: {e}"))?;
+        let entry = Entry::bytes(body).with_content_type(ContentType::json());
+        self.put_with_byte_fallback(&resource_scope, &path, entry, CasExpectation::Any)
+            .await
+            .map_err(|e| format!("delivered gate route write: {e}"))
+    }
+
+    async fn load_delivered_gate_route(
+        &self,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+        gate_ref: &str,
+    ) -> Result<Option<DeliveredGateRouteRecord>, String> {
+        let path = delivered_gate_route_path(tenant_id, user_id, gate_ref)
+            .map_err(|e| format!("delivered gate route path: {e}"))?;
+        let resource_scope = delivered_gate_route_resource_scope(tenant_id, user_id);
+        match self
+            .filesystem
+            .get(&resource_scope, &path)
+            .await
+            .map_err(|e| format!("delivered gate route read: {e}"))?
+        {
+            Some(versioned) => {
+                let record: DeliveredGateRouteRecord =
+                    serde_json::from_slice(&versioned.entry.body)
+                        .map_err(|e| format!("delivered gate route deserialize: {e}"))?;
+                Ok(Some(record))
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn remove_delivered_gate_route(
+        &self,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+        gate_ref: &str,
+    ) -> Result<(), String> {
+        let path = delivered_gate_route_path(tenant_id, user_id, gate_ref)
+            .map_err(|e| format!("delivered gate route path: {e}"))?;
+        let resource_scope = delivered_gate_route_resource_scope(tenant_id, user_id);
+        match self.filesystem.delete(&resource_scope, &path).await {
+            Ok(()) => Ok(()),
+            Err(FilesystemError::NotFound { .. }) => Ok(()),
+            Err(e) => Err(format!("delivered gate route delete: {e}")),
+        }
+    }
+
+    /// Sweep expired route records from the filesystem store.
+    ///
+    /// # Scope limitation
+    ///
+    /// The filesystem store is constructed with a per-(tenant, user) mount
+    /// view. This sweep can only list and delete files that are reachable
+    /// through the mount aliases on the current filesystem instance — i.e.,
+    /// files belonging to the tenant + user the store was created for. It
+    /// cannot enumerate records belonging to other tenant/user combinations.
+    /// The opportunistic sweep on write is therefore scoped to the triggering
+    /// user; a background sweep covering all users would require a separate
+    /// admin-scoped store or a direct backend scan. This limitation is
+    /// accepted for now.
+    ///
+    /// Best-effort per-file: one unreadable or undeserializable file does not
+    /// abort the sweep. A missing directory returns `Ok(0)`.
+    async fn sweep_expired_delivered_gate_routes(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<usize, String> {
+        let root = ScopedPath::new(DELIVERED_GATE_ROUTES_ROOT)
+            .map_err(|e| format!("delivered gate route sweep root path: {e}"))?;
+        // Use the system resource scope so the mount resolver picks up the
+        // tenant-scoped virtual root; the isolation boundary is enforced by
+        // the mount, not by a specific user_id in the ResourceScope here.
+        let resource_scope = ResourceScope::system();
+        let entries = match self.filesystem.list_dir(&resource_scope, &root).await {
+            Ok(entries) => entries,
+            Err(FilesystemError::NotFound { .. }) => return Ok(0),
+            Err(e) => return Err(format!("delivered gate route sweep list_dir: {e}")),
+        };
+
+        let mut removed = 0usize;
+        for entry in entries {
+            if entry.file_type != FileType::File {
+                continue;
+            }
+            // Reconstruct the ScopedPath from the file name.
+            let file_path =
+                match ScopedPath::new(format!("{DELIVERED_GATE_ROUTES_ROOT}/{}", entry.name)) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        tracing::debug!(
+                            target = "ironclaw::outbound::filesystem_store",
+                            name = %entry.name,
+                            "delivered gate route sweep: skipping entry with invalid scoped path"
+                        );
+                        continue;
+                    }
+                };
+            // Read the file; skip if unreadable.
+            let versioned = match self.filesystem.get(&resource_scope, &file_path).await {
+                Ok(Some(v)) => v,
+                Ok(None) => continue,
+                Err(e) => {
+                    tracing::debug!(
+                        target = "ironclaw::outbound::filesystem_store",
+                        name = %entry.name,
+                        error = %e,
+                        "delivered gate route sweep: skipping unreadable file"
+                    );
+                    continue;
+                }
+            };
+            // Deserialize; skip if undeserializable.
+            let record: crate::DeliveredGateRouteRecord =
+                match serde_json::from_slice(&versioned.entry.body) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::debug!(
+                            target = "ironclaw::outbound::filesystem_store",
+                            name = %entry.name,
+                            error = %e,
+                            "delivered gate route sweep: skipping undeserializable file"
+                        );
+                        continue;
+                    }
+                };
+            if !record.is_expired(now) {
+                continue;
+            }
+            // Delete the expired file.
+            match self.filesystem.delete(&resource_scope, &file_path).await {
+                Ok(()) => removed += 1,
+                Err(FilesystemError::NotFound { .. }) => {
+                    // Already gone — count it as removed.
+                    removed += 1;
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        target = "ironclaw::outbound::filesystem_store",
+                        name = %entry.name,
+                        error = %e,
+                        "delivered gate route sweep: failed to delete expired file (best-effort)"
+                    );
+                }
+            }
+        }
+        Ok(removed)
+    }
+}
+
+/// Resource scope for delivered-gate route records. Carries the real tenant
+/// and user so the mount's path-prefix isolation applies structurally, on top
+/// of the hash-keyed file name (which also binds tenant + user + gate_ref).
+fn delivered_gate_route_resource_scope(tenant_id: &TenantId, user_id: &UserId) -> ResourceScope {
+    let mut resource_scope = ResourceScope::system();
+    resource_scope.tenant_id = tenant_id.clone();
+    resource_scope.user_id = user_id.clone();
+    resource_scope
+}
+
 fn delivery_scope_index_value(scope: &TurnScope) -> IndexValue {
     // Reuse `thread_scope_key`'s hash so the same scope hashes consistently
     // across the policy path and the delivery scope index. The hash is
@@ -796,10 +1042,146 @@ fn map_fs_error(error: FilesystemError) -> OutboundError {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
-    use ironclaw_turns::TurnScope;
+    use std::sync::Arc;
 
-    use super::{SCOPE_NONE_SENTINEL, thread_scope_key};
+    use chrono::{Duration, Utc};
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::{
+        AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId,
+        ThreadId, UserId, VirtualPath,
+    };
+    use ironclaw_turns::{TurnRunId, TurnScope};
+
+    use super::{FilesystemOutboundStateStore, SCOPE_NONE_SENTINEL, thread_scope_key};
+    use crate::{DeliveredGateRouteRecord, DeliveredGateRouteStore};
+
+    /// Build a `ScopedFilesystem<InMemoryBackend>` with full permissions on the
+    /// `/outbound` alias, mapped to a fixed tenant+user-scoped virtual root.
+    /// The `target_root` mirrors how composition wires the outbound filesystem
+    /// mount.
+    fn build_scoped_fs_for_gate_routes(
+        backend: Arc<InMemoryBackend>,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+    ) -> Arc<ScopedFilesystem<InMemoryBackend>> {
+        let target_root = format!(
+            "/engine/tenants/{}/users/{}/outbound",
+            tenant_id.as_str(),
+            user_id.as_str()
+        );
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/outbound").expect("alias"),
+            VirtualPath::new(&target_root).expect("virtual path"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view");
+        Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
+    }
+
+    /// Build a `FilesystemOutboundStateStore` backed by an `InMemoryBackend`
+    /// for testing the `DeliveredGateRouteStore` implementation.
+    fn build_gate_route_store(
+        tenant_id: &TenantId,
+        user_id: &UserId,
+    ) -> FilesystemOutboundStateStore<InMemoryBackend> {
+        let backend = Arc::new(InMemoryBackend::new());
+        FilesystemOutboundStateStore::new(build_scoped_fs_for_gate_routes(
+            backend, tenant_id, user_id,
+        ))
+    }
+
+    /// Build a minimal `DeliveredGateRouteRecord` for the given identities.
+    fn gate_route_record(
+        tenant_id: TenantId,
+        user_id: UserId,
+        gate_ref: &str,
+        run_id: TurnRunId,
+        scope: TurnScope,
+    ) -> DeliveredGateRouteRecord {
+        DeliveredGateRouteRecord {
+            tenant_id,
+            user_id,
+            gate_ref: gate_ref.to_string(),
+            run_id,
+            scope,
+            recorded_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn filesystem_gate_route_store_round_trip_record_load_remove() {
+        // Test: record → load (hash-path + JSON round-trip) → remove → load returns None.
+        // Also verifies that removing a missing record is Ok (idempotent).
+        let tenant_id = TenantId::new("fs-gate-route-tenant").expect("tenant");
+        let user_id = UserId::new("fs-gate-route-user").expect("user");
+        let agent_id = AgentId::new("fs-gate-route-agent").expect("agent");
+        let thread_id = ThreadId::new("fs-gate-route-thread").expect("thread");
+        let gate_ref = "gate:fs-route-test-001";
+
+        let store = build_gate_route_store(&tenant_id, &user_id);
+
+        let run_id = TurnRunId::new();
+        // Use a TurnScope with explicit owner to mirror triggered-run delivery.
+        let scope = TurnScope::new_with_owner(
+            tenant_id.clone(),
+            Some(agent_id),
+            None,
+            thread_id,
+            Some(user_id.clone()),
+        );
+        let record = gate_route_record(
+            tenant_id.clone(),
+            user_id.clone(),
+            gate_ref,
+            run_id,
+            scope.clone(),
+        );
+
+        // 1. remove of a missing record must be Ok (idempotent).
+        store
+            .remove_delivered_gate_route(&tenant_id, &user_id, gate_ref)
+            .await
+            .expect("remove of absent record must be Ok");
+
+        // 2. Record → load round-trip (hash path + JSON encoding).
+        store
+            .record_delivered_gate_route(record.clone())
+            .await
+            .expect("record must succeed");
+
+        let loaded = store
+            .load_delivered_gate_route(&tenant_id, &user_id, gate_ref)
+            .await
+            .expect("load must not error")
+            .expect("record must be present after recording");
+
+        assert_eq!(loaded.tenant_id, tenant_id, "tenant_id round-trips");
+        assert_eq!(loaded.user_id, user_id, "user_id round-trips");
+        assert_eq!(loaded.gate_ref, gate_ref, "gate_ref round-trips");
+        assert_eq!(loaded.run_id, run_id, "run_id round-trips");
+        assert_eq!(
+            loaded.scope.thread_id, scope.thread_id,
+            "scope thread_id round-trips"
+        );
+
+        // 3. remove → load returns None.
+        store
+            .remove_delivered_gate_route(&tenant_id, &user_id, gate_ref)
+            .await
+            .expect("remove must succeed");
+
+        let after_remove = store
+            .load_delivered_gate_route(&tenant_id, &user_id, gate_ref)
+            .await
+            .expect("load after remove must not error");
+        assert!(after_remove.is_none(), "record must be absent after remove");
+
+        // 4. Idempotent second remove is also Ok.
+        store
+            .remove_delivered_gate_route(&tenant_id, &user_id, gate_ref)
+            .await
+            .expect("second remove of absent record must be Ok");
+    }
 
     fn tenant() -> TenantId {
         TenantId::new("tenant-scope-key").unwrap()
@@ -807,6 +1189,95 @@ mod tests {
 
     fn thread() -> ThreadId {
         ThreadId::new("thread-scope-key").unwrap()
+    }
+
+    #[tokio::test]
+    async fn filesystem_gate_route_sweep_removes_expired_keeps_fresh() {
+        let tenant_id = TenantId::new("sweep-tenant").expect("tenant");
+        let user_id = UserId::new("sweep-user").expect("user");
+        let agent_id = AgentId::new("sweep-agent").expect("agent");
+        let thread_id = ThreadId::new("sweep-thread").expect("thread");
+
+        let store = build_gate_route_store(&tenant_id, &user_id);
+        let now = Utc::now();
+
+        // Build two records: one fresh, one expired.
+        let scope = TurnScope::new_with_owner(
+            tenant_id.clone(),
+            Some(agent_id),
+            None,
+            thread_id,
+            Some(user_id.clone()),
+        );
+
+        let fresh = gate_route_record(
+            tenant_id.clone(),
+            user_id.clone(),
+            "gate:sweep-fs-fresh",
+            TurnRunId::new(),
+            scope.clone(),
+        );
+        // Override recorded_at to be well within TTL.
+        let fresh = crate::DeliveredGateRouteRecord {
+            recorded_at: now,
+            ..fresh
+        };
+
+        let expired = gate_route_record(
+            tenant_id.clone(),
+            user_id.clone(),
+            "gate:sweep-fs-expired",
+            TurnRunId::new(),
+            scope.clone(),
+        );
+        // Override recorded_at to be past TTL.
+        let expired = crate::DeliveredGateRouteRecord {
+            recorded_at: now - Duration::hours(49),
+            ..expired
+        };
+
+        store
+            .record_delivered_gate_route(fresh.clone())
+            .await
+            .expect("record fresh");
+        store
+            .record_delivered_gate_route(expired.clone())
+            .await
+            .expect("record expired");
+
+        let removed = store
+            .sweep_expired_delivered_gate_routes(now)
+            .await
+            .expect("sweep succeeds");
+        assert_eq!(removed, 1, "exactly one expired record removed");
+
+        // Fresh record is still loadable.
+        let still_there = store
+            .load_delivered_gate_route(&tenant_id, &user_id, "gate:sweep-fs-fresh")
+            .await
+            .expect("load after sweep")
+            .expect("fresh record must survive sweep");
+        assert_eq!(still_there.gate_ref, "gate:sweep-fs-fresh");
+
+        // Expired record is gone.
+        let gone = store
+            .load_delivered_gate_route(&tenant_id, &user_id, "gate:sweep-fs-expired")
+            .await
+            .expect("load after sweep for expired");
+        assert!(gone.is_none(), "expired record must be absent after sweep");
+    }
+
+    #[tokio::test]
+    async fn filesystem_gate_route_sweep_empty_directory_returns_zero() {
+        let tenant_id = TenantId::new("sweep-empty-tenant").expect("tenant");
+        let user_id = UserId::new("sweep-empty-user").expect("user");
+        let store = build_gate_route_store(&tenant_id, &user_id);
+
+        let removed = store
+            .sweep_expired_delivered_gate_routes(Utc::now())
+            .await
+            .expect("sweep on empty directory");
+        assert_eq!(removed, 0);
     }
 
     #[test]

@@ -22,8 +22,8 @@ use ironclaw_host_runtime::{
     RuntimeStatusRequest, VisibleCapabilitySurface,
 };
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureKind, CapabilityOutcome,
-    LoopCapabilityPort, LoopHostMilestoneSink,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureKind, CapabilityInputRef,
+    CapabilityOutcome, LoopCapabilityPort, LoopHostMilestoneSink, LoopRunContext,
 };
 
 #[tokio::test]
@@ -407,6 +407,7 @@ async fn runtime_auth_gate_forwards_credential_requirements() {
     let provider_id = ExtensionId::new("demo").expect("provider id");
     let requirement = RuntimeCredentialAuthRequirement {
         provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        setup: Default::default(),
         requester_extension: provider_id.clone(),
         provider_scopes: Vec::new(),
     };
@@ -589,6 +590,7 @@ async fn visible_runtime_invocation(port: &HostRuntimeLoopCapabilityPort) -> Cap
         surface_version: surface.version,
         capability_id: candidate.capability_id,
         input_ref: candidate.input_ref,
+        approval_resume: None,
     }
 }
 
@@ -597,6 +599,198 @@ async fn invoke_visible_runtime_capability(
 ) -> Result<CapabilityOutcome, AgentLoopHostError> {
     port.invoke_capability(visible_runtime_invocation(port).await)
         .await
+}
+
+#[tokio::test]
+async fn approval_resume_metadata_invokes_runtime_resume_with_original_invocation() {
+    let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+    let provider_id = ExtensionId::new("demo").expect("valid provider id");
+    let approval_request_id = ApprovalRequestId::new();
+    let runtime = Arc::new(ApprovalResumeRecordingRuntime::new(
+        visible_capability(capability_id.clone(), provider_id.clone()),
+        approval_request_id,
+    ));
+    let mut context = execution_context("thread-approval-resume");
+    let run_context = loop_run_context(&context).await;
+    let loop_driver_extension =
+        loop_driver_execution_extension_id(&run_context).expect("valid extension id");
+    context.grants.grants.push(dispatch_capability_grant(
+        &capability_id,
+        &loop_driver_extension,
+    ));
+    let port = HostRuntimeLoopCapabilityPortFactory::new(
+        runtime.clone(),
+        visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
+            provider_id,
+            dispatch_trust_decision(),
+        )])),
+        Arc::new(InputRefEchoResolver),
+        Arc::new(RecordingResultWriter::default()),
+        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default()),
+    )
+    .port_for_run_context(run_context);
+
+    let first_invocation = visible_runtime_invocation(&port).await;
+    let first = port
+        .invoke_capability(first_invocation.clone())
+        .await
+        .expect("first invocation returns approval gate");
+    let CapabilityOutcome::ApprovalRequired {
+        approval_resume: Some(resume),
+        ..
+    } = first
+    else {
+        panic!("approval gate must carry resume metadata, got {first:?}");
+    };
+    assert_eq!(resume.input, serde_json::json!({ "message": "hello" }));
+    assert_eq!(resume.estimate, ResourceEstimate::default());
+
+    let surface = port
+        .visible_capabilities(VisibleCapabilityRequest {})
+        .await
+        .expect("visible capabilities load");
+    let resumed = port
+        .invoke_capability(CapabilityInvocation {
+            surface_version: surface.version,
+            capability_id: capability_id.clone(),
+            input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new(
+                "input:approval-resume-replayed-call",
+            )
+            .expect("valid input ref"),
+            approval_resume: Some(resume.clone()),
+        })
+        .await
+        .expect("approval resume dispatch succeeds");
+
+    assert!(matches!(resumed, CapabilityOutcome::Completed(_)));
+    assert_eq!(runtime.invoke_count(), 1);
+    let resume_requests = runtime.resume_requests();
+    assert_eq!(resume_requests.len(), 1);
+    assert_eq!(resume_requests[0].approval_request_id, approval_request_id);
+    let resume_invocation_id = ironclaw_host_api::InvocationId::parse(resume.resume_token.as_str())
+        .expect("resume token carries original invocation id");
+    assert_eq!(
+        resume_requests[0].context.invocation_id,
+        resume_invocation_id
+    );
+    assert_eq!(
+        resume_requests[0].context.resource_scope.invocation_id,
+        resume_invocation_id
+    );
+    assert_eq!(
+        resume_requests[0].context.correlation_id,
+        resume.correlation_id
+    );
+    assert_eq!(resume.input_ref, first_invocation.input_ref);
+    assert_eq!(
+        resume_requests[0].input,
+        serde_json::json!({ "message": "hello" })
+    );
+}
+
+struct InputRefEchoResolver;
+
+#[async_trait]
+impl LoopCapabilityInputResolver for InputRefEchoResolver {
+    async fn resolve_capability_input(
+        &self,
+        _run_context: &LoopRunContext,
+        input_ref: &CapabilityInputRef,
+    ) -> Result<serde_json::Value, AgentLoopHostError> {
+        Ok(serde_json::json!({ "input_ref": input_ref.as_str() }))
+    }
+}
+
+struct ApprovalResumeRecordingRuntime {
+    capability: VisibleCapability,
+    approval_request_id: ApprovalRequestId,
+    invoke_count: AtomicUsize,
+    resume_requests: Mutex<Vec<RuntimeCapabilityResumeRequest>>,
+}
+
+impl ApprovalResumeRecordingRuntime {
+    fn new(capability: VisibleCapability, approval_request_id: ApprovalRequestId) -> Self {
+        Self {
+            capability,
+            approval_request_id,
+            invoke_count: AtomicUsize::new(0),
+            resume_requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn invoke_count(&self) -> usize {
+        self.invoke_count.load(Ordering::SeqCst)
+    }
+
+    fn resume_requests(&self) -> Vec<RuntimeCapabilityResumeRequest> {
+        self.resume_requests
+            .lock()
+            .expect("resume requests lock")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl HostRuntime for ApprovalResumeRecordingRuntime {
+    async fn invoke_capability(
+        &self,
+        request: RuntimeCapabilityRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        self.invoke_count.fetch_add(1, Ordering::SeqCst);
+        Ok(RuntimeCapabilityOutcome::ApprovalRequired(
+            RuntimeApprovalGate {
+                approval_request_id: self.approval_request_id,
+                capability_id: request.capability_id,
+                reason: RuntimeBlockedReason::ApprovalRequired,
+            },
+        ))
+    }
+
+    async fn resume_capability(
+        &self,
+        request: RuntimeCapabilityResumeRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        self.resume_requests
+            .lock()
+            .expect("resume requests lock")
+            .push(request.clone());
+        Ok(RuntimeCapabilityOutcome::Completed(Box::new(
+            RuntimeCapabilityCompleted {
+                capability_id: request.capability_id,
+                output: serde_json::json!({"resumed": true}),
+                display_preview: None,
+                usage: ResourceUsage::default(),
+            },
+        )))
+    }
+
+    async fn visible_capabilities(
+        &self,
+        _request: ironclaw_host_runtime::VisibleCapabilityRequest,
+    ) -> Result<VisibleCapabilitySurface, HostRuntimeError> {
+        Ok(VisibleCapabilitySurface {
+            version: CapabilitySurfaceVersion::new("surface-v1").expect("valid version"),
+            capabilities: vec![self.capability.clone()],
+        })
+    }
+
+    async fn cancel_work(
+        &self,
+        _request: CancelRuntimeWorkRequest,
+    ) -> Result<CancelRuntimeWorkOutcome, HostRuntimeError> {
+        unreachable!("approval resume recording runtime should not cancel work")
+    }
+
+    async fn runtime_status(
+        &self,
+        _request: RuntimeStatusRequest,
+    ) -> Result<HostRuntimeStatus, HostRuntimeError> {
+        unreachable!("approval resume recording runtime should not report status")
+    }
+
+    async fn health(&self) -> Result<HostRuntimeHealth, HostRuntimeError> {
+        unreachable!("approval resume recording runtime should not report health")
+    }
 }
 
 struct QueuedHostRuntime {

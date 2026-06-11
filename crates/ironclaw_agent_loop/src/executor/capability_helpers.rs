@@ -4,19 +4,21 @@ use ironclaw_host_api::CapabilityId;
 use ironclaw_turns::{
     LoopResultRef,
     run_profile::{
-        AgentLoopDriverHost, AppendCapabilityResultRef, CapabilityCallCandidate,
-        CapabilityDescriptorView, CapabilityFailure, CapabilityFailureDetail,
-        CapabilityFailureKind, CapabilityInputIssue, CapabilityInputIssueCode,
-        CapabilityInputRepair, CapabilityInvocation, CapabilityRecoveryHint,
-        CapabilityResultMessage, CapabilitySurfaceVersion, ModelVisibleToolObservation,
-        ObservationTrust, ProviderToolCallReference, SameCallRetryConstraint,
-        ToolObservationDetail, ToolObservationStatus, ToolRecoveryObservation,
-        VisibleCapabilitySurface,
+        AgentLoopDriverHost, AppendCapabilityResultRef, CapabilityApprovalResume,
+        CapabilityCallCandidate, CapabilityDescriptorView, CapabilityFailure,
+        CapabilityFailureDetail, CapabilityFailureKind, CapabilityInputIssue,
+        CapabilityInputIssueCode, CapabilityInputRepair, CapabilityInvocation,
+        CapabilityRecoveryHint, CapabilityResultMessage, CapabilitySurfaceVersion,
+        ModelVisibleToolObservation, ObservationTrust, ProviderToolCall, ProviderToolCallReference,
+        SameCallRetryConstraint, ToolObservationDetail, ToolObservationStatus,
+        ToolRecoveryObservation, VisibleCapabilitySurface,
     },
 };
 
 use crate::{
-    state::{CapabilityCallSignature, LoopExecutionState},
+    state::{
+        CapabilityCallSignature, LoopExecutionState, PendingApprovalResume, PendingAuthResume,
+    },
     strategies::{CapabilityCallSummary, CapabilityErrorSummary, CapabilityFilter, GateKind},
 };
 
@@ -27,11 +29,74 @@ const MAX_MODEL_OBSERVATION_TEXT_BYTES: usize = 256;
 
 pub(super) fn capability_invocation_from_candidate(
     call: CapabilityCallCandidate,
+    approval_resume: Option<CapabilityApprovalResume>,
 ) -> CapabilityInvocation {
     CapabilityInvocation {
         surface_version: call.surface_version,
         capability_id: call.capability_id,
         input_ref: call.input_ref,
+        approval_resume,
+    }
+}
+
+pub(super) fn pending_approval_resume_candidate(
+    resume: &PendingApprovalResume,
+    surface_version: CapabilitySurfaceVersion,
+) -> CapabilityCallCandidate {
+    CapabilityCallCandidate {
+        surface_version,
+        capability_id: resume.capability_id.clone(),
+        input_ref: resume.input_ref.clone(),
+        effective_capability_ids: resume.effective_capability_ids.clone(),
+        provider_replay: resume.provider_replay.clone(),
+    }
+}
+
+pub(super) async fn pending_auth_resume_candidate(
+    host: &(dyn AgentLoopDriverHost + Send + Sync),
+    resume: &PendingAuthResume,
+    surface_version: CapabilitySurfaceVersion,
+) -> Result<CapabilityCallCandidate, AgentLoopExecutorError> {
+    if let Some(replay) = resume.provider_replay.as_ref() {
+        let candidate = host
+            .register_provider_tool_call(ProviderToolCall {
+                provider_id: replay.provider_id.clone(),
+                provider_model_id: replay.provider_model_id.clone(),
+                turn_id: Some(replay.provider_turn_id.clone()),
+                id: replay.provider_call_id.clone(),
+                name: replay.provider_tool_name.clone(),
+                arguments: replay.arguments.clone(),
+                response_reasoning: replay.response_reasoning.clone(),
+                reasoning: replay.reasoning.clone(),
+                signature: replay.signature.clone(),
+            })
+            .await
+            .map_err(capability_host_error)?;
+        if candidate.capability_id != resume.capability_id
+            || candidate.effective_capability_ids != resume.effective_capability_ids
+        {
+            return Err(AgentLoopExecutorError::PlannerContract {
+                detail: "auth resume provider replay no longer matches blocked capability",
+            });
+        }
+        return Ok(candidate);
+    }
+    Ok(pending_auth_resume_staged_input_candidate(
+        resume,
+        surface_version,
+    ))
+}
+
+fn pending_auth_resume_staged_input_candidate(
+    resume: &PendingAuthResume,
+    surface_version: CapabilitySurfaceVersion,
+) -> CapabilityCallCandidate {
+    CapabilityCallCandidate {
+        surface_version,
+        capability_id: resume.capability_id.clone(),
+        input_ref: resume.input_ref.clone(),
+        effective_capability_ids: resume.effective_capability_ids.clone(),
+        provider_replay: resume.provider_replay.clone(),
     }
 }
 
@@ -368,6 +433,19 @@ pub(super) fn gate_tool_result_summary(kind: GateKind, outcome: &'static str) ->
     format!("{gate} gate {outcome}")
 }
 
+pub(super) fn clear_matching_pending_auth_resume(
+    state: &mut LoopExecutionState,
+    call: &CapabilityCallCandidate,
+) {
+    if state
+        .pending_auth_resume
+        .as_ref()
+        .is_some_and(|resume| resume.capability_id == call.capability_id)
+    {
+        state.pending_auth_resume = None;
+    }
+}
+
 pub(super) fn push_completed_result(
     state: &mut LoopExecutionState,
     capability_id: &CapabilityId,
@@ -440,5 +518,31 @@ mod tests {
             Some(&2000)
         );
         assert_eq!(state.result_refs.len(), 3);
+    }
+
+    #[test]
+    fn pending_auth_resume_candidate_carries_non_empty_effective_capability_ids() {
+        use crate::state::PendingAuthResume;
+        use ironclaw_turns::run_profile::{CapabilityInputRef, CapabilitySurfaceVersion};
+
+        let cap_a = CapabilityId::new("test.cap_a").unwrap();
+        let cap_b = CapabilityId::new("test.cap_b").unwrap();
+        let resume = PendingAuthResume {
+            gate_ref: ironclaw_turns::LoopGateRef::new("gate:auth-test").unwrap(),
+            capability_id: cap_a.clone(),
+            surface_version: CapabilitySurfaceVersion::new("surface:v1").unwrap(),
+            input_ref: CapabilityInputRef::new("input:test").unwrap(),
+            effective_capability_ids: vec![cap_a.clone(), cap_b.clone()],
+            provider_replay: None,
+        };
+        let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
+
+        let candidate = pending_auth_resume_staged_input_candidate(&resume, surface_version);
+
+        assert_eq!(
+            candidate.effective_capability_ids,
+            vec![cap_a, cap_b],
+            "pending_auth_resume_candidate must propagate all effective_capability_ids"
+        );
     }
 }
