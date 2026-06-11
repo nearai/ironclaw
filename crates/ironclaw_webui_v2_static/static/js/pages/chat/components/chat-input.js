@@ -2,6 +2,12 @@ import { Icon } from "../../../design-system/icons.js";
 import { Button } from "../../../design-system/button.js";
 import { React, html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
+import {
+  NEW_DRAFT_KEY,
+  clearDraft,
+  getDraft,
+  setDraft,
+} from "../lib/draft-store.js";
 
 export function ChatInput({
   onSend,
@@ -10,13 +16,14 @@ export function ChatInput({
   canCancel = false,
   initialText = "",
   resetKey = "",
+  draftKey = NEW_DRAFT_KEY,
   variant = "dock",
   context = {},
   statusText = "",
 }) {
   const t = useT();
   const isHero = variant === "hero";
-  const [text, setText] = React.useState("");
+  const [text, setText] = React.useState(() => getDraft(draftKey));
   const [isSending, setIsSending] = React.useState(false);
   const [isCancelling, setIsCancelling] = React.useState(false);
   const [unsupportedPayloadError, setUnsupportedPayloadError] =
@@ -43,6 +50,14 @@ export function ChatInput({
     setUnsupportedPayloadError("");
   }, [resetKey]);
 
+  // Restore the persisted draft when the active conversation changes
+  // (draftKey switches). The initialText effect below runs after this
+  // and overrides when a location.state draft was passed in, so an
+  // explicit hand-off draft still wins over the stored one.
+  React.useEffect(() => {
+    setText(getDraft(draftKey));
+  }, [draftKey]);
+
   React.useEffect(() => {
     if (!initialText) return;
     setText(initialText);
@@ -64,6 +79,7 @@ export function ChatInput({
     try {
       await onSend(text.trim());
       setText("");
+      clearDraft(draftKey);
       setUnsupportedPayloadError("");
       if (textareaRef.current) textareaRef.current.style.height = "auto";
     } catch {
@@ -76,7 +92,17 @@ export function ChatInput({
     disabled,
     isSending,
     onSend,
+    draftKey,
   ]);
+
+  const handleChange = React.useCallback(
+    (e) => {
+      const next = e.target.value;
+      setText(next);
+      setDraft(draftKey, next);
+    },
+    [draftKey]
+  );
 
   const handleCancel = React.useCallback(async () => {
     if (!canCancel || isCancelling || !onCancel) return;
@@ -207,7 +233,7 @@ export function ChatInput({
           ref=${textareaRef}
           data-testid="chat-composer"
           value=${text}
-          onChange=${(e) => setText(e.target.value)}
+          onChange=${handleChange}
           onKeyDown=${onKeyDown}
           onPaste=${onPaste}
           placeholder=${placeholder}
