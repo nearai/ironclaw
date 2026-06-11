@@ -3902,7 +3902,7 @@ async fn resume_after_auth_gate_redispatches_original_call_without_model_turn() 
     // that carries a pending_auth_resume record with the original input_ref.
     let gate_ref = LoopGateRef::new("gate:auth-resume-test").expect("valid");
     let completed_ref = LoopResultRef::new("result:auth-resumed").expect("valid");
-    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+    let host = MockHost::new(vec![provider_calls_response()]).with_batch_outcomes(vec![
         ironclaw_turns::run_profile::CapabilityBatchOutcome {
             outcomes: vec![CapabilityOutcome::AuthRequired {
                 gate_ref: gate_ref.clone(),
@@ -3951,18 +3951,31 @@ async fn resume_after_auth_gate_redispatches_original_call_without_model_turn() 
         "BeforeBlock checkpoint must carry pending_auth_resume"
     );
 
-    // Derive the expected input_ref from the BeforeBlock checkpoint before the
+    // Derive the stale input_ref from the BeforeBlock checkpoint before the
     // state is consumed by the phase 2 execute call.
-    let original_input_ref = before_block_state
+    let checkpoint_input_ref = before_block_state
         .pending_auth_resume
         .as_ref()
         .expect("pending_auth_resume set in BeforeBlock checkpoint")
         .input_ref
         .clone();
+    assert!(
+        before_block_state
+            .pending_auth_resume
+            .as_ref()
+            .expect("pending_auth_resume set")
+            .provider_replay
+            .is_some(),
+        "provider-backed auth resumes must checkpoint replay metadata"
+    );
+    assert!(
+        host.registered_provider_calls().is_empty(),
+        "phase 1 model response is already a candidate; registration happens on auth resume"
+    );
 
     // Phase 2 run — seeded from the BeforeBlock checkpoint state.
     // The prompt stage must detect pending_auth_resume and skip the model call,
-    // re-dispatching the original capability invocation directly.
+    // restaging the provider replay metadata before re-dispatching the capability.
     let second_exit = executor
         .execute_family(&crate::families::default(), &host, before_block_state)
         .await
@@ -3987,11 +4000,31 @@ async fn resume_after_auth_gate_redispatches_original_call_without_model_turn() 
         "expected two batch invocations (phase 1 block + phase 2 re-dispatch)"
     );
 
-    // The Phase 2 invocation must carry the original input_ref (derived from the
-    // BeforeBlock checkpoint, not a magic string literal).
+    // The Phase 2 invocation must carry a freshly staged input_ref. The
+    // checkpoint input_ref belonged to the old provider-call input resolver.
+    assert_ne!(
+        batch_invocations[1].invocations[0].input_ref, checkpoint_input_ref,
+        "provider-backed auth resume must not reuse the stale checkpoint input_ref"
+    );
     assert_eq!(
-        batch_invocations[1].invocations[0].input_ref, original_input_ref,
-        "re-dispatched invocation must carry the original input_ref"
+        batch_invocations[1].invocations[0].input_ref.as_str(),
+        "input:registered-provider-1",
+        "provider-backed auth resume must invoke with the restaged provider input"
+    );
+    let registered_provider_calls = host.registered_provider_calls();
+    assert_eq!(
+        registered_provider_calls.len(),
+        1,
+        "auth resume must restage exactly one provider tool call"
+    );
+    assert_eq!(
+        registered_provider_calls[0].name, "demo__echo",
+        "auth resume must restage the checkpointed provider tool name"
+    );
+    assert_eq!(
+        registered_provider_calls[0].arguments,
+        serde_json::json!({"message":"hello"}),
+        "auth resume must restage the checkpointed provider tool arguments"
     );
 
     // (c) Neither invocation carries an approval_resume token.

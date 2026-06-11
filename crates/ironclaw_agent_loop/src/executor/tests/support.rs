@@ -18,7 +18,7 @@ use ironclaw_turns::{
         LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
         LoopModelResponse, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
         LoopRunContext, ModelProfileId, ModelStreamChunk, ParentLoopOutput, PromptMode,
-        ProviderToolCallReplay, RedactedRunProfileProvenance, ResolvedRunProfile,
+        ProviderToolCall, ProviderToolCallReplay, RedactedRunProfileProvenance, ResolvedRunProfile,
         ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
         RuntimeProfileConstraints, SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy,
         VisibleCapabilityRequest, VisibleCapabilitySurface,
@@ -57,6 +57,7 @@ pub(super) struct MockHost {
     checkpoints: Arc<Mutex<Vec<LoopCheckpointKind>>>,
     batch_invocations: Arc<Mutex<Vec<CapabilityBatchInvocation>>>,
     single_invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
+    registered_provider_calls: Arc<Mutex<Vec<ProviderToolCall>>>,
     staged_payloads: Arc<Mutex<Vec<StageCheckpointPayloadRequest>>>,
     appended_result_refs: Arc<Mutex<Vec<AppendCapabilityResultRef>>>,
     events: Arc<Mutex<Vec<String>>>,
@@ -93,6 +94,7 @@ impl MockHost {
             checkpoints: Arc::new(Mutex::new(Vec::new())),
             batch_invocations: Arc::new(Mutex::new(Vec::new())),
             single_invocations: Arc::new(Mutex::new(Vec::new())),
+            registered_provider_calls: Arc::new(Mutex::new(Vec::new())),
             staged_payloads: Arc::new(Mutex::new(Vec::new())),
             appended_result_refs: Arc::new(Mutex::new(Vec::new())),
             events: Arc::new(Mutex::new(Vec::new())),
@@ -175,6 +177,10 @@ impl MockHost {
 
     pub(super) fn single_invocations(&self) -> Vec<CapabilityInvocation> {
         self.single_invocations.lock().expect("lock").clone()
+    }
+
+    pub(super) fn registered_provider_calls(&self) -> Vec<ProviderToolCall> {
+        self.registered_provider_calls.lock().expect("lock").clone()
     }
 
     pub(super) fn model_requests(&self) -> Vec<LoopModelRequest> {
@@ -572,6 +578,40 @@ impl ironclaw_turns::run_profile::LoopModelPort for MockHost {
 
 #[async_trait]
 impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
+    async fn register_provider_tool_call(
+        &self,
+        tool_call: ProviderToolCall,
+    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        let provider_turn_id = tool_call.turn_id.clone().ok_or_else(|| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "provider tool call missing turn id",
+            )
+        })?;
+        let mut registered = self.registered_provider_calls.lock().expect("lock");
+        registered.push(tool_call.clone());
+        let input_ref =
+            CapabilityInputRef::new(format!("input:registered-provider-{}", registered.len()))
+                .expect("valid input ref");
+        Ok(CapabilityCallCandidate {
+            surface_version: self.visible_surface_version.clone(),
+            capability_id: capability_id(),
+            input_ref,
+            effective_capability_ids: vec![capability_id()],
+            provider_replay: Some(ProviderToolCallReplay {
+                provider_id: tool_call.provider_id,
+                provider_model_id: tool_call.provider_model_id,
+                provider_turn_id,
+                provider_call_id: tool_call.id,
+                provider_tool_name: tool_call.name,
+                arguments: tool_call.arguments,
+                response_reasoning: tool_call.response_reasoning,
+                reasoning: tool_call.reasoning,
+                signature: tool_call.signature,
+            }),
+        })
+    }
+
     async fn visible_capabilities(
         &self,
         _request: VisibleCapabilityRequest,
