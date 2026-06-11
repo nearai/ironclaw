@@ -3,7 +3,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use ironclaw_host_api::NetworkMethod;
+use axum::{Router, http::Uri};
+use ironclaw_host_api::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern};
 use ironclaw_network::{
     NetworkHttpError, NetworkHttpResponse, NetworkHttpTransport, NetworkTransportRequest,
     PolicyNetworkHttpEgress,
@@ -139,4 +140,82 @@ fn is_sensitive_header(name: &str) -> bool {
             | "client-secret"
             | "x-client-secret"
     )
+}
+
+#[derive(Clone)]
+pub struct LiveLoopbackHttpState {
+    requests: Arc<Mutex<Vec<String>>>,
+}
+
+impl LiveLoopbackHttpState {
+    pub fn record(&self, uri: &Uri) {
+        self.requests
+            .lock()
+            .expect("live loopback HTTP request log lock poisoned")
+            .push(
+                uri.path_and_query()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| uri.path().to_string()),
+            );
+    }
+}
+
+pub struct LiveLoopbackHttpServer {
+    port: u16,
+    requests: Arc<Mutex<Vec<String>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl LiveLoopbackHttpServer {
+    pub async fn start(routes: Router<LiveLoopbackHttpState>) -> Self {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind live loopback HTTP test server");
+        let port = listener.local_addr().expect("local addr").port();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let app = routes.with_state(LiveLoopbackHttpState {
+            requests: Arc::clone(&requests),
+        });
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Self {
+            port,
+            requests,
+            task,
+        }
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub fn url(&self, path_and_query: &str) -> String {
+        format!("http://127.0.0.1:{}{path_and_query}", self.port)
+    }
+
+    pub fn requests(&self) -> Vec<String> {
+        self.requests
+            .lock()
+            .expect("live loopback HTTP request log lock poisoned")
+            .clone()
+    }
+}
+
+impl Drop for LiveLoopbackHttpServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+pub fn loopback_http_policy(port: u16) -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Http),
+            host_pattern: "127.0.0.1".to_string(),
+            port: Some(port),
+        }],
+        deny_private_ip_ranges: false,
+        max_egress_bytes: Some(10_000),
+    }
 }

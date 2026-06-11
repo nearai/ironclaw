@@ -16,8 +16,6 @@
 mod reborn_support;
 mod support;
 
-use std::sync::{Arc, Mutex};
-
 use axum::{
     Json, Router,
     extract::State,
@@ -25,7 +23,7 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
-use ironclaw_host_api::{CapabilityId, NetworkPolicy, NetworkScheme, NetworkTargetPattern};
+use ironclaw_host_api::CapabilityId;
 use ironclaw_host_runtime::HTTP_CAPABILITY_ID;
 use ironclaw_loop_support::HostManagedModelResponse;
 use ironclaw_turns::TurnStatus;
@@ -34,12 +32,14 @@ use reborn_support::{
     model_replay::{
         RebornModelReplayStep, RebornScriptedProviderToolCall, RebornTraceReplayModelGateway,
     },
+    network::{LiveLoopbackHttpServer, LiveLoopbackHttpState, loopback_http_policy},
 };
 
 #[tokio::test]
 async fn reborn_qa_endpoint_status_check_reports_http_200() {
     let http = CapabilityId::new(HTTP_CAPABILITY_ID).expect("valid capability id");
-    let server = LiveQaHttpServer::start(Router::new().route("/status", get(status_ok))).await;
+    let server =
+        LiveLoopbackHttpServer::start(Router::new().route("/status", get(status_ok))).await;
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![RebornScriptedProviderToolCall::new(
@@ -63,7 +63,7 @@ async fn reborn_qa_endpoint_status_check_reports_http_200() {
         RebornBinaryE2EHarness::with_host_runtime_core_builtin_capabilities_live_http_egress(
             "room-qa-endpoint-status",
             model_gateway,
-            loopback_policy(server.port),
+            loopback_http_policy(server.port()),
         )
         .await
         .expect("harness");
@@ -99,7 +99,7 @@ async fn reborn_qa_endpoint_status_check_reports_http_200() {
 #[tokio::test]
 async fn reborn_qa_latest_release_summary_from_github_api() {
     let http = CapabilityId::new(HTTP_CAPABILITY_ID).expect("valid capability id");
-    let server = LiveQaHttpServer::start(Router::new().route(
+    let server = LiveLoopbackHttpServer::start(Router::new().route(
         "/repos/nearai/ironclaw/releases/latest",
         get(latest_release),
     ))
@@ -127,7 +127,7 @@ async fn reborn_qa_latest_release_summary_from_github_api() {
         RebornBinaryE2EHarness::with_host_runtime_core_builtin_capabilities_live_http_egress(
             "room-qa-release-summary",
             model_gateway,
-            loopback_policy(server.port),
+            loopback_http_policy(server.port()),
         )
         .await
         .expect("harness");
@@ -176,7 +176,7 @@ async fn reborn_qa_latest_release_summary_from_github_api() {
 async fn reborn_qa_hacker_news_keyword_search_reports_matches() {
     let http = CapabilityId::new(HTTP_CAPABILITY_ID).expect("valid capability id");
     let server =
-        LiveQaHttpServer::start(Router::new().route("/api/v1/search", get(hn_search))).await;
+        LiveLoopbackHttpServer::start(Router::new().route("/api/v1/search", get(hn_search))).await;
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![RebornScriptedProviderToolCall::new(
@@ -200,7 +200,7 @@ async fn reborn_qa_hacker_news_keyword_search_reports_matches() {
         RebornBinaryE2EHarness::with_host_runtime_core_builtin_capabilities_live_http_egress(
             "room-qa-hn-search",
             model_gateway,
-            loopback_policy(server.port),
+            loopback_http_policy(server.port()),
         )
         .await
         .expect("harness");
@@ -244,7 +244,7 @@ async fn reborn_qa_hacker_news_keyword_search_reports_matches() {
     harness.shutdown().await;
 }
 
-async fn status_ok(State(state): State<LiveQaHttpState>, uri: Uri) -> impl IntoResponse {
+async fn status_ok(State(state): State<LiveLoopbackHttpState>, uri: Uri) -> impl IntoResponse {
     state.record(&uri);
     (
         StatusCode::OK,
@@ -254,7 +254,7 @@ async fn status_ok(State(state): State<LiveQaHttpState>, uri: Uri) -> impl IntoR
         .into_response()
 }
 
-async fn latest_release(State(state): State<LiveQaHttpState>, uri: Uri) -> impl IntoResponse {
+async fn latest_release(State(state): State<LiveLoopbackHttpState>, uri: Uri) -> impl IntoResponse {
     state.record(&uri);
     (
         StatusCode::OK,
@@ -268,7 +268,7 @@ async fn latest_release(State(state): State<LiveQaHttpState>, uri: Uri) -> impl 
         .into_response()
 }
 
-async fn hn_search(State(state): State<LiveQaHttpState>, uri: Uri) -> impl IntoResponse {
+async fn hn_search(State(state): State<LiveLoopbackHttpState>, uri: Uri) -> impl IntoResponse {
     state.record(&uri);
     (
         StatusCode::OK,
@@ -281,78 +281,4 @@ async fn hn_search(State(state): State<LiveQaHttpState>, uri: Uri) -> impl IntoR
         })),
     )
         .into_response()
-}
-
-#[derive(Clone)]
-struct LiveQaHttpState {
-    requests: Arc<Mutex<Vec<String>>>,
-}
-
-impl LiveQaHttpState {
-    fn record(&self, uri: &Uri) {
-        self.requests
-            .lock()
-            .expect("live QA HTTP request log lock poisoned")
-            .push(
-                uri.path_and_query()
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| uri.path().to_string()),
-            );
-    }
-}
-
-struct LiveQaHttpServer {
-    port: u16,
-    requests: Arc<Mutex<Vec<String>>>,
-    task: tokio::task::JoinHandle<()>,
-}
-
-impl LiveQaHttpServer {
-    async fn start(routes: Router<LiveQaHttpState>) -> Self {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .expect("bind live QA HTTP test server");
-        let port = listener.local_addr().expect("local addr").port();
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let app = routes.with_state(LiveQaHttpState {
-            requests: Arc::clone(&requests),
-        });
-        let task = tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        Self {
-            port,
-            requests,
-            task,
-        }
-    }
-
-    fn url(&self, path_and_query: &str) -> String {
-        format!("http://127.0.0.1:{}{path_and_query}", self.port)
-    }
-
-    fn requests(&self) -> Vec<String> {
-        self.requests
-            .lock()
-            .expect("live QA HTTP request log lock poisoned")
-            .clone()
-    }
-}
-
-impl Drop for LiveQaHttpServer {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
-fn loopback_policy(port: u16) -> NetworkPolicy {
-    NetworkPolicy {
-        allowed_targets: vec![NetworkTargetPattern {
-            scheme: Some(NetworkScheme::Http),
-            host_pattern: "127.0.0.1".to_string(),
-            port: Some(port),
-        }],
-        deny_private_ip_ranges: false,
-        max_egress_bytes: Some(10_000),
-    }
 }

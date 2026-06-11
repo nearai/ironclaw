@@ -16,8 +16,6 @@
 mod reborn_support;
 mod support;
 
-use std::sync::{Arc, Mutex};
-
 use axum::{
     Json, Router,
     extract::State,
@@ -25,7 +23,7 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
-use ironclaw_host_api::{CapabilityId, NetworkPolicy, NetworkScheme, NetworkTargetPattern};
+use ironclaw_host_api::CapabilityId;
 use ironclaw_host_runtime::{HTTP_CAPABILITY_ID, READ_FILE_CAPABILITY_ID};
 use ironclaw_loop_support::HostManagedModelResponse;
 use ironclaw_turns::TurnStatus;
@@ -34,6 +32,7 @@ use reborn_support::{
     model_replay::{
         RebornModelReplayStep, RebornScriptedProviderToolCall, RebornTraceReplayModelGateway,
     },
+    network::{LiveLoopbackHttpServer, LiveLoopbackHttpState, loopback_http_policy},
 };
 
 const STRATEGY_DOC_CONTENT: &str = "NEAR AI Strategy: user-owned agents are the core pillar; users keep custody of credentials and data.";
@@ -106,7 +105,8 @@ async fn reborn_qa_meeting_prep_references_company_doc_and_latest_news() {
     let read_file = CapabilityId::new(READ_FILE_CAPABILITY_ID).expect("valid capability id");
     let http = CapabilityId::new(HTTP_CAPABILITY_ID).expect("valid capability id");
     let server =
-        LiveNewsHttpServer::start(Router::new().route("/news/pepsico", get(company_news))).await;
+        LiveLoopbackHttpServer::start(Router::new().route("/news/pepsico", get(company_news)))
+            .await;
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![
@@ -135,7 +135,7 @@ async fn reborn_qa_meeting_prep_references_company_doc_and_latest_news() {
         RebornBinaryE2EHarness::with_host_runtime_core_builtin_capabilities_live_http_egress(
             "room-qa-meeting-prep",
             model_gateway,
-            loopback_policy(server.port),
+            loopback_http_policy(server.port()),
         )
         .await
         .expect("harness");
@@ -195,7 +195,7 @@ fn seed_drive_doc(harness: &RebornBinaryE2EHarness, relative: &str, content: &st
     std::fs::write(path, content).expect("write drive doc");
 }
 
-async fn company_news(State(state): State<LiveNewsHttpState>, uri: Uri) -> impl IntoResponse {
+async fn company_news(State(state): State<LiveLoopbackHttpState>, uri: Uri) -> impl IntoResponse {
     state.record(&uri);
     (
         StatusCode::OK,
@@ -207,78 +207,4 @@ async fn company_news(State(state): State<LiveNewsHttpState>, uri: Uri) -> impl 
         })),
     )
         .into_response()
-}
-
-#[derive(Clone)]
-struct LiveNewsHttpState {
-    requests: Arc<Mutex<Vec<String>>>,
-}
-
-impl LiveNewsHttpState {
-    fn record(&self, uri: &Uri) {
-        self.requests
-            .lock()
-            .expect("live news request log lock poisoned")
-            .push(
-                uri.path_and_query()
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| uri.path().to_string()),
-            );
-    }
-}
-
-struct LiveNewsHttpServer {
-    port: u16,
-    requests: Arc<Mutex<Vec<String>>>,
-    task: tokio::task::JoinHandle<()>,
-}
-
-impl LiveNewsHttpServer {
-    async fn start(routes: Router<LiveNewsHttpState>) -> Self {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .expect("bind live news test server");
-        let port = listener.local_addr().expect("local addr").port();
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let app = routes.with_state(LiveNewsHttpState {
-            requests: Arc::clone(&requests),
-        });
-        let task = tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        Self {
-            port,
-            requests,
-            task,
-        }
-    }
-
-    fn url(&self, path_and_query: &str) -> String {
-        format!("http://127.0.0.1:{}{path_and_query}", self.port)
-    }
-
-    fn requests(&self) -> Vec<String> {
-        self.requests
-            .lock()
-            .expect("live news request log lock poisoned")
-            .clone()
-    }
-}
-
-impl Drop for LiveNewsHttpServer {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
-fn loopback_policy(port: u16) -> NetworkPolicy {
-    NetworkPolicy {
-        allowed_targets: vec![NetworkTargetPattern {
-            scheme: Some(NetworkScheme::Http),
-            host_pattern: "127.0.0.1".to_string(),
-            port: Some(port),
-        }],
-        deny_private_ip_ranges: false,
-        max_egress_bytes: Some(10_000),
-    }
 }

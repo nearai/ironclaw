@@ -334,7 +334,7 @@ async fn reborn_qa_routine_created_by_tool_fires_and_runs_routine_prompt() {
         .await
         .expect("get created trigger")
         .expect("created trigger persisted");
-    record.next_run_at = Utc::now() - chrono::Duration::seconds(120);
+    record.next_run_at = Utc::now() - chrono::Duration::try_seconds(120).expect("valid duration");
     repo.upsert_trigger(record)
         .await
         .expect("make created routine due");
@@ -482,7 +482,7 @@ async fn reborn_qa_fired_routine_executes_action_and_finalizes_reply() {
         .await
         .expect("get created trigger")
         .expect("created trigger persisted");
-    record.next_run_at = Utc::now() - chrono::Duration::seconds(120);
+    record.next_run_at = Utc::now() - chrono::Duration::try_seconds(120).expect("valid duration");
     repo.upsert_trigger(record)
         .await
         .expect("make created routine due");
