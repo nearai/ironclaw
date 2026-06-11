@@ -38,6 +38,9 @@ env:
   # cfg!(test) covers unit tests; this covers integration/e2e that link the
   # non-cfg(test) library.
   IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
+  # GitHub-hosted runners can crash lld with bus errors when several large
+  # Reborn test binaries link concurrently.
+  CARGO_BUILD_JOBS: "1"
 
 jobs:
   changes:
