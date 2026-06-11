@@ -1067,8 +1067,7 @@ fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
         .transpose()?;
     let schedule_expression = required_text(row, SCHEDULE_EXPRESSION_COL, "schedule_expression")?;
     let schedule_timezone = required_text(row, SCHEDULE_TIMEZONE_COL, "schedule_timezone")?;
-    let schedule = TriggerSchedule::cron_with_timezone(schedule_expression, schedule_timezone)
-        .map_err(|error| invalid_record("schedule", error.to_string()))?;
+    let schedule = TriggerSchedule::cron_with_timezone(schedule_expression, schedule_timezone)?;
     let last_run_at = optional_text(row, LAST_RUN_AT_COL, "last_run_at")?
         .map(|value| parse_timestamp(&value, "last_run_at"))
         .transpose()?;
