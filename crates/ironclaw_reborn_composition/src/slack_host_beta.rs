@@ -255,8 +255,6 @@ pub struct SlackHostBetaMounts {
     pub events: PublicRouteMount,
     pub personal_binding_pairing: SlackPersonalBindingPairingRouteConfig,
     pub channel_routes: SlackChannelRouteAdminRouteConfig,
-    /// Internal target-authority handle consumed only by WebUI product-facade composition.
-    pub(crate) outbound_delivery_target_provider: Arc<dyn OutboundDeliveryTargetProvider>,
 }
 
 pub fn build_slack_events_route_mount(
@@ -437,11 +435,8 @@ pub fn build_slack_host_beta_mounts(
         }
     }
 
-    Ok(SlackHostBetaMounts {
-        events,
-        personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
-        channel_routes,
-        outbound_delivery_target_provider: Arc::new(SlackHostBetaOutboundTargetProvider::new(
+    let outbound_delivery_target_provider: Arc<dyn OutboundDeliveryTargetProvider> =
+        Arc::new(SlackHostBetaOutboundTargetProvider::new(
             SlackOutboundTargetProviderConfig {
                 tenant_id: config.tenant_id.clone(),
                 agent_id: config.agent_id.clone(),
@@ -461,7 +456,16 @@ pub fn build_slack_host_beta_mounts(
             },
             channel_route_store,
             Arc::clone(&personal_dm_target_store),
-        )),
+        ));
+    runtime.register_outbound_delivery_target_provider(
+        format!("slack:{}", config.installation_id.as_str()),
+        Arc::clone(&outbound_delivery_target_provider),
+    );
+
+    Ok(SlackHostBetaMounts {
+        events,
+        personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
+        channel_routes,
     })
 }
 

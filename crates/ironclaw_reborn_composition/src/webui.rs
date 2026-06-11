@@ -76,9 +76,12 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     runtime: &RebornRuntime,
     event_stream: Option<Arc<dyn ProjectionStream>>,
     connectable_channels: Option<Arc<dyn ConnectableChannelsProductFacade>>,
-    outbound_delivery_target_providers: Vec<Arc<dyn OutboundDeliveryTargetProvider>>,
+    mut outbound_delivery_target_providers: Vec<Arc<dyn OutboundDeliveryTargetProvider>>,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
     let services = runtime.services();
+    if let Some(provider) = runtime.outbound_delivery_target_provider() {
+        outbound_delivery_target_providers.push(provider);
+    }
 
     let mut api = ProductRebornServices::new(
         runtime.webui_thread_service(),
