@@ -27,8 +27,9 @@ use ironclaw_product_adapters::{
     DeclaredEgressHost, EgressCredentialHandle, EgressHeader, EgressMethod, EgressPath,
     EgressRequest, EgressResponse, ExternalActorRef, ExternalConversationRef, FinalReplyView,
     GatePromptView, OutboundDeliverySink, ProductAdapter, ProductAdapterError, ProductInboundAck,
-    ProductInboundEnvelope, ProductInboundPayload, ProductOutboundPayload, ProductTriggerReason,
-    ProtocolHttpEgress, ProtocolHttpEgressError,
+    ProductInboundEnvelope, ProductInboundPayload, ProductOutboundPayload, ProductRejection,
+    ProductRejectionKind, ProductTriggerReason, ProductWorkflowRejectionKind, ProtocolHttpEgress,
+    ProtocolHttpEgressError,
 };
 use ironclaw_product_workflow::{
     ConversationBindingService, ProductOutboundDeliveryRequest, ProductOutboundTargetResolver,
@@ -145,26 +146,6 @@ impl SlackFinalReplyDeliveryObserver {
                 SLACK_AUTH_CANCELED_MESSAGE,
             )
             .await?;
-            return Ok(());
-        }
-        // A2: For rejected resolution attempts, post a user-facing hint back to the
-        // conversation so the user knows why their approve/deny was not processed.
-        if let Some(hint) = rejection_hint_for_resolution(&envelope, &ack) {
-            if let Err(error) = post_slack_message(
-                self.services.egress.as_ref(),
-                envelope.external_conversation_ref(),
-                hint,
-            )
-            .await
-            {
-                tracing::debug!(
-                    target = "ironclaw::reborn::slack_delivery",
-                    error = %error,
-                    "failed to post rejection hint to Slack (best-effort)"
-                );
-            }
-            // A rejected resolution ack never carries a run to deliver; return
-            // explicitly rather than relying on the guards below to no-op.
             return Ok(());
         }
         if !should_deliver_after_ack(&envelope, &ack) {
@@ -500,6 +481,43 @@ impl SlackFinalReplyDeliveryObserver {
             );
         }
     }
+
+    async fn post_rejection_hint_if_authorized(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        ack: &ProductInboundAck,
+    ) -> bool {
+        let Some(hint) = rejection_hint_for_resolution(envelope, ack) else {
+            return false;
+        };
+        if let Err(error) = self
+            .services
+            .binding_service
+            .lookup_binding(ResolveBindingRequest::from_envelope(envelope))
+            .await
+        {
+            tracing::debug!(
+                target = "ironclaw::reborn::slack_delivery",
+                error = %error,
+                "skipped Slack rejection hint because the originating conversation was not authorized"
+            );
+            return true;
+        }
+        if let Err(error) = post_slack_message(
+            self.services.egress.as_ref(),
+            envelope.external_conversation_ref(),
+            hint,
+        )
+        .await
+        {
+            tracing::debug!(
+                target = "ironclaw::reborn::slack_delivery",
+                error = %error,
+                "failed to post rejection hint to Slack (best-effort)"
+            );
+        }
+        true
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -767,6 +785,15 @@ fn jittered_poll_interval(base: Duration, run_id: &TurnRunId) -> Duration {
 #[async_trait]
 impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
     async fn observe_workflow_ack(&self, envelope: ProductInboundEnvelope, ack: ProductInboundAck) {
+        // A2: rejected approval/auth feedback is a single best-effort post, not a
+        // long-running final delivery. Handle it before taking the shared delivery
+        // semaphore so it cannot queue behind runs that may poll until max_wait.
+        if self
+            .post_rejection_hint_if_authorized(&envelope, &ack)
+            .await
+        {
+            return;
+        }
         let Ok(_permit) = self.delivery_permits.clone().acquire_owned().await else {
             tracing::warn!(
                 target = "ironclaw::reborn::slack_delivery",
@@ -805,6 +832,18 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
                 );
             }
         }
+    }
+
+    async fn observe_workflow_error(
+        &self,
+        envelope: ProductInboundEnvelope,
+        error: ProductAdapterError,
+    ) {
+        let Some(ack) = rejection_ack_for_workflow_error(&error) else {
+            return;
+        };
+        self.post_rejection_hint_if_authorized(&envelope, &ack)
+            .await;
     }
 }
 
@@ -958,6 +997,34 @@ fn rejection_hint_for_resolution(
         _ => effective_rejection.kind.user_facing_hint(),
     };
     Some(hint)
+}
+
+fn rejection_ack_for_workflow_error(error: &ProductAdapterError) -> Option<ProductInboundAck> {
+    match error {
+        ProductAdapterError::WorkflowRejected {
+            kind,
+            retryable: false,
+            ..
+        } => Some(ProductInboundAck::Rejected(ProductRejection::permanent(
+            product_rejection_kind_for_workflow_rejection(*kind),
+            "workflow rejected resolution",
+        ))),
+        _ => None,
+    }
+}
+
+fn product_rejection_kind_for_workflow_rejection(
+    kind: ProductWorkflowRejectionKind,
+) -> ProductRejectionKind {
+    match kind {
+        ProductWorkflowRejectionKind::ScopeNotFound => ProductRejectionKind::BindingRequired,
+        ProductWorkflowRejectionKind::Unauthorized => ProductRejectionKind::AccessDenied,
+        ProductWorkflowRejectionKind::InvalidRequest => ProductRejectionKind::InvalidRequest,
+        ProductWorkflowRejectionKind::ThreadBusy
+        | ProductWorkflowRejectionKind::AdmissionRejected
+        | ProductWorkflowRejectionKind::Unavailable
+        | ProductWorkflowRejectionKind::Conflict => ProductRejectionKind::PolicyDenied,
+    }
 }
 
 fn is_accepted_auth_denial(envelope: &ProductInboundEnvelope, ack: &ProductInboundAck) -> bool {
@@ -2752,14 +2819,20 @@ mod tests {
         outbound: Arc<InMemoryOutboundStateStore>,
         installation_id: &str,
     ) -> SlackFinalReplyDeliveryObserver {
+        use ironclaw_product_workflow::FakeConversationBindingService;
+
         let thread_service = Arc::new(InMemorySessionThreadService::default());
-        let services = make_services(
-            coordinator,
+        let services = SlackFinalReplyDeliveryServices {
+            binding_service: Arc::new(FakeConversationBindingService::new()),
             thread_service,
+            turn_coordinator: coordinator,
+            outbound_store: outbound.clone(),
+            communication_preferences: outbound,
+            adapter: test_adapter(installation_id),
             egress,
-            outbound,
-            installation_id,
-        );
+            delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
+            auth_challenges: None,
+        };
         let settings = SlackFinalReplyDeliverySettings {
             poll_interval: std::time::Duration::ZERO,
             max_wait: std::time::Duration::from_millis(1),
@@ -2782,6 +2855,16 @@ mod tests {
                 ironclaw_product_adapters::ApprovalDecision::ApproveOnce,
             )
             .expect("scoped approval resolution"),
+        )
+    }
+
+    fn approval_resolution_payload() -> ProductInboundPayload {
+        ProductInboundPayload::ApprovalResolution(
+            ironclaw_product_adapters::ApprovalResolutionPayload::new(
+                "gate:approval-hint-test",
+                ironclaw_product_adapters::ApprovalDecision::ApproveOnce,
+            )
+            .expect("approval resolution"),
         )
     }
 
@@ -2836,6 +2919,47 @@ mod tests {
         assert!(
             body.contains("approve gate:"),
             "rejection hint body must contain 'approve gate:', got: {body}"
+        );
+    }
+
+    /// Rejected unscoped approval ack → hint posted to the envelope conversation.
+    #[tokio::test]
+    async fn rejected_approval_resolution_ack_posts_hint_to_conversation() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "1000.2"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::Running,
+        ));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+        let env = envelope(approval_resolution_payload());
+        let ack = rejected_ack(ironclaw_product_adapters::ProductRejectionKind::BindingRequired);
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "expected exactly one hint chat.postMessage call"
+        );
+        let body = std::str::from_utf8(&post_calls[0].body).expect("utf8 body");
+        assert!(
+            body.contains("approve gate:"),
+            "rejection hint body must contain approval guidance, got: {body}"
         );
     }
 
@@ -2895,6 +3019,34 @@ mod tests {
         );
     }
 
+    /// Duplicate { prior: Rejected } → nothing posted at observer level.
+    #[tokio::test]
+    async fn duplicate_rejected_ack_posts_nothing() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::Running,
+        ));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+        let env = envelope(scoped_approval_resolution_payload());
+        let ack = ProductInboundAck::Duplicate {
+            prior: Box::new(rejected_ack(
+                ironclaw_product_adapters::ProductRejectionKind::BindingRequired,
+            )),
+        };
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        let calls = egress.calls();
+        assert!(
+            !calls.iter().any(|c| c.path == "/api/chat.postMessage"),
+            "no chat.postMessage expected for Duplicate{{Rejected}}"
+        );
+    }
+
     /// All `Duplicate` acks suppress the hint, regardless of the prior inside.
     ///
     /// `Duplicate` is keyed on the external event id: transport retries of the
@@ -2926,6 +3078,36 @@ mod tests {
         assert!(
             rejection_hint_for_resolution(&env, &duplicate_accepted).is_none(),
             "Duplicate{{Accepted}} must not produce a hint"
+        );
+    }
+
+    /// A failed best-effort rejection-hint post must not fall through into generic
+    /// delivery-error feedback.
+    #[tokio::test]
+    async fn rejected_resolution_hint_post_failure_is_best_effort() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::Running,
+        ));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+        let env = envelope(scoped_approval_resolution_payload());
+        let ack = rejected_ack(ironclaw_product_adapters::ProductRejectionKind::BindingRequired);
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "expected exactly one failed best-effort hint post"
         );
     }
 
@@ -3180,6 +3362,101 @@ mod tests {
         );
     }
 
+    /// WorkflowRejected errors after protocol ACK still post resolution hints when
+    /// the originating conversation is authorized.
+    #[tokio::test]
+    async fn workflow_rejected_resolution_error_posts_authorized_hint() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "4500.1"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::Running,
+        ));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+        let env = envelope(scoped_approval_resolution_payload());
+        let error = ProductAdapterError::WorkflowRejected {
+            kind: ProductWorkflowRejectionKind::ScopeNotFound,
+            status_code: 404,
+            retryable: false,
+            reason: ironclaw_product_adapters::RedactedString::new("missing gate"),
+        };
+
+        observer.observe_workflow_error(env, error).await;
+
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "expected exactly one hint chat.postMessage call"
+        );
+        let body = std::str::from_utf8(&post_calls[0].body).expect("utf8 body");
+        assert!(
+            body.contains("approve gate:"),
+            "workflow rejection hint body must contain approval guidance, got: {body}"
+        );
+        assert!(
+            !body.contains("missing gate"),
+            "workflow rejection hint must not expose redacted reason, got: {body}"
+        );
+    }
+
+    /// If route/binding authorization fails, rejected-resolution feedback is
+    /// suppressed instead of posting to an arbitrary shared Slack conversation.
+    #[tokio::test]
+    async fn workflow_rejected_resolution_error_without_binding_posts_nothing() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::Running,
+        ));
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let services = make_services(
+            coordinator,
+            thread_service,
+            egress.clone(),
+            outbound,
+            install,
+        );
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_millis(1),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let observer = SlackFinalReplyDeliveryObserver::with_settings(services, settings);
+        let env = envelope(scoped_approval_resolution_payload());
+        let error = ProductAdapterError::WorkflowRejected {
+            kind: ProductWorkflowRejectionKind::ScopeNotFound,
+            status_code: 404,
+            retryable: false,
+            reason: ironclaw_product_adapters::RedactedString::new("missing gate"),
+        };
+
+        observer.observe_workflow_error(env, error).await;
+
+        let calls = egress.calls();
+        assert!(
+            !calls.iter().any(|c| c.path == "/api/chat.postMessage"),
+            "no chat.postMessage expected when binding authorization fails"
+        );
+    }
+
     /// When a blocked-state notification (approval prompt) was delivered and
     /// the subsequent wait times out, no additional timeout notice must be
     /// posted to Slack.
@@ -3281,6 +3558,85 @@ mod tests {
         assert!(
             body.contains(gate_ref_str),
             "approval prompt must reference the gate ref, body: {body}"
+        );
+    }
+
+    /// Same suppression as the approval-prompt case, but through the auth prompt
+    /// payload path.
+    #[tokio::test]
+    async fn timeout_after_auth_blocked_notification_suppresses_timeout_message() {
+        use ironclaw_product_workflow::FakeConversationBindingService;
+
+        let install = "test-install";
+        let gate_ref_str = "gate:auth-timeout-test";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "5000.2"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+            TurnStatus::BlockedAuth,
+            Some(gate_ref_str),
+        )]));
+
+        let binding_service = Arc::new(FakeConversationBindingService::new());
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let services = SlackFinalReplyDeliveryServices {
+            binding_service,
+            thread_service,
+            turn_coordinator: coordinator,
+            outbound_store: outbound.clone(),
+            communication_preferences: outbound,
+            adapter: test_adapter(install),
+            egress: egress.clone(),
+            delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
+            auth_challenges: None,
+        };
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_millis(1),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let observer = SlackFinalReplyDeliveryObserver::with_settings(services, settings);
+
+        let env = envelope(user_message_payload());
+        let ack = ProductInboundAck::Accepted {
+            accepted_message_ref: AcceptedMessageRef::new("slack:auth-blocked-timeout-test")
+                .expect("ref"),
+            submitted_run_id: TurnRunId::new(),
+        };
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "expected exactly one chat.postMessage (the auth prompt), bodies: {:?}",
+            post_calls
+                .iter()
+                .map(|c| std::str::from_utf8(&c.body).unwrap_or("?"))
+                .collect::<Vec<_>>()
+        );
+        let body = std::str::from_utf8(&post_calls[0].body).unwrap_or("");
+        assert!(
+            !body.contains("longer than expected"),
+            "timeout notice must not be posted after auth notification timeout, body: {body}"
+        );
+        assert!(
+            body.contains(gate_ref_str),
+            "auth prompt must reference the gate ref, body: {body}"
         );
     }
 
