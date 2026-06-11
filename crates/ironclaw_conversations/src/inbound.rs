@@ -541,7 +541,7 @@ mod tests {
         assert_eq!(binding.trusted_calls(), 1);
         assert_eq!(
             binding.trusted_scopes(),
-            vec![(Some(agent()), Some(project()))]
+            vec![(Some(agent()), Some(project()), None)]
         );
         let resolve_requests = binding.resolve_requests();
         assert_eq!(resolve_requests.len(), 1);
@@ -579,7 +579,7 @@ mod tests {
         assert!(matches!(err, InboundTurnError::BindingRequired { .. }));
         assert_eq!(
             binding.trusted_scopes(),
-            vec![(Some(agent()), Some(project()))]
+            vec![(Some(agent()), Some(project()), None)]
         );
         let resolve_requests = binding.resolve_requests();
         assert_eq!(resolve_requests.len(), 1);
@@ -611,7 +611,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(binding.trusted_scopes(), vec![(None, None)]);
+        assert_eq!(binding.trusted_scopes(), vec![(None, None, None)]);
         let resolve_requests = binding.resolve_requests();
         assert_eq!(resolve_requests.len(), 1);
         assert_eq!(resolve_requests[0].requested_agent_id, None);
@@ -1017,7 +1017,7 @@ mod tests {
         ProjectId::new("project").unwrap()
     }
 
-    type TrustedScopeRecord = (Option<AgentId>, Option<ProjectId>);
+    type TrustedScopeRecord = (Option<AgentId>, Option<ProjectId>, Option<UserId>);
     type TrustedScopeRecords = Arc<Mutex<Vec<TrustedScopeRecord>>>;
 
     #[derive(Clone)]
@@ -1044,7 +1044,7 @@ mod tests {
             self.resolve_requests.lock().unwrap().clone()
         }
 
-        fn trusted_scopes(&self) -> Vec<(Option<AgentId>, Option<ProjectId>)> {
+        fn trusted_scopes(&self) -> Vec<(Option<AgentId>, Option<ProjectId>, Option<UserId>)> {
             self.trusted_scopes.lock().unwrap().clone()
         }
     }
@@ -1066,10 +1066,11 @@ mod tests {
             trusted_owner_user_id: Option<UserId>,
         ) -> Result<ConversationBindingResolution, InboundTurnError> {
             self.resolve_requests.lock().unwrap().push(request.clone());
-            self.trusted_scopes
-                .lock()
-                .unwrap()
-                .push((trusted_agent_id.clone(), trusted_project_id.clone()));
+            self.trusted_scopes.lock().unwrap().push((
+                trusted_agent_id.clone(),
+                trusted_project_id.clone(),
+                trusted_owner_user_id.clone(),
+            ));
             self.inner
                 .resolve_or_create_binding_with_trusted_scope(
                     request,
@@ -1116,7 +1117,7 @@ mod tests {
             }
         }
 
-        fn trusted_scopes(&self) -> Vec<(Option<AgentId>, Option<ProjectId>)> {
+        fn trusted_scopes(&self) -> Vec<(Option<AgentId>, Option<ProjectId>, Option<UserId>)> {
             self.trusted_scopes.lock().unwrap().clone()
         }
 
@@ -1139,13 +1140,14 @@ mod tests {
             request: crate::ResolveConversationRequest,
             trusted_agent_id: Option<AgentId>,
             trusted_project_id: Option<ProjectId>,
-            _trusted_owner_user_id: Option<UserId>,
+            trusted_owner_user_id: Option<UserId>,
         ) -> Result<ConversationBindingResolution, InboundTurnError> {
             self.resolve_requests.lock().unwrap().push(request);
-            self.trusted_scopes
-                .lock()
-                .unwrap()
-                .push((trusted_agent_id, trusted_project_id));
+            self.trusted_scopes.lock().unwrap().push((
+                trusted_agent_id,
+                trusted_project_id,
+                trusted_owner_user_id,
+            ));
             Err(InboundTurnError::BindingRequired {
                 adapter_kind: "trusted".to_string(),
                 external_actor_id: "trusted".to_string(),
