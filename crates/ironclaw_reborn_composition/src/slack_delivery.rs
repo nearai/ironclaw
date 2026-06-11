@@ -149,19 +149,23 @@ impl SlackFinalReplyDeliveryObserver {
         }
         // A2: For rejected resolution attempts, post a user-facing hint back to the
         // conversation so the user knows why their approve/deny was not processed.
-        if let Some(hint) = rejection_hint_for_resolution(&envelope, &ack)
-            && let Err(error) = post_slack_message(
+        if let Some(hint) = rejection_hint_for_resolution(&envelope, &ack) {
+            if let Err(error) = post_slack_message(
                 self.services.egress.as_ref(),
                 envelope.external_conversation_ref(),
                 hint,
             )
             .await
-        {
-            tracing::debug!(
-                target = "ironclaw::reborn::slack_delivery",
-                error = %error,
-                "failed to post rejection hint to Slack (best-effort)"
-            );
+            {
+                tracing::debug!(
+                    target = "ironclaw::reborn::slack_delivery",
+                    error = %error,
+                    "failed to post rejection hint to Slack (best-effort)"
+                );
+            }
+            // A rejected resolution ack never carries a run to deliver; return
+            // explicitly rather than relying on the guards below to no-op.
+            return Ok(());
         }
         if !should_deliver_after_ack(&envelope, &ack) {
             return Ok(());
@@ -925,8 +929,13 @@ fn rejection_hint_for_resolution(
     envelope: &ProductInboundEnvelope,
     ack: &ProductInboundAck,
 ) -> Option<&'static str> {
-    // Unwrap Duplicate recursively, but only one level — a re-sent approve that
-    // was already accepted must not produce an error message.
+    // Deliberately unwrap Duplicate exactly one level, not recursively: the
+    // inbound ledger stores the original (non-Duplicate) ack as `prior`, so a
+    // re-sent approve always arrives as Duplicate{original}. Deeper nesting
+    // would mean the ledger stored a Duplicate, which the pipeline never
+    // produces, so it is treated as non-rejected (no hint) rather than
+    // unwrapped further. A re-sent approve whose original succeeded
+    // (Duplicate{Accepted}) must not produce an error message.
     let effective_rejection: &ProductRejection = match ack {
         ProductInboundAck::Rejected(rejection) => rejection,
         ProductInboundAck::Duplicate { prior } => match prior.as_ref() {
@@ -2884,6 +2893,38 @@ mod tests {
         );
     }
 
+    /// Duplicate unwrapping is deliberately single-level: Duplicate{Rejected}
+    /// posts a hint, but Duplicate{Duplicate{Rejected}} does not. The inbound
+    /// ledger stores the original ack as `prior`, so duplicates wrap exactly
+    /// one level; deeper nesting never occurs in the pipeline and is treated
+    /// as non-rejected.
+    #[test]
+    fn rejection_hint_unwraps_duplicate_exactly_one_level() {
+        let env = envelope(scoped_approval_resolution_payload());
+
+        let single = ProductInboundAck::Duplicate {
+            prior: Box::new(rejected_ack(
+                ironclaw_product_adapters::ProductRejectionKind::BindingRequired,
+            )),
+        };
+        assert!(
+            rejection_hint_for_resolution(&env, &single).is_some(),
+            "Duplicate{{Rejected}} must produce a hint"
+        );
+
+        let double = ProductInboundAck::Duplicate {
+            prior: Box::new(ProductInboundAck::Duplicate {
+                prior: Box::new(rejected_ack(
+                    ironclaw_product_adapters::ProductRejectionKind::BindingRequired,
+                )),
+            }),
+        };
+        assert!(
+            rejection_hint_for_resolution(&env, &double).is_none(),
+            "Duplicate{{Duplicate{{Rejected}}}} must not produce a hint (single-level unwrap)"
+        );
+    }
+
     /// Delivery error (RunWaitTimedOut) → timeout notice posted to conversation.
     ///
     /// Uses `FakeConversationBindingService` so the binding lookup succeeds and
@@ -2961,14 +3002,12 @@ mod tests {
             "expected at least one chat.postMessage for timeout notice"
         );
 
-        // At least one post must contain the timeout message text.
-        let timeout_found = post_calls.iter().any(|c| {
-            let body = std::str::from_utf8(&c.body).unwrap_or("");
-            body.contains("longer than expected")
-        });
+        // The timeout notice must be the final post — a working message may
+        // precede it, but nothing should be posted after the timeout notice.
+        let last_body = std::str::from_utf8(&post_calls[post_calls.len() - 1].body).unwrap_or("");
         assert!(
-            timeout_found,
-            "at least one chat.postMessage must contain timeout notice text, bodies: {:?}",
+            last_body.contains("longer than expected"),
+            "last chat.postMessage must contain timeout notice text, bodies: {:?}",
             post_calls
                 .iter()
                 .map(|c| std::str::from_utf8(&c.body).unwrap_or("?"))

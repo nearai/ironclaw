@@ -1059,5 +1059,19 @@ mod tests {
                 "{kind:?} hint '{hint}' must contain '{expected_substr}'"
             );
         }
+
+        // Hints must be pairwise distinct — two kinds sharing a hint would
+        // make the user-facing feedback ambiguous about what went wrong.
+        let mut hints: Vec<&str> = cases
+            .iter()
+            .map(|(kind, _)| kind.user_facing_hint())
+            .collect();
+        hints.sort_unstable();
+        hints.dedup();
+        assert_eq!(
+            hints.len(),
+            cases.len(),
+            "every ProductRejectionKind must have a distinct user-facing hint"
+        );
     }
 }
