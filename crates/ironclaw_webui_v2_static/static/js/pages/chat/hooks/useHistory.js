@@ -4,11 +4,23 @@ import { messagesFromTimeline } from "../lib/history-messages.js";
 
 const PAGE_SIZE = 50;
 
+/* Session-lived per-thread message cache (survives component unmount).
+ *
+ * Returning to a conversation — e.g. after visiting Settings, which
+ * unmounts the whole chat page — used to reset messages to [] and
+ * re-fetch from scratch, flashing an empty list before the timeline
+ * landed. This cache lets us render the last-known messages instantly
+ * and refresh in the background (stale-while-revalidate), so the
+ * content area no longer flickers. It is an in-memory cache, not a
+ * source of truth; the /timeline endpoint remains authoritative. */
+const historyCache = new Map();
+
 export function useHistory(threadId, options = {}) {
   const { getPendingMessages, setPendingMessages } = options;
+  const cached = threadId ? historyCache.get(threadId) : null;
   const [state, setState] = React.useState({
-    messages: [],
-    nextCursor: null,
+    messages: cached?.messages || [],
+    nextCursor: cached?.nextCursor || null,
     isLoading: false,
   });
   // Synchronous reentrancy guard — `isLoading` in state is async so
@@ -17,6 +29,11 @@ export function useHistory(threadId, options = {}) {
   // first await and clears in `finally` so a thrown timeline call
   // doesn't permanently wedge the next load.
   const loadingRef = React.useRef(false);
+  // Tracks the currently-active thread so a fetch that resolves after
+  // the user has switched threads doesn't clobber the live view (its
+  // result still goes into the cache, keyed by its own thread id).
+  const threadIdRef = React.useRef(threadId);
+  threadIdRef.current = threadId;
 
   const loadHistory = React.useCallback(
     async (cursor) => {
@@ -36,23 +53,37 @@ export function useHistory(threadId, options = {}) {
 
         const pendingMessages = cursor ? [] : getPendingMessages?.() || [];
         const renderable = messagesFromTimeline(data.messages || [], pendingMessages);
+        const nextCursor = data.next_cursor || null;
 
         // RebornTimelineResponse.next_cursor === null means we reached
         // the start of the thread.
         if (!cursor) setPendingMessages?.([]);
 
+        // A full (non-paginated) load can be cached without the previous
+        // state, so refresh the cache even if the user has since switched
+        // threads.
+        if (!cursor) {
+          historyCache.set(threadId, { messages: renderable, nextCursor });
+        }
+
         setState((prev) => {
+          // Stale resolve for a thread that's no longer active: leave the
+          // live view alone (the cache above already captured the result).
+          if (threadIdRef.current !== threadId) return prev;
           const merged = cursor
             ? mergePage(renderable, prev.messages)
             : renderable;
+          if (cursor) historyCache.set(threadId, { messages: merged, nextCursor });
           return {
             messages: merged,
-            nextCursor: data.next_cursor || null,
+            nextCursor,
             isLoading: false,
           };
         });
       } catch (err) {
-        setState((s) => ({ ...s, isLoading: false }));
+        setState((s) =>
+          threadIdRef.current === threadId ? { ...s, isLoading: false } : s,
+        );
         // Stay loud — surface to the SPA error boundary rather than
         // silently masking timeline outages.
         console.error("Failed to load timeline:", err);
@@ -64,10 +95,14 @@ export function useHistory(threadId, options = {}) {
   );
 
   React.useEffect(() => {
+    const entry = threadId ? historyCache.get(threadId) : null;
     setState({
-      messages: [],
-      nextCursor: null,
-      isLoading: Boolean(threadId),
+      messages: entry?.messages || [],
+      nextCursor: entry?.nextCursor || null,
+      // Only show the loading state when nothing is cached to show;
+      // otherwise render the cached thread immediately and refresh in
+      // the background so the content area doesn't flash empty.
+      isLoading: Boolean(threadId) && !entry,
     });
     if (threadId) loadHistory();
   }, [threadId, loadHistory]);
@@ -79,10 +114,16 @@ export function useHistory(threadId, options = {}) {
     isLoading: state.isLoading,
     loadHistory,
     setMessages: (updater) =>
-      setState((s) => ({
-        ...s,
-        messages: typeof updater === "function" ? updater(s.messages) : updater,
-      })),
+      setState((s) => {
+        const messages =
+          typeof updater === "function" ? updater(s.messages) : updater;
+        // Keep the cache in step with optimistic sends and SSE-driven
+        // updates so returning to the thread shows the latest messages.
+        if (threadId) {
+          historyCache.set(threadId, { messages, nextCursor: s.nextCursor });
+        }
+        return { ...s, messages };
+      }),
   };
 }
 
