@@ -12,7 +12,7 @@ export function primaryExtensionAction(ext) {
     return "configure";
   }
 
-  if (ext.kind === "wasm_channel") {
+  if (ext.kind === "wasm_channel" || ext.kind === "channel") {
     return null;
   }
 

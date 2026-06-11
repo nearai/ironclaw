@@ -10,7 +10,8 @@ use ironclaw_host_api::{
 use ironclaw_product_workflow::{
     LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
     LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
-    LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError,
+    LifecycleExtensionSummary, LifecycleExtensionSurfaceKind, LifecyclePackageKind,
+    LifecyclePackageRef, ProductWorkflowError,
 };
 use toml::Value;
 
@@ -56,6 +57,9 @@ const WEB_ACCESS_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/web-access/manifest.toml");
 const NEARAI_MCP_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/nearai-mcp/manifest.toml");
+const SLACK_MANIFEST: &str =
+    include_str!("../../ironclaw_first_party_extensions/assets/slack/manifest.toml");
+const PRODUCT_ADAPTER_HOST_API_ID: &str = "ironclaw.product_adapter/v1";
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct AvailableExtensionAsset {
@@ -92,6 +96,7 @@ impl AvailableExtensionPackage {
             description: self.package.manifest.description.clone(),
             source: LifecycleExtensionSource::HostBundled,
             runtime_kind: runtime_kind(&self.package.manifest.runtime),
+            surface_kinds: surface_kinds(&self.package.manifest),
             visible_capability_ids,
             visible_read_only_capability_ids,
             credential_requirements: credential_requirements(self),
@@ -173,6 +178,18 @@ fn runtime_kind(runtime: &ExtensionRuntime) -> LifecycleExtensionRuntimeKind {
         ExtensionRuntime::FirstParty { .. } => LifecycleExtensionRuntimeKind::FirstParty,
         ExtensionRuntime::System { .. } => LifecycleExtensionRuntimeKind::System,
         ExtensionRuntime::Script { .. } => LifecycleExtensionRuntimeKind::Script,
+    }
+}
+
+fn surface_kinds(manifest: &ExtensionManifest) -> Vec<LifecycleExtensionSurfaceKind> {
+    if manifest
+        .host_apis
+        .iter()
+        .any(|host_api| host_api.id.as_str() == PRODUCT_ADAPTER_HOST_API_ID)
+    {
+        vec![LifecycleExtensionSurfaceKind::ProductAdapter]
+    } else {
+        Vec::new()
     }
 }
 
@@ -272,6 +289,7 @@ impl AvailableExtensionCatalog {
             google_sheets_package()?,
             google_slides_package()?,
             gmail_package()?,
+            slack_package()?,
         ]))
     }
 
@@ -446,6 +464,10 @@ fn gmail_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     bundled_extension_package("gmail", "Gmail", GMAIL_MANIFEST, gmail_assets())
 }
 
+fn slack_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    bundled_extension_package("slack", "Slack", SLACK_MANIFEST, slack_assets())
+}
+
 pub(crate) fn google_calendar_manifest_digest() -> String {
     sha256_digest_token(GOOGLE_CALENDAR_MANIFEST.as_bytes())
 }
@@ -476,6 +498,10 @@ pub(crate) fn notion_mcp_manifest_digest() -> String {
 
 pub(crate) fn web_access_manifest_digest() -> String {
     sha256_digest_token(WEB_ACCESS_MANIFEST.as_bytes())
+}
+
+pub(crate) fn slack_manifest_digest() -> String {
+    sha256_digest_token(SLACK_MANIFEST.as_bytes())
 }
 
 pub(crate) fn nearai_mcp_manifest_toml_for_config(
@@ -1251,6 +1277,10 @@ fn gmail_assets() -> Vec<AvailableExtensionAsset> {
     ]
 }
 
+fn slack_assets() -> Vec<AvailableExtensionAsset> {
+    vec![bytes_asset("manifest.toml", SLACK_MANIFEST.as_bytes())]
+}
+
 fn bytes_asset(path: &str, bytes: &[u8]) -> AvailableExtensionAsset {
     AvailableExtensionAsset {
         path: path.to_string(),
@@ -1770,6 +1800,32 @@ mod tests {
         assert!(upload_file.effects.contains(&EffectKind::ExternalWrite));
     }
 
+    #[test]
+    fn bundled_slack_package_declares_product_adapter_channel_surface() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").unwrap();
+        let package = catalog.resolve(&package_ref).unwrap();
+
+        assert_eq!(package.package.manifest.id.as_str(), "slack");
+        assert!(matches!(
+            package.package.manifest.runtime,
+            ExtensionRuntime::FirstParty { ref service } if service == "slack_v2_host_beta"
+        ));
+        assert_eq!(package.package.manifest.capabilities.len(), 0);
+        assert!(package.package.manifest.host_apis.iter().any(|host_api| {
+            host_api.id.as_str() == PRODUCT_ADAPTER_HOST_API_ID
+                && host_api.section.as_str() == "product_adapter.host_beta"
+        }));
+
+        let summary = package.summary();
+        assert_eq!(
+            summary.surface_kinds,
+            vec![LifecycleExtensionSurfaceKind::ProductAdapter]
+        );
+        assert_eq!(summary.visible_capability_ids, Vec::<String>::new());
+    }
+
     #[tokio::test]
     async fn materialize_bundled_github_writes_manifest_schema_refs() {
         let fs = InMemoryBackend::default();
@@ -1810,6 +1866,7 @@ mod tests {
         assert!(google_sheets_manifest_digest().starts_with("sha256:"));
         assert!(google_slides_manifest_digest().starts_with("sha256:"));
         assert!(gmail_manifest_digest().starts_with("sha256:"));
+        assert!(slack_manifest_digest().starts_with("sha256:"));
     }
 
     #[test]

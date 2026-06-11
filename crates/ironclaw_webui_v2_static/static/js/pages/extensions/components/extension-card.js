@@ -27,6 +27,10 @@ function packageId(item) {
   return item.package_ref?.id || "";
 }
 
+function isChannelKind(kind) {
+  return kind === "wasm_channel" || kind === "channel";
+}
+
 /* Lightweight overflow menu. Real <button>s; closes on outside click. */
 function OverflowMenu({ actions, isBusy }) {
   const t = useT();
@@ -144,7 +148,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
       run: () => onConfigure(configurePayload),
     });
   }
-  if (canManage && ext.kind === "wasm_channel" && (state === "setup_required" || state === "failed")) {
+  if (canManage && isChannelKind(ext.kind) && (state === "setup_required" || state === "failed")) {
     overflowActions.push({
       id: "setup",
       label: "Setup",
@@ -154,7 +158,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   }
   if (
     canManage &&
-    ext.kind === "wasm_channel" &&
+    isChannelKind(ext.kind) &&
     (state === "active" || state === "ready" || state === "pairing_required" || state === "pairing")
   ) {
     overflowActions.push({
