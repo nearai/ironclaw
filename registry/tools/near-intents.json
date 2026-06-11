@@ -1,0 +1,16 @@
+{
+  "name": "near-intents",
+  "display_name": "Near Intents",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Token resolution, balance queries, and reverse lookups for NEAR Intents (Defuse protocol)",
+  "keywords": ["near", "intents", "defuse", "defi", "trading", "token"],
+  "source": {
+    "dir": "tools-src/near-intents",
+    "capabilities": "near-intents-tool.capabilities.json",
+    "crate_name": "near-intents-tool"
+  },
+  "artifacts": {},
+  "tags": ["trading"]
+}
