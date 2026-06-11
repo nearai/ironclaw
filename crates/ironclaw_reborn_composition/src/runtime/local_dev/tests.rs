@@ -1742,6 +1742,18 @@ mod tests {
             .await
             .expect("activate github extension");
 
+        let staged_after_activation = port
+            .register_provider_tool_call(provider_tool_call_with_name(
+                "github__search_issues",
+                serde_json::json!({"query": "repo:nearai/ironclaw is:issue"}),
+            ))
+            .await
+            .expect("provider registration should refresh newly activated extension surface");
+        assert_eq!(
+            staged_after_activation.capability_id.as_str(),
+            "github.search_issues"
+        );
+
         let active_surface = port
             .visible_capabilities(VisibleCapabilityRequest {})
             .await

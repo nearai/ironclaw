@@ -4,7 +4,9 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_first_party_extensions::is_gsuite_extension_id;
-use ironclaw_host_api::{CapabilityId, ExtensionId, VirtualPath, sha256_digest_token};
+use ironclaw_host_api::{
+    CapabilityId, ExtensionId, RuntimeCredentialAccountProviderId, VirtualPath, sha256_digest_token,
+};
 use ironclaw_product_workflow::{
     LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
     LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
@@ -215,7 +217,7 @@ fn credential_requirements(
                 } else {
                     group.handle.clone()
                 },
-                provider: group.provider.clone(),
+                provider: group.provider.as_str().to_string(),
                 required: group.required,
                 setup: group.setup.clone(),
             }
@@ -225,7 +227,7 @@ fn credential_requirements(
 
 struct CredentialRequirementGroup {
     handle: String,
-    provider: String,
+    provider: RuntimeCredentialAccountProviderId,
     required: bool,
     setup: LifecycleExtensionCredentialSetup,
 }
@@ -341,7 +343,7 @@ fn package_search_terms(package: &AvailableExtensionPackage) -> Vec<String> {
     for capability in &package.package.manifest.capabilities {
         for credential in &capability.runtime_credentials {
             if let Some((provider, _setup)) = product_auth_credential_source(credential) {
-                push_search_term(&mut terms, provider);
+                push_search_term(&mut terms, provider.as_str());
             }
         }
     }
@@ -1352,7 +1354,10 @@ where
         if entry.file_type != FileType::Directory {
             continue;
         }
-        if ExtensionId::new(entry.name.clone()).is_err() {
+        let Ok(extension_id) = ExtensionId::new(entry.name.clone()) else {
+            continue;
+        };
+        if reserved_host_bundled_extension_id(&extension_id) {
             continue;
         }
         let manifest_path = VirtualPath::new(format!(
@@ -1409,6 +1414,13 @@ where
         });
     }
     Ok(packages)
+}
+
+fn reserved_host_bundled_extension_id(extension_id: &ExtensionId) -> bool {
+    matches!(
+        extension_id.as_str(),
+        "github" | "notion" | "web-access" | "nearai"
+    ) || is_gsuite_extension_id(extension_id)
 }
 
 fn extension_asset_path(
@@ -1935,6 +1947,26 @@ mod tests {
         fs.write_file(
             &VirtualPath::new("/system/extensions/incomplete/cache/leftover").unwrap(),
             b"stale",
+        )
+        .await
+        .unwrap();
+
+        let catalog = AvailableExtensionCatalog::from_filesystem_root(
+            &fs,
+            &VirtualPath::new("/system/extensions").unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(catalog.search("").count(), 0);
+    }
+
+    #[tokio::test]
+    async fn filesystem_catalog_skips_reserved_host_bundled_extension_ids() {
+        let fs = InMemoryBackend::default();
+        fs.write_file(
+            &VirtualPath::new("/system/extensions/gmail/manifest.toml").unwrap(),
+            b"not parsed because gmail is host-bundled",
         )
         .await
         .unwrap();

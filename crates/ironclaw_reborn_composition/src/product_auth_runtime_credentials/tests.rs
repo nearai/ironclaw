@@ -33,8 +33,22 @@ fn resolver_with_refresh(
                 Arc::new(crate::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy),
             ),
         ),
-        Arc::new(ProductAuthRuntimeCredentialAccountRefresher::new(accounts)),
+        Arc::new(ProductAuthRuntimeCredentialAccountRefresher::new(Arc::new(
+            TestRuntimeCredentialRefreshPort(accounts),
+        ))),
     )
+}
+
+struct TestRuntimeCredentialRefreshPort(Arc<InMemoryAuthProductServices>);
+
+#[async_trait::async_trait]
+impl RuntimeCredentialAccountRefreshPort for TestRuntimeCredentialRefreshPort {
+    async fn refresh_credential_account(
+        &self,
+        request: CredentialRefreshRequest,
+    ) -> Result<CredentialRefreshReport, AuthProductError> {
+        self.0.refresh_account(request).await
+    }
 }
 
 #[tokio::test]
@@ -120,6 +134,104 @@ async fn resolver_refreshes_oauth_account_before_staging_access_secret() {
             .as_str()
             .starts_with("oauth-refreshed-access")
     );
+}
+
+#[tokio::test]
+async fn resolver_refreshes_gsuite_owned_account_with_owner_authority_for_sibling_requester() {
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let scope =
+        ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
+    let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+    let stale_access = SecretHandle::new("google_stale_gsuite_access").unwrap();
+    let calendar_scope =
+        ProviderScope::new("https://www.googleapis.com/auth/calendar.readonly").unwrap();
+    accounts
+        .create_account(NewCredentialAccount {
+            scope: auth_scope,
+            provider: AuthProviderId::new("google").unwrap(),
+            label: CredentialAccountLabel::new("google").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::ExtensionOwned,
+            owner_extension: Some(ExtensionId::new("google-drive").unwrap()),
+            granted_extensions: Vec::new(),
+            access_secret: Some(stale_access.clone()),
+            refresh_secret: Some(SecretHandle::new("google_gsuite_refresh").unwrap()),
+            scopes: vec![calendar_scope.clone()],
+        })
+        .await
+        .unwrap();
+    let resolver = resolver_with_refresh(accounts.clone());
+
+    let resolved = resolver
+        .resolve_access_secret(RuntimeCredentialAccountRequest {
+            scope: &scope,
+            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+            provider_scopes: &[calendar_scope.as_str().to_string()],
+            requester_extension: &ExtensionId::new("google-calendar").unwrap(),
+        })
+        .await
+        .expect("GSuite siblings should refresh through the selected account owner");
+
+    assert_ne!(resolved.handle, stale_access);
+    assert!(
+        resolved
+            .handle
+            .as_str()
+            .starts_with("oauth-refreshed-access")
+    );
+}
+
+#[tokio::test]
+async fn resolver_does_not_refresh_same_oauth_account_twice_during_runtime_staging() {
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let scope =
+        ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
+    let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+    let drive_scope = ProviderScope::new("https://www.googleapis.com/auth/drive.readonly").unwrap();
+    accounts
+        .create_account(NewCredentialAccount {
+            scope: auth_scope,
+            provider: AuthProviderId::new("google").unwrap(),
+            label: CredentialAccountLabel::new("google").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("google_stale_access_once").unwrap()),
+            refresh_secret: Some(SecretHandle::new("google_refresh_once").unwrap()),
+            scopes: vec![drive_scope.clone()],
+        })
+        .await
+        .unwrap();
+    let resolver = resolver_with_refresh(accounts.clone());
+    let provider = RuntimeCredentialAccountProviderId::new("google").unwrap();
+    let setup = RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() };
+    let provider_scopes = vec![drive_scope.as_str().to_string()];
+    let requester_extension = ExtensionId::new("google-drive").unwrap();
+
+    let first = resolver
+        .resolve_access_secret(RuntimeCredentialAccountRequest {
+            scope: &scope,
+            provider: &provider,
+            setup: &setup,
+            provider_scopes: &provider_scopes,
+            requester_extension: &requester_extension,
+        })
+        .await
+        .expect("first OAuth staging refreshes");
+    let second = resolver
+        .resolve_access_secret(RuntimeCredentialAccountRequest {
+            scope: &scope,
+            provider: &provider,
+            setup: &setup,
+            provider_scopes: &provider_scopes,
+            requester_extension: &requester_extension,
+        })
+        .await
+        .expect("second OAuth staging reuses refreshed account");
+
+    assert_eq!(second.handle, first.handle);
 }
 
 #[tokio::test]

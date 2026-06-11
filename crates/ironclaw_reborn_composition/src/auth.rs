@@ -32,7 +32,8 @@ use crate::oauth_dcr::{DcrGateChallengeRequest, DcrSetupFlowRequest, OAuthDcrPro
 use crate::oauth_gate::{GoogleOAuthGateProviderRegistry, OAuthGateChallengeRequest};
 use crate::product_auth_runtime_credentials::{
     ProductAuthRuntimeCredentialAccountRefresher, ProductAuthRuntimeCredentialAccountSelector,
-    RuntimeCredentialAccountRefreshService, RuntimeCredentialAccountSelectionService,
+    RuntimeCredentialAccountRefreshPort, RuntimeCredentialAccountRefreshService,
+    RuntimeCredentialAccountSelectionService,
 };
 use crate::{AuthChallengeProvider, AuthChallengeView};
 
@@ -637,10 +638,11 @@ impl RebornProductAuthServices {
     }
 
     pub(crate) fn runtime_credential_account_refresh_service(
-        &self,
+        self: &Arc<Self>,
     ) -> Arc<dyn RuntimeCredentialAccountRefreshService> {
+        let refresh_port: Arc<dyn RuntimeCredentialAccountRefreshPort> = self.clone();
         Arc::new(ProductAuthRuntimeCredentialAccountRefresher::new(
-            self.credential_account_service(),
+            refresh_port,
         ))
     }
 
@@ -1221,6 +1223,38 @@ impl RebornProductAuthServices {
         RebornProductAuthServicePorts::from_shared(services.clone())
             .into_services(continuation_dispatcher)
             .with_flow_record_source(services)
+    }
+}
+
+#[async_trait]
+impl RuntimeCredentialAccountRefreshPort for RebornProductAuthServices {
+    async fn refresh_credential_account(
+        &self,
+        request: CredentialRefreshRequest,
+    ) -> Result<CredentialRefreshReport, AuthProductError> {
+        RebornProductAuthServices::refresh_credential_account(self, request)
+            .await
+            .map_err(auth_product_error_from_reborn_error)
+    }
+}
+
+fn auth_product_error_from_reborn_error(error: RebornAuthProductError) -> AuthProductError {
+    match error.code {
+        AuthErrorCode::UnknownOrExpiredFlow => AuthProductError::UnknownOrExpiredFlow,
+        AuthErrorCode::CrossScopeDenied => AuthProductError::CrossScopeDenied,
+        AuthErrorCode::ProviderDenied => AuthProductError::ProviderDenied,
+        AuthErrorCode::TokenExchangeFailed => AuthProductError::TokenExchangeFailed,
+        AuthErrorCode::RefreshFailed => AuthProductError::RefreshFailed,
+        AuthErrorCode::CredentialMissing => AuthProductError::CredentialMissing,
+        AuthErrorCode::AccountSelectionRequired => AuthProductError::AccountSelectionRequired,
+        AuthErrorCode::BackendUnavailable => AuthProductError::BackendUnavailable,
+        AuthErrorCode::MalformedConfig => AuthProductError::MalformedConfig,
+        AuthErrorCode::MalformedCallback => AuthProductError::MalformedCallback,
+        AuthErrorCode::Canceled => AuthProductError::Canceled,
+        AuthErrorCode::FlowAlreadyTerminal => AuthProductError::FlowAlreadyTerminal,
+        AuthErrorCode::InvalidRequest => AuthProductError::InvalidRequest {
+            reason: "runtime credential refresh request rejected".to_string(),
+        },
     }
 }
 

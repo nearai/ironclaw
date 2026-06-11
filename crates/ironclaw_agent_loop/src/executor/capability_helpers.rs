@@ -58,7 +58,7 @@ pub(super) async fn pending_auth_resume_candidate(
     surface_version: CapabilitySurfaceVersion,
 ) -> Result<CapabilityCallCandidate, AgentLoopExecutorError> {
     if let Some(replay) = resume.provider_replay.as_ref() {
-        return host
+        let candidate = host
             .register_provider_tool_call(ProviderToolCall {
                 provider_id: replay.provider_id.clone(),
                 provider_model_id: replay.provider_model_id.clone(),
@@ -71,7 +71,15 @@ pub(super) async fn pending_auth_resume_candidate(
                 signature: replay.signature.clone(),
             })
             .await
-            .map_err(capability_host_error);
+            .map_err(capability_host_error)?;
+        if candidate.capability_id != resume.capability_id
+            || candidate.effective_capability_ids != resume.effective_capability_ids
+        {
+            return Err(AgentLoopExecutorError::PlannerContract {
+                detail: "auth resume provider replay no longer matches blocked capability",
+            });
+        }
+        return Ok(candidate);
     }
     Ok(pending_auth_resume_staged_input_candidate(
         resume,

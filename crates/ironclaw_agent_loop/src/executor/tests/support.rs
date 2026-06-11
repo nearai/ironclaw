@@ -58,6 +58,7 @@ pub(super) struct MockHost {
     batch_invocations: Arc<Mutex<Vec<CapabilityBatchInvocation>>>,
     single_invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
     registered_provider_calls: Arc<Mutex<Vec<ProviderToolCall>>>,
+    provider_registration_errors: Arc<Mutex<VecDeque<AgentLoopHostError>>>,
     staged_payloads: Arc<Mutex<Vec<StageCheckpointPayloadRequest>>>,
     appended_result_refs: Arc<Mutex<Vec<AppendCapabilityResultRef>>>,
     events: Arc<Mutex<Vec<String>>>,
@@ -95,6 +96,7 @@ impl MockHost {
             batch_invocations: Arc::new(Mutex::new(Vec::new())),
             single_invocations: Arc::new(Mutex::new(Vec::new())),
             registered_provider_calls: Arc::new(Mutex::new(Vec::new())),
+            provider_registration_errors: Arc::new(Mutex::new(VecDeque::new())),
             staged_payloads: Arc::new(Mutex::new(Vec::new())),
             appended_result_refs: Arc::new(Mutex::new(Vec::new())),
             events: Arc::new(Mutex::new(Vec::new())),
@@ -159,6 +161,11 @@ impl MockHost {
 
     pub(super) fn with_failing_prompt_bundle(mut self) -> Self {
         self.fail_prompt_bundle = true;
+        self
+    }
+
+    pub(super) fn with_provider_registration_errors(self, errors: Vec<AgentLoopHostError>) -> Self {
+        *self.provider_registration_errors.lock().expect("lock") = errors.into();
         self
     }
 
@@ -582,6 +589,14 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
         &self,
         tool_call: ProviderToolCall,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        if let Some(error) = self
+            .provider_registration_errors
+            .lock()
+            .expect("lock")
+            .pop_front()
+        {
+            return Err(error);
+        }
         let provider_turn_id = tool_call.turn_id.clone().ok_or_else(|| {
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,

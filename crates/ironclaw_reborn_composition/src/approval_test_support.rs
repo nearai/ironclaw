@@ -104,7 +104,7 @@ pub(crate) async fn invoke_with_local_dev_approval(
                 other => panic!("unexpected local-dev approval action: {other:?}"),
             };
 
-            let resumed = runtime
+            runtime
                 .resume_capability(RuntimeCapabilityResumeRequest::new(
                     context,
                     gate.approval_request_id,
@@ -114,8 +114,7 @@ pub(crate) async fn invoke_with_local_dev_approval(
                     trust_decision,
                 ))
                 .await
-                .expect("approved runtime invocation resumes"); // safety: test-only helper in #[cfg(test)] module.
-            resumed
+                .expect("approved runtime invocation resumes") // safety: test-only helper in #[cfg(test)] module.
         }
         other => other,
     }

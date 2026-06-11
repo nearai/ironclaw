@@ -1548,6 +1548,46 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn mcp_auth_context_preserves_product_auth_oauth_setup() {
+        let scopes = vec!["https://www.googleapis.com/auth/drive.readonly".to_string()];
+        let credential = RuntimeCredentialRequirement {
+            handle: SecretHandle::new("google-drive-access").unwrap(),
+            source: RuntimeCredentialRequirementSource::ProductAuthAccount {
+                provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("google")
+                    .unwrap(),
+                setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                    scopes: scopes.clone(),
+                },
+            },
+            provider_scopes: scopes.clone(),
+            audience: ironclaw_host_api::NetworkTargetPattern {
+                scheme: None,
+                host_pattern: "*".to_string(),
+                port: None,
+            },
+            target: ironclaw_host_api::RuntimeCredentialTarget::Header {
+                name: "authorization".to_string(),
+                prefix: Some("Bearer ".to_string()),
+            },
+            required: true,
+        };
+
+        let context = mcp_auth_context(&ExtensionId::new("google-drive").unwrap(), &[credential]);
+
+        assert!(context.required_secrets.is_empty());
+        assert_eq!(
+            context.credential_requirements,
+            vec![RuntimeCredentialAuthRequirement {
+                provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("google")
+                    .unwrap(),
+                setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth { scopes },
+                requester_extension: ExtensionId::new("google-drive").unwrap(),
+                provider_scopes: vec!["https://www.googleapis.com/auth/drive.readonly".to_string()],
+            }]
+        );
+    }
+
+    #[test]
     fn parse_tools_list_result_rejects_oversized_tool_list() {
         let tools = (0..129)
             .map(|index| valid_tool(&format!("tool-{index}"), json!({"type": "object"})))

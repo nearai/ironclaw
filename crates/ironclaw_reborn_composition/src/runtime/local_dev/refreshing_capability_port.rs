@@ -11,6 +11,7 @@ use ironclaw_turns::run_profile::{
     LoopHostMilestoneSink, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
     ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::local_dev_capability_policy::LocalDevCapabilityPolicy;
 use crate::runtime::LocalDevSelectableSkillContextSource;
@@ -53,6 +54,7 @@ pub(super) async fn create_refreshing_local_dev_capability_port(
         milestone_sink: config.milestone_sink,
         skill_activation_source: config.skill_activation_source,
         current: StdMutex::new(None),
+        refresh_lock: AsyncMutex::new(()),
     });
     let (initial, _) = port
         .refresh_with_surface(VisibleCapabilityRequest {})
@@ -75,6 +77,7 @@ struct RefreshingLocalDevCapabilityPort {
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
     current: StdMutex<Option<Arc<dyn LoopCapabilityPort>>>,
+    refresh_lock: AsyncMutex<()>,
 }
 
 impl RefreshingLocalDevCapabilityPort {
@@ -158,14 +161,21 @@ impl RefreshingLocalDevCapabilityPort {
         Ok(())
     }
 
+    async fn refresh_current(
+        &self,
+        request: VisibleCapabilityRequest,
+    ) -> Result<(Arc<dyn LoopCapabilityPort>, VisibleCapabilitySurface), AgentLoopHostError> {
+        let _guard = self.refresh_lock.lock().await;
+        let (port, surface) = self.refresh_with_surface(request).await?;
+        self.replace_current(port.clone())?;
+        Ok((port, surface))
+    }
+
     async fn current_or_refresh(&self) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         match self.current_port() {
             Ok(port) => Ok(port),
             Err(error) if error.kind == AgentLoopHostErrorKind::StaleSurface => {
-                let (port, _) = self
-                    .refresh_with_surface(VisibleCapabilityRequest {})
-                    .await?;
-                self.replace_current(port.clone())?;
+                let (port, _) = self.refresh_current(VisibleCapabilityRequest {}).await?;
                 Ok(port)
             }
             Err(error) => Err(error),
@@ -198,8 +208,9 @@ impl LoopCapabilityPort for RefreshingLocalDevCapabilityPort {
         &self,
         tool_call: ProviderToolCall,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        self.current_or_refresh()
+        self.refresh_current(VisibleCapabilityRequest {})
             .await?
+            .0
             .register_provider_tool_call(tool_call)
             .await
     }
@@ -208,8 +219,7 @@ impl LoopCapabilityPort for RefreshingLocalDevCapabilityPort {
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        let (port, surface) = self.refresh_with_surface(request).await?;
-        self.replace_current(port)?;
+        let (_, surface) = self.refresh_current(request).await?;
         Ok(surface)
     }
 

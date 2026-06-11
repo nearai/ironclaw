@@ -335,5 +335,11 @@ mod tests {
             requirement.provider_scopes,
             vec![ironclaw_auth::GOOGLE_GMAIL_READONLY_SCOPE.to_string()]
         );
+        assert_eq!(
+            requirement.setup,
+            RuntimeCredentialAccountSetup::OAuth {
+                scopes: vec![ironclaw_auth::GOOGLE_GMAIL_READONLY_SCOPE.to_string()]
+            }
+        );
     }
 }

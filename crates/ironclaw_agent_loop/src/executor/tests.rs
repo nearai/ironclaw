@@ -4054,6 +4054,75 @@ async fn resume_after_auth_gate_redispatches_original_call_without_model_turn() 
 }
 
 #[tokio::test]
+async fn auth_resume_provider_registration_failure_fails_before_invocation() {
+    let gate_ref = LoopGateRef::new("gate:auth-resume-register-fails").expect("valid");
+    let completed_ref = LoopResultRef::new("result:unused-auth-resume").expect("valid");
+    let host = MockHost::new(vec![provider_calls_response()])
+        .with_batch_outcomes(vec![
+            ironclaw_turns::run_profile::CapabilityBatchOutcome {
+                outcomes: vec![CapabilityOutcome::AuthRequired {
+                    gate_ref: gate_ref.clone(),
+                    credential_requirements: Vec::new(),
+                    safe_summary: "auth required".to_string(),
+                }],
+                stopped_on_suspension: true,
+            },
+            ironclaw_turns::run_profile::CapabilityBatchOutcome {
+                outcomes: vec![CapabilityOutcome::Completed(
+                    ironclaw_turns::run_profile::CapabilityResultMessage {
+                        result_ref: completed_ref,
+                        safe_summary: "should not invoke".to_string(),
+                        progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                        terminate_hint: true,
+                        byte_len: 0,
+                    },
+                )],
+                stopped_on_suspension: false,
+            },
+        ])
+        .with_provider_registration_errors(vec![AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Internal,
+            "provider registration failed",
+        )]);
+    let executor = CanonicalAgentLoopExecutor;
+
+    let first_exit = executor
+        .execute_family(
+            &crate::families::default(),
+            &host,
+            LoopExecutionState::initial_for_run(host.run_context()),
+        )
+        .await
+        .expect("first execute blocks on auth gate");
+    assert!(
+        matches!(first_exit, LoopExit::Blocked(_)),
+        "expected Blocked exit, got {first_exit:?}"
+    );
+    let before_block_state = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+
+    let error = executor
+        .execute_family(&crate::families::default(), &host, before_block_state)
+        .await
+        .expect_err("provider registration failure should fail auth resume");
+
+    assert!(matches!(
+        error,
+        AgentLoopExecutorError::HostUnavailable {
+            stage: HostStage::Capability
+        }
+    ));
+    assert!(
+        host.registered_provider_calls().is_empty(),
+        "failed provider registration must not be recorded as staged"
+    );
+    assert_eq!(
+        host.batch_invocations().len(),
+        1,
+        "phase 2 must fail before invoking the resumed capability"
+    );
+}
+
+#[tokio::test]
 async fn resume_with_still_missing_credentials_blocks_again_without_model_turn() {
     // Phase 1: scripted AuthRequired -> executor exits Blocked and writes a
     // BeforeBlock checkpoint carrying a pending_auth_resume record.

@@ -2,10 +2,9 @@ use std::sync::Arc;
 
 use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount,
-    CredentialAccountId, CredentialAccountLookupRequest, CredentialAccountRecordSource,
-    CredentialAccountService, CredentialAccountStatus, CredentialRecoveryProjection,
-    CredentialRefreshRequest, GOOGLE_PROVIDER_ID, ProviderScope,
-    select_latest_duplicate_user_reusable_account,
+    CredentialAccountId, CredentialAccountRecordSource, CredentialAccountService,
+    CredentialAccountStatus, CredentialRecoveryProjection, CredentialRefreshRequest,
+    GOOGLE_PROVIDER_ID, ProviderScope, select_latest_duplicate_user_reusable_account,
 };
 use ironclaw_host_api::{ExtensionId, ResourceScope, SecretHandle};
 use thiserror::Error;
@@ -184,10 +183,12 @@ impl GoogleCredentialResolver {
             .await?;
         self.recoverable_result(
             self.accounts
-                .refresh_account(
-                    CredentialRefreshRequest::new(account.scope, provider.clone(), account_id)
-                        .for_extension(requester_extension.clone()),
-                )
+                .refresh_account(refresh_request_for_account(
+                    &account,
+                    provider.clone(),
+                    account_id,
+                    requester_extension,
+                ))
                 .await,
             scope,
             requester_extension,
@@ -205,12 +206,11 @@ impl GoogleCredentialResolver {
         account_id: CredentialAccountId,
     ) -> Result<Option<CredentialAccount>, AuthProductError> {
         let account = self
-            .accounts
-            .get_account(
-                CredentialAccountLookupRequest::new(scope.clone(), account_id)
-                    .for_extension(requester_extension.clone()),
-            )
-            .await?;
+            .account_records
+            .accounts_for_owner(scope)
+            .await?
+            .into_iter()
+            .find(|account| account.id == account_id);
         let Some(account) = account else {
             return Ok(None);
         };
@@ -346,6 +346,24 @@ pub fn google_provider_id() -> Result<AuthProviderId, AuthProductError> {
     AuthProviderId::new(GOOGLE_PROVIDER_ID)
 }
 
+fn refresh_request_for_account(
+    account: &CredentialAccount,
+    provider: AuthProviderId,
+    account_id: CredentialAccountId,
+    requester_extension: &ExtensionId,
+) -> CredentialRefreshRequest {
+    let request = CredentialRefreshRequest::new(account.scope.clone(), provider, account_id);
+    if account.is_authorized_for_requester(Some(requester_extension)) {
+        return request.for_extension(requester_extension.clone());
+    }
+    if let Some(owner_extension) = account.owner_extension.clone()
+        && account.is_authorized_for_requester(Some(&owner_extension))
+    {
+        return request.for_extension(owner_extension);
+    }
+    request
+}
+
 fn account_has_provider_scopes(
     account: &CredentialAccount,
     required_scopes: &[ProviderScope],
@@ -361,7 +379,7 @@ mod tests {
     use ironclaw_auth::{
         CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountLabel,
         CredentialAccountListPage, CredentialAccountListRequest, CredentialAccountLookupRequest,
-        CredentialAccountOwnerScope, CredentialAccountProjection,
+        CredentialAccountOwnerScope, CredentialAccountProjection, CredentialAccountRecordSource,
         CredentialAccountSelectionRequest, CredentialOwnership, CredentialRecoveryKind,
         CredentialRecoveryProjection, CredentialRecoveryReason, CredentialRecoveryRequest,
         CredentialRefreshReport, CredentialRefreshRequest, InMemoryAuthProductServices,
@@ -674,6 +692,94 @@ mod tests {
             .unwrap();
 
         assert_eq!(credential.account_id, account.id);
+    }
+
+    #[tokio::test]
+    async fn resolve_account_reuses_gsuite_owned_google_account_from_durable_store() {
+        let scope =
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap();
+        let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+        let auth = Arc::new(InMemoryAuthProductServices::new());
+        let calendar_scope =
+            ProviderScope::new("https://www.googleapis.com/auth/calendar.readonly").unwrap();
+        let account = auth
+            .create_account(NewCredentialAccount {
+                scope: auth_scope.clone(),
+                provider: google_provider_id().unwrap(),
+                label: CredentialAccountLabel::new("work google").unwrap(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::ExtensionOwned,
+                owner_extension: Some(ExtensionId::new("google-drive").unwrap()),
+                granted_extensions: Vec::new(),
+                access_secret: Some(SecretHandle::new("google-access-token").unwrap()),
+                refresh_secret: None,
+                scopes: vec![calendar_scope.clone()],
+            })
+            .await
+            .unwrap();
+        let resolver = GoogleCredentialResolver::new(auth.clone(), auth.clone());
+
+        let credential = resolver
+            .resolve_account(
+                &scope,
+                &auth_scope,
+                &ExtensionId::new("google-calendar").unwrap(),
+                account.id,
+                &[calendar_scope],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(credential.account_id, account.id);
+    }
+
+    #[tokio::test]
+    async fn refresh_reuses_gsuite_owned_google_account_from_durable_store() {
+        let scope =
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap();
+        let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+        let auth = Arc::new(InMemoryAuthProductServices::new());
+        let calendar_scope =
+            ProviderScope::new("https://www.googleapis.com/auth/calendar.readonly").unwrap();
+        let stale_access = SecretHandle::new("google-stale-access-token").unwrap();
+        let account = auth
+            .create_account(NewCredentialAccount {
+                scope: auth_scope.clone(),
+                provider: google_provider_id().unwrap(),
+                label: CredentialAccountLabel::new("work google").unwrap(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::ExtensionOwned,
+                owner_extension: Some(ExtensionId::new("google-drive").unwrap()),
+                granted_extensions: Vec::new(),
+                access_secret: Some(stale_access.clone()),
+                refresh_secret: Some(SecretHandle::new("google-refresh-token").unwrap()),
+                scopes: vec![calendar_scope],
+            })
+            .await
+            .unwrap();
+        let resolver = GoogleCredentialResolver::new(auth.clone(), auth.clone());
+
+        resolver
+            .refresh(
+                &scope,
+                &auth_scope,
+                &ExtensionId::new("google-calendar").unwrap(),
+                account.id,
+            )
+            .await
+            .unwrap();
+
+        let updated = auth
+            .accounts_for_owner(&auth_scope)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.id == account.id)
+            .expect("account remains stored");
+        assert_ne!(updated.access_secret, Some(stale_access));
+        assert_eq!(updated.status, CredentialAccountStatus::Configured);
     }
 
     #[tokio::test]

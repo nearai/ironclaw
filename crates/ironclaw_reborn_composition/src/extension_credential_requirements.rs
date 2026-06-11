@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 
 use ironclaw_extensions::ExtensionPackage;
 use ironclaw_host_api::{
-    RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement,
-    RuntimeCredentialRequirementSource,
+    RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
+    RuntimeCredentialAuthRequirement, RuntimeCredentialRequirementSource,
 };
 use ironclaw_product_workflow::LifecycleExtensionCredentialSetup;
 
@@ -56,16 +56,16 @@ pub(crate) fn lifecycle_credential_setup(
 
 pub(crate) fn product_auth_credential_source(
     credential: &ironclaw_host_api::RuntimeCredentialRequirement,
-) -> Option<(String, LifecycleExtensionCredentialSetup)> {
+) -> Option<(
+    RuntimeCredentialAccountProviderId,
+    LifecycleExtensionCredentialSetup,
+)> {
     let RuntimeCredentialRequirementSource::ProductAuthAccount { provider, setup } =
         &credential.source
     else {
         return None;
     };
-    Some((
-        provider.as_str().to_string(),
-        lifecycle_credential_setup(setup),
-    ))
+    Some((provider.clone(), lifecycle_credential_setup(setup)))
 }
 
 pub(crate) fn can_merge_lifecycle_credential_setup(

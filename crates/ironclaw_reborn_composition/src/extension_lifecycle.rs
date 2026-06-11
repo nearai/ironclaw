@@ -1172,7 +1172,10 @@ fn compensation_failure(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::{
+        collections::BTreeSet,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     use super::hosted_mcp_test_support::HostedMcpDiscoveryEgress;
     use super::*;
@@ -1496,6 +1499,55 @@ mod tests {
                 .get_capability(&CapabilityId::new("notion.notion-search").unwrap())
                 .is_some(),
             "fallback activation must publish bundled Notion capabilities"
+        );
+    }
+
+    #[tokio::test]
+    async fn hosted_mcp_activation_rechecks_credentials_after_discovery_before_publish() {
+        let catalog =
+            AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets");
+        let (_dir, _storage_root, port, active_registry, _installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                catalog,
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
+        let credential_gate = FailsSecondCredentialGate {
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let calls = Arc::clone(&credential_gate.calls);
+
+        port.install(package_ref.clone())
+            .await
+            .expect("install Notion MCP");
+        let error = port
+            .activate_with_credential_gate(
+                package_ref,
+                ExtensionActivationMode::HostedMcpDiscovery {
+                    scope: hosted_mcp_scope("hosted-mcp-credential-recheck"),
+                    runtime_http_egress: Arc::new(HostedMcpDiscoveryEgress::default()),
+                },
+                credential_gate,
+            )
+            .await
+            .expect_err("post-discovery credential recheck should fail activation");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "hosted MCP activation must check credentials before and after discovery"
+        );
+        assert!(
+            active_registry
+                .snapshot()
+                .get_capability(&CapabilityId::new("notion.live-search").unwrap())
+                .is_none(),
+            "discovered tools must not publish after post-discovery credential failure"
         );
     }
 
@@ -3480,6 +3532,25 @@ mod tests {
             InvocationId::new(),
         )
         .expect("valid local scope")
+    }
+
+    struct FailsSecondCredentialGate {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ExtensionActivationCredentialGate for FailsSecondCredentialGate {
+        async fn ensure_credentials(
+            &self,
+            _package: &ExtensionPackage,
+        ) -> Result<(), ProductWorkflowError> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(());
+            }
+            Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: "post-discovery credential recheck failed".to_string(),
+            })
+        }
     }
 
     struct EmptyToolsHostedMcpEgress;

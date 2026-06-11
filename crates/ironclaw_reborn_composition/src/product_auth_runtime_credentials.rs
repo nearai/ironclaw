@@ -1,11 +1,11 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount,
-    CredentialAccountRecordSource, CredentialAccountSelectionRequest, CredentialAccountService,
-    CredentialAccountStatus, CredentialOwnership, CredentialRefreshRequest, ProviderScope,
-    select_latest_duplicate_user_reusable_account,
+    CredentialAccountId, CredentialAccountRecordSource, CredentialAccountSelectionRequest,
+    CredentialAccountStatus, CredentialOwnership, CredentialRefreshReport,
+    CredentialRefreshRequest, ProviderScope, select_latest_duplicate_user_reusable_account,
 };
 use ironclaw_host_api::{
     CredentialStageError, ExtensionId, ResourceScope, RuntimeCredentialAccountProviderId,
@@ -82,6 +82,14 @@ pub(crate) struct RuntimeCredentialAccountSelectionRequest {
     runtime_scope: AuthProductScope,
     setup: RuntimeCredentialAccountSetup,
     provider_scopes: Vec<ProviderScope>,
+}
+
+#[async_trait]
+pub(crate) trait RuntimeCredentialAccountRefreshPort: Send + Sync {
+    async fn refresh_credential_account(
+        &self,
+        request: CredentialRefreshRequest,
+    ) -> Result<CredentialRefreshReport, AuthProductError>;
 }
 
 impl RuntimeCredentialAccountSelectionRequest {
@@ -188,12 +196,16 @@ impl RuntimeCredentialAccountVisibilityPolicy for DefaultRuntimeCredentialAccoun
 }
 
 pub(crate) struct ProductAuthRuntimeCredentialAccountRefresher {
-    refresh_accounts: Arc<dyn CredentialAccountService>,
+    refresh_accounts: Arc<dyn RuntimeCredentialAccountRefreshPort>,
+    refreshed_account_ids: tokio::sync::Mutex<HashSet<CredentialAccountId>>,
 }
 
 impl ProductAuthRuntimeCredentialAccountRefresher {
-    pub(crate) fn new(refresh_accounts: Arc<dyn CredentialAccountService>) -> Self {
-        Self { refresh_accounts }
+    pub(crate) fn new(refresh_accounts: Arc<dyn RuntimeCredentialAccountRefreshPort>) -> Self {
+        Self {
+            refresh_accounts,
+            refreshed_account_ids: tokio::sync::Mutex::new(HashSet::new()),
+        }
     }
 }
 
@@ -261,17 +273,31 @@ impl RuntimeCredentialAccountRefreshService for ProductAuthRuntimeCredentialAcco
         if account.refresh_secret.is_none() {
             return Ok(account);
         }
+        let account_id = account.id;
+        let mut refreshed_account_ids = self.refreshed_account_ids.lock().await;
+        if refreshed_account_ids.contains(&account_id) {
+            return accounts
+                .select_unique_configured_runtime_account(request)
+                .await;
+        }
 
         let mut refresh_request = CredentialRefreshRequest::new(
             account.scope.clone(),
             account.provider.clone(),
-            account.id,
+            account_id,
         );
-        if let Some(requester_extension) = request.lookup.requester_extension.clone() {
+        if let Some(requester_extension) =
+            refresh_requester_for_account(&account, request.lookup.requester_extension.as_ref())
+        {
             refresh_request = refresh_request.for_extension(requester_extension);
         }
-        match self.refresh_accounts.refresh_account(refresh_request).await {
+        match self
+            .refresh_accounts
+            .refresh_credential_account(refresh_request)
+            .await
+        {
             Ok(_) => {
+                refreshed_account_ids.insert(account_id);
                 accounts
                     .select_unique_configured_runtime_account(request)
                     .await
@@ -284,6 +310,21 @@ impl RuntimeCredentialAccountRefreshService for ProductAuthRuntimeCredentialAcco
             Err(error) => Err(error),
         }
     }
+}
+
+fn refresh_requester_for_account(
+    account: &CredentialAccount,
+    requester_extension: Option<&ExtensionId>,
+) -> Option<ExtensionId> {
+    if let Some(requester_extension) = requester_extension
+        && account.is_authorized_for_requester(Some(requester_extension))
+    {
+        return Some(requester_extension.clone());
+    }
+    account
+        .owner_extension
+        .clone()
+        .filter(|owner_extension| account.is_authorized_for_requester(Some(owner_extension)))
 }
 
 impl std::fmt::Debug for ProductAuthRuntimeCredentialResolver {
