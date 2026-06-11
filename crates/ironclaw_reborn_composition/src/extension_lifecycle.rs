@@ -2301,6 +2301,7 @@ mod tests {
         assert_eq!(
             extension_ids,
             BTreeSet::from([
+                "gmail",
                 "google-calendar",
                 "google-docs",
                 "google-drive",

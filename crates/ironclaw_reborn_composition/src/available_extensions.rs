@@ -3,6 +3,7 @@ use ironclaw_extensions::{
     ExtensionPackage, ExtensionRuntime, ManifestSource,
 };
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
+use ironclaw_first_party_extensions::is_gsuite_extension_id;
 use ironclaw_host_api::{CapabilityId, ExtensionId, VirtualPath, sha256_digest_token};
 use ironclaw_product_workflow::{
     LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
@@ -303,27 +304,9 @@ impl AvailableExtensionCatalog {
         query: &str,
     ) -> impl Iterator<Item = &'a AvailableExtensionPackage> + 'a {
         let normalized_query = query.trim().to_ascii_lowercase();
-        self.packages.iter().filter(move |package| {
-            normalized_query.is_empty()
-                || package
-                    .package_ref
-                    .id
-                    .as_str()
-                    .to_ascii_lowercase()
-                    .contains(&normalized_query)
-                || package
-                    .package
-                    .manifest
-                    .name
-                    .to_ascii_lowercase()
-                    .contains(&normalized_query)
-                || package
-                    .package
-                    .manifest
-                    .description
-                    .to_ascii_lowercase()
-                    .contains(&normalized_query)
-        })
+        self.packages
+            .iter()
+            .filter(move |package| package_matches_search(package, &normalized_query))
     }
 
     pub(crate) fn resolve(
@@ -337,6 +320,49 @@ impl AvailableExtensionCatalog {
             .ok_or_else(|| ProductWorkflowError::InvalidBindingRequest {
                 reason: "available extension was not found".to_string(),
             })
+    }
+}
+
+fn package_matches_search(package: &AvailableExtensionPackage, normalized_query: &str) -> bool {
+    normalized_query.is_empty()
+        || package_search_terms(package)
+            .iter()
+            .any(|term| term.contains(normalized_query))
+}
+
+fn package_search_terms(package: &AvailableExtensionPackage) -> Vec<String> {
+    let mut terms = Vec::new();
+    push_search_term(&mut terms, package.package_ref.id.as_str());
+    push_search_term(&mut terms, &package.package.manifest.name);
+    push_search_term(&mut terms, &package.package.manifest.description);
+    if let ExtensionRuntime::FirstParty { service } = &package.package.manifest.runtime {
+        push_search_term(&mut terms, service);
+    }
+    for capability in &package.package.manifest.capabilities {
+        for credential in &capability.runtime_credentials {
+            if let Some((provider, _setup)) = product_auth_credential_source(credential) {
+                push_search_term(&mut terms, provider);
+            }
+        }
+    }
+    if is_gsuite_extension_id(&package.package.manifest.id) {
+        for alias in [
+            "google",
+            "gsuite",
+            "g suite",
+            "workspace",
+            "google workspace",
+        ] {
+            push_search_term(&mut terms, alias);
+        }
+    }
+    terms
+}
+
+fn push_search_term(terms: &mut Vec<String>, term: impl AsRef<str>) {
+    let term = term.as_ref().trim().to_ascii_lowercase();
+    if !term.is_empty() {
+        terms.push(term);
     }
 }
 
@@ -1527,6 +1553,31 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn bundled_gsuite_extensions_match_google_workspace_aliases() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let expected = BTreeSet::from([
+            "gmail",
+            "google-calendar",
+            "google-docs",
+            "google-drive",
+            "google-sheets",
+            "google-slides",
+        ]);
+
+        for query in ["google", "gsuite", "workspace"] {
+            let ids = catalog
+                .search(query)
+                .map(|package| package.package_ref.id.as_str())
+                .collect::<BTreeSet<_>>();
+
+            assert!(
+                expected.is_subset(&ids),
+                "{query} should discover every GSuite package; got {ids:?}"
+            );
         }
     }
 
