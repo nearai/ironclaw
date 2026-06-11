@@ -207,6 +207,20 @@ impl LibSqlTriggerRepository {
             )
             .await
             .map_err(|error| backend_error("create trigger run history list index", error))?;
+            // Index supporting find_trigger_run_by_thread_id — idempotent.
+            // thread_id is nullable; WHERE tenant_id = ? AND thread_id = ? naturally
+            // skips NULL rows so no partial-index condition is needed.
+            conn.execute(
+                &format!(
+                    "CREATE INDEX IF NOT EXISTS trigger_run_history_tenant_thread_id_idx
+                     ON {TRIGGER_RUN_TABLE} (tenant_id, thread_id)"
+                ),
+                (),
+            )
+            .await
+            .map_err(|error| {
+                backend_error("create trigger run history thread_id index", error)
+            })?;
             // Add schedule_timezone column if it doesn't already exist (idempotent migration).
             // SQLite does not support ADD COLUMN IF NOT EXISTS, so we attempt the ALTER and
             // ignore the "duplicate column" error that indicates it was already applied.
@@ -1025,6 +1039,53 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 rollback(&conn, "rollback failed clear active trigger fire").await?;
                 Err(error)
             }
+        }
+    }
+
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        tenant_id: TenantId,
+        thread_id: &crate::ThreadId,
+    ) -> Result<Option<(crate::TriggerRecord, crate::TriggerRunRecord)>, crate::TriggerError> {
+        let conn = self.connect().await?;
+        // Look up the run row by (tenant_id, thread_id) using the dedicated index.
+        let mut run_rows = conn
+            .query(
+                &format!(
+                    "SELECT {TRIGGER_RUN_COLUMNS}
+                     FROM {TRIGGER_RUN_TABLE}
+                     WHERE tenant_id = ?1 AND thread_id = ?2
+                     LIMIT 1"
+                ),
+                params![tenant_id.as_str(), thread_id.as_str()],
+            )
+            .await
+            .map_err(|error| backend_error("query trigger run by thread_id", error))?;
+        let run = match run_rows.next().await {
+            Ok(Some(row)) => row_to_run_record(&row)?,
+            Ok(None) => return Ok(None),
+            Err(error) => return Err(backend_error("read trigger run by thread_id row", error)),
+        };
+        // Then load the parent trigger record.
+        let mut trigger_rows = conn
+            .query(
+                &format!(
+                    "SELECT {TRIGGER_COLUMNS}
+                     FROM {TRIGGER_TABLE}
+                     WHERE tenant_id = ?1 AND trigger_id = ?2
+                     LIMIT 1"
+                ),
+                params![tenant_id.as_str(), run.trigger_id.to_string()],
+            )
+            .await
+            .map_err(|error| backend_error("query parent trigger for thread_id lookup", error))?;
+        match trigger_rows.next().await {
+            Ok(Some(row)) => Ok(Some((row_to_record(&row)?, run))),
+            Ok(None) => Ok(None),
+            Err(error) => Err(backend_error(
+                "read parent trigger record for thread_id lookup",
+                error,
+            )),
         }
     }
 

@@ -845,6 +845,26 @@ pub trait TriggerRepository: Send + Sync {
         request: ClearActiveFireRequest,
     ) -> Result<Option<TriggerRecord>, TriggerError>;
 
+    /// Looks up the run-history row and its parent trigger by `thread_id`.
+    ///
+    /// Returns `Some((trigger_record, run_record))` when a run with the given
+    /// `thread_id` exists for the tenant, `None` when no match is found.
+    ///
+    /// # Authorization
+    ///
+    /// This method performs a pure storage lookup with **no authorization
+    /// filtering**. The caller is responsible for applying any caller-visibility
+    /// or scope predicate before acting on the returned record (e.g., checking
+    /// that the trigger belongs to the expected `creator_user_id`, `agent_id`,
+    /// and `project_id`).
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        Ok(None)
+    }
+
     /// Returns recent run-history rows for one tenant-scoped trigger.
     ///
     /// Rows are ordered newest first by fire slot. Implementations must clamp
@@ -1398,6 +1418,26 @@ impl TriggerRepository for InMemoryTriggerRepository {
             });
         prune_run_history_locked(&mut state, &request.tenant_id, request.trigger_id);
         Ok(Some(record))
+    }
+
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        tenant_id: TenantId,
+        thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        let state = self.lock_state()?;
+        let Some(run) = state.runs.values().find(|run| {
+            run.tenant_id == tenant_id
+                && run.thread_id.as_ref().map(|t| t.as_str()) == Some(thread_id.as_str())
+        }) else {
+            return Ok(None);
+        };
+        let run = run.clone();
+        let trigger = state
+            .records
+            .get(&TriggerRepositoryKey::new(&tenant_id, run.trigger_id))
+            .cloned();
+        Ok(trigger.map(|t| (t, run)))
     }
 
     async fn list_trigger_run_history(

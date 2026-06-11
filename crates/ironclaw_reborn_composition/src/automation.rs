@@ -2,11 +2,10 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use ironclaw_host_api::ThreadId;
 use ironclaw_product_workflow::{
-    AUTOMATION_LIST_MAX_PAGE_SIZE, AutomationListRequest, AutomationProductFacade,
-    ProductAgentBoundCaller, RebornAutomationInfo, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    TriggerRunThreadScope,
+    AutomationListRequest, AutomationProductFacade, ProductAgentBoundCaller, RebornAutomationInfo,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
+    RebornAutomationSource, RebornAutomationState, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, TriggerRunThreadScope,
 };
 use ironclaw_triggers::{
     TriggerError, TriggerId, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus,
@@ -14,9 +13,6 @@ use ironclaw_triggers::{
 };
 
 const AUTOMATION_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
-/// Number of recent runs scanned per trigger when resolving a thread's scope.
-/// Matches the window used by `list_automations` for consistency.
-const RESOLVE_SCOPE_RUN_HISTORY_LIMIT: usize = 100;
 
 /// WebUI panel facade for automation (trigger) listing.
 ///
@@ -59,7 +55,7 @@ impl RebornAutomationProductFacade {
     }
 
     #[cfg(test)]
-    fn with_backend_timeout(
+    pub(crate) fn with_backend_timeout(
         trigger_repository: Arc<dyn TriggerRepository>,
         backend_timeout: Duration,
     ) -> Self {
@@ -131,60 +127,61 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
         caller: ProductAgentBoundCaller,
         thread_id: &ThreadId,
     ) -> Result<Option<TriggerRunThreadScope>, RebornServicesError> {
-        // Both repository calls share one deadline so the total budget is
-        // backend_timeout, not per call.
         let deadline = tokio::time::Instant::now() + self.backend_timeout;
-        let records = tokio::time::timeout_at(
+
+        // Direct thread-id-keyed lookup — O(1) repository query instead of the
+        // prior O(triggers × runs) linear scan.
+        let result = tokio::time::timeout_at(
             deadline,
-            self.trigger_repository.list_scoped_triggers(
-                caller.tenant_id.clone(),
-                caller.user_id.clone(),
-                Some(caller.agent_id.clone()),
-                caller.project_id.clone(),
-                AUTOMATION_LIST_MAX_PAGE_SIZE as usize,
-            ),
+            self.trigger_repository
+                .find_trigger_run_by_thread_id(caller.tenant_id.clone(), thread_id),
         )
         .await
         .map_err(|_| backend_timeout_error())?
         .map_err(map_trigger_error)?;
 
-        if records.is_empty() {
-            return Ok(None);
-        }
-
-        let trigger_ids: Vec<TriggerId> = records.iter().map(|r| r.trigger_id).collect();
-        let runs_by_trigger = tokio::time::timeout_at(
-            deadline,
-            self.trigger_repository.list_trigger_run_history_batch(
-                caller.tenant_id.clone(),
-                &trigger_ids,
-                RESOLVE_SCOPE_RUN_HISTORY_LIMIT,
-            ),
-        )
-        .await
-        .map_err(|_| backend_timeout_error())?
-        .map_err(map_trigger_error)?;
-
-        let thread_id_str = thread_id.as_str();
-        let Some(matched_record) = records.into_iter().find(|record| {
-            runs_by_trigger
-                .get(&record.trigger_id)
-                .map(|runs| {
-                    runs.iter().any(|run| {
-                        run.thread_id.as_ref().map(|t| t.as_str()) == Some(thread_id_str)
-                    })
-                })
-                .unwrap_or(false)
-        }) else {
+        let Some((trigger, _run)) = result else {
             return Ok(None);
         };
 
+        // Apply the same caller-visibility predicate that `list_scoped_triggers`
+        // enforces: the trigger must match tenant + creator_user_id + agent_id +
+        // project_id.  A mismatch means this caller cannot see the trigger in
+        // `list_automations`, so it must not see it here either.
+        if !trigger_is_caller_visible(&trigger, &caller) {
+            return Ok(None);
+        }
+
         Ok(Some(TriggerRunThreadScope {
-            agent_id: matched_record.agent_id,
-            project_id: matched_record.project_id,
-            creator_user_id: matched_record.creator_user_id,
+            agent_id: trigger.agent_id,
+            project_id: trigger.project_id,
+            creator_user_id: trigger.creator_user_id,
         }))
     }
+}
+
+/// Returns `true` when `trigger` would appear in the caller's `list_automations`
+/// response — i.e. the trigger matches the exact caller scope that
+/// `list_scoped_triggers` enforces (tenant_id + creator_user_id + agent_id +
+/// project_id).  This mirrors the filter in
+/// `InMemoryTriggerRepository::list_scoped_triggers` and the SQL WHERE clause
+/// used by the libSQL and PostgreSQL backends:
+///
+/// ```text
+/// WHERE tenant_id    = <caller.tenant_id>
+///   AND creator_user_id = <caller.user_id>
+///   AND agent_id    IS <caller.agent_id>   -- NULL-safe equality
+///   AND project_id  IS <caller.project_id> -- NULL-safe equality
+/// ```
+///
+/// A `false` result causes `resolve_run_thread_scope` to return `Ok(None)` (404
+/// upstream) without leaking the existence of the trigger to an unauthorized
+/// caller.
+fn trigger_is_caller_visible(trigger: &TriggerRecord, caller: &ProductAgentBoundCaller) -> bool {
+    trigger.tenant_id == caller.tenant_id
+        && trigger.creator_user_id == caller.user_id
+        && trigger.agent_id == Some(caller.agent_id.clone())
+        && trigger.project_id == caller.project_id
 }
 
 fn automation_info_from_record(
@@ -439,11 +436,15 @@ mod tests {
 
     /// Single configurable mock covering every error/hang path the facade
     /// exercises. `scoped` scripts `list_scoped_triggers`; `batch` scripts
-    /// `list_trigger_run_history_batch`. All other trait methods are never
+    /// `list_trigger_run_history_batch`; `thread_lookup` scripts
+    /// `find_trigger_run_by_thread_id`. All other trait methods are never
     /// called by the facade and return a backend error.
+    #[allow(dead_code)]
     enum ScriptedOutcome {
         Records(Vec<TriggerRecord>),
         Runs(HashMap<TriggerId, Vec<TriggerRunRecord>>),
+        /// Used by `thread_lookup` — returns the given pair or None.
+        ThreadResult(Box<Option<(TriggerRecord, TriggerRunRecord)>>),
         FailBackend,
         NotFound,
         Hang,
@@ -455,6 +456,9 @@ mod tests {
     struct ScriptedRepository {
         scoped: ScriptedOutcome,
         batch: ScriptedOutcome,
+        /// Scripts `find_trigger_run_by_thread_id`. Defaults to `Ok(None)` when
+        /// not set (None here means "method not scripted", not "no result found").
+        thread_lookup: Option<ScriptedOutcome>,
         limits: Option<RecordedLimits>,
     }
 
@@ -497,10 +501,31 @@ mod tests {
             }
             match &self.scoped {
                 ScriptedOutcome::Records(records) => Ok(records.clone()),
-                ScriptedOutcome::Runs(_) => Err(Self::backend_error()),
+                ScriptedOutcome::Runs(_) | ScriptedOutcome::ThreadResult(_) => {
+                    Err(Self::backend_error())
+                }
                 ScriptedOutcome::FailBackend => Err(Self::backend_error()),
                 ScriptedOutcome::NotFound => Err(TriggerError::NotFound),
                 ScriptedOutcome::Hang => std::future::pending().await,
+            }
+        }
+
+        async fn find_trigger_run_by_thread_id(
+            &self,
+            _: TenantId,
+            _: &ThreadId,
+        ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+            let Some(outcome) = &self.thread_lookup else {
+                return Ok(None);
+            };
+            match outcome {
+                ScriptedOutcome::ThreadResult(pair) => Ok(*pair.clone()),
+                ScriptedOutcome::FailBackend => Err(Self::backend_error()),
+                ScriptedOutcome::NotFound => Err(TriggerError::NotFound),
+                ScriptedOutcome::Hang => std::future::pending().await,
+                ScriptedOutcome::Records(_) | ScriptedOutcome::Runs(_) => {
+                    Err(Self::backend_error())
+                }
             }
         }
 
@@ -515,7 +540,9 @@ mod tests {
                 limits.lock().expect("limits").push(("batch", limit));
             }
             match &self.batch {
-                ScriptedOutcome::Records(_) => Ok(HashMap::new()),
+                ScriptedOutcome::Records(_) | ScriptedOutcome::ThreadResult(_) => {
+                    Ok(HashMap::new())
+                }
                 ScriptedOutcome::Runs(runs) => Ok(runs.clone()),
                 ScriptedOutcome::FailBackend => Err(Self::backend_error()),
                 ScriptedOutcome::NotFound => Err(TriggerError::NotFound),
@@ -789,57 +816,16 @@ mod tests {
         assert_eq!(mapped.status, RebornAutomationRecentRunStatus::Running);
     }
 
-    #[tokio::test]
-    async fn resolve_run_thread_scope_returns_matching_trigger_scope_and_uses_bounded_limits() {
-        let c = caller();
-        let trigger_id = TriggerId::new();
-        let mut record = make_record(
-            trigger_id,
-            &c,
-            TriggerState::Scheduled,
-            "Resolver test",
-            "0 9 * * *",
-        );
-        record.creator_user_id =
-            UserId::new("user-trigger-creator").expect("valid trigger creator user id");
-        let run = make_run_record(trigger_id, TriggerRunHistoryStatus::Ok);
-        let thread_id = run
-            .thread_id
-            .clone()
-            .expect("make_run_record always sets a canonical thread_id");
-        let mut runs_by_trigger = HashMap::new();
-        runs_by_trigger.insert(trigger_id, vec![run]);
-        let limits = Arc::new(Mutex::new(Vec::new()));
-        let facade = RebornAutomationProductFacade::new(Arc::new(ScriptedRepository {
-            scoped: ScriptedOutcome::Records(vec![record.clone()]),
-            batch: ScriptedOutcome::Runs(runs_by_trigger),
-            limits: Some(limits.clone()),
-        }));
-
-        let resolved = facade
-            .resolve_run_thread_scope(c, &thread_id)
-            .await
-            .expect("resolver succeeds")
-            .expect("thread run is visible");
-
-        assert_eq!(resolved.agent_id, record.agent_id);
-        assert_eq!(resolved.project_id, record.project_id);
-        assert_eq!(resolved.creator_user_id, record.creator_user_id);
-        assert_eq!(
-            *limits.lock().expect("limits"),
-            vec![
-                ("scoped", super::AUTOMATION_LIST_MAX_PAGE_SIZE as usize),
-                ("batch", super::RESOLVE_SCOPE_RUN_HISTORY_LIMIT),
-            ],
-            "resolver must use the documented 100 trigger x 100 run window"
-        );
-    }
+    // Resolver tests (resolve_run_thread_scope_*) live in
+    // `crates/ironclaw_reborn_composition/src/automation_resolver_tests.rs`
+    // to keep this file under the project's 800-900 line file-size target.
 
     #[tokio::test]
     async fn automation_facade_maps_backend_error_to_unavailable() {
         let repo = Arc::new(ScriptedRepository {
             scoped: ScriptedOutcome::FailBackend,
             batch: ScriptedOutcome::FailBackend,
+            thread_lookup: None,
             limits: None,
         });
         let facade = RebornAutomationProductFacade::new(repo);
@@ -868,6 +854,7 @@ mod tests {
             Arc::new(ScriptedRepository {
                 scoped: ScriptedOutcome::Hang,
                 batch: ScriptedOutcome::Hang,
+                thread_lookup: None,
                 limits: None,
             }),
             std::time::Duration::from_millis(10),
@@ -900,6 +887,7 @@ mod tests {
         let facade = RebornAutomationProductFacade::new(Arc::new(ScriptedRepository {
             scoped: ScriptedOutcome::Records(vec![record]),
             batch: ScriptedOutcome::FailBackend,
+            thread_lookup: None,
             limits: None,
         }));
 
@@ -934,6 +922,7 @@ mod tests {
             Arc::new(ScriptedRepository {
                 scoped: ScriptedOutcome::Records(vec![record]),
                 batch: ScriptedOutcome::Hang,
+                thread_lookup: None,
                 limits: None,
             }),
             std::time::Duration::from_millis(10),
@@ -958,6 +947,7 @@ mod tests {
         let facade = RebornAutomationProductFacade::new(Arc::new(ScriptedRepository {
             scoped: ScriptedOutcome::NotFound,
             batch: ScriptedOutcome::NotFound,
+            thread_lookup: None,
             limits: None,
         }));
 

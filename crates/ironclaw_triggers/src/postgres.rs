@@ -816,6 +816,48 @@ impl TriggerRepository for PostgresTriggerRepository {
         }
     }
 
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        tenant_id: TenantId,
+        thread_id: &crate::ThreadId,
+    ) -> Result<Option<(crate::TriggerRecord, crate::TriggerRunRecord)>, crate::TriggerError> {
+        let client = self.connect().await?;
+        // Look up the run row by (tenant_id, thread_id) using the dedicated index.
+        let run_row = client
+            .query_opt(
+                &format!(
+                    "SELECT {TRIGGER_RUN_COLUMNS}
+                     FROM {TRIGGER_RUN_TABLE}
+                     WHERE tenant_id = $1 AND thread_id = $2
+                     LIMIT 1"
+                ),
+                &[&tenant_id.as_str(), &thread_id.as_str()],
+            )
+            .await
+            .map_err(|error| backend_error("query trigger run by thread_id", error))?;
+        let Some(run_row) = run_row else {
+            return Ok(None);
+        };
+        let run = row_to_run_record(&run_row)?;
+        // Then load the parent trigger record.
+        let trigger_row = client
+            .query_opt(
+                &format!(
+                    "SELECT {TRIGGER_COLUMNS}
+                     FROM {TRIGGER_TABLE}
+                     WHERE tenant_id = $1 AND trigger_id = $2
+                     LIMIT 1"
+                ),
+                &[&tenant_id.as_str(), &run.trigger_id.to_string()],
+            )
+            .await
+            .map_err(|error| backend_error("query parent trigger for thread_id lookup", error))?;
+        match trigger_row {
+            Some(row) => Ok(Some((row_to_record(&row)?, run))),
+            None => Ok(None),
+        }
+    }
+
     async fn list_trigger_run_history(
         &self,
         tenant_id: TenantId,
@@ -1345,6 +1387,12 @@ CREATE TABLE IF NOT EXISTS trigger_run_history (
 
 CREATE INDEX IF NOT EXISTS trigger_run_history_trigger_fire_slot_idx
     ON trigger_run_history (tenant_id, trigger_id, fire_slot DESC);
+
+-- Index supporting find_trigger_run_by_thread_id.
+-- thread_id is nullable; WHERE tenant_id = $1 AND thread_id = $2
+-- naturally skips NULL rows so no partial-index condition is needed.
+CREATE INDEX IF NOT EXISTS trigger_run_history_tenant_thread_id_idx
+    ON trigger_run_history (tenant_id, thread_id);
 
 ALTER TABLE trigger_run_history ALTER COLUMN thread_id DROP NOT NULL;
 "#;

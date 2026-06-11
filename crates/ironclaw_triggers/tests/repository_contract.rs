@@ -3323,3 +3323,147 @@ mod fire_claim_contract {
         clear_postgres_triggers(&pool).await;
     }
 }
+
+// ---------------------------------------------------------------------------
+// find_trigger_run_by_thread_id contract
+// ---------------------------------------------------------------------------
+
+mod find_trigger_run_by_thread_id_contract {
+    use super::*;
+
+    use ironclaw_triggers::{ClaimDueFireOutcome, ClaimDueFireRequest, FireAcceptedRequest};
+
+    fn thread_id(value: &str) -> ThreadId {
+        ThreadId::new(value).expect("valid thread id")
+    }
+
+    /// Seeds a trigger record and marks one fire as accepted with the given
+    /// `thread_id`, returning `(trigger_id, fire_slot)`.
+    async fn seed_accepted_run(
+        repo: &impl TriggerRepository,
+        trigger_id: TriggerId,
+        tenant_id: TenantId,
+        run_thread_id: ThreadId,
+    ) -> Timestamp {
+        let fire_slot = ts(1_704_067_200);
+        let record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
+        repo.upsert_trigger(record).await.expect("upsert");
+        let claimed = repo
+            .claim_due_fire(ClaimDueFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                now: fire_slot,
+            })
+            .await
+            .expect("claim due fire");
+        assert!(
+            matches!(claimed, ClaimDueFireOutcome::Claimed(_)),
+            "seed_accepted_run: claim must succeed"
+        );
+        let next_run_at = ts(fire_slot.timestamp() + 3600);
+        repo.mark_fire_accepted(FireAcceptedRequest {
+            tenant_id,
+            trigger_id,
+            fire_slot,
+            run_id: TurnRunId::new(),
+            thread_id: run_thread_id,
+            submitted_at: fire_slot,
+            next_run_at,
+        })
+        .await
+        .expect("mark fire accepted");
+        fire_slot
+    }
+
+    async fn assert_find_trigger_run_by_thread_id_contract(repo: &impl TriggerRepository) {
+        let tenant_a = tenant("tenant-a");
+        let tenant_b = tenant("tenant-b");
+        let trigger_id_a = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let trigger_id_b = TriggerId::parse("01J00000000000000000000000").expect("ulid");
+        let t1 = thread_id("01890f0f-test-7000-8000-000000000001");
+        let t2 = thread_id("01890f0f-test-7000-8000-000000000002");
+        let unknown = thread_id("01890f0f-test-7000-8000-999999999999");
+
+        // Seed trigger-a (tenant-a) with thread t1.
+        let _ = seed_accepted_run(repo, trigger_id_a, tenant_a.clone(), t1.clone()).await;
+        // Seed trigger-b (tenant-b) with thread t2.
+        let _ = seed_accepted_run(repo, trigger_id_b, tenant_b.clone(), t2.clone()).await;
+
+        // Found: correct tenant + thread_id.
+        let result = repo
+            .find_trigger_run_by_thread_id(tenant_a.clone(), &t1)
+            .await
+            .expect("find by known thread_id")
+            .expect("run record must be present");
+        assert_eq!(result.0.trigger_id, trigger_id_a);
+        assert_eq!(
+            result.1.thread_id.as_ref().map(|t| t.as_str()),
+            Some(t1.as_str())
+        );
+
+        // Not found: correct tenant, wrong thread_id (unknown).
+        let not_found = repo
+            .find_trigger_run_by_thread_id(tenant_a.clone(), &unknown)
+            .await
+            .expect("find by unknown thread_id must not error");
+        assert!(not_found.is_none(), "unknown thread_id must return None");
+
+        // Tenant isolation: searching tenant_b for thread t1 (which lives in tenant_a)
+        // must return None.
+        let cross_tenant = repo
+            .find_trigger_run_by_thread_id(tenant_b.clone(), &t1)
+            .await
+            .expect("cross-tenant find must not error");
+        assert!(
+            cross_tenant.is_none(),
+            "thread_id from another tenant must not be visible"
+        );
+
+        // Run rows without a thread_id (pre-acceptance rows) must not be
+        // findable.  We test this via a fresh trigger that has been claimed but
+        // NOT accepted (no thread_id row yet).
+        let trigger_id_c = TriggerId::parse("01J00000000000000000000003").expect("ulid");
+        let fire_slot_c = ts(1_704_067_300);
+        let record_c = sample_record(trigger_id_c, tenant_a.clone(), fire_slot_c);
+        repo.upsert_trigger(record_c)
+            .await
+            .expect("upsert trigger-c");
+        // Do not call mark_fire_accepted — no thread_id row exists.
+        let t_none = thread_id("01890f0f-test-7000-8000-000000000003");
+        let pre_accept = repo
+            .find_trigger_run_by_thread_id(tenant_a.clone(), &t_none)
+            .await
+            .expect("pre-acceptance find must not error");
+        assert!(
+            pre_accept.is_none(),
+            "pre-acceptance trigger (no thread_id row) must return None"
+        );
+    }
+
+    // In-memory backend.
+    #[tokio::test]
+    async fn in_memory_find_trigger_run_by_thread_id() {
+        let repo = InMemoryTriggerRepository::default();
+        assert_find_trigger_run_by_thread_id_contract(&repo).await;
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn libsql_find_trigger_run_by_thread_id() {
+        let (_dir, repo) = super::build_libsql_repo().await;
+        assert_find_trigger_run_by_thread_id_contract(&repo).await;
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn postgres_find_trigger_run_by_thread_id() {
+        let Some((_container, pool)) = super::postgres_pool_or_skip().await else {
+            return;
+        };
+        let repo = PostgresTriggerRepository::new(pool.clone());
+        repo.run_migrations().await.expect("run migrations");
+        assert_find_trigger_run_by_thread_id_contract(&repo).await;
+        super::clear_postgres_triggers(&pool).await;
+    }
+}
