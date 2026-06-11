@@ -36,7 +36,7 @@ export function useLogs() {
       });
       if (requestId !== requestIdRef.current) return;
       const hidden = hiddenEntryIdsRef.current;
-      const nextEntries = (response.logs?.entries || [])
+      const nextEntries = (response.entries || [])
         .map(normalizeEntry)
         .filter((entry) => !hidden.has(entry.id));
       setEntries(nextEntries);

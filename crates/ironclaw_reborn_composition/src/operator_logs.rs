@@ -79,24 +79,35 @@ impl OperatorLogBuffer {
             .clamp(1, self.capacity);
         let before_id = request.cursor.as_deref().and_then(parse_before_cursor);
         let target_filter = request.target.map(|target| target.to_lowercase());
-        let entries = self
-            .state
-            .lock()
-            .map(|state| state.entries.iter().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
+        let Ok(state) = self.state.lock() else {
+            return RebornLogQueryResponse {
+                source: SOURCE.to_string(),
+                entries: Vec::new(),
+                next_cursor: None,
+                tail_supported: true,
+                follow_supported: false,
+            };
+        };
 
-        let mut selected = entries
-            .into_iter()
-            .rev()
-            .filter(|entry| before_id.is_none_or(|id| entry.id < id))
-            .filter(|entry| request.level.is_none_or(|level| entry.level == level))
-            .filter(|entry| {
-                target_filter
-                    .as_ref()
-                    .is_none_or(|target| entry.target.to_lowercase().contains(target.as_str()))
-            })
-            .take(limit + 1)
-            .collect::<Vec<_>>();
+        let mut selected = Vec::with_capacity((limit + 1).min(self.capacity));
+        for entry in state.entries.iter().rev() {
+            if before_id.is_some_and(|id| entry.id >= id) {
+                continue;
+            }
+            if request.level.is_some_and(|level| entry.level != level) {
+                continue;
+            }
+            if let Some(target) = target_filter.as_ref()
+                && !entry.target.to_lowercase().contains(target.as_str())
+            {
+                continue;
+            }
+
+            selected.push(entry.clone());
+            if selected.len() > limit {
+                break;
+            }
+        }
 
         let next_cursor = if selected.len() > limit {
             selected.truncate(limit);
