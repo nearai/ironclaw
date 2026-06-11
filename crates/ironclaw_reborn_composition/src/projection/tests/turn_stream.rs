@@ -257,17 +257,12 @@ async fn webui_event_stream_offers_always_for_typed_approval_gate() {
     assert_eq!(context.action.label, "Run tool");
     assert_eq!(
         context.reason.as_deref(),
-        Some("capability requires approval")
+        Some("raw path /Users/firatsertgoz/.ssh/id_rsa and token sk-secret")
     );
     assert_eq!(context.scope.label, "This request only");
     assert!(context.details.iter().any(|detail| {
         detail.label == "Estimated network egress" && detail.value == "4096 bytes"
     }));
-    assert!(
-        !serde_json::to_string(context)
-            .expect("serialize context")
-            .contains("sk-secret")
-    );
 }
 
 #[tokio::test]

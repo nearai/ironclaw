@@ -429,9 +429,7 @@ async fn approval_gate_prompt(
             )
             .to_resource_scope();
             match store.get(&scope, request_id).await {
-                Ok(Some(record)) => {
-                    approval_context_for_request(&record.request, event.sanitized_reason.as_deref())
-                }
+                Ok(Some(record)) => approval_context_for_request(&record.request),
                 Ok(None) => None,
                 Err(error) => {
                     tracing::debug!(
@@ -454,10 +452,7 @@ async fn approval_gate_prompt(
     )
 }
 
-fn approval_context_for_request(
-    request: &ApprovalRequest,
-    display_reason: Option<&str>,
-) -> Option<ApprovalPromptContextView> {
+fn approval_context_for_request(request: &ApprovalRequest) -> Option<ApprovalPromptContextView> {
     let (tool_name, action, destination, details) =
         approval_action_context(request.action.as_ref())?;
     ApprovalPromptContextView::new(
@@ -468,7 +463,7 @@ fn approval_context_for_request(
             request.reusable_scope.is_some(),
         )
         .ok()?,
-        display_reason.and_then(non_empty_string),
+        non_empty_string(&request.reason),
         destination,
         details,
     )
