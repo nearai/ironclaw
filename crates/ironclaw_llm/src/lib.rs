@@ -467,15 +467,17 @@ fn create_anthropic_from_registry(
             provider: config.provider_id.clone(),
         })?;
 
-    let client: anthropic::Client = if config.base_url.is_empty() {
-        anthropic::Client::new(&api_key)
-    } else {
-        anthropic::Client::builder()
-            .api_key(&api_key)
-            .base_url(&config.base_url)
-            .build()
+    // Build with the proxy-aware client (same as the OpenAI-compatible path) so
+    // a localhost/self-hosted Anthropic-compatible endpoint bypasses the system
+    // proxy for live chat too — not just model discovery. Remote hosts keep
+    // default proxy behavior.
+    let mut builder = anthropic::Client::<reqwest::Client>::builder()
+        .api_key(&api_key)
+        .http_client(provider_http_client(&config.provider_id, &config.base_url)?);
+    if !config.base_url.is_empty() {
+        builder = builder.base_url(&config.base_url);
     }
-    .map_err(|e| LlmError::RequestFailed {
+    let client: anthropic::Client = builder.build().map_err(|e| LlmError::RequestFailed {
         provider: config.provider_id.clone(),
         reason: format!("Failed to create Anthropic client: {e}"),
     })?;

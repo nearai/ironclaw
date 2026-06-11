@@ -124,19 +124,35 @@ export function useProviderLogin({ onSuccess } = {}) {
         setNearaiError(t("onboarding.nearaiLocalSso"));
         return;
       }
+      // Open the popup synchronously inside the click gesture: browsers only
+      // allow gesture-time opens, so opening after the awaited backend call
+      // would be blocked. Navigate the blank popup to the auth URL once it
+      // returns. Sever `opener` (we keep the handle, so no `noopener` flag) as
+      // reverse-tabnabbing defense before sending it to the external page.
+      const popup = window.open("about:blank", "_blank");
+      if (!popup) {
+        setNearaiError(t("onboarding.nearaiFailed"));
+        return;
+      }
+      try {
+        popup.opener = null;
+      } catch (_e) {
+        // Ignore: some engines disallow setting opener; navigation still works.
+      }
       setNearaiBusy(true);
       try {
         const { auth_url: authUrl } = await startNearaiLogin({
           provider,
           origin: window.location.origin,
         });
-        window.open(authUrl, "_blank", "noopener");
+        popup.location.href = authUrl;
         if (await pollUntilActive("nearai", NEARAI_POLL_DEADLINE_MS)) {
           await finishActive();
           return;
         }
         setNearaiError(t("onboarding.nearaiTimeout"));
       } catch (_err) {
+        popup.close();
         setNearaiError(t("onboarding.nearaiFailed"));
       } finally {
         setNearaiBusy(false);
@@ -150,11 +166,12 @@ export function useProviderLogin({ onSuccess } = {}) {
   // message, then relay it to the backend (which exchanges it for a NEAR AI
   // session token, makes NEAR AI active, and hot-swaps the provider).
   const startNearaiWallet = React.useCallback(async () => {
+    // Unlike the GitHub/Google hosted SSO flow, wallet login does NOT depend on
+    // a NEAR AI `frontend_callback` redirect (which rejects loopback origins):
+    // NEP-413 signing happens in a same-origin popup and the signed message is
+    // relayed through our own backend. So it works on localhost — no local-dev
+    // guard here.
     setNearaiError("");
-    if (isLocalDevOrigin()) {
-      setNearaiError(t("onboarding.nearaiLocalSso"));
-      return;
-    }
     setNearaiBusy(true);
     try {
       const channelName = walletLoginChannelName();

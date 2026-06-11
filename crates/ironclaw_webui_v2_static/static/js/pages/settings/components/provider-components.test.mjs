@@ -665,7 +665,9 @@ function runProviderLogin({ hostname, activeProviderId = null }) {
       location: { hostname, origin: `http://${hostname}` },
       open: () => {
         httpCalls.push("open");
-        return {};
+        // A usable popup handle for the synchronous-open + sever-opener +
+        // navigate pattern: a settable location/opener and a no-op close.
+        return { location: { href: "" }, opener: null, closed: false, close() {} };
       },
       crypto: { randomUUID: () => "uuid" },
     },
@@ -699,11 +701,17 @@ test("startNearai bails on a loopback origin without firing the login HTTP call"
   assert.equal(run.busySetTrue(), false, "never enters the busy state");
 });
 
-test("startNearaiWallet bails on a loopback origin without opening the wallet popup", async () => {
+test("startNearaiWallet proceeds on a loopback origin (wallet is not hosted SSO)", async () => {
+  // Wallet login signs in a same-origin popup and relays through our backend —
+  // it does not use a NEAR AI frontend_callback redirect, so the localhost
+  // guard must NOT apply (unlike GitHub/Google SSO).
   const run = runProviderLogin({ hostname: "127.0.0.1" });
   await run.hook.startNearaiWallet();
-  assert.deepEqual(run.httpCalls, [], "no wallet popup opened");
-  assert.ok(run.nearaiErrors().includes("onboarding.nearaiLocalSso"));
+  assert.ok(run.httpCalls.includes("open"), "wallet popup opens on localhost");
+  assert.ok(
+    !run.nearaiErrors().includes("onboarding.nearaiLocalSso"),
+    "no hosted-SSO local block for the wallet path"
+  );
 });
 
 test("startNearai fires the login HTTP call on a remote origin (predicate is the gate)", async () => {

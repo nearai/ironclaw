@@ -305,25 +305,43 @@ mod tests {
     async fn accepts_normal_and_local_endpoints() {
         // Literal public over https, plus local/private endpoints (localhost
         // resolves through the system resolver, no network).
-        check_models_url("p", "https://93.184.216.34/v1/models").await.unwrap();
-        check_models_url("p", "http://localhost:11434/api/tags").await.unwrap();
-        check_models_url("p", "http://127.0.0.1:11434/api/tags").await.unwrap();
-        check_models_url("p", "http://192.168.1.50:8000/models").await.unwrap();
+        check_models_url("p", "https://93.184.216.34/v1/models")
+            .await
+            .unwrap();
+        check_models_url("p", "http://localhost:11434/api/tags")
+            .await
+            .unwrap();
+        check_models_url("p", "http://127.0.0.1:11434/api/tags")
+            .await
+            .unwrap();
+        check_models_url("p", "http://192.168.1.50:8000/models")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn rejects_metadata_link_local_multicast_unspecified() {
-        check_models_url("p", "https://169.254.169.254/models").await.expect_err("metadata IP");
-        check_models_url("p", "https://[fe80::1]/models").await.expect_err("link-local v6");
-        check_models_url("p", "http://224.0.0.1/models").await.expect_err("multicast");
-        check_models_url("p", "http://0.0.0.0/models").await.expect_err("unspecified");
+        check_models_url("p", "https://169.254.169.254/models")
+            .await
+            .expect_err("metadata IP");
+        check_models_url("p", "https://[fe80::1]/models")
+            .await
+            .expect_err("link-local v6");
+        check_models_url("p", "http://224.0.0.1/models")
+            .await
+            .expect_err("multicast");
+        check_models_url("p", "http://0.0.0.0/models")
+            .await
+            .expect_err("unspecified");
     }
 
     #[tokio::test]
     async fn rejects_public_http_endpoint() {
         // Public host over non-TLS http is rejected even though the IP is not
         // in the always-blocked class; use https for public endpoints.
-        check_models_url("p", "http://8.8.8.8/models").await.expect_err("public http");
+        check_models_url("p", "http://8.8.8.8/models")
+            .await
+            .expect_err("public http");
     }
 
     #[tokio::test]
@@ -342,13 +360,19 @@ mod tests {
     async fn allows_ipv6_loopback() {
         // ::1 classifies as loopback (private), so self-hosted providers on the
         // IPv6 loopback stay reachable over http.
-        check_models_url("p", "http://[::1]:11434/api/tags").await.unwrap();
+        check_models_url("p", "http://[::1]:11434/api/tags")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn rejects_non_http_and_unparseable() {
-        check_models_url("p", "file:///etc/passwd").await.expect_err("file scheme");
-        check_models_url("p", "not a url").await.expect_err("garbage");
+        check_models_url("p", "file:///etc/passwd")
+            .await
+            .expect_err("file scheme");
+        check_models_url("p", "not a url")
+            .await
+            .expect_err("garbage");
     }
 
     // The crux of the SSRF fix: a *hostname* (not a literal IP) whose resolved
@@ -376,9 +400,18 @@ mod tests {
 
     #[test]
     fn classify_ip_handles_v6_loopback_and_embedded_metadata() {
-        assert_eq!(classify_ip(&"::1".parse().unwrap()), IpClass::PrivateOrLoopback);
-        assert_eq!(classify_ip(&"::169.254.169.254".parse().unwrap()), IpClass::AlwaysBlocked);
-        assert_eq!(classify_ip(&"::ffff:127.0.0.1".parse().unwrap()), IpClass::PrivateOrLoopback);
+        assert_eq!(
+            classify_ip(&"::1".parse().unwrap()),
+            IpClass::PrivateOrLoopback
+        );
+        assert_eq!(
+            classify_ip(&"::169.254.169.254".parse().unwrap()),
+            IpClass::AlwaysBlocked
+        );
+        assert_eq!(
+            classify_ip(&"::ffff:127.0.0.1".parse().unwrap()),
+            IpClass::PrivateOrLoopback
+        );
         assert_eq!(classify_ip(&"8.8.8.8".parse().unwrap()), IpClass::Public);
     }
 
