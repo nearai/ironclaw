@@ -5157,7 +5157,7 @@ async fn text_only_host_maps_explicit_unknown_runtime_outcome_to_failure() {
 }
 
 #[tokio::test]
-async fn text_only_host_preserves_host_runtime_error_kind_and_summary() {
+async fn text_only_host_preserves_invalid_request_and_returns_unavailable_as_failed_outcome() {
     let fixture = HostFixture::new("thread-host-runtime-capability-host-error", "hello").await;
     let capability_id = CapabilityId::new("demo.echo").unwrap();
     let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
@@ -5215,15 +5215,16 @@ async fn text_only_host_preserves_host_runtime_error_kind_and_summary() {
             approval_resume: None,
         })
         .await
-        .unwrap_err();
+        .unwrap();
 
     assert_eq!(invalid.kind, AgentLoopHostErrorKind::InvalidInvocation);
     assert_eq!(invalid.safe_summary, "capability input schema invalid");
-    assert_eq!(unavailable.kind, AgentLoopHostErrorKind::Unavailable);
-    assert_eq!(
-        unavailable.safe_summary,
-        "resource governor temporarily unavailable"
-    );
+    assert!(matches!(
+        unavailable,
+        CapabilityOutcome::Failed(failure)
+            if failure.error_kind == CapabilityFailureKind::Unavailable
+                && failure.safe_summary == "resource governor temporarily unavailable"
+    ));
 }
 
 #[tokio::test]
