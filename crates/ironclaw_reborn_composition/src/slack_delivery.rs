@@ -3015,6 +3015,77 @@ mod tests {
         );
     }
 
+    /// Accepted ack, then binding lookup fails → generic delivery-error notice
+    /// posted to the conversation (A3). Drives the observer (the caller), not
+    /// just `deliver_final_reply`, so the error→feedback mapping in
+    /// `observe_workflow_ack` is covered.
+    #[tokio::test]
+    async fn accepted_ack_then_binding_error_posts_delivery_error_notice() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "3000.1"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::Running,
+        ));
+        let services = SlackFinalReplyDeliveryServices {
+            // Errors on lookup_binding, so delivery fails after the Accepted
+            // ack and before any polling.
+            binding_service: Arc::new(TestNoopConversationBindingService),
+            thread_service: Arc::new(InMemorySessionThreadService::default()),
+            turn_coordinator: coordinator,
+            outbound_store: outbound.clone(),
+            communication_preferences: outbound,
+            adapter: test_adapter(install),
+            egress: egress.clone(),
+            delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
+            auth_challenges: None,
+        };
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_millis(1),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let observer = SlackFinalReplyDeliveryObserver::with_settings(services, settings);
+
+        let env = envelope(user_message_payload());
+        let ack = ProductInboundAck::Accepted {
+            accepted_message_ref: AcceptedMessageRef::new("slack:binding-error-test").expect("ref"),
+            submitted_run_id: TurnRunId::new(),
+        };
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "expected exactly one chat.postMessage (the delivery-error notice), bodies: {:?}",
+            post_calls
+                .iter()
+                .map(|c| std::str::from_utf8(&c.body).unwrap_or("?"))
+                .collect::<Vec<_>>()
+        );
+        let body = std::str::from_utf8(&post_calls[0].body).unwrap_or("");
+        assert!(
+            body.contains("Something went wrong delivering the result"),
+            "post must contain the generic delivery-error notice, body: {body}"
+        );
+    }
+
     // --- OnceLock slot behaviour tests ----------------------------------------
 
     #[tokio::test]
