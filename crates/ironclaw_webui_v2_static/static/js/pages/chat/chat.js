@@ -187,6 +187,7 @@ export function Chat({
             hasMore=${hasMore}
             onLoadMore=${loadMore}
             onRetryMessage=${retryMessage}
+            pending=${isProcessing}
           >
             ${recoveryNotice &&
             html`
