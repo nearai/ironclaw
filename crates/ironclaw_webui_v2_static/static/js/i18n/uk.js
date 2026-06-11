@@ -942,6 +942,8 @@ registerPack("uk", {
   "extensions.emptyMcpTitle": "Немає серверів MCP",
   "extensions.emptyMcpDesc": "Сервери MCP розширюють агент за допомогою додаткових інструментальних можливостей за допомогою протоколу модельного контексту. Встановіть їх з реєстру.",
   "common.dismiss": "Закрити",
+  "common.pin": "Закріпити",
+  "common.unpin": "Відкріпити",
   "common.remove": "Видалити",
   "automations.detail.currentRun": "Поточний запуск",
   "automations.detail.emptyDescription": "Виберіть розклад, щоб переглянути останні запуски.",

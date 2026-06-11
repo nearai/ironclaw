@@ -942,6 +942,8 @@ registerPack("pt-BR", {
   "extensions.emptyMcpTitle": "Nenhum servidor MCP",
   "extensions.emptyMcpDesc": "Os servidores MCP estendem o agente com recursos de ferramenta adicionais através do Model Context Protocol. Instale-os a partir do registro.",
   "common.dismiss": "Dispensar",
+  "common.pin": "Fixar",
+  "common.unpin": "Desafixar",
   "common.remove": "Remover",
   "automations.detail.currentRun": "Execução atual",
   "automations.detail.emptyDescription": "Escolha um agendamento para ver execuções recentes.",

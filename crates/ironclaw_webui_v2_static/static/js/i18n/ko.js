@@ -942,6 +942,8 @@ registerPack("ko", {
   "extensions.emptyMcpTitle": "MCP 서버 없음",
   "extensions.emptyMcpDesc": "MCP 서버는 모델 컨텍스트 프로토콜을 통해 추가 도구 기능으로 에이전트를 확장합니다. 레지스트리에서 설치하십시오.",
   "common.dismiss": "닫기",
+  "common.pin": "고정",
+  "common.unpin": "고정 해제",
   "common.remove": "제거",
   "automations.detail.currentRun": "현재 실행",
   "automations.detail.emptyDescription": "최근 실행을 확인할 일정을 선택하세요.",

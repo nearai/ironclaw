@@ -942,6 +942,8 @@ registerPack("ar", {
   "extensions.emptyMcpTitle": "لا توجد خوادم MCP",
   "extensions.emptyMcpDesc": "تعمل خوادم MCP على توسيع الوكيل بقدرات أداة إضافية عبر بروتوكول سياق النموذج. تثبيتها من التسجيل.",
   "common.dismiss": "تجاهل",
+  "common.pin": "تثبيت",
+  "common.unpin": "إلغاء التثبيت",
   "common.remove": "إزالة",
   "automations.detail.currentRun": "التشغيل الحالي",
   "automations.detail.emptyDescription": "اختر جدولة لمراجعة عمليات التشغيل الأخيرة.",

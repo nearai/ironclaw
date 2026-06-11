@@ -942,6 +942,8 @@ registerPack("ja", {
   "extensions.emptyMcpTitle": "MCPサーバーがありません",
   "extensions.emptyMcpDesc": "MCPサーバーは設定によりModel Context Protocolを介したツール機能をエージェントに拡張します。レジストリからインストールしてください。",
   "common.dismiss": "閉じる",
+  "common.pin": "ピン留め",
+  "common.unpin": "ピン留め解除",
   "common.remove": "削除",
   "automations.detail.currentRun": "現在の実行",
   "automations.detail.emptyDescription": "最近の実行を確認するスケジュールを選択してください。",

@@ -988,5 +988,7 @@ registerPack("en", {
   "extensions.emptyMcpTitle": "No MCP servers",
   "extensions.emptyMcpDesc": "MCP servers extend the agent with additional tool capabilities over the Model Context Protocol. Install them from the registry.",
   "common.dismiss": "Dismiss",
+  "common.pin": "Pin",
+  "common.unpin": "Unpin",
   "common.remove": "Remove"
 });
