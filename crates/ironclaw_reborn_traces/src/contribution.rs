@@ -4284,6 +4284,23 @@ pub fn read_trace_queue_holds_for_scope(
     Ok(holds)
 }
 
+/// The subset of queue holds that are awaiting user manual review (e.g. a High
+/// residual-PII-risk hold). These are the only holds surfaced for the user to
+/// authorize; policy/value gates (`PolicyGate`) and transient retry holds
+/// (`RetryableSubmissionFailure`) are intentionally excluded.
+pub fn manual_review_holds_for_scope(scope: Option<&str>) -> anyhow::Result<Vec<TraceQueueHold>> {
+    Ok(retain_manual_review_holds(
+        read_trace_queue_holds_for_scope(scope)?,
+    ))
+}
+
+fn retain_manual_review_holds(holds: Vec<TraceQueueHold>) -> Vec<TraceQueueHold> {
+    holds
+        .into_iter()
+        .filter(|hold| matches!(hold.kind, TraceQueueHoldKind::ManualReview))
+        .collect()
+}
+
 pub fn trace_queue_diagnostics_for_scope(
     scope: Option<&str>,
 ) -> anyhow::Result<TraceQueueDiagnostics> {
@@ -10728,6 +10745,65 @@ mod tests {
             "hold reason preserved, got {}",
             holds[0].reason
         );
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
+    }
+
+    #[test]
+    fn retain_manual_review_holds_excludes_policy_and_retry_holds() {
+        let holds = vec![
+            TraceQueueHold {
+                submission_id: Uuid::new_v4(),
+                kind: TraceQueueHoldKind::ManualReview,
+                reason: "residual privacy risk is high".to_string(),
+                attempts: 0,
+                next_retry_at: None,
+            },
+            TraceQueueHold {
+                submission_id: Uuid::new_v4(),
+                kind: TraceQueueHoldKind::PolicyGate,
+                reason: "submission score below minimum".to_string(),
+                attempts: 0,
+                next_retry_at: None,
+            },
+            TraceQueueHold {
+                submission_id: Uuid::new_v4(),
+                kind: TraceQueueHoldKind::RetryableSubmissionFailure,
+                reason: "retained for retry".to_string(),
+                attempts: 1,
+                next_retry_at: None,
+            },
+        ];
+        let kept = retain_manual_review_holds(holds);
+        assert_eq!(kept.len(), 1, "only the ManualReview hold is surfaced");
+        assert_eq!(kept[0].kind, TraceQueueHoldKind::ManualReview);
+    }
+
+    #[tokio::test]
+    async fn manual_review_holds_for_scope_returns_only_manual_review_holds() {
+        let scope = format!("trace-manual-holds-test-{}", Uuid::new_v4());
+        let raw = RawTraceContribution::from_recorded_trace(
+            &sample_trace(),
+            RecordedTraceContributionOptions::default(),
+        );
+        let mut envelope = DeterministicTraceRedactor::default()
+            .redact_trace(raw)
+            .await
+            .expect("redaction should succeed");
+        apply_credit_estimate_to_envelope(&mut envelope);
+
+        queue_trace_envelope_as_held_for_scope(
+            Some(&scope),
+            &envelope,
+            "manual review required because residual privacy risk is high",
+        )
+        .expect("held envelope queues");
+
+        let holds = manual_review_holds_for_scope(Some(&scope)).expect("read manual-review holds");
+        assert_eq!(holds.len(), 1, "the one ManualReview hold is returned");
+        assert_eq!(holds[0].submission_id, envelope.submission_id);
+        assert_eq!(holds[0].kind, TraceQueueHoldKind::ManualReview);
+        assert!(holds[0].reason.contains("residual privacy risk is high"));
 
         let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
     }

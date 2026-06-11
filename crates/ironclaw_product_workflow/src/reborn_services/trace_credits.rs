@@ -8,7 +8,8 @@
 
 use chrono::{DateTime, Utc};
 use ironclaw_reborn_traces::contribution::{
-    read_local_trace_records_for_scope, read_trace_policy_for_scope, trace_credit_report,
+    manual_review_holds_for_scope, read_local_trace_records_for_scope, read_trace_policy_for_scope,
+    trace_credit_report,
 };
 use serde::{Deserialize, Serialize};
 
@@ -42,8 +43,25 @@ pub struct RebornTraceCreditsResponse {
     pub last_credit_sync_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_explanations: Vec<String>,
+    /// Count of traces held awaiting the caller's manual-review authorization
+    /// (e.g. High residual-PII-risk). These are retained, not submitted.
+    #[serde(default)]
+    pub manual_review_hold_count: u32,
+    /// The held traces awaiting authorization. Sanitized: submission id and a
+    /// safe hold reason only — never raw trace content.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holds: Vec<RebornTraceHold>,
     /// Server-authoritative framing — always [`TRACE_CREDITS_NOTE`].
     pub note: String,
+}
+
+/// One trace held awaiting the caller's manual-review authorization. Carries
+/// only the submission id (to authorize against) and a sanitized hold reason;
+/// no raw trace payload is ever exposed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RebornTraceHold {
+    pub submission_id: String,
+    pub reason: String,
 }
 
 /// Build the caller-scoped local Trace Commons credit view.
@@ -75,8 +93,26 @@ pub(super) fn local_trace_credits_for_user(user_id: &str) -> RebornTraceCreditsR
         }
     };
     let report = trace_credit_report(&records);
+    let holds: Vec<RebornTraceHold> = match manual_review_holds_for_scope(scope) {
+        Ok(holds) => holds
+            .into_iter()
+            .map(|hold| RebornTraceHold {
+                submission_id: hold.submission_id.to_string(),
+                reason: hold.reason,
+            })
+            .collect(),
+        Err(error) => {
+            tracing::debug!(
+                %error,
+                "failed to read Trace Commons manual-review holds for WebUI credits; treating as none"
+            );
+            Vec::new()
+        }
+    };
     RebornTraceCreditsResponse {
         enrolled,
+        manual_review_hold_count: holds.len() as u32,
+        holds,
         pending_credit: report.pending_credit,
         final_credit: report.final_credit,
         delayed_credit_delta: report.delayed_credit_delta,
@@ -129,6 +165,8 @@ mod tests {
         assert_eq!(response.delayed_credit_delta, 0.0);
         assert!(response.last_submission_at.is_none());
         assert!(response.last_credit_sync_at.is_none());
+        assert_eq!(response.manual_review_hold_count, 0);
+        assert!(response.holds.is_empty());
         // `trace_credit_report` always emits its summary lines, even
         // for an empty record set.
         assert!(
