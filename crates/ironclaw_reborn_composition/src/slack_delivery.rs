@@ -3086,6 +3086,193 @@ mod tests {
         );
     }
 
+    /// Rejected AuthResolution ack → static user-facing hint posted; internal
+    /// rejection reason must not leak into the Slack message.
+    ///
+    /// This is the caller-level regression for `rejection_hint_for_resolution`
+    /// covering the `ProductInboundPayload::AuthResolution(_)` branch: the hint
+    /// must be the sanitized `user_facing_hint()` string, not the raw internal
+    /// reason stored in `ProductRejection::reason`.
+    #[tokio::test]
+    async fn rejected_auth_resolution_ack_posts_static_hint_not_internal_reason() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // Program a success response for the hint post.
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "4000.1"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::Running,
+        ));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+
+        // Build an AuthResolution envelope — this payload kind is included in
+        // `rejection_hint_for_resolution`'s `is_resolution` match but had no
+        // caller-level test before this one.
+        let auth_resolution_payload = ProductInboundPayload::AuthResolution(
+            ironclaw_product_adapters::AuthResolutionPayload::new(
+                "gate:auth-hint-test",
+                ironclaw_product_adapters::AuthResolutionResult::Denied,
+            )
+            .expect("auth resolution payload"),
+        );
+        let env = envelope(auth_resolution_payload);
+
+        // Use a rejection with a distinctive internal reason that must NOT appear
+        // in the posted message.
+        let internal_marker = "internal-secret-reason-marker";
+        let ack =
+            ProductInboundAck::Rejected(ironclaw_product_adapters::ProductRejection::permanent(
+                ironclaw_product_adapters::ProductRejectionKind::BindingRequired,
+                internal_marker,
+            ));
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "expected exactly one chat.postMessage (the hint), bodies: {:?}",
+            post_calls
+                .iter()
+                .map(|c| std::str::from_utf8(&c.body).unwrap_or("?"))
+                .collect::<Vec<_>>()
+        );
+
+        let body = std::str::from_utf8(&post_calls[0].body).unwrap_or("");
+
+        // The posted text must contain the static user-facing hint for
+        // BindingRequired.
+        let expected_hint =
+            ironclaw_product_adapters::ProductRejectionKind::BindingRequired.user_facing_hint();
+        assert!(
+            body.contains(expected_hint),
+            "post must contain the static user-facing hint '{expected_hint}', body: {body}"
+        );
+
+        // The internal rejection reason must NOT appear in the post.
+        assert!(
+            !body.contains(internal_marker),
+            "post must not contain the internal rejection reason '{internal_marker}', body: {body}"
+        );
+    }
+
+    /// When a blocked-state notification (approval prompt) was delivered and
+    /// the subsequent wait times out, no additional timeout notice must be
+    /// posted to Slack.
+    ///
+    /// This is the caller-level regression for the
+    /// `RunWaitTimedOutAfterNotification` error variant: `observe_workflow_ack`
+    /// maps this variant to `feedback = None` so the user is not double-notified
+    /// after already seeing the approval prompt.
+    #[tokio::test]
+    async fn timeout_after_blocked_notification_suppresses_timeout_message() {
+        use ironclaw_product_workflow::FakeConversationBindingService;
+
+        let install = "test-install";
+        let gate_ref_str = "gate:approval-timeout-test";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // One programmed response for the approval-prompt postMessage.
+        // No second response — if the timeout notice were posted, the test
+        // would fail because `FakeProtocolHttpEgress` returns an error on
+        // an empty queue.
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "5000.1"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        // Always BlockedApproval with the same gate_ref: the first poll exits
+        // `wait_for_actionable` immediately (new blocked state, different from
+        // `delivered_blocked_marker=None`), delivering the approval prompt.
+        // Subsequent polls (second call to `wait_for_actionable`) return the same
+        // marker as `delivered_blocked_marker`, so the loop does not exit — it
+        // times out after `max_wait=1ms` and the error is converted to
+        // `RunWaitTimedOutAfterNotification`.
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+            TurnStatus::BlockedApproval,
+            Some(gate_ref_str),
+        )]));
+
+        let binding_service = Arc::new(FakeConversationBindingService::new());
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let services = SlackFinalReplyDeliveryServices {
+            binding_service,
+            thread_service,
+            turn_coordinator: coordinator,
+            outbound_store: outbound.clone(),
+            communication_preferences: outbound,
+            adapter: test_adapter(install),
+            egress: egress.clone(),
+            delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
+            auth_challenges: None,
+        };
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_millis(1),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let observer = SlackFinalReplyDeliveryObserver::with_settings(services, settings);
+
+        let run_id = TurnRunId::new();
+        let env = envelope(user_message_payload());
+        let ack = ProductInboundAck::Accepted {
+            accepted_message_ref: AcceptedMessageRef::new("slack:blocked-timeout-test")
+                .expect("ref"),
+            submitted_run_id: run_id,
+        };
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+
+        // Exactly one postMessage: the approval prompt notification.
+        // No timeout notice must have been posted.
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "expected exactly one chat.postMessage (the approval prompt), bodies: {:?}",
+            post_calls
+                .iter()
+                .map(|c| std::str::from_utf8(&c.body).unwrap_or("?"))
+                .collect::<Vec<_>>()
+        );
+
+        let body = std::str::from_utf8(&post_calls[0].body).unwrap_or("");
+
+        // The one message must be the approval prompt, not a timeout notice.
+        assert!(
+            !body.contains("longer than expected"),
+            "timeout notice must not be posted after blocked-notification timeout, body: {body}"
+        );
+        // The approval prompt must reference the gate ref.
+        assert!(
+            body.contains(gate_ref_str),
+            "approval prompt must reference the gate ref, body: {body}"
+        );
+    }
+
     // --- OnceLock slot behaviour tests ----------------------------------------
 
     #[tokio::test]
