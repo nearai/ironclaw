@@ -15,6 +15,13 @@ const PAGE_SIZE = 50;
  * source of truth; the /timeline endpoint remains authoritative. */
 const historyCache = new Map();
 
+/// Drop all cached thread messages. Called on sign-out so a different user
+/// logging in on the same tab (no full reload) can never observe the previous
+/// session's cached conversations.
+export function clearHistoryCache() {
+  historyCache.clear();
+}
+
 export function useHistory(threadId, options = {}) {
   const { getPendingMessages, setPendingMessages } = options;
   const cached = threadId ? historyCache.get(threadId) : null;

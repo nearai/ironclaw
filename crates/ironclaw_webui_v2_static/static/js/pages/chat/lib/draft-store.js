@@ -42,3 +42,18 @@ export function setDraft(key, text) {
 export function clearDraft(key) {
   setDraft(key, "");
 }
+
+/** Remove every persisted draft. Called on sign-out so unsent text can't
+ * leak to a different user signing in on the same browser. */
+export function clearAllDrafts() {
+  try {
+    const keys = [];
+    for (let i = 0; i < window.localStorage.length; i += 1) {
+      const key = window.localStorage.key(i);
+      if (key && key.startsWith(STORAGE_PREFIX)) keys.push(key);
+    }
+    keys.forEach((key) => window.localStorage.removeItem(key));
+  } catch (_) {
+    // Best-effort.
+  }
+}

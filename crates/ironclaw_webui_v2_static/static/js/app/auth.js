@@ -7,6 +7,8 @@ import {
   readStoredToken,
   storeToken,
 } from "../lib/api.js";
+import { clearHistoryCache } from "../pages/chat/hooks/useHistory.js";
+import { clearAllDrafts } from "../pages/chat/lib/draft-store.js";
 
 // The Reborn host validates bearer tokens via OIDC; the SPA simply
 // carries whatever token the user supplies (via `?token=` URL param,
@@ -212,6 +214,11 @@ export function useAuthSession() {
     setSession(null);
     setError("");
     queryClient.clear();
+    // Drop per-session client state so a different user signing in on the
+    // same tab (no full reload) can't observe the previous session's cached
+    // conversations or unsent drafts.
+    clearHistoryCache();
+    clearAllDrafts();
   }, []);
 
   return {
