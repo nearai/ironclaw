@@ -27,8 +27,8 @@ use ironclaw_product_adapters::{
     DeclaredEgressHost, EgressCredentialHandle, EgressHeader, EgressMethod, EgressPath,
     EgressRequest, EgressResponse, ExternalActorRef, ExternalConversationRef, FinalReplyView,
     GatePromptView, OutboundDeliverySink, ProductAdapter, ProductAdapterError, ProductInboundAck,
-    ProductInboundEnvelope, ProductInboundPayload, ProductOutboundPayload, ProductRejection,
-    ProductTriggerReason, ProtocolHttpEgress, ProtocolHttpEgressError,
+    ProductInboundEnvelope, ProductInboundPayload, ProductOutboundPayload, ProductTriggerReason,
+    ProtocolHttpEgress, ProtocolHttpEgressError,
 };
 use ironclaw_product_workflow::{
     ConversationBindingService, ProductOutboundDeliveryRequest, ProductOutboundTargetResolver,
@@ -924,25 +924,21 @@ fn should_deliver_after_ack(envelope: &ProductInboundEnvelope, ack: &ProductInbo
 
 /// Returns the user-facing hint to post when a resolution attempt (approval or
 /// auth) is rejected. Returns `None` for non-resolution payloads (e.g. user
-/// messages) or for `Duplicate` wrapping a non-rejected prior ack.
+/// messages) or for any `Duplicate` ack regardless of the prior ack inside it.
 fn rejection_hint_for_resolution(
     envelope: &ProductInboundEnvelope,
     ack: &ProductInboundAck,
 ) -> Option<&'static str> {
-    // Deliberately unwrap Duplicate exactly one level, not recursively: the
-    // inbound ledger stores the original (non-Duplicate) ack as `prior`, so a
-    // re-sent approve always arrives as Duplicate{original}. Deeper nesting
-    // would mean the ledger stored a Duplicate, which the pipeline never
-    // produces, so it is treated as non-rejected (no hint) rather than
-    // unwrapped further. A re-sent approve whose original succeeded
-    // (Duplicate{Accepted}) must not produce an error message.
-    let effective_rejection: &ProductRejection = match ack {
-        ProductInboundAck::Rejected(rejection) => rejection,
-        ProductInboundAck::Duplicate { prior } => match prior.as_ref() {
-            ProductInboundAck::Rejected(rejection) => rejection,
-            _ => return None,
-        },
-        _ => return None,
+    // `Duplicate` is keyed on the external event id (see `ActionFingerprintKey`
+    // in ironclaw_product_workflow): Slack transport retries reuse the same
+    // event id, so the same event arriving N times produces Duplicate{original}
+    // on the second through Nth delivery. A user re-typing "approve" produces a
+    // new event id and therefore a fresh `Rejected` ack, never `Duplicate`.
+    // Posting a hint on `Duplicate{Rejected}` would repeat the side effect N
+    // times on transport retries while suppressing it loses nothing — the
+    // original processing already posted the hint.
+    let ProductInboundAck::Rejected(effective_rejection) = ack else {
+        return None;
     };
     // Only post feedback for resolution-type payloads; user messages and other
     // payloads that happen to be rejected produce no channel noise.
@@ -955,7 +951,13 @@ fn rejection_hint_for_resolution(
     if !is_resolution {
         return None;
     }
-    Some(effective_rejection.kind.user_facing_hint())
+    let hint = match envelope.payload() {
+        ProductInboundPayload::AuthResolution(_) => {
+            effective_rejection.kind.user_facing_auth_hint()
+        }
+        _ => effective_rejection.kind.user_facing_hint(),
+    };
+    Some(hint)
 }
 
 fn is_accepted_auth_denial(envelope: &ProductInboundEnvelope, ack: &ProductInboundAck) -> bool {
@@ -2893,35 +2895,37 @@ mod tests {
         );
     }
 
-    /// Duplicate unwrapping is deliberately single-level: Duplicate{Rejected}
-    /// posts a hint, but Duplicate{Duplicate{Rejected}} does not. The inbound
-    /// ledger stores the original ack as `prior`, so duplicates wrap exactly
-    /// one level; deeper nesting never occurs in the pipeline and is treated
-    /// as non-rejected.
+    /// All `Duplicate` acks suppress the hint, regardless of the prior inside.
+    ///
+    /// `Duplicate` is keyed on the external event id: transport retries of the
+    /// same Slack event land as `Duplicate{original}`. The original processing
+    /// already posted any hint, so replays must not repeat the side effect.
+    /// A user re-typing "approve" produces a new event id → a fresh `Rejected`,
+    /// never a `Duplicate`, so suppressing `Duplicate{Rejected}` loses nothing.
     #[test]
-    fn rejection_hint_unwraps_duplicate_exactly_one_level() {
+    fn duplicate_acks_produce_no_hint() {
         let env = envelope(scoped_approval_resolution_payload());
 
-        let single = ProductInboundAck::Duplicate {
+        let duplicate_rejected = ProductInboundAck::Duplicate {
             prior: Box::new(rejected_ack(
                 ironclaw_product_adapters::ProductRejectionKind::BindingRequired,
             )),
         };
         assert!(
-            rejection_hint_for_resolution(&env, &single).is_some(),
-            "Duplicate{{Rejected}} must produce a hint"
+            rejection_hint_for_resolution(&env, &duplicate_rejected).is_none(),
+            "Duplicate{{Rejected}} must NOT produce a hint (transport replay)"
         );
 
-        let double = ProductInboundAck::Duplicate {
-            prior: Box::new(ProductInboundAck::Duplicate {
-                prior: Box::new(rejected_ack(
-                    ironclaw_product_adapters::ProductRejectionKind::BindingRequired,
-                )),
+        let duplicate_accepted = ProductInboundAck::Duplicate {
+            prior: Box::new(ProductInboundAck::Accepted {
+                accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("slack:prior")
+                    .expect("ref"),
+                submitted_run_id: ironclaw_turns::TurnRunId::new(),
             }),
         };
         assert!(
-            rejection_hint_for_resolution(&env, &double).is_none(),
-            "Duplicate{{Duplicate{{Rejected}}}} must not produce a hint (single-level unwrap)"
+            rejection_hint_for_resolution(&env, &duplicate_accepted).is_none(),
+            "Duplicate{{Accepted}} must not produce a hint"
         );
     }
 
@@ -3086,13 +3090,14 @@ mod tests {
         );
     }
 
-    /// Rejected AuthResolution ack → static user-facing hint posted; internal
-    /// rejection reason must not leak into the Slack message.
+    /// Rejected AuthResolution ack → auth-flavored hint posted; approval
+    /// command text and internal rejection reason must not appear.
     ///
     /// This is the caller-level regression for `rejection_hint_for_resolution`
     /// covering the `ProductInboundPayload::AuthResolution(_)` branch: the hint
-    /// must be the sanitized `user_facing_hint()` string, not the raw internal
-    /// reason stored in `ProductRejection::reason`.
+    /// must come from `user_facing_auth_hint()` (which references `auth deny
+    /// <auth-request-ref>`), not from `user_facing_hint()` (which references
+    /// approval commands), and not from the raw internal reason.
     #[tokio::test]
     async fn rejected_auth_resolution_ack_posts_static_hint_not_internal_reason() {
         let install = "test-install";
@@ -3153,13 +3158,19 @@ mod tests {
 
         let body = std::str::from_utf8(&post_calls[0].body).unwrap_or("");
 
-        // The posted text must contain the static user-facing hint for
-        // BindingRequired.
-        let expected_hint =
-            ironclaw_product_adapters::ProductRejectionKind::BindingRequired.user_facing_hint();
+        // The posted text must contain the auth-specific hint for BindingRequired,
+        // not the approval-command variant.
+        let expected_hint = ironclaw_product_adapters::ProductRejectionKind::BindingRequired
+            .user_facing_auth_hint();
         assert!(
             body.contains(expected_hint),
-            "post must contain the static user-facing hint '{expected_hint}', body: {body}"
+            "post must contain the auth-flavored hint '{expected_hint}', body: {body}"
+        );
+
+        // The approval command must NOT appear in an auth-resolution hint.
+        assert!(
+            !body.contains("approve gate:"),
+            "post must not contain approval command 'approve gate:', body: {body}"
         );
 
         // The internal rejection reason must NOT appear in the post.

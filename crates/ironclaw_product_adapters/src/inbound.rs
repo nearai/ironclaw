@@ -768,6 +768,21 @@ impl ProductRejectionKind {
             Self::PolicyDenied => "That request was declined by policy.",
         }
     }
+
+    /// Auth-resolution-flavored variant of [`Self::user_facing_hint`]: kinds whose
+    /// generic hint references approval commands get auth-specific guidance
+    /// (`auth deny <auth-request-ref>`); all other kinds reuse the generic hint.
+    pub fn user_facing_auth_hint(&self) -> &'static str {
+        match self {
+            Self::BindingRequired => {
+                "I couldn't match this reply to an active auth request. Reply in the auth prompt thread, or use `auth deny <auth-request-ref>` to decline."
+            }
+            Self::InvalidRequest => {
+                "I couldn't read that request. Use `auth deny <auth-request-ref>` to decline an auth request."
+            }
+            _ => self.user_facing_hint(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1073,5 +1088,43 @@ mod tests {
             cases.len(),
             "every ProductRejectionKind must have a distinct user-facing hint"
         );
+    }
+
+    #[test]
+    fn rejection_kind_user_facing_auth_hint_overrides_approval_kinds_and_falls_through() {
+        // BindingRequired and InvalidRequest must return auth-specific guidance,
+        // not the approval-command text from user_facing_hint().
+        let binding_hint = ProductRejectionKind::BindingRequired.user_facing_auth_hint();
+        assert!(
+            binding_hint.contains("auth deny"),
+            "BindingRequired auth hint must reference 'auth deny', got: {binding_hint}"
+        );
+        assert!(
+            !binding_hint.contains("approve gate:"),
+            "BindingRequired auth hint must not contain approval command, got: {binding_hint}"
+        );
+
+        let invalid_hint = ProductRejectionKind::InvalidRequest.user_facing_auth_hint();
+        assert!(
+            invalid_hint.contains("auth deny"),
+            "InvalidRequest auth hint must reference 'auth deny', got: {invalid_hint}"
+        );
+        assert!(
+            !invalid_hint.contains("approve"),
+            "InvalidRequest auth hint must not contain approval command, got: {invalid_hint}"
+        );
+
+        // All other kinds fall through to user_facing_hint().
+        for kind in [
+            ProductRejectionKind::AccessDenied,
+            ProductRejectionKind::UnknownInstallation,
+            ProductRejectionKind::PolicyDenied,
+        ] {
+            assert_eq!(
+                kind.user_facing_auth_hint(),
+                kind.user_facing_hint(),
+                "{kind:?} auth hint must fall through to user_facing_hint()"
+            );
+        }
     }
 }
