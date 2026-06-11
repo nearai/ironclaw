@@ -205,11 +205,13 @@ async fn wait_for_canonical_thread_id(
             .await
             .expect("list_trigger_run_history");
         if let Some(run) = runs.first() {
-            let thread_id_str = run.thread_id.as_str().to_string();
-            // A canonical UUID is parseable; the route id placeholder (64-char
-            // lower-hex) is not a valid UUID v4/v7 and will fail parse_str.
-            if uuid::Uuid::parse_str(&thread_id_str).is_ok() {
-                return thread_id_str;
+            // `thread_id` is None until fire acceptance. Once Some, it must be a
+            // canonical UUID; wait until that's the case.
+            if let Some(thread_id) = run.thread_id.as_ref() {
+                let thread_id_str = thread_id.as_str().to_string();
+                if uuid::Uuid::parse_str(&thread_id_str).is_ok() {
+                    return thread_id_str;
+                }
             }
         }
         if Instant::now() >= stop {
@@ -517,7 +519,7 @@ async fn run_thread_id_is_canonical_uuid_after_fire() {
     let user_id = UserId::new(USER).expect("user id");
     let agent_id = AgentId::new(AGENT).expect("agent id");
 
-    let (trigger_id, thread_id) = fire_trigger_and_get_run_thread_id(
+    let (_trigger_id, thread_id) = fire_trigger_and_get_run_thread_id(
         &runtime,
         &tenant_id,
         &user_id,
@@ -529,24 +531,12 @@ async fn run_thread_id_is_canonical_uuid_after_fire() {
     runtime.shutdown().await.expect("runtime shutdown");
 
     // The thread_id returned by wait_for_canonical_thread_id is already
-    // UUID-parseable (that's the poll condition). Assert explicitly so a
-    // regression is immediately visible in the test output.
+    // UUID-parseable (that's the poll condition — it waits until thread_id
+    // is Some(canonical UUID)). Assert explicitly so a regression is
+    // immediately visible in the test output.
     assert!(
         uuid::Uuid::parse_str(&thread_id).is_ok(),
         "run.thread_id must be a UUID after fire acceptance, got: {thread_id:?}"
-    );
-
-    // Assert it's NOT the 64-char lowercase hex route id.
-    assert_ne!(
-        thread_id.len(),
-        64,
-        "run.thread_id must not be the 64-char hex route id after acceptance; \
-         trigger_id={trigger_id:?}"
-    );
-    assert!(
-        !thread_id.chars().all(|c| c.is_ascii_hexdigit()),
-        "run.thread_id must not be all-hex (route id placeholder) after acceptance; \
-         got: {thread_id:?}"
     );
 }
 

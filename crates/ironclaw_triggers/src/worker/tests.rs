@@ -320,6 +320,7 @@ async fn tick_persists_replayed_submit_with_original_run_ref() {
             TrustedTriggerFireSubmitOutcome::Replayed {
                 original_run_id,
                 replayed_at: ts(1_704_067_205),
+                thread_id: None,
             },
         )])),
         Arc::new(RecordingActiveRunLookup::default()),
@@ -1178,6 +1179,7 @@ async fn tick_replayed_submit_can_be_cleared_on_a_later_tick_without_stopping_du
             TrustedTriggerFireSubmitOutcome::Replayed {
                 original_run_id: replayed_run_id,
                 replayed_at: ts(1_704_067_205),
+                thread_id: None,
             },
         )])),
         Arc::new(RecordingActiveRunLookup::default()),
@@ -1527,6 +1529,7 @@ async fn tick_replayed_mark_fire_missing_reports_due_failure() {
             TrustedTriggerFireSubmitOutcome::Replayed {
                 original_run_id,
                 replayed_at: fire_slot,
+                thread_id: None,
             },
         )])),
         Arc::new(RecordingActiveRunLookup::default()),

@@ -496,9 +496,7 @@ impl TriggerRepository for PostgresTriggerRepository {
             Some(request.run_id),
             record.last_run_at.unwrap_or(request.submitted_at),
         );
-        // Overwrite the placeholder route thread id with the canonical UUID assigned
-        // by the conversation binding layer at fire-acceptance time.
-        run_record.thread_id = request.thread_id;
+        run_record.thread_id = Some(request.thread_id);
         upsert_run_history(&tx, &run_record).await?;
         tx.commit()
             .await
@@ -542,17 +540,15 @@ impl TriggerRepository for PostgresTriggerRepository {
             },
         )
         .await?;
-        upsert_run_history(
-            &tx,
-            &TriggerRunRecord::running(
-                request.tenant_id.clone(),
-                request.trigger_id,
-                request.fire_slot,
-                Some(request.original_run_id),
-                record.last_run_at.unwrap_or(request.replayed_at),
-            ),
-        )
-        .await?;
+        let mut run_record = TriggerRunRecord::running(
+            request.tenant_id.clone(),
+            request.trigger_id,
+            request.fire_slot,
+            Some(request.original_run_id),
+            record.last_run_at.unwrap_or(request.replayed_at),
+        );
+        run_record.thread_id = request.thread_id;
+        upsert_run_history(&tx, &run_record).await?;
         tx.commit()
             .await
             .map_err(|error| backend_error("commit replayed trigger fire", error))?;
@@ -974,7 +970,7 @@ async fn upsert_run_history(
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 ON CONFLICT (tenant_id, trigger_id, fire_slot) DO UPDATE SET
                     run_id = EXCLUDED.run_id,
-                    thread_id = EXCLUDED.thread_id,
+                    thread_id = COALESCE(EXCLUDED.thread_id, {TRIGGER_RUN_TABLE}.thread_id),
                     status = EXCLUDED.status,
                     submitted_at = EXCLUDED.submitted_at,
                     completed_at = EXCLUDED.completed_at"
@@ -984,7 +980,7 @@ async fn upsert_run_history(
                 &run.trigger_id.to_string(),
                 &fmt_ts(&run.fire_slot),
                 &run_id,
-                &run.thread_id.as_str(),
+                &run.thread_id.as_ref().map(|t| t.as_str()),
                 &status,
                 &submitted_at,
                 &completed_at,
@@ -1006,13 +1002,11 @@ async fn complete_run_history(
     completed_at: Timestamp,
 ) -> Result<(), TriggerError> {
     let run_id_text = run_id.as_ref().map(ToString::to_string);
-    let thread_id =
-        TriggerRunRecord::running(tenant_id.clone(), trigger_id, fire_slot, run_id, fire_slot)
-            .thread_id;
     let status = trigger_run_history_status_text(status);
     let fire_slot_text = fmt_ts(&fire_slot);
     let completed_at = fmt_ts(&completed_at);
     let submitted_at_fallback = completed_at.clone();
+    let thread_id: Option<&str> = None;
     client
         .execute(
             &format!(
@@ -1029,7 +1023,7 @@ async fn complete_run_history(
                 &trigger_id.to_string(),
                 &fire_slot_text,
                 &run_id_text,
-                &thread_id.as_str(),
+                &thread_id,
                 &status,
                 &submitted_at_fallback,
                 &completed_at,
@@ -1080,8 +1074,11 @@ fn row_to_run_record(row: &Row) -> Result<TriggerRunRecord, TriggerError> {
     let run_id = optional_text(row, "run_id")?
         .map(|value| parse_turn_run_id_with_field(&value, "run_id"))
         .transpose()?;
-    let thread_id = ThreadId::new(required_text(row, "thread_id")?)
-        .map_err(|error| invalid_record("thread_id", error.to_string()))?;
+    let thread_id = optional_text(row, "thread_id")?
+        .map(|value| {
+            ThreadId::new(value).map_err(|error| invalid_record("thread_id", error.to_string()))
+        })
+        .transpose()?;
     let status = parse_run_history_status(&required_text(row, "status")?)?;
     let submitted_at = parse_timestamp(&required_text(row, "submitted_at")?, "submitted_at")?;
     let completed_at = optional_text(row, "completed_at")?
@@ -1348,4 +1345,6 @@ CREATE TABLE IF NOT EXISTS trigger_run_history (
 
 CREATE INDEX IF NOT EXISTS trigger_run_history_trigger_fire_slot_idx
     ON trigger_run_history (tenant_id, trigger_id, fire_slot DESC);
+
+ALTER TABLE trigger_run_history ALTER COLUMN thread_id DROP NOT NULL;
 "#;

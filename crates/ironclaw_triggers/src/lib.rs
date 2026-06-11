@@ -450,25 +450,28 @@ pub struct TriggerRunRecord {
     pub trigger_id: TriggerId,
     pub fire_slot: Timestamp,
     pub run_id: Option<TurnRunId>,
-    /// Thread id for this run.
+    /// Canonical thread id for this run, or `None` if no canonical conversation
+    /// thread has been established yet.
     ///
-    /// Populated with the route thread id (a 64-char lower-hex derived from the
-    /// fire identity) when the run row is first created at claim time. Overwritten
-    /// with the canonical `ThreadId` (UUID) once the fire is accepted — that is
-    /// the id the conversation binding layer assigns and the one the WebUI panel
-    /// uses to open the chat thread. Pre-acceptance rows that failed before the
-    /// submit step retain the route id, which does not correspond to any live
-    /// thread.
-    pub thread_id: ThreadId,
+    /// `None` is the initial state for claim-time rows and for runs that fail
+    /// before fire acceptance. `Some(canonical_uuid)` is set by
+    /// [`TriggerRepository::mark_fire_accepted`] (and optionally by
+    /// [`TriggerRepository::mark_fire_replayed`] when the replayed outcome
+    /// carries a canonical thread id). Only `Some` values correspond to a live
+    /// chat thread that the WebUI panel can open.
+    pub thread_id: Option<ThreadId>,
     pub status: TriggerRunHistoryStatus,
     pub submitted_at: Timestamp,
     pub completed_at: Option<Timestamp>,
 }
 
 impl TriggerRunRecord {
-    /// Create a "running" run record with the route thread id as a placeholder
-    /// thread id. The `thread_id` field will be overwritten with the canonical
-    /// UUID at fire-acceptance time via [`TriggerRepository::mark_fire_accepted`].
+    /// Create a "running" run record with no canonical thread id yet.
+    ///
+    /// The `thread_id` field will be populated with the canonical UUID at
+    /// fire-acceptance time via [`TriggerRepository::mark_fire_accepted`].
+    /// Rows that never reach acceptance (e.g. pre-submit failures) retain
+    /// `None` — the WebUI panel must not render a chat link for them.
     fn running(
         tenant_id: TenantId,
         trigger_id: TriggerId,
@@ -476,17 +479,12 @@ impl TriggerRunRecord {
         run_id: Option<TurnRunId>,
         submitted_at: Timestamp,
     ) -> Self {
-        let identity = TriggerFireIdentity::new(tenant_id.clone(), trigger_id, fire_slot);
-        // The route thread id is a 64-char lower-hex string, which is a valid
-        // `ThreadId` value (non-empty, no path separators, no control chars).
-        let thread_id = ThreadId::new(identity.route_thread_id.as_str())
-            .expect("route thread id is always a valid ThreadId");
         Self {
             tenant_id,
             trigger_id,
             fire_slot,
             run_id,
-            thread_id,
+            thread_id: None,
             status: TriggerRunHistoryStatus::Running,
             submitted_at,
             completed_at: None,
@@ -611,6 +609,14 @@ pub struct FireReplayedRequest {
     pub trigger_id: TriggerId,
     pub fire_slot: Timestamp,
     pub original_run_id: TurnRunId,
+    /// Canonical thread id for the replayed fire, if one is known.
+    ///
+    /// The submission path resolves conversation binding before determining
+    /// whether a fire is new or replayed, so the replayed outcome can carry
+    /// the canonical `ThreadId` (UUID). `None` means the submission path
+    /// did not resolve a canonical thread — the run-history row will have
+    /// no chat link.
+    pub thread_id: Option<ThreadId>,
     pub replayed_at: Timestamp,
     pub next_run_at: Timestamp,
 }
@@ -1206,7 +1212,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
             request.trigger_id,
             request.fire_slot,
             request.run_id,
-            request.thread_id,
+            Some(request.thread_id),
             record.last_run_at.unwrap_or(request.submitted_at),
         )?;
         Ok(Some(record))
@@ -1238,24 +1244,12 @@ impl TriggerRepository for InMemoryTriggerRepository {
         else {
             return Ok(None);
         };
-        // Replayed fires reuse the original run's thread; no new canonical thread
-        // is assigned. Retain the route id placeholder so the row is consistent
-        // with the claim-time state (the acceptance path will overwrite it if a
-        // re-acceptance ever occurs, but replayed fires don't go through accepted).
-        let placeholder_thread_id = TriggerRunRecord::running(
-            request.tenant_id.clone(),
-            request.trigger_id,
-            request.fire_slot,
-            None,
-            request.replayed_at,
-        )
-        .thread_id;
         self.upsert_running_run_history(
             &request.tenant_id,
             request.trigger_id,
             request.fire_slot,
             request.original_run_id,
-            placeholder_thread_id,
+            request.thread_id,
             record.last_run_at.unwrap_or(request.replayed_at),
         )?;
         Ok(Some(record))
@@ -1496,18 +1490,19 @@ impl InMemoryTriggerRepository {
         trigger_id: TriggerId,
         fire_slot: Timestamp,
         run_id: TurnRunId,
-        thread_id: ThreadId,
+        thread_id: Option<ThreadId>,
         submitted_at: Timestamp,
     ) -> Result<(), TriggerError> {
         let mut state = self.lock_state()?;
         let key = TriggerRunRepositoryKey::new(tenant_id, trigger_id, fire_slot);
-        if state
-            .runs
-            .get(&key)
-            .is_some_and(|run| run.completed_at.is_some())
-        {
+        let existing = state.runs.get(&key);
+        if existing.is_some_and(|run| run.completed_at.is_some()) {
             return Ok(());
         }
+        // A replay without a resolved scope must not clobber an already
+        // persisted canonical thread id back to None.
+        let preserved_thread_id =
+            thread_id.or_else(|| existing.and_then(|run| run.thread_id.clone()));
         let mut run = TriggerRunRecord::running(
             tenant_id.clone(),
             trigger_id,
@@ -1515,9 +1510,7 @@ impl InMemoryTriggerRepository {
             Some(run_id),
             submitted_at,
         );
-        // Overwrite the placeholder route thread id with the canonical UUID assigned
-        // by the conversation binding layer at fire-acceptance time.
-        run.thread_id = thread_id;
+        run.thread_id = preserved_thread_id;
         state.runs.insert(key, run);
         prune_run_history_locked(&mut state, tenant_id, trigger_id);
         Ok(())
@@ -2376,7 +2369,7 @@ mod tests {
             trigger_id,
             fire_slot,
             run_id,
-            ThreadId::new("01890f0f-test-7000-8000-000000000001").expect("valid thread id"),
+            Some(ThreadId::new("01890f0f-test-7000-8000-000000000001").expect("valid thread id")),
             later_submitted_at,
         )
         .expect("late running upsert is ignored");
@@ -2461,6 +2454,7 @@ mod tests {
                 fire_slot,
                 original_run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a")
                     .expect("valid run"),
+                thread_id: None,
                 replayed_at: fire_slot,
                 next_run_at: ts(1_704_067_260),
             })

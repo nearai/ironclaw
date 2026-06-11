@@ -158,6 +158,7 @@ impl TriggerPollerWorker {
             Ok(TrustedTriggerFireSubmitOutcome::Replayed {
                 original_run_id,
                 replayed_at,
+                thread_id,
             }) => {
                 let updated = self
                     .deps
@@ -167,6 +168,7 @@ impl TriggerPollerWorker {
                         trigger_id: record.trigger_id,
                         fire_slot,
                         original_run_id,
+                        thread_id,
                         replayed_at,
                         next_run_at,
                     })

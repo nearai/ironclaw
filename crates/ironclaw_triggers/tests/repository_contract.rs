@@ -1492,7 +1492,7 @@ mod fire_claim_contract {
     use ironclaw_triggers::{
         ClaimDueFireOutcome, ClaimDueFireRequest, FireAcceptedRequest, FirePermanentFailedRequest,
         FireReplayedRequest, FireRetryableFailedRequest, FireTerminalFailedRequest,
-        TriggerFireIdentity, TriggerRunHistoryStatus,
+        TriggerRunHistoryStatus,
     };
 
     async fn assert_fire_claim_and_update_contract(repo: &impl TriggerRepository) {
@@ -1627,6 +1627,7 @@ mod fire_claim_contract {
                 trigger_id: replayed_trigger_id,
                 fire_slot,
                 original_run_id: replayed_run_id,
+                thread_id: None,
                 replayed_at: accepted_at,
                 next_run_at: expected_next_run_at,
             })
@@ -1646,6 +1647,7 @@ mod fire_claim_contract {
                 trigger_id: replayed_trigger_id,
                 fire_slot,
                 original_run_id: replayed_run_id,
+                thread_id: None,
                 replayed_at: ts(1_704_067_207),
                 next_run_at: expected_next_run_at,
             })
@@ -1662,6 +1664,7 @@ mod fire_claim_contract {
                 trigger_id: replayed_trigger_id,
                 fire_slot,
                 original_run_id: different_replayed_run_id,
+                thread_id: None,
                 replayed_at: accepted_at,
                 next_run_at: expected_next_run_at,
             })
@@ -1879,6 +1882,7 @@ mod fire_claim_contract {
                 fire_slot: stale_fire_slot,
                 original_run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f63")
                     .expect("valid run"),
+                thread_id: None,
                 replayed_at: fire_slot,
                 next_run_at: ts(1_704_067_260),
             })
@@ -2020,6 +2024,7 @@ mod fire_claim_contract {
                 fire_slot,
                 original_run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f61")
                     .expect("valid run"),
+                thread_id: None,
                 replayed_at: fire_slot,
                 next_run_at: fire_slot,
             })
@@ -2597,6 +2602,7 @@ mod fire_claim_contract {
             trigger_id,
             fire_slot,
             original_run_id,
+            thread_id: None,
             replayed_at,
             next_run_at,
         };
@@ -2708,16 +2714,14 @@ mod fire_claim_contract {
             .await
             .expect("list claimed run history");
         assert_eq!(runs.len(), 1);
-        // Pre-acceptance: thread_id holds the route id placeholder (64-char lower-hex).
-        let expected_route_thread_id =
-            TriggerFireIdentity::new(tenant_id.clone(), trigger_id, fire_slot).route_thread_id;
+        // Pre-acceptance: thread_id is None — no canonical thread exists yet.
         assert_eq!(runs[0].tenant_id, tenant_id);
         assert_eq!(runs[0].trigger_id, trigger_id);
         assert_eq!(runs[0].fire_slot, fire_slot);
         assert_eq!(runs[0].run_id, None);
         assert_eq!(
-            runs[0].thread_id.as_str(),
-            expected_route_thread_id.as_str()
+            runs[0].thread_id, None,
+            "claim-time run must have no canonical thread"
         );
         assert_eq!(runs[0].status, TriggerRunHistoryStatus::Running);
         assert_eq!(runs[0].submitted_at, claim_now);
@@ -2748,12 +2752,11 @@ mod fire_claim_contract {
         assert_eq!(runs[0].status, TriggerRunHistoryStatus::Running);
         assert_eq!(runs[0].submitted_at, submitted_at);
         assert_eq!(runs[0].completed_at, None);
-        // After acceptance, thread_id must be the canonical UUID, not the route hex id.
-        assert_eq!(runs[0].thread_id, canonical_thread_id);
-        assert_ne!(
-            runs[0].thread_id.as_str(),
-            expected_route_thread_id.as_str(),
-            "thread_id must be overwritten with canonical UUID at fire acceptance"
+        // After acceptance, thread_id must be Some(canonical UUID).
+        assert_eq!(
+            runs[0].thread_id,
+            Some(canonical_thread_id.clone()),
+            "thread_id must be set to the canonical UUID at fire acceptance"
         );
 
         repo.clear_active_fire(ClearActiveFireRequest {
@@ -2933,6 +2936,96 @@ mod fire_claim_contract {
             runs[0].submitted_at,
             runs[0].completed_at.expect("completion timestamp"),
             "completion-only run-history rows must use completed_at as fallback submitted_at"
+        );
+
+        // Replay thread-id semantics: a replay carrying the canonical thread id
+        // persists it, and a later replay WITHOUT a resolved scope must not
+        // clobber the stored canonical id back to None (which would regress the
+        // Automations panel chat link to a 404).
+        let replay_thread_trigger_id =
+            TriggerId::parse("01J00000000000000000000035").expect("ulid");
+        let replay_thread_tenant_id = tenant("tenant-run-history-replay-thread");
+        let replay_thread_record = sample_record(
+            replay_thread_trigger_id,
+            replay_thread_tenant_id.clone(),
+            fire_slot,
+        );
+        let replay_next_run_at = replay_thread_record
+            .schedule
+            .next_slot_after(fire_slot)
+            .expect("next slot calculation")
+            .expect("future slot");
+        repo.upsert_trigger(replay_thread_record)
+            .await
+            .expect("insert replay-thread record");
+        let replay_thread_claim = repo
+            .claim_due_fire(ClaimDueFireRequest {
+                tenant_id: replay_thread_tenant_id.clone(),
+                trigger_id: replay_thread_trigger_id,
+                fire_slot,
+                now: claim_now,
+            })
+            .await
+            .expect("claim replay-thread fire");
+        assert!(matches!(
+            replay_thread_claim,
+            ClaimDueFireOutcome::Claimed(_)
+        ));
+
+        let replay_thread_run_id =
+            TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f83").expect("valid run");
+        let replay_canonical_thread_id =
+            ThreadId::new("01890f0f-c000-7000-8000-000000000003").expect("valid thread id");
+        repo.mark_fire_replayed(FireReplayedRequest {
+            tenant_id: replay_thread_tenant_id.clone(),
+            trigger_id: replay_thread_trigger_id,
+            fire_slot,
+            original_run_id: replay_thread_run_id,
+            thread_id: Some(replay_canonical_thread_id.clone()),
+            replayed_at: submitted_at,
+            next_run_at: replay_next_run_at,
+        })
+        .await
+        .expect("mark replayed with canonical thread id")
+        .expect("replayed fire should persist");
+
+        let runs = repo
+            .list_trigger_run_history(
+                replay_thread_tenant_id.clone(),
+                replay_thread_trigger_id,
+                10,
+            )
+            .await
+            .expect("list replayed run history");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(
+            runs[0].thread_id,
+            Some(replay_canonical_thread_id.clone()),
+            "replay must persist the canonical thread id when the submit outcome carries it"
+        );
+
+        repo.mark_fire_replayed(FireReplayedRequest {
+            tenant_id: replay_thread_tenant_id.clone(),
+            trigger_id: replay_thread_trigger_id,
+            fire_slot,
+            original_run_id: replay_thread_run_id,
+            thread_id: None,
+            replayed_at: ts(1_704_067_209),
+            next_run_at: replay_next_run_at,
+        })
+        .await
+        .expect("idempotent replay without resolved scope")
+        .expect("replayed result returns existing record");
+
+        let runs = repo
+            .list_trigger_run_history(replay_thread_tenant_id, replay_thread_trigger_id, 10)
+            .await
+            .expect("list run history after scopeless replay");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(
+            runs[0].thread_id,
+            Some(replay_canonical_thread_id),
+            "a replay without a resolved scope must not clobber the stored canonical thread id"
         );
     }
 

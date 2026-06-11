@@ -1062,7 +1062,7 @@ fn automation_info(
         last_status,
         recent_runs: vec![RebornAutomationRecentRunInfo {
             run_id: Some(automation_run_id()),
-            thread_id: ThreadId::new("thread-listed").expect("valid thread id"),
+            thread_id: Some(ThreadId::new("thread-listed").expect("valid thread id")),
             fire_slot: Some("2026-06-03T09:00:00Z".parse().expect("fire slot")),
             status: RebornAutomationRecentRunStatus::Ok,
             submitted_at: "2026-06-03T09:00:01Z".parse().expect("submitted at"),
@@ -4206,8 +4206,11 @@ async fn list_automation_dispatches_through_product_facade() {
         RebornAutomationRecentRunStatus::Ok
     );
     assert_eq!(
-        listed.automations[0].recent_runs[0].thread_id.as_str(),
-        "thread-listed"
+        listed.automations[0].recent_runs[0]
+            .thread_id
+            .as_ref()
+            .map(|t| t.as_str()),
+        Some("thread-listed")
     );
 
     let list_calls = automation_facade.list_calls();
@@ -5105,7 +5108,7 @@ fn reborn_automation_state_round_trips_serde_for_every_variant() {
 fn reborn_automation_recent_run_info_round_trips_typed_ids_and_preserves_unknown_status() {
     let recent_run = RebornAutomationRecentRunInfo {
         run_id: Some(automation_run_id()),
-        thread_id: ThreadId::new("thread-listed").expect("valid thread id"),
+        thread_id: Some(ThreadId::new("thread-listed").expect("valid thread id")),
         fire_slot: Some("2026-06-03T09:00:00Z".parse().expect("fire slot")),
         status: RebornAutomationRecentRunStatus::Running,
         submitted_at: "2026-06-03T09:00:01Z".parse().expect("submitted at"),
@@ -5359,7 +5362,7 @@ async fn get_timeline_succeeds_for_own_automation_trigger_thread() {
             last_status: Some(RebornAutomationRunStatus::Ok),
             recent_runs: vec![RebornAutomationRecentRunInfo {
                 run_id: Some(automation_run_id()),
-                thread_id: trigger_thread_id.clone(),
+                thread_id: Some(trigger_thread_id.clone()),
                 fire_slot: None,
                 status: RebornAutomationRecentRunStatus::Ok,
                 submitted_at: "2026-06-09T09:00:01Z".parse().expect("submitted_at"),
@@ -5461,7 +5464,7 @@ fn automation_facade_with_trigger_thread(
             last_status: Some(RebornAutomationRunStatus::Ok),
             recent_runs: vec![RebornAutomationRecentRunInfo {
                 run_id: Some(automation_run_id()),
-                thread_id: trigger_thread_id.clone(),
+                thread_id: Some(trigger_thread_id.clone()),
                 fire_slot: None,
                 status: RebornAutomationRecentRunStatus::Ok,
                 submitted_at: "2026-06-10T09:00:01Z".parse().expect("submitted_at"),
@@ -5920,7 +5923,7 @@ async fn get_timeline_rejects_thread_id_absent_from_callers_automations() {
             last_status: None,
             recent_runs: vec![RebornAutomationRecentRunInfo {
                 run_id: Some(automation_run_id()),
-                thread_id: unrelated_thread_id,
+                thread_id: Some(unrelated_thread_id),
                 fire_slot: None,
                 status: RebornAutomationRecentRunStatus::Ok,
                 submitted_at: "2026-06-10T12:00:00Z".parse().expect("submitted_at"),

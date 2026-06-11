@@ -170,8 +170,9 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
             runs_by_trigger
                 .get(&record.trigger_id)
                 .map(|runs| {
-                    runs.iter()
-                        .any(|run| run.thread_id.as_str() == thread_id_str)
+                    runs.iter().any(|run| {
+                        run.thread_id.as_ref().map(|t| t.as_str()) == Some(thread_id_str)
+                    })
                 })
                 .unwrap_or(false)
         }) else {
@@ -263,9 +264,9 @@ fn map_recent_run(run: &TriggerRunRecord) -> Option<RebornAutomationRecentRunInf
     };
     Some(RebornAutomationRecentRunInfo {
         run_id: run.run_id,
-        // After fire acceptance, thread_id holds the canonical UUID minted by the
-        // conversation binding layer. Pre-acceptance runs (failed before submit)
-        // retain the route id placeholder; those runs never open a chat thread.
+        // `thread_id` is `None` until fire acceptance; pre-acceptance and
+        // pre-submit-failure rows carry no canonical thread. The WebUI panel
+        // must not render a chat link when this field is absent.
         thread_id: run.thread_id.clone(),
         fire_slot: Some(run.fire_slot),
         status,
@@ -413,17 +414,19 @@ mod tests {
     }
 
     fn make_run_record(trigger_id: TriggerId, status: TriggerRunHistoryStatus) -> TriggerRunRecord {
-        use ironclaw_triggers::TriggerFireIdentity;
         let tenant_id = TenantId::new("tenant-alpha").expect("valid tenant");
         let fire_slot = now();
-        let identity = TriggerFireIdentity::new(tenant_id.clone(), trigger_id, fire_slot);
         TriggerRunRecord {
             tenant_id,
             trigger_id,
             fire_slot,
             run_id: Some(TurnRunId::new()),
-            thread_id: ThreadId::new(identity.route_thread_id.as_str())
-                .expect("route thread id is always a valid ThreadId"),
+            // Use a canonical UUID thread_id to represent a post-acceptance run.
+            // Pre-acceptance rows would have thread_id: None.
+            thread_id: Some(
+                ThreadId::new("01890f0f-test-7000-8000-000000000001")
+                    .expect("valid canonical thread id"),
+            ),
             status,
             submitted_at: now(),
             completed_at: None,
@@ -755,7 +758,10 @@ mod tests {
         assert!(mapped.run_id.is_some());
         assert!(mapped.submitted_at <= chrono::Utc::now());
         assert!(mapped.completed_at.is_none());
-        let _ = mapped.thread_id; // valid ThreadId produced
+        assert!(
+            mapped.thread_id.is_some(),
+            "post-acceptance run must carry a canonical thread_id"
+        );
     }
 
     #[tokio::test]
@@ -797,8 +803,10 @@ mod tests {
         record.creator_user_id =
             UserId::new("user-trigger-creator").expect("valid trigger creator user id");
         let run = make_run_record(trigger_id, TriggerRunHistoryStatus::Ok);
-        let thread_id =
-            ironclaw_host_api::ThreadId::new(run.thread_id.as_str()).expect("valid thread id");
+        let thread_id = run
+            .thread_id
+            .clone()
+            .expect("make_run_record always sets a canonical thread_id");
         let mut runs_by_trigger = HashMap::new();
         runs_by_trigger.insert(trigger_id, vec![run]);
         let limits = Arc::new(Mutex::new(Vec::new()));
