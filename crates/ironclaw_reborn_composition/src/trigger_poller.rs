@@ -760,23 +760,33 @@ mod tests {
         }
 
         /// Inner submitter that always returns `Accepted` with a pre-set run_id
-        /// and scope. Used to exercise the wrapper without going through the
-        /// real submission pipeline.
+        /// and a scope derived from the request's creator. Used to exercise the
+        /// wrapper without going through the real submission pipeline.
         struct FixedAcceptedSubmitter {
             run_id: TurnRunId,
-            scope: TurnScope,
         }
 
         #[async_trait]
         impl TrustedTriggerFireSubmitter for FixedAcceptedSubmitter {
             async fn submit_trusted_trigger_fire(
                 &self,
-                _request: TrustedTriggerSubmitRequest,
+                request: TrustedTriggerSubmitRequest,
             ) -> Result<TrustedTriggerFireSubmitOutcome, TriggerError> {
+                let creator = request.fire().creator_user_id.clone();
+                // Mirror the post-Task-2 production shape: fabricate the scope
+                // with the trigger creator as explicit owner so the fixture
+                // matches what the real trusted-submit path now produces.
+                let scope = TurnScope::new_with_owner(
+                    wrapper_tenant(),
+                    Some(AgentId::new("hook-wrapper-agent").expect("agent")),
+                    None,
+                    ThreadId::new(format!("hook-wrapper-thread-{}", self.run_id)).expect("thread"),
+                    Some(creator),
+                );
                 Ok(TrustedTriggerFireSubmitOutcome::Accepted {
                     run_id: self.run_id,
                     submitted_at: Utc::now(),
-                    turn_scope: self.scope.clone(),
+                    turn_scope: scope,
                 })
             }
         }
@@ -885,11 +895,7 @@ mod tests {
             seed_due_trigger(&repo, fire_slot).await;
 
             let run_id = TurnRunId::new();
-            let scope = wrapper_scope(run_id);
-            let inner = Arc::new(FixedAcceptedSubmitter {
-                run_id,
-                scope: scope.clone(),
-            });
+            let inner = Arc::new(FixedAcceptedSubmitter { run_id });
             let hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>> =
                 Arc::new(OnceLock::new());
 
@@ -928,10 +934,7 @@ mod tests {
 
             let run_id = TurnRunId::new();
             let scope = wrapper_scope(run_id);
-            let inner = Arc::new(FixedAcceptedSubmitter {
-                run_id,
-                scope: scope.clone(),
-            });
+            let inner = Arc::new(FixedAcceptedSubmitter { run_id });
             let hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>> =
                 Arc::new(OnceLock::new());
 
@@ -959,7 +962,7 @@ mod tests {
             let calls = recording.calls();
             assert_eq!(calls.len(), 1, "hook must fire exactly once");
 
-            let (_, called_run_id, called_scope) = &calls[0];
+            let (recorded_fire, called_run_id, called_scope) = &calls[0];
             assert_eq!(
                 *called_run_id, run_id,
                 "hook must receive the accepted run_id"
@@ -967,6 +970,11 @@ mod tests {
             assert_eq!(
                 called_scope.thread_id, scope.thread_id,
                 "hook must receive the accepted turn_scope thread_id"
+            );
+            assert_eq!(
+                called_scope.explicit_owner_user_id(),
+                Some(&recorded_fire.creator_user_id),
+                "post-submit hook must receive a TurnScope owned by the trigger creator"
             );
         }
     }
