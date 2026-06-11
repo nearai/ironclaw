@@ -82,6 +82,8 @@ export function LogsPage() {
     setAutoScroll,
     serverLevel,
     changeServerLevel,
+    isLoading,
+    error,
   } = useLogs();
 
   const outputRef = React.useRef(null);
@@ -117,6 +119,10 @@ export function LogsPage() {
         />
 
         <div className="flex items-center gap-2 ml-auto">
+          <span className="hidden tabular-nums text-xs text-[var(--v2-text-muted)] sm:inline">
+            ${t("logs.entryCount", { count: totalCount })}
+          </span>
+
           <!-- Auto-scroll toggle -->
           <label className="flex cursor-pointer items-center gap-1.5 text-xs text-[var(--v2-text-muted)]">
             <input
@@ -177,7 +183,26 @@ export function LogsPage() {
         ref=${outputRef}
         className="min-h-0 flex-1 overflow-y-auto bg-[var(--v2-canvas)]"
       >
-        ${entries.length === 0
+        ${error
+          ? html`
+              <div
+                className="flex h-full items-center justify-center px-6 text-center text-sm text-red-300"
+              >
+                ${t("error.loadFailed", {
+                  what: t("nav.logs"),
+                  message: error.message || error.statusText || "Request failed",
+                })}
+              </div>
+            `
+          : isLoading && entries.length === 0
+            ? html`
+                <div
+                  className="flex h-full items-center justify-center text-sm text-[var(--v2-text-muted)]"
+                >
+                  ${t("common.loading")}
+                </div>
+              `
+            : entries.length === 0
           ? html`
               <div
                 className="flex h-full items-center justify-center text-sm text-[var(--v2-text-muted)]"

@@ -207,6 +207,17 @@ export function setOutboundPreferences({ finalReplyTargetId } = {}) {
   });
 }
 
+// --- Operator logs ---
+
+export function queryOperatorLogs({ limit, cursor, level, target } = {}) {
+  const url = new URL(`${V2_BASE}/operator/logs`, window.location.origin);
+  if (limit != null) url.searchParams.set("limit", String(limit));
+  if (cursor) url.searchParams.set("cursor", cursor);
+  if (level) url.searchParams.set("level", level);
+  if (target) url.searchParams.set("target", target);
+  return apiFetch(url.pathname + url.search);
+}
+
 // --- Messages ---
 
 export function sendMessage({ threadId, content, clientActionId: clientId }) {
