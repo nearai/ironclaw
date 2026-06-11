@@ -18,7 +18,8 @@ use ironclaw_turns::{
 
 use crate::state::{
     CapabilityCallSignature, CheckpointKind, DeferredCompactionWatermark, IndexedMessageKind,
-    LoopExecutionState, MessageIndexEntry, RepeatedCallWarningPhase, RepeatedCallWarningState,
+    LoopExecutionState, MessageIndexEntry, PendingAuthResume, RepeatedCallWarningPhase,
+    RepeatedCallWarningState,
 };
 use crate::strategies::{
     CapabilityBatchTurnSummary, CapabilityFilter, DefaultCompactionStrategy, GateKind, GateOutcome,
@@ -3778,11 +3779,14 @@ async fn auth_gate_block_stores_pending_auth_resume() {
         "expected Blocked exit for auth gate, got {exit:?}"
     );
 
-    // BeforeBlock checkpoint must have been written.
-    assert!(
-        host.checkpoint_kinds()
-            .contains(&LoopCheckpointKind::BeforeBlock),
-        "BeforeBlock checkpoint must be written when auth gate blocks"
+    // BeforeBlock checkpoint must have been written in the expected sequence.
+    assert_eq!(
+        host.checkpoint_kinds(),
+        vec![
+            LoopCheckpointKind::BeforeModel,
+            LoopCheckpointKind::BeforeSideEffect,
+            LoopCheckpointKind::BeforeBlock,
+        ]
     );
 
     // Recover state from the BeforeBlock checkpoint — this is what the resume
@@ -3808,5 +3812,70 @@ async fn auth_gate_block_stores_pending_auth_resume() {
     assert!(
         before_block_state.pending_approval_resume.is_none(),
         "auth block must not populate pending_approval_resume"
+    );
+}
+
+#[tokio::test]
+async fn non_auth_gate_block_preserves_pending_auth_resume() {
+    // Regression test for the fix where `_ => state.pending_auth_resume.take()`
+    // would erase a live auth resume record when a non-auth gate (e.g. approval)
+    // blocked mid-re-dispatch.
+    //
+    // Scenario: auth gate previously blocked → record stored → OAuth completes →
+    // resume re-dispatches the call → re-dispatch hits an APPROVAL gate → Block
+    // arm must NOT clear the auth record. The auth record must survive so that
+    // the outer resume handler can still consume it.
+    let approval_gate_ref = LoopGateRef::new("gate:approval-during-redispatch").expect("valid");
+    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::ApprovalRequired {
+                gate_ref: approval_gate_ref.clone(),
+                safe_summary: "approval required during redispatch".to_string(),
+                approval_resume: None,
+            }],
+            stopped_on_suspension: true,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+
+    // Seed a live auth resume record, simulating a state that was rehydrated
+    // from a BeforeBlock checkpoint written when the auth gate first blocked.
+    let seeded_gate_ref = LoopGateRef::new("gate:auth-original").expect("valid");
+    let seeded_auth_resume = PendingAuthResume {
+        gate_ref: seeded_gate_ref.clone(),
+        capability_id: capability_id(),
+        surface_version: surface_version(),
+        input_ref: CapabilityInputRef::new("input:original").expect("valid"),
+        effective_capability_ids: Vec::new(),
+        provider_replay: None,
+    };
+    let mut initial_state = LoopExecutionState::initial_for_run(host.run_context());
+    initial_state.pending_auth_resume = Some(seeded_auth_resume.clone());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, initial_state)
+        .await
+        .expect("execute blocks on approval gate");
+
+    // Exit must be a Blocked exit (approval gate fired).
+    assert!(
+        matches!(exit, LoopExit::Blocked(_)),
+        "expected Blocked exit when approval gate blocks, got {exit:?}"
+    );
+
+    // The BeforeBlock checkpoint must carry the auth resume record unchanged —
+    // the approval-gate Block arm must not have erased it.
+    let before_block_state = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+    let surviving_resume = before_block_state
+        .pending_auth_resume
+        .as_ref()
+        .expect("pending_auth_resume must survive a non-auth gate block");
+    assert_eq!(
+        surviving_resume.gate_ref, seeded_gate_ref,
+        "surviving pending_auth_resume.gate_ref must be the original auth gate ref, not the approval gate ref"
+    );
+    assert_eq!(
+        surviving_resume.capability_id, seeded_auth_resume.capability_id,
+        "surviving pending_auth_resume.capability_id must be unchanged"
     );
 }

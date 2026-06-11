@@ -75,17 +75,20 @@ impl ExecutorStage<GateInput> for GateStage {
                         input: resume.input,
                         estimate: resume.estimate,
                     });
-                state.pending_auth_resume = match kind {
-                    GateKind::Auth => Some(PendingAuthResume {
+                if matches!(kind, GateKind::Auth) {
+                    state.pending_auth_resume = Some(PendingAuthResume {
                         gate_ref: gate_ref.clone(),
                         capability_id: call.capability_id.clone(),
                         surface_version: call.surface_version.clone(),
                         input_ref: call.input_ref.clone(),
                         effective_capability_ids: call.effective_capability_ids.clone(),
                         provider_replay: call.provider_replay.clone(),
-                    }),
-                    _ => state.pending_auth_resume.take(),
-                };
+                    });
+                }
+                // Non-auth blocks do not invalidate a pending auth resume: a resource or
+                // approval gate can fire mid-re-dispatch, and clearing here would erase the
+                // record before it is consumed. Clearing on completion happens in the
+                // capability stage.
                 match CheckpointStage.cancel_if_requested(ctx, state).await? {
                     CancelCheck::Continue(next) => state = *next,
                     CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
