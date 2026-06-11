@@ -6,7 +6,7 @@ export function TypingIndicator() {
   const t = useT();
   return html`
     <div className="flex flex-col items-start">
-      <div className="flex min-w-0 max-w-[85%] flex-col gap-1">
+      <div className="flex min-w-0 max-w-[85%] flex-col gap-2">
         <div className="flex items-center gap-2 px-1">
           <${Avatar} role="assistant" />
           <span className="text-xs font-medium text-[var(--v2-text-muted)]">

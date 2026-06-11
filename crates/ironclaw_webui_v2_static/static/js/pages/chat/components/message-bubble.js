@@ -124,7 +124,7 @@ function MessageBubbleImpl({ message, onRetry }) {
       data-testid=${`msg-${role}`}
       className=${["group flex flex-col", isUser ? "items-end" : "items-start"].join(" ")}
     >
-      <div className="flex min-w-0 max-w-[85%] flex-col gap-1">
+      <div className="flex min-w-0 max-w-[85%] flex-col gap-2">
         ${showIdentity &&
         html`
           <div

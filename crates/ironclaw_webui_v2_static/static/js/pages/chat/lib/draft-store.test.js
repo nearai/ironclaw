@@ -1,4 +1,4 @@
-// Unit tests for the per-conversation composer draft store (#4724).
+// Unit tests for the per-conversation composer draft store.
 //
 // Run with Node's built-in test runner (no extra deps):
 //   node --test crates/ironclaw_webui_v2_static/static/js/pages/chat/lib/draft-store.test.js

@@ -21,8 +21,8 @@ DENIAL_PATTERN = re.compile(
 
 CANNED_RESPONSES = [
     (re.compile(r"empty routine response", re.IGNORECASE), ""),
-    # Markdown link reply for the WebChat v2 "links open in a new tab" smoke
-    # (#4733). The renderer must add target=_blank to the rendered anchor.
+    # Markdown link reply for the WebChat v2 "links open in a new tab" smoke.
+    # The renderer must add target=_blank to the rendered anchor.
     (re.compile(r"link test", re.IGNORECASE),
      "See [the pull request](https://example.com/pr/1) for details."),
     (re.compile(r"\bhello\b|\bhi\b|\bhey\b", re.IGNORECASE), "Hello! How can I help you today?"),

@@ -347,7 +347,7 @@ async def test_reborn_v2_ui_send_renders_reply(reborn_v2_page, reborn_v2_server)
 
 
 async def test_reborn_v2_messages_show_identity_labels(reborn_v2_page):
-    """User and assistant messages render a persistent identity label (#4722)."""
+    """User and assistant messages render a persistent identity label."""
     composer = reborn_v2_page.locator(SEL_V2["chat_composer"])
     await composer.fill("hello there")
     await composer.press("Enter")
@@ -364,7 +364,7 @@ async def test_reborn_v2_messages_show_identity_labels(reborn_v2_page):
 
 
 async def test_reborn_v2_response_links_open_in_new_tab(reborn_v2_page):
-    """Links inside an assistant reply open in a new tab (#4733)."""
+    """Links inside an assistant reply open in a new tab."""
     composer = reborn_v2_page.locator(SEL_V2["chat_composer"])
     await composer.fill("link test")
     await composer.press("Enter")
