@@ -670,6 +670,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_provider_configs,
+        nearai_mcp_bootstrap_config,
         owner_id,
         ..
     } = input;
@@ -763,6 +764,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         Arc::clone(&filesystem),
         runtime_workspace_mounts.clone(),
     ));
+    let owner_user_id_for_nearai_mcp = owner_user_id.clone();
     let mut store_graph = build_local_dev_store_graph(RebornLocalDevStoreGraphInput {
         filesystem: Arc::clone(&filesystem),
         owner_user_id,
@@ -902,10 +904,11 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         reason: format!("available extension catalog could not be loaded: {error}"),
     })?;
     available_extensions.extend(
-        AvailableExtensionCatalog::from_first_party_assets().map_err(|error| {
-            RebornBuildError::InvalidConfig {
-                reason: format!("first-party extension catalog could not be loaded: {error}"),
-            }
+        AvailableExtensionCatalog::from_first_party_assets_with_nearai_mcp_config(
+            nearai_mcp_bootstrap_config.as_ref(),
+        )
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("first-party extension catalog could not be loaded: {error}"),
         })?,
     );
     let extension_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
@@ -943,6 +946,13 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         extension_lifecycle_service,
         active_extensions,
     ));
+    crate::nearai_mcp::bootstrap_local_dev_nearai_mcp(
+        nearai_mcp_bootstrap_config,
+        &product_auth,
+        &extension_management,
+        &owner_user_id_for_nearai_mcp,
+    )
+    .await?;
     if let Some(local_runtime) = Arc::get_mut(&mut store_graph.local_runtime) {
         local_runtime.extension_management = Some(Arc::clone(&extension_management));
         local_runtime.runtime_http_egress = Some(product_auth_runtime_ports.runtime_http_egress());
@@ -2320,6 +2330,7 @@ async fn build_production_shaped(
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_provider_configs,
+        nearai_mcp_bootstrap_config: _,
     } = input;
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     let wiring_config = production_config(
@@ -3076,7 +3087,7 @@ mod tests {
         SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
         TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
     };
-    use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef};
+    use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase};
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
     #[cfg(feature = "libsql")]
     use secrecy::ExposeSecret;
@@ -3790,12 +3801,34 @@ mod tests {
         assert_eq!(failure.kind, RuntimeFailureKind::Backend);
     }
 
+    fn nearai_bootstrap_input_with_base(
+        owner: &str,
+        root: PathBuf,
+        base_url: &str,
+        api_key: &str,
+    ) -> RebornBuildInput {
+        RebornBuildInput::local_dev(owner, root).with_nearai_mcp_bootstrap_config(
+            crate::nearai_mcp::NearAiMcpBootstrapConfig::new(
+                base_url,
+                secrecy::SecretString::from(api_key.to_string()),
+            )
+            .expect("valid NEAR AI MCP bootstrap config"),
+        )
+    }
+
+    fn nearai_bootstrap_input(owner: &str, root: PathBuf, api_key: &str) -> RebornBuildInput {
+        nearai_bootstrap_input_with_base(owner, root, "https://private.near.ai", api_key)
+    }
+
     #[tokio::test]
-    async fn local_dev_nearai_mcp_installs_and_activates_model_visible_capability() {
+    async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
-            "local-dev-nearai-mcp-owner",
+        let owner = "local-dev-nearai-mcp-owner";
+        let services = build_reborn_services(nearai_bootstrap_input_with_base(
+            owner,
             dir.path().join("local-dev"),
+            "https://nearai-db.example.test:9443/v1",
+            "nearai-test-key",
         ))
         .await
         .expect("local-dev services build");
@@ -3807,14 +3840,11 @@ mod tests {
         let nearai_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
 
-        extension_management
-            .install(nearai_ref.clone())
+        let projection = extension_management
+            .project(nearai_ref)
             .await
-            .expect("install NEAR AI MCP");
-        extension_management
-            .activate(nearai_ref, ExtensionActivationMode::Static)
-            .await
-            .expect("activate NEAR AI MCP");
+            .expect("NEAR AI MCP projected");
+        assert_eq!(projection.phase, LifecyclePhase::Active);
 
         let capabilities = extension_management
             .active_model_visible_capabilities()
@@ -3832,12 +3862,6 @@ mod tests {
             search.runtime_credentials[0].handle,
             SecretHandle::new("llm_nearai_api_key").unwrap()
         );
-        // NEAR AI MCP credential is sourced from a product-auth account so that the
-        // user-facing setup flow is the manual-token product-auth surface (shared
-        // with GitHub WASM), not an out-of-band SecretStore handle drop.
-        // The 'handle' field remains the staging slot name the MCP egress planner
-        // reads from RuntimeSecretInjectionStore after the obligation handler resolves
-        // the access secret via RuntimeCredentialAccountResolver.
         assert_eq!(
             search.runtime_credentials[0].source,
             RuntimeCredentialRequirementSource::ProductAuthAccount {
@@ -3847,8 +3871,151 @@ mod tests {
         );
         assert_eq!(
             search.runtime_credentials[0].audience.host_pattern,
-            "private.near.ai"
+            "nearai-db.example.test"
         );
+        assert_eq!(search.runtime_credentials[0].audience.port, Some(9443));
+
+        let auth_scope = AuthProductScope::new(
+            ResourceScope::local_default(UserId::new(owner).unwrap(), InvocationId::new()).unwrap(),
+            AuthSurface::Api,
+        );
+        let accounts = services
+            .product_auth
+            .as_ref()
+            .expect("product auth")
+            .credential_account_record_source()
+            .accounts_for_owner(&auth_scope)
+            .await
+            .expect("credential accounts load");
+        let nearai_account = accounts
+            .iter()
+            .find(|account| account.provider.as_str() == "nearai")
+            .expect("NEAR AI product-auth account");
+        assert_eq!(nearai_account.status, CredentialAccountStatus::Configured);
+        assert!(nearai_account.access_secret.is_some());
+    }
+
+    #[tokio::test]
+    async fn local_dev_nearai_mcp_rebootstrap_updates_existing_account() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("local-dev");
+        let owner = "local-dev-nearai-mcp-idempotent-owner";
+
+        let first = build_reborn_services(nearai_bootstrap_input(
+            owner,
+            root.clone(),
+            "nearai-first-key",
+        ))
+        .await
+        .expect("first local-dev services build");
+        drop(first);
+
+        let second =
+            build_reborn_services(nearai_bootstrap_input(owner, root, "nearai-second-key"))
+                .await
+                .expect("second local-dev services build");
+        let auth_scope = AuthProductScope::new(
+            ResourceScope::local_default(UserId::new(owner).unwrap(), InvocationId::new()).unwrap(),
+            AuthSurface::Api,
+        );
+        let accounts = second
+            .product_auth
+            .as_ref()
+            .expect("product auth")
+            .credential_account_record_source()
+            .accounts_for_owner(&auth_scope)
+            .await
+            .expect("credential accounts load");
+        let nearai_accounts = accounts
+            .iter()
+            .filter(|account| account.provider.as_str() == "nearai")
+            .collect::<Vec<_>>();
+
+        assert_eq!(nearai_accounts.len(), 1);
+        assert_eq!(
+            nearai_accounts[0].status,
+            CredentialAccountStatus::Configured
+        );
+    }
+
+    #[tokio::test]
+    async fn local_dev_nearai_mcp_bootstrap_preserves_removed_extension() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let owner = "local-dev-nearai-mcp-disabled-owner";
+        let nearai_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
+
+        let services = build_reborn_services(nearai_bootstrap_input(
+            owner,
+            dir.path().join("local-dev"),
+            "nearai-test-key",
+        ))
+        .await
+        .expect("local-dev services build");
+        let extension_management = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime")
+            .extension_management
+            .as_ref()
+            .expect("extension management");
+        extension_management
+            .remove(nearai_ref.clone())
+            .await
+            .expect("disable NEAR AI MCP extension");
+        crate::nearai_mcp::bootstrap_local_dev_nearai_mcp(
+            Some(
+                crate::nearai_mcp::NearAiMcpBootstrapConfig::new(
+                    "https://private.near.ai",
+                    secrecy::SecretString::from("nearai-test-key"),
+                )
+                .expect("valid NEAR AI MCP bootstrap config"),
+            ),
+            services.product_auth.as_ref().expect("product auth"),
+            extension_management,
+            &UserId::new(owner).unwrap(),
+        )
+        .await
+        .expect("bootstrap should preserve disabled extension");
+        let projection = extension_management
+            .project(nearai_ref)
+            .await
+            .expect("NEAR AI MCP projected");
+        assert_ne!(projection.phase, LifecyclePhase::Active);
+
+        let capabilities = extension_management
+            .active_model_visible_capabilities()
+            .await
+            .expect("active capabilities");
+        assert!(
+            capabilities
+                .iter()
+                .all(|capability| capability.id.as_str() != "nearai.web_search")
+        );
+    }
+
+    #[tokio::test]
+    async fn local_dev_nearai_mcp_invalid_base_url_fails_build() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = crate::nearai_mcp::NearAiMcpBootstrapConfig::new(
+            "http://private.near.ai",
+            secrecy::SecretString::from("nearai-test-key"),
+        )
+        .expect("config shape");
+        let error = build_reborn_services(
+            RebornBuildInput::local_dev(
+                "local-dev-nearai-mcp-invalid-owner",
+                dir.path().join("local-dev"),
+            )
+            .with_nearai_mcp_bootstrap_config(config),
+        )
+        .await
+        .expect_err("invalid endpoint should fail build");
+
+        let RebornBuildError::InvalidConfig { reason } = error else {
+            panic!("expected invalid config");
+        };
+        assert!(reason.contains("NEARAI_BASE_URL must use https"));
     }
 
     #[test]

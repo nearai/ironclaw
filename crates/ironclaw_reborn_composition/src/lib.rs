@@ -200,6 +200,9 @@ pub use local_runtime_profile::{
     local_dev_yolo_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options,
 };
+pub use nearai_mcp::{
+    NearAiMcpBootstrapConfig, NearAiMcpBootstrapConfigError, nearai_mcp_bootstrap_config_from_env,
+};
 #[cfg(feature = "openai-compat-beta")]
 pub use openai_compat_serve::build_openai_compat_route_mount;
 pub use product_live_adapters::{

@@ -15,6 +15,7 @@ use ironclaw_reborn_composition::{
     OAuthClientConfig, PollSettings, RebornBuildInput, RebornCompositionProfile,
     RebornLocalRuntimeProfileOptions, RebornRuntimeIdentity, RebornRuntimeInput,
     TurnRunnerSettings, build_reborn_runtime, local_runtime_build_input_with_options,
+    nearai_mcp_bootstrap_config_from_env,
 };
 use ironclaw_reborn_config::{
     REBORN_PROFILE_ENV, RebornBootConfig, RebornProfile, seed_default_config_file_if_missing,
@@ -424,6 +425,9 @@ pub(crate) fn build_services_input_with_options(
                 services_input =
                     services_input.with_local_dev_confirmed_host_home_root(host_home_root);
             }
+            services_input = services_input.with_optional_nearai_mcp_bootstrap_config(
+                nearai_mcp_bootstrap_config_from_env().context("NEAR AI MCP bootstrap config")?,
+            );
             services_input
         }
         RebornProfile::Production | RebornProfile::MigrationDryRun => {
