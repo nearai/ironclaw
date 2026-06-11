@@ -1647,7 +1647,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_capability_port_snapshots_extensions_when_port_is_created() {
+    async fn local_dev_capability_port_refreshes_extensions_after_activation() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
         let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
@@ -1678,6 +1678,25 @@ mod tests {
             None,
         )
         .expect("local-dev capability wiring");
+        let port = wiring
+            .capability_factory
+            .create_capability_port(&run_context)
+            .await
+            .expect("capability port");
+        let inactive_surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("inactive visible surface");
+        let inactive_capability_ids = inactive_surface
+            .descriptors
+            .iter()
+            .map(|descriptor| descriptor.capability_id.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            !inactive_capability_ids.contains(&"github.search_issues"),
+            "github capability should stay hidden before activation"
+        );
+
         let local_runtime = services
             .local_runtime
             .as_ref()
@@ -1711,7 +1730,28 @@ mod tests {
             .await
             .expect("activate github extension");
 
-        assert_github_capabilities_visible(&wiring, &run_context).await;
+        let active_surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("active visible surface");
+        let active_capability_ids = active_surface
+            .descriptors
+            .iter()
+            .map(|descriptor| descriptor.capability_id.as_str())
+            .collect::<Vec<_>>();
+        assert!(active_capability_ids.contains(&"github.search_issues"));
+        assert!(active_capability_ids.contains(&"github.get_issue"));
+        assert!(active_capability_ids.contains(&"github.comment_issue"));
+
+        let tool_definitions = port.tool_definitions().expect("tool definitions");
+        let tool_definition_ids = tool_definitions
+            .iter()
+            .map(|definition| definition.capability_id.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            tool_definition_ids.contains(&"github.search_issues"),
+            "refreshed provider tools should include github after activation"
+        );
     }
 
     #[tokio::test]

@@ -360,13 +360,17 @@ impl RebornLocalExtensionManagementPort {
         }
 
         Ok(response_with_payload(
-            Some(package_ref),
+            Some(package_ref.clone()),
             LifecyclePhase::Installed,
             LifecycleProductPayload::ExtensionInstall {
                 installed: true,
                 visible_capability_ids: visible_capability_ids(available)
                     .map(|id| id.as_str().to_string())
                     .collect(),
+                next_step: format!(
+                    "Call builtin.extension_activate now with input {{\"extension_id\":\"{}\"}}. Activation publishes the tools and opens the auth gate if credentials are missing.",
+                    package_ref.id.as_str()
+                ),
             },
         ))
     }
@@ -531,10 +535,15 @@ impl RebornLocalExtensionManagementPort {
             return Err(error);
         }
 
+        let visible_capability_ids = package_visible_capability_ids(&active_package);
+
         Ok(response_with_payload(
             Some(package_ref),
             LifecyclePhase::Active,
-            LifecycleProductPayload::ExtensionActivate { activated: true },
+            LifecycleProductPayload::ExtensionActivate {
+                activated: true,
+                visible_capability_ids,
+            },
         ))
     }
 
@@ -1207,6 +1216,16 @@ fn available_manifest_hash(
 ) -> Result<ManifestHash, ProductWorkflowError> {
     ManifestHash::new(sha256_digest_token(available.manifest_toml.as_bytes()))
         .map_err(map_extension_installation_error)
+}
+
+fn package_visible_capability_ids(package: &ExtensionPackage) -> Vec<String> {
+    package
+        .manifest
+        .capabilities
+        .iter()
+        .filter(|capability| capability.visibility == CapabilityVisibility::Model)
+        .map(|capability| capability.id.as_str().to_string())
+        .collect()
 }
 
 fn extension_ids_from_package_ref(

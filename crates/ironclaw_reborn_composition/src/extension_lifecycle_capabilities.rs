@@ -61,19 +61,19 @@ fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
         lifecycle_manifest(
             EXTENSION_SEARCH_CAPABILITY_ID,
-            "Search the local Reborn extension catalog by extension, product, provider, or service name. The catalog includes host-bundled extensions that are not installed yet and installed extensions that are inactive; use this first for connect, enable, install, or integrate requests when the needed capability is not already visible.",
+            "Search the local Reborn extension catalog by extension, product, provider, or service name. The catalog includes host-bundled extensions that are not installed yet and installed extensions that are inactive. For connect, enable, install, or integrate requests, use this for discovery only, then continue with builtin.extension_install for the matching extension instead of asking the user to configure credentials from search results.",
             vec![EffectKind::ReadFilesystem],
             PermissionMode::Allow,
         )?,
         lifecycle_manifest(
             EXTENSION_INSTALL_CAPABILITY_ID,
-            "Install a searched Reborn extension into durable local-dev lifecycle state. If install fails because the extension is already installed, use builtin.extension_activate instead.",
+            "Install a searched Reborn extension into durable local-dev lifecycle state. Installation does not require credentials. After install succeeds, immediately call builtin.extension_activate for the same extension so activation can publish tools or raise the auth gate. If install fails because the extension is already installed, use builtin.extension_activate instead.",
             vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
             PermissionMode::Ask,
         )?,
         lifecycle_manifest(
             EXTENSION_ACTIVATE_CAPABILITY_ID,
-            "Activate an installed Reborn extension for the model-visible local-dev capability surface. Use after install succeeds or when install reports the extension is already installed.",
+            "Activate an installed Reborn extension for the model-visible local-dev capability surface. Use after install succeeds or when install reports the extension is already installed. This is the step that opens the credential/auth gate when required; do not ask the user for credentials before calling it.",
             vec![
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,
@@ -318,7 +318,9 @@ mod tests {
                     .description
                     .contains("installed extensions that are inactive")
                 && search.description.contains("connect")
-                && search.description.contains("service name"),
+                && search.description.contains("service name")
+                && search.description.contains("discovery only")
+                && search.description.contains(EXTENSION_INSTALL_CAPABILITY_ID),
             "extension_search description should teach the model to discover bundled or inactive integrations from generic service names: {}",
             search.description
         );
@@ -334,8 +336,10 @@ mod tests {
             install.description.contains("already installed")
                 && install
                     .description
-                    .contains(EXTENSION_ACTIVATE_CAPABILITY_ID),
-            "extension_install description should route already-installed failures to activation: {}",
+                    .contains(EXTENSION_ACTIVATE_CAPABILITY_ID)
+                && install.description.contains("does not require credentials")
+                && install.description.contains("immediately call"),
+            "extension_install description should route successful installs and already-installed failures to activation: {}",
             install.description
         );
         assert_eq!(
@@ -344,6 +348,13 @@ mod tests {
         );
 
         let activate = descriptor_for(&surface, EXTENSION_ACTIVATE_CAPABILITY_ID);
+        assert!(
+            activate.description.contains("credential/auth gate")
+                && activate.description.contains("do not ask the user"),
+            "extension_activate description should teach the model to raise auth through activation: {}",
+            activate.description
+        );
+
         assert!(
             activate.effects.contains(&EffectKind::Network),
             "hosted MCP activation needs runtime HTTP egress for discovery"

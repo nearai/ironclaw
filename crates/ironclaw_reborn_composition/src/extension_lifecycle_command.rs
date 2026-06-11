@@ -78,12 +78,18 @@ pub fn render_reborn_extension_lifecycle_response(
         Some(LifecycleProductPayload::ExtensionInstall {
             installed,
             visible_capability_ids,
+            next_step,
         }) => {
             push_line(&mut output, format_args!("installed: {installed}"));
             render_string_array(&mut output, visible_capability_ids, "visible_capability");
+            push_line(&mut output, format_args!("next_step: {next_step}"));
         }
-        Some(LifecycleProductPayload::ExtensionActivate { activated }) => {
+        Some(LifecycleProductPayload::ExtensionActivate {
+            activated,
+            visible_capability_ids,
+        }) => {
             push_line(&mut output, format_args!("activated: {activated}"));
+            render_string_array(&mut output, visible_capability_ids, "visible_capability");
         }
         Some(LifecycleProductPayload::ExtensionRemove { removed }) => {
             push_line(&mut output, format_args!("removed: {removed}"));
@@ -294,9 +300,23 @@ mod tests {
         .expect("activate uses product-auth credentials");
 
         assert_eq!(activate.phase, LifecyclePhase::Active);
-        assert_eq!(
-            activate.payload,
-            Some(LifecycleProductPayload::ExtensionActivate { activated: true })
+        let Some(LifecycleProductPayload::ExtensionActivate {
+            activated,
+            visible_capability_ids,
+        }) = activate.payload
+        else {
+            panic!("expected extension activation payload");
+        };
+        assert!(activated);
+        assert!(
+            visible_capability_ids
+                .iter()
+                .any(|id| id == "github.search_issues")
+        );
+        assert!(
+            visible_capability_ids
+                .iter()
+                .any(|id| id == "github.get_issue")
         );
     }
 
