@@ -184,7 +184,7 @@ pub fn materialize_goal_message(
             ),
         ));
     }
-    let safe_body = loop_safe_inline_text(body);
+    let safe_body = sanitize_model_visible_text(body);
     if safe_body.len() > limits.max_goal_bytes {
         return Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::Invalid,
@@ -203,7 +203,7 @@ fn materialize_inline_message(
     label: &'static str,
     body: impl Into<String>,
 ) -> Result<LoopInlineMessage, AgentLoopHostError> {
-    materialize_sanitized_inline_message(role, label, loop_safe_inline_text(body))
+    materialize_sanitized_inline_message(role, label, sanitize_model_visible_text(body))
 }
 
 fn materialize_sanitized_inline_message(
@@ -234,13 +234,6 @@ fn log_dropped_subagent_prompt_capabilities(dropped_capabilities: &[CapabilityId
     );
 }
 
-fn loop_safe_inline_text(value: impl Into<String>) -> String {
-    sanitize_model_visible_text(value)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 pub fn subagent_run_id_from_context(run_context: &LoopRunContext) -> TurnRunId {
     run_context.run_id
 }
@@ -261,8 +254,9 @@ mod tests {
 
     #[test]
     fn materializes_direction_and_goal_with_persisted_handoff_without_thread_marker() {
-        let direction = materialize_direction_message("Follow the researcher direction.")
-            .expect("direction should materialize");
+        let direction =
+            materialize_direction_message("Follow the researcher direction.\n\n- Keep markdown.")
+                .expect("direction should materialize");
         let goal = materialize_goal_message(
             &SubagentPromptGoal {
                 task: "Find the answer".to_string(),
@@ -274,8 +268,17 @@ mod tests {
 
         assert_eq!(direction.role, LoopInlineMessageRole::System);
         assert_eq!(goal.role, LoopInlineMessageRole::User);
+        assert_eq!(
+            direction.safe_body.as_str(),
+            "Follow the researcher direction.\n\n- Keep markdown."
+        );
         assert!(goal.safe_body.as_str().contains("Subagent task:"));
         assert!(goal.safe_body.as_str().contains("Find the answer"));
+        assert!(
+            goal.safe_body
+                .as_str()
+                .contains("Find the answer\n\nSubagent handoff:\nUse source citations")
+        );
         assert!(goal.safe_body.as_str().contains("Subagent handoff:"));
         assert!(goal.safe_body.as_str().contains("Use source citations"));
         assert!(!goal.safe_body.as_str().contains("Parent handoff"));
@@ -382,16 +385,17 @@ mod tests {
 
     #[test]
     fn goal_budget_uses_sanitized_model_visible_text() {
+        let expected = "Subagent task:\nanswer\n[redacted]\nbriefly";
         let goal = materialize_goal_message(
             &SubagentPromptGoal {
-                task: "answer\n\n\nbriefly".to_string(),
+                task: "answer\nsk-secret\nbriefly".to_string(),
                 handoff: None,
             },
-            SubagentPromptLimits::new("Subagent task: answer briefly".len()),
+            SubagentPromptLimits::new(expected.len()),
         )
-        .expect("collapsed goal should fit");
+        .expect("sanitized formatted goal should fit");
 
-        assert_eq!(goal.safe_body.as_str(), "Subagent task: answer briefly");
+        assert_eq!(goal.safe_body.as_str(), expected);
     }
 
     #[test]
