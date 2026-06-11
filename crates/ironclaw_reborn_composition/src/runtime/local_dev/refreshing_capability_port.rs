@@ -35,6 +35,7 @@ pub(super) struct RefreshingLocalDevCapabilityPortConfig {
     pub(super) result_writer: Arc<dyn LoopCapabilityResultWriter>,
     pub(super) milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     pub(super) skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
+    pub(super) trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
 }
 
 pub(super) async fn create_refreshing_local_dev_capability_port(
@@ -53,6 +54,7 @@ pub(super) async fn create_refreshing_local_dev_capability_port(
         result_writer: config.result_writer,
         milestone_sink: config.milestone_sink,
         skill_activation_source: config.skill_activation_source,
+        trajectory_observer: config.trajectory_observer,
         current: StdMutex::new(None),
         refresh_lock: AsyncMutex::new(()),
     });
@@ -76,6 +78,7 @@ struct RefreshingLocalDevCapabilityPort {
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
+    trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     current: StdMutex<Option<Arc<dyn LoopCapabilityPort>>>,
     refresh_lock: AsyncMutex<()>,
 }
@@ -103,7 +106,8 @@ impl RefreshingLocalDevCapabilityPort {
             Arc::clone(&self.result_writer),
             Arc::clone(&self.milestone_sink),
         )
-        .with_execution_mounts(self.workspace_mounts.clone());
+        .with_execution_mounts(self.workspace_mounts.clone())
+        .with_trajectory_observer(self.trajectory_observer.clone());
         for capability_id in self.policy.skill_management_capability_ids() {
             factory = factory
                 .with_capability_execution_mount(capability_id.clone(), self.skill_mounts.clone());
