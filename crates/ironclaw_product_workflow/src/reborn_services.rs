@@ -1865,7 +1865,8 @@ impl RebornServicesApi for RebornServices {
         // could read another user's projection feed by guessing thread_id.
         // The automation fallback allows the owner of an automation to stream
         // events for a trigger-fired thread (which is stored ownerless). The
-        // returned scope may be unscoped (Ownerless) for trigger threads.
+        // returned scope may contain an explicit owner (the trigger creator)
+        // for trigger threads.
         let (scope, _thread_scope) = self
             .resolve_thread_access_for_caller(caller.clone(), caller.turn_scope(thread_id), &actor)
             .await?;
@@ -1877,9 +1878,26 @@ impl RebornServicesApi for RebornServices {
                 false,
             ));
         };
+        // Projection identity must be the thread owner, not necessarily the
+        // caller. Turn events and the runtime event stream are keyed under the
+        // identity of the actor that submitted the run (the trigger creator for
+        // trigger threads; the session user for normal threads). The caller
+        // already proved visibility via automation ownership above; using the
+        // caller's id here would filter to the wrong stream/events.
+        //
+        // For normal session threads `explicit_owner_user_id()` is `None` and
+        // we fall back to the caller's id — behaviour is unchanged.
+        let projection_actor = match scope.explicit_owner_user_id() {
+            Some(owner_user_id) if owner_user_id != &actor.user_id => {
+                let mut owned_actor = actor.clone();
+                owned_actor.user_id = owner_user_id.clone();
+                owned_actor
+            }
+            _ => actor,
+        };
         let events = event_stream
             .drain(ProjectionSubscriptionRequest {
-                actor,
+                actor: projection_actor,
                 scope,
                 after_cursor: request.after_cursor,
             })

@@ -5518,6 +5518,70 @@ async fn resolve_gate_rejects_other_users_automation_trigger_thread() {
     );
 }
 
+// Regression: stream_events used the WebUI caller's user_id as the projection
+// identity even after resolve_thread_access_for_caller succeeded via the
+// automation fallback. For a trigger-fired thread the run events are keyed
+// under the trigger creator's user_id, not the WebUI caller's; passing the
+// caller's id caused the turn-event replay filter (owner_user_id) and the
+// runtime event stream key (EventStreamKey) to select the wrong bucket —
+// approval-gate events were invisible to the chat page.
+//
+// The fix: after authorization succeeds, derive the projection identity from
+// scope.explicit_owner_user_id() (the creator for trigger threads; falls back
+// to caller for normal session threads where thread_owner = ActorFallback).
+#[tokio::test]
+async fn stream_events_uses_trigger_creator_as_projection_identity() {
+    // The caller ("user-alpha") owns the automation. The trigger thread was
+    // stored under the external creator's scope ("user-trigger-creator").
+    // stream_events must pass the CREATOR's identity to the projection drain,
+    // not the caller's, so the correct event stream bucket is selected.
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let trigger_thread_id =
+        setup_trigger_thread(&thread_service, &caller, "thread-trigger-stream-alpha").await;
+
+    let event_stream = Arc::new(RecordingProjectionStream::default());
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(automation_facade_with_trigger_thread(
+            trigger_thread_id.clone(),
+            &caller,
+        ))
+        .with_event_stream(event_stream.clone());
+
+    services
+        .stream_events(
+            caller.clone(),
+            RebornStreamEventsRequest {
+                thread_id: trigger_thread_id.as_str().to_string(),
+                after_cursor: None,
+            },
+        )
+        .await
+        .expect("automation owner should be able to stream trigger thread events");
+
+    // The projection drain must have been called with the trigger CREATOR's
+    // user_id, not the WebUI caller's user_id. Events are owned by the
+    // run's submitting identity (the creator); using the caller's id
+    // filters to the wrong stream/event bucket.
+    let requests = event_stream.requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "projection drain must be called exactly once"
+    );
+    assert_eq!(
+        requests[0].actor.user_id,
+        UserId::new(TRIGGER_CREATOR_USER_ID).expect("valid creator user id"),
+        "projection actor must be the trigger creator (owner of the run events), \
+         not the WebUI caller (who proved visibility via automation ownership)"
+    );
+    // The scope must still carry the thread_id correctly.
+    assert_eq!(
+        requests[0].scope.thread_id, trigger_thread_id,
+        "projection scope thread_id must match the trigger thread"
+    );
+}
+
 #[tokio::test]
 async fn get_timeline_rejects_thread_id_absent_from_callers_automations() {
     // The thread_id does not appear in the caller's automation run history at
