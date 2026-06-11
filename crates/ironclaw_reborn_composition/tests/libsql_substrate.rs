@@ -86,14 +86,14 @@ async fn libsql_substrate_readiness_diagnostics_cover_required_backend_gaps() {
 
 #[tokio::test]
 async fn libsql_substrate_builder_rejects_invalid_secret_master_key() {
-    let dir = tempdir().unwrap();
+    let dir = tempdir().expect("create temporary directory for libSQL test databases");
     let state_db_path = dir.path().join("state.db");
     let events_db_path = dir.path().join("events.db");
     let database = Arc::new(
         libsql::Builder::new_local(state_db_path.display().to_string())
             .build()
             .await
-            .unwrap(),
+            .expect("build local libSQL state database"),
     );
 
     let result = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
@@ -108,9 +108,10 @@ async fn libsql_substrate_builder_rejects_invalid_secret_master_key() {
             production_runtime_policy(),
             sandbox_process_port(),
         )
-        .unwrap(),
+        .expect("create production runtime policy with tenant sandbox process port"),
         turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
-        surface_version: CapabilitySurfaceVersion::new("test-surface").unwrap(),
+        surface_version: CapabilitySurfaceVersion::new("test-surface")
+            .expect("create test capability surface version"),
     })
     .await;
 
@@ -129,14 +130,14 @@ async fn libsql_substrate_builder_rejects_weak_env_secret_master_key() {
         ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV,
         "correct horse battery staple pad!!",
     );
-    let dir = tempdir().unwrap();
+    let dir = tempdir().expect("create temporary directory for libSQL test databases");
     let state_db_path = dir.path().join("state.db");
     let events_db_path = dir.path().join("events.db");
     let database = Arc::new(
         libsql::Builder::new_local(state_db_path.display().to_string())
             .build()
             .await
-            .unwrap(),
+            .expect("build local libSQL state database"),
     );
 
     let result = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
@@ -151,9 +152,10 @@ async fn libsql_substrate_builder_rejects_weak_env_secret_master_key() {
             production_runtime_policy(),
             sandbox_process_port(),
         )
-        .unwrap(),
+        .expect("create production runtime policy with tenant sandbox process port"),
         turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
-        surface_version: CapabilitySurfaceVersion::new("test-surface").unwrap(),
+        surface_version: CapabilitySurfaceVersion::new("test-surface")
+            .expect("create test capability surface version"),
     })
     .await;
 
@@ -213,14 +215,14 @@ struct LibSqlTestServices {
 }
 
 async fn build_libsql_test_services() -> LibSqlTestServices {
-    let dir = tempdir().unwrap();
+    let dir = tempdir().expect("create temporary directory for libSQL test databases");
     let state_db_path = dir.path().join("state.db");
     let events_db_path = dir.path().join("events.db");
     let database = Arc::new(
         libsql::Builder::new_local(state_db_path.display().to_string())
             .build()
             .await
-            .unwrap(),
+            .expect("build local libSQL state database"),
     );
 
     let services = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
@@ -235,12 +237,13 @@ async fn build_libsql_test_services() -> LibSqlTestServices {
             production_runtime_policy(),
             sandbox_process_port(),
         )
-        .unwrap(),
+        .expect("create production runtime policy with tenant sandbox process port"),
         turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
-        surface_version: CapabilitySurfaceVersion::new("test-surface").unwrap(),
+        surface_version: CapabilitySurfaceVersion::new("test-surface")
+            .expect("create test capability surface version"),
     })
     .await
-    .unwrap();
+    .expect("build libSQL production host runtime services");
 
     LibSqlTestServices {
         _dir: dir,
