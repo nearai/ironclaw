@@ -21,6 +21,7 @@ use ironclaw_loop_support::{
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
     loop_driver_execution_extension_id,
 };
+use ironclaw_product_workflow::OutboundPreferencesProductFacade;
 use ironclaw_threads::{
     AppendCapabilityDisplayPreviewRequest, CapabilityDisplayPreviewEnvelope,
     CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus, SessionThreadService,
@@ -44,6 +45,7 @@ use crate::{
 };
 
 pub(super) mod extension_surface;
+mod outbound_delivery;
 #[cfg(test)]
 mod shell_tests;
 mod skill_activation;
@@ -51,6 +53,11 @@ mod surface_disclosure;
 mod synthetic_capability;
 
 use extension_surface::{LocalDevExtensionSurface, LocalDevExtensionSurfaceSource};
+use outbound_delivery::outbound_delivery_capabilities;
+#[cfg(test)]
+pub(crate) use outbound_delivery::{
+    OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
+};
 #[cfg(test)]
 pub(crate) use skill_activation::SKILL_ACTIVATE_CAPABILITY_ID;
 use skill_activation::skill_activation_capability;
@@ -75,6 +82,7 @@ pub(super) fn capability_wiring(
     model_gateway: Arc<dyn HostManagedModelGateway>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
+    outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
 ) -> Option<LocalDevCapabilityWiring> {
     let runtime = services.host_runtime.clone()?;
     let local_runtime = services.local_runtime.as_ref()?;
@@ -102,6 +110,7 @@ pub(super) fn capability_wiring(
             result_writer: Arc::clone(&capability_result_writer),
             milestone_sink,
             skill_activation_source,
+            outbound_preferences_facade,
         });
     let model_gateway: Arc<dyn HostManagedModelGateway> = Arc::new(
         LocalDevResultHydratingModelGateway::new(model_gateway, capability_io),
@@ -128,6 +137,7 @@ struct LocalDevLoopCapabilityPortFactory {
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
+    outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
 }
 
 #[async_trait::async_trait]
@@ -175,7 +185,7 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
                 .with_capability_execution_mount(capability_id.clone(), memory_mounts.clone());
         }
         let port = factory.for_run_context(run_context.clone());
-        let synthetic_capabilities = match &self.skill_activation_source {
+        let mut synthetic_capabilities = match &self.skill_activation_source {
             Some(skill_activation_source) => {
                 vec![skill_activation_capability(Arc::clone(
                     skill_activation_source,
@@ -183,6 +193,12 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             }
             None => Vec::new(),
         };
+        if let Some(outbound_preferences_facade) = &self.outbound_preferences_facade {
+            synthetic_capabilities.extend(outbound_delivery_capabilities(
+                Arc::clone(outbound_preferences_facade),
+                self.fallback_user_id.clone(),
+            )?);
+        }
         let port = wrap_local_dev_synthetic_capabilities(
             port,
             synthetic_capabilities,

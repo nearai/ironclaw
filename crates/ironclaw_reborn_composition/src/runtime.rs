@@ -55,7 +55,7 @@ use ironclaw_product_workflow::{
     ApprovalBlockedTurnRun, ApprovalInteractionScope, ApprovalInteractionService,
     ApprovalResolverPort, ApprovalTurnRunLocator, AuthInteractionService,
     DefaultApprovalInteractionService, DefaultAuthInteractionService,
-    RunStateApprovalInteractionReadModel,
+    OutboundPreferencesProductFacade, RunStateApprovalInteractionReadModel,
 };
 use ironclaw_reborn::loop_exit_applier::{
     ApprovalGateEvidenceStore, ThreadCheckpointLoopExitEvidencePort,
@@ -94,6 +94,10 @@ use ironclaw_turns::{
 use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore, builtin_extension_registry};
 use crate::local_dev_capability_policy::local_dev_capability_policy;
+use crate::outbound_preferences::{
+    MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetProvider,
+    RebornOutboundPreferencesFacade,
+};
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::runtime_input::{
     PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerAuthorizerConfig,
@@ -349,6 +353,7 @@ pub struct RebornRuntime {
     #[cfg(any(test, feature = "test-support"))]
     trigger_conversation_pairing:
         Option<Arc<dyn ironclaw_conversations::ConversationActorPairingService>>,
+    outbound_delivery_target_registry: Option<Arc<MutableOutboundDeliveryTargetRegistry>>,
     budget_event_projection: Option<crate::budget_events::BudgetEventProjection>,
     poll_settings: PollSettings,
     actor_user_id: UserId,
@@ -1020,6 +1025,33 @@ impl RebornRuntime {
 
     pub(crate) fn webui_auth_interaction_service(&self) -> Arc<dyn AuthInteractionService> {
         self.auth_interaction_service.clone()
+    }
+
+    pub(crate) fn outbound_delivery_target_provider(
+        &self,
+    ) -> Option<Arc<dyn OutboundDeliveryTargetProvider>> {
+        self.outbound_delivery_target_registry
+            .as_ref()
+            .map(|registry| {
+                let registry = Arc::clone(registry);
+                let provider: Arc<dyn OutboundDeliveryTargetProvider> = registry;
+                provider
+            })
+    }
+
+    #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(dead_code))]
+    pub(crate) fn register_outbound_delivery_target_provider(
+        &self,
+        provider_key: impl Into<String>,
+        provider: Arc<dyn OutboundDeliveryTargetProvider>,
+    ) -> bool {
+        let Some(registry) = self.outbound_delivery_target_registry.as_ref() else {
+            tracing::debug!(
+                "register_outbound_delivery_target_provider: local runtime registry unavailable"
+            );
+            return false;
+        };
+        registry.register_provider(provider_key, provider)
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
@@ -1826,6 +1858,19 @@ pub async fn build_reborn_runtime(
         subagent_goal_store,
         trigger_repository: _trigger_repository,
     } = runtime_parts;
+    let outbound_delivery_target_registry =
+        local_runtime.map(|_| Arc::new(MutableOutboundDeliveryTargetRegistry::default()));
+    let outbound_preferences_facade = match (local_runtime, &outbound_delivery_target_registry) {
+        (Some(local_runtime), Some(registry)) => {
+            let registry = Arc::clone(registry);
+            let provider: Arc<dyn OutboundDeliveryTargetProvider> = registry;
+            Some(Arc::new(RebornOutboundPreferencesFacade::new(
+                Arc::clone(&local_runtime.outbound_preferences),
+                provider,
+            )) as Arc<dyn OutboundPreferencesProductFacade>)
+        }
+        _ => None,
+    };
     let validated_identity = validate_runtime_identity(identity)?;
     let (skill_context_source, skill_activation_source, skill_execution_adapter) =
         match (configured_skill_context_source, local_runtime) {
@@ -2058,6 +2103,7 @@ pub async fn build_reborn_runtime(
             model_gateway,
             milestone_sink.clone(),
             skill_activation_source.clone(),
+            outbound_preferences_facade.clone(),
         )
         .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
         (
@@ -2405,6 +2451,7 @@ pub async fn build_reborn_runtime(
         post_submit_hook_slot: runtime_post_submit_hook_slot,
         #[cfg(any(test, feature = "test-support"))]
         trigger_conversation_pairing: trigger_conversation_pairing_value,
+        outbound_delivery_target_registry,
         budget_event_projection,
         poll_settings: poll,
         actor_user_id,
