@@ -51,6 +51,23 @@ impl TrustedTriggerSubmitRequest {
     pub fn into_parts(self) -> (TriggerFire, TriggerMaterializedPrompt, Timestamp) {
         (self.fire, self.materialized_prompt, self.received_at)
     }
+
+    /// Test-only constructor that bypasses the `pub(crate)` seal.
+    ///
+    /// Production code always creates submit requests inside the trigger worker
+    /// (`due_fire.rs`), which is the only caller allowed to pair a `TriggerFire`
+    /// with its materialized prompt. This helper lets downstream crates (e.g.
+    /// `ironclaw_conversations`) test their `TrustedTriggerFireSubmitter` impls
+    /// without pulling in the full worker. Gated on `test-support` feature so
+    /// it ships zero bytes in production binaries.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new_for_test(
+        fire: TriggerFire,
+        materialized_prompt: TriggerMaterializedPrompt,
+        received_at: Timestamp,
+    ) -> Self {
+        Self::new(fire, materialized_prompt, received_at)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

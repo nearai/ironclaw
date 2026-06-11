@@ -10,6 +10,7 @@ publish = false
 default = []
 libsql = ["dep:libsql"]
 postgres = ["dep:deadpool-postgres", "dep:tokio-postgres"]
+test-support = []
 
 [dependencies]
 async-trait = "0.1"

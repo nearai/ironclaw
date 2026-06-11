@@ -780,7 +780,7 @@ mod tests {
                     wrapper_tenant(),
                     Some(AgentId::new("hook-wrapper-agent").expect("agent")),
                     None,
-                    ThreadId::new(format!("hook-wrapper-thread-{}", self.run_id)).expect("thread"),
+                    hook_wrapper_thread_id(self.run_id),
                     Some(creator),
                 );
                 Ok(TrustedTriggerFireSubmitOutcome::Accepted {
@@ -824,10 +824,8 @@ mod tests {
             TenantId::new("hook-wrapper-tenant").expect("tenant")
         }
 
-        fn wrapper_scope(run_id: TurnRunId) -> TurnScope {
-            let agent = AgentId::new("hook-wrapper-agent").expect("agent");
-            let thread = ThreadId::new(format!("hook-wrapper-thread-{run_id}")).expect("thread");
-            TurnScope::new(wrapper_tenant(), Some(agent), None, thread)
+        fn hook_wrapper_thread_id(run_id: TurnRunId) -> ThreadId {
+            ThreadId::new(format!("hook-wrapper-thread-{run_id}")).expect("thread id")
         }
 
         /// Seed one due trigger in `repo` and return the fire slot timestamp.
@@ -933,7 +931,6 @@ mod tests {
             seed_due_trigger(&repo, fire_slot).await;
 
             let run_id = TurnRunId::new();
-            let scope = wrapper_scope(run_id);
             let inner = Arc::new(FixedAcceptedSubmitter { run_id });
             let hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>> =
                 Arc::new(OnceLock::new());
@@ -967,8 +964,9 @@ mod tests {
                 *called_run_id, run_id,
                 "hook must receive the accepted run_id"
             );
+            let expected_thread_id = hook_wrapper_thread_id(run_id);
             assert_eq!(
-                called_scope.thread_id, scope.thread_id,
+                called_scope.thread_id, expected_thread_id,
                 "hook must receive the accepted turn_scope thread_id"
             );
             assert_eq!(
