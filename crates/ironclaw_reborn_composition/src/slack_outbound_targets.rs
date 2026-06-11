@@ -591,26 +591,33 @@ impl SlackHostBetaOutboundTargetProvider {
             if stored_channel_ids.contains(&static_route.channel_id) {
                 continue;
             }
-            let key = match SlackChannelRouteKey::new(
-                self.tenant_id.clone(),
-                self.installation_id.clone(),
-                self.team_id.as_str().to_string(),
-                static_route.channel_id.clone(),
-            ) {
-                Ok(key) => key,
-                Err(_) => continue,
-            };
-            let store_override = self
-                .channel_route_store
-                .resolve_subject_user_id(&key)
-                .await
-                .map_err(map_slack_target_route_error)?;
-            if store_override.is_none() {
+            if self.static_channel_route_is_active(static_route).await? {
                 routes.push(static_route.clone());
             }
         }
         routes.sort_by(|left, right| left.channel_id.cmp(&right.channel_id));
         Ok(routes)
+    }
+
+    async fn static_channel_route_is_active(
+        &self,
+        route: &SlackConfiguredChannelRoute,
+    ) -> Result<bool, RebornServicesError> {
+        let key = match SlackChannelRouteKey::new(
+            self.tenant_id.clone(),
+            self.installation_id.clone(),
+            self.team_id.as_str().to_string(),
+            route.channel_id.clone(),
+        ) {
+            Ok(key) => key,
+            Err(_) => return Ok(false),
+        };
+        Ok(self
+            .channel_route_store
+            .resolve_subject_user_id(&key)
+            .await
+            .map_err(map_slack_target_route_error)?
+            .is_none())
     }
 
     async fn has_active_shared_channel_route_for_caller(
@@ -639,22 +646,7 @@ impl SlackHostBetaOutboundTargetProvider {
             .iter()
             .filter(|route| route.subject_user_id == caller.user_id)
         {
-            let key = match SlackChannelRouteKey::new(
-                self.tenant_id.clone(),
-                self.installation_id.clone(),
-                self.team_id.as_str().to_string(),
-                static_route.channel_id.clone(),
-            ) {
-                Ok(key) => key,
-                Err(_) => continue,
-            };
-            if self
-                .channel_route_store
-                .resolve_subject_user_id(&key)
-                .await
-                .map_err(map_slack_target_route_error)?
-                .is_none()
-            {
+            if self.static_channel_route_is_active(static_route).await? {
                 return Ok(true);
             }
         }
@@ -670,19 +662,7 @@ impl SlackHostBetaOutboundTargetProvider {
         if caller.tenant_id != self.tenant_id {
             return Ok(None);
         }
-        let key = SlackPersonalDmTargetKey::new(
-            self.tenant_id.clone(),
-            self.installation_id.clone(),
-            self.team_id.as_str().to_string(),
-            caller.user_id.clone(),
-        )
-        .map_err(map_slack_personal_dm_target_error)?;
-        let Some(target) = self
-            .personal_dm_target_store
-            .load_personal_dm_target(&key)
-            .await
-            .map_err(map_slack_personal_dm_target_error)?
-        else {
+        let Some(target) = self.load_personal_dm_target_for_caller(caller).await? else {
             return Ok(None);
         };
         if target.dm_channel_id != dm_channel_id || target.slack_user_id != *slack_user_id {

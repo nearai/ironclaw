@@ -605,6 +605,39 @@ where
         .map(Some)
     }
 
+    async fn listed_channel_route_paths_for_team(
+        &self,
+        installation_id: &AdapterInstallationId,
+        team_id: &str,
+    ) -> Result<Vec<ScopedPath>, SlackChannelRouteError> {
+        let dir = Self::channel_route_team_dir_path(installation_id, team_id)
+            .map_err(map_route_fs_error)?;
+        let entries = match self.filesystem.list_dir(&self.scope, &dir).await {
+            Ok(entries) => entries,
+            Err(FilesystemError::NotFound { .. }) => return Ok(Vec::new()),
+            Err(error) => return Err(map_route_fs_error(error)),
+        };
+        let mut paths = entries
+            .into_iter()
+            .filter_map(|entry| {
+                if entry.file_type != FileType::File {
+                    return None;
+                }
+                Some(Self::listed_channel_route_path(
+                    installation_id,
+                    team_id,
+                    &entry.name,
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(map_route_fs_error)?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        paths.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        Ok(paths)
+    }
+
     fn channel_route_team_lock_key(
         installation_id: &AdapterInstallationId,
         team_id: &str,
@@ -1043,36 +1076,9 @@ where
                 next_cursor: None,
             });
         }
-        let dir = Self::channel_route_team_dir_path(installation_id, team_id)
-            .map_err(map_route_fs_error)?;
-        let entries = match self.filesystem.list_dir(&self.scope, &dir).await {
-            Ok(entries) => entries,
-            Err(FilesystemError::NotFound { .. }) => {
-                return Ok(SlackChannelRouteListPage {
-                    routes: Vec::new(),
-                    next_cursor: None,
-                });
-            }
-            Err(error) => return Err(map_route_fs_error(error)),
-        };
-        let mut paths = entries
-            .into_iter()
-            .filter_map(|entry| {
-                if entry.file_type != FileType::File {
-                    return None;
-                }
-                Some(Self::listed_channel_route_path(
-                    installation_id,
-                    team_id,
-                    &entry.name,
-                ))
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(map_route_fs_error)?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-        paths.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        let paths = self
+            .listed_channel_route_paths_for_team(installation_id, team_id)
+            .await?;
         let start = cursor.min(paths.len());
         let end = cursor.saturating_add(limit).min(paths.len());
         let reads = paths[start..end]
@@ -1209,31 +1215,9 @@ where
         if tenant_id != &self.scope.tenant_id {
             return Ok(false);
         }
-        let dir = Self::channel_route_team_dir_path(installation_id, team_id)
-            .map_err(map_route_fs_error)?;
-        let entries = match self.filesystem.list_dir(&self.scope, &dir).await {
-            Ok(entries) => entries,
-            Err(FilesystemError::NotFound { .. }) => return Ok(false),
-            Err(error) => return Err(map_route_fs_error(error)),
-        };
-        let mut paths = entries
-            .into_iter()
-            .filter_map(|entry| {
-                if entry.file_type != FileType::File {
-                    return None;
-                }
-                Some(Self::listed_channel_route_path(
-                    installation_id,
-                    team_id,
-                    &entry.name,
-                ))
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(map_route_fs_error)?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-        paths.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        let paths = self
+            .listed_channel_route_paths_for_team(installation_id, team_id)
+            .await?;
         for path in paths {
             let Some((record, _)) = self
                 .read_record::<StoredSlackChannelRoute>(&path)
