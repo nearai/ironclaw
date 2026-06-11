@@ -3,7 +3,10 @@ use ironclaw_extensions::{
     ExtensionPackage, ExtensionRuntime, ManifestSource,
 };
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
-use ironclaw_host_api::{CapabilityId, ExtensionId, VirtualPath, sha256_digest_token};
+use ironclaw_first_party_extensions::is_gsuite_extension_id;
+use ironclaw_host_api::{
+    CapabilityId, ExtensionId, RuntimeCredentialAccountProviderId, VirtualPath, sha256_digest_token,
+};
 use ironclaw_product_workflow::{
     LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
     LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
@@ -11,6 +14,10 @@ use ironclaw_product_workflow::{
 };
 use toml::Value;
 
+use crate::extension_credential_requirements::{
+    can_merge_lifecycle_credential_setup, merge_lifecycle_credential_setup,
+    product_auth_credential_source,
+};
 use crate::nearai_mcp::{
     NearAiMcpBootstrapConfig, NearAiMcpEndpoint, nearai_mcp_endpoint_from_env,
 };
@@ -98,40 +105,48 @@ fn onboarding(package_id: &str) -> Option<LifecycleExtensionOnboarding> {
         "github" => Some(onboarding_message(
             "GitHub needs a personal access token before its repository and pull request tools can run.",
             Some(
-                "Create a GitHub personal access token with the repository permissions you want IronClaw to use, then paste it here.",
+                "Install GitHub first. Activation will open the secure credential prompt for a GitHub personal access token with the repository permissions you want IronClaw to use.",
             ),
             Some("https://github.com/settings/personal-access-tokens/new"),
-            "After saving the token, activate GitHub to publish its tools.",
+            "Install GitHub, then activate it to open the token prompt and publish its tools.",
         )),
         "gmail" => Some(onboarding_message(
             "Gmail needs Google OAuth authorization before mail tools can run.",
-            Some("Authorize the Google account that IronClaw should use for Gmail."),
+            Some(
+                "Install Gmail first. Activation will open the Google OAuth prompt for the account IronClaw should use.",
+            ),
             None,
-            "After authorization completes, activate Gmail to publish its tools.",
+            "Install Gmail, then activate it to open OAuth and publish its tools.",
         )),
         "google-calendar" => Some(onboarding_message(
             "Google Calendar needs Google OAuth authorization before calendar tools can run.",
-            Some("Authorize the Google account that IronClaw should use for calendar events."),
+            Some(
+                "Install Google Calendar first. Activation will open the Google OAuth prompt for calendar access.",
+            ),
             None,
-            "After authorization completes, activate Google Calendar to publish its tools.",
+            "Install Google Calendar, then activate it to open OAuth and publish its tools.",
         )),
         "notion" => Some(onboarding_message(
             "Notion needs OAuth authorization before MCP tools can run.",
-            Some("Authorize the Notion workspace that IronClaw should access for MCP requests."),
+            Some(
+                "Install Notion first. Activation will open the OAuth prompt for the workspace IronClaw should access.",
+            ),
             None,
-            "After authorization completes, activate Notion to publish its MCP tools.",
+            "Install Notion, then activate it to open OAuth and publish its MCP tools.",
         )),
         "nearai" => Some(onboarding_message(
             "NEAR AI needs an API key before its MCP tools can run.",
-            Some("Paste the NEAR AI API key IronClaw should use for hosted MCP requests."),
+            Some(
+                "Install NEAR AI first. Activation will open the secure credential prompt for the API key IronClaw should use.",
+            ),
             None,
-            "After saving the API key, activate NEAR AI to publish its MCP tools.",
+            "Install NEAR AI, then activate it to open the API key prompt and publish its MCP tools.",
         )),
         "web-access" => Some(onboarding_message(
             "Web Access does not need credentials. Activate it to make web search and saved-result retrieval tools available.",
             Some("No credentials are required for Web Access."),
             None,
-            "Activate Web Access to publish its tools.",
+            "Install Web Access, then activate it to publish its tools.",
         )),
         _ => None,
     }
@@ -167,23 +182,17 @@ fn credential_requirements(
     let mut groups: Vec<CredentialRequirementGroup> = Vec::new();
     for capability in &package.package.manifest.capabilities {
         for requirement in &capability.runtime_credentials {
-            let ironclaw_host_api::RuntimeCredentialRequirementSource::ProductAuthAccount {
-                provider,
-                setup,
-            } = &requirement.source
-            else {
+            let Some((provider, setup)) = product_auth_credential_source(requirement) else {
                 continue;
             };
             let handle = requirement.handle.as_str().to_string();
-            let provider = provider.as_str().to_string();
-            let setup = credential_setup(setup);
             if let Some(seen) = groups.iter_mut().find(|seen| {
                 seen.handle == handle
                     && seen.provider == provider
-                    && can_merge_credential_setup(&seen.setup, &setup)
+                    && can_merge_lifecycle_credential_setup(&seen.setup, &setup)
             }) {
                 seen.required |= requirement.required;
-                merge_credential_setup(&mut seen.setup, setup);
+                merge_lifecycle_credential_setup(&mut seen.setup, setup);
                 continue;
             }
             groups.push(CredentialRequirementGroup {
@@ -208,7 +217,7 @@ fn credential_requirements(
                 } else {
                     group.handle.clone()
                 },
-                provider: group.provider.clone(),
+                provider: group.provider.as_str().to_string(),
                 required: group.required,
                 setup: group.setup.clone(),
             }
@@ -216,33 +225,9 @@ fn credential_requirements(
         .collect()
 }
 
-fn can_merge_credential_setup(
-    existing: &LifecycleExtensionCredentialSetup,
-    candidate: &LifecycleExtensionCredentialSetup,
-) -> bool {
-    existing == candidate
-}
-
-fn merge_credential_setup(
-    existing: &mut LifecycleExtensionCredentialSetup,
-    candidate: LifecycleExtensionCredentialSetup,
-) {
-    if let (
-        LifecycleExtensionCredentialSetup::OAuth { scopes: existing },
-        LifecycleExtensionCredentialSetup::OAuth { scopes: candidate },
-    ) = (existing, candidate)
-    {
-        for scope in candidate {
-            if !existing.contains(&scope) {
-                existing.push(scope);
-            }
-        }
-    }
-}
-
 struct CredentialRequirementGroup {
     handle: String,
-    provider: String,
+    provider: RuntimeCredentialAccountProviderId,
     required: bool,
     setup: LifecycleExtensionCredentialSetup,
 }
@@ -256,21 +241,6 @@ fn credential_requirement_name(
         .filter(|seen| seen.handle == group.handle)
         .count();
     format!("{}__{}", group.handle, ordinal)
-}
-
-fn credential_setup(
-    setup: &ironclaw_host_api::RuntimeCredentialAccountSetup,
-) -> LifecycleExtensionCredentialSetup {
-    match setup {
-        ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken => {
-            LifecycleExtensionCredentialSetup::ManualToken
-        }
-        ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth { scopes } => {
-            LifecycleExtensionCredentialSetup::OAuth {
-                scopes: scopes.clone(),
-            }
-        }
-    }
 }
 
 #[derive(Debug, Default)]
@@ -336,27 +306,9 @@ impl AvailableExtensionCatalog {
         query: &str,
     ) -> impl Iterator<Item = &'a AvailableExtensionPackage> + 'a {
         let normalized_query = query.trim().to_ascii_lowercase();
-        self.packages.iter().filter(move |package| {
-            normalized_query.is_empty()
-                || package
-                    .package_ref
-                    .id
-                    .as_str()
-                    .to_ascii_lowercase()
-                    .contains(&normalized_query)
-                || package
-                    .package
-                    .manifest
-                    .name
-                    .to_ascii_lowercase()
-                    .contains(&normalized_query)
-                || package
-                    .package
-                    .manifest
-                    .description
-                    .to_ascii_lowercase()
-                    .contains(&normalized_query)
-        })
+        self.packages
+            .iter()
+            .filter(move |package| package_matches_search(package, &normalized_query))
     }
 
     pub(crate) fn resolve(
@@ -370,6 +322,49 @@ impl AvailableExtensionCatalog {
             .ok_or_else(|| ProductWorkflowError::InvalidBindingRequest {
                 reason: "available extension was not found".to_string(),
             })
+    }
+}
+
+fn package_matches_search(package: &AvailableExtensionPackage, normalized_query: &str) -> bool {
+    normalized_query.is_empty()
+        || package_search_terms(package)
+            .iter()
+            .any(|term| term.contains(normalized_query))
+}
+
+fn package_search_terms(package: &AvailableExtensionPackage) -> Vec<String> {
+    let mut terms = Vec::new();
+    push_search_term(&mut terms, package.package_ref.id.as_str());
+    push_search_term(&mut terms, &package.package.manifest.name);
+    push_search_term(&mut terms, &package.package.manifest.description);
+    if let ExtensionRuntime::FirstParty { service } = &package.package.manifest.runtime {
+        push_search_term(&mut terms, service);
+    }
+    for capability in &package.package.manifest.capabilities {
+        for credential in &capability.runtime_credentials {
+            if let Some((provider, _setup)) = product_auth_credential_source(credential) {
+                push_search_term(&mut terms, provider.as_str());
+            }
+        }
+    }
+    if is_gsuite_extension_id(&package.package.manifest.id) {
+        for alias in [
+            "google",
+            "gsuite",
+            "g suite",
+            "workspace",
+            "google workspace",
+        ] {
+            push_search_term(&mut terms, alias);
+        }
+    }
+    terms
+}
+
+fn push_search_term(terms: &mut Vec<String>, term: impl AsRef<str>) {
+    let term = term.as_ref().trim().to_ascii_lowercase();
+    if !term.is_empty() {
+        terms.push(term);
     }
 }
 
@@ -1359,7 +1354,10 @@ where
         if entry.file_type != FileType::Directory {
             continue;
         }
-        if ExtensionId::new(entry.name.clone()).is_err() {
+        let Ok(extension_id) = ExtensionId::new(entry.name.clone()) else {
+            continue;
+        };
+        if reserved_host_bundled_extension_id(&extension_id) {
             continue;
         }
         let manifest_path = VirtualPath::new(format!(
@@ -1418,6 +1416,13 @@ where
     Ok(packages)
 }
 
+fn reserved_host_bundled_extension_id(extension_id: &ExtensionId) -> bool {
+    matches!(
+        extension_id.as_str(),
+        "github" | "notion" | "web-access" | "nearai"
+    ) || is_gsuite_extension_id(extension_id)
+}
+
 fn extension_asset_path(
     extension_id: &ExtensionId,
     asset_path: &str,
@@ -1464,7 +1469,7 @@ fn visible_capabilities(
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::{HashMap, HashSet},
+        collections::{BTreeSet, HashMap, HashSet},
         sync::{Arc, Mutex},
         time::SystemTime,
     };
@@ -1564,6 +1569,31 @@ mod tests {
     }
 
     #[test]
+    fn bundled_gsuite_extensions_match_google_workspace_aliases() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let expected = BTreeSet::from([
+            "gmail",
+            "google-calendar",
+            "google-docs",
+            "google-drive",
+            "google-sheets",
+            "google-slides",
+        ]);
+
+        for query in ["google", "gsuite", "workspace"] {
+            let ids = catalog
+                .search(query)
+                .map(|package| package.package_ref.id.as_str())
+                .collect::<BTreeSet<_>>();
+
+            assert!(
+                expected.is_subset(&ids),
+                "{query} should discover every GSuite package; got {ids:?}"
+            );
+        }
+    }
+
+    #[test]
     fn bundled_extension_summaries_include_onboarding_messages() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
 
@@ -1595,6 +1625,13 @@ mod tests {
                 onboarding.credential_next_step.is_some(),
                 "{extension_id} must include the next user step"
             );
+            assert!(
+                onboarding
+                    .credential_next_step
+                    .as_deref()
+                    .is_some_and(|step| step.contains("Install") && step.contains("activate")),
+                "{extension_id} onboarding should preserve install-then-activate ordering"
+            );
         }
     }
 
@@ -1615,7 +1652,7 @@ mod tests {
     }
 
     #[test]
-    fn bundled_google_credentials_project_oauth_setup_per_declared_scope_set() {
+    fn bundled_google_credentials_project_single_oauth_setup_with_scope_union() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
 
         for extension_id in [
@@ -1637,7 +1674,7 @@ mod tests {
                 .collect::<Vec<_>>();
 
             let mut credential_count = 0;
-            let mut expected_setup_scopes: Vec<String> = Vec::new();
+            let mut expected_setup_scopes = BTreeSet::new();
             for capability in &package.package.manifest.capabilities {
                 for credential in &capability.runtime_credentials {
                     let RuntimeCredentialRequirementSource::ProductAuthAccount { provider, setup } =
@@ -1661,32 +1698,25 @@ mod tests {
                         "{extension_id} capability {} OAuth setup scopes should match requested provider scopes",
                         capability.id
                     );
-                    for scope in scopes {
-                        if !expected_setup_scopes.contains(scope) {
-                            expected_setup_scopes.push(scope.clone());
-                        }
-                    }
+                    expected_setup_scopes.extend(scopes.iter().cloned());
                     credential_count += 1;
                 }
             }
 
             assert_eq!(
                 google_requirements.len(),
-                expected_setup_scopes.len(),
-                "{extension_id} lifecycle setup should show one Google OAuth request per distinct scope set"
+                1,
+                "{extension_id} lifecycle setup should show one Google OAuth request"
             );
-            for (requirement, expected_scope) in
-                google_requirements.iter().zip(expected_setup_scopes.iter())
-            {
-                let LifecycleExtensionCredentialSetup::OAuth { scopes } = &requirement.setup else {
-                    panic!("{extension_id} should expose Google OAuth setup");
-                };
-                assert_eq!(
-                    scopes.as_slice(),
-                    std::slice::from_ref(expected_scope),
-                    "{extension_id} lifecycle setup should preserve each capability OAuth scope set"
-                );
-            }
+            let LifecycleExtensionCredentialSetup::OAuth { scopes } = &google_requirements[0].setup
+            else {
+                panic!("{extension_id} should expose Google OAuth setup");
+            };
+            assert_eq!(
+                scopes.iter().cloned().collect::<BTreeSet<_>>(),
+                expected_setup_scopes,
+                "{extension_id} lifecycle setup should include every capability OAuth scope"
+            );
             assert!(
                 credential_count > 0,
                 "{extension_id} should declare runtime credentials"
@@ -1917,6 +1947,26 @@ mod tests {
         fs.write_file(
             &VirtualPath::new("/system/extensions/incomplete/cache/leftover").unwrap(),
             b"stale",
+        )
+        .await
+        .unwrap();
+
+        let catalog = AvailableExtensionCatalog::from_filesystem_root(
+            &fs,
+            &VirtualPath::new("/system/extensions").unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(catalog.search("").count(), 0);
+    }
+
+    #[tokio::test]
+    async fn filesystem_catalog_skips_reserved_host_bundled_extension_ids() {
+        let fs = InMemoryBackend::default();
+        fs.write_file(
+            &VirtualPath::new("/system/extensions/gmail/manifest.toml").unwrap(),
+            b"not parsed because gmail is host-bundled",
         )
         .await
         .unwrap();

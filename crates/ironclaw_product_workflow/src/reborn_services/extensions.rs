@@ -661,6 +661,7 @@ mod tests {
                 payload: Some(LifecycleProductPayload::ExtensionInstall {
                     installed: true,
                     visible_capability_ids: Vec::new(),
+                    next_step: "Call builtin.extension_activate next.".to_string(),
                 }),
             })
         }

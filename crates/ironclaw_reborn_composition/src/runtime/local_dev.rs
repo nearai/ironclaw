@@ -17,9 +17,8 @@ use ironclaw_host_runtime::{
 use ironclaw_loop_support::{
     CapabilityResultWrite, HostManagedModelError, HostManagedModelErrorKind,
     HostManagedModelGateway, HostManagedModelMessageRole, HostManagedModelRequest,
-    HostManagedModelResponse, HostManagedToolResultContent, HostRuntimeLoopCapabilityPortFactory,
-    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
-    loop_driver_execution_extension_id,
+    HostManagedModelResponse, HostManagedToolResultContent, LoopCapabilityInputResolver,
+    LoopCapabilityPortFactory, LoopCapabilityResultWriter, loop_driver_execution_extension_id,
 };
 use ironclaw_threads::{
     AppendCapabilityDisplayPreviewRequest, CapabilityDisplayPreviewEnvelope,
@@ -44,6 +43,7 @@ use crate::{
 };
 
 pub(super) mod extension_surface;
+mod refreshing_capability_port;
 #[cfg(test)]
 mod shell_tests;
 mod skill_activation;
@@ -51,11 +51,11 @@ mod surface_disclosure;
 mod synthetic_capability;
 
 use extension_surface::{LocalDevExtensionSurface, LocalDevExtensionSurfaceSource};
+use refreshing_capability_port::{
+    RefreshingLocalDevCapabilityPortConfig, create_refreshing_local_dev_capability_port,
+};
 #[cfg(test)]
 pub(crate) use skill_activation::SKILL_ACTIVATE_CAPABILITY_ID;
-use skill_activation::skill_activation_capability;
-use surface_disclosure::wrap_local_dev_surface_disclosure;
-use synthetic_capability::wrap_local_dev_synthetic_capabilities;
 
 pub(super) struct LocalDevCapabilityWiring {
     pub(super) capability_factory: Arc<dyn LoopCapabilityPortFactory>,
@@ -136,61 +136,26 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
         &self,
         run_context: &LoopRunContext,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
-        let workspace_mounts = self.workspace_mounts.clone();
         let skill_mounts = scoped_skill_management_mount_view(&local_dev_resource_scope_for_run(
             run_context,
             &self.fallback_user_id,
         ))
         .map_err(host_api_agent_loop_error)?;
-        let memory_mounts = self.memory_mounts.clone();
-        let extension_surface = self
-            .extension_surface_source
-            .snapshot()
-            .await
-            .map_err(host_api_agent_loop_error)?;
-        let visible_request = local_dev_visible_capability_request(
-            run_context,
-            &self.fallback_user_id,
-            workspace_mounts.clone(),
-            skill_mounts.clone(),
-            memory_mounts.clone(),
-            &self.policy,
-            &extension_surface,
-        )?;
-        let disclosure_mounts = workspace_mounts.clone();
-        let mut factory = HostRuntimeLoopCapabilityPortFactory::new(
-            Arc::clone(&self.runtime),
-            visible_request,
-            Arc::clone(&self.input_resolver),
-            Arc::clone(&self.result_writer),
-            Arc::clone(&self.milestone_sink),
-        )
-        .with_execution_mounts(workspace_mounts);
-        for capability_id in self.policy.skill_management_capability_ids() {
-            factory = factory
-                .with_capability_execution_mount(capability_id.clone(), skill_mounts.clone());
-        }
-        for capability_id in self.policy.memory_capability_ids() {
-            factory = factory
-                .with_capability_execution_mount(capability_id.clone(), memory_mounts.clone());
-        }
-        let port = factory.for_run_context(run_context.clone());
-        let synthetic_capabilities = match &self.skill_activation_source {
-            Some(skill_activation_source) => {
-                vec![skill_activation_capability(Arc::clone(
-                    skill_activation_source,
-                ))?]
-            }
-            None => Vec::new(),
-        };
-        let port = wrap_local_dev_synthetic_capabilities(
-            port,
-            synthetic_capabilities,
-            run_context.clone(),
-            Arc::clone(&self.input_resolver),
-            Arc::clone(&self.result_writer),
-        )?;
-        Ok(wrap_local_dev_surface_disclosure(port, &disclosure_mounts))
+        create_refreshing_local_dev_capability_port(RefreshingLocalDevCapabilityPortConfig {
+            runtime: Arc::clone(&self.runtime),
+            run_context: run_context.clone(),
+            fallback_user_id: self.fallback_user_id.clone(),
+            policy: Arc::clone(&self.policy),
+            workspace_mounts: self.workspace_mounts.clone(),
+            skill_mounts,
+            memory_mounts: self.memory_mounts.clone(),
+            extension_surface_source: self.extension_surface_source.clone(),
+            input_resolver: Arc::clone(&self.input_resolver),
+            result_writer: Arc::clone(&self.result_writer),
+            milestone_sink: Arc::clone(&self.milestone_sink),
+            skill_activation_source: self.skill_activation_source.clone(),
+        })
+        .await
     }
 }
 

@@ -2017,6 +2017,7 @@ mod tests {
         let gate_ref = "gate:notion-auth";
         let requirements = vec![RuntimeCredentialAuthRequirement {
             provider: RuntimeCredentialAccountProviderId::new("notion").expect("provider"),
+            setup: Default::default(),
             requester_extension: ExtensionId::new("notion").expect("extension"),
             provider_scopes: Vec::new(),
         }];

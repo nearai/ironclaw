@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_auth::{CredentialAccountRecordSource, CredentialAccountService};
+use ironclaw_auth::{
+    CredentialAccount, CredentialAccountRecordSource, CredentialAccountSelectionRequest,
+    CredentialAccountService, GOOGLE_PROVIDER_ID,
+};
 use ironclaw_extensions::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionManifest, ExtensionPackage,
     ExtensionRuntime, MANIFEST_SCHEMA_VERSION, ManifestSource,
@@ -9,7 +12,8 @@ use ironclaw_extensions::{
 use ironclaw_first_party_extensions::{
     GsuiteCapabilitySpec, GsuiteCredentialStageError, GsuiteCredentialStageRequest,
     GsuiteCredentialStager, GsuiteDispatchError, GsuiteDispatchRequest, GsuiteExecutor,
-    GsuitePackageSpec, find_gsuite_capability, gsuite_package_specs, gsuite_resource_profile,
+    GsuitePackageSpec, find_gsuite_capability, gsuite_google_account_visible_to_requester,
+    gsuite_package_specs, gsuite_resource_profile,
 };
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileSchemaRef, ExtensionId, HostApiError, NetworkScheme,
@@ -23,6 +27,8 @@ use ironclaw_host_runtime::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ProductAuthProviderRuntimePorts,
 };
 
+use crate::product_auth_runtime_credentials::RuntimeCredentialAccountVisibilityPolicy;
+
 /// Host-bundled GSuite packages available to an install/activation surface.
 ///
 /// These packages are deliberately not inserted into the default built-in
@@ -34,6 +40,25 @@ pub fn bundled_gsuite_extension_packages() -> Result<Vec<ExtensionPackage>, Exte
         .iter()
         .map(package_from_spec)
         .collect()
+}
+
+pub(crate) struct GsuiteRuntimeCredentialAccountVisibilityPolicy;
+
+impl RuntimeCredentialAccountVisibilityPolicy for GsuiteRuntimeCredentialAccountVisibilityPolicy {
+    fn account_visible_to_requester(
+        &self,
+        account: &CredentialAccount,
+        lookup: &CredentialAccountSelectionRequest,
+    ) -> bool {
+        let requester = lookup.requester_extension.as_ref();
+        if lookup.provider.as_str() != GOOGLE_PROVIDER_ID {
+            return account.is_authorized_for_requester(requester);
+        }
+        let Some(requester) = requester else {
+            return account.is_authorized_for_requester(None);
+        };
+        gsuite_google_account_visible_to_requester(account, requester)
+    }
 }
 
 /// Build GSuite handlers for a surface that can install and activate GSuite packages.
@@ -226,15 +251,22 @@ fn gsuite_credential_requirements(
         find_gsuite_capability(capability_id.as_str()).ok_or_else(|| {
             FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::UndeclaredCapability)
         })?;
-    let provider = RuntimeCredentialAccountProviderId::new(ironclaw_auth::GOOGLE_PROVIDER_ID)
-        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend))?;
     let requester_extension = ExtensionId::new(package.extension_id)
         .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend))?;
-    Ok(vec![RuntimeCredentialAuthRequirement {
-        provider,
-        requester_extension,
-        provider_scopes: required_provider_scopes(capability),
-    }])
+    let requirements = runtime_credentials(capability, package)
+        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend))?
+        .into_iter()
+        .filter(|credential| credential.required)
+        .filter_map(|credential| {
+            credential.product_auth_requirement_for(requester_extension.clone())
+        })
+        .collect::<Vec<_>>();
+    if requirements.is_empty() {
+        return Err(FirstPartyCapabilityError::new(
+            RuntimeDispatchErrorKind::Backend,
+        ));
+    }
+    Ok(requirements)
 }
 
 pub(crate) struct ProductAuthRuntimeGsuiteCredentialStager {
@@ -302,6 +334,12 @@ mod tests {
         assert_eq!(
             requirement.provider_scopes,
             vec![ironclaw_auth::GOOGLE_GMAIL_READONLY_SCOPE.to_string()]
+        );
+        assert_eq!(
+            requirement.setup,
+            RuntimeCredentialAccountSetup::OAuth {
+                scopes: vec![ironclaw_auth::GOOGLE_GMAIL_READONLY_SCOPE.to_string()]
+            }
         );
     }
 }

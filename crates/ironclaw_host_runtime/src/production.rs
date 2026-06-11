@@ -1782,6 +1782,9 @@ mod tests {
     fn auth_requirement(scopes: &[&str]) -> RuntimeCredentialAuthRequirement {
         RuntimeCredentialAuthRequirement {
             provider: RuntimeCredentialAccountProviderId::new("notion").unwrap(),
+            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
+            },
             requester_extension: ExtensionId::new("notion").unwrap(),
             provider_scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
         }
