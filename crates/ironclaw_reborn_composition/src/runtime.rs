@@ -1769,6 +1769,9 @@ pub async fn build_reborn_runtime(
     let trusted_laptop_access = services_input.grants_trusted_laptop_access();
     let owner_id = services_input.owner_id().to_string();
     let mut services = build_reborn_services(services_input).await?;
+    #[cfg(feature = "root-llm-provider")]
+    let llm =
+        apply_startup_stored_llm_key(llm, crate::LlmKeyStore::new(services.secret_store())).await?;
     enforce_runtime_cutover_gate(profile, &services.readiness)?;
 
     let runtime_parts = match profile {
@@ -2568,6 +2571,26 @@ fn local_dev_filesystem_skill_context_source(
     })
 }
 
+#[cfg(feature = "root-llm-provider")]
+async fn apply_startup_stored_llm_key(
+    llm: Option<ResolvedRebornLlm>,
+    keys: crate::LlmKeyStore,
+) -> Result<Option<ResolvedRebornLlm>, RebornRuntimeError> {
+    let Some(mut llm) = llm else {
+        return Ok(None);
+    };
+
+    if let Some(stored) = keys
+        .read(llm.provider_id())
+        .await
+        .map_err(|error| RebornRuntimeError::LlmProvider(error.to_string()))?
+    {
+        crate::llm_catalog::apply_stored_api_key(&mut llm.config, stored);
+    }
+
+    Ok(Some(llm))
+}
+
 struct ValidatedRuntimeIdentity {
     tenant_id: TenantId,
     agent_id: AgentId,
@@ -3322,6 +3345,12 @@ mod tests {
             ironclaw_common::env_helpers::set_runtime_env(name, value);
             Self { name, previous }
         }
+
+        fn unset(name: &'static str) -> Self {
+            let previous = ironclaw_common::env_helpers::env_or_override(name);
+            ironclaw_common::env_helpers::remove_runtime_env(name);
+            Self { name, previous }
+        }
     }
 
     #[cfg(feature = "root-llm-provider")]
@@ -3644,6 +3673,98 @@ mod tests {
             .expect("chat request should be captured")
             .expect("auth header should be sent by capture server");
         assert_eq!(auth_header, "Bearer sess_reborn_env_token");
+    }
+
+    #[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
+    #[tokio::test]
+    async fn local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart() {
+        let _session_token_guard = RuntimeEnvGuard::unset("NEARAI_SESSION_TOKEN");
+        let _api_key_guard = RuntimeEnvGuard::unset("NEARAI_API_KEY");
+        let root = tempfile::tempdir().expect("tempdir");
+        let local_dev_root = root.path().join("local-dev");
+        let session_dir = tempfile::tempdir().expect("session tempdir");
+        let (base_url, auth_rx) = start_nearai_auth_capture_server().await;
+
+        let services = crate::build_reborn_services(
+            RebornBuildInput::local_dev("runtime-nearai-stored-key-owner", local_dev_root.clone())
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .await
+        .expect("services build for stored key seed");
+        crate::LlmKeyStore::new(services.secret_store())
+            .put(
+                "nearai",
+                ironclaw_secrets::SecretMaterial::from("sk-reborn-stored-nearai-key"),
+            )
+            .await
+            .expect("stored key seeded");
+        drop(services);
+
+        let config = ironclaw_llm::LlmConfig {
+            backend: "nearai".to_string(),
+            session: ironclaw_llm::SessionConfig {
+                auth_base_url: base_url.clone(),
+                session_path: session_dir.path().join("session.json"),
+            },
+            nearai: ironclaw_llm::NearAiConfig {
+                model: "test-model".to_string(),
+                cheap_model: None,
+                base_url,
+                api_key: None,
+                fallback_model: None,
+                max_retries: 0,
+                circuit_breaker_threshold: None,
+                circuit_breaker_recovery_secs: 30,
+                response_cache_enabled: false,
+                response_cache_ttl_secs: 3600,
+                response_cache_max_entries: 1000,
+                failover_cooldown_secs: 300,
+                failover_cooldown_threshold: 3,
+                smart_routing_cascade: false,
+            },
+            provider: None,
+            bedrock: None,
+            gemini_oauth: None,
+            openai_codex: None,
+            request_timeout_secs: 5,
+            cheap_model: None,
+            smart_routing_cascade: false,
+            max_retries: 0,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+        };
+        let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config);
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-nearai-stored-key-owner", local_dev_root)
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_resolved_llm(llm)
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-nearai-stored-key-tenant".to_string(),
+            agent_id: "runtime-nearai-stored-key-agent".to_string(),
+            source_binding_id: "runtime-nearai-stored-key-source".to_string(),
+            reply_target_binding_id: "runtime-nearai-stored-key-reply".to_string(),
+        });
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = runtime
+            .send_user_message(&conversation, "hi")
+            .await
+            .expect("message sends");
+
+        assert!(reply.is_successful_final_reply(), "reply: {reply:?}");
+        let auth_header = tokio::time::timeout(Duration::from_secs(5), auth_rx)
+            .await
+            .expect("chat request should be captured")
+            .expect("auth header should be sent by capture server");
+        assert_eq!(auth_header, "Bearer sk-reborn-stored-nearai-key");
+
+        runtime.shutdown().await.expect("runtime shutdown");
     }
 
     #[cfg(feature = "libsql")]
