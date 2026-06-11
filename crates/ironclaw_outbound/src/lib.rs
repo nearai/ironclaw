@@ -6,6 +6,7 @@
 //! payloads, prompts, tool I/O, secrets, host paths, or backend detail strings.
 
 mod communication_preferences;
+mod delivered_gate_routes;
 mod delivery_resolution;
 mod error;
 mod filesystem_store;
@@ -14,6 +15,7 @@ mod memory;
 mod resolution_engine;
 mod service;
 mod store;
+mod triggered_run_delivery;
 mod types;
 mod validation;
 
@@ -21,6 +23,10 @@ pub use communication_preferences::{
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
     CommunicationPreferenceVersion, DeliveryDefaultScope, VersionedCommunicationPreferenceRecord,
     WriteCommunicationPreferenceRequest,
+};
+pub use delivered_gate_routes::{
+    DELIVERED_GATE_ROUTE_TTL, DeliveredGateRouteRecord, DeliveredGateRouteStore,
+    InMemoryDeliveredGateRouteStore,
 };
 pub use delivery_resolution::{
     CommunicationDeliveryCandidate, CommunicationDeliveryIntent, CommunicationDeliveryKind,
@@ -40,6 +46,10 @@ pub use service::{
     OutboundPolicyService, ReplyTargetBindingValidator, ThreadProjectionAccessPolicy,
 };
 pub use store::OutboundStateStore;
+pub use triggered_run_delivery::{
+    InMemoryTriggeredRunDeliveryStore, TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryRecord,
+    TriggeredRunDeliveryStore,
+};
 pub use types::{
     AdvanceSubscriptionCursorRequest, DeliveryFailureKind, LoadSubscriptionCursorRequest,
     OutboundDeliveryAttempt, OutboundDeliveryDecision, OutboundDeliveryStatus,

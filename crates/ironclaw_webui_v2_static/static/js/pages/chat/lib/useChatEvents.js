@@ -407,8 +407,7 @@ function applyProjectionItems({
     }
 
     if (item.gate) {
-      // ProductProjectionItem::Gate { gate_ref, headline } — projection
-      // carries gate_ref but not run_id, so we correlate to the
+      // ProductProjectionItem::Gate carries gate_ref but not run_id, so we correlate to the
       // active run (snapshotted above). Without a run_id the
       // pendingGate is unusable (`resolveGate` would 400 at the path
       // construction in `api.js`), so skip emitting the gate entirely
@@ -421,6 +420,7 @@ function applyProjectionItems({
           gateRef: item.gate.gate_ref,
           headline: item.gate.headline,
           body: "",
+          allowAlways: item.gate.allow_always === true,
         });
         setIsProcessing(false);
       }

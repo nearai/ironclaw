@@ -1217,18 +1217,34 @@ mod tests {
     }
 
     #[test]
+    fn context_length_error_detects_provider_prompt_too_long_wording() {
+        let body = r#"{"error":{"message":"Provider failed for model 'anthropic/claude-sonnet-4-5': prompt is too long: 234872 tokens > 200000 maximum","type":"invalid_request_error","param":null,"code":null}}"#;
+        match crate::error::context_length_error(400, body) {
+            Some(LlmError::ContextLengthExceeded { used, limit }) => {
+                assert_eq!(used, 234872);
+                assert_eq!(limit, 200000);
+            }
+            other => panic!("expected context-length error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn context_length_error_does_not_treat_all_bad_requests_as_overflow() {
         let body = r#"{"error":{"message":"invalid tool schema"}}"#;
         assert!(crate::error::context_length_error(400, body).is_none());
     }
 
-    #[tokio::test]
-    async fn complete_maps_context_overflow_http_400_to_context_length_exceeded() {
+    async fn assert_complete_maps_context_overflow_message(
+        message: &str,
+        expected_used: usize,
+        expected_limit: usize,
+    ) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let message = message.to_string();
         tokio::spawn(async move {
             loop {
                 let Ok((mut socket, _)) = listener.accept().await else {
@@ -1244,7 +1260,7 @@ mod tests {
                         "400 Bad Request",
                         serde_json::json!({
                             "error": {
-                                "message": "Provider failed: The input (314325 tokens) is longer than the model's context length (262144 tokens)."
+                                "message": message
                             }
                         })
                         .to_string(),
@@ -1272,11 +1288,31 @@ mod tests {
 
         match err {
             LlmError::ContextLengthExceeded { used, limit } => {
-                assert_eq!(used, 314325);
-                assert_eq!(limit, 262144);
+                assert_eq!(used, expected_used);
+                assert_eq!(limit, expected_limit);
             }
             other => panic!("expected context-length error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn complete_maps_prompt_too_long_http_400_to_context_length_exceeded() {
+        assert_complete_maps_context_overflow_message(
+            "Provider failed for model 'anthropic/claude-sonnet-4-5': prompt is too long: 234872 tokens > 200000 maximum",
+            234872,
+            200000,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn complete_maps_longer_than_context_http_400_to_context_length_exceeded() {
+        assert_complete_maps_context_overflow_message(
+            "Provider failed: The input (314325 tokens) is longer than the model's context length (262144 tokens).",
+            314325,
+            262144,
+        )
+        .await;
     }
 
     #[test]

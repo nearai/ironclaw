@@ -60,6 +60,9 @@ macro_rules! google_wasm_services_for_test {
                 Obligation::InjectCredentialAccountOnce {
                     handle: SecretHandle::new("google_runtime_token").unwrap(),
                     provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+                    setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                        scopes: required_scopes.clone(),
+                    },
                     provider_scopes: required_scopes.clone(),
                     requester_extension: ExtensionId::new(package_id).unwrap(),
                 },
@@ -107,6 +110,7 @@ async fn host_runtime_services_routes_structured_github_wasm_search_through_runt
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
                 provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
                 provider_scopes: Vec::new(),
                 requester_extension: ExtensionId::new("github").unwrap(),
             },
@@ -193,6 +197,7 @@ async fn host_runtime_services_restages_github_product_auth_for_multi_request_wa
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
                 provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
                 provider_scopes: Vec::new(),
                 requester_extension: ExtensionId::new("github").unwrap(),
             },
@@ -284,6 +289,9 @@ async fn host_runtime_services_routes_google_drive_wasm_list_files_with_scoped_g
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
                 provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+                setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                    scopes: required_scopes.clone(),
+                },
                 provider_scopes: required_scopes.clone(),
                 requester_extension: ExtensionId::new("google-drive").unwrap(),
             },
@@ -550,6 +558,7 @@ async fn host_runtime_services_maps_github_wasm_input_errors_to_invalid_input() 
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
                 provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
                 provider_scopes: Vec::new(),
                 requester_extension: ExtensionId::new("github").unwrap(),
             },
@@ -612,6 +621,7 @@ async fn host_runtime_services_missing_github_runtime_secret_blocks_on_auth() {
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
                 provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
                 provider_scopes: Vec::new(),
                 requester_extension: ExtensionId::new("github").unwrap(),
             },

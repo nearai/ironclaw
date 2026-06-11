@@ -392,6 +392,7 @@ impl OutboundPreferencesProductFacade for UnsupportedOutboundPreferencesProductF
 pub struct ExtensionCredentialStatusRequest {
     pub scope: AuthProductScope,
     pub provider: AuthProviderId,
+    pub setup: crate::LifecycleExtensionCredentialSetup,
     pub provider_scopes: Vec<ProviderScope>,
     pub requester_extension: ExtensionId,
 }

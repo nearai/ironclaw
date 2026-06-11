@@ -13,6 +13,7 @@ export function gateFromEvent(eventType, prompt) {
       gateRef: prompt.gate_ref,
       headline: prompt.headline,
       body: prompt.body,
+      allowAlways: prompt.allow_always === true,
     };
   }
 

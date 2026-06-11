@@ -2409,6 +2409,7 @@ async fn mcp_http_client_reuses_product_auth_staged_credential_for_json_rpc_sess
                 Obligation::InjectCredentialAccountOnce {
                     handle: runtime_slot_handle.clone(),
                     provider: RuntimeCredentialAccountProviderId::new("mcp").unwrap(),
+                    setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
                     provider_scopes: Vec::new(),
                     requester_extension: ExtensionId::new("mcp").unwrap(),
                 },

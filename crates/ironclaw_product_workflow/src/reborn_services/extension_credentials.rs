@@ -174,6 +174,7 @@ fn credential_status_request(
     Ok(ExtensionCredentialStatusRequest {
         scope,
         provider: provider_for_requirement(requirement)?,
+        setup: requirement.setup.clone(),
         provider_scopes: provider_scopes_for_requirement(requirement)?,
         requester_extension: extension_id.clone(),
     })

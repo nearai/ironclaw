@@ -294,6 +294,7 @@ async fn build_harness_with_actor_user_resolver_and_auth_challenges(
             poll_interval: Duration::from_millis(1),
             max_wait: Duration::from_secs(2),
             max_concurrent_deliveries: std::num::NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
+            max_pending_deliveries: std::num::NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
         },
     ));
 
