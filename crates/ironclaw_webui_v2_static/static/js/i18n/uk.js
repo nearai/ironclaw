@@ -939,6 +939,7 @@ registerPack("uk", {
   "extensions.emptyInstalledDesc": "Перегляньте вкладку Реєстр, щоб знайти та встановити інструменти, канали та сервери WASM.",
   "extensions.emptyMcpTitle": "Немає серверів MCP",
   "extensions.emptyMcpDesc": "Сервери MCP розширюють агент за допомогою додаткових інструментальних можливостей за допомогою протоколу модельного контексту. Встановіть їх з реєстру.",
+  "common.dismiss": "Закрити",
   "common.remove": "Видалити",
   "automations.detail.currentRun": "Поточний запуск",
   "automations.detail.emptyDescription": "Виберіть розклад, щоб переглянути останні запуски.",

@@ -939,6 +939,7 @@ registerPack("pt-BR", {
   "extensions.emptyInstalledDesc": "Navegue pela guia Registro para descobrir e instalar ferramentas WASM, canais e servidores MCP.",
   "extensions.emptyMcpTitle": "Nenhum servidor MCP",
   "extensions.emptyMcpDesc": "Os servidores MCP estendem o agente com recursos de ferramenta adicionais através do Model Context Protocol. Instale-os a partir do registro.",
+  "common.dismiss": "Dispensar",
   "common.remove": "Remover",
   "automations.detail.currentRun": "Execução atual",
   "automations.detail.emptyDescription": "Escolha um agendamento para ver execuções recentes.",

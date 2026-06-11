@@ -939,6 +939,7 @@ registerPack("hi", {
   "extensions.emptyInstalledDesc": "WASM टूल, चैनल और MCP सर्वर को खोजने और इंस्टॉल करने के लिए रजिस्ट्री टैब ब्राउज़ करें।",
   "extensions.emptyMcpTitle": "कोई MCP सर्वर नहीं",
   "extensions.emptyMcpDesc": "MCP सर्वर मॉडल कॉन्टेक्स्ट प्रोटोकॉल पर अतिरिक्त टूल क्षमताओं के साथ एजेंट का विस्तार करते हैं। उन्हें र��िस्ट्री से स्थापित करें.",
+  "common.dismiss": "खारिज करें",
   "common.remove": "हटाएं",
   "automations.detail.currentRun": "वर्तमान रन",
   "automations.detail.emptyDescription": "हाल के रन देखने के लिए कोई शेड्यूल चुनें।",

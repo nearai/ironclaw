@@ -939,6 +939,7 @@ registerPack("de", {
   "extensions.emptyInstalledDesc": "Durchsuchen Sie die Registerkarte „Registrierung“, um WASM-Tools, Kanäle und MCP-Server zu entdecken und zu installieren.",
   "extensions.emptyMcpTitle": "Keine MCP-Server",
   "extensions.emptyMcpDesc": "MCP-Server erweitern den Agenten um zusätzliche Toolfunktionen über das Model Context Protocol. Installieren Sie sie aus der Registrierung.",
+  "common.dismiss": "Schließen",
   "common.remove": "Entfernen",
   "automations.detail.currentRun": "Aktueller Lauf",
   "automations.detail.emptyDescription": "Wählen Sie einen Zeitplan aus, um aktuelle Läufe anzuzeigen.",

@@ -939,6 +939,7 @@ registerPack("zh-CN", {
   "extensions.emptyInstalledDesc": "浏览扩展注册表去发现并安装 WASM 工具、服务通道 和各种 MCP 协议服务服务器。",
   "extensions.emptyMcpTitle": "暂无 MCP 代理服务器",
   "extensions.emptyMcpDesc": "MCP 服务器可通过模型上下文协议（Model Context Protocol）扩展代理与外界交互能力。从应用注册表（Registry）处可获取与安装。",
+  "common.dismiss": "关闭",
   "common.remove": "移除",
   "automations.detail.currentRun": "当前运行",
   "automations.detail.emptyDescription": "选择一个计划以查看最近运行。",

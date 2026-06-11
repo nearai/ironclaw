@@ -939,6 +939,7 @@ registerPack("ja", {
   "extensions.emptyInstalledDesc": "レジストリタブを参照して、WASMツール、チャネル、およびMCPサーバーをインストールしてください。",
   "extensions.emptyMcpTitle": "MCPサーバーがありません",
   "extensions.emptyMcpDesc": "MCPサーバーは設定によりModel Context Protocolを介したツール機能をエージェントに拡張します。レジストリからインストールしてください。",
+  "common.dismiss": "閉じる",
   "common.remove": "削除",
   "automations.detail.currentRun": "現在の実行",
   "automations.detail.emptyDescription": "最近の実行を確認するスケジュールを選択してください。",

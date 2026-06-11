@@ -34,6 +34,15 @@ export function ChatInput({
     autoResize();
   }, [text, autoResize]);
 
+  // Clear the attachment warning whenever the composer is reset (a new
+  // navigation / conversation switch changes resetKey). Without this the
+  // banner is local state that survives the switch and only clears on
+  // refresh or send. Runs independently of the initialText restore below,
+  // which early-returns when there is no draft to restore.
+  React.useEffect(() => {
+    setUnsupportedPayloadError("");
+  }, [resetKey]);
+
   React.useEffect(() => {
     if (!initialText) return;
     setText(initialText);
@@ -170,8 +179,17 @@ export function ChatInput({
         `}
         ${unsupportedPayloadError &&
         html`
-          <div className="mb-3 rounded-md border border-red-400/25 bg-red-500/10 px-3 py-2 text-xs leading-5 text-red-100">
-            ${unsupportedPayloadError}
+          <div className="mb-3 flex items-start gap-2 rounded-md border border-red-400/25 bg-red-500/10 px-3 py-2 text-xs leading-5 text-red-100">
+            <span className="min-w-0 flex-1">${unsupportedPayloadError}</span>
+            <button
+              type="button"
+              onClick=${() => setUnsupportedPayloadError("")}
+              aria-label=${t("common.dismiss")}
+              title=${t("common.dismiss")}
+              className="shrink-0 rounded p-0.5 text-red-200 hover:text-red-50"
+            >
+              <${Icon} name="close" className="h-3.5 w-3.5" />
+            </button>
           </div>
         `}
 

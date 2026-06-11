@@ -939,6 +939,7 @@ registerPack("ar", {
   "extensions.emptyInstalledDesc": "تصفح علامة التبويب \"التسجيل\" لاكتشاف وتثبيت أدوات وقنوات WASM وخوادم MCP.",
   "extensions.emptyMcpTitle": "لا توجد خوادم MCP",
   "extensions.emptyMcpDesc": "تعمل خوادم MCP على توسيع الوكيل بقدرات أداة إضافية عبر بروتوكول سياق النموذج. تثبيتها من التسجيل.",
+  "common.dismiss": "تجاهل",
   "common.remove": "إزالة",
   "automations.detail.currentRun": "التشغيل الحالي",
   "automations.detail.emptyDescription": "اختر جدولة لمراجعة عمليات التشغيل الأخيرة.",
