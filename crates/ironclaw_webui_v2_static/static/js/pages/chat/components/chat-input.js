@@ -30,6 +30,32 @@ export function ChatInput({
     React.useState("");
   const textareaRef = React.useRef(null);
 
+  // Debounce draft persistence: localStorage writes are synchronous and
+  // disk-backed, so writing on every keystroke can add typing latency. We
+  // hold the latest {key, text} and flush after a short idle, but also flush
+  // immediately on unmount / thread switch so navigating away never drops the
+  // last keystrokes, and cancel outright on send so a queued write can't
+  // resurrect a just-sent draft.
+  const pendingDraftRef = React.useRef(null);
+  const draftTimerRef = React.useRef(null);
+  const flushDraft = React.useCallback(() => {
+    if (draftTimerRef.current) {
+      window.clearTimeout(draftTimerRef.current);
+      draftTimerRef.current = null;
+    }
+    if (pendingDraftRef.current) {
+      setDraft(pendingDraftRef.current.key, pendingDraftRef.current.text);
+      pendingDraftRef.current = null;
+    }
+  }, []);
+  const cancelPendingDraft = React.useCallback(() => {
+    if (draftTimerRef.current) {
+      window.clearTimeout(draftTimerRef.current);
+      draftTimerRef.current = null;
+    }
+    pendingDraftRef.current = null;
+  }, []);
+
   const autoResize = React.useCallback(() => {
     const el = textareaRef.current;
     if (!el) return;
@@ -56,7 +82,10 @@ export function ChatInput({
   // explicit hand-off draft still wins over the stored one.
   React.useEffect(() => {
     setText(getDraft(draftKey));
-  }, [draftKey]);
+    // Flush any queued write (for the previous key) before this key changes
+    // or the composer unmounts, so a debounced draft is never lost.
+    return () => flushDraft();
+  }, [draftKey, flushDraft]);
 
   React.useEffect(() => {
     if (!initialText) return;
@@ -73,12 +102,12 @@ export function ChatInput({
   }, [initialText, resetKey]);
 
   const handleSend = React.useCallback(async () => {
-    if (!text.trim() || disabled || isSending)
-      return;
+    if (!text.trim() || disabled || isSending) return;
     setIsSending(true);
     try {
       await onSend(text.trim());
       setText("");
+      cancelPendingDraft();
       clearDraft(draftKey);
       setUnsupportedPayloadError("");
       if (textareaRef.current) textareaRef.current.style.height = "auto";
@@ -87,21 +116,18 @@ export function ChatInput({
     } finally {
       setIsSending(false);
     }
-  }, [
-    text,
-    disabled,
-    isSending,
-    onSend,
-    draftKey,
-  ]);
+  }, [text, disabled, isSending, onSend, draftKey, cancelPendingDraft]);
 
   const handleChange = React.useCallback(
     (e) => {
       const next = e.target.value;
       setText(next);
-      setDraft(draftKey, next);
+      // Queue a debounced persist instead of writing on every keystroke.
+      pendingDraftRef.current = { key: draftKey, text: next };
+      if (draftTimerRef.current) window.clearTimeout(draftTimerRef.current);
+      draftTimerRef.current = window.setTimeout(flushDraft, 300);
     },
-    [draftKey]
+    [draftKey, flushDraft]
   );
 
   const handleCancel = React.useCallback(async () => {

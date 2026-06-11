@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import { beforeEach, test } from "node:test";
 import {
   NEW_DRAFT_KEY,
+  clearAllDrafts,
   clearDraft,
   getDraft,
   setDraft,
@@ -25,6 +26,10 @@ function installStorage() {
       getItem: (k) => (map.has(k) ? map.get(k) : null),
       setItem: (k, v) => map.set(k, String(v)),
       removeItem: (k) => map.delete(k),
+      get length() {
+        return map.size;
+      },
+      key: (i) => [...map.keys()][i] ?? null,
     },
   };
   return map;
@@ -72,6 +77,19 @@ test("clearDraft removes a stored draft", () => {
   setDraft("thread-1", "to be sent");
   clearDraft("thread-1");
   assert.equal(getDraft("thread-1"), "");
+});
+
+test("clearAllDrafts removes every draft but leaves unrelated keys", () => {
+  setDraft("thread-1", "a");
+  setDraft(NEW_DRAFT_KEY, "b");
+  globalThis.window.localStorage.setItem("ironclaw:unrelated", "keep");
+  clearAllDrafts();
+  assert.equal(getDraft("thread-1"), "");
+  assert.equal(getDraft(NEW_DRAFT_KEY), "");
+  assert.equal(
+    globalThis.window.localStorage.getItem("ironclaw:unrelated"),
+    "keep"
+  );
 });
 
 test("storage failures are swallowed (best-effort persistence)", () => {
