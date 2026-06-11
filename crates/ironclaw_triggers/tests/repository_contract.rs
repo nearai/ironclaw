@@ -881,6 +881,7 @@ async fn assert_rejects_validation_failures_before_persistence(repo: &impl Trigg
     let mut schedule_error = sample_record(trigger_id, tenant_id, next_run_at);
     schedule_error.schedule = TriggerSchedule::Cron {
         expression: "*/30 * * * * *".to_string(),
+        timezone: "UTC".to_string(),
     };
     assert!(matches!(
         repo.upsert_trigger(schedule_error).await,

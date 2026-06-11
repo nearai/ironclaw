@@ -158,9 +158,15 @@ fn automation_info_from_record(
 fn automation_source_from_record(record: &TriggerRecord) -> Option<RebornAutomationSource> {
     match record.source {
         TriggerSourceKind::Schedule => match &record.schedule {
-            TriggerSchedule::Cron { expression } => Some(RebornAutomationSource::Schedule {
-                cron: expression.clone(),
-            }),
+            TriggerSchedule::Cron {
+                expression,
+                timezone: _,
+            } => {
+                // timezone is not yet surfaced in the panel DTO (RebornAutomationSource::Schedule has no timezone field)
+                Some(RebornAutomationSource::Schedule {
+                    cron: expression.clone(),
+                })
+            }
         },
     }
 }
@@ -328,6 +334,7 @@ mod tests {
             source: TriggerSourceKind::Schedule,
             schedule: TriggerSchedule::Cron {
                 expression: cron.to_string(),
+                timezone: "UTC".to_string(),
             },
             completion_policy: ironclaw_triggers::TriggerCompletionPolicy::Recurring,
             prompt: "run the daily task".to_string(),

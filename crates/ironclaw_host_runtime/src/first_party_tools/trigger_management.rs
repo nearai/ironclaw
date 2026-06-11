@@ -197,6 +197,7 @@ struct TriggerCreateInput {
     name: String,
     prompt: String,
     cron: String,
+    timezone: String,
 }
 
 #[derive(Deserialize)]
@@ -218,7 +219,8 @@ async fn create_trigger(
     now: DateTime<Utc>,
 ) -> Result<Value, FirstPartyCapabilityError> {
     let input: TriggerCreateInput = serde_json::from_value(input).map_err(|_| input_error())?;
-    let schedule = TriggerSchedule::cron(input.cron).map_err(trigger_input_error)?;
+    let schedule = TriggerSchedule::cron_with_timezone(input.cron, input.timezone)
+        .map_err(trigger_input_error)?;
     let next_run_at = next_run_at_for_schedule(&schedule, now)?;
     let record = TriggerRecord {
         trigger_id: TriggerId::new(),
@@ -475,5 +477,55 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn trigger_create_input_rejects_missing_timezone() {
+        let input = serde_json::json!({
+            "name": "daily",
+            "prompt": "check mail",
+            "cron": "0 9 * * *"
+        });
+        let result: Result<TriggerCreateInput, _> = serde_json::from_value(input);
+        assert!(
+            result.is_err(),
+            "missing timezone must fail deserialization"
+        );
+    }
+
+    #[test]
+    fn trigger_create_input_rejects_invalid_timezone() {
+        let input = serde_json::json!({
+            "name": "daily",
+            "prompt": "check mail",
+            "cron": "0 9 * * *",
+            "timezone": "Not/A/Timezone"
+        });
+        let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
+        let result = TriggerSchedule::cron_with_timezone(parsed.cron, parsed.timezone);
+        assert!(result.is_err(), "invalid timezone must be rejected");
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("invalid timezone"),
+            "error should name the problem: {error_msg}"
+        );
+    }
+
+    #[test]
+    fn trigger_create_input_accepts_valid_timezone() {
+        let input = serde_json::json!({
+            "name": "daily",
+            "prompt": "check mail",
+            "cron": "0 9 * * *",
+            "timezone": "America/Los_Angeles"
+        });
+        let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
+        let schedule = TriggerSchedule::cron_with_timezone(parsed.cron, &parsed.timezone)
+            .expect("valid timezone accepted");
+        match &schedule {
+            TriggerSchedule::Cron { timezone, .. } => {
+                assert_eq!(timezone, "America/Los_Angeles");
+            }
+        }
     }
 }
