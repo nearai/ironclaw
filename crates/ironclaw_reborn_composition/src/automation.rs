@@ -446,10 +446,13 @@ mod tests {
         Hang,
     }
 
+    /// Recorded `(method, limit)` pairs for asserting bounded lookups.
+    type RecordedLimits = Arc<Mutex<Vec<(&'static str, usize)>>>;
+
     struct ScriptedRepository {
         scoped: ScriptedOutcome,
         batch: ScriptedOutcome,
-        limits: Option<Arc<Mutex<Vec<(&'static str, usize)>>>>,
+        limits: Option<RecordedLimits>,
     }
 
     impl ScriptedRepository {
