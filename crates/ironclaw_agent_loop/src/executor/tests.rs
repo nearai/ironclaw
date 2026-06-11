@@ -264,7 +264,9 @@ async fn prompt_stage_compacts_candidate_prompt_then_rebuilds_final_bundle() {
     let output = match step {
         PromptStep::Prepared(output) => output,
         PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
-        PromptStep::ResumeApproval(_) => panic!("unexpected ResumeApproval"),
+        PromptStep::ResumeApproval(_) | PromptStep::ResumeAuth(_) => {
+            panic!("unexpected resume step")
+        }
         PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
     };
     assert_eq!(host.prompt_requests().len(), 2);
@@ -340,7 +342,9 @@ async fn prompt_stage_deferred_compaction_returns_to_normal_prompt_path() {
     let output = match step {
         PromptStep::Prepared(output) => output,
         PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
-        PromptStep::ResumeApproval(_) => panic!("unexpected ResumeApproval"),
+        PromptStep::ResumeApproval(_) | PromptStep::ResumeAuth(_) => {
+            panic!("unexpected resume step")
+        }
         PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
     };
     assert_eq!(host.prompt_requests().len(), 1);
@@ -423,7 +427,9 @@ async fn prompt_stage_successful_compaction_clears_deferred_watermark() {
     let output = match step {
         PromptStep::Prepared(output) => output,
         PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
-        PromptStep::ResumeApproval(_) => panic!("unexpected ResumeApproval"),
+        PromptStep::ResumeApproval(_) | PromptStep::ResumeAuth(_) => {
+            panic!("unexpected resume step")
+        }
         PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
     };
     assert_eq!(
@@ -509,7 +515,9 @@ async fn prompt_stage_compaction_index_maps_system_summary_and_other_kinds() {
     let output = match step {
         PromptStep::Prepared(output) => output,
         PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
-        PromptStep::ResumeApproval(_) => panic!("unexpected ResumeApproval"),
+        PromptStep::ResumeApproval(_) | PromptStep::ResumeAuth(_) => {
+            panic!("unexpected resume step")
+        }
         PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
     };
     assert_eq!(
@@ -561,7 +569,9 @@ async fn prompt_stage_cancellation_after_prompt_bundle_returns_cancelled_exit() 
             assert!(cancelled.checkpoint_id.is_some());
         }
         PromptStep::Prepared(_) => panic!("expected cancelled exit"),
-        PromptStep::ResumeApproval(_) => panic!("unexpected ResumeApproval"),
+        PromptStep::ResumeApproval(_) | PromptStep::ResumeAuth(_) => {
+            panic!("unexpected resume step")
+        }
         PromptStep::Exit(exit) => panic!("expected cancelled exit, got {exit:?}"),
         PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
     }
@@ -664,7 +674,9 @@ async fn prompt_stage_compaction_security_rejection_returns_failed_exit() {
             assert!(failed.checkpoint_id.is_some());
         }
         PromptStep::Prepared(_) => panic!("security rejection should end the run"),
-        PromptStep::ResumeApproval(_) => panic!("unexpected ResumeApproval"),
+        PromptStep::ResumeApproval(_) | PromptStep::ResumeAuth(_) => {
+            panic!("unexpected resume step")
+        }
         PromptStep::Exit(exit) => panic!("expected failed exit, got {exit:?}"),
         PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
     }
@@ -2945,7 +2957,9 @@ async fn prompt_stage_returns_skip_model_when_flag_set() {
     let returned_state = match step {
         PromptStep::SkipModel(state, _ack) => *state,
         PromptStep::Prepared(_) => panic!("expected SkipModel, got Prepared"),
-        PromptStep::ResumeApproval(_) => panic!("expected SkipModel, got ResumeApproval"),
+        PromptStep::ResumeApproval(_) | PromptStep::ResumeAuth(_) => {
+            panic!("expected SkipModel, got resume step")
+        }
         PromptStep::Exit(exit) => panic!("expected SkipModel, got Exit({exit:?})"),
     };
 
@@ -3005,7 +3019,9 @@ async fn prompt_stage_skip_model_carries_pending_input_ack() {
     let mut carried_ack = match step {
         PromptStep::SkipModel(_state, ack) => ack,
         PromptStep::Prepared(_) => panic!("expected SkipModel, got Prepared"),
-        PromptStep::ResumeApproval(_) => panic!("expected SkipModel, got ResumeApproval"),
+        PromptStep::ResumeApproval(_) | PromptStep::ResumeAuth(_) => {
+            panic!("expected SkipModel, got resume step")
+        }
         PromptStep::Exit(exit) => panic!("expected SkipModel, got Exit({exit:?})"),
     };
 
@@ -3877,5 +3893,115 @@ async fn non_auth_gate_block_preserves_pending_auth_resume() {
     assert_eq!(
         surviving_resume.capability_id, seeded_auth_resume.capability_id,
         "surviving pending_auth_resume.capability_id must be unchanged"
+    );
+}
+
+#[tokio::test]
+async fn resume_after_auth_gate_redispatches_original_call_without_model_turn() {
+    // Phase 1: executor blocks on an auth gate and writes a BeforeBlock checkpoint
+    // that carries a pending_auth_resume record with the original input_ref.
+    let gate_ref = LoopGateRef::new("gate:auth-resume-test").expect("valid");
+    let completed_ref = LoopResultRef::new("result:auth-resumed").expect("valid");
+    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::AuthRequired {
+                gate_ref: gate_ref.clone(),
+                credential_requirements: Vec::new(),
+                safe_summary: "auth required".to_string(),
+            }],
+            stopped_on_suspension: true,
+        },
+        // Phase 2 scripted outcome: the auth is now satisfied, call completes.
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Completed(
+                ironclaw_turns::run_profile::CapabilityResultMessage {
+                    result_ref: completed_ref.clone(),
+                    safe_summary: "auth resumed and completed".to_string(),
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    terminate_hint: true,
+                    byte_len: 0,
+                },
+            )],
+            stopped_on_suspension: false,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let initial_state = LoopExecutionState::initial_for_run(host.run_context());
+
+    // Phase 1 run — expect a Blocked exit.
+    let first_exit = executor
+        .execute_family(&crate::families::default(), &host, initial_state)
+        .await
+        .expect("first execute blocks on auth gate");
+    assert!(
+        matches!(first_exit, LoopExit::Blocked(_)),
+        "expected Blocked exit, got {first_exit:?}"
+    );
+    // Exactly one model call happened during Phase 1.
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "phase 1 must make exactly one model call"
+    );
+
+    // Recover the BeforeBlock checkpoint state — this is what resume loads.
+    let before_block_state = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+    assert!(
+        before_block_state.pending_auth_resume.is_some(),
+        "BeforeBlock checkpoint must carry pending_auth_resume"
+    );
+
+    // Phase 2 run — seeded from the BeforeBlock checkpoint state.
+    // The prompt stage must detect pending_auth_resume and skip the model call,
+    // re-dispatching the original capability invocation directly.
+    let second_exit = executor
+        .execute_family(&crate::families::default(), &host, before_block_state)
+        .await
+        .expect("second execute resumes from auth gate");
+    assert!(
+        matches!(second_exit, LoopExit::Completed(_)),
+        "expected Completed exit after auth resume, got {second_exit:?}"
+    );
+
+    // (a) No additional model call during Phase 2 — capability re-dispatched before model.
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "auth resume must re-dispatch the saved invocation without a model call"
+    );
+
+    // (b) Exactly two batch invocations total: Phase 1 (blocked) + Phase 2 (completed).
+    let batch_invocations = host.batch_invocations();
+    assert_eq!(
+        batch_invocations.len(),
+        2,
+        "expected two batch invocations (phase 1 block + phase 2 re-dispatch)"
+    );
+
+    // The Phase 2 invocation must carry the original input_ref.
+    let original_input_ref = CapabilityInputRef::new("input:demo").expect("valid");
+    assert_eq!(
+        batch_invocations[1].invocations[0].input_ref, original_input_ref,
+        "re-dispatched invocation must carry the original input_ref"
+    );
+
+    // (c) Auth re-dispatch is token-less — no approval_resume on the invocation.
+    assert_eq!(
+        batch_invocations[1].invocations[0].approval_resume, None,
+        "auth re-dispatch must not carry an approval_resume token"
+    );
+
+    // (d) pending_auth_resume is cleared in the final state.
+    let final_state = final_staged_state(&host);
+    assert!(
+        final_state.pending_auth_resume.is_none(),
+        "pending_auth_resume must be cleared after successful re-dispatch"
+    );
+
+    // (e) The completed result was recorded.
+    assert_eq!(
+        final_state.result_refs,
+        vec![completed_ref],
+        "completed result ref must be recorded in final state"
     );
 }

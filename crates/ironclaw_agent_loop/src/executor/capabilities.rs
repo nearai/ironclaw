@@ -202,6 +202,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     CapabilityOutcome::Completed(result) => {
                         push_call_signature_once(&mut state, &mut signatures, &call)?;
                         clear_matching_pending_approval_resume(&mut state, &call);
+                        clear_matching_pending_auth_resume(&mut state, &call);
                         append_completed_capability_result(
                             ctx.host,
                             &mut state,
@@ -219,6 +220,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     } => {
                         push_call_signature_once(&mut state, &mut signatures, &call)?;
                         clear_matching_pending_approval_resume(&mut state, &call);
+                        clear_matching_pending_auth_resume(&mut state, &call);
                         append_spawned_child_result(
                             ctx.host,
                             &mut state,
@@ -241,6 +243,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     {
                         push_call_signature_once(&mut state, &mut signatures, &call)?;
                         clear_matching_pending_approval_resume(&mut state, &call);
+                        clear_matching_pending_auth_resume(&mut state, &call);
                         let result = CapabilityResultMessage {
                             result_ref,
                             safe_summary,
@@ -399,6 +402,7 @@ impl CapabilityStage {
         match outcome {
             CapabilityOutcome::Completed(result) => {
                 clear_matching_pending_approval_resume(&mut state, &call);
+                clear_matching_pending_auth_resume(&mut state, &call);
                 append_completed_capability_result(
                     ctx.host,
                     &mut state,
@@ -416,6 +420,7 @@ impl CapabilityStage {
                 ..
             } => {
                 clear_matching_pending_approval_resume(&mut state, &call);
+                clear_matching_pending_auth_resume(&mut state, &call);
                 append_spawned_child_result(
                     ctx.host,
                     &mut state,
@@ -565,6 +570,7 @@ impl CapabilityStage {
         capability_batch: &mut CapabilityBatchTurnSummary,
     ) -> Result<BatchStep, AgentLoopExecutorError> {
         clear_matching_pending_approval_resume(&mut state, &call);
+        clear_matching_pending_auth_resume(&mut state, &call);
         for _ in 0..MAX_CAPABILITY_RETRIES {
             match ctx
                 .planner
@@ -754,6 +760,19 @@ fn clear_matching_pending_approval_resume(
         .is_some_and(|resume| resume.capability_id == call.capability_id)
     {
         state.pending_approval_resume = None;
+    }
+}
+
+fn clear_matching_pending_auth_resume(
+    state: &mut LoopExecutionState,
+    call: &CapabilityCallCandidate,
+) {
+    if state
+        .pending_auth_resume
+        .as_ref()
+        .is_some_and(|resume| resume.capability_id == call.capability_id)
+    {
+        state.pending_auth_resume = None;
     }
 }
 

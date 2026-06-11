@@ -22,7 +22,7 @@ use crate::strategies::CompactionDecision;
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, HostStage,
     PendingInputAck, StageContext, apply_capability_filter, cancelled_exit, debug_host_unavailable,
-    failed_exit, pending_approval_resume_candidate,
+    failed_exit, pending_approval_resume_candidate, pending_auth_resume_candidate,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -58,6 +58,12 @@ pub(super) struct ApprovalResumePromptOutput {
 pub(super) enum PromptStep {
     Prepared(Box<PromptOutput>),
     ResumeApproval(Box<ApprovalResumePromptOutput>),
+    /// Re-dispatch an auth-gated capability call without a model turn.
+    ///
+    /// Mirrors [`PromptStep::ResumeApproval`] but carries no approval resume token.
+    /// The capability stage's `take_if` on `pending_approval_resume` finds nothing,
+    /// so the invocation goes out as a plain re-invocation — exactly what we want.
+    ResumeAuth(Box<ApprovalResumePromptOutput>),
     Exit(LoopExit),
     /// Compaction-only turn: PromptCompactionStep ran (forced by the
     /// `skip_model_this_iteration` flag), no prompt was assembled, no
@@ -239,6 +245,19 @@ impl<'a> PromptPlanningPipeline<'a> {
         if let Some(resume) = self.state.pending_approval_resume.as_ref() {
             let call = pending_approval_resume_candidate(resume, surface.version.clone());
             return Ok(PromptStep::ResumeApproval(Box::new(
+                ApprovalResumePromptOutput {
+                    state: self.state,
+                    pending_input_ack: self.pending_input_ack,
+                    surface,
+                    call,
+                },
+            )));
+        }
+        // Auth-resume check runs after approval (approval takes priority; both set
+        // simultaneously is impossible today, but this ordering is defensive).
+        if let Some(resume) = self.state.pending_auth_resume.as_ref() {
+            let call = pending_auth_resume_candidate(resume, surface.version.clone());
+            return Ok(PromptStep::ResumeAuth(Box::new(
                 ApprovalResumePromptOutput {
                     state: self.state,
                     pending_input_ack: self.pending_input_ack,
