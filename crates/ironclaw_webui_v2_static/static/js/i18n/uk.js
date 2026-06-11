@@ -195,6 +195,7 @@ registerPack("uk", {
   "settings.restartRequired": "Деякі зміни потребують перезапуску, щоб набрати чинності.",
   "settings.restartNow": "Перезапустити зараз",
   "settings.restartStarting": "Перезапустити...",
+  "settings.restartUnavailable": "Перезапуск через вебінтерфейс ще недоступний. Перезапустіть процес шлюзу вручну, щоб застосувати незавершені зміни.",
 
   // Restart dialog
   "restart.title": "Перезапустити IronClaw",
@@ -272,6 +273,7 @@ registerPack("uk", {
   "onboarding.nearaiWaiting": "Очікування входу NEAR AI у відкритій вкладці…",
   "onboarding.nearaiTimeout": "Час очікування входу NEAR AI минув. Спробуйте ще раз.",
   "onboarding.nearaiFailed": "Помилка вход�� NEAR AI. Спробуйте ще раз.",
+  "onboarding.nearaiLocalSso": "Вхід у NEAR AI через браузер (GitHub, Google, гаманець NEAR) не підтримується на localhost — NEAR AI відхиляє локальні URL зворотного виклику. Додайте натомість ключ API NEAR AI або запустіть за публічним URL.",
   "onboarding.codexSignIn": "Увійдіть за допомогою ChatGPT",
   "onboarding.codexEnterCode": "Введіть цей код у відкриту вкладку для авторизації:",
   "onboarding.codexWaiting": "Очікування авторизації ChatGPT у відкритій вкладці…",

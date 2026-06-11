@@ -662,6 +662,17 @@ fn setup_response_from_llm_snapshot(
 
 const LLM_BASE_URL_MAX_BYTES: usize = 2048;
 
+/// Validate an operator-supplied LLM `base_url` before it is persisted or
+/// probed.
+///
+/// Mirrors the `AllowPrivateNetwork` posture used at the model-discovery egress
+/// point (`ironclaw_llm`'s `check_models_url`) and the binary's
+/// `validate_operator_base_url`: a self-hosted provider on a loopback or private
+/// address (Ollama, vLLM) is the primary local use case and must be allowed.
+/// Only the never-legitimate classes — cloud metadata / link-local, multicast,
+/// and the unspecified address — are rejected here. DNS-name hosts are resolved,
+/// re-validated, and pinned by the egress guard; this syntactic check only
+/// screens literal IPs.
 fn validate_llm_base_url(base_url: Option<&str>) -> Result<(), RebornServicesError> {
     let Some(raw) = base_url else {
         return Ok(());
@@ -677,10 +688,12 @@ fn validate_llm_base_url(base_url: Option<&str>) -> Result<(), RebornServicesErr
     let Some(host) = parsed.host_str() else {
         return Err(operator_setup_validation_error("base_url"));
     };
-    if host.eq_ignore_ascii_case("localhost") {
-        return Err(operator_setup_validation_error("base_url"));
-    }
-    if let Ok(ip) = host.parse::<IpAddr>()
+    // `localhost` and loopback/private literals are intentionally allowed —
+    // pointing the operator's provider at a self-hosted endpoint is the main
+    // reason this field exists. Only literal IPs in the always-blocked classes
+    // are rejected.
+    let normalized_host = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = normalized_host.parse::<IpAddr>()
         && forbidden_llm_base_url_ip(ip)
     {
         return Err(operator_setup_validation_error("base_url"));
@@ -695,20 +708,25 @@ fn forbidden_llm_base_url_ip(ip: IpAddr) -> bool {
     }
 }
 
+/// Always-blocked IPv4 classes: the unspecified address, multicast, and
+/// link-local (which includes the cloud-metadata endpoint 169.254.169.254).
+/// Loopback and private ranges are allowed so self-hosted providers work.
 fn forbidden_llm_base_url_ipv4(ip: Ipv4Addr) -> bool {
-    ip.is_private()
-        || ip.is_loopback()
-        || ip.is_link_local()
-        || ip.is_unspecified()
-        || ip.is_multicast()
+    ip.is_unspecified() || ip.is_multicast() || ip.is_link_local()
 }
 
+/// Always-blocked IPv6 classes: unspecified, multicast, and link-local.
+/// Loopback (`::1`) and unique-local are allowed so self-hosted providers work.
+/// Embedded-IPv4 forms (`::ffff:a.b.c.d` and `::a.b.c.d`) are unwrapped so an
+/// IPv4-compatible metadata address can't slip through as a "plain" v6 host.
 fn forbidden_llm_base_url_ipv6(ip: Ipv6Addr) -> bool {
-    ip.is_loopback()
-        || ip.is_unspecified()
-        || ip.is_multicast()
-        || ip.is_unique_local()
-        || ip.is_unicast_link_local()
+    if ip.is_unspecified() || ip.is_multicast() || ip.is_unicast_link_local() {
+        return true;
+    }
+    if let Some(v4) = ip.to_ipv4() {
+        return forbidden_llm_base_url_ipv4(v4);
+    }
+    false
 }
 
 fn operator_config_surface_not_wired_diagnostic() -> RebornOperatorConfigDiagnostic {

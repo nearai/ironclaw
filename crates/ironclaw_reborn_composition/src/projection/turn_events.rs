@@ -5,14 +5,20 @@ use std::{
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
+use ironclaw_host_api::{Action, ApprovalRequest, NetworkMethod, NetworkScheme, UserId};
 use ironclaw_product_adapters::{
-    GatePromptView, ProductAdapterError, ProductOutboundPayload, ProductProjectionItem,
-    ProductProjectionState, ProductWorkflowRejectionKind, RedactedString,
+    ApprovalPromptActionView, ApprovalPromptContextView, ApprovalPromptDestinationView,
+    ApprovalPromptDetailView, ApprovalPromptScopeView, GatePromptView, ProductAdapterError,
+    ProductOutboundPayload, ProductProjectionItem, ProductProjectionState,
+    ProductWorkflowRejectionKind, RedactedString,
 };
-use ironclaw_product_workflow::is_approval_gate_ref;
+use ironclaw_product_workflow::{
+    ApprovalInteractionScope, approval_request_id_from_gate_ref, is_approval_gate_ref,
+};
+use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_turns::{
-    GetRunStateRequest, SanitizedFailure, TurnCoordinator, TurnError, TurnEventKind,
-    TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
+    GateRef, GetRunStateRequest, SanitizedFailure, TurnActor, TurnCoordinator, TurnError,
+    TurnEventKind, TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
     TurnEventProjectionService, TurnEventProjectionSource, TurnLifecycleEvent, TurnRunId,
     TurnScope, TurnStatus,
     run_profile::{
@@ -23,12 +29,11 @@ use ironclaw_turns::{
 };
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 
-use ironclaw_reborn::failure_categories::{
-    MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
-};
-
 use crate::AuthChallengeProvider;
 use crate::auth_prompt::auth_prompt_view_for_blocked_auth;
+use crate::failure_summary::{
+    pinned_failure_summary_for_category, reborn_failure_summary_for_category,
+};
 
 pub(super) const WEBUI_TURN_EVENT_PAGE_LIMIT: usize = 256;
 const FAILURE_EXPLANATION_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
@@ -68,6 +73,7 @@ pub(super) enum TurnEventBridge {
     Enabled {
         service: Arc<TurnEventProjectionService<dyn TurnEventProjectionSource>>,
         coordinator: Arc<dyn TurnCoordinator>,
+        approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
         failure_explainer: Arc<dyn FailureExplanationProvider>,
         failure_explanation_cache: Arc<Mutex<FailureExplanationCache>>,
     },
@@ -105,15 +111,30 @@ impl TurnEventBridge {
     pub(super) fn enabled(
         source: Arc<dyn TurnEventProjectionSource>,
         coordinator: Arc<dyn TurnCoordinator>,
+        approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
     ) -> Self {
         Self::Enabled {
             service: Arc::new(TurnEventProjectionService::new(source)),
             coordinator,
+            approval_requests,
             failure_explainer: Arc::new(NoopFailureExplanationProvider),
             failure_explanation_cache: Arc::new(Mutex::new(FailureExplanationCache::new(
                 FAILURE_EXPLANATION_CACHE_CAPACITY,
             ))),
         }
+    }
+
+    pub(super) fn with_approval_requests(
+        mut self,
+        requests: Option<Arc<dyn ApprovalRequestStore>>,
+    ) -> Self {
+        if let Self::Enabled {
+            approval_requests, ..
+        } = &mut self
+        {
+            *approval_requests = requests;
+        }
+        self
     }
 
     pub(super) fn with_failure_explainer(
@@ -139,6 +160,7 @@ impl TurnEventBridge {
         let Self::Enabled {
             service,
             coordinator,
+            approval_requests,
             failure_explainer,
             failure_explanation_cache,
         } = self
@@ -180,6 +202,7 @@ impl TurnEventBridge {
                     failure_explainer.as_ref(),
                     failure_explanation_cache,
                     auth_challenges,
+                    approval_requests.as_deref(),
                     page.entries,
                 )
                 .await?,
@@ -202,6 +225,7 @@ async fn turn_event_payloads_for_page(
     failure_explainer: &dyn FailureExplanationProvider,
     failure_explanation_cache: &Arc<Mutex<FailureExplanationCache>>,
     auth_challenges: Option<&dyn AuthChallengeProvider>,
+    approval_requests: Option<&dyn ApprovalRequestStore>,
     events: Vec<TurnLifecycleEvent>,
 ) -> Result<Vec<TurnEventPayload>, ProductAdapterError> {
     let futures = events.into_iter().map(|event| {
@@ -213,6 +237,7 @@ async fn turn_event_payloads_for_page(
                 failure_explainer,
                 failure_explanation_cache,
                 auth_challenges,
+                approval_requests,
                 &event,
             )
             .await
@@ -234,11 +259,18 @@ async fn turn_event_payload(
     failure_explainer: &dyn FailureExplanationProvider,
     failure_explanation_cache: &Arc<Mutex<FailureExplanationCache>>,
     auth_challenges: Option<&dyn AuthChallengeProvider>,
+    approval_requests: Option<&dyn ApprovalRequestStore>,
     event: &TurnLifecycleEvent,
 ) -> Result<Option<ProductOutboundPayload>, ProductAdapterError> {
     if matches!(event.kind, TurnEventKind::Blocked)
-        && let Some(prompt) =
-            blocked_prompt_payload(caller_user_id, coordinator, auth_challenges, event).await?
+        && let Some(prompt) = blocked_prompt_payload(
+            caller_user_id,
+            coordinator,
+            auth_challenges,
+            approval_requests,
+            event,
+        )
+        .await?
     {
         return Ok(Some(prompt));
     }
@@ -305,6 +337,7 @@ async fn blocked_prompt_payload(
     caller_user_id: &ironclaw_host_api::UserId,
     coordinator: &dyn TurnCoordinator,
     auth_challenges: Option<&dyn AuthChallengeProvider>,
+    approval_requests: Option<&dyn ApprovalRequestStore>,
     event: &TurnLifecycleEvent,
 ) -> Result<Option<ProductOutboundPayload>, ProductAdapterError> {
     let state = match coordinator
@@ -351,12 +384,16 @@ async fn blocked_prompt_payload(
             .await?;
             Ok(Some(ProductOutboundPayload::AuthPrompt(view)))
         }
-        TurnStatus::BlockedApproval => Ok(Some(gate_prompt(
-            event,
-            gate_ref_str,
-            "Approval required",
-            is_approval_gate_ref(gate_ref),
-        ))),
+        TurnStatus::BlockedApproval => Ok(Some(
+            approval_gate_prompt(
+                caller_user_id,
+                approval_requests,
+                event,
+                gate_ref,
+                gate_ref_str,
+            )
+            .await,
+        )),
         TurnStatus::BlockedResource => Ok(Some(gate_prompt(
             event,
             gate_ref_str,
@@ -376,11 +413,192 @@ async fn blocked_prompt_payload(
     }
 }
 
+async fn approval_gate_prompt(
+    caller_user_id: &UserId,
+    approval_requests: Option<&dyn ApprovalRequestStore>,
+    event: &TurnLifecycleEvent,
+    gate_ref: &GateRef,
+    gate_ref_string: String,
+) -> ProductOutboundPayload {
+    let context = approval_requests.zip(approval_request_id_from_gate_ref(gate_ref).ok());
+    let context = match context {
+        Some((store, request_id)) => {
+            let owner_user_id = event.owner_user_id.as_ref().unwrap_or(caller_user_id);
+            let scope = ApprovalInteractionScope::from_turn(
+                &event.scope,
+                &TurnActor::new(owner_user_id.clone()),
+            )
+            .to_resource_scope();
+            match store.get(&scope, request_id).await {
+                Ok(Some(record)) => approval_context_for_request(&record.request),
+                Ok(None) => None,
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        request_id = %request_id,
+                        "approval request lookup failed during WebUI gate projection"
+                    );
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    gate_prompt_with_context(
+        event,
+        gate_ref_string,
+        "Approval required",
+        is_approval_gate_ref(gate_ref),
+        context,
+    )
+}
+
+fn approval_context_for_request(request: &ApprovalRequest) -> Option<ApprovalPromptContextView> {
+    let (tool_name, action, destination, details) =
+        approval_action_context(request.action.as_ref())?;
+    ApprovalPromptContextView::new(
+        tool_name,
+        action,
+        ApprovalPromptScopeView::new(
+            approval_scope_label(request),
+            request.reusable_scope.is_some(),
+        )
+        .ok()?,
+        non_empty_string(&request.reason),
+        destination,
+        details,
+    )
+    .ok()
+}
+
+fn approval_action_context(
+    action: &Action,
+) -> Option<(
+    String,
+    ApprovalPromptActionView,
+    Option<ApprovalPromptDestinationView>,
+    Vec<ApprovalPromptDetailView>,
+)> {
+    match action {
+        Action::Dispatch {
+            capability,
+            estimated_resources,
+        } => {
+            let mut details = vec![detail("Capability", capability.as_str())?];
+            if let Some(bytes) = estimated_resources.network_egress_bytes {
+                details.push(detail("Estimated network egress", format_bytes(bytes))?);
+            }
+            Some((
+                capability.as_str().to_string(),
+                ApprovalPromptActionView::new("Run tool", None).ok()?,
+                None,
+                details,
+            ))
+        }
+        Action::SpawnCapability {
+            capability,
+            estimated_resources,
+        } => {
+            let mut details = vec![detail("Capability", capability.as_str())?];
+            if let Some(process_count) = estimated_resources.process_count {
+                details.push(detail("Processes", process_count.to_string())?);
+            }
+            Some((
+                capability.as_str().to_string(),
+                ApprovalPromptActionView::new("Start tool", None).ok()?,
+                None,
+                details,
+            ))
+        }
+        Action::Network {
+            target,
+            method,
+            estimated_bytes,
+        } => {
+            let destination =
+                network_destination(method, target.scheme, &target.host, target.port)?;
+            let mut details = vec![detail("Method", method_label(method))?];
+            if let Some(bytes) = estimated_bytes {
+                details.push(detail("Estimated transfer", format_bytes(*bytes))?);
+            }
+            Some((
+                "builtin.http".to_string(),
+                ApprovalPromptActionView::new("Network request", Some(*method)).ok()?,
+                Some(destination),
+                details,
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn approval_scope_label(request: &ApprovalRequest) -> &'static str {
+    if request.reusable_scope.is_some() {
+        "Reusable grant"
+    } else {
+        "This request only"
+    }
+}
+
+fn network_destination(
+    method: &NetworkMethod,
+    scheme: NetworkScheme,
+    host: &str,
+    port: Option<u16>,
+) -> Option<ApprovalPromptDestinationView> {
+    let scheme = match scheme {
+        NetworkScheme::Http => "http",
+        NetworkScheme::Https => "https",
+    };
+    let authority = match port {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    };
+    let url = format!("{scheme}://{authority}");
+    ApprovalPromptDestinationView::new(
+        format!("{} {url}", method_label(method)),
+        Some(url),
+        Some(host.to_string()),
+    )
+    .ok()
+}
+
+fn detail(label: impl Into<String>, value: impl Into<String>) -> Option<ApprovalPromptDetailView> {
+    ApprovalPromptDetailView::new(label, value).ok()
+}
+
+fn method_label(method: &NetworkMethod) -> String {
+    method.to_string().to_ascii_uppercase()
+}
+
+fn format_bytes(bytes: u64) -> String {
+    format!("{bytes} bytes")
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 fn gate_prompt(
     event: &TurnLifecycleEvent,
     gate_ref: String,
     headline: &'static str,
     allow_always: bool,
+) -> ProductOutboundPayload {
+    gate_prompt_with_context(event, gate_ref, headline, allow_always, None)
+}
+
+fn gate_prompt_with_context(
+    event: &TurnLifecycleEvent,
+    gate_ref: String,
+    headline: &'static str,
+    allow_always: bool,
+    approval_context: Option<ApprovalPromptContextView>,
 ) -> ProductOutboundPayload {
     ProductOutboundPayload::GatePrompt(GatePromptView {
         turn_run_id: event.run_id,
@@ -391,6 +609,7 @@ fn gate_prompt(
             .clone()
             .unwrap_or_else(|| "Resolve this gate to continue the run.".to_string()),
         allow_always,
+        approval_context,
     })
 }
 
@@ -476,7 +695,7 @@ async fn failure_details_for_turn_event(
     let Some(category) = failure_category_for_turn_event(event) else {
         return FailureProjectionDetails::default();
     };
-    let fallback_summary = failure_summary_for_category(&category).to_string();
+    let fallback_summary = reborn_failure_summary_for_category(Some(&category)).to_string();
     let cache_key = FailureExplanationCacheKey {
         run_id: event.run_id,
         category: category.clone(),
@@ -509,7 +728,7 @@ async fn failure_summary_for_turn_event(
     category: &str,
     fallback_summary: String,
 ) -> String {
-    if let Some(summary) = pinned_failure_summary(category) {
+    if let Some(summary) = pinned_failure_summary_for_category(category) {
         return summary.to_string();
     }
     failure_explainer
@@ -521,18 +740,6 @@ async fn failure_summary_for_turn_event(
         .unwrap_or(fallback_summary)
 }
 
-fn pinned_failure_summary(category: &str) -> Option<&'static str> {
-    match category {
-        MODEL_CREDITS_EXHAUSTED_CATEGORY => Some(
-            "The AI provider account is out of credits. Add credits or switch providers and try again.",
-        ),
-        MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY => Some(
-            "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL.",
-        ),
-        _ => None,
-    }
-}
-
 fn failure_category_for_turn_event(event: &TurnLifecycleEvent) -> Option<String> {
     matches!(
         event.status,
@@ -540,42 +747,6 @@ fn failure_category_for_turn_event(event: &TurnLifecycleEvent) -> Option<String>
     )
     .then(|| event.sanitized_reason.clone())
     .flatten()
-}
-
-fn failure_summary_for_category(category: &str) -> &'static str {
-    if let Some(summary) = pinned_failure_summary(category) {
-        return summary;
-    }
-
-    match category {
-        "driver_not_found" => {
-            "The run failed because the configured execution driver was not available."
-        }
-        "driver_unavailable" => {
-            "The run failed because the execution driver was temporarily unavailable."
-        }
-        "driver_failed" => "The run failed because the execution driver reported an error.",
-        "driver_invalid_request" => {
-            "The run failed because the execution driver rejected the request."
-        }
-        "driver_panic" => "The run failed because the execution driver stopped unexpectedly.",
-        "host_creation_failed" => "The run failed while preparing the runtime host.",
-        "route_snapshot_persistence_failed" => {
-            "The run failed while saving the selected model route."
-        }
-        "heartbeat_failed" => "The run failed after the runner heartbeat could not be recorded.",
-        "exit_application_failed" => "The run failed while recording its final result.",
-        "lease_expired" => "The run failed because its runner lease expired.",
-        "interrupted_unexpectedly" => "The run stopped before it could complete cleanly.",
-        "no_progress_detected" => {
-            "The run stopped because it repeated the same step without making progress."
-        }
-        "iteration_limit" => {
-            "The run stopped after reaching its iteration limit before producing a reply."
-        }
-        "unknown_failure" => "The run failed for an unknown reason.",
-        _ => "The run failed before producing a reply.",
-    }
 }
 
 fn failure_explanation_request(input: &FailureExplanationInput) -> Option<SystemInferenceRequest> {

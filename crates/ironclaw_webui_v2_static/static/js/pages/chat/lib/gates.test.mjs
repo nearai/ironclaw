@@ -60,3 +60,46 @@ test("gateFromEvent defaults missing always-allow affordance to false", () => {
     },
   );
 });
+test("gateFromEvent maps approval context into readable approval card props", () => {
+  const { gateFromEvent } = loadGates();
+
+  const gate = plain(gateFromEvent("gate", {
+    turn_run_id: "run-1",
+    gate_ref: "gate:approval-1",
+    headline: "Approval required",
+    body: "capability requires approval",
+    allow_always: true,
+    approval_context: {
+      tool_name: "builtin.http",
+      action: { label: "Run tool" },
+      scope: { label: "This request only", reusable: false },
+      reason: "approval required for Dispatch of builtin.http",
+      destination: {
+        label: "GET https://example.com",
+        url: "https://example.com",
+        domain: "example.com",
+      },
+      details: [
+        { label: "Capability", value: "builtin.http" },
+        { label: "Estimated network egress", value: "4096 bytes" },
+      ],
+    },
+  }));
+
+  assert.equal(gate.allowAlways, true);
+  assert.equal(gate.toolName, "builtin.http");
+  assert.equal(gate.description, "approval required for Dispatch of builtin.http");
+  assert.equal(gate.destination.domain, "example.com");
+  assert.deepEqual(gate.approvalScope, {
+    label: "This request only",
+    reusable: false,
+  });
+  assert.deepEqual(gate.approvalDetails, [
+    { label: "Action", value: "Run tool" },
+    { label: "Destination", value: "GET https://example.com" },
+    { label: "Scope", value: "This request only" },
+    { label: "Capability", value: "builtin.http" },
+    { label: "Estimated network egress", value: "4096 bytes" },
+  ]);
+  assert.match(gate.parameters, /Estimated network egress: 4096 bytes/);
+});

@@ -291,13 +291,24 @@ impl RebornLlmConfigService {
             {
                 apply_stored_api_key(&mut config, stored);
             }
-        } else {
+        } else if self
+            .keys
+            .exists(&request.provider_id)
+            .await
+            .map_err(|_| LlmConfigServiceError::Unavailable)?
+        {
+            // A stored key exists but this probe targets an overridden endpoint:
+            // refuse to inject it (a caller-controlled base_url could exfiltrate
+            // it). The caller must supply an inline key to probe elsewhere.
             return Err(LlmConfigServiceError::InvalidRequest {
                 field: Some("api_key".to_string()),
                 reason: "inline api_key is required when probing an overridden provider endpoint"
                     .to_string(),
             });
         }
+        // Otherwise there is neither an inline key nor a stored key to protect,
+        // so probe keyless — local OpenAI-compatible endpoints (e.g. Ollama)
+        // need no auth and must not be blocked behind a phantom key requirement.
 
         let session = ironclaw_llm::create_session_manager(config.session.clone()).await;
         ironclaw_llm::build_static_provider_chain(&config, session)
@@ -577,11 +588,19 @@ impl LlmConfigService for RebornLlmConfigService {
                 models,
                 message: String::new(),
             }),
-            Err(_) => Ok(LlmModelsResult {
-                ok: false,
-                models: Vec::new(),
-                message: "could not list models for this provider".to_string(),
-            }),
+            Err(error) => {
+                tracing::debug!(
+                    provider_id = %request.provider_id,
+                    adapter = %request.adapter,
+                    error = %error,
+                    "list_models probe failed"
+                );
+                Ok(LlmModelsResult {
+                    ok: false,
+                    models: Vec::new(),
+                    message: "could not list models for this provider".to_string(),
+                })
+            }
         }
     }
 
@@ -810,11 +829,24 @@ pub(crate) const NEARAI_LOGIN_CALLBACK_PATH: &str =
     "/api/webchat/v2/llm/nearai/{state}/auth/callback";
 
 /// Reduce a browser-supplied origin to a bare `scheme://host[:port]`, rejecting
-/// anything with a path/query or a non-http scheme. NEAR AI redirects the token
-/// here, so it must be a clean same-machine origin.
+/// anything with userinfo, a path, a query, or a fragment, plus non-http(s)
+/// schemes. NEAR AI redirects the login token to this origin, so it must be a
+/// clean origin with no smuggled structure — extra components are rejected
+/// outright rather than silently normalized away.
 fn sanitize_origin(raw: &str) -> Option<String> {
     let parsed = url::Url::parse(raw.trim()).ok()?;
     if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    // A bare origin has no credentials, only a root ("" or "/") path, and no
+    // query or fragment. Anything else is not an origin we will trust to build
+    // the token-bearing callback URL.
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || !matches!(parsed.path(), "" | "/")
+    {
         return None;
     }
     let host = parsed.host_str()?;
@@ -1145,6 +1177,36 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_origin_accepts_bare_origins_only() {
+        assert_eq!(
+            sanitize_origin("https://app.example.com"),
+            Some("https://app.example.com".to_string())
+        );
+        assert_eq!(
+            sanitize_origin("http://localhost:3000"),
+            Some("http://localhost:3000".to_string())
+        );
+        // A trailing root slash is still a bare origin.
+        assert_eq!(
+            sanitize_origin("https://app.example.com/"),
+            Some("https://app.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn sanitize_origin_rejects_smuggled_structure_and_bad_schemes() {
+        // Path, query, fragment, and userinfo must be rejected outright, not
+        // silently dropped — they are not part of a trusted callback origin.
+        assert_eq!(sanitize_origin("https://app.example.com/evil/path"), None);
+        assert_eq!(sanitize_origin("https://app.example.com/?x=1"), None);
+        assert_eq!(sanitize_origin("https://app.example.com/#frag"), None);
+        assert_eq!(sanitize_origin("https://user:pass@app.example.com"), None);
+        assert_eq!(sanitize_origin("ftp://app.example.com"), None);
+        assert_eq!(sanitize_origin("javascript:alert(1)"), None);
+        assert_eq!(sanitize_origin("not a url"), None);
+    }
+
+    #[test]
     fn parses_known_adapters() {
         assert_eq!(
             parse_adapter("open_ai_completions"),
@@ -1355,6 +1417,33 @@ mod tests {
                 } if field == "api_key" && reason.contains("overridden provider endpoint")
             ),
             "stored operator keys must not be applied to caller-controlled probe endpoints"
+        );
+    }
+
+    /// Reproduction for the "Fetch models" failure on a keyless local provider
+    /// (e.g. Ollama at `http://localhost:11434`). With neither an inline key nor
+    /// a stored key, the probe used to be rejected with an `invalid_request`
+    /// validation error demanding an `api_key`. There is no stored key to
+    /// exfiltrate, so the probe must be allowed to run keyless instead — it then
+    /// just reports the endpoint as unreachable in the test environment.
+    #[tokio::test]
+    async fn probe_keyless_local_provider_is_not_blocked_on_missing_api_key() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        let boot = boot_for_home(&reborn_home);
+        let service = RebornLlmConfigService::new(boot, key_store());
+
+        // Brand-new custom provider, never persisted, no stored key.
+        let result = service
+            .list_models(
+                caller(),
+                probe_request("local-ollama", "http://127.0.0.1:1", None),
+            )
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "keyless local provider must pass the probe validation gate, got {result:?}"
         );
     }
 

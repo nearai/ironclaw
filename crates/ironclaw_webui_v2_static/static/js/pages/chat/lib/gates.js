@@ -7,7 +7,11 @@ export function gateFromEvent(eventType, prompt) {
   if (!prompt) return null;
 
   if (eventType === "gate") {
-    return {
+    const approvalContext = prompt.approval_context || null;
+    const approvalDetails = approvalContext
+      ? approvalDetailsFromContext(approvalContext)
+      : [];
+    const gate = {
       kind: "gate",
       runId: prompt.turn_run_id,
       gateRef: prompt.gate_ref,
@@ -15,8 +19,20 @@ export function gateFromEvent(eventType, prompt) {
       body: prompt.body,
       allowAlways: prompt.allow_always === true,
     };
+    if (!approvalContext) return gate;
+    return {
+      ...gate,
+      toolName: approvalContext.tool_name || null,
+      description: approvalContext.reason || prompt.body,
+      actionLabel: approvalContext.action?.label || null,
+      destination: approvalContext.destination || null,
+      approvalScope: approvalContext.scope || null,
+      approvalDetails,
+      parameters: approvalDetails.length
+        ? approvalDetails.map((detail) => `${detail.label}: ${detail.value}`).join("\n")
+        : null,
+    };
   }
-
   if (eventType === "auth_required") {
     return {
       kind: "auth_required",
@@ -44,4 +60,21 @@ export function gateFromEvent(eventType, prompt) {
   }
 
   return null;
+}
+function approvalDetailsFromContext(context) {
+  const details = [];
+  if (context.action?.label) {
+    details.push({ label: "Action", value: context.action.label });
+  }
+  if (context.destination?.label) {
+    details.push({ label: "Destination", value: context.destination.label });
+  }
+  if (context.scope?.label) {
+    details.push({ label: "Scope", value: context.scope.label });
+  }
+  for (const detail of context.details || []) {
+    if (!detail?.label || detail.value == null) continue;
+    details.push({ label: detail.label, value: String(detail.value) });
+  }
+  return details;
 }

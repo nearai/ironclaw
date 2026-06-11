@@ -195,6 +195,7 @@ registerPack("hi", {
   "settings.restartRequired": "कुछ बदलाव लागू होने के लिए रीस्टार्ट की ज़रूरत है।",
   "settings.restartNow": "अभी पुनरारंभ करें",
   "settings.restartStarting": "पुनरारंभ हो रहा है...",
+  "settings.restartUnavailable": "वेब UI से पुनरारंभ अभी उपलब्ध नहीं है। लंबित परिवर्तनों को लागू करने के लिए गेटवे प्रक्रिया को मैन्युअल रूप से पुनरारंभ करें।",
 
   // Restart dialog
   "restart.title": "IronClaw पुनरारंभ करें",
@@ -272,6 +273,7 @@ registerPack("hi", {
   "onboarding.nearaiWaiting": "खुले हुए टैब में NEAR AI साइन-इन की प्रतीक्षा की जा रही है...",
   "onboarding.nearaiTimeout": "NEAR AI साइन-इन का समय समाप्त हो गया। कृपया पुन: प्रयास करें।",
   "onboarding.nearaiFailed": "NEAR AI साइन-इन विफल रहा। कृपया पुन: प्रयास करें।",
+  "onboarding.nearaiLocalSso": "ब्राउज़र से NEAR AI साइन-इन (GitHub, Google, NEAR वॉलेट) localhost पर समर्थित नहीं है — NEAR AI लोकल कॉलबैक URL अस्वीकार करता है। इसके बजाय NEAR AI API key जोड़ें, या किसी सार्वजनिक URL के पीछे चलाएँ।",
   "onboarding.codexSignIn": "चैटजीपीटी के साथ साइन इन करें",
   "onboarding.codexEnterCode": "अधिकृत करने के लिए खुले टैब में यह कोड दर्ज करें:",
   "onboarding.codexWaiting": "खुले टैब में चैटजीपीटी प्राधिकरण की प्रतीक्षा की जा रही है...",

@@ -967,9 +967,22 @@ pub async fn start_nearai_login(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
-    Json(body): Json<NearAiLoginRequest>,
+    headers: HeaderMap,
+    Json(mut body): Json<NearAiLoginRequest>,
 ) -> Result<Json<NearAiLoginStart>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
+    // The NEAR AI callback carries the login token in its redirect, so the
+    // callback origin must come from trusted request context, not arbitrary
+    // body input. This route's descriptor is `CorsPolicy::SameOriginOnly`, so a
+    // present `Origin` header has been gateway-validated as same-origin; prefer
+    // it over the body field (which stays as a fallback for non-browser callers).
+    if let Some(origin) = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+    {
+        body.origin = origin.to_string();
+    }
     let response = state.services().start_nearai_login(caller, body).await?;
     Ok(Json(response))
 }
