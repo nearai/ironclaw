@@ -226,10 +226,10 @@ impl DynamicSlackInstallationResolver {
 
         let resolver = Arc::new(self.build_resolver(setup).await?);
         let mut cache = self.cached_resolver.lock().await;
-        if let Some(current) = &cache.current {
-            if current.revision == revision {
-                return Ok(Arc::clone(&current.resolver));
-            }
+        if let Some(current) = &cache.current
+            && current.revision == revision
+        {
+            return Ok(Arc::clone(&current.resolver));
         }
         if let Some(previous) = cache.current.replace(DynamicCachedSlackResolver {
             revision,
