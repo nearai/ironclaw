@@ -1138,6 +1138,21 @@ impl TriggeredRunDeliveryDriver {
     pub fn try_acquire_pending_permit(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
         Arc::clone(&self.pending_permits).try_acquire_owned().ok()
     }
+
+    /// Returns the `CommunicationPreferenceRepository` wired into this driver's
+    /// `SlackFinalReplyDeliveryServices.communication_preferences`.
+    ///
+    /// Production call site: `build_triggered_run_delivery_hook` in
+    /// `slack_host_beta.rs` — the store it passes here must be pointer-equal to
+    /// `local_runtime.outbound_preferences` so WebUI-written preferences are
+    /// visible to Slack delivery.  Use `Arc::ptr_eq` in tests to assert this.
+    /// This accessor is for tests only and compiles to nothing in production binaries.
+    #[cfg(test)]
+    pub(crate) fn communication_preferences(
+        &self,
+    ) -> Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository> {
+        Arc::clone(&self.services.communication_preferences)
+    }
 }
 
 #[async_trait]

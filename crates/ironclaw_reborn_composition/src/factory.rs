@@ -64,6 +64,10 @@ use ironclaw_outbound::CommunicationPreferenceRepository;
 use ironclaw_outbound::FilesystemOutboundStateStore;
 #[cfg(not(feature = "libsql"))]
 use ironclaw_outbound::InMemoryOutboundStateStore;
+#[cfg(feature = "slack-v2-host-beta")]
+use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRunDeliveryStore};
+#[cfg(all(not(feature = "libsql"), feature = "slack-v2-host-beta"))]
+use ironclaw_outbound::{InMemoryDeliveredGateRouteStore, InMemoryTriggeredRunDeliveryStore};
 use ironclaw_processes::ProcessServices;
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use ironclaw_resources::InMemoryResourceGovernor;
@@ -395,6 +399,12 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) turn_state: Arc<LocalDevTurnStateStore>,
     pub(crate) trigger_repository: Arc<dyn TriggerRepository>,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) outbound_state: Arc<dyn OutboundStateStore>,
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) delivered_gate_routes: Arc<dyn DeliveredGateRouteStore>,
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     pub(crate) trigger_conversation_services: InMemoryConversationServices,
     #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1237,7 +1247,7 @@ fn build_local_dev_store_graph(
     let host_state_filesystem = local_dev_slack_host_state_filesystem(Arc::clone(&filesystem));
     let skill_management =
         build_local_skill_management_port(owner_user_id, Arc::clone(&filesystem))?;
-    let outbound_preferences = local_dev_outbound_preferences(Arc::clone(&filesystem));
+    let outbound_stores = local_dev_outbound_store(Arc::clone(&filesystem));
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
@@ -1245,7 +1255,13 @@ fn build_local_dev_store_graph(
         persistent_approval_policies: Arc::clone(&persistent_approval_policies),
         turn_state: Arc::clone(&turn_state),
         trigger_repository: Arc::clone(&trigger_repository),
-        outbound_preferences,
+        outbound_preferences: outbound_stores.outbound_preferences,
+        #[cfg(feature = "slack-v2-host-beta")]
+        outbound_state: outbound_stores.outbound_state,
+        #[cfg(feature = "slack-v2-host-beta")]
+        delivered_gate_routes: outbound_stores.delivered_gate_routes,
+        #[cfg(feature = "slack-v2-host-beta")]
+        triggered_run_delivery: outbound_stores.triggered_run_delivery,
         #[cfg(not(any(feature = "libsql", feature = "postgres")))]
         trigger_conversation_services,
         #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1353,7 +1369,7 @@ fn build_local_dev_store_graph(
         build_local_skill_management_port(owner_user_id, Arc::clone(&filesystem))?;
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let trigger_conversation_services = local_dev_trigger_conversation_services();
-    let outbound_preferences = local_dev_outbound_preferences(Arc::clone(&filesystem));
+    let outbound_stores = local_dev_outbound_store(Arc::clone(&filesystem));
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
@@ -1361,7 +1377,13 @@ fn build_local_dev_store_graph(
         persistent_approval_policies: Arc::clone(&persistent_approval_policies),
         turn_state: Arc::clone(&turn_state),
         trigger_repository: Arc::clone(&trigger_repository),
-        outbound_preferences,
+        outbound_preferences: outbound_stores.outbound_preferences,
+        #[cfg(feature = "slack-v2-host-beta")]
+        outbound_state: outbound_stores.outbound_state,
+        #[cfg(feature = "slack-v2-host-beta")]
+        delivered_gate_routes: outbound_stores.delivered_gate_routes,
+        #[cfg(feature = "slack-v2-host-beta")]
+        triggered_run_delivery: outbound_stores.triggered_run_delivery,
         #[cfg(not(any(feature = "libsql", feature = "postgres")))]
         trigger_conversation_services,
         #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1930,20 +1952,73 @@ fn local_dev_scoped_filesystem(
     crate::wrap_scoped(filesystem)
 }
 
+/// Unified bundle of outbound store handles returned by both cfg variants of
+/// [`local_dev_outbound_store`].
+///
+/// All four trait roles must be satisfied on construction.  In the libsql
+/// build every role is an `Arc` clone of a single
+/// `FilesystemOutboundStateStore`, so the WebUI delivery-defaults facade and
+/// the Slack delivery path share one backing tree.  In the non-libsql build
+/// `InMemoryOutboundStateStore` covers the preference and state roles;
+/// `DeliveredGateRouteStore` and `TriggeredRunDeliveryStore` use separate
+/// in-memory instances — the cross-store invariant that matters (WebUI-written
+/// preferences visible to the Slack triggered-delivery hook) only involves the
+/// preference role.
+/// See docs/plans/2026-05-29-trigger-loop-delivery-resolution-implementation.md.
+pub(crate) struct LocalDevOutboundStores {
+    pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) outbound_state: Arc<dyn OutboundStateStore>,
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) delivered_gate_routes: Arc<dyn DeliveredGateRouteStore>,
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
+}
+
 #[cfg(feature = "libsql")]
-fn local_dev_outbound_preferences(
-    filesystem: Arc<LocalDevRootFilesystem>,
-) -> Arc<dyn CommunicationPreferenceRepository> {
-    Arc::new(FilesystemOutboundStateStore::new(
-        local_dev_scoped_filesystem(filesystem),
-    ))
+fn local_dev_outbound_store(filesystem: Arc<LocalDevRootFilesystem>) -> LocalDevOutboundStores {
+    // One store instance over the composition-owned per-user scoped filesystem
+    // (`/outbound` → `/tenants/<t>/users/<u>/outbound`). All four outbound
+    // roles — preferences, state, delivered-gate routes, triggered-run delivery
+    // — are Arc-cloned from this single instance so the WebUI delivery-defaults
+    // facade and the Slack delivery path share the same backing tree.
+    // composition-owned construction site, the only one allowed.
+    #[allow(clippy::disallowed_methods)]
+    let store: Arc<FilesystemOutboundStateStore<LocalDevRootFilesystem>> = Arc::new(
+        FilesystemOutboundStateStore::new(local_dev_scoped_filesystem(filesystem)),
+    );
+    LocalDevOutboundStores {
+        outbound_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
+        #[cfg(feature = "slack-v2-host-beta")]
+        outbound_state: Arc::clone(&store) as Arc<dyn OutboundStateStore>,
+        #[cfg(feature = "slack-v2-host-beta")]
+        delivered_gate_routes: Arc::clone(&store) as Arc<dyn DeliveredGateRouteStore>,
+        #[cfg(feature = "slack-v2-host-beta")]
+        triggered_run_delivery: store as Arc<dyn TriggeredRunDeliveryStore>,
+    }
 }
 
 #[cfg(not(feature = "libsql"))]
-fn local_dev_outbound_preferences(
-    _filesystem: Arc<LocalDevRootFilesystem>,
-) -> Arc<dyn CommunicationPreferenceRepository> {
-    Arc::new(InMemoryOutboundStateStore::default())
+fn local_dev_outbound_store(_filesystem: Arc<LocalDevRootFilesystem>) -> LocalDevOutboundStores {
+    // In the non-filesystem (no libsql/postgres) profile, InMemoryOutboundStateStore
+    // implements both CommunicationPreferenceRepository and OutboundStateStore, so a
+    // single Arc covers both roles.  The other two roles (DeliveredGateRouteStore and
+    // TriggeredRunDeliveryStore) are not implemented by InMemoryOutboundStateStore and
+    // therefore use separate in-memory instances; this is acceptable because the
+    // cross-store invariant that matters — WebUI-written preferences being visible to
+    // the Slack triggered-delivery hook — only involves the preference role.  The libsql
+    // build avoids this gap entirely by sharing one FilesystemOutboundStateStore across
+    // all four roles.
+    let outbound = Arc::new(InMemoryOutboundStateStore::default());
+    LocalDevOutboundStores {
+        outbound_preferences: Arc::clone(&outbound) as Arc<dyn CommunicationPreferenceRepository>,
+        #[cfg(feature = "slack-v2-host-beta")]
+        outbound_state: outbound as Arc<dyn OutboundStateStore>,
+        #[cfg(feature = "slack-v2-host-beta")]
+        delivered_gate_routes: Arc::new(InMemoryDeliveredGateRouteStore::default()),
+        #[cfg(feature = "slack-v2-host-beta")]
+        triggered_run_delivery: Arc::new(InMemoryTriggeredRunDeliveryStore::default()),
+    }
 }
 
 #[cfg(all(
@@ -3218,6 +3293,12 @@ mod tests {
             turn_state: Arc::clone(&base_runtime.turn_state),
             trigger_repository: Arc::clone(&base_runtime.trigger_repository),
             outbound_preferences: Arc::clone(&base_runtime.outbound_preferences),
+            #[cfg(feature = "slack-v2-host-beta")]
+            outbound_state: Arc::clone(&base_runtime.outbound_state),
+            #[cfg(feature = "slack-v2-host-beta")]
+            delivered_gate_routes: Arc::clone(&base_runtime.delivered_gate_routes),
+            #[cfg(feature = "slack-v2-host-beta")]
+            triggered_run_delivery: Arc::clone(&base_runtime.triggered_run_delivery),
             #[cfg(not(any(feature = "libsql", feature = "postgres")))]
             trigger_conversation_services: base_runtime.trigger_conversation_services.clone(),
             #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -4692,6 +4773,46 @@ mod tests {
 
     fn skill_md(name: &str, description: &str, prompt: &str) -> String {
         format!("---\nname: {name}\ndescription: {description}\n---\n{prompt}\n")
+    }
+
+    /// Verify that the libsql `local_dev_outbound_store` bundle shares a single
+    /// `FilesystemOutboundStateStore` allocation across all four trait-object roles.
+    ///
+    /// The assertion reads the four trait-object pointers from the built
+    /// `RebornLocalRuntimeServices` and compares their data halves via
+    /// `std::ptr::addr_eq` (trait objects of different traits cannot be compared
+    /// with `Arc::ptr_eq` directly).
+    #[cfg(all(feature = "libsql", feature = "slack-v2-host-beta"))]
+    #[tokio::test]
+    async fn local_dev_outbound_store_libsql_shares_one_allocation_across_all_roles() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "outbound-store-alloc-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+
+        let local_runtime = services.local_runtime.as_ref().expect("local runtime");
+
+        // Cast each fat-pointer's data half to *const () for cross-trait comparison.
+        let pref_ptr = Arc::as_ptr(&local_runtime.outbound_preferences) as *const ();
+        let state_ptr = Arc::as_ptr(&local_runtime.outbound_state) as *const ();
+        let gate_ptr = Arc::as_ptr(&local_runtime.delivered_gate_routes) as *const ();
+        let delivery_ptr = Arc::as_ptr(&local_runtime.triggered_run_delivery) as *const ();
+
+        assert!(
+            std::ptr::addr_eq(pref_ptr, state_ptr),
+            "outbound_preferences and outbound_state must share one allocation"
+        );
+        assert!(
+            std::ptr::addr_eq(pref_ptr, gate_ptr),
+            "outbound_preferences and delivered_gate_routes must share one allocation"
+        );
+        assert!(
+            std::ptr::addr_eq(pref_ptr, delivery_ptr),
+            "outbound_preferences and triggered_run_delivery must share one allocation"
+        );
     }
 }
 
