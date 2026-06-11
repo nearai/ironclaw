@@ -1006,6 +1006,17 @@ impl RebornRuntime {
         self.thread_service.clone()
     }
 
+    /// Test-only accessor for the session thread service shared by the trigger
+    /// poller, REPL, and WebUI paths. Integration tests use this to enumerate
+    /// threads stored by `record_trigger_prompt` without going through the WebUI
+    /// `/api/webchat/v2/threads` endpoint (which filters automation threads out
+    /// of the list response). The returned handle is the same `Arc` the
+    /// production code uses; writes made through it are visible to all paths.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn session_thread_service(&self) -> Arc<dyn ironclaw_threads::SessionThreadService> {
+        Arc::clone(&self.thread_service)
+    }
+
     pub(crate) fn webui_turn_coordinator(&self) -> Arc<dyn TurnCoordinator> {
         self.turn_coordinator.clone()
     }
