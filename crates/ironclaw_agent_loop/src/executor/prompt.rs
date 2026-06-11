@@ -63,6 +63,10 @@ pub(super) enum PromptStep {
     /// Mirrors [`PromptStep::ResumeApproval`] but carries no approval resume token.
     /// The capability stage's `take_if` on `pending_approval_resume` finds nothing,
     /// so the invocation goes out as a plain re-invocation — exactly what we want.
+    ///
+    /// Uses [`ApprovalResumePromptOutput`] purely as a shared resume payload shape
+    /// (state + ack + surface + call). It carries no approval semantics or token —
+    /// the struct is reused for its fields, not for any approval meaning.
     ResumeAuth(Box<ApprovalResumePromptOutput>),
     Exit(LoopExit),
     /// Compaction-only turn: PromptCompactionStep ran (forced by the

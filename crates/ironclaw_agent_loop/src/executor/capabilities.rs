@@ -457,6 +457,10 @@ impl CapabilityStage {
                 credential_requirements,
                 ..
             } => {
+                // Clearing here keeps the clear-on-every-outcome invariant; for auth
+                // outcomes GateStage re-populates the record when it blocks.
+                clear_matching_pending_approval_resume(&mut state, &call);
+                clear_matching_pending_auth_resume(&mut state, &call);
                 GateStage
                     .process(
                         ctx,

@@ -3985,7 +3985,12 @@ async fn resume_after_auth_gate_redispatches_original_call_without_model_turn() 
         "re-dispatched invocation must carry the original input_ref"
     );
 
-    // (c) Auth re-dispatch is token-less — no approval_resume on the invocation.
+    // (c) Neither invocation carries an approval_resume token.
+    //     Phase 1 is a plain first invocation; phase 2 is a token-less auth re-dispatch.
+    assert_eq!(
+        batch_invocations[0].invocations[0].approval_resume, None,
+        "phase-1 invocation must not carry an approval_resume token"
+    );
     assert_eq!(
         batch_invocations[1].invocations[0].approval_resume, None,
         "auth re-dispatch must not carry an approval_resume token"
