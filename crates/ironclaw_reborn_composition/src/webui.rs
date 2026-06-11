@@ -15,6 +15,8 @@ use ironclaw_product_workflow::{
     WebUiAuthenticatedCaller,
 };
 
+use ironclaw_triggers::TriggerRepository;
+
 use crate::{
     RebornAutomationProductFacade, RebornBuildError, RebornProductAuthServices, RebornReadiness,
     RebornRuntime,
@@ -137,10 +139,28 @@ pub(crate) fn build_webui_services_with_connectable_channels(
             Arc::clone(product_auth),
         )));
     }
-    if let Some(local_runtime) = &services.local_runtime {
+    // Local-dev and production graphs both carry a trigger repository; whichever
+    // is wired backs the automations panel.
+    let automation_repository: Option<Arc<dyn TriggerRepository>> = {
+        let from_local = services
+            .local_runtime
+            .as_ref()
+            .map(|local_runtime| Arc::clone(&local_runtime.trigger_repository));
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        let from_local = from_local.or_else(|| {
+            services
+                .production_runtime
+                .as_ref()
+                .map(|production_runtime| production_runtime.trigger_repository())
+        });
+        from_local
+    };
+    if let Some(repository) = automation_repository {
         api = api.with_automation_product_facade(Arc::new(RebornAutomationProductFacade::new(
-            Arc::clone(&local_runtime.trigger_repository),
+            repository,
         )));
+    }
+    if let Some(local_runtime) = &services.local_runtime {
         api = api.with_outbound_preferences_facade(Arc::new(RebornOutboundPreferencesFacade::new(
             Arc::clone(&local_runtime.outbound_preferences),
             Arc::new(OutboundDeliveryTargetRegistry::new(

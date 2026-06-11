@@ -510,6 +510,21 @@ where
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
+impl RebornProductionRuntimeServices {
+    /// Returns the trigger repository from whichever production store graph is
+    /// active. Backs the WebUI automations facade for production profiles
+    /// (libSQL / Postgres) where `local_runtime` is None.
+    pub(crate) fn trigger_repository(&self) -> Arc<dyn TriggerRepository> {
+        match self {
+            #[cfg(feature = "libsql")]
+            Self::LibSql(graph) => Arc::clone(&graph.trigger_repository),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(graph) => Arc::clone(&graph.trigger_repository),
+        }
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 impl RebornLocalRuntimeServices {
     pub(crate) async fn durable_trigger_conversation_services(
         &self,
