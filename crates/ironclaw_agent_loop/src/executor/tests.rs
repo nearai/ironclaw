@@ -3748,3 +3748,65 @@ async fn await_dependent_run_gate_skip_and_continue_accumulates_byte_len() {
          causing iter 2 to be a SkipModel iteration"
     );
 }
+
+#[tokio::test]
+async fn auth_gate_block_stores_pending_auth_resume() {
+    // Drive the full executor loop so the GateStage block arm runs through the
+    // canonical path (cancel-check → progress emit → write_before_block).
+    let gate_ref = LoopGateRef::new("gate:auth-block").expect("valid");
+    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::AuthRequired {
+                gate_ref: gate_ref.clone(),
+                credential_requirements: Vec::new(),
+                safe_summary: "auth required".to_string(),
+            }],
+            stopped_on_suspension: true,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let initial_state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, initial_state)
+        .await
+        .expect("execute blocks on auth gate");
+
+    // Exit must be a blocked (auth) exit.
+    assert!(
+        matches!(exit, LoopExit::Blocked(_)),
+        "expected Blocked exit for auth gate, got {exit:?}"
+    );
+
+    // BeforeBlock checkpoint must have been written.
+    assert!(
+        host.checkpoint_kinds()
+            .contains(&LoopCheckpointKind::BeforeBlock),
+        "BeforeBlock checkpoint must be written when auth gate blocks"
+    );
+
+    // Recover state from the BeforeBlock checkpoint — this is what the resume
+    // path will load, so it must carry the pending_auth_resume record.
+    let before_block_state = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+
+    // Auth slot must be populated.
+    let pending = before_block_state
+        .pending_auth_resume
+        .as_ref()
+        .expect("BeforeBlock checkpoint must carry pending_auth_resume when auth gate blocks");
+    assert_eq!(
+        pending.gate_ref, gate_ref,
+        "pending_auth_resume.gate_ref must match the blocked gate ref"
+    );
+    assert_eq!(
+        pending.capability_id,
+        capability_id(),
+        "pending_auth_resume.capability_id must match the scripted capability"
+    );
+
+    // Approval slot must NOT be touched by an auth block.
+    assert!(
+        before_block_state.pending_approval_resume.is_none(),
+        "auth block must not populate pending_approval_resume"
+    );
+}

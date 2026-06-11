@@ -8,7 +8,7 @@ use ironclaw_turns::{
 };
 
 use crate::{
-    state::{CheckpointKind, LoopExecutionState, PendingApprovalResume},
+    state::{CheckpointKind, LoopExecutionState, PendingApprovalResume, PendingAuthResume},
     strategies::{GateKind, GateOutcome},
 };
 
@@ -75,6 +75,17 @@ impl ExecutorStage<GateInput> for GateStage {
                         input: resume.input,
                         estimate: resume.estimate,
                     });
+                state.pending_auth_resume = match kind {
+                    GateKind::Auth => Some(PendingAuthResume {
+                        gate_ref: gate_ref.clone(),
+                        capability_id: call.capability_id.clone(),
+                        surface_version: call.surface_version.clone(),
+                        input_ref: call.input_ref.clone(),
+                        effective_capability_ids: call.effective_capability_ids.clone(),
+                        provider_replay: call.provider_replay.clone(),
+                    }),
+                    _ => state.pending_auth_resume.take(),
+                };
                 match CheckpointStage.cancel_if_requested(ctx, state).await? {
                     CancelCheck::Continue(next) => state = *next,
                     CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
