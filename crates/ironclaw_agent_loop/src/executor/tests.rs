@@ -3951,6 +3951,15 @@ async fn resume_after_auth_gate_redispatches_original_call_without_model_turn() 
         "BeforeBlock checkpoint must carry pending_auth_resume"
     );
 
+    // Derive the expected input_ref from the BeforeBlock checkpoint before the
+    // state is consumed by the phase 2 execute call.
+    let original_input_ref = before_block_state
+        .pending_auth_resume
+        .as_ref()
+        .expect("pending_auth_resume set in BeforeBlock checkpoint")
+        .input_ref
+        .clone();
+
     // Phase 2 run — seeded from the BeforeBlock checkpoint state.
     // The prompt stage must detect pending_auth_resume and skip the model call,
     // re-dispatching the original capability invocation directly.
@@ -3978,8 +3987,8 @@ async fn resume_after_auth_gate_redispatches_original_call_without_model_turn() 
         "expected two batch invocations (phase 1 block + phase 2 re-dispatch)"
     );
 
-    // The Phase 2 invocation must carry the original input_ref.
-    let original_input_ref = CapabilityInputRef::new("input:demo").expect("valid");
+    // The Phase 2 invocation must carry the original input_ref (derived from the
+    // BeforeBlock checkpoint, not a magic string literal).
     assert_eq!(
         batch_invocations[1].invocations[0].input_ref, original_input_ref,
         "re-dispatched invocation must carry the original input_ref"
@@ -4118,5 +4127,13 @@ async fn resume_with_still_missing_credentials_blocks_again_without_model_turn()
     assert_eq!(
         phase2_resume.capability_id, phase1_capability_id,
         "phase 2 pending_auth_resume.capability_id must match the original capability"
+    );
+    // The gate_ref in the phase-2 BeforeBlock checkpoint must reflect the refreshed
+    // AuthRequired outcome from phase 2, not the stale phase-1 gate ref.  This
+    // proves GateStage wrote a fresh record rather than preserving the old one.
+    let phase2_gate_ref = LoopGateRef::new("gate:auth-still-missing-2").expect("valid");
+    assert_eq!(
+        phase2_resume.gate_ref, phase2_gate_ref,
+        "phase 2 pending_auth_resume.gate_ref must equal the refreshed phase-2 gate ref"
     );
 }
