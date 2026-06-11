@@ -198,6 +198,7 @@ jobs:
       REBORN_ROOT_TEST_PARTITIONS: 4
       REBORN_ROOT_TEST_PARTITION: ${{ matrix.partition }}
       REBORN_ROOT_TEST_TIMEOUT: 28m
+      CARGO_INCREMENTAL: "0"
     strategy:
       fail-fast: true
       matrix:
