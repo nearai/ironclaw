@@ -81,6 +81,8 @@ fn sanitized_driver_failure(reason_kind: &str) -> Option<SanitizedFailure> {
     }
     sanitized_failure("driver_failed")
 }
+
+#[derive(Debug, Clone)]
 pub struct TurnRunnerWorkerConfig {
     /// How often to send heartbeats for an active run lease.
     pub heartbeat_interval: Duration,

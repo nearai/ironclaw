@@ -21,7 +21,8 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverHost,
         AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, AgentLoopHostError,
-        LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopDriverId, LoopRunContext,
+        AgentLoopHostErrorKind, LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopDriverId,
+        LoopRunContext,
     },
 };
 
