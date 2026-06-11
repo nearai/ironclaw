@@ -11,6 +11,9 @@ use ironclaw_safety::LeakDetector;
 
 const HISTORY_CAP: usize = 500;
 const DEFAULT_LIMIT: usize = 100;
+const MAX_LOG_MESSAGE_BYTES: usize = 16 * 1024;
+const MAX_LOG_RESPONSE_BYTES: usize = 256 * 1024;
+const LOG_TRUNCATED_SUFFIX: &str = " ... [truncated]";
 const SOURCE: &str = "in_memory_tracing";
 
 static OPERATOR_LOGS: LazyLock<Arc<OperatorLogBuffer>> =
@@ -54,6 +57,7 @@ impl OperatorLogBuffer {
             .leak_detector
             .scan_and_clean(&message)
             .unwrap_or_else(|_| "[log message redacted: contained blocked secret]".to_string());
+        let message = truncate_utf8_with_suffix(&message, MAX_LOG_MESSAGE_BYTES);
         let Ok(mut state) = self.state.lock() else {
             return;
         };
@@ -89,7 +93,9 @@ impl OperatorLogBuffer {
             };
         };
 
-        let mut selected = Vec::with_capacity((limit + 1).min(self.capacity));
+        let mut selected = Vec::with_capacity(limit.min(self.capacity));
+        let mut selected_bytes = 0usize;
+        let mut next_cursor = None;
         for entry in state.entries.iter().rev() {
             if before_id.is_some_and(|id| entry.id >= id) {
                 continue;
@@ -103,18 +109,24 @@ impl OperatorLogBuffer {
                 continue;
             }
 
-            selected.push(entry.clone());
-            if selected.len() > limit {
+            if selected.len() >= limit {
+                next_cursor = selected
+                    .last()
+                    .map(|entry: &StoredLogEntry| format!("before:{}", entry.id));
                 break;
             }
+            let entry_bytes = response_entry_bytes(entry);
+            if !selected.is_empty()
+                && selected_bytes.saturating_add(entry_bytes) > MAX_LOG_RESPONSE_BYTES
+            {
+                next_cursor = selected
+                    .last()
+                    .map(|entry: &StoredLogEntry| format!("before:{}", entry.id));
+                break;
+            }
+            selected_bytes = selected_bytes.saturating_add(entry_bytes);
+            selected.push(entry.clone());
         }
-
-        let next_cursor = if selected.len() > limit {
-            selected.truncate(limit);
-            selected.last().map(|entry| format!("before:{}", entry.id))
-        } else {
-            None
-        };
 
         RebornLogQueryResponse {
             source: SOURCE.to_string(),
@@ -124,6 +136,14 @@ impl OperatorLogBuffer {
             follow_supported: false,
         }
     }
+}
+
+fn response_entry_bytes(entry: &StoredLogEntry) -> usize {
+    entry.id.to_string().len()
+        + entry.timestamp.to_rfc3339().len()
+        + entry.target.len()
+        + entry.message.len()
+        + 64
 }
 
 impl From<StoredLogEntry> for RebornLogEntry {
@@ -171,6 +191,26 @@ fn parse_before_cursor(cursor: &str) -> Option<u64> {
     cursor
         .strip_prefix("before:")
         .and_then(|value| value.parse::<u64>().ok())
+}
+
+fn truncate_utf8_with_suffix(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+
+    if max_bytes <= LOG_TRUNCATED_SUFFIX.len() {
+        return LOG_TRUNCATED_SUFFIX[..max_bytes].to_string();
+    }
+
+    let mut end = max_bytes - LOG_TRUNCATED_SUFFIX.len();
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    let mut truncated = String::with_capacity(max_bytes);
+    truncated.push_str(&value[..end]);
+    truncated.push_str(LOG_TRUNCATED_SUFFIX);
+    truncated
 }
 
 #[cfg(test)]
@@ -253,5 +293,51 @@ mod tests {
             response.entries[0].message,
             "[log message redacted: contained blocked secret]"
         );
+    }
+
+    #[test]
+    fn record_truncates_large_messages_on_utf8_boundary() {
+        let buffer = OperatorLogBuffer::new(10);
+        buffer.record(
+            RebornLogLevel::Info,
+            "ironclaw::test",
+            "\u{1F600}".repeat(MAX_LOG_MESSAGE_BYTES),
+        );
+
+        let response = buffer.query(RebornLogQueryRequest {
+            limit: Some(1),
+            ..RebornLogQueryRequest::default()
+        });
+
+        let message = &response.entries[0].message;
+        assert!(message.len() <= MAX_LOG_MESSAGE_BYTES);
+        assert!(message.ends_with(LOG_TRUNCATED_SUFFIX));
+        assert!(message.is_char_boundary(message.len()));
+    }
+
+    #[test]
+    fn query_enforces_response_byte_budget() {
+        let buffer = OperatorLogBuffer::new(100);
+        for index in 0..40 {
+            buffer.record(
+                RebornLogLevel::Info,
+                "ironclaw::test",
+                format!("{index}:{}", "x".repeat(MAX_LOG_MESSAGE_BYTES)),
+            );
+        }
+
+        let response = buffer.query(RebornLogQueryRequest {
+            limit: Some(100),
+            ..RebornLogQueryRequest::default()
+        });
+
+        let message_bytes = response
+            .entries
+            .iter()
+            .map(|entry| entry.message.len())
+            .sum::<usize>();
+        assert!(message_bytes <= MAX_LOG_RESPONSE_BYTES);
+        assert!(response.entries.len() < 40);
+        assert!(response.next_cursor.is_some());
     }
 }

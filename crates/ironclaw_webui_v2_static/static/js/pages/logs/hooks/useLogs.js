@@ -5,6 +5,7 @@ import { normalizeOperatorLogsResponse } from "../lib/logs-data.js";
 const POLL_INTERVAL_MS = 2000;
 const LOG_LIMIT = 500;
 const HIDDEN_ENTRY_ID_CAP = 2000;
+const TERMINAL_UNSUPPORTED_STATUSES = new Set([403, 404]);
 
 export function useLogs() {
   const [entries, setEntries] = React.useState([]);
@@ -14,10 +15,12 @@ export function useLogs() {
   const [autoScroll, setAutoScroll] = React.useState(true);
   const [isLoading, setIsLoading] = React.useState(true);
   const [error, setError] = React.useState(null);
+  const [isUnsupported, setIsUnsupported] = React.useState(false);
   const hiddenEntryIdsRef = React.useRef(new Set());
   const requestIdRef = React.useRef(0);
 
   const loadLogs = React.useCallback(async () => {
+    if (isUnsupported) return;
     const requestId = ++requestIdRef.current;
     setIsLoading(true);
     try {
@@ -34,20 +37,26 @@ export function useLogs() {
       setError(null);
     } catch (err) {
       if (requestId !== requestIdRef.current) return;
+      if (TERMINAL_UNSUPPORTED_STATUSES.has(err?.status)) {
+        setEntries([]);
+        setError(null);
+        setIsUnsupported(true);
+        return;
+      }
       setError(err);
     } finally {
       if (requestId === requestIdRef.current) {
         setIsLoading(false);
       }
     }
-  }, [levelFilter, targetFilter]);
+  }, [isUnsupported, levelFilter, targetFilter]);
 
   React.useEffect(() => {
-    if (paused) return undefined;
+    if (paused || isUnsupported) return undefined;
     loadLogs();
     const timer = setInterval(loadLogs, POLL_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [loadLogs, paused]);
+  }, [isUnsupported, loadLogs, paused]);
 
   const togglePause = React.useCallback(() => {
     setPaused((value) => !value);
