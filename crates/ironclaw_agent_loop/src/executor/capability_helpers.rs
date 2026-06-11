@@ -398,6 +398,19 @@ pub(super) fn gate_tool_result_summary(kind: GateKind, outcome: &'static str) ->
     format!("{gate} gate {outcome}")
 }
 
+pub(super) fn clear_matching_pending_auth_resume(
+    state: &mut LoopExecutionState,
+    call: &CapabilityCallCandidate,
+) {
+    if state
+        .pending_auth_resume
+        .as_ref()
+        .is_some_and(|resume| resume.capability_id == call.capability_id)
+    {
+        state.pending_auth_resume = None;
+    }
+}
+
 pub(super) fn push_completed_result(
     state: &mut LoopExecutionState,
     capability_id: &CapabilityId,
@@ -470,5 +483,31 @@ mod tests {
             Some(&2000)
         );
         assert_eq!(state.result_refs.len(), 3);
+    }
+
+    #[test]
+    fn pending_auth_resume_candidate_carries_non_empty_effective_capability_ids() {
+        use crate::state::PendingAuthResume;
+        use ironclaw_turns::run_profile::{CapabilityInputRef, CapabilitySurfaceVersion};
+
+        let cap_a = CapabilityId::new("test.cap_a").unwrap();
+        let cap_b = CapabilityId::new("test.cap_b").unwrap();
+        let resume = PendingAuthResume {
+            gate_ref: ironclaw_turns::LoopGateRef::new("gate:auth-test").unwrap(),
+            capability_id: cap_a.clone(),
+            surface_version: CapabilitySurfaceVersion::new("surface:v1").unwrap(),
+            input_ref: CapabilityInputRef::new("input:test").unwrap(),
+            effective_capability_ids: vec![cap_a.clone(), cap_b.clone()],
+            provider_replay: None,
+        };
+        let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
+
+        let candidate = pending_auth_resume_candidate(&resume, surface_version);
+
+        assert_eq!(
+            candidate.effective_capability_ids,
+            vec![cap_a, cap_b],
+            "pending_auth_resume_candidate must propagate all effective_capability_ids"
+        );
     }
 }

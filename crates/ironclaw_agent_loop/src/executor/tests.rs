@@ -4137,3 +4137,195 @@ async fn resume_with_still_missing_credentials_blocks_again_without_model_turn()
         "phase 2 pending_auth_resume.gate_ref must equal the refreshed phase-2 gate ref"
     );
 }
+
+#[tokio::test]
+async fn gate_stage_skip_and_continue_clears_stale_pending_auth_resume() {
+    // Bug scenario: auth record stored for capability A → resume re-dispatches A
+    // → re-dispatch returns ApprovalRequired → GateStage runs with kind Approval
+    // → planner returns SkipAndContinue. Without the fix, pending_auth_resume
+    // for A survives, and the next prompt iteration re-dispatches A again —
+    // potential infinite re-dispatch loop with no model turn.
+    //
+    // This test exercises GateStage directly (not the full executor) so we can
+    // seed pending_auth_resume before the gate runs, mirroring the existing
+    // gate_stage_skips_and_continues_records_skipped_summary pattern.
+    let family = family_with_gate_outcome(GateOutcome::SkipAndContinue {
+        gate: empty_gate_state(),
+    });
+    let host = MockHost::new(Vec::new());
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    // Seed a pending_auth_resume for the same capability that will be dispatched
+    // through GateStage — this simulates the state reloaded from a BeforeBlock
+    // checkpoint that was written when the auth gate first blocked.
+    let seeded_gate_ref = LoopGateRef::new("gate:auth-original").expect("valid");
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.pending_auth_resume = Some(PendingAuthResume {
+        gate_ref: seeded_gate_ref.clone(),
+        capability_id: capability_id(),
+        surface_version: surface_version(),
+        input_ref: CapabilityInputRef::new("input:original").expect("valid"),
+        effective_capability_ids: Vec::new(),
+        provider_replay: None,
+    });
+    let call = match provider_calls_response().output {
+        ParentLoopOutput::CapabilityCalls(mut calls) => calls.remove(0),
+        ParentLoopOutput::AssistantReply(_) => panic!("expected provider call fixture"),
+    };
+    let gate_ref = LoopGateRef::new("gate:approval-skip").expect("valid");
+
+    let step = GateStage
+        .process(
+            ctx,
+            GateInput {
+                state,
+                call,
+                kind: GateKind::Approval,
+                gate_ref,
+                credential_requirements: Vec::new(),
+                approval_resume: None,
+            },
+        )
+        .await
+        .expect("gate stage");
+
+    let BatchStep::Continue(final_state) = step else {
+        panic!("expected SkipAndContinue to return Continue");
+    };
+    assert!(
+        final_state.pending_auth_resume.is_none(),
+        "SkipAndContinue must clear pending_auth_resume for the skipped capability \
+         to prevent an infinite re-dispatch loop on the next prompt iteration"
+    );
+}
+
+#[tokio::test]
+async fn gate_stage_abort_clears_stale_pending_auth_resume() {
+    // Bug scenario: auth record stored for capability A → resume re-dispatches A
+    // → re-dispatch returns ResourceBlocked → GateStage runs with kind Resource
+    // → planner returns Abort. Without the fix, pending_auth_resume persists
+    // into the Final checkpoint, leaving a stale record.
+    let failure_kind = LoopFailureKind::CapabilityProtocolError;
+    let family = family_with_gate_outcome(GateOutcome::Abort {
+        gate: empty_gate_state(),
+        failure_kind,
+    });
+    let host = MockHost::new(Vec::new());
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    // Seed a pending_auth_resume for the same capability.
+    let seeded_gate_ref = LoopGateRef::new("gate:auth-original-abort").expect("valid");
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.pending_auth_resume = Some(PendingAuthResume {
+        gate_ref: seeded_gate_ref.clone(),
+        capability_id: capability_id(),
+        surface_version: surface_version(),
+        input_ref: CapabilityInputRef::new("input:original-abort").expect("valid"),
+        effective_capability_ids: Vec::new(),
+        provider_replay: None,
+    });
+    let call = match provider_calls_response().output {
+        ParentLoopOutput::CapabilityCalls(mut calls) => calls.remove(0),
+        ParentLoopOutput::AssistantReply(_) => panic!("expected provider call fixture"),
+    };
+    let gate_ref = LoopGateRef::new("gate:resource-abort").expect("valid");
+
+    let step = GateStage
+        .process(
+            ctx,
+            GateInput {
+                state,
+                call,
+                kind: GateKind::Resource,
+                gate_ref,
+                credential_requirements: Vec::new(),
+                approval_resume: None,
+            },
+        )
+        .await
+        .expect("gate stage");
+
+    // The Abort arm must return a Failed exit and write a Final checkpoint.
+    let BatchStep::Exit(LoopExit::Failed(failed)) = step else {
+        panic!("expected failed exit from Abort arm");
+    };
+    assert_eq!(failed.reason_kind, failure_kind);
+    assert!(failed.checkpoint_id.is_some());
+
+    // The Final checkpoint must NOT carry a stale pending_auth_resume.
+    let final_state = final_staged_state(&host);
+    assert!(
+        final_state.pending_auth_resume.is_none(),
+        "Abort must clear pending_auth_resume for the aborted capability \
+         to prevent a stale record from persisting into the Final checkpoint"
+    );
+}
+
+#[tokio::test]
+async fn gate_stage_skip_does_not_clear_auth_resume_for_different_capability() {
+    // The clear is capability-scoped: a SkipAndContinue for capability B must NOT
+    // erase a pending_auth_resume record belonging to capability A.
+    let family = family_with_gate_outcome(GateOutcome::SkipAndContinue {
+        gate: empty_gate_state(),
+    });
+    let host = MockHost::new(Vec::new());
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    // Seed a pending_auth_resume for a DIFFERENT capability (not the one being gated).
+    let different_cap_id = ironclaw_host_api::CapabilityId::new("other.cap").expect("valid");
+    let seeded_gate_ref = LoopGateRef::new("gate:auth-other-cap").expect("valid");
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.pending_auth_resume = Some(PendingAuthResume {
+        gate_ref: seeded_gate_ref.clone(),
+        capability_id: different_cap_id.clone(),
+        surface_version: surface_version(),
+        input_ref: CapabilityInputRef::new("input:other-cap").expect("valid"),
+        effective_capability_ids: Vec::new(),
+        provider_replay: None,
+    });
+    // The call being dispatched through GateStage is capability_id() ("demo.echo"),
+    // not the seeded "other.cap".
+    let call = match provider_calls_response().output {
+        ParentLoopOutput::CapabilityCalls(mut calls) => calls.remove(0),
+        ParentLoopOutput::AssistantReply(_) => panic!("expected provider call fixture"),
+    };
+    let gate_ref = LoopGateRef::new("gate:approval-skip-other").expect("valid");
+
+    let step = GateStage
+        .process(
+            ctx,
+            GateInput {
+                state,
+                call,
+                kind: GateKind::Approval,
+                gate_ref,
+                credential_requirements: Vec::new(),
+                approval_resume: None,
+            },
+        )
+        .await
+        .expect("gate stage");
+
+    let BatchStep::Continue(final_state) = step else {
+        panic!("expected SkipAndContinue to return Continue");
+    };
+    // The record for "other.cap" must survive — only the matching capability is cleared.
+    let surviving = final_state
+        .pending_auth_resume
+        .as_ref()
+        .expect("pending_auth_resume for a different capability must not be cleared");
+    assert_eq!(
+        surviving.capability_id, different_cap_id,
+        "surviving pending_auth_resume must belong to the other capability"
+    );
+    assert_eq!(
+        surviving.gate_ref, seeded_gate_ref,
+        "surviving pending_auth_resume.gate_ref must be unchanged"
+    );
+}

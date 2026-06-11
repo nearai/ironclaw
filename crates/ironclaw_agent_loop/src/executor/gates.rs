@@ -14,8 +14,9 @@ use crate::{
 
 use super::{
     AgentLoopExecutorError, BatchStep, CancelCheck, CheckpointStage, ExecutorStage, StageContext,
-    append_capability_result_ref, append_capability_safe_summary_ref, blocked_kind, exit_id,
-    failed_exit, gate_tool_result_summary, loop_gate_kind, push_completed_result,
+    append_capability_result_ref, append_capability_safe_summary_ref, blocked_kind,
+    clear_matching_pending_auth_resume, exit_id, failed_exit, gate_tool_result_summary,
+    loop_gate_kind, push_completed_result,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -116,6 +117,10 @@ impl ExecutorStage<GateInput> for GateStage {
             }
             GateOutcome::SkipAndContinue { gate } => {
                 state.gate_state = gate;
+                // A skipped gate bypasses all capability-outcome clear sites, so a
+                // pending_auth_resume for this call would survive and trigger an
+                // infinite re-dispatch loop on the next prompt iteration.
+                clear_matching_pending_auth_resume(&mut state, &call);
                 append_capability_safe_summary_ref(
                     ctx.host,
                     &mut state,
@@ -131,6 +136,9 @@ impl ExecutorStage<GateInput> for GateStage {
             }
             GateOutcome::Abort { gate, failure_kind } => {
                 state.gate_state = gate;
+                // Clear any pending auth resume so a stale record does not persist
+                // into the Final checkpoint for an aborted capability.
+                clear_matching_pending_auth_resume(&mut state, &call);
                 append_capability_safe_summary_ref(
                     ctx.host,
                     &mut state,

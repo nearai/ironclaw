@@ -60,13 +60,11 @@ pub(super) enum PromptStep {
     ResumeApproval(Box<ApprovalResumePromptOutput>),
     /// Re-dispatch an auth-gated capability call without a model turn.
     ///
-    /// Mirrors [`PromptStep::ResumeApproval`] but carries no approval resume token.
-    /// The capability stage's `take_if` on `pending_approval_resume` finds nothing,
-    /// so the invocation goes out as a plain re-invocation — exactly what we want.
-    ///
-    /// Uses [`ApprovalResumePromptOutput`] purely as a shared resume payload shape
-    /// (state + ack + surface + call). It carries no approval semantics or token —
-    /// the struct is reused for its fields, not for any approval meaning.
+    /// Emitted when `pending_auth_resume` is set on the incoming state. The original
+    /// capability call is re-dispatched as a plain invocation (no approval token).
+    /// The `pending_auth_resume` slot is cleared at every capability-outcome site
+    /// (Completed, SpawnedChild, AuthRequired, error/retry paths) and at gate
+    /// SkipAndContinue/Abort outcomes — never consumed via `take_if` here.
     ResumeAuth(Box<ApprovalResumePromptOutput>),
     Exit(LoopExit),
     /// Compaction-only turn: PromptCompactionStep ran (forced by the
