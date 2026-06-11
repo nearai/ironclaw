@@ -390,7 +390,7 @@ A turn that completes but fails mid-flight (the model errored, a required tool r
 Two cases do **not** use the JSON envelope and need separate handling:
 
 - **`401` Unauthorized** comes from the gateway auth middleware before the request reaches the handler, and the body is a plain-text string (`Invalid or missing auth token`). Same for `403` (`Forbidden` for OIDC domain violations) and the `503` (`Database unavailable`) emitted by the middleware when the token store is down.
-- **`GET /api/v1/responses/{id}`** returns `404` (still JSON-enveloped) when the response id is unknown or the thread does not belong to the authenticated user. `POST` with a foreign `previous_response_id` does **not** return `404`; the handler only decodes the UUID and dispatches into the agent, where the cross-user resume surfaces as a turn-level failure rather than an HTTP error. Treat cross-user resume as undefined and avoid relying on the response shape.
+- **`GET /api/v1/responses/{id}`** and **`POST /api/v1/responses`** with a foreign `previous_response_id` both return `404` (still JSON-enveloped) when the response id is unknown or the thread does not belong to the authenticated user. The check runs before the agent dispatch on POST, so cross-user resume now surfaces as an HTTP error rather than a turn-level failure.
 
 The Responses API does **not** support interactive approvals or authentication gates in the response stream. If the agent hits a tool that requires user approval (e.g. shell with a destructive command) or an extension OAuth flow, the turn fails with a clear error directing you to resolve the gate via the web UI or a different channel.
 

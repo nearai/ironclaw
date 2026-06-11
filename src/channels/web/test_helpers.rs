@@ -48,6 +48,7 @@ pub struct TestGatewayBuilder {
     llm_provider: Option<Arc<dyn ironclaw_llm::LlmProvider>>,
     user_id: String,
     tool_registry: Option<Arc<crate::tools::ToolRegistry>>,
+    store: Option<Arc<dyn crate::db::Database>>,
 }
 
 impl Default for TestGatewayBuilder {
@@ -57,6 +58,7 @@ impl Default for TestGatewayBuilder {
             llm_provider: None,
             user_id: "test-user".to_string(),
             tool_registry: None,
+            store: None,
         }
     }
 }
@@ -94,6 +96,16 @@ impl TestGatewayBuilder {
         self
     }
 
+    /// Attach a `Database` store. Required for handler paths that
+    /// touch persisted state (conversation ownership, history,
+    /// settings). Without this, `GatewayState.store` is `None` and
+    /// store-conditional checks (e.g. cross-tenant authz on
+    /// `create_response_handler`) silently no-op.
+    pub fn store(mut self, store: Arc<dyn crate::db::Database>) -> Self {
+        self.store = Some(store);
+        self
+    }
+
     /// Build the `Arc<GatewayState>` without starting a server.
     pub fn build(self) -> Arc<GatewayState> {
         Arc::new(GatewayState {
@@ -107,7 +119,7 @@ impl TestGatewayBuilder {
             log_level_handle: None,
             extension_manager: None,
             tool_registry: self.tool_registry,
-            store: None,
+            store: self.store,
             settings_cache: None,
             job_manager: None,
             prompt_queue: None,

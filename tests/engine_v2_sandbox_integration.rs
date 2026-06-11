@@ -98,6 +98,8 @@ fn make_context(project_id: ProjectId) -> ThreadExecutionContext {
         gate_controller: ironclaw_engine::CancellingGateController::arc(),
         call_approval_granted: false,
         conversation_id: None,
+        client_thread_id: None,
+        client_response_id: None,
     }
 }
 

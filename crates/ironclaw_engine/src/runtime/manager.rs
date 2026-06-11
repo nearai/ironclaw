@@ -26,6 +26,10 @@ use crate::types::thread::{Thread, ThreadConfig, ThreadId, ThreadState, ThreadTy
 struct RunningThread {
     signal_tx: SignalSender,
     handle: tokio::task::JoinHandle<Result<ThreadOutcome, EngineError>>,
+    /// Spawn-time `client_thread_id` (if the channel supplied one), cached
+    /// here so the drift check on message inject can compare in memory
+    /// instead of round-tripping the store on every injected message.
+    client_thread_id: Option<String>,
 }
 
 /// Top-level orchestrator for thread lifecycle.
@@ -337,6 +341,14 @@ impl ThreadManager {
         is_resume: bool,
     ) -> Result<ThreadId, EngineError> {
         let thread_id = thread.id;
+        // Capture the spawn-time client_thread_id before `thread` is moved
+        // into the execution loop, so the inject-path drift check can read it
+        // from `self.running` without a store round-trip.
+        let client_thread_id = thread
+            .metadata
+            .get("client_thread_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
 
         reconcile_dynamic_tool_lease(
             &mut thread,
@@ -439,6 +451,7 @@ impl ThreadManager {
             RunningThread {
                 signal_tx: tx,
                 handle,
+                client_thread_id,
             },
         );
 
@@ -547,6 +560,19 @@ impl ThreadManager {
                 reason: format!("set_thread_metadata: save failed: {e}"),
             })?;
         Ok(())
+    }
+
+    /// Spawn-time `client_thread_id` for a running thread, if one was
+    /// supplied by the channel. Returns `None` when the thread isn't in the
+    /// running set (e.g. resumed from the store after a restart) or carried
+    /// no `client_thread_id`. Lets callers compare against the in-memory
+    /// value without a store round-trip on the message-inject hot path.
+    pub async fn running_client_thread_id(&self, thread_id: ThreadId) -> Option<String> {
+        self.running
+            .read()
+            .await
+            .get(&thread_id)
+            .and_then(|rt| rt.client_thread_id.clone())
     }
 
     /// Check if a thread is still running.

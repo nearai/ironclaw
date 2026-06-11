@@ -3004,6 +3004,8 @@ async fn dispatch_protected_write(
         gate_controller: crate::gate::CancellingGateController::arc(),
         call_approval_granted: false,
         conversation_id: None,
+        client_thread_id: None,
+        client_response_id: None,
     };
 
     effects

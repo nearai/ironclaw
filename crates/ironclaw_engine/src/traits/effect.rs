@@ -79,6 +79,18 @@ pub struct ThreadExecutionContext {
     /// `None` for background mission threads with no user-facing
     /// conversation.
     pub conversation_id: Option<ConversationId>,
+    /// Channel-supplied stable thread id (Responses API thread half).
+    /// Stable across turns. `None` for callers that don't supply one.
+    // TODO: wrap in a `ClientThreadId(Uuid)` newtype so it can't be swapped
+    // with `client_response_id` or with the engine's own `ThreadId` (both
+    // wrap a Uuid but mean different things). See .claude/rules/types.md.
+    pub client_thread_id: Option<String>,
+    /// Channel-supplied per-turn response id (full Responses API `resp_...`).
+    /// Changes every turn. `None` for callers that don't supply one.
+    // TODO: wrap in a `ClientResponseId` newtype validating the `resp_`
+    // prefix, so it can't be swapped with `client_thread_id`. See
+    // .claude/rules/types.md.
+    pub client_response_id: Option<String>,
 }
 
 // Manual Debug impl: `dyn GateController` is not Debug, but the rest of
@@ -108,6 +120,8 @@ impl std::fmt::Debug for ThreadExecutionContext {
             .field("gate_controller", &"<dyn GateController>")
             .field("call_approval_granted", &self.call_approval_granted)
             .field("conversation_id", &self.conversation_id)
+            .field("client_thread_id", &self.client_thread_id)
+            .field("client_response_id", &self.client_response_id)
             .finish()
     }
 }

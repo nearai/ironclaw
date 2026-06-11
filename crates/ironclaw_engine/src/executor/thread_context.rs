@@ -54,5 +54,15 @@ pub(crate) fn thread_execution_context(
             .and_then(|v| v.as_str())
             .and_then(|s| Uuid::from_str(s).ok())
             .map(ConversationId),
+        client_thread_id: thread
+            .metadata
+            .get("client_thread_id")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        client_response_id: thread
+            .metadata
+            .get("client_response_id")
+            .and_then(|v| v.as_str())
+            .map(String::from),
     }
 }

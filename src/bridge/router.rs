@@ -1208,6 +1208,16 @@ async fn execute_pending_gate_action(
         // Post-resolution replay never triggers a fresh inline gate;
         // the conversation routing is moot here.
         conversation_id: None,
+        client_thread_id: thread
+            .metadata
+            .get("client_thread_id")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        client_response_id: thread
+            .metadata
+            .get("client_response_id")
+            .and_then(|v| v.as_str())
+            .map(String::from),
     };
     let active_leases = state
         .thread_manager
@@ -4722,11 +4732,31 @@ async fn handle_with_engine_inner(
         .await;
 
     // Handle the message — spawns a new thread or injects into active one.
+    //
+    // `client_thread_id` / `client_response_id` are channel-explicit
+    // correlation ids: only channels that opt in (today: the Responses
+    // API handler) stamp them into message metadata. Reading from a
+    // dedicated metadata key — *not* `conversation_scope()` — avoids
+    // Telegram/Slack/web channels accidentally surfacing their external
+    // chat id as `notify_thread_id`, which would change v1-era tool
+    // behavior for those channels (engine ThreadId remains the fallback
+    // when the keys are absent).
+    //
     // On error we must clear the pre-execution slot we just installed:
     // without this, a failed `handle_user_message` (engine spawn / inject
     // failed before any thread_id was allocated) leaves a stale entry
     // keyed by user_id that would mis-route the next gate prompt for
     // the same user.
+    let client_thread_id = message
+        .metadata
+        .get("client_thread_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let client_response_id = message
+        .metadata
+        .get("client_response_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     let thread_id = match state
         .conversation_manager
         .handle_user_message(
@@ -4737,6 +4767,8 @@ async fn handle_with_engine_inner(
             thread_config,
             validated_tz.as_ref().map(|tz| tz.name()),
             extra_metadata,
+            client_thread_id.as_deref(),
+            client_response_id.as_deref(),
         )
         .await
     {
