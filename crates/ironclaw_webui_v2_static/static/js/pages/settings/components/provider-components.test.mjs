@@ -610,6 +610,9 @@ test("NearAiSetupMenu closes the setup dropdown on Escape", () => {
 test("isLocalDevOrigin detects loopback origins so NEAR AI SSO fails fast there", () => {
   assert.equal(evalIsLocalDevOrigin({ hostname: "localhost" }), true);
   assert.equal(evalIsLocalDevOrigin({ hostname: "127.0.0.1" }), true);
+  // The whole 127.0.0.0/8 block is loopback, not just 127.0.0.1.
+  assert.equal(evalIsLocalDevOrigin({ hostname: "127.0.1.1" }), true);
+  assert.equal(evalIsLocalDevOrigin({ hostname: "127.255.255.254" }), true);
   assert.equal(evalIsLocalDevOrigin({ hostname: "::1" }), true);
   assert.equal(evalIsLocalDevOrigin({ hostname: "api.localhost" }), true);
   assert.equal(evalIsLocalDevOrigin({ hostname: "app.example.com" }), false);

@@ -103,20 +103,24 @@ impl ModelsEndpoint {
     /// shape. Network, auth, and parse failures map to `LlmError` so the caller
     /// can surface a real message instead of an empty list.
     async fn fetch_models(&self) -> Result<Vec<String>, LlmError> {
-        crate::url_check::check_models_url(&self.provider_id, &self.url).await?;
+        let validated = crate::url_check::check_models_url(&self.provider_id, &self.url).await?;
 
         // `check_models_url` validates only the initial URL. Disable redirect
         // following so a host that passes the guard cannot 3xx-redirect the
         // request to a blocked target (e.g. the cloud-metadata IP) — a 3xx is
         // surfaced as a non-success status below instead of being chased. The
         // shared builder also bypasses the proxy for loopback providers.
-        let client = crate::url_check::build_http_client(
-            &self.provider_id,
-            &self.url,
-            reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .redirect(reqwest::redirect::Policy::none()),
-        )?;
+        let mut builder = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none());
+        // Pin the client to the addresses the guard validated, so the
+        // connect-time resolver can't rebind the hostname to a blocked IP after
+        // the check passed (DNS TOCTOU). `None` for literal-IP / proxy-resolved
+        // hosts, where there is nothing to pin.
+        if let Some((host, addrs)) = &validated.pin {
+            builder = builder.resolve_to_addrs(host, addrs);
+        }
+        let client = crate::url_check::build_http_client(&self.provider_id, &self.url, builder)?;
 
         let mut builder = client.get(&self.url).headers(self.extra_headers.clone());
         builder = match &self.auth {

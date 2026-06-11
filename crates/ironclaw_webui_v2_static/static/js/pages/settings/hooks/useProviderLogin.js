@@ -21,11 +21,17 @@ export function isLocalDevOrigin() {
   // `window.location.hostname` exposes IPv6 hosts without brackets (e.g.
   // `http://[::1]:3000/` -> `"::1"`), so a bracketed `"[::1]"` form never
   // appears here.
+  //
+  // The entire `127.0.0.0/8` block is loopback, not just `127.0.0.1` — some
+  // setups serve the dev UI on `127.0.1.1` (Debian's default for the hostname)
+  // or other `127.*` addresses. Matching only `127.0.0.1` would let those
+  // origins open the doomed hosted-SSO flow and wait out the full timeout
+  // instead of failing fast.
   return (
     host === "localhost" ||
-    host === "127.0.0.1" ||
     host === "0.0.0.0" ||
     host === "::1" ||
+    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host) ||
     host.endsWith(".localhost")
   );
 }

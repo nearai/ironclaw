@@ -21,9 +21,22 @@
 //! resolve on the caller's behalf), IP validation is skipped — the syntactic
 //! checks still apply and the proxy resolves at request time.
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use crate::error::LlmError;
+
+/// Outcome of [`check_models_url`]: the URL passed the SSRF policy, plus the
+/// pin the caller must apply to the outbound request.
+#[derive(Debug)]
+pub(crate) struct ValidatedModelsUrl {
+    /// When `Some`, the host was a DNS name we resolved and validated; the
+    /// caller MUST pin the HTTP client to exactly these `(host, addrs)` so the
+    /// connect-time resolver cannot rebind the name to a blocked IP after the
+    /// guard cleared a safe one (DNS time-of-check/time-of-use). `None` when
+    /// the host is a literal IP (no name to rebind) or DNS was globally
+    /// unavailable (a trusted egress proxy resolves on our behalf).
+    pub pin: Option<(String, Vec<SocketAddr>)>,
+}
 
 /// Validate a base/endpoint URL before issuing an outbound model-discovery
 /// request. This is the operator base-URL SSRF policy applied at the egress
@@ -42,7 +55,17 @@ use crate::error::LlmError;
 /// environments that resolve on the caller's behalf), IP validation is skipped
 /// — the syntactic checks still apply and the proxy resolves at request time —
 /// so model discovery does not break where names cannot be resolved locally.
-pub(crate) async fn check_models_url(provider_id: &str, url: &str) -> Result<(), LlmError> {
+///
+/// On success returns a [`ValidatedModelsUrl`] whose `pin` the caller must
+/// apply to the HTTP client: validation resolves the hostname once, but
+/// `reqwest` would resolve it again at connect time, so a DNS-rebinding
+/// endpoint could return a safe IP here and a blocked one (e.g.
+/// `169.254.169.254`) when the request actually fires. Pinning the client to
+/// the exact validated addresses closes that time-of-check/time-of-use gap.
+pub(crate) async fn check_models_url(
+    provider_id: &str,
+    url: &str,
+) -> Result<ValidatedModelsUrl, LlmError> {
     let reject = |reason: String| LlmError::RequestFailed {
         provider: provider_id.to_string(),
         reason,
@@ -66,26 +89,37 @@ pub(crate) async fn check_models_url(provider_id: &str, url: &str) -> Result<(),
         .port()
         .unwrap_or(if scheme == "http" { 80 } else { 443 });
 
-    let ips = if let Ok(ip) = normalized_host.parse::<IpAddr>() {
-        vec![ip]
-    } else {
-        match resolve_host_ips(normalized_host, port).await {
-            HostResolution::Resolved(ips) => ips,
-            HostResolution::Unresolvable => {
-                return Err(reject(format!("could not resolve models host '{host}'")));
-            }
-            HostResolution::DnsUnavailable => {
-                tracing::debug!(
-                    host = %host,
-                    provider = %provider_id,
-                    "DNS resolution unavailable; skipping SSRF IP validation for model-discovery URL"
-                );
-                return Ok(());
-            }
-        }
-    };
+    if let Ok(ip) = normalized_host.parse::<IpAddr>() {
+        enforce_resolved_policy(provider_id, scheme, host, normalized_host, &[ip])?;
+        // Literal IP: `reqwest` connects to it directly with no DNS lookup, so
+        // there is nothing to rebind and nothing to pin.
+        return Ok(ValidatedModelsUrl { pin: None });
+    }
 
-    enforce_resolved_policy(provider_id, scheme, host, normalized_host, &ips)
+    match resolve_host_ips(normalized_host, port).await {
+        HostResolution::Resolved(addrs) => {
+            let ips: Vec<IpAddr> = addrs.iter().map(SocketAddr::ip).collect();
+            enforce_resolved_policy(provider_id, scheme, host, normalized_host, &ips)?;
+            // Pin the client to the addresses we just validated so the
+            // connect-time resolver can't rebind to a blocked IP.
+            Ok(ValidatedModelsUrl {
+                pin: Some((normalized_host.to_string(), addrs)),
+            })
+        }
+        HostResolution::Unresolvable => {
+            Err(reject(format!("could not resolve models host '{host}'")))
+        }
+        HostResolution::DnsUnavailable => {
+            tracing::debug!(
+                host = %host,
+                provider = %provider_id,
+                "DNS resolution unavailable; skipping SSRF IP validation for model-discovery URL"
+            );
+            // No local resolution available: the trusted egress proxy resolves
+            // at request time, so there is no address to pin.
+            Ok(ValidatedModelsUrl { pin: None })
+        }
+    }
 }
 
 /// Apply the IP-class / scheme policy to a host's literal or DNS-resolved IPs.
@@ -240,9 +274,11 @@ fn is_always_blocked(ip: &IpAddr) -> bool {
     matches!(classify_ip(ip), IpClass::AlwaysBlocked)
 }
 
-/// Result of resolving a hostname to IPs for SSRF validation.
+/// Result of resolving a hostname to socket addresses for SSRF validation.
+/// Socket addresses (not bare IPs) are carried so the caller can pin the HTTP
+/// client to exactly these endpoints and avoid a second, rebindable lookup.
 enum HostResolution {
-    Resolved(Vec<IpAddr>),
+    Resolved(Vec<SocketAddr>),
     /// The name did not resolve, but DNS itself is working — a genuine
     /// "unknown host".
     Unresolvable,
@@ -254,11 +290,11 @@ enum HostResolution {
 async fn resolve_host_ips(host: &str, port: u16) -> HostResolution {
     match tokio::net::lookup_host((host, port)).await {
         Ok(addrs) => {
-            let ips: Vec<IpAddr> = addrs.map(|addr| addr.ip()).collect();
-            if ips.is_empty() {
+            let addrs: Vec<SocketAddr> = addrs.collect();
+            if addrs.is_empty() {
                 HostResolution::Unresolvable
             } else {
-                HostResolution::Resolved(ips)
+                HostResolution::Resolved(addrs)
             }
         }
         // The target itself didn't resolve — distinguish "DNS is down" (skip
@@ -354,6 +390,30 @@ mod tests {
         check_models_url("p", "https://[::169.254.169.254]/models")
             .await
             .expect_err("ipv4-compatible metadata");
+    }
+
+    #[tokio::test]
+    async fn literal_ip_url_carries_no_pin() {
+        // A literal IP is connected to directly with no DNS lookup, so there's
+        // nothing to rebind and the result must not pin.
+        let validated = check_models_url("p", "https://93.184.216.34/v1/models")
+            .await
+            .unwrap();
+        assert!(validated.pin.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolved_hostname_pins_validated_addresses() {
+        // `localhost` resolves through the system resolver to loopback
+        // addresses; the guard must hand back a pin so the outbound request
+        // can't rebind the name to a different IP at connect time (DNS TOCTOU).
+        let validated = check_models_url("p", "http://localhost:11434/api/tags")
+            .await
+            .unwrap();
+        let (host, addrs) = validated.pin.expect("a resolved hostname carries a pin");
+        assert_eq!(host, "localhost");
+        assert!(!addrs.is_empty());
+        assert!(addrs.iter().all(|addr| addr.ip().is_loopback()));
     }
 
     #[tokio::test]
