@@ -33,12 +33,12 @@ use ironclaw_host_api::{
     ResourceEstimate, RuntimeKind, TenantId, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, TRIGGER_CREATE_CAPABILITY_ID,
-    TRIGGER_LIST_CAPABILITY_ID,
+    ECHO_CAPABILITY_ID, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
+    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
 };
 use ironclaw_loop_support::{
-    HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
-    HostManagedModelResponse,
+    HostManagedModelError, HostManagedModelGateway, HostManagedModelMessageRole,
+    HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_reborn_composition::{
     RebornCompositionProfile, RebornLocalRuntimeProfileOptions, RebornRuntime,
@@ -254,11 +254,13 @@ impl HostManagedModelGateway for RecordingGateway {
     }
 }
 
-#[tokio::test]
-async fn reborn_qa_routine_created_by_tool_fires_and_runs_routine_prompt() {
-    let root = tempfile::tempdir().expect("tempdir");
-    let recording_gateway = Arc::new(RecordingGateway::default());
-
+/// Builds a local-dev yolo `RebornRuntime` with the trigger poller enabled
+/// and the supplied model gateway override — the shared setup for the
+/// fire-path tests below.
+async fn build_qa_fire_runtime(
+    root: &tempfile::TempDir,
+    gateway: Arc<dyn HostManagedModelGateway>,
+) -> RebornRuntime {
     let host_home_root = root.path().join("host-home");
     std::fs::create_dir_all(&host_home_root).expect("host home root");
     let input = local_runtime_build_input_with_options(
@@ -285,10 +287,19 @@ async fn reborn_qa_routine_created_by_tool_fires_and_runs_routine_prompt() {
                     ..Default::default()
                 }),
         )
-        .with_model_gateway_override(
-            Arc::clone(&recording_gateway) as Arc<dyn HostManagedModelGateway>
-        );
-    let runtime: RebornRuntime = build_reborn_runtime(input).await.expect("runtime builds");
+        .with_model_gateway_override(gateway);
+    build_reborn_runtime(input).await.expect("runtime builds")
+}
+
+#[tokio::test]
+async fn reborn_qa_routine_created_by_tool_fires_and_runs_routine_prompt() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let recording_gateway = Arc::new(RecordingGateway::default());
+    let runtime = build_qa_fire_runtime(
+        &root,
+        Arc::clone(&recording_gateway) as Arc<dyn HostManagedModelGateway>,
+    )
+    .await;
 
     let created = invoke_trigger_create(
         &runtime,
@@ -404,6 +415,136 @@ async fn reborn_qa_routine_created_by_tool_fires_and_runs_routine_prompt() {
         settled.next_run_at > fired_slot,
         "recurring QA routine should reschedule past the fired slot — fired: {fired_slot:?}, next: {:?}",
         settled.next_run_at
+    );
+}
+
+/// QA expected result for the deployment health watcher: the fired routine
+/// does not just receive its prompt — it executes the downstream action
+/// (here `builtin.echo` standing in for "send a Slack DM", dispatched through
+/// the real host runtime) and finalizes a reply. The scripted gateway only
+/// serves the final reply after the loop returns the action's tool result,
+/// so an Ok settle proves the full fired-turn chain:
+/// poller fire → trusted turn → capability dispatch → tool result → reply.
+#[tokio::test]
+async fn reborn_qa_fired_routine_executes_action_and_finalizes_reply() {
+    // No slashes: the model-visible output sanitizer rewrites path-like
+    // tokens in tool results, which would break the exact-marker match.
+    const QA_DM_ACTION_MARKER: &str =
+        "qa-slack-dm: deployment health endpoint returned 503, alerting user";
+    const QA_FIRED_REPLY: &str = "Slack DM sent: the endpoint did not return a 200";
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let echo = CapabilityId::new(ECHO_CAPABILITY_ID).expect("valid capability id");
+    let gateway = RebornTraceReplayModelGateway::with_scripted_steps([
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![RebornScriptedProviderToolCall::new(
+                echo.clone(),
+                "call_qa_fired_dm_action",
+                json!({"message": QA_DM_ACTION_MARKER}),
+            )],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::Response {
+            response: HostManagedModelResponse::assistant_reply(QA_FIRED_REPLY),
+            expected_tool_results: Vec::new(),
+        },
+    ]);
+    let runtime = build_qa_fire_runtime(
+        &root,
+        Arc::new(gateway.clone()) as Arc<dyn HostManagedModelGateway>,
+    )
+    .await;
+
+    let created = invoke_trigger_create(
+        &runtime,
+        json!({
+            "name": "Deployment health watcher action",
+            "prompt": QA_ROUTINE_PROMPT,
+            "cron": "*/5 * * * *",
+        }),
+    )
+    .await;
+    assert_eq!(created["trigger"]["state"], json!("scheduled"));
+
+    let repo = runtime
+        .trigger_repository()
+        .expect("local-dev runtime exposes trigger repository");
+    let tenant_id = TenantId::new(QA_TENANT).expect("tenant id");
+    let trigger_id = TriggerId::parse(
+        created["trigger"]["trigger_id"]
+            .as_str()
+            .expect("created trigger id"),
+    )
+    .expect("valid trigger id");
+
+    let mut record = repo
+        .get_trigger(tenant_id.clone(), trigger_id)
+        .await
+        .expect("get created trigger")
+        .expect("created trigger persisted");
+    record.next_run_at = Utc::now() - chrono::Duration::seconds(120);
+    repo.upsert_trigger(record)
+        .await
+        .expect("make created routine due");
+
+    // Wait for the fired turn to consume the full model script: both steps
+    // taken means the action's tool result made it back to the model and the
+    // final reply was served.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline && gateway.remaining_responses() > 0 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Wait for the settle writes before asserting the trigger outcome.
+    let settle_deadline = Instant::now() + Duration::from_secs(5);
+    let mut settled = repo
+        .get_trigger(tenant_id.clone(), trigger_id)
+        .await
+        .expect("get trigger")
+        .expect("record present");
+    while Instant::now() < settle_deadline
+        && !(settled.last_fired_slot.is_some() && settled.last_run_at.is_some())
+    {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        settled = repo
+            .get_trigger(tenant_id.clone(), trigger_id)
+            .await
+            .expect("get trigger")
+            .expect("record present");
+    }
+
+    runtime.shutdown().await.expect("runtime shutdown");
+
+    gateway.assert_exhausted();
+    let requests = gateway.requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "fired routine turn should make exactly two model requests (prompt, then tool result)"
+    );
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|message| message.content.contains(QA_ROUTINE_PROMPT)),
+        "first fired-turn request should carry the routine prompt"
+    );
+    assert!(
+        requests[1].messages.iter().any(|message| {
+            message.role == HostManagedModelMessageRole::ToolResult
+                && message.content.contains(QA_DM_ACTION_MARKER)
+        }),
+        "the fired routine's action must execute and its tool result must reach the model — messages: {:?}",
+        requests[1]
+            .messages
+            .iter()
+            .map(|message| (&message.role, &message.content))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        settled.last_status,
+        Some(TriggerRunStatus::Ok),
+        "fired QA routine with an action should settle with Ok status — record: {settled:?}"
     );
 }
 
