@@ -3370,3 +3370,127 @@ impl TriggerRepository for ClaimRaceRepository {
         unreachable!("claim-race repository should not clear active fires")
     }
 }
+
+#[tokio::test]
+async fn timezone_aware_firing_harness() {
+    // Fixed instants — all UTC.
+    // "0 9 * * *" America/New_York in January (UTC-5) = 14:00 UTC.
+    let before = ymd_hms(2026, 1, 2, 13, 0, 0);
+    let expected_seed_next_run_at = ymd_hms(2026, 1, 2, 14, 0, 0);
+    let tick1 = ymd_hms(2026, 1, 2, 13, 59, 0);
+    let tick2 = ymd_hms(2026, 1, 2, 14, 0, 0);
+    let expected_post_fire_next_run_at = ymd_hms(2026, 1, 3, 14, 0, 0);
+
+    // Build the schedule and compute the seed next_run_at from the reference instant.
+    let schedule = TriggerSchedule::cron_with_timezone("0 9 * * *", "America/New_York")
+        .expect("valid schedule");
+    let computed_seed = schedule
+        .next_slot_after(before)
+        .expect("next slot computation succeeds")
+        .expect("there is a future slot after 2026-01-02 13:00:00 UTC");
+
+    // Conversion assertion: 9 AM ET (UTC-5 in January) = 14:00 UTC.
+    assert_eq!(
+        computed_seed, expected_seed_next_run_at,
+        "next_slot_after(13:00 UTC) for '0 9 * * *' America/New_York must be 14:00 UTC"
+    );
+
+    // Seed one trigger record with next_run_at = 14:00 UTC.
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+    let record = TriggerRecord {
+        trigger_id,
+        tenant_id: tenant("tenant-tz"),
+        creator_user_id: user("user-a"),
+        agent_id: Some(AgentId::new("agent-a").expect("valid agent")),
+        project_id: Some(ProjectId::new("project-a").expect("valid project")),
+        name: "daily 9am eastern".to_string(),
+        source: TriggerSourceKind::Schedule,
+        schedule: schedule.clone(),
+        completion_policy: TriggerCompletionPolicy::Recurring,
+        prompt: "run daily summary".to_string(),
+        state: TriggerState::Scheduled,
+        next_run_at: computed_seed,
+        last_run_at: None,
+        last_fired_slot: None,
+        last_status: None,
+        active_fire_slot: None,
+        active_run_ref: None,
+        created_at: ts(1_704_067_000),
+    };
+    repo.upsert_trigger(record.clone()).await.expect("insert");
+
+    // ── tick1: 13:59 UTC — not yet due, must not fire ────────────────
+    {
+        let submitter = Arc::new(RecordingSubmitter::with_outcomes(Vec::new()));
+        let materializer = Arc::new(RecordingMaterializer::success("content:trigger-fire"));
+        let w = worker(
+            repo.clone(),
+            materializer.clone(),
+            submitter.clone(),
+            Arc::new(RecordingActiveRunLookup::default()),
+        );
+
+        w.tick_once(tick1).await.expect("tick1 succeeds");
+
+        assert_eq!(
+            submitter.requests().len(),
+            0,
+            "tick1 (13:59 UTC): submitter must not be called before 14:00 UTC fire slot"
+        );
+        let state_after_tick1 = repo
+            .get_trigger(tenant("tenant-tz"), trigger_id)
+            .await
+            .expect("load after tick1")
+            .expect("record present");
+        assert!(
+            state_after_tick1.last_fired_slot.is_none(),
+            "tick1 (13:59 UTC): last_fired_slot must remain None"
+        );
+        assert_eq!(
+            state_after_tick1.next_run_at, expected_seed_next_run_at,
+            "tick1 (13:59 UTC): next_run_at must be unchanged"
+        );
+    }
+
+    // ── tick2: 14:00 UTC — due, must fire ───────────────────────────
+    {
+        let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("run id");
+        let submitter = Arc::new(RecordingSubmitter::with_outcomes(vec![Ok(
+            TrustedTriggerFireSubmitOutcome::Accepted {
+                run_id,
+                submitted_at: tick2,
+                turn_scope: test_turn_scope(),
+            },
+        )]));
+        let materializer = Arc::new(RecordingMaterializer::success("content:trigger-fire"));
+        let w = worker(
+            repo.clone(),
+            materializer.clone(),
+            submitter.clone(),
+            Arc::new(RecordingActiveRunLookup::default()),
+        );
+
+        w.tick_once(tick2).await.expect("tick2 succeeds");
+
+        assert_eq!(
+            submitter.requests().len(),
+            1,
+            "tick2 (14:00 UTC): submitter must be called exactly once"
+        );
+        let state_after_tick2 = repo
+            .get_trigger(tenant("tenant-tz"), trigger_id)
+            .await
+            .expect("load after tick2")
+            .expect("record present");
+        assert_eq!(
+            state_after_tick2.last_fired_slot,
+            Some(tick2),
+            "tick2 (14:00 UTC): last_fired_slot must equal the fire slot"
+        );
+        assert_eq!(
+            state_after_tick2.next_run_at, expected_post_fire_next_run_at,
+            "tick2 (14:00 UTC): next_run_at must advance to 2026-01-03 14:00:00 UTC (next day 9 AM ET)"
+        );
+    }
+}
