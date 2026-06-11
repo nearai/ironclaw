@@ -919,7 +919,12 @@ pub struct RebornAutomationInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RebornAutomationSource {
-    Schedule { cron: String },
+    Schedule {
+        cron: String,
+        /// IANA timezone name in which the cron expression is evaluated
+        /// (e.g. "America/New_York"). Always "UTC" for legacy rows.
+        timezone: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

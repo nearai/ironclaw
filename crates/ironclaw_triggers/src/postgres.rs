@@ -21,7 +21,7 @@ const TRIGGER_TABLE: &str = "trigger_records";
 const TRIGGER_RUN_TABLE: &str = "trigger_run_history";
 const TRIGGER_COLUMNS: &str = "\
     trigger_id, tenant_id, creator_user_id, agent_id, project_id, \
-    name, source, schedule_expression, completion_policy, prompt, \
+    name, source, schedule_expression, schedule_timezone, completion_policy, prompt, \
     state, next_run_at, last_run_at, last_fired_slot, last_status, \
     active_fire_slot, active_run_ref, created_at";
 const TRIGGER_RUN_COLUMNS: &str = "\
@@ -78,6 +78,7 @@ impl TriggerRepository for PostgresTriggerRepository {
         let project_id = record.project_id.as_ref().map(ProjectId::as_str);
         let source = source_kind_text(record.source);
         let schedule_expression = schedule_expression_text(&record.schedule);
+        let schedule_timezone = schedule_timezone_text(&record.schedule);
         let completion_policy = completion_policy_text(record.completion_policy);
         let state = state_text(record.state);
         let next_run_at = fmt_ts(&record.next_run_at);
@@ -93,14 +94,14 @@ impl TriggerRepository for PostgresTriggerRepository {
                 r#"
                 INSERT INTO trigger_records (
                     trigger_id, tenant_id, creator_user_id, agent_id, project_id,
-                    name, source, schedule_expression, completion_policy, prompt,
+                    name, source, schedule_expression, schedule_timezone, completion_policy, prompt,
                     state, next_run_at, last_run_at, last_fired_slot, last_status,
                     active_fire_slot, active_run_ref, created_at
                 ) VALUES (
                     $1, $2, $3, $4, $5,
                     $6, $7, $8, $9, $10,
                     $11, $12, $13, $14, $15,
-                    $16, $17, $18
+                    $16, $17, $18, $19
                 )
                 ON CONFLICT (tenant_id, trigger_id) DO UPDATE SET
                     creator_user_id = EXCLUDED.creator_user_id,
@@ -109,6 +110,7 @@ impl TriggerRepository for PostgresTriggerRepository {
                     name = EXCLUDED.name,
                     source = EXCLUDED.source,
                     schedule_expression = EXCLUDED.schedule_expression,
+                    schedule_timezone = EXCLUDED.schedule_timezone,
                     completion_policy = EXCLUDED.completion_policy,
                     prompt = EXCLUDED.prompt,
                     state = EXCLUDED.state,
@@ -128,6 +130,7 @@ impl TriggerRepository for PostgresTriggerRepository {
                     &record.name,
                     &source,
                     &schedule_expression,
+                    &schedule_timezone,
                     &completion_policy,
                     &record.prompt,
                     &state,
@@ -1111,7 +1114,10 @@ fn row_to_record(row: &Row) -> Result<TriggerRecord, TriggerError> {
             ProjectId::new(value).map_err(|error| invalid_record("project_id", error.to_string()))
         })
         .transpose()?;
-    let schedule = TriggerSchedule::cron(required_text(row, "schedule_expression")?)?;
+    let schedule = TriggerSchedule::cron_with_timezone(
+        required_text(row, "schedule_expression")?,
+        required_text(row, "schedule_timezone")?,
+    )?;
     let last_run_at = optional_text(row, "last_run_at")?
         .map(|value| parse_timestamp(&value, "last_run_at"))
         .transpose()?;
@@ -1266,7 +1272,13 @@ fn parse_run_history_status(value: &str) -> Result<TriggerRunHistoryStatus, Trig
 
 fn schedule_expression_text(schedule: &TriggerSchedule) -> String {
     match schedule {
-        TriggerSchedule::Cron { expression } => expression.clone(),
+        TriggerSchedule::Cron { expression, .. } => expression.clone(),
+    }
+}
+
+fn schedule_timezone_text(schedule: &TriggerSchedule) -> String {
+    match schedule {
+        TriggerSchedule::Cron { timezone, .. } => timezone.clone(),
     }
 }
 
@@ -1292,6 +1304,7 @@ CREATE TABLE IF NOT EXISTS trigger_records (
     name TEXT NOT NULL,
     source TEXT NOT NULL,
     schedule_expression TEXT NOT NULL,
+    schedule_timezone TEXT NOT NULL DEFAULT 'UTC',
     completion_policy TEXT NOT NULL,
     prompt TEXT NOT NULL,
     state TEXT NOT NULL,
@@ -1304,6 +1317,8 @@ CREATE TABLE IF NOT EXISTS trigger_records (
     created_at TEXT NOT NULL,
     PRIMARY KEY (tenant_id, trigger_id)
 );
+
+ALTER TABLE trigger_records ADD COLUMN IF NOT EXISTS schedule_timezone TEXT NOT NULL DEFAULT 'UTC';
 
 CREATE INDEX IF NOT EXISTS trigger_records_state_next_run_at_idx
     ON trigger_records (state, next_run_at, tenant_id, trigger_id);

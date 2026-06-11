@@ -917,7 +917,10 @@ fn automation_info(
     RebornAutomationInfo {
         automation_id: trigger_id.to_string(),
         name: name.into(),
-        source: RebornAutomationSource::Schedule { cron: cron.into() },
+        source: RebornAutomationSource::Schedule {
+            cron: cron.into(),
+            timezone: "UTC".to_string(),
+        },
         state: RebornAutomationState::Active,
         next_run_at: Some("2026-06-03T09:00:00Z".parse().expect("next run")),
         last_run_at: None,
@@ -4053,7 +4056,8 @@ async fn list_automation_dispatches_through_product_facade() {
     assert_eq!(
         listed.automations[0].source,
         RebornAutomationSource::Schedule {
-            cron: "0 9 * * *".to_string()
+            cron: "0 9 * * *".to_string(),
+            timezone: "UTC".to_string(),
         }
     );
     assert_eq!(listed.automations[0].state, RebornAutomationState::Active);
