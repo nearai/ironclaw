@@ -100,32 +100,38 @@ export function ChatInput({
 
   const onPaste = React.useCallback(
     (e) => {
+      if (disabled) return;
       const files = Array.from(e.clipboardData.files);
       if (files.length > 0) {
         e.preventDefault();
         setUnsupportedPayloadError(t("chat.attachmentsUnsupported"));
       }
     },
-    [t]
+    [t, disabled]
   );
 
   const onDrop = React.useCallback(
     (e) => {
       e.preventDefault();
       setDragOver(false);
+      if (disabled) return;
       const files = Array.from(e.dataTransfer.files);
       if (files.length > 0) {
         setUnsupportedPayloadError(t("chat.attachmentsUnsupported"));
       }
     },
-    [t]
+    [t, disabled]
   );
 
   const [dragOver, setDragOver] = React.useState(false);
-  const onDragOver = React.useCallback((e) => {
-    e.preventDefault();
-    setDragOver(true);
-  }, []);
+  const onDragOver = React.useCallback(
+    (e) => {
+      e.preventDefault();
+      if (disabled) return;
+      setDragOver(true);
+    },
+    [disabled]
+  );
   const onDragLeave = React.useCallback((e) => {
     if (e.currentTarget.contains(e.relatedTarget)) return;
     setDragOver(false);
@@ -134,12 +140,12 @@ export function ChatInput({
   const onFileInputChange = React.useCallback(
     (e) => {
       const files = Array.from(e.target.files || []);
-      if (files.length > 0) {
+      if (!disabled && files.length > 0) {
         setUnsupportedPayloadError(t("chat.attachmentsUnsupported"));
       }
       e.target.value = "";
     },
-    [t]
+    [t, disabled]
   );
 
   const hasPayload = text.trim();
@@ -153,7 +159,11 @@ export function ChatInput({
     "relative mx-auto w-full max-w-5xl rounded-[20px] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] shadow-[var(--v2-card-shadow)] p-2.5 transition-colors",
     // Highlight the full rounded container on focus (not just the
     // leaking textarea ring), mirroring the global input:focus accent.
-    "focus-within:border-[var(--v2-accent)] focus-within:shadow-[0_0_0_3px_color-mix(in_srgb,var(--v2-accent)_28%,transparent)]",
+    // Suppressed while disabled so the Working-state composer never
+    // looks interactive.
+    disabled
+      ? ""
+      : "focus-within:border-[var(--v2-accent)] focus-within:shadow-[0_0_0_3px_color-mix(in_srgb,var(--v2-accent)_28%,transparent)]",
     isHero ? "min-h-[120px]" : "",
     disabled ? "opacity-70" : "",
   ].join(" ");
@@ -216,13 +226,19 @@ export function ChatInput({
           `}
           <div className="ml-auto flex items-center gap-1.5">
             <label
-              className="flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-full text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-accent-text)]"
+              className=${[
+                "flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[var(--v2-text-muted)]",
+                disabled
+                  ? "cursor-not-allowed opacity-50 pointer-events-none"
+                  : "cursor-pointer hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-accent-text)]",
+              ].join(" ")}
               title=${t("chat.attachmentsUnsupported")}
             >
               <input
                 type="file"
                 multiple
                 className="hidden"
+                disabled=${disabled}
                 onChange=${onFileInputChange}
               />
               <${Icon} name="attach" className="h-5 w-5" />
