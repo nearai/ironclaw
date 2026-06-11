@@ -1,5 +1,6 @@
 import { React } from "../../../lib/html.js";
 import { fetchTimeline } from "../../../lib/api.js";
+import { authScope } from "../../../lib/auth-scope.js";
 import { messagesFromTimeline } from "../lib/history-messages.js";
 
 const PAGE_SIZE = 50;
@@ -15,6 +16,14 @@ const PAGE_SIZE = 50;
  * source of truth; the /timeline endpoint remains authoritative. */
 const historyCache = new Map();
 
+// Namespace cache entries by the authenticated user so a session change in
+// the same tab (sign-out/in, token swap, 401 re-auth) can't surface the
+// previous user's cached conversations — a different identity reads under a
+// different key and misses them.
+function cacheKey(threadId) {
+  return `${authScope()}:${threadId}`;
+}
+
 /// Drop all cached thread messages. Called on sign-out so a different user
 /// logging in on the same tab (no full reload) can never observe the previous
 /// session's cached conversations.
@@ -24,7 +33,7 @@ export function clearHistoryCache() {
 
 export function useHistory(threadId, options = {}) {
   const { getPendingMessages, setPendingMessages } = options;
-  const cached = threadId ? historyCache.get(threadId) : null;
+  const cached = threadId ? historyCache.get(cacheKey(threadId)) : null;
   const [state, setState] = React.useState({
     messages: cached?.messages || [],
     nextCursor: cached?.nextCursor || null,
@@ -70,7 +79,7 @@ export function useHistory(threadId, options = {}) {
         // state, so refresh the cache even if the user has since switched
         // threads.
         if (!cursor) {
-          historyCache.set(threadId, { messages: renderable, nextCursor });
+          historyCache.set(cacheKey(threadId), { messages: renderable, nextCursor });
         }
 
         setState((prev) => {
@@ -80,7 +89,7 @@ export function useHistory(threadId, options = {}) {
           const merged = cursor
             ? mergePage(renderable, prev.messages)
             : renderable;
-          if (cursor) historyCache.set(threadId, { messages: merged, nextCursor });
+          if (cursor) historyCache.set(cacheKey(threadId), { messages: merged, nextCursor });
           return {
             messages: merged,
             nextCursor,
@@ -102,7 +111,7 @@ export function useHistory(threadId, options = {}) {
   );
 
   React.useEffect(() => {
-    const entry = threadId ? historyCache.get(threadId) : null;
+    const entry = threadId ? historyCache.get(cacheKey(threadId)) : null;
     setState({
       messages: entry?.messages || [],
       nextCursor: entry?.nextCursor || null,
@@ -127,7 +136,7 @@ export function useHistory(threadId, options = {}) {
         // Keep the cache in step with optimistic sends and SSE-driven
         // updates so returning to the thread shows the latest messages.
         if (threadId) {
-          historyCache.set(threadId, { messages, nextCursor: s.nextCursor });
+          historyCache.set(cacheKey(threadId), { messages, nextCursor: s.nextCursor });
         }
         return { ...s, messages };
       }),

@@ -7,12 +7,17 @@
  * previously dropped its draft on unmount.
  */
 
+import { authScope } from "../../../lib/auth-scope.js";
+
 export const NEW_DRAFT_KEY = "__new__";
 
 const STORAGE_PREFIX = "ironclaw:v2-draft:";
 
+// Namespaced by the authenticated user so one user's unsent text can't be
+// restored for another in the same browser (the new-conversation slot is
+// shared by key, so this scoping is what isolates it across sessions).
 function storageKey(key) {
-  return `${STORAGE_PREFIX}${key || NEW_DRAFT_KEY}`;
+  return `${STORAGE_PREFIX}${authScope()}:${key || NEW_DRAFT_KEY}`;
 }
 
 /** Read the saved draft for a key, or "" when none / storage is unavailable. */

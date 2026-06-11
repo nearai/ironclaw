@@ -7,6 +7,7 @@ import {
   readStoredToken,
   storeToken,
 } from "../lib/api.js";
+import { setAuthScope } from "../lib/auth-scope.js";
 import { clearHistoryCache } from "../pages/chat/hooks/useHistory.js";
 import { clearAllDrafts } from "../pages/chat/lib/draft-store.js";
 
@@ -191,6 +192,14 @@ export function useAuthSession() {
       cancelled = true;
     };
   }, [token, isExchanging]);
+
+  // Mirror the resolved identity into the cache scope so per-session client
+  // state (history cache, drafts) is namespaced by user. Covers every
+  // session transition, not just explicit sign-out: login, token swap, and
+  // 401 re-auth all flow through `session`.
+  React.useEffect(() => {
+    setAuthScope(session);
+  }, [session]);
 
   const signIn = React.useCallback((nextToken) => {
     storeToken(nextToken);

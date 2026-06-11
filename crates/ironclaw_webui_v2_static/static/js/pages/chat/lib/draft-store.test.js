@@ -8,6 +8,7 @@
 
 import assert from "node:assert/strict";
 import { beforeEach, test } from "node:test";
+import { setAuthScope } from "../../../lib/auth-scope.js";
 import {
   NEW_DRAFT_KEY,
   clearAllDrafts,
@@ -37,6 +38,26 @@ function installStorage() {
 
 beforeEach(() => {
   installStorage();
+  setAuthScope(null);
+});
+
+test("drafts are isolated per authenticated user across a session switch", () => {
+  // Regression: signing out and a different user signing into the same tab
+  // must not restore the previous user's unsent draft (the new-conversation
+  // slot is shared by key, so identity scoping is what isolates it).
+  setAuthScope({ tenant_id: "t1", user_id: "user-A" });
+  setDraft(NEW_DRAFT_KEY, "user A's secret draft");
+
+  setAuthScope({ tenant_id: "t1", user_id: "user-B" });
+  assert.equal(getDraft(NEW_DRAFT_KEY), "", "user B must not see user A's draft");
+  setDraft(NEW_DRAFT_KEY, "user B's draft");
+
+  setAuthScope({ tenant_id: "t1", user_id: "user-A" });
+  assert.equal(
+    getDraft(NEW_DRAFT_KEY),
+    "user A's secret draft",
+    "user A's own draft is still scoped to A"
+  );
 });
 
 test("getDraft returns an empty string when nothing is stored", () => {
