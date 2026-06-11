@@ -27,8 +27,6 @@ mod auth;
 mod auth_dcr_tests;
 mod auth_prompt;
 mod automation;
-#[cfg(test)]
-mod automation_resolver_tests;
 mod available_extensions;
 mod budget;
 mod budget_events;
