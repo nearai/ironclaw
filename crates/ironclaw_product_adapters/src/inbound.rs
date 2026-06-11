@@ -751,6 +751,25 @@ impl ProductRejection {
     }
 }
 
+impl ProductRejectionKind {
+    /// Returns a sanitized, user-facing hint for this rejection kind.
+    ///
+    /// Never interpolates internal state, reasons, or redacted strings.
+    pub fn user_facing_hint(&self) -> &'static str {
+        match self {
+            Self::BindingRequired => {
+                "I couldn't match this reply to an active conversation. Reply in the approval thread, or use `approve gate:<ref>`."
+            }
+            Self::AccessDenied => "You don't have access to resolve this request.",
+            Self::UnknownInstallation => "This workspace isn't set up with IronClaw yet.",
+            Self::InvalidRequest => {
+                "I couldn't read that request. Use `approve` / `deny`, optionally with `gate:<ref>`."
+            }
+            Self::PolicyDenied => "That request was declined by policy.",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InboundRetryDisposition {
@@ -1020,5 +1039,25 @@ mod tests {
             .retry_disposition(),
             InboundRetryDisposition::ReplayPrior
         );
+    }
+
+    #[test]
+    fn rejection_kind_user_facing_hint_is_exhaustive_and_sanitized() {
+        // Every variant must return a non-empty, static hint with no internal state.
+        let cases = [
+            (ProductRejectionKind::BindingRequired, "approve gate:"),
+            (ProductRejectionKind::AccessDenied, "access"),
+            (ProductRejectionKind::UnknownInstallation, "workspace"),
+            (ProductRejectionKind::InvalidRequest, "approve"),
+            (ProductRejectionKind::PolicyDenied, "policy"),
+        ];
+        for (kind, expected_substr) in &cases {
+            let hint = kind.user_facing_hint();
+            assert!(!hint.is_empty(), "{kind:?} hint must not be empty");
+            assert!(
+                hint.contains(expected_substr),
+                "{kind:?} hint '{hint}' must contain '{expected_substr}'"
+            );
+        }
     }
 }
