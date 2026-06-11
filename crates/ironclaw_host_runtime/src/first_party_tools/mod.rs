@@ -32,9 +32,9 @@ use ironclaw_first_party_extensions::coding::{
 };
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileSchemaRef, EffectKind, ExtensionId, HostApiError,
-    PermissionMode, RequestedTrustClass, ResourceCeiling, ResourceEstimate, ResourceProfile,
-    ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgressError, RuntimeHttpEgressResponse,
-    TrustClass, VirtualPath,
+    PermissionMode, ProcessBackendKind, RequestedTrustClass, ResourceCeiling, ResourceEstimate,
+    ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgressError,
+    RuntimeHttpEgressResponse, TrustClass, VirtualPath,
 };
 
 use crate::{
@@ -178,6 +178,57 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
     )
 }
 
+pub fn builtin_first_party_package_for_process_backend(
+    process_backend: ProcessBackendKind,
+) -> Result<ExtensionPackage, ExtensionError> {
+    let mut package = builtin_first_party_package()?;
+    if !first_party_process_capabilities_enabled(process_backend) {
+        remove_builtin_shell_capability(&mut package)?;
+    }
+    Ok(package)
+}
+
+fn first_party_process_capabilities_enabled(process_backend: ProcessBackendKind) -> bool {
+    matches!(
+        process_backend,
+        ProcessBackendKind::Docker
+            | ProcessBackendKind::Srt
+            | ProcessBackendKind::SmolVm
+            | ProcessBackendKind::LocalHost
+            | ProcessBackendKind::TenantSandbox
+            | ProcessBackendKind::OrgDedicatedRunner
+    )
+}
+
+fn remove_builtin_shell_capability(package: &mut ExtensionPackage) -> Result<(), ExtensionError> {
+    let shell_capability_id = CapabilityId::new(SHELL_CAPABILITY_ID)?;
+    let descriptor_present = package
+        .capabilities
+        .iter()
+        .any(|candidate| candidate.id == shell_capability_id);
+    let manifest_present = package
+        .manifest
+        .capabilities
+        .iter()
+        .any(|candidate| candidate.id == shell_capability_id);
+    if !descriptor_present || !manifest_present {
+        return Err(ExtensionError::InvalidManifest {
+            reason: format!(
+                "built-in first-party package is missing process capability {SHELL_CAPABILITY_ID}"
+            ),
+        });
+    }
+
+    package
+        .capabilities
+        .retain(|candidate| candidate.id != shell_capability_id);
+    package
+        .manifest
+        .capabilities
+        .retain(|candidate| candidate.id != shell_capability_id);
+    Ok(())
+}
+
 fn coding_manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     CODING_CAPABILITIES
         .iter()
@@ -203,6 +254,17 @@ pub fn builtin_first_party_handlers(
     Ok(registry)
 }
 
+pub fn builtin_first_party_handlers_for_process_backend(
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    process_backend: ProcessBackendKind,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    let mut registry = builtin_first_party_handlers(trigger_repository)?;
+    if !first_party_process_capabilities_enabled(process_backend) {
+        remove_builtin_shell_handler(&mut registry)?;
+    }
+    Ok(registry)
+}
+
 /// Create handlers for all built-in first-party capabilities using an
 /// explicitly composed trigger repository and trigger-create lifecycle hook.
 pub fn builtin_first_party_handlers_with_trigger_create_hook(
@@ -216,6 +278,36 @@ pub fn builtin_first_party_handlers_with_trigger_create_hook(
         trigger_create_hook,
     )?;
     Ok(registry)
+}
+
+pub fn builtin_first_party_handlers_with_trigger_create_hook_for_process_backend(
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    process_backend: ProcessBackendKind,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    let mut registry = builtin_first_party_handlers_with_trigger_create_hook(
+        trigger_repository,
+        trigger_create_hook,
+    )?;
+    if !first_party_process_capabilities_enabled(process_backend) {
+        remove_builtin_shell_handler(&mut registry)?;
+    }
+    Ok(registry)
+}
+
+fn remove_builtin_shell_handler(
+    registry: &mut FirstPartyCapabilityRegistry,
+) -> Result<(), HostApiError> {
+    let shell_capability_id = CapabilityId::new(SHELL_CAPABILITY_ID)?;
+    if !registry.contains_handler(&shell_capability_id) {
+        return Err(HostApiError::InvariantViolation {
+            reason: format!(
+                "built-in first-party handlers are missing process capability {SHELL_CAPABILITY_ID}"
+            ),
+        });
+    }
+    registry.remove_handler(&shell_capability_id);
+    Ok(())
 }
 
 #[cfg(any(test, feature = "test-support"))]

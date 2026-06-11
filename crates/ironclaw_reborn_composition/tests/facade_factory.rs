@@ -22,8 +22,8 @@ use ironclaw_host_api::{
 };
 #[cfg(feature = "libsql")]
 use ironclaw_host_runtime::{
-    CapabilitySurfacePolicy, RuntimeCapabilityOutcome, RuntimeCapabilityRequest, SurfaceKind,
-    VisibleCapabilityRequest,
+    CapabilitySurfacePolicy, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
+    SHELL_CAPABILITY_ID, SurfaceKind, VisibleCapabilityRequest,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_runtime::{
@@ -253,6 +253,57 @@ fn local_dev_builtin_visible_request() -> VisibleCapabilityRequest {
 }
 
 #[cfg(feature = "libsql")]
+fn production_builtin_visible_request() -> VisibleCapabilityRequest {
+    let grants = CapabilitySet {
+        grants: vec![local_dev_grant(
+            SHELL_CAPABILITY_ID,
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::SpawnProcess,
+                EffectKind::ExecuteCode,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::Network,
+            ],
+        )],
+    };
+    let context = ExecutionContext::local_default(
+        UserId::new("production-user").unwrap(),
+        ExtensionId::new("caller").unwrap(),
+        RuntimeKind::FirstParty,
+        TrustClass::UserTrusted,
+        grants,
+        MountView::default(),
+    )
+    .unwrap();
+
+    let mut provider_trust = BTreeMap::new();
+    provider_trust.insert(
+        ExtensionId::new("builtin").unwrap(),
+        TrustDecision {
+            effective_trust: EffectiveTrustClass::user_trusted(),
+            authority_ceiling: AuthorityCeiling {
+                allowed_effects: vec![
+                    EffectKind::DispatchCapability,
+                    EffectKind::SpawnProcess,
+                    EffectKind::ExecuteCode,
+                    EffectKind::ReadFilesystem,
+                    EffectKind::WriteFilesystem,
+                    EffectKind::Network,
+                ],
+                max_resource_ceiling: None,
+            },
+            provenance: TrustProvenance::AdminConfig,
+            evaluated_at: Utc::now(),
+        },
+    );
+
+    VisibleCapabilityRequest::new(context, SurfaceKind::new("agent_loop").unwrap())
+        .with_policy(CapabilitySurfacePolicy::allow_all())
+        .with_provider_trust(provider_trust)
+}
+
+#[cfg(feature = "libsql")]
 fn local_dev_grant(capability: &str, allowed_effects: Vec<EffectKind>) -> CapabilityGrant {
     CapabilityGrant {
         id: CapabilityGrantId::new(),
@@ -371,6 +422,27 @@ async fn assert_production_services_ready_with_first_party_runtime(services: &Re
         "production host runtime should report first-party backend ready"
     );
     assert!(health.missing_runtime_backends.is_empty());
+}
+
+#[cfg(feature = "libsql")]
+async fn assert_shell_not_visible_for_processless_runtime(services: &RebornServices) {
+    let runtime = services
+        .host_runtime
+        .as_deref()
+        .expect("production services expose host runtime");
+    let surface = runtime
+        .visible_capabilities(production_builtin_visible_request())
+        .await
+        .expect("visible capabilities resolve");
+    let ids = surface
+        .capabilities
+        .iter()
+        .map(|capability| capability.descriptor.id.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        !ids.contains(&SHELL_CAPABILITY_ID),
+        "builtin.shell must not be visible when process_backend == None: {ids:?}"
+    );
 }
 
 #[cfg(feature = "libsql")]
@@ -1277,6 +1349,7 @@ async fn production_libsql_secure_default_builds_without_process_port() {
     handle.shutdown().await;
 
     assert_production_services_ready_with_first_party_runtime(&services).await;
+    assert_shell_not_visible_for_processless_runtime(&services).await;
 }
 
 #[cfg(feature = "libsql")]

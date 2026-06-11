@@ -202,14 +202,23 @@ impl ExtensionRegistry {
         let descriptor = self.capabilities.remove(capability_id)?;
         self.capability_visibility.remove(capability_id);
         self.capability_order.retain(|id| id != capability_id);
-        if let Some(package) = self.packages.get_mut(&descriptor.provider) {
+        let provider = descriptor.provider.clone();
+        let remove_empty_package = if let Some(package) = self.packages.get_mut(&provider) {
             package
                 .capabilities
-                .retain(|candidate| candidate.id != *capability_id);
+                .retain(|candidate| &candidate.id != capability_id);
             package
                 .manifest
                 .capabilities
-                .retain(|candidate| candidate.id != *capability_id);
+                .retain(|candidate| &candidate.id != capability_id);
+            package.capabilities.is_empty()
+        } else {
+            false
+        };
+        if remove_empty_package {
+            self.packages.remove(&provider);
+            self.extension_order
+                .retain(|extension_id| extension_id != &provider);
         }
         Some(descriptor)
     }
@@ -464,6 +473,95 @@ mod tests {
         for id in ["alpha", "beta", "gamma"] {
             assert!(snapshot.get_extension(&extension_id(id)).is_some());
         }
+    }
+
+    #[test]
+    fn remove_capability_returns_none_for_unknown_id() {
+        let mut registry = ExtensionRegistry::new();
+        registry
+            .insert(test_package("builtin", &["shell"]))
+            .expect("insert package");
+
+        assert!(
+            registry
+                .remove_capability(&capability_id("builtin.nonexistent"))
+                .is_none()
+        );
+        assert!(
+            registry
+                .get_capability(&capability_id("builtin.shell"))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn remove_capability_cleans_all_structures_and_preserves_sibling() {
+        let mut registry = ExtensionRegistry::new();
+        registry
+            .insert(test_package("builtin", &["shell", "echo"]))
+            .expect("insert package");
+        let shell_id = capability_id("builtin.shell");
+
+        let descriptor = registry
+            .remove_capability(&shell_id)
+            .expect("removes shell capability");
+
+        assert_eq!(descriptor.id, shell_id);
+        assert!(registry.get_capability(&shell_id).is_none());
+        assert!(registry.capability_visibility(&shell_id).is_none());
+        assert!(
+            !registry
+                .capabilities()
+                .any(|candidate| candidate.id == shell_id)
+        );
+        let package = registry
+            .get_extension(&extension_id("builtin"))
+            .expect("package survives while sibling capability remains");
+        assert!(
+            !package
+                .capabilities
+                .iter()
+                .any(|candidate| candidate.id == shell_id)
+        );
+        assert!(
+            !package
+                .manifest
+                .capabilities
+                .iter()
+                .any(|candidate| candidate.id == shell_id)
+        );
+        assert!(
+            registry
+                .get_capability(&capability_id("builtin.echo"))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn remove_capability_removes_package_after_last_capability() {
+        let mut registry = ExtensionRegistry::new();
+        registry
+            .insert(test_package("single", &["only"]))
+            .expect("insert package");
+
+        registry
+            .remove_capability(&capability_id("single.only"))
+            .expect("removes only capability");
+
+        assert!(registry.get_extension(&extension_id("single")).is_none());
+        assert!(
+            !registry
+                .extensions()
+                .any(|package| package.id == extension_id("single"))
+        );
+        registry
+            .insert(test_package("single", &["next"]))
+            .expect("empty package does not block reinsertion");
+        assert!(
+            registry
+                .get_capability(&capability_id("single.next"))
+                .is_some()
+        );
     }
 
     fn test_package(extension_id: &str, capabilities: &[&str]) -> ExtensionPackage {
