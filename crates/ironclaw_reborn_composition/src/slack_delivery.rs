@@ -1148,7 +1148,7 @@ impl TriggeredRunDeliveryDriver {
     /// visible to Slack delivery.  Use `Arc::ptr_eq` in tests to assert this.
     /// This accessor is for tests only and compiles to nothing in production binaries.
     #[cfg(test)]
-    pub(crate) fn communication_preferences(
+    pub(crate) fn communication_preferences_for_test(
         &self,
     ) -> Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository> {
         Arc::clone(&self.services.communication_preferences)
