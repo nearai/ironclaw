@@ -4010,3 +4010,113 @@ async fn resume_after_auth_gate_redispatches_original_call_without_model_turn() 
         "completed result ref must be recorded in final state"
     );
 }
+
+#[tokio::test]
+async fn resume_with_still_missing_credentials_blocks_again_without_model_turn() {
+    // Phase 1: scripted AuthRequired -> executor exits Blocked and writes a
+    // BeforeBlock checkpoint carrying a pending_auth_resume record.
+    let gate_ref = LoopGateRef::new("gate:auth-still-missing").expect("valid");
+    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::AuthRequired {
+                gate_ref: gate_ref.clone(),
+                credential_requirements: Vec::new(),
+                safe_summary: "auth required (phase 1)".to_string(),
+            }],
+            stopped_on_suspension: true,
+        },
+        // Phase 2 scripted outcome: credentials are STILL missing — block again.
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::AuthRequired {
+                gate_ref: LoopGateRef::new("gate:auth-still-missing-2").expect("valid"),
+                credential_requirements: Vec::new(),
+                safe_summary: "auth required (phase 2 — still missing)".to_string(),
+            }],
+            stopped_on_suspension: true,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let initial_state = LoopExecutionState::initial_for_run(host.run_context());
+
+    // Phase 1 run — expect Blocked exit.
+    let first_exit = executor
+        .execute_family(&crate::families::default(), &host, initial_state)
+        .await
+        .expect("first execute blocks on auth gate");
+    assert!(
+        matches!(first_exit, LoopExit::Blocked(_)),
+        "expected Blocked exit in phase 1, got {first_exit:?}"
+    );
+    // Exactly one model call in phase 1.
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "phase 1 must make exactly one model call"
+    );
+
+    // Recover the BeforeBlock checkpoint — this is what resume loads.
+    let before_block_state = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+    assert!(
+        before_block_state.pending_auth_resume.is_some(),
+        "BeforeBlock checkpoint must carry pending_auth_resume after phase 1"
+    );
+    let phase1_capability_id = before_block_state
+        .pending_auth_resume
+        .as_ref()
+        .expect("pending_auth_resume set")
+        .capability_id
+        .clone();
+
+    // Phase 2 run — seeded from the BeforeBlock state.
+    // Credentials are still missing: the capability re-dispatches and blocks again.
+    let second_exit = executor
+        .execute_family(&crate::families::default(), &host, before_block_state)
+        .await
+        .expect("second execute — still-missing credentials path should not error");
+    assert!(
+        matches!(second_exit, LoopExit::Blocked(_)),
+        "expected Blocked exit in phase 2 (credentials still missing), got {second_exit:?}"
+    );
+
+    // (a) No additional model call during phase 2 — re-dispatch happened without model turn.
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "auth resume with still-missing credentials must not trigger a new model call"
+    );
+
+    // (b) Exactly two batch invocations total: phase 1 block + phase 2 re-dispatch block.
+    let batch_invocations = host.batch_invocations();
+    assert_eq!(
+        batch_invocations.len(),
+        2,
+        "expected two batch invocations (phase 1 block + phase 2 re-dispatch block)"
+    );
+
+    // (c) The new BeforeBlock checkpoint must carry a pending_auth_resume record
+    //     whose capability_id matches the original one from phase 1.
+    let phase2_before_block_states: Vec<_> = host
+        .staged_payloads()
+        .into_iter()
+        .filter(|p| p.kind == LoopCheckpointKind::BeforeBlock)
+        .map(|p| {
+            LoopExecutionState::from_checkpoint_payload(&p.payload, CheckpointKind::BeforeBlock)
+                .expect("phase 2 BeforeBlock checkpoint payload")
+        })
+        .collect();
+    // There should be at least two BeforeBlock checkpoints (one per phase).
+    assert!(
+        phase2_before_block_states.len() >= 2,
+        "expected at least two BeforeBlock checkpoints (phase 1 + phase 2)"
+    );
+    let phase2_resume = phase2_before_block_states
+        .last()
+        .expect("at least one")
+        .pending_auth_resume
+        .as_ref()
+        .expect("phase 2 BeforeBlock checkpoint must carry pending_auth_resume");
+    assert_eq!(
+        phase2_resume.capability_id, phase1_capability_id,
+        "phase 2 pending_auth_resume.capability_id must match the original capability"
+    );
+}
