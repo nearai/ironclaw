@@ -52,6 +52,101 @@ async fn resolver_returns_configured_product_auth_access_secret() {
 }
 
 #[tokio::test]
+async fn resolver_refreshes_oauth_account_before_staging_access_secret() {
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let scope =
+        ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
+    let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+    let stale_access = SecretHandle::new("google_stale_access").unwrap();
+    let drive_scope = ProviderScope::new("https://www.googleapis.com/auth/drive.readonly").unwrap();
+    accounts
+        .create_account(NewCredentialAccount {
+            scope: auth_scope,
+            provider: AuthProviderId::new("google").unwrap(),
+            label: CredentialAccountLabel::new("google").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(stale_access.clone()),
+            refresh_secret: Some(SecretHandle::new("google_refresh").unwrap()),
+            scopes: vec![drive_scope.clone()],
+        })
+        .await
+        .unwrap();
+    let resolver = ProductAuthRuntimeCredentialResolver::new(Arc::new(
+        ProductAuthRuntimeCredentialAccountSelector::new_with_refresh(
+            accounts.clone(),
+            accounts.clone(),
+        ),
+    ));
+
+    let resolved = resolver
+        .resolve_access_secret(RuntimeCredentialAccountRequest {
+            scope: &scope,
+            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+            provider_scopes: &[drive_scope.as_str().to_string()],
+            requester_extension: &ExtensionId::new("google-drive").unwrap(),
+        })
+        .await
+        .expect("OAuth runtime credentials should refresh before staging");
+
+    assert_eq!(resolved.scope, scope);
+    assert_ne!(resolved.handle, stale_access);
+    assert!(
+        resolved
+            .handle
+            .as_str()
+            .starts_with("oauth-refreshed-access")
+    );
+}
+
+#[tokio::test]
+async fn resolver_maps_oauth_refresh_failure_to_auth_required() {
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let scope =
+        ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
+    let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+    let drive_scope = ProviderScope::new("https://www.googleapis.com/auth/drive.readonly").unwrap();
+    let account = accounts
+        .create_account(NewCredentialAccount {
+            scope: auth_scope,
+            provider: AuthProviderId::new("google").unwrap(),
+            label: CredentialAccountLabel::new("google").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("google_stale_access").unwrap()),
+            refresh_secret: Some(SecretHandle::new("google_refresh").unwrap()),
+            scopes: vec![drive_scope.clone()],
+        })
+        .await
+        .unwrap();
+    accounts.fail_next_refresh_for_tests(account.id);
+    let resolver = ProductAuthRuntimeCredentialResolver::new(Arc::new(
+        ProductAuthRuntimeCredentialAccountSelector::new_with_refresh(
+            accounts.clone(),
+            accounts.clone(),
+        ),
+    ));
+
+    let error = resolver
+        .resolve_access_secret(RuntimeCredentialAccountRequest {
+            scope: &scope,
+            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+            provider_scopes: &[drive_scope.as_str().to_string()],
+            requester_extension: &ExtensionId::new("google-drive").unwrap(),
+        })
+        .await
+        .expect_err("stale OAuth access token must not be staged after refresh failure");
+
+    assert_eq!(error, CredentialStageError::AuthRequired);
+}
+
+#[tokio::test]
 async fn resolver_accepts_unscoped_github_manual_token_for_scoped_runtime_request() {
     let accounts = Arc::new(InMemoryAuthProductServices::new());
     let scope =

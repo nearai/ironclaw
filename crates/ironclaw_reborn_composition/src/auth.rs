@@ -627,9 +627,12 @@ impl RebornProductAuthServices {
     pub(crate) fn runtime_credential_account_selection_service(
         &self,
     ) -> Arc<dyn RuntimeCredentialAccountSelectionService> {
-        Arc::new(ProductAuthRuntimeCredentialAccountSelector::new(
-            self.credential_account_record_source(),
-        ))
+        Arc::new(
+            ProductAuthRuntimeCredentialAccountSelector::new_with_refresh(
+                self.credential_account_record_source(),
+                self.credential_account_service(),
+            ),
+        )
     }
 
     pub fn provider_client(&self) -> Arc<dyn AuthProviderClient> {

@@ -3,9 +3,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount,
-    CredentialAccountRecordSource, CredentialAccountSelectionRequest, CredentialAccountStatus,
-    CredentialOwnership, GOOGLE_PROVIDER_ID, ProviderScope,
-    select_latest_duplicate_user_reusable_account,
+    CredentialAccountRecordSource, CredentialAccountSelectionRequest, CredentialAccountService,
+    CredentialAccountStatus, CredentialOwnership, CredentialRefreshRequest, GOOGLE_PROVIDER_ID,
+    ProviderScope, select_latest_duplicate_user_reusable_account,
 };
 use ironclaw_first_party_extensions::gsuite_google_account_visible_to_requester;
 use ironclaw_host_api::{
@@ -34,8 +34,17 @@ pub(crate) trait RuntimeCredentialAccountSelectionService: Send + Sync {
         &self,
         request: RuntimeCredentialAccountSelectionRequest,
     ) -> Result<CredentialAccount, AuthProductError>;
+
+    async fn refresh_configured_runtime_account(
+        &self,
+        _request: RuntimeCredentialAccountSelectionRequest,
+        account: CredentialAccount,
+    ) -> Result<CredentialAccount, AuthProductError> {
+        Ok(account)
+    }
 }
 
+#[derive(Clone)]
 pub(crate) struct RuntimeCredentialAccountSelectionRequest {
     lookup: CredentialAccountSelectionRequest,
     runtime_scope: AuthProductScope,
@@ -101,11 +110,26 @@ async fn runtime_credential_auth_requirement_configured(
 
 pub(crate) struct ProductAuthRuntimeCredentialAccountSelector {
     accounts: Arc<dyn CredentialAccountRecordSource>,
+    refresh_accounts: Option<Arc<dyn CredentialAccountService>>,
 }
 
 impl ProductAuthRuntimeCredentialAccountSelector {
+    #[cfg(test)]
     pub(crate) fn new(accounts: Arc<dyn CredentialAccountRecordSource>) -> Self {
-        Self { accounts }
+        Self {
+            accounts,
+            refresh_accounts: None,
+        }
+    }
+
+    pub(crate) fn new_with_refresh(
+        accounts: Arc<dyn CredentialAccountRecordSource>,
+        refresh_accounts: Arc<dyn CredentialAccountService>,
+    ) -> Self {
+        Self {
+            accounts,
+            refresh_accounts: Some(refresh_accounts),
+        }
     }
 }
 
@@ -114,6 +138,7 @@ impl std::fmt::Debug for ProductAuthRuntimeCredentialAccountSelector {
         formatter
             .debug_struct("ProductAuthRuntimeCredentialAccountSelector")
             .field("accounts", &"<credential_account_record_source>")
+            .field("refresh_accounts", &self.refresh_accounts.is_some())
             .finish()
     }
 }
@@ -154,6 +179,30 @@ impl RuntimeCredentialAccountSelectionService for ProductAuthRuntimeCredentialAc
                 .ok_or(AuthProductError::AccountSelectionRequired),
         }
     }
+
+    async fn refresh_configured_runtime_account(
+        &self,
+        request: RuntimeCredentialAccountSelectionRequest,
+        account: CredentialAccount,
+    ) -> Result<CredentialAccount, AuthProductError> {
+        if !matches!(request.setup, RuntimeCredentialAccountSetup::OAuth { .. }) {
+            return Ok(account);
+        }
+        let Some(refresh_accounts) = &self.refresh_accounts else {
+            return Ok(account);
+        };
+
+        let mut refresh_request = CredentialRefreshRequest::new(
+            account.scope.clone(),
+            account.provider.clone(),
+            account.id,
+        );
+        if let Some(requester_extension) = request.lookup.requester_extension.clone() {
+            refresh_request = refresh_request.for_extension(requester_extension);
+        }
+        refresh_accounts.refresh_account(refresh_request).await?;
+        self.select_unique_configured_runtime_account(request).await
+    }
 }
 
 impl std::fmt::Debug for ProductAuthRuntimeCredentialResolver {
@@ -180,7 +229,12 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
         )?;
         let account = self
             .accounts
-            .select_unique_configured_runtime_account(selection_request)
+            .select_unique_configured_runtime_account(selection_request.clone())
+            .await
+            .map_err(map_account_error)?;
+        let account = self
+            .accounts
+            .refresh_configured_runtime_account(selection_request, account)
             .await
             .map_err(map_account_error)?;
         if account.status != CredentialAccountStatus::Configured {
