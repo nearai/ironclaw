@@ -1043,6 +1043,7 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
             trigger_id: record.trigger_id,
             fire_slot: first_fire_slot,
             run_id: first_run_id,
+            thread_id: ThreadId::new("01890f0f-0001-7000-8000-000000000001").unwrap(),
             submitted_at: first_fire_slot + chrono::Duration::seconds(1),
             next_run_at: first_fire_slot + chrono::Duration::minutes(1),
         })
@@ -1076,6 +1077,7 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
             trigger_id: record.trigger_id,
             fire_slot: second_fire_slot,
             run_id: second_run_id,
+            thread_id: ThreadId::new("01890f0f-0002-7000-8000-000000000002").unwrap(),
             submitted_at: second_fire_slot + chrono::Duration::seconds(1),
             next_run_at: second_fire_slot + chrono::Duration::minutes(1),
         })
@@ -1109,6 +1111,7 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
             trigger_id: record.trigger_id,
             fire_slot: third_fire_slot,
             run_id: third_run_id,
+            thread_id: ThreadId::new("01890f0f-0003-7000-8000-000000000003").unwrap(),
             submitted_at: third_fire_slot + chrono::Duration::seconds(1),
             next_run_at: third_fire_slot + chrono::Duration::minutes(1),
         })
@@ -1251,6 +1254,7 @@ async fn seed_completed_trigger_runs(
                 trigger_id: record.trigger_id,
                 fire_slot,
                 run_id,
+                thread_id: ThreadId::new("01890f0f-0004-7000-8000-000000000004").unwrap(),
                 submitted_at: fire_slot + chrono::Duration::seconds(1),
                 next_run_at: fire_slot + chrono::Duration::minutes(1),
             })

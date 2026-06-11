@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
 use chrono_tz::Tz;
 use cron::Schedule;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
 use ironclaw_turns::TurnRunId;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -450,13 +450,25 @@ pub struct TriggerRunRecord {
     pub trigger_id: TriggerId,
     pub fire_slot: Timestamp,
     pub run_id: Option<TurnRunId>,
-    pub thread_id: TriggerRouteThreadId,
+    /// Thread id for this run.
+    ///
+    /// Populated with the route thread id (a 64-char lower-hex derived from the
+    /// fire identity) when the run row is first created at claim time. Overwritten
+    /// with the canonical `ThreadId` (UUID) once the fire is accepted — that is
+    /// the id the conversation binding layer assigns and the one the WebUI panel
+    /// uses to open the chat thread. Pre-acceptance rows that failed before the
+    /// submit step retain the route id, which does not correspond to any live
+    /// thread.
+    pub thread_id: ThreadId,
     pub status: TriggerRunHistoryStatus,
     pub submitted_at: Timestamp,
     pub completed_at: Option<Timestamp>,
 }
 
 impl TriggerRunRecord {
+    /// Create a "running" run record with the route thread id as a placeholder
+    /// thread id. The `thread_id` field will be overwritten with the canonical
+    /// UUID at fire-acceptance time via [`TriggerRepository::mark_fire_accepted`].
     fn running(
         tenant_id: TenantId,
         trigger_id: TriggerId,
@@ -465,12 +477,16 @@ impl TriggerRunRecord {
         submitted_at: Timestamp,
     ) -> Self {
         let identity = TriggerFireIdentity::new(tenant_id.clone(), trigger_id, fire_slot);
+        // The route thread id is a 64-char lower-hex string, which is a valid
+        // `ThreadId` value (non-empty, no path separators, no control chars).
+        let thread_id = ThreadId::new(identity.route_thread_id.as_str())
+            .expect("route thread id is always a valid ThreadId");
         Self {
             tenant_id,
             trigger_id,
             fire_slot,
             run_id,
-            thread_id: identity.route_thread_id,
+            thread_id,
             status: TriggerRunHistoryStatus::Running,
             submitted_at,
             completed_at: None,
@@ -581,6 +597,10 @@ pub struct FireAcceptedRequest {
     pub trigger_id: TriggerId,
     pub fire_slot: Timestamp,
     pub run_id: TurnRunId,
+    /// Canonical thread id minted by the conversation binding layer for the
+    /// accepted run. Persisted into the run-history row so the WebUI Automations
+    /// panel can open the correct chat thread from `recent_runs[].thread_id`.
+    pub thread_id: ThreadId,
     pub submitted_at: Timestamp,
     pub next_run_at: Timestamp,
 }
@@ -1186,6 +1206,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
             request.trigger_id,
             request.fire_slot,
             request.run_id,
+            request.thread_id,
             record.last_run_at.unwrap_or(request.submitted_at),
         )?;
         Ok(Some(record))
@@ -1217,11 +1238,24 @@ impl TriggerRepository for InMemoryTriggerRepository {
         else {
             return Ok(None);
         };
+        // Replayed fires reuse the original run's thread; no new canonical thread
+        // is assigned. Retain the route id placeholder so the row is consistent
+        // with the claim-time state (the acceptance path will overwrite it if a
+        // re-acceptance ever occurs, but replayed fires don't go through accepted).
+        let placeholder_thread_id = TriggerRunRecord::running(
+            request.tenant_id.clone(),
+            request.trigger_id,
+            request.fire_slot,
+            None,
+            request.replayed_at,
+        )
+        .thread_id;
         self.upsert_running_run_history(
             &request.tenant_id,
             request.trigger_id,
             request.fire_slot,
             request.original_run_id,
+            placeholder_thread_id,
             record.last_run_at.unwrap_or(request.replayed_at),
         )?;
         Ok(Some(record))
@@ -1462,6 +1496,7 @@ impl InMemoryTriggerRepository {
         trigger_id: TriggerId,
         fire_slot: Timestamp,
         run_id: TurnRunId,
+        thread_id: ThreadId,
         submitted_at: Timestamp,
     ) -> Result<(), TriggerError> {
         let mut state = self.lock_state()?;
@@ -1473,16 +1508,17 @@ impl InMemoryTriggerRepository {
         {
             return Ok(());
         }
-        state.runs.insert(
-            key,
-            TriggerRunRecord::running(
-                tenant_id.clone(),
-                trigger_id,
-                fire_slot,
-                Some(run_id),
-                submitted_at,
-            ),
+        let mut run = TriggerRunRecord::running(
+            tenant_id.clone(),
+            trigger_id,
+            fire_slot,
+            Some(run_id),
+            submitted_at,
         );
+        // Overwrite the placeholder route thread id with the canonical UUID assigned
+        // by the conversation binding layer at fire-acceptance time.
+        run.thread_id = thread_id;
+        state.runs.insert(key, run);
         prune_run_history_locked(&mut state, tenant_id, trigger_id);
         Ok(())
     }
@@ -2340,6 +2376,7 @@ mod tests {
             trigger_id,
             fire_slot,
             run_id,
+            ThreadId::new("01890f0f-test-7000-8000-000000000001").expect("valid thread id"),
             later_submitted_at,
         )
         .expect("late running upsert is ignored");
@@ -2400,6 +2437,8 @@ mod tests {
                 fire_slot,
                 run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a")
                     .expect("valid run"),
+                thread_id: ThreadId::new("01890f0f-test-7000-8000-000000000002")
+                    .expect("valid thread id"),
                 submitted_at: fire_slot,
                 next_run_at: ts(1_704_067_260),
             })

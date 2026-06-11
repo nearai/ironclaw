@@ -284,7 +284,10 @@ test("normalizeAutomations presents bounded recent run history", () => {
   assert.match(automations[0].last_run_label, /Jun 4/);
   assert.equal(automations[0].last_status_label, "Error");
   assert.equal(automations[0].last_status_tone, "danger");
+  // Post-acceptance statuses (running/ok/error) must produce a chat_path.
   assert.equal(automations[0].recent_runs[0].chat_path, "/chat/thread-running");
+  assert.equal(automations[0].recent_runs[1].chat_path, "/chat/thread-error");
+  assert.equal(automations[0].recent_runs[2].chat_path, "/chat/thread-ok");
   assert.equal(automations[0].success_rate_label, "50% visible runs");
   assert.deepEqual(automationSummary(automations), {
     scheduled: 1,
@@ -300,5 +303,40 @@ test("normalizeAutomations presents bounded recent run history", () => {
   assert.deepEqual(
     filterAutomations(automations, "failures").map((automation) => automation.automation_id),
     ["daily"],
+  );
+});
+
+test("normalizeAutomations does not emit chat_path for unknown/pre-acceptance runs", () => {
+  // Runs that failed before fire acceptance (unknown status) retain the route id
+  // placeholder as thread_id. The panel must not link to them since there is no
+  // live chat thread at that id.
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "pre-accept",
+        name: "Pre-acceptance run",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "active",
+        next_run_at: "2026-06-06T16:00:00Z",
+        recent_runs: [
+          {
+            status: "unknown",
+            fire_slot: "2026-06-05T16:00:00Z",
+            submitted_at: "2026-06-05T16:00:01Z",
+            // thread_id is the route id placeholder — not a real thread
+            thread_id:
+              "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+            run_id: "run-unknown",
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(automations[0].recent_runs[0].status, "unknown");
+  assert.equal(
+    automations[0].recent_runs[0].chat_path,
+    null,
+    "unknown (pre-acceptance) runs must not produce a chat_path",
   );
 });

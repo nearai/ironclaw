@@ -6,7 +6,7 @@ use async_trait::async_trait;
 #[cfg(feature = "libsql")]
 use chrono::{DateTime, SecondsFormat, Utc};
 #[cfg(feature = "libsql")]
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
 #[cfg(feature = "libsql")]
 use ironclaw_turns::TurnRunId;
 #[cfg(feature = "libsql")]
@@ -17,8 +17,8 @@ use crate::{
     ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire,
     ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
     FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerCompletionPolicy, TriggerError,
-    TriggerId, TriggerRecord, TriggerRepository, TriggerRouteThreadId, TriggerRunHistoryStatus,
-    TriggerRunRecord, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
+    TriggerId, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord,
+    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
     reject_failed_result_after_active_run, reject_non_future_next_run_at, reject_run_ref_rewrite,
     trigger_run_history_status_text,
 };
@@ -639,6 +639,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 trigger_id: request.trigger_id,
                 fire_slot: request.fire_slot,
                 run_id: request.run_id,
+                thread_id: Some(request.thread_id),
                 result_at: request.submitted_at,
                 next_run_at: request.next_run_at,
                 update_operation: "mark accepted trigger fire",
@@ -660,6 +661,10 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 trigger_id: request.trigger_id,
                 fire_slot: request.fire_slot,
                 run_id: request.original_run_id,
+                // Replayed fires do not carry a fresh canonical thread id; the
+                // original thread id (either already-canonical or route id) is
+                // retained from the existing row.
+                thread_id: None,
                 result_at: request.replayed_at,
                 next_run_at: request.next_run_at,
                 update_operation: "mark replayed trigger fire",
@@ -1312,17 +1317,20 @@ async fn mark_successful_fire_result(
         let Some(record) = returned_record(&mut rows, update.read_operation).await? else {
             return Ok(None);
         };
-        upsert_run_history(
-            conn,
-            &TriggerRunRecord::running(
-                update.tenant_id.clone(),
-                update.trigger_id,
-                update.fire_slot,
-                Some(update.run_id),
-                record.last_run_at.unwrap_or(update.result_at),
-            ),
-        )
-        .await?;
+        let mut run_record = TriggerRunRecord::running(
+            update.tenant_id.clone(),
+            update.trigger_id,
+            update.fire_slot,
+            Some(update.run_id),
+            record.last_run_at.unwrap_or(update.result_at),
+        );
+        // Overwrite the placeholder route thread id with the canonical UUID when
+        // one is provided (acceptance path). The replayed-fire path passes None
+        // and retains the route id.
+        if let Some(thread_id) = update.thread_id.clone() {
+            run_record.thread_id = thread_id;
+        }
+        upsert_run_history(conn, &run_record).await?;
         Ok(Some(record))
     }
     .await;
@@ -1354,6 +1362,11 @@ struct SuccessfulFireResultUpdate<'a> {
     trigger_id: TriggerId,
     fire_slot: Timestamp,
     run_id: TurnRunId,
+    /// Canonical thread id to persist in the run-history row. When `Some`, the
+    /// placeholder route thread id is overwritten with this value. `None` keeps
+    /// the route thread id (used by the replayed-fire path which has no accepted
+    /// canonical thread).
+    thread_id: Option<ThreadId>,
     result_at: Timestamp,
     next_run_at: Timestamp,
     update_operation: &'static str,
@@ -1372,7 +1385,8 @@ fn row_to_run_record(row: &libsql::Row) -> Result<TriggerRunRecord, TriggerError
     let run_id = optional_text(row, RUN_ID_COL, "run_id")?
         .map(|value| parse_turn_run_id_with_field(&value, "run_id"))
         .transpose()?;
-    let thread_id = TriggerRouteThreadId::new(required_text(row, RUN_THREAD_ID_COL, "thread_id")?)?;
+    let thread_id = ThreadId::new(required_text(row, RUN_THREAD_ID_COL, "thread_id")?)
+        .map_err(|error| invalid_record("thread_id", error.to_string()))?;
     let status = parse_run_history_status(&required_text(row, RUN_STATUS_COL, "status")?)?;
     let submitted_at = parse_timestamp(
         &required_text(row, RUN_SUBMITTED_AT_COL, "submitted_at")?,
@@ -1453,6 +1467,11 @@ async fn complete_run_history(
     completed_at: Timestamp,
 ) -> Result<(), TriggerError> {
     let run_id_value = opt_turn_run_id(run_id.as_ref());
+    // Materialize the placeholder thread id (route-derived) into a local so
+    // the &str lifetime is not borrowed from a temporary.
+    let placeholder_thread_id =
+        TriggerRunRecord::running(tenant_id.clone(), trigger_id, fire_slot, run_id, fire_slot)
+            .thread_id;
     conn.execute(
         &format!(
             "INSERT INTO {TRIGGER_RUN_TABLE} (
@@ -1468,15 +1487,7 @@ async fn complete_run_history(
             trigger_id.to_string(),
             fmt_ts(&fire_slot),
             run_id_value,
-            TriggerRunRecord::running(
-                tenant_id.clone(),
-                trigger_id,
-                fire_slot,
-                run_id,
-                fire_slot,
-            )
-            .thread_id
-            .as_str(),
+            placeholder_thread_id.as_str(),
             trigger_run_history_status_text(status),
             fmt_ts(&completed_at),
             fmt_ts(&completed_at),

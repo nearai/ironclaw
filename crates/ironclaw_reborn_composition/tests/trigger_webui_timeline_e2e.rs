@@ -5,12 +5,15 @@
 //!
 //! 1. **Happy path** (`timeline_opens_for_creator`):
 //!    A trigger fired by the real poller creates a thread in the in-memory
-//!    thread service. The trigger creator's WebUI bearer then retrieves 200
-//!    from `GET /api/webchat/v2/threads/{thread_id}/timeline` with a timeline
+//!    thread service. The trigger run-history row's `thread_id` field holds
+//!    the canonical UUID (not the 64-char hex route id placeholder). The
+//!    trigger creator's WebUI bearer then retrieves 200 from
+//!    `GET /api/webchat/v2/threads/{thread_id}/timeline` with a timeline
 //!    containing the thread record and at least one message (the trigger
 //!    prompt). This exercises the full composition path:
 //!
 //!    real poller → `record_trigger_prompt` → `InMemorySessionThreadService`
+//!    → `TriggerRunRecord.thread_id` (canonical UUID)
 //!    → `RebornServices::get_timeline` → composed WebUI v2 HTTP layer.
 //!
 //! 2. **Automation-service-stack path**
@@ -18,31 +21,19 @@
 //!    Same setup, second independent trigger. Confirms the automation facade
 //!    wiring is correct across multiple trigger fires.
 //!
-//!    The thread_id is discovered via `session_thread_service()` (test-support
-//!    accessor) because `GET /api/webchat/v2/threads` filters automation-trigger
-//!    threads out of the list response (they carry `metadata_json` with the
-//!    automation marker and are excluded by `is_automation_trigger_thread`).
+//!    The thread_id is discovered via `list_trigger_run_history` on the
+//!    trigger repository — the same field the WebUI Automations panel reads
+//!    to build the `chat_path`. This replaces the old `session_thread_service()`
+//!    workaround that bypassed the actual panel data path.
 //!
-//!    **In-memory fallback limitation (read before assuming this tests the
-//!    fallback):**
-//!    `RebornServices::get_timeline` falls back to
-//!    `check_automation_trigger_access` → `AutomationProductFacade::
-//!    resolve_run_thread_scope` only when the primary session-scoped
-//!    `list_thread_history` returns `UnknownThread` or `ThreadScopeMismatch`.
+//! 3. **thread_id is canonical UUID after acceptance**
+//!    (`run_thread_id_is_canonical_uuid_after_fire`):
+//!    After a trigger fires, the run-history row's `thread_id` must be a
+//!    valid UUID (parseable by `uuid::Uuid::parse_str`) and must NOT be the
+//!    64-char lowercase hex route id derived from `TriggerFireIdentity`.
+//!    This directly regression-tests the fix for the "click run → 404" bug.
 //!
-//!    With the in-memory backend the thread is stored under the UUID assigned
-//!    by the conversation binding layer; `TriggerRunRecord.thread_id` holds the
-//!    hex `TriggerRouteThreadId`. These are two separate values, so calling
-//!    `get_timeline` with the hex fails at the `list_thread_history` step even
-//!    after `resolve_run_thread_scope` succeeds.
-//!
-//!    Tests 1 and 2 therefore use the real UUID (obtained via
-//!    `session_thread_service().list_threads_for_scope`) for the timeline URL
-//!    so the PRIMARY session-scoped lookup succeeds directly. The fallback is
-//!    NOT triggered in those scenarios. Full end-to-end fallback coverage
-//!    (hex → fallback → 200) requires a PostgreSQL backend.
-//!
-//! 3. **Negative / fallback-denial** (`timeline_denied_for_different_user`):
+//! 4. **Negative / fallback-denial** (`timeline_denied_for_different_user`):
 //!    A different authenticated user on the same UUID thread_id gets 404.
 //!
 //!    - Direct scope: `owner_user_id = OTHER_USER`; thread was stored with
@@ -74,7 +65,6 @@ use ironclaw_reborn_composition::{
     WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, build_reborn_runtime,
     build_webui_services, local_runtime_build_input_with_options, webui_v2_app,
 };
-use ironclaw_threads::{ListThreadsForScopeRequest, SessionThreadService, ThreadScope};
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerCompletionPolicy, TriggerId,
@@ -193,45 +183,44 @@ async fn wait_for_trigger_fire(
     last.expect("at least one read should have succeeded in wait_for_trigger_fire")
 }
 
-/// Wait until at least one thread appears in the creator's scope in the
-/// session thread service (the store the trigger poller writes to via
-/// `record_trigger_prompt`).
+/// Wait until the trigger run-history row for `trigger_id` has a `thread_id`
+/// that is a valid UUID (i.e. the canonical thread UUID has been persisted by
+/// `mark_fire_accepted`).
 ///
-/// We bypass `GET /api/webchat/v2/threads` because that endpoint filters
-/// automation-trigger threads out of its list response (they carry the
-/// automation `metadata_json` marker). Instead, we read from the same
-/// `SessionThreadService` the trigger poller writes to via the test-support
-/// accessor `RebornRuntime::session_thread_service`.
+/// This polls `list_trigger_run_history` — the same repository method the WebUI
+/// Automations panel uses via `AutomationProductFacade::list_automations`. Once
+/// the row's `thread_id` is a parseable UUID we know the panel's `chat_path`
+/// would open a real thread.
 ///
-/// Returns the `thread_id` (UUID) of the first thread found in the scope.
-async fn wait_for_session_thread(
-    thread_service: &Arc<dyn SessionThreadService>,
+/// Returns the canonical thread UUID as a `String`.
+async fn wait_for_canonical_thread_id(
+    repo: &Arc<dyn TriggerRepository>,
     tenant_id: &TenantId,
-    user_id: &UserId,
-    agent_id: &AgentId,
+    trigger_id: TriggerId,
 ) -> String {
-    let scope = ThreadScope {
-        tenant_id: tenant_id.clone(),
-        agent_id: agent_id.clone(),
-        project_id: None,
-        owner_user_id: Some(user_id.clone()),
-        mission_id: None,
-    };
     let stop = Instant::now() + Duration::from_secs(15);
     loop {
-        let response = thread_service
-            .list_threads_for_scope(ListThreadsForScopeRequest {
-                scope: scope.clone(),
-                limit: Some(5),
-                cursor: None,
-            })
+        let runs = repo
+            .list_trigger_run_history(tenant_id.clone(), trigger_id, 5)
             .await
-            .expect("list_threads_for_scope");
-        if let Some(first) = response.threads.first() {
-            return first.thread_id.as_str().to_string();
+            .expect("list_trigger_run_history");
+        if let Some(run) = runs.first() {
+            let thread_id_str = run.thread_id.as_str().to_string();
+            // A canonical UUID is parseable; the route id placeholder (64-char
+            // lower-hex) is not a valid UUID v4/v7 and will fail parse_str.
+            if uuid::Uuid::parse_str(&thread_id_str).is_ok() {
+                return thread_id_str;
+            }
         }
         if Instant::now() >= stop {
-            panic!("no thread appeared in the session thread service within 15s");
+            let runs = repo
+                .list_trigger_run_history(tenant_id.clone(), trigger_id, 5)
+                .await
+                .unwrap_or_default();
+            panic!(
+                "canonical thread UUID did not appear in run history within 15s — \
+                 last runs: {runs:?}"
+            );
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -343,30 +332,23 @@ async fn get_timeline(
     .await
 }
 
-/// Seed a trigger, wait for the poller to fire it, then return the actual UUID
-/// `ThreadId` that `record_trigger_prompt` stored in the session thread service.
+/// Seed a trigger, pair the external actor, wait for the poller to fire it,
+/// then return the canonical `thread_id` from the run-history row.
 ///
-/// ## Thread-id resolution strategy
+/// ## Thread-id resolution strategy (post-fix)
 ///
-/// `TriggerRunRecord.thread_id` is the `TriggerRouteThreadId` (64-char hex
-/// derived from trigger_id + fire_slot). The session thread service stores the
-/// thread under the UUID assigned by the conversation binding layer — a
-/// distinct value. The `GET /api/webchat/v2/threads` endpoint filters
-/// automation-trigger threads out of its response (they carry the automation
-/// `metadata_json` marker), so we cannot use it to discover the UUID.
-///
-/// Instead we query the session thread service directly via
-/// `RebornRuntime::session_thread_service()` (test-support accessor) and
-/// `list_threads_for_scope` with the creator's scope. This is the same store
-/// the trigger poller writes to, so the UUID appears there as soon as
-/// `record_trigger_prompt` completes.
-async fn fire_trigger_and_get_session_thread_id(
+/// `TriggerRunRecord.thread_id` is overwritten with the canonical UUID by
+/// `mark_fire_accepted` when the fire is accepted. We poll
+/// `list_trigger_run_history` until a UUID-parseable value appears — this is
+/// the same field the WebUI Automations panel reads to build `chat_path`.
+/// The old `session_thread_service()` workaround is no longer needed.
+async fn fire_trigger_and_get_run_thread_id(
     runtime: &RebornRuntime,
     tenant_id: &TenantId,
     user_id: &UserId,
     agent_id: &AgentId,
     trigger_name: &str,
-) -> String {
+) -> (TriggerId, String) {
     let repo = runtime.trigger_repository().expect("trigger repository");
     let pairing = runtime
         .trigger_conversation_pairing()
@@ -400,18 +382,18 @@ async fn fire_trigger_and_get_session_thread_id(
     let trigger_id = record.trigger_id;
     repo.upsert_trigger(record).await.expect("upsert trigger");
 
-    // Phase 1: wait for the trigger to fire (checks the trigger repo, no HTTP).
+    // Phase 1: wait for the trigger to fire (last_run_at is set).
     let settled = wait_for_trigger_fire(&repo, tenant_id, trigger_id).await;
     assert!(
         settled.last_run_at.is_some(),
         "trigger was not fired by the poller within 15s — record: {settled:?}"
     );
 
-    // Phase 2: after the trigger fires, record_trigger_prompt runs
-    // asynchronously. Poll the session thread service directly (same Arc the
-    // poller writes to) until the thread appears.
-    let thread_service = runtime.session_thread_service();
-    wait_for_session_thread(&thread_service, tenant_id, user_id, agent_id).await
+    // Phase 2: wait for mark_fire_accepted to overwrite thread_id with the
+    // canonical UUID (a UUID-parseable string replaces the 64-char hex route id).
+    let thread_id = wait_for_canonical_thread_id(&repo, tenant_id, trigger_id).await;
+
+    (trigger_id, thread_id)
 }
 
 // ─── tests ───────────────────────────────────────────────────────────────────
@@ -419,14 +401,11 @@ async fn fire_trigger_and_get_session_thread_id(
 /// Happy path: the trigger creator's bearer retrieves the timeline for a
 /// trigger-fired thread.
 ///
-/// Exercises the full composition path:
-///   real poller → `record_trigger_prompt` → `InMemorySessionThreadService`
-///   → `RebornServices::get_timeline` → composed WebUI v2 HTTP layer.
-///
-/// The thread_id is the UUID stored by the session thread service (obtained
-/// via `RebornRuntime::session_thread_service()`). The creator's scope matches
-/// the stored scope exactly so the primary session-scoped lookup succeeds
-/// without triggering the automation fallback.
+/// The thread_id is read from `TriggerRunRecord.thread_id` — the same field
+/// the WebUI Automations panel uses to build `chat_path`. After the fix,
+/// this holds the canonical UUID (not the 64-char hex route id placeholder),
+/// so the timeline request succeeds without the `session_thread_service()`
+/// workaround.
 #[tokio::test]
 async fn timeline_opens_for_creator() {
     let root = tempfile::tempdir().expect("tempdir");
@@ -438,7 +417,7 @@ async fn timeline_opens_for_creator() {
 
     let app = build_timeline_app(&runtime);
 
-    let thread_id = fire_trigger_and_get_session_thread_id(
+    let (_trigger_id, thread_id) = fire_trigger_and_get_run_thread_id(
         &runtime,
         &tenant_id,
         &user_id,
@@ -475,10 +454,8 @@ async fn timeline_opens_for_creator() {
 /// product-workflow path using a second independent trigger.
 ///
 /// Confirms the automation facade wiring is correct across multiple trigger
-/// fires. Uses the session thread service accessor to discover the UUID.
-///
-/// See module-level comment for the in-memory backend limitation that prevents
-/// isolating the fallback path from the direct session-scope path.
+/// fires. Uses `list_trigger_run_history` to discover the canonical UUID —
+/// the same data path the WebUI Automations panel uses.
 #[tokio::test]
 async fn timeline_opens_for_creator_via_automation_service_stack() {
     let root = tempfile::tempdir().expect("tempdir");
@@ -490,7 +467,7 @@ async fn timeline_opens_for_creator_via_automation_service_stack() {
 
     let app = build_timeline_app(&runtime);
 
-    let thread_id = fire_trigger_and_get_session_thread_id(
+    let (_trigger_id, thread_id) = fire_trigger_and_get_run_thread_id(
         &runtime,
         &tenant_id,
         &user_id,
@@ -523,6 +500,56 @@ async fn timeline_opens_for_creator_via_automation_service_stack() {
     );
 }
 
+/// Regression test for the "click run → 404" bug.
+///
+/// After a trigger fires and is accepted, the run-history row's `thread_id`
+/// must be a valid UUID — not the 64-char lowercase hex route id placeholder
+/// (`TriggerFireIdentity::route_thread_id`). The WebUI Automations panel
+/// builds `chat_path: /chat/${run.thread_id}` from this field; if it holds
+/// the hex placeholder, clicking the run 404s because no thread exists under
+/// that id.
+#[tokio::test]
+async fn run_thread_id_is_canonical_uuid_after_fire() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let runtime = build_timeline_runtime(&root).await;
+
+    let tenant_id = TenantId::new(TENANT).expect("tenant id");
+    let user_id = UserId::new(USER).expect("user id");
+    let agent_id = AgentId::new(AGENT).expect("agent id");
+
+    let (trigger_id, thread_id) = fire_trigger_and_get_run_thread_id(
+        &runtime,
+        &tenant_id,
+        &user_id,
+        &agent_id,
+        "timeline-e2e-uuid-check",
+    )
+    .await;
+
+    runtime.shutdown().await.expect("runtime shutdown");
+
+    // The thread_id returned by wait_for_canonical_thread_id is already
+    // UUID-parseable (that's the poll condition). Assert explicitly so a
+    // regression is immediately visible in the test output.
+    assert!(
+        uuid::Uuid::parse_str(&thread_id).is_ok(),
+        "run.thread_id must be a UUID after fire acceptance, got: {thread_id:?}"
+    );
+
+    // Assert it's NOT the 64-char lowercase hex route id.
+    assert_ne!(
+        thread_id.len(),
+        64,
+        "run.thread_id must not be the 64-char hex route id after acceptance; \
+         trigger_id={trigger_id:?}"
+    );
+    assert!(
+        !thread_id.chars().all(|c| c.is_ascii_hexdigit()),
+        "run.thread_id must not be all-hex (route id placeholder) after acceptance; \
+         got: {thread_id:?}"
+    );
+}
+
 /// NEGATIVE: a different authenticated user cannot access the trigger-owned
 /// thread.
 ///
@@ -545,7 +572,7 @@ async fn timeline_denied_for_different_user() {
 
     let app = build_timeline_app(&runtime);
 
-    let thread_id = fire_trigger_and_get_session_thread_id(
+    let (_trigger_id, thread_id) = fire_trigger_and_get_run_thread_id(
         &runtime,
         &tenant_id,
         &user_id,

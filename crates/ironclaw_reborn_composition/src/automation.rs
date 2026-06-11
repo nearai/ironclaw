@@ -261,13 +261,12 @@ fn map_recent_run(run: &TriggerRunRecord) -> Option<RebornAutomationRecentRunInf
         TriggerRunHistoryStatus::Ok => RebornAutomationRecentRunStatus::Ok,
         TriggerRunHistoryStatus::Error => RebornAutomationRecentRunStatus::Error,
     };
-    // TriggerRouteThreadId is a validated lower-hex string; ThreadId accepts
-    // any non-empty value without path separators or control chars, so this
-    // conversion cannot fail for constructible repository rows.
-    let thread_id = ThreadId::new(run.thread_id.as_str()).ok()?; // silent-ok: structurally unreachable; defensive drop if ThreadId validation ever tightens
     Some(RebornAutomationRecentRunInfo {
         run_id: run.run_id,
-        thread_id,
+        // After fire acceptance, thread_id holds the canonical UUID minted by the
+        // conversation binding layer. Pre-acceptance runs (failed before submit)
+        // retain the route id placeholder; those runs never open a chat thread.
+        thread_id: run.thread_id.clone(),
         fire_slot: Some(run.fire_slot),
         status,
         submitted_at: run.submitted_at,
@@ -343,7 +342,7 @@ mod tests {
     };
 
     use async_trait::async_trait;
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
     use ironclaw_product_workflow::{
         AutomationListRequest, AutomationProductFacade, ProductAgentBoundCaller,
         RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
@@ -423,7 +422,8 @@ mod tests {
             trigger_id,
             fire_slot,
             run_id: Some(TurnRunId::new()),
-            thread_id: identity.route_thread_id,
+            thread_id: ThreadId::new(identity.route_thread_id.as_str())
+                .expect("route thread id is always a valid ThreadId"),
             status,
             submitted_at: now(),
             completed_at: None,

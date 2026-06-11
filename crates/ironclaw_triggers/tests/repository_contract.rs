@@ -1,7 +1,7 @@
 #![cfg(any(feature = "libsql", feature = "postgres"))]
 
 use chrono::{TimeZone, Utc};
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
 use ironclaw_triggers::{
     ActiveTriggerScanCursor, ClearActiveFireRequest, InMemoryTriggerRepository,
     TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
@@ -1543,6 +1543,8 @@ mod fire_claim_contract {
                 trigger_id,
                 fire_slot,
                 run_id: accepted_run_id,
+                thread_id: ThreadId::new("01890f0f-aa01-7000-8000-000000000001")
+                    .expect("valid thread id"),
                 submitted_at: accepted_at,
                 next_run_at: expected_next_run_at,
             })
@@ -1562,6 +1564,8 @@ mod fire_claim_contract {
                 trigger_id,
                 fire_slot,
                 run_id: accepted_run_id,
+                thread_id: ThreadId::new("01890f0f-aa01-7000-8000-000000000001")
+                    .expect("valid thread id"),
                 submitted_at: ts(1_704_067_206),
                 next_run_at: expected_next_run_at,
             })
@@ -1578,6 +1582,8 @@ mod fire_claim_contract {
                 trigger_id,
                 fire_slot,
                 run_id: different_accepted_run_id,
+                thread_id: ThreadId::new("01890f0f-aa01-7000-8000-000000000002")
+                    .expect("valid thread id"),
                 submitted_at: accepted_at,
                 next_run_at: expected_next_run_at,
             })
@@ -1838,6 +1844,8 @@ mod fire_claim_contract {
                 fire_slot: stale_fire_slot,
                 run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f62")
                     .expect("valid run"),
+                thread_id: ThreadId::new("01890f0f-bb01-7000-8000-000000000001")
+                    .expect("valid thread id"),
                 submitted_at: fire_slot,
                 next_run_at: ts(1_704_067_260),
             })
@@ -1988,6 +1996,8 @@ mod fire_claim_contract {
                 fire_slot,
                 run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f60")
                     .expect("valid run"),
+                thread_id: ThreadId::new("01890f0f-cc01-7000-8000-000000000001")
+                    .expect("valid thread id"),
                 submitted_at: fire_slot,
                 next_run_at: fire_slot,
             })
@@ -2512,6 +2522,8 @@ mod fire_claim_contract {
             trigger_id,
             fire_slot,
             run_id,
+            thread_id: ThreadId::new("01890f0f-dd01-7000-8000-000000000001")
+                .expect("valid thread id"),
             submitted_at: accepted_at,
             next_run_at,
         };
@@ -2696,23 +2708,30 @@ mod fire_claim_contract {
             .await
             .expect("list claimed run history");
         assert_eq!(runs.len(), 1);
-        let expected_thread_id =
+        // Pre-acceptance: thread_id holds the route id placeholder (64-char lower-hex).
+        let expected_route_thread_id =
             TriggerFireIdentity::new(tenant_id.clone(), trigger_id, fire_slot).route_thread_id;
         assert_eq!(runs[0].tenant_id, tenant_id);
         assert_eq!(runs[0].trigger_id, trigger_id);
         assert_eq!(runs[0].fire_slot, fire_slot);
         assert_eq!(runs[0].run_id, None);
-        assert_eq!(runs[0].thread_id, expected_thread_id);
+        assert_eq!(
+            runs[0].thread_id.as_str(),
+            expected_route_thread_id.as_str()
+        );
         assert_eq!(runs[0].status, TriggerRunHistoryStatus::Running);
         assert_eq!(runs[0].submitted_at, claim_now);
         assert_eq!(runs[0].completed_at, None);
 
         let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f80").expect("valid run");
+        let canonical_thread_id =
+            ThreadId::new("01890f0f-c000-7000-8000-000000000001").expect("valid thread id");
         repo.mark_fire_accepted(FireAcceptedRequest {
             tenant_id: tenant_id.clone(),
             trigger_id,
             fire_slot,
             run_id,
+            thread_id: canonical_thread_id.clone(),
             submitted_at,
             next_run_at: expected_next_run_at,
         })
@@ -2729,6 +2748,13 @@ mod fire_claim_contract {
         assert_eq!(runs[0].status, TriggerRunHistoryStatus::Running);
         assert_eq!(runs[0].submitted_at, submitted_at);
         assert_eq!(runs[0].completed_at, None);
+        // After acceptance, thread_id must be the canonical UUID, not the route hex id.
+        assert_eq!(runs[0].thread_id, canonical_thread_id);
+        assert_ne!(
+            runs[0].thread_id.as_str(),
+            expected_route_thread_id.as_str(),
+            "thread_id must be overwritten with canonical UUID at fire acceptance"
+        );
 
         repo.clear_active_fire(ClearActiveFireRequest {
             tenant_id: tenant_id.clone(),
@@ -2778,6 +2804,8 @@ mod fire_claim_contract {
             trigger_id,
             fire_slot: second_fire_slot,
             run_id: second_run_id,
+            thread_id: ThreadId::new("01890f0f-c000-7000-8000-000000000002")
+                .expect("valid thread id"),
             submitted_at: second_submitted_at,
             next_run_at: second_next_run_at,
         })
@@ -2982,6 +3010,8 @@ mod fire_claim_contract {
             trigger_id,
             fire_slot,
             run_id,
+            thread_id: ThreadId::new("01890f0f-ee01-7000-8000-000000000001")
+                .expect("valid thread id"),
             submitted_at: fire_slot + chrono::Duration::seconds(5),
             next_run_at: expected_next_run_at,
         })
@@ -2996,7 +3026,7 @@ mod fire_claim_contract {
         vec![
             ("fire_slot", "not-a-timestamp", "fire_slot"),
             ("run_id", "not-a-uuid", "run_id"),
-            ("thread_id", "not-a-route-thread-id", "route thread id"),
+            ("thread_id", "not/a/valid/thread-id", "thread"),
             ("status", "timed_out", "status"),
             ("submitted_at", "not-a-timestamp", "submitted_at"),
             ("completed_at", "not-a-timestamp", "completed_at"),

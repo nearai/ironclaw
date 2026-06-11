@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use deadpool_postgres::GenericClient;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
 use ironclaw_turns::TurnRunId;
 use tokio_postgres::Row;
 
@@ -11,8 +11,8 @@ use crate::{
     ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire,
     ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
     FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerCompletionPolicy, TriggerError,
-    TriggerId, TriggerRecord, TriggerRepository, TriggerRouteThreadId, TriggerRunHistoryStatus,
-    TriggerRunRecord, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
+    TriggerId, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord,
+    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
     reject_failed_result_after_active_run, reject_non_future_next_run_at, reject_run_ref_rewrite,
     trigger_run_history_status_text,
 };
@@ -489,17 +489,17 @@ impl TriggerRepository for PostgresTriggerRepository {
             },
         )
         .await?;
-        upsert_run_history(
-            &tx,
-            &TriggerRunRecord::running(
-                request.tenant_id.clone(),
-                request.trigger_id,
-                request.fire_slot,
-                Some(request.run_id),
-                record.last_run_at.unwrap_or(request.submitted_at),
-            ),
-        )
-        .await?;
+        let mut run_record = TriggerRunRecord::running(
+            request.tenant_id.clone(),
+            request.trigger_id,
+            request.fire_slot,
+            Some(request.run_id),
+            record.last_run_at.unwrap_or(request.submitted_at),
+        );
+        // Overwrite the placeholder route thread id with the canonical UUID assigned
+        // by the conversation binding layer at fire-acceptance time.
+        run_record.thread_id = request.thread_id;
+        upsert_run_history(&tx, &run_record).await?;
         tx.commit()
             .await
             .map_err(|error| backend_error("commit accepted trigger fire", error))?;
@@ -1080,7 +1080,8 @@ fn row_to_run_record(row: &Row) -> Result<TriggerRunRecord, TriggerError> {
     let run_id = optional_text(row, "run_id")?
         .map(|value| parse_turn_run_id_with_field(&value, "run_id"))
         .transpose()?;
-    let thread_id = TriggerRouteThreadId::new(required_text(row, "thread_id")?)?;
+    let thread_id = ThreadId::new(required_text(row, "thread_id")?)
+        .map_err(|error| invalid_record("thread_id", error.to_string()))?;
     let status = parse_run_history_status(&required_text(row, "status")?)?;
     let submitted_at = parse_timestamp(&required_text(row, "submitted_at")?, "submitted_at")?;
     let completed_at = optional_text(row, "completed_at")?
