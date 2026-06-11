@@ -19,12 +19,9 @@ use ironclaw_skills::{
     install_skill, list_skills, read_skill_content, remove_skill, search_skills, update_skill,
 };
 
-use crate::extension_lifecycle::{
-    ExtensionActivationCredentialPreflight, RebornLocalExtensionManagementPort,
-};
-use crate::product_auth_runtime_credentials::{
-    RuntimeCredentialAccountSelectionService, missing_runtime_credential_auth_requirements,
-};
+use crate::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
+use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
+use crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionService;
 
 const SKILL_SEARCH_RESULT_LIMIT: usize = 50;
 
@@ -356,8 +353,8 @@ impl RebornLocalLifecycleFacade {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(Some(package_ref));
                 };
-                let credential_preflight = self
-                    .extension_activation_credential_preflight(
+                let credential_gate = self
+                    .extension_activation_credential_gate(
                         &context,
                         extension_management,
                         &package_ref,
@@ -381,28 +378,20 @@ impl RebornLocalLifecycleFacade {
                             scope,
                             runtime_http_egress,
                         };
-                    return match credential_preflight {
-                        Some(credential_preflight) => {
+                    return match credential_gate {
+                        Some(credential_gate) => {
                             extension_management
-                                .activate_with_credential_preflight(
-                                    package_ref,
-                                    mode,
-                                    credential_preflight,
-                                )
+                                .activate_with_credential_gate(package_ref, mode, credential_gate)
                                 .await
                         }
                         None => extension_management.activate(package_ref, mode).await,
                     };
                 }
                 let mode = crate::extension_lifecycle::ExtensionActivationMode::Static;
-                match credential_preflight {
-                    Some(credential_preflight) => {
+                match credential_gate {
+                    Some(credential_gate) => {
                         extension_management
-                            .activate_with_credential_preflight(
-                                package_ref,
-                                mode,
-                                credential_preflight,
-                            )
+                            .activate_with_credential_gate(package_ref, mode, credential_gate)
                             .await
                     }
                     None => extension_management.activate(package_ref, mode).await,
@@ -421,12 +410,12 @@ impl RebornLocalLifecycleFacade {
         }
     }
 
-    async fn extension_activation_credential_preflight(
+    async fn extension_activation_credential_gate(
         &self,
         context: &LifecycleProductContext,
         extension_management: &RebornLocalExtensionManagementPort,
         package_ref: &LifecyclePackageRef,
-    ) -> Result<Option<ExtensionActivationCredentialPreflight>, ProductWorkflowError> {
+    ) -> Result<Option<RuntimeExtensionActivationCredentialGate>, ProductWorkflowError> {
         let requirements = extension_management
             .activation_credential_requirements(package_ref)
             .await?;
@@ -442,18 +431,14 @@ impl RebornLocalLifecycleFacade {
             });
         };
         let scope = lifecycle_resource_scope(context)?;
-        let missing_requirements = missing_runtime_credential_auth_requirements(
-            credential_accounts.as_ref(),
-            &scope,
-            requirements,
-        )
-        .await
-        .map_err(map_lifecycle_credential_stage_error)?;
+        let credential_gate =
+            RuntimeExtensionActivationCredentialGate::new(scope, Arc::clone(credential_accounts));
+        let missing_requirements = credential_gate
+            .missing_requirements(requirements)
+            .await
+            .map_err(map_lifecycle_credential_stage_error)?;
         if missing_requirements.is_empty() {
-            return Ok(Some(ExtensionActivationCredentialPreflight::new(
-                scope,
-                Arc::clone(credential_accounts),
-            )));
+            return Ok(Some(credential_gate));
         }
         Err(ProductWorkflowError::InvalidBindingRequest {
             reason: format!(

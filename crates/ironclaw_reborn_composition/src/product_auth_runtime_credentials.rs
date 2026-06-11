@@ -4,10 +4,9 @@ use async_trait::async_trait;
 use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount,
     CredentialAccountRecordSource, CredentialAccountSelectionRequest, CredentialAccountService,
-    CredentialAccountStatus, CredentialOwnership, CredentialRefreshRequest, GOOGLE_PROVIDER_ID,
-    ProviderScope, select_latest_duplicate_user_reusable_account,
+    CredentialAccountStatus, CredentialOwnership, CredentialRefreshRequest, ProviderScope,
+    select_latest_duplicate_user_reusable_account,
 };
-use ironclaw_first_party_extensions::gsuite_google_account_visible_to_requester;
 use ironclaw_host_api::{
     CredentialStageError, ExtensionId, ResourceScope, RuntimeCredentialAccountProviderId,
     RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement,
@@ -20,11 +19,26 @@ use ironclaw_host_runtime::{
 #[derive(Clone)]
 pub(crate) struct ProductAuthRuntimeCredentialResolver {
     accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
+    refresher: Arc<dyn RuntimeCredentialAccountRefreshService>,
 }
 
 impl ProductAuthRuntimeCredentialResolver {
+    #[cfg(test)]
     pub(crate) fn new(accounts: Arc<dyn RuntimeCredentialAccountSelectionService>) -> Self {
-        Self { accounts }
+        Self {
+            accounts,
+            refresher: Arc::new(NoopRuntimeCredentialAccountRefresher),
+        }
+    }
+
+    pub(crate) fn new_with_refresh(
+        accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
+        refresher: Arc<dyn RuntimeCredentialAccountRefreshService>,
+    ) -> Self {
+        Self {
+            accounts,
+            refresher,
+        }
     }
 }
 
@@ -34,11 +48,29 @@ pub(crate) trait RuntimeCredentialAccountSelectionService: Send + Sync {
         &self,
         request: RuntimeCredentialAccountSelectionRequest,
     ) -> Result<CredentialAccount, AuthProductError>;
+}
 
+#[async_trait]
+pub(crate) trait RuntimeCredentialAccountRefreshService: Send + Sync {
+    async fn refresh_configured_runtime_account(
+        &self,
+        request: RuntimeCredentialAccountSelectionRequest,
+        account: CredentialAccount,
+        accounts: &dyn RuntimeCredentialAccountSelectionService,
+    ) -> Result<CredentialAccount, AuthProductError>;
+}
+
+#[cfg(test)]
+struct NoopRuntimeCredentialAccountRefresher;
+
+#[cfg(test)]
+#[async_trait]
+impl RuntimeCredentialAccountRefreshService for NoopRuntimeCredentialAccountRefresher {
     async fn refresh_configured_runtime_account(
         &self,
         _request: RuntimeCredentialAccountSelectionRequest,
         account: CredentialAccount,
+        _accounts: &dyn RuntimeCredentialAccountSelectionService,
     ) -> Result<CredentialAccount, AuthProductError> {
         Ok(account)
     }
@@ -110,7 +142,7 @@ async fn runtime_credential_auth_requirement_configured(
 
 pub(crate) struct ProductAuthRuntimeCredentialAccountSelector {
     accounts: Arc<dyn CredentialAccountRecordSource>,
-    refresh_accounts: Option<Arc<dyn CredentialAccountService>>,
+    visibility_policy: Arc<dyn RuntimeCredentialAccountVisibilityPolicy>,
 }
 
 impl ProductAuthRuntimeCredentialAccountSelector {
@@ -118,18 +150,50 @@ impl ProductAuthRuntimeCredentialAccountSelector {
     pub(crate) fn new(accounts: Arc<dyn CredentialAccountRecordSource>) -> Self {
         Self {
             accounts,
-            refresh_accounts: None,
+            visibility_policy: Arc::new(DefaultRuntimeCredentialAccountVisibilityPolicy),
         }
     }
 
-    pub(crate) fn new_with_refresh(
+    pub(crate) fn new_with_visibility(
         accounts: Arc<dyn CredentialAccountRecordSource>,
-        refresh_accounts: Arc<dyn CredentialAccountService>,
+        visibility_policy: Arc<dyn RuntimeCredentialAccountVisibilityPolicy>,
     ) -> Self {
         Self {
             accounts,
-            refresh_accounts: Some(refresh_accounts),
+            visibility_policy,
         }
+    }
+}
+
+pub(crate) trait RuntimeCredentialAccountVisibilityPolicy: Send + Sync {
+    fn account_visible_to_requester(
+        &self,
+        account: &CredentialAccount,
+        lookup: &CredentialAccountSelectionRequest,
+    ) -> bool;
+}
+
+#[cfg(test)]
+struct DefaultRuntimeCredentialAccountVisibilityPolicy;
+
+#[cfg(test)]
+impl RuntimeCredentialAccountVisibilityPolicy for DefaultRuntimeCredentialAccountVisibilityPolicy {
+    fn account_visible_to_requester(
+        &self,
+        account: &CredentialAccount,
+        lookup: &CredentialAccountSelectionRequest,
+    ) -> bool {
+        account.is_authorized_for_requester(lookup.requester_extension.as_ref())
+    }
+}
+
+pub(crate) struct ProductAuthRuntimeCredentialAccountRefresher {
+    refresh_accounts: Arc<dyn CredentialAccountService>,
+}
+
+impl ProductAuthRuntimeCredentialAccountRefresher {
+    pub(crate) fn new(refresh_accounts: Arc<dyn CredentialAccountService>) -> Self {
+        Self { refresh_accounts }
     }
 }
 
@@ -138,7 +202,6 @@ impl std::fmt::Debug for ProductAuthRuntimeCredentialAccountSelector {
         formatter
             .debug_struct("ProductAuthRuntimeCredentialAccountSelector")
             .field("accounts", &"<credential_account_record_source>")
-            .field("refresh_accounts", &self.refresh_accounts.is_some())
             .finish()
     }
 }
@@ -170,7 +233,10 @@ impl RuntimeCredentialAccountSelectionService for ProductAuthRuntimeCredentialAc
         }
         let selectable = configured
             .into_iter()
-            .filter(|account| account_visible_to_runtime_requester(account, &request.lookup))
+            .filter(|account| {
+                self.visibility_policy
+                    .account_visible_to_requester(account, &request.lookup)
+            })
             .collect::<Vec<_>>();
         match selectable.as_slice() {
             [] => Err(AuthProductError::CrossScopeDenied),
@@ -179,11 +245,15 @@ impl RuntimeCredentialAccountSelectionService for ProductAuthRuntimeCredentialAc
                 .ok_or(AuthProductError::AccountSelectionRequired),
         }
     }
+}
 
+#[async_trait]
+impl RuntimeCredentialAccountRefreshService for ProductAuthRuntimeCredentialAccountRefresher {
     async fn refresh_configured_runtime_account(
         &self,
         request: RuntimeCredentialAccountSelectionRequest,
         account: CredentialAccount,
+        accounts: &dyn RuntimeCredentialAccountSelectionService,
     ) -> Result<CredentialAccount, AuthProductError> {
         if !matches!(request.setup, RuntimeCredentialAccountSetup::OAuth { .. }) {
             return Ok(account);
@@ -191,9 +261,6 @@ impl RuntimeCredentialAccountSelectionService for ProductAuthRuntimeCredentialAc
         if account.refresh_secret.is_none() {
             return Ok(account);
         }
-        let Some(refresh_accounts) = &self.refresh_accounts else {
-            return Ok(account);
-        };
 
         let mut refresh_request = CredentialRefreshRequest::new(
             account.scope.clone(),
@@ -203,8 +270,12 @@ impl RuntimeCredentialAccountSelectionService for ProductAuthRuntimeCredentialAc
         if let Some(requester_extension) = request.lookup.requester_extension.clone() {
             refresh_request = refresh_request.for_extension(requester_extension);
         }
-        match refresh_accounts.refresh_account(refresh_request).await {
-            Ok(_) => self.select_unique_configured_runtime_account(request).await,
+        match self.refresh_accounts.refresh_account(refresh_request).await {
+            Ok(_) => {
+                accounts
+                    .select_unique_configured_runtime_account(request)
+                    .await
+            }
             Err(
                 AuthProductError::BackendUnavailable
                 | AuthProductError::BackendConflict
@@ -243,8 +314,8 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
             .await
             .map_err(map_account_error)?;
         let account = self
-            .accounts
-            .refresh_configured_runtime_account(selection_request, account)
+            .refresher
+            .refresh_configured_runtime_account(selection_request, account, self.accounts.as_ref())
             .await
             .map_err(map_account_error)?;
         if account.status != CredentialAccountStatus::Configured {
@@ -338,20 +409,6 @@ fn account_visible_from_runtime_scope(
         && account_resource.mission_id == runtime_resource.mission_id
         && account_resource.thread_id == runtime_resource.thread_id
         && account.scope.session_id == runtime_scope.session_id
-}
-
-fn account_visible_to_runtime_requester(
-    account: &CredentialAccount,
-    lookup: &CredentialAccountSelectionRequest,
-) -> bool {
-    let requester = lookup.requester_extension.as_ref();
-    if lookup.provider.as_str() != GOOGLE_PROVIDER_ID {
-        return account.is_authorized_for_requester(requester);
-    }
-    let Some(requester) = requester else {
-        return account.is_authorized_for_requester(None);
-    };
-    gsuite_google_account_visible_to_requester(account, requester)
 }
 
 pub(crate) fn runtime_account_owner_scope(

@@ -17,9 +17,8 @@ use ironclaw_host_runtime::{
 use ironclaw_loop_support::{
     CapabilityResultWrite, HostManagedModelError, HostManagedModelErrorKind,
     HostManagedModelGateway, HostManagedModelMessageRole, HostManagedModelRequest,
-    HostManagedModelResponse, HostManagedToolResultContent, HostRuntimeLoopCapabilityPortFactory,
-    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
-    loop_driver_execution_extension_id,
+    HostManagedModelResponse, HostManagedToolResultContent, LoopCapabilityInputResolver,
+    LoopCapabilityPortFactory, LoopCapabilityResultWriter, loop_driver_execution_extension_id,
 };
 use ironclaw_threads::{
     AppendCapabilityDisplayPreviewRequest, CapabilityDisplayPreviewEnvelope,
@@ -30,11 +29,8 @@ use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, Trust
 use ironclaw_turns::{
     LoopResultRef,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-        CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityInputRef, CapabilityInvocation,
-        CapabilityOutcome, LoopCapabilityPort, LoopHostMilestoneSink, LoopRunContext,
-        ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolDefinition,
-        VisibleCapabilityRequest, VisibleCapabilitySurface, sanitize_model_visible_text,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, LoopCapabilityPort,
+        LoopHostMilestoneSink, LoopRunContext, ProviderToolCall, sanitize_model_visible_text,
     },
 };
 
@@ -47,6 +43,7 @@ use crate::{
 };
 
 pub(super) mod extension_surface;
+mod refreshing_capability_port;
 #[cfg(test)]
 mod shell_tests;
 mod skill_activation;
@@ -54,11 +51,11 @@ mod surface_disclosure;
 mod synthetic_capability;
 
 use extension_surface::{LocalDevExtensionSurface, LocalDevExtensionSurfaceSource};
+use refreshing_capability_port::{
+    RefreshingLocalDevCapabilityPortConfig, create_refreshing_local_dev_capability_port,
+};
 #[cfg(test)]
 pub(crate) use skill_activation::SKILL_ACTIVATE_CAPABILITY_ID;
-use skill_activation::skill_activation_capability;
-use surface_disclosure::wrap_local_dev_surface_disclosure;
-use synthetic_capability::wrap_local_dev_synthetic_capabilities;
 
 pub(super) struct LocalDevCapabilityWiring {
     pub(super) capability_factory: Arc<dyn LoopCapabilityPortFactory>,
@@ -144,7 +141,7 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             &self.fallback_user_id,
         ))
         .map_err(host_api_agent_loop_error)?;
-        let port = Arc::new(RefreshingLocalDevCapabilityPort {
+        create_refreshing_local_dev_capability_port(RefreshingLocalDevCapabilityPortConfig {
             runtime: Arc::clone(&self.runtime),
             run_context: run_context.clone(),
             fallback_user_id: self.fallback_user_id.clone(),
@@ -157,190 +154,8 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             result_writer: Arc::clone(&self.result_writer),
             milestone_sink: Arc::clone(&self.milestone_sink),
             skill_activation_source: self.skill_activation_source.clone(),
-            current: StdMutex::new(None),
-        });
-        let (initial, _) = port
-            .refresh_with_surface(VisibleCapabilityRequest {})
-            .await?;
-        port.replace_current(initial)?;
-        Ok(port)
-    }
-}
-
-struct RefreshingLocalDevCapabilityPort {
-    runtime: Arc<dyn HostRuntime>,
-    run_context: LoopRunContext,
-    fallback_user_id: UserId,
-    policy: Arc<LocalDevCapabilityPolicy>,
-    workspace_mounts: MountView,
-    skill_mounts: MountView,
-    memory_mounts: MountView,
-    extension_surface_source: LocalDevExtensionSurfaceSource,
-    input_resolver: Arc<dyn LoopCapabilityInputResolver>,
-    result_writer: Arc<dyn LoopCapabilityResultWriter>,
-    milestone_sink: Arc<dyn LoopHostMilestoneSink>,
-    skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
-    current: StdMutex<Option<Arc<dyn LoopCapabilityPort>>>,
-}
-
-impl RefreshingLocalDevCapabilityPort {
-    async fn build_inner(&self) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
-        let extension_surface = self
-            .extension_surface_source
-            .snapshot()
-            .await
-            .map_err(host_api_agent_loop_error)?;
-        let visible_request = local_dev_visible_capability_request(
-            &self.run_context,
-            &self.fallback_user_id,
-            self.workspace_mounts.clone(),
-            self.skill_mounts.clone(),
-            self.memory_mounts.clone(),
-            &self.policy,
-            &extension_surface,
-        )?;
-        let mut factory = HostRuntimeLoopCapabilityPortFactory::new(
-            Arc::clone(&self.runtime),
-            visible_request,
-            Arc::clone(&self.input_resolver),
-            Arc::clone(&self.result_writer),
-            Arc::clone(&self.milestone_sink),
-        )
-        .with_execution_mounts(self.workspace_mounts.clone());
-        for capability_id in self.policy.skill_management_capability_ids() {
-            factory = factory
-                .with_capability_execution_mount(capability_id.clone(), self.skill_mounts.clone());
-        }
-        for capability_id in self.policy.memory_capability_ids() {
-            factory = factory
-                .with_capability_execution_mount(capability_id.clone(), self.memory_mounts.clone());
-        }
-        let port = factory.for_run_context(self.run_context.clone());
-        let synthetic_capabilities = match &self.skill_activation_source {
-            Some(skill_activation_source) => {
-                vec![skill_activation_capability(Arc::clone(
-                    skill_activation_source,
-                ))?]
-            }
-            None => Vec::new(),
-        };
-        let port = wrap_local_dev_synthetic_capabilities(
-            port,
-            synthetic_capabilities,
-            self.run_context.clone(),
-            Arc::clone(&self.input_resolver),
-            Arc::clone(&self.result_writer),
-        )?;
-        Ok(wrap_local_dev_surface_disclosure(
-            port,
-            &self.workspace_mounts,
-        ))
-    }
-
-    async fn refresh_with_surface(
-        &self,
-        request: VisibleCapabilityRequest,
-    ) -> Result<(Arc<dyn LoopCapabilityPort>, VisibleCapabilitySurface), AgentLoopHostError> {
-        let port = self.build_inner().await?;
-        let surface = port.visible_capabilities(request).await?;
-        Ok((port, surface))
-    }
-
-    fn current_port(&self) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
-        self.current
-            .lock()
-            .map_err(|_| capability_io_error())?
-            .clone()
-            .ok_or_else(|| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::StaleSurface,
-                    "capability surface is unavailable",
-                )
-            })
-    }
-
-    fn replace_current(&self, port: Arc<dyn LoopCapabilityPort>) -> Result<(), AgentLoopHostError> {
-        *self.current.lock().map_err(|_| capability_io_error())? = Some(port);
-        Ok(())
-    }
-
-    async fn current_or_refresh(&self) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
-        match self.current_port() {
-            Ok(port) => Ok(port),
-            Err(error) if error.kind == AgentLoopHostErrorKind::StaleSurface => {
-                let (port, _) = self
-                    .refresh_with_surface(VisibleCapabilityRequest {})
-                    .await?;
-                self.replace_current(port.clone())?;
-                Ok(port)
-            }
-            Err(error) => Err(error),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl LoopCapabilityPort for RefreshingLocalDevCapabilityPort {
-    fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
-        match self.current_port() {
-            Ok(port) => port.tool_definitions(),
-            Err(error) if error.kind == AgentLoopHostErrorKind::StaleSurface => Ok(Vec::new()),
-            Err(error) => Err(error),
-        }
-    }
-
-    fn provider_tool_call_capability_ids(
-        &self,
-        tool_call: &ProviderToolCall,
-    ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
-        self.current_port()?
-            .provider_tool_call_capability_ids(tool_call)
-    }
-
-    fn validate_provider_tool_call(
-        &self,
-        tool_call: &ProviderToolCall,
-    ) -> Result<(), AgentLoopHostError> {
-        self.current_port()?.validate_provider_tool_call(tool_call)
-    }
-
-    async fn register_provider_tool_call(
-        &self,
-        tool_call: ProviderToolCall,
-    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        self.current_or_refresh()
-            .await?
-            .register_provider_tool_call(tool_call)
-            .await
-    }
-
-    async fn visible_capabilities(
-        &self,
-        request: VisibleCapabilityRequest,
-    ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        let (port, surface) = self.refresh_with_surface(request).await?;
-        self.replace_current(port)?;
-        Ok(surface)
-    }
-
-    async fn invoke_capability(
-        &self,
-        request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
-        self.current_or_refresh()
-            .await?
-            .invoke_capability(request)
-            .await
-    }
-
-    async fn invoke_capability_batch(
-        &self,
-        request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-        self.current_or_refresh()
-            .await?
-            .invoke_capability_batch(request)
-            .await
+        })
+        .await
     }
 }
 

@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use ironclaw_extensions::{
     CapabilityDeclV2, CapabilityVisibility, ExtensionAssetPath, ExtensionManifest,
     ExtensionPackage, ExtensionRuntime, ManifestSource,
@@ -13,6 +11,10 @@ use ironclaw_product_workflow::{
 };
 use toml::Value;
 
+use crate::extension_credential_requirements::{
+    can_merge_lifecycle_credential_setup, merge_lifecycle_credential_setup,
+    product_auth_credential_source,
+};
 use crate::nearai_mcp::{
     NearAiMcpBootstrapConfig, NearAiMcpEndpoint, nearai_mcp_endpoint_from_env,
 };
@@ -177,23 +179,17 @@ fn credential_requirements(
     let mut groups: Vec<CredentialRequirementGroup> = Vec::new();
     for capability in &package.package.manifest.capabilities {
         for requirement in &capability.runtime_credentials {
-            let ironclaw_host_api::RuntimeCredentialRequirementSource::ProductAuthAccount {
-                provider,
-                setup,
-            } = &requirement.source
-            else {
+            let Some((provider, setup)) = product_auth_credential_source(requirement) else {
                 continue;
             };
             let handle = requirement.handle.as_str().to_string();
-            let provider = provider.as_str().to_string();
-            let setup = credential_setup(setup);
             if let Some(seen) = groups.iter_mut().find(|seen| {
                 seen.handle == handle
                     && seen.provider == provider
-                    && can_merge_credential_setup(&seen.setup, &setup)
+                    && can_merge_lifecycle_credential_setup(&seen.setup, &setup)
             }) {
                 seen.required |= requirement.required;
-                merge_credential_setup(&mut seen.setup, setup);
+                merge_lifecycle_credential_setup(&mut seen.setup, setup);
                 continue;
             }
             groups.push(CredentialRequirementGroup {
@@ -226,41 +222,6 @@ fn credential_requirements(
         .collect()
 }
 
-fn can_merge_credential_setup(
-    existing: &LifecycleExtensionCredentialSetup,
-    candidate: &LifecycleExtensionCredentialSetup,
-) -> bool {
-    matches!(
-        (existing, candidate),
-        (
-            LifecycleExtensionCredentialSetup::ManualToken,
-            LifecycleExtensionCredentialSetup::ManualToken
-        ) | (
-            LifecycleExtensionCredentialSetup::OAuth { .. },
-            LifecycleExtensionCredentialSetup::OAuth { .. }
-        )
-    )
-}
-
-fn merge_credential_setup(
-    existing: &mut LifecycleExtensionCredentialSetup,
-    candidate: LifecycleExtensionCredentialSetup,
-) {
-    if let (
-        LifecycleExtensionCredentialSetup::OAuth { scopes: existing },
-        LifecycleExtensionCredentialSetup::OAuth { scopes: candidate },
-    ) = (existing, candidate)
-    {
-        merge_scope_strings(existing, candidate);
-    }
-}
-
-fn merge_scope_strings(existing: &mut Vec<String>, candidate: Vec<String>) {
-    let mut scopes = existing.iter().cloned().collect::<BTreeSet<_>>();
-    scopes.extend(candidate);
-    *existing = scopes.into_iter().collect();
-}
-
 struct CredentialRequirementGroup {
     handle: String,
     provider: String,
@@ -277,21 +238,6 @@ fn credential_requirement_name(
         .filter(|seen| seen.handle == group.handle)
         .count();
     format!("{}__{}", group.handle, ordinal)
-}
-
-fn credential_setup(
-    setup: &ironclaw_host_api::RuntimeCredentialAccountSetup,
-) -> LifecycleExtensionCredentialSetup {
-    match setup {
-        ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken => {
-            LifecycleExtensionCredentialSetup::ManualToken
-        }
-        ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth { scopes } => {
-            LifecycleExtensionCredentialSetup::OAuth {
-                scopes: scopes.clone(),
-            }
-        }
-    }
 }
 
 #[derive(Debug, Default)]
@@ -1485,7 +1431,7 @@ fn visible_capabilities(
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::{HashMap, HashSet},
+        collections::{BTreeSet, HashMap, HashSet},
         sync::{Arc, Mutex},
         time::SystemTime,
     };

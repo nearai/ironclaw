@@ -8,9 +8,9 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, CredentialStageError, EffectKind, ExtensionId,
-    PermissionMode, ResourceScope, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement,
-    RuntimeCredentialRequirement, RuntimeHttpEgress, VirtualPath, sha256_digest_token,
+    CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, PermissionMode, ResourceScope,
+    RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement, RuntimeHttpEgress, VirtualPath,
+    sha256_digest_token,
 };
 use ironclaw_product_workflow::{
     LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
@@ -26,12 +26,13 @@ use crate::available_extensions::{
     AvailableExtensionCatalog, AvailableExtensionPackage, materialize_available_extension,
     visible_capability_ids,
 };
+use crate::extension_activation_credentials::{
+    ExtensionActivationCredentialGate, UnavailableExtensionActivationCredentialGate,
+};
+use crate::extension_credential_requirements::package_runtime_credential_auth_requirements;
 use crate::lifecycle::response_with_payload;
 use crate::mcp_discovery::{
     HostedMcpDiscoveryError, discover_hosted_mcp_package, is_hosted_http_mcp_package,
-};
-use crate::product_auth_runtime_credentials::{
-    RuntimeCredentialAccountSelectionService, missing_runtime_credential_auth_requirements,
 };
 
 pub(crate) use active_publication::ActiveExtensionPublisher;
@@ -70,30 +71,6 @@ pub(crate) enum ExtensionActivationMode {
         scope: ResourceScope,
         runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
     },
-}
-
-#[derive(Clone)]
-pub(crate) struct ExtensionActivationCredentialPreflight {
-    scope: ResourceScope,
-    credential_accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
-}
-
-impl ExtensionActivationCredentialPreflight {
-    pub(crate) fn new(
-        scope: ResourceScope,
-        credential_accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
-    ) -> Self {
-        Self {
-            scope,
-            credential_accounts,
-        }
-    }
-}
-
-enum ActivationCredentialPreflightPolicy<'a> {
-    Required(Option<&'a ExtensionActivationCredentialPreflight>),
-    #[cfg(test)]
-    AssumePrecheckedForTest,
 }
 
 impl ActiveExtensionCapability {
@@ -380,47 +357,38 @@ impl RebornLocalExtensionManagementPort {
         package_ref: LifecyclePackageRef,
         mode: ExtensionActivationMode,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        self.activate_inner(
-            package_ref,
-            mode,
-            ActivationCredentialPreflightPolicy::Required(None),
-        )
-        .await
+        let credential_gate = UnavailableExtensionActivationCredentialGate;
+        self.activate_inner(package_ref, mode, &credential_gate)
+            .await
     }
 
-    pub(crate) async fn activate_with_credential_preflight(
+    pub(crate) async fn activate_with_credential_gate(
         &self,
         package_ref: LifecyclePackageRef,
         mode: ExtensionActivationMode,
-        credential_preflight: ExtensionActivationCredentialPreflight,
+        credential_gate: impl ExtensionActivationCredentialGate,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        self.activate_inner(
-            package_ref,
-            mode,
-            ActivationCredentialPreflightPolicy::Required(Some(&credential_preflight)),
-        )
-        .await
+        self.activate_inner(package_ref, mode, &credential_gate)
+            .await
     }
 
     #[cfg(test)]
-    pub(crate) async fn activate_without_credential_preflight_for_test(
+    pub(crate) async fn activate_with_prechecked_credentials_for_test(
         &self,
         package_ref: LifecyclePackageRef,
         mode: ExtensionActivationMode,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        self.activate_inner(
-            package_ref,
-            mode,
-            ActivationCredentialPreflightPolicy::AssumePrecheckedForTest,
-        )
-        .await
+        let credential_gate =
+            crate::extension_activation_credentials::PrecheckedExtensionActivationCredentialGate;
+        self.activate_inner(package_ref, mode, &credential_gate)
+            .await
     }
 
     async fn activate_inner(
         &self,
         package_ref: LifecyclePackageRef,
         mode: ExtensionActivationMode,
-        credential_preflight: ActivationCredentialPreflightPolicy<'_>,
+        credential_gate: &dyn ExtensionActivationCredentialGate,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
 
@@ -430,8 +398,7 @@ impl RebornLocalExtensionManagementPort {
                 .load_installation(&extension_id, &installation_id)
                 .await?;
             let package = self.lifecycle_package(&extension_id).await?;
-            self.ensure_activation_credentials(&package, &credential_preflight)
-                .await?;
+            credential_gate.ensure_credentials(&package).await?;
             match mode {
                 ExtensionActivationMode::HostedMcpDiscovery {
                     scope,
@@ -488,8 +455,7 @@ impl RebornLocalExtensionManagementPort {
         if current_package != discovery.base_package {
             return Err(hosted_mcp_changed_during_discovery_error());
         };
-        self.ensure_activation_credentials(&active_package, &credential_preflight)
-            .await?;
+        credential_gate.ensure_credentials(&active_package).await?;
         self.commit_activation(
             package_ref,
             &extension_id,
@@ -555,50 +521,6 @@ impl RebornLocalExtensionManagementPort {
         let _operation_guard = self.operation_lock.lock().await;
         let package = self.lifecycle_package(&extension_id).await?;
         Ok(is_hosted_http_mcp_package(&package))
-    }
-
-    async fn ensure_activation_credentials(
-        &self,
-        package: &ExtensionPackage,
-        credential_preflight: &ActivationCredentialPreflightPolicy<'_>,
-    ) -> Result<(), ProductWorkflowError> {
-        let requirements = package_runtime_credential_auth_requirements(package);
-        if requirements.is_empty() {
-            return Ok(());
-        }
-        #[cfg(test)]
-        if matches!(
-            credential_preflight,
-            ActivationCredentialPreflightPolicy::AssumePrecheckedForTest
-        ) {
-            return Ok(());
-        }
-        let ActivationCredentialPreflightPolicy::Required(Some(credential_preflight)) =
-            credential_preflight
-        else {
-            return Err(ProductWorkflowError::InvalidBindingRequest {
-                reason: format!(
-                    "extension {} requires product auth credentials before activation",
-                    package.manifest.id.as_str()
-                ),
-            });
-        };
-        let missing_requirements = missing_runtime_credential_auth_requirements(
-            credential_preflight.credential_accounts.as_ref(),
-            &credential_preflight.scope,
-            requirements,
-        )
-        .await
-        .map_err(map_activation_credential_stage_error)?;
-        if missing_requirements.is_empty() {
-            return Ok(());
-        }
-        Err(ProductWorkflowError::InvalidBindingRequest {
-            reason: format!(
-                "extension {} requires product auth credentials before activation",
-                package.manifest.id.as_str()
-            ),
-        })
     }
 
     pub(crate) async fn remove(
@@ -1015,124 +937,6 @@ impl RebornLocalExtensionManagementPort {
     }
 }
 
-fn package_runtime_credential_auth_requirements(
-    package: &ExtensionPackage,
-) -> Vec<RuntimeCredentialAuthRequirement> {
-    let mut requirements: Vec<RuntimeCredentialAuthRequirement> = Vec::new();
-    for capability in &package.manifest.capabilities {
-        for credential in &capability.runtime_credentials {
-            if !credential.required {
-                continue;
-            }
-            let Some(requirement) =
-                credential.product_auth_requirement_for(package.manifest.id.clone())
-            else {
-                continue;
-            };
-            let requirement = RuntimeCredentialAuthRequirement {
-                provider_scopes: normalized_provider_scopes(&requirement.provider_scopes),
-                setup: normalized_runtime_credential_setup(requirement.setup),
-                ..requirement
-            };
-            if let Some(seen) = requirements
-                .iter_mut()
-                .find(|seen| can_merge_runtime_credential_auth_requirement(seen, &requirement))
-            {
-                merge_runtime_credential_auth_requirement(seen, requirement);
-                continue;
-            }
-            requirements.push(requirement);
-        }
-    }
-    requirements
-}
-
-fn can_merge_runtime_credential_auth_requirement(
-    existing: &RuntimeCredentialAuthRequirement,
-    candidate: &RuntimeCredentialAuthRequirement,
-) -> bool {
-    existing.provider == candidate.provider
-        && existing.requester_extension == candidate.requester_extension
-        && can_merge_runtime_credential_setup(&existing.setup, &candidate.setup)
-}
-
-fn can_merge_runtime_credential_setup(
-    existing: &RuntimeCredentialAccountSetup,
-    candidate: &RuntimeCredentialAccountSetup,
-) -> bool {
-    matches!(
-        (existing, candidate),
-        (
-            RuntimeCredentialAccountSetup::ManualToken,
-            RuntimeCredentialAccountSetup::ManualToken
-        ) | (
-            RuntimeCredentialAccountSetup::OAuth { .. },
-            RuntimeCredentialAccountSetup::OAuth { .. }
-        )
-    )
-}
-
-fn merge_runtime_credential_auth_requirement(
-    existing: &mut RuntimeCredentialAuthRequirement,
-    candidate: RuntimeCredentialAuthRequirement,
-) {
-    existing.provider_scopes = merged_provider_scopes(
-        existing
-            .provider_scopes
-            .iter()
-            .cloned()
-            .chain(candidate.provider_scopes),
-    );
-    merge_runtime_credential_setup(&mut existing.setup, candidate.setup);
-}
-
-fn merge_runtime_credential_setup(
-    existing: &mut RuntimeCredentialAccountSetup,
-    candidate: RuntimeCredentialAccountSetup,
-) {
-    if let (
-        RuntimeCredentialAccountSetup::OAuth { scopes: existing },
-        RuntimeCredentialAccountSetup::OAuth { scopes: candidate },
-    ) = (existing, candidate)
-    {
-        *existing = merged_provider_scopes(existing.iter().cloned().chain(candidate));
-    }
-}
-
-fn normalized_runtime_credential_setup(
-    setup: RuntimeCredentialAccountSetup,
-) -> RuntimeCredentialAccountSetup {
-    match setup {
-        RuntimeCredentialAccountSetup::OAuth { scopes } => RuntimeCredentialAccountSetup::OAuth {
-            scopes: normalized_provider_scopes(&scopes),
-        },
-        RuntimeCredentialAccountSetup::ManualToken => RuntimeCredentialAccountSetup::ManualToken,
-    }
-}
-
-fn normalized_provider_scopes(scopes: &[String]) -> Vec<String> {
-    merged_provider_scopes(scopes.iter().cloned())
-}
-
-fn merged_provider_scopes(scopes: impl IntoIterator<Item = String>) -> Vec<String> {
-    scopes
-        .into_iter()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
-}
-
-fn map_activation_credential_stage_error(error: CredentialStageError) -> ProductWorkflowError {
-    match error {
-        CredentialStageError::AuthRequired => ProductWorkflowError::InvalidBindingRequest {
-            reason: "extension requires product auth credentials before activation".to_string(),
-        },
-        CredentialStageError::Backend => ProductWorkflowError::InvalidBindingRequest {
-            reason: "extension product auth credential state is invalid".to_string(),
-        },
-    }
-}
-
 struct HostedMcpDiscoveryRequest {
     base_package: ExtensionPackage,
     scope: ResourceScope,
@@ -1368,6 +1172,8 @@ fn compensation_failure(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::hosted_mcp_test_support::HostedMcpDiscoveryEgress;
     use super::*;
     use crate::available_extensions::{
@@ -1385,8 +1191,8 @@ mod tests {
     use ironclaw_host_api::{
         CapabilityId, ExtensionLifecycleOperation, HostPath, HostPortCatalog, InvocationId,
         MountAlias, MountGrant, MountPermissions, MountView, NetworkMethod, ResourceScope,
-        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-        RuntimeHttpEgressResponse, TenantId, TrustClass, UserId,
+        RuntimeCredentialAccountSetup, RuntimeHttpEgress, RuntimeHttpEgressError,
+        RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, TenantId, TrustClass, UserId,
     };
     use ironclaw_host_runtime::{SPAWN_SUBAGENT_CAPABILITY_ID, builtin_first_party_package};
     use ironclaw_product_workflow::{
@@ -1519,7 +1325,7 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install fixture extension");
-        port.activate_without_credential_preflight_for_test(
+        port.activate_with_prechecked_credentials_for_test(
             package_ref,
             ExtensionActivationMode::Static,
         )
@@ -1614,7 +1420,7 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install Notion MCP");
-        port.activate_without_credential_preflight_for_test(
+        port.activate_with_prechecked_credentials_for_test(
             package_ref,
             ExtensionActivationMode::HostedMcpDiscovery {
                 scope: ResourceScope::local_default(
@@ -1673,7 +1479,7 @@ mod tests {
             .await
             .expect("install Notion MCP");
         let activate = port
-            .activate_without_credential_preflight_for_test(
+            .activate_with_prechecked_credentials_for_test(
                 package_ref,
                 ExtensionActivationMode::HostedMcpDiscovery {
                     scope: hosted_mcp_scope("hosted-mcp-empty-tools"),
@@ -1714,7 +1520,7 @@ mod tests {
             let port = Arc::clone(&port);
             let package_ref = package_ref.clone();
             async move {
-                port.activate_without_credential_preflight_for_test(
+                port.activate_with_prechecked_credentials_for_test(
                     package_ref,
                     ExtensionActivationMode::HostedMcpDiscovery {
                         scope: hosted_mcp_scope("hosted-mcp-remove-race"),
@@ -1766,7 +1572,7 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install fixture extension");
-        port.activate_without_credential_preflight_for_test(
+        port.activate_with_prechecked_credentials_for_test(
             package_ref.clone(),
             ExtensionActivationMode::Static,
         )
@@ -1940,7 +1746,7 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install fixture extension");
-        port.activate_without_credential_preflight_for_test(
+        port.activate_with_prechecked_credentials_for_test(
             package_ref,
             ExtensionActivationMode::Static,
         )
@@ -1978,7 +1784,7 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install fixture extension");
-        port.activate_without_credential_preflight_for_test(
+        port.activate_with_prechecked_credentials_for_test(
             package_ref,
             ExtensionActivationMode::Static,
         )
@@ -2039,7 +1845,7 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install fixture extension");
-        port.activate_without_credential_preflight_for_test(
+        port.activate_with_prechecked_credentials_for_test(
             package_ref,
             ExtensionActivationMode::Static,
         )
@@ -2089,7 +1895,7 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install fixture extension");
-        port.activate_without_credential_preflight_for_test(
+        port.activate_with_prechecked_credentials_for_test(
             package_ref,
             ExtensionActivationMode::Static,
         )
@@ -2875,7 +2681,7 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install extension");
-        port.activate_without_credential_preflight_for_test(
+        port.activate_with_prechecked_credentials_for_test(
             package_ref.clone(),
             ExtensionActivationMode::Static,
         )
@@ -2938,7 +2744,7 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install extension");
-        port.activate_without_credential_preflight_for_test(
+        port.activate_with_prechecked_credentials_for_test(
             package_ref.clone(),
             ExtensionActivationMode::Static,
         )
@@ -2977,7 +2783,7 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install extension");
-        port.activate_without_credential_preflight_for_test(
+        port.activate_with_prechecked_credentials_for_test(
             package_ref.clone(),
             ExtensionActivationMode::Static,
         )

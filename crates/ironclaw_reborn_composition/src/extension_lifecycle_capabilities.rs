@@ -15,13 +15,9 @@ use ironclaw_host_runtime::{
 use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError};
 use serde::Deserialize;
 
-use crate::extension_lifecycle::{
-    ExtensionActivationCredentialPreflight, ExtensionActivationMode,
-    RebornLocalExtensionManagementPort,
-};
-use crate::product_auth_runtime_credentials::{
-    RuntimeCredentialAccountSelectionService, missing_runtime_credential_auth_requirements,
-};
+use crate::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
+use crate::extension_lifecycle::{ExtensionActivationMode, RebornLocalExtensionManagementPort};
+use crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionService;
 
 pub(crate) const EXTENSION_SEARCH_CAPABILITY_ID: &str = "builtin.extension_search";
 pub(crate) const EXTENSION_INSTALL_CAPABILITY_ID: &str = "builtin.extension_install";
@@ -166,13 +162,14 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     .activation_credential_requirements(&package_ref)
                     .await
                     .map_err(lifecycle_error)?;
-                let missing_requirements = missing_runtime_credential_auth_requirements(
-                    self.credential_accounts.as_ref(),
-                    &request.scope,
-                    requirements,
-                )
-                .await
-                .map_err(credential_stage_error)?;
+                let credential_gate = RuntimeExtensionActivationCredentialGate::new(
+                    request.scope.clone(),
+                    Arc::clone(&self.credential_accounts),
+                );
+                let missing_requirements = credential_gate
+                    .missing_requirements(requirements)
+                    .await
+                    .map_err(credential_stage_error)?;
                 if !missing_requirements.is_empty() {
                     return Err(FirstPartyCapabilityError::auth_required_for_credentials(
                         missing_requirements,
@@ -184,14 +181,7 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     request.services.runtime_http_egress.clone(),
                 );
                 self.extension_management
-                    .activate_with_credential_preflight(
-                        package_ref,
-                        mode,
-                        ExtensionActivationCredentialPreflight::new(
-                            request.scope.clone(),
-                            Arc::clone(&self.credential_accounts),
-                        ),
-                    )
+                    .activate_with_credential_gate(package_ref, mode, credential_gate)
                     .await
             }
             EXTENSION_REMOVE_CAPABILITY_ID => {

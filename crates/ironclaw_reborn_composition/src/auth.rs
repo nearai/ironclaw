@@ -31,7 +31,8 @@ use crate::manual_token_flow::{PortBackedManualTokenFlowService, RebornManualTok
 use crate::oauth_dcr::{DcrGateChallengeRequest, DcrSetupFlowRequest, OAuthDcrProviderRegistry};
 use crate::oauth_gate::{GoogleOAuthGateProviderRegistry, OAuthGateChallengeRequest};
 use crate::product_auth_runtime_credentials::{
-    ProductAuthRuntimeCredentialAccountSelector, RuntimeCredentialAccountSelectionService,
+    ProductAuthRuntimeCredentialAccountRefresher, ProductAuthRuntimeCredentialAccountSelector,
+    RuntimeCredentialAccountRefreshService, RuntimeCredentialAccountSelectionService,
 };
 use crate::{AuthChallengeProvider, AuthChallengeView};
 
@@ -628,11 +629,19 @@ impl RebornProductAuthServices {
         &self,
     ) -> Arc<dyn RuntimeCredentialAccountSelectionService> {
         Arc::new(
-            ProductAuthRuntimeCredentialAccountSelector::new_with_refresh(
+            ProductAuthRuntimeCredentialAccountSelector::new_with_visibility(
                 self.credential_account_record_source(),
-                self.credential_account_service(),
+                Arc::new(crate::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy),
             ),
         )
+    }
+
+    pub(crate) fn runtime_credential_account_refresh_service(
+        &self,
+    ) -> Arc<dyn RuntimeCredentialAccountRefreshService> {
+        Arc::new(ProductAuthRuntimeCredentialAccountRefresher::new(
+            self.credential_account_service(),
+        ))
     }
 
     pub fn provider_client(&self) -> Arc<dyn AuthProviderClient> {

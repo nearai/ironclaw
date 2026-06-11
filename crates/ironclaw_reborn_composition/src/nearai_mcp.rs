@@ -13,10 +13,8 @@ use secrecy::{ExposeSecret, SecretString};
 
 use crate::{
     RebornBuildError, RebornProductAuthServices,
-    extension_lifecycle::{
-        ExtensionActivationCredentialPreflight, ExtensionActivationMode,
-        RebornLocalExtensionManagementPort,
-    },
+    extension_activation_credentials::RuntimeExtensionActivationCredentialGate,
+    extension_lifecycle::{ExtensionActivationMode, RebornLocalExtensionManagementPort},
     webui_extension_credentials::ProductAuthExtensionCredentialSetup,
 };
 
@@ -291,10 +289,10 @@ pub(crate) async fn bootstrap_local_dev_nearai_mcp(
     match phase {
         LifecyclePhase::Discovered | LifecyclePhase::Installed => {
             extension_management
-                .activate_with_credential_preflight(
+                .activate_with_credential_gate(
                     package_ref,
                     ExtensionActivationMode::Static,
-                    ExtensionActivationCredentialPreflight::new(
+                    RuntimeExtensionActivationCredentialGate::new(
                         resource_scope,
                         product_auth.runtime_credential_account_selection_service(),
                     ),
