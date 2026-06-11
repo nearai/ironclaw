@@ -346,6 +346,39 @@ async def test_reborn_v2_ui_send_renders_reply(reborn_v2_page, reborn_v2_server)
     )
 
 
+async def test_reborn_v2_messages_show_identity_labels(reborn_v2_page):
+    """User and assistant messages render a persistent identity label (#4722)."""
+    composer = reborn_v2_page.locator(SEL_V2["chat_composer"])
+    await composer.fill("hello there")
+    await composer.press("Enter")
+
+    # The user bubble carries the "You" identity alongside its content.
+    user_bubble = reborn_v2_page.locator(SEL_V2["msg_user"]).first
+    await expect(user_bubble).to_contain_text("hello there", timeout=15000)
+    await expect(user_bubble).to_contain_text("You")
+
+    # The assistant bubble carries the "IronClaw" identity (the canned reply
+    # text itself never contains that string).
+    assistant_bubble = reborn_v2_page.locator(SEL_V2["msg_assistant"]).first
+    await expect(assistant_bubble).to_contain_text("IronClaw", timeout=30000)
+
+
+async def test_reborn_v2_response_links_open_in_new_tab(reborn_v2_page):
+    """Links inside an assistant reply open in a new tab (#4733)."""
+    composer = reborn_v2_page.locator(SEL_V2["chat_composer"])
+    await composer.fill("link test")
+    await composer.press("Enter")
+
+    link = (
+        reborn_v2_page.locator(SEL_V2["msg_assistant"])
+        .get_by_role("link", name="the pull request")
+    )
+    await expect(link).to_be_visible(timeout=30000)
+    assert await link.get_attribute("target") == "_blank", "link must open in a new tab"
+    rel = await link.get_attribute("rel") or ""
+    assert "noopener" in rel, f"link must be noopener, got rel={rel!r}"
+
+
 async def test_reborn_v2_thread_list_and_delete(reborn_v2_server):
     """Threads are listed for the caller and deletion removes the thread and transcript."""
     headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
