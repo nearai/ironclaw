@@ -43,8 +43,10 @@ use crate::slack_personal_binding_pairing::{
     SlackPersonalBindingPairingError,
 };
 use crate::slack_serve::SlackUserId;
+use crate::slack_setup::{SlackInstallationSetup, SlackInstallationSetupStore, SlackSetupError};
 
 const SLACK_HOST_STATE_ROOT: &str = "/tenant-shared/slack-personal-binding";
+const SLACK_INSTALLATION_SETUP_PATH: &str = "/tenant-shared/slack-setup/installation.json";
 const IDENTITY_ROOT: &str = "/tenant-shared/slack-personal-binding/identities";
 const PAIRING_CODE_ROOT: &str = "/tenant-shared/slack-personal-binding/pairing/codes";
 const PAIRING_ACTOR_ROOT: &str = "/tenant-shared/slack-personal-binding/pairing/actors";
@@ -667,6 +669,35 @@ where
             }
             Err(error) => Err(map_route_fs_error(error)),
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl<F> SlackInstallationSetupStore for FilesystemSlackHostState<F>
+where
+    F: RootFilesystem + 'static,
+{
+    async fn get_slack_installation_setup(
+        &self,
+    ) -> Result<Option<SlackInstallationSetup>, SlackSetupError> {
+        let path = ScopedPath::new(SLACK_INSTALLATION_SETUP_PATH)
+            .map_err(|_| SlackSetupError::StoreUnavailable)?;
+        self.read_record(&path)
+            .await
+            .map(|record| record.map(|(setup, _)| setup))
+            .map_err(|_| SlackSetupError::StoreUnavailable)
+    }
+
+    async fn put_slack_installation_setup(
+        &self,
+        setup: &SlackInstallationSetup,
+    ) -> Result<(), SlackSetupError> {
+        let path = ScopedPath::new(SLACK_INSTALLATION_SETUP_PATH)
+            .map_err(|_| SlackSetupError::StoreUnavailable)?;
+        self.write_record(&path, setup, CasExpectation::Any)
+            .await
+            .map(|_| ())
+            .map_err(|_| SlackSetupError::StoreUnavailable)
     }
 }
 
@@ -1339,8 +1370,10 @@ struct StoredSlackPersonalDmTarget {
 }
 
 impl StoredSlackPersonalDmTarget {
-    // arch-exempt: dead_code, reserved for explicit Slack DM provisioning product route, plan #4600
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "paired with the optional explicit Slack DM target upsert path"
+    )]
     fn from_target(target: &SlackPersonalDmTarget, created_at: DateTime<Utc>) -> Self {
         Self {
             tenant_id: target.key.tenant_id.as_str().to_string(),
@@ -1387,6 +1420,8 @@ struct StoredSlackPairingChallenge {
     code: String,
     installation_id: String,
     slack_user_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    setup_revision: Option<u64>,
     status: StoredSlackPairingStatus,
     created_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
@@ -1403,6 +1438,7 @@ impl StoredSlackPairingChallenge {
             code: code.as_str().to_string(),
             installation_id: challenge.installation_id.as_str().to_string(),
             slack_user_id: challenge.slack_user_id.as_str().to_string(),
+            setup_revision: challenge.setup_revision,
             status: StoredSlackPairingStatus::Pending,
             created_at: Utc::now(),
             expires_at,
@@ -1589,6 +1625,7 @@ fn active_pairing_challenge(
         installation_id: AdapterInstallationId::new(record.installation_id.clone())
             .map_err(|error| SlackPersonalBindingPairingError::Backend(error.to_string()))?,
         slack_user_id: SlackUserId::new(record.slack_user_id.clone()),
+        setup_revision: record.setup_revision,
     })
 }
 
@@ -2897,6 +2934,7 @@ mod tests {
         SlackPersonalBindingPairingChallenge {
             installation_id: installation(),
             slack_user_id: SlackUserId::new("U123"),
+            setup_revision: None,
         }
     }
 

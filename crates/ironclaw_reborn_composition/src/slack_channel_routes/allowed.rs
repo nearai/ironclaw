@@ -13,9 +13,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     MAX_LIST_LIMIT, SLACK_CHANNEL_ROUTES_BODY_LIMIT_BYTES, SlackChannelRoute,
-    SlackChannelRouteAdminRouteConfig, SlackChannelRouteAssignment, SlackRouteError,
-    WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH, ensure_allowed_subject_user, ensure_authorized_operator,
-    route_policy, scan_route_admin_field, subjects,
+    SlackChannelRouteAdminContext, SlackChannelRouteAdminRouteConfig, SlackChannelRouteAssignment,
+    SlackRouteError, WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH, ensure_allowed_subject_user,
+    ensure_authorized_operator, route_policy, scan_route_admin_field, subjects,
 };
 use ironclaw_host_api::UserId;
 use ironclaw_product_workflow::WebUiAuthenticatedCaller;
@@ -110,31 +110,35 @@ impl<'a> SlackAllowedChannelAdmin<'a> {
         Self { config }
     }
 
-    async fn list(&self) -> Result<Vec<SlackAllowedChannel>, SlackRouteError> {
-        let routes = self.list_all_routes().await?;
+    async fn list(
+        &self,
+        context: &SlackChannelRouteAdminContext,
+    ) -> Result<Vec<SlackAllowedChannel>, SlackRouteError> {
+        let routes = self.list_all_routes(context).await?;
         Ok(allowed_channels_from_routes(routes))
     }
 
     async fn replace(
         &self,
+        context: &SlackChannelRouteAdminContext,
         request: SlackAllowedChannelSaveRequest,
     ) -> Result<Vec<SlackAllowedChannel>, SlackRouteError> {
         let assignments = match request.into_selection()? {
             SlackAllowedChannelSaveSelection::Managed(channel_ids) => {
-                self.managed_assignments(channel_ids)?
+                self.managed_assignments(context, channel_ids)?
             }
             SlackAllowedChannelSaveSelection::Explicit(channels) => {
-                let current_subjects_by_channel = self.current_subjects_by_channel().await?;
-                self.explicit_assignments(channels, &current_subjects_by_channel)?
+                let current_subjects_by_channel = self.current_subjects_by_channel(context).await?;
+                self.explicit_assignments(context, channels, &current_subjects_by_channel)?
             }
         };
         let routes = self
             .config
             .store
             .replace_managed_routes(
-                &self.config.tenant_id,
-                &self.config.installation_id,
-                &self.config.team_id,
+                &context.tenant_id,
+                &context.installation_id,
+                &context.team_id,
                 assignments,
             )
             .await?;
@@ -143,13 +147,14 @@ impl<'a> SlackAllowedChannelAdmin<'a> {
 
     fn managed_assignments(
         &self,
+        context: &SlackChannelRouteAdminContext,
         channel_ids: Vec<String>,
     ) -> Result<Vec<SlackChannelRouteAssignment>, SlackRouteError> {
-        let channel_ids = self.normalize_channel_ids(channel_ids)?;
+        let channel_ids = self.normalize_channel_ids(context, channel_ids)?;
         channel_ids
             .into_iter()
             .map(|channel_id| {
-                self.config
+                context
                     .channel_subject_assigner
                     .assignment_for(channel_id)
                     .map_err(Into::into)
@@ -159,6 +164,7 @@ impl<'a> SlackAllowedChannelAdmin<'a> {
 
     fn explicit_assignments(
         &self,
+        context: &SlackChannelRouteAdminContext,
         channels: Vec<SlackAllowedChannelSaveAssignment>,
         current_subjects_by_channel: &BTreeMap<String, UserId>,
     ) -> Result<Vec<SlackChannelRouteAssignment>, SlackRouteError> {
@@ -172,7 +178,8 @@ impl<'a> SlackAllowedChannelAdmin<'a> {
                 return Err(SlackRouteError::BadRequest);
             }
             scan_route_admin_field(self.config, "channel_id", &channel_id)?;
-            self.config.key_for_channel(channel_id.clone())?;
+            self.config
+                .key_for_channel_in_context(context, channel_id.clone())?;
 
             let subject_user_id = match channel
                 .subject_user_id
@@ -185,7 +192,7 @@ impl<'a> SlackAllowedChannelAdmin<'a> {
                     let subject_user_id = UserId::new(subject_user_id.to_string())
                         .map_err(|_| SlackRouteError::BadRequest)?;
                     ensure_selected_subject_user(
-                        self.config,
+                        context,
                         current_subjects_by_channel,
                         &channel_id,
                         &subject_user_id,
@@ -193,7 +200,7 @@ impl<'a> SlackAllowedChannelAdmin<'a> {
                     subject_user_id
                 }
                 None => {
-                    self.config
+                    context
                         .channel_subject_assigner
                         .assignment_for(channel_id.clone())?
                         .subject_user_id
@@ -217,8 +224,9 @@ impl<'a> SlackAllowedChannelAdmin<'a> {
 
     async fn current_subjects_by_channel(
         &self,
+        context: &SlackChannelRouteAdminContext,
     ) -> Result<BTreeMap<String, UserId>, SlackRouteError> {
-        self.list_all_routes()
+        self.list_all_routes(context)
             .await?
             .into_iter()
             .map(|route| {
@@ -229,7 +237,10 @@ impl<'a> SlackAllowedChannelAdmin<'a> {
             .collect()
     }
 
-    async fn list_all_routes(&self) -> Result<Vec<SlackChannelRoute>, SlackRouteError> {
+    async fn list_all_routes(
+        &self,
+        context: &SlackChannelRouteAdminContext,
+    ) -> Result<Vec<SlackChannelRoute>, SlackRouteError> {
         let mut cursor = 0;
         let mut routes = Vec::new();
         loop {
@@ -237,9 +248,9 @@ impl<'a> SlackAllowedChannelAdmin<'a> {
                 .config
                 .store
                 .list_routes(
-                    &self.config.tenant_id,
-                    &self.config.installation_id,
-                    &self.config.team_id,
+                    &context.tenant_id,
+                    &context.installation_id,
+                    &context.team_id,
                     cursor,
                     MAX_LIST_LIMIT,
                 )
@@ -258,6 +269,7 @@ impl<'a> SlackAllowedChannelAdmin<'a> {
 
     fn normalize_channel_ids(
         &self,
+        context: &SlackChannelRouteAdminContext,
         channel_ids: Vec<String>,
     ) -> Result<Vec<String>, SlackRouteError> {
         if channel_ids.len() > MAX_ALLOWED_CHANNELS {
@@ -270,7 +282,8 @@ impl<'a> SlackAllowedChannelAdmin<'a> {
                 return Err(SlackRouteError::BadRequest);
             }
             scan_route_admin_field(self.config, "channel_id", &channel_id)?;
-            self.config.key_for_channel(channel_id.clone())?;
+            self.config
+                .key_for_channel_in_context(context, channel_id.clone())?;
             normalized.insert(channel_id);
         }
         Ok(normalized.into_iter().collect())
@@ -278,12 +291,12 @@ impl<'a> SlackAllowedChannelAdmin<'a> {
 }
 
 fn ensure_selected_subject_user(
-    config: &SlackChannelRouteAdminRouteConfig,
+    context: &SlackChannelRouteAdminContext,
     current_subjects_by_channel: &BTreeMap<String, UserId>,
     channel_id: &str,
     subject_user_id: &UserId,
 ) -> Result<(), SlackRouteError> {
-    if ensure_allowed_subject_user(config, subject_user_id).is_ok() {
+    if ensure_allowed_subject_user(context, subject_user_id).is_ok() {
         return Ok(());
     }
     if current_subjects_by_channel
@@ -292,7 +305,7 @@ fn ensure_selected_subject_user(
     {
         return Ok(());
     }
-    let managed_assignment = config
+    let managed_assignment = context
         .channel_subject_assigner
         .assignment_for(channel_id.to_string())?;
     if managed_assignment.subject_user_id == *subject_user_id {
@@ -307,9 +320,10 @@ async fn list_handler(
 ) -> Result<Json<SlackAllowedChannelListResponse>, SlackRouteError> {
     ensure_authorized_operator(&config, &caller)?;
     let admin = SlackAllowedChannelAdmin::new(&config);
+    let context = config.route_context().await?;
     Ok(Json(SlackAllowedChannelListResponse {
-        team_id: config.team_id.clone(),
-        channels: admin.list().await?,
+        team_id: context.team_id.clone(),
+        channels: admin.list(&context).await?,
     }))
 }
 
@@ -320,10 +334,11 @@ async fn save_handler(
 ) -> Result<Json<SlackAllowedChannelSaveResponse>, SlackRouteError> {
     ensure_authorized_operator(&config, &caller)?;
     let admin = SlackAllowedChannelAdmin::new(&config);
+    let context = config.route_context().await?;
     Ok(Json(SlackAllowedChannelSaveResponse {
         success: true,
-        team_id: config.team_id.clone(),
-        channels: admin.replace(request).await?,
+        team_id: context.team_id.clone(),
+        channels: admin.replace(&context, request).await?,
     }))
 }
 

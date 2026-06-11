@@ -18,7 +18,7 @@ use ironclaw_reborn_composition::{
 };
 #[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_reborn_composition::{
-    SlackOperatorRouteVisibility, build_slack_host_beta_mounts,
+    SlackOperatorRouteVisibility, build_slack_host_beta_runtime_mounts,
     build_webui_services_with_slack_host_beta_mounts,
 };
 use ironclaw_reborn_config::{IdentitySection, seed_default_config_file_if_missing};
@@ -360,18 +360,14 @@ impl ServeCommand {
             #[cfg(feature = "slack-v2-host-beta")]
             let slack_mounts = if let Some(slack_config) = slack_host_beta_config {
                 Some(
-                    build_slack_host_beta_mounts(&runtime, slack_config)
+                    build_slack_host_beta_runtime_mounts(&runtime, slack_config)
                         .context("failed to compose Slack host-beta routes")?,
                 )
             } else {
                 None
             };
             #[cfg(feature = "slack-v2-host-beta")]
-            let operator_route_visibility = if sso_startup.is_none() {
-                SlackOperatorRouteVisibility::Visible
-            } else {
-                SlackOperatorRouteVisibility::Hidden
-            };
+            let operator_route_visibility = SlackOperatorRouteVisibility::Visible;
             #[cfg(feature = "slack-v2-host-beta")]
             let bundle: RebornWebuiBundle = build_webui_services_with_slack_host_beta_mounts(
                 &runtime,
