@@ -12,6 +12,7 @@ The `reborn-integration` branch currently exposes Reborn structure primarily thr
 | --- | --- |
 | Standalone Reborn binary | `docs/reborn-binary.md` |
 | Standalone Reborn onboarding | `docs/reborn/onboarding.md` |
+| Production cutover readiness closeout | `docs/reborn/production-cutover-readiness-closeout.md` |
 | Standalone Reborn Slack setup | `docs/reborn/setup-slack-for-reborn-binary.md` |
 | Porting v1 channels to Reborn surfaces/ProductAdapters | `docs/reborn/how-to-port-channel-to-reborn.md` |
 | Proposed subagent spawn design | `docs/reborn/subagent-spawn/README.md` |
