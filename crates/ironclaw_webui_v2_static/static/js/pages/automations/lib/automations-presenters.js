@@ -200,6 +200,7 @@ function normalizeAutomation(automation) {
     ...automation,
     display_name: automation.name || "Untitled automation",
     schedule_label: scheduleLabel(automation.source?.cron),
+    schedule_timezone: automation.source?.timezone || "UTC",
     state_label: stateLabel(automation.state),
     state_tone: stateTone(automation.state),
     next_run_timestamp: parseTimestamp(automation.next_run_at),

@@ -14,7 +14,7 @@ test("normalizeAutomations keeps only schedule rows and avoids raw schedule text
       {
         automation_id: "daily",
         name: "Daily summary",
-        source: { type: "schedule", cron: "0 9 * * 1-5" },
+        source: { type: "schedule", cron: "0 9 * * 1-5", timezone: "America/New_York" },
         state: "active",
         is_active: true,
         next_run_at: "2026-06-05T16:00:00Z",
@@ -34,7 +34,25 @@ test("normalizeAutomations keeps only schedule rows and avoids raw schedule text
   assert.equal(automations.length, 1);
   assert.equal(automations[0].display_name, "Daily summary");
   assert.equal(automations[0].schedule_label, "Weekdays at 9:00 AM");
+  assert.equal(automations[0].schedule_timezone, "America/New_York");
   assert.equal(automations[0].last_status_label, "Done");
+});
+
+test("normalizeAutomations defaults schedule_timezone to UTC when absent", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "utc-default",
+        name: "UTC default",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "scheduled",
+        is_active: false,
+      },
+    ],
+  });
+
+  assert.equal(automations.length, 1);
+  assert.equal(automations[0].schedule_timezone, "UTC");
 });
 
 test("normalizeAutomations handles empty and malformed schedule payloads", () => {
