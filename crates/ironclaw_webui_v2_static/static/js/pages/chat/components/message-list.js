@@ -52,7 +52,7 @@ export function MessageList({
     <div
       ref=${containerRef}
       onScroll=${onScroll}
-      className="flex flex-1 overflow-y-auto px-4 py-6 sm:px-5 lg:px-8"
+      className="flex flex-1 overflow-y-auto px-4 pt-6 pb-14 sm:px-5 lg:px-8"
     >
       <div className="mx-auto flex w-full max-w-5xl flex-col gap-5">
         ${hasMore &&

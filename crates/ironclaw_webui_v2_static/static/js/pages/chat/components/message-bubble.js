@@ -134,7 +134,7 @@ function MessageBubbleImpl({ message, onRetry }) {
             ].join(" ")}
           >
             <${Avatar} role=${role} />
-            <span className="text-xs font-medium text-iron-300">
+            <span className="text-xs font-medium text-[var(--v2-text-muted)]">
               ${identityName}
             </span>
           </div>
