@@ -23,7 +23,9 @@ use ironclaw_turns::{
 };
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 
-use ironclaw_reborn::failure_categories::MODEL_CREDITS_EXHAUSTED_CATEGORY;
+use ironclaw_reborn::failure_categories::{
+    MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
+};
 
 use crate::AuthChallengeProvider;
 use crate::auth_prompt::auth_prompt_view_for_blocked_auth;
@@ -507,8 +509,8 @@ async fn failure_summary_for_turn_event(
     category: &str,
     fallback_summary: String,
 ) -> String {
-    if category == MODEL_CREDITS_EXHAUSTED_CATEGORY {
-        return fallback_summary;
+    if let Some(summary) = pinned_failure_summary(category) {
+        return summary.to_string();
     }
     failure_explainer
         .explain_failure(FailureExplanationInput {
@@ -517,6 +519,18 @@ async fn failure_summary_for_turn_event(
         })
         .await
         .unwrap_or(fallback_summary)
+}
+
+fn pinned_failure_summary(category: &str) -> Option<&'static str> {
+    match category {
+        MODEL_CREDITS_EXHAUSTED_CATEGORY => Some(
+            "The AI provider account is out of credits. Add credits or switch providers and try again.",
+        ),
+        MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY => Some(
+            "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL.",
+        ),
+        _ => None,
+    }
 }
 
 fn failure_category_for_turn_event(event: &TurnLifecycleEvent) -> Option<String> {
@@ -529,6 +543,10 @@ fn failure_category_for_turn_event(event: &TurnLifecycleEvent) -> Option<String>
 }
 
 fn failure_summary_for_category(category: &str) -> &'static str {
+    if let Some(summary) = pinned_failure_summary(category) {
+        return summary;
+    }
+
     match category {
         "driver_not_found" => {
             "The run failed because the configured execution driver was not available."
@@ -544,9 +562,6 @@ fn failure_summary_for_category(category: &str) -> &'static str {
         "host_creation_failed" => "The run failed while preparing the runtime host.",
         "route_snapshot_persistence_failed" => {
             "The run failed while saving the selected model route."
-        }
-        MODEL_CREDITS_EXHAUSTED_CATEGORY => {
-            "The AI provider account is out of credits. Add credits or switch providers and try again."
         }
         "heartbeat_failed" => "The run failed after the runner heartbeat could not be recorded.",
         "exit_application_failed" => "The run failed while recording its final result.",

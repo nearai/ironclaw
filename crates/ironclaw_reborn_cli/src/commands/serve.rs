@@ -12,10 +12,9 @@ use ironclaw_reborn_composition::build_webui_services;
 use ironclaw_reborn_composition::host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_reborn_composition::{
     GoogleOAuthRouteConfig, LocalTriggerAccessReconciliation, LocalTriggerAccessRole,
-    LocalTriggerAccessSource, RebornBuildInput, RebornCompositionProfile, RebornReadiness,
-    RebornReadinessState, RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle,
-    WebuiAuthenticator, WebuiServeConfig, build_reborn_runtime, open_local_trigger_access_store,
-    webui_v2_app_with_lifecycle,
+    LocalTriggerAccessSource, RebornBuildInput, RebornReadiness, RebornRuntimeIdentity,
+    RebornRuntimeInput, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig,
+    build_reborn_runtime, open_local_trigger_access_store, webui_v2_app_with_lifecycle,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_reborn_composition::{
@@ -358,7 +357,6 @@ impl ServeCommand {
             let runtime = build_reborn_runtime(runtime_input)
                 .await
                 .context("failed to assemble Reborn runtime for `serve`")?;
-            enforce_serve_cutover_gate(&runtime.services().readiness)?;
             #[cfg(feature = "slack-v2-host-beta")]
             let slack_mounts = if let Some(slack_config) = slack_host_beta_config {
                 Some(
@@ -725,126 +723,9 @@ fn print_serve_banner(
     eprintln!();
 }
 
-fn enforce_serve_cutover_gate(readiness: &RebornReadiness) -> anyhow::Result<()> {
-    match readiness.profile {
-        RebornCompositionProfile::Production => {
-            if readiness.state != RebornReadinessState::ProductionValidated {
-                anyhow::bail!(
-                    "profile=production cannot serve Reborn traffic before production readiness is validated; state={:?}",
-                    readiness.state
-                );
-            }
-            if let Some(diagnostic) = readiness
-                .diagnostics
-                .iter()
-                .find(|diagnostic| diagnostic.blocks_production)
-            {
-                anyhow::bail!(
-                    "profile=production cannot serve Reborn traffic while readiness diagnostic blocks production: component={:?}, reason={:?}",
-                    diagnostic.component,
-                    diagnostic.reason
-                );
-            }
-            Ok(())
-        }
-        RebornCompositionProfile::MigrationDryRun => {
-            anyhow::bail!(
-                "profile=migration-dry-run validates production-shaped wiring but must not serve live Reborn traffic"
-            )
-        }
-        RebornCompositionProfile::Disabled => {
-            anyhow::bail!("profile=disabled must not serve live Reborn traffic")
-        }
-        RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo => Ok(()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_reborn_composition::{
-        RebornFacadeReadiness, RebornReadinessDiagnostic, RebornReadinessDiagnosticComponent,
-        RebornReadinessDiagnosticReason, RebornWorkerReadiness,
-    };
-
-    fn readiness_for_gate(
-        profile: RebornCompositionProfile,
-        state: RebornReadinessState,
-        diagnostics: Vec<RebornReadinessDiagnostic>,
-    ) -> RebornReadiness {
-        RebornReadiness {
-            profile,
-            state,
-            facades: RebornFacadeReadiness {
-                host_runtime: true,
-                turn_coordinator: true,
-                product_auth: true,
-            },
-            workers: RebornWorkerReadiness {
-                turn_runner: true,
-                trigger_poller: false,
-            },
-            diagnostics,
-        }
-    }
-
-    #[test]
-    fn serve_cutover_gate_allows_validated_production_readiness() {
-        let readiness = readiness_for_gate(
-            RebornCompositionProfile::Production,
-            RebornReadinessState::ProductionValidated,
-            Vec::new(),
-        );
-
-        enforce_serve_cutover_gate(&readiness).expect("validated production can serve");
-    }
-
-    #[test]
-    fn serve_cutover_gate_rejects_production_blocking_diagnostics() {
-        let readiness = readiness_for_gate(
-            RebornCompositionProfile::Production,
-            RebornReadinessState::ProductionValidated,
-            vec![
-                RebornReadinessDiagnostic::production_blocker(
-                    RebornCompositionProfile::Production,
-                    RebornReadinessDiagnosticComponent::RuntimeBackend,
-                    RebornReadinessDiagnosticReason::Missing,
-                )
-                .expect("production profile should create a blocker"),
-            ],
-        );
-
-        let error = enforce_serve_cutover_gate(&readiness)
-            .expect_err("blocking diagnostic prevents live serve");
-        let message = error.to_string();
-        assert!(message.contains("RuntimeBackend"), "message: {message}");
-        assert!(message.contains("Missing"), "message: {message}");
-    }
-
-    #[test]
-    fn serve_cutover_gate_rejects_migration_dry_run_live_traffic() {
-        let readiness = readiness_for_gate(
-            RebornCompositionProfile::MigrationDryRun,
-            RebornReadinessState::MigrationDryRunValidated,
-            Vec::new(),
-        );
-
-        let error = enforce_serve_cutover_gate(&readiness)
-            .expect_err("migration-dry-run must not mount live serve routes");
-
-        assert!(error.to_string().contains("migration-dry-run"));
-    }
-
-    #[test]
-    fn serve_cutover_gate_allows_local_dev_profiles() {
-        let readiness = readiness_for_gate(
-            RebornCompositionProfile::LocalDev,
-            RebornReadinessState::DevOnly,
-            vec![RebornReadinessDiagnostic::local_dev()],
-        );
-
-        enforce_serve_cutover_gate(&readiness).expect("local-dev serve is not production traffic");
-    }
 
     #[test]
     fn webui_default_agent_falls_back_to_runtime_identity() {

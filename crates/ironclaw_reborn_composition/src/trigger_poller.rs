@@ -1,5 +1,7 @@
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+#[cfg(feature = "slack-v2-host-beta")]
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
