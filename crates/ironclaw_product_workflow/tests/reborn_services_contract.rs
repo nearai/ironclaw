@@ -4162,6 +4162,37 @@ async fn list_connectable_channels_returns_configured_action_metadata() {
 }
 
 #[test]
+fn connectable_channel_connection_status_defaults_and_omits_disconnected() {
+    let value = json!({
+        "channel": "slack",
+        "display_name": "Slack",
+        "strategy": "inbound_proof_code",
+        "action": {
+            "title": "Slack account connection",
+            "instructions": "Message the Slack app, then enter the code here.",
+            "input_placeholder": "Enter Slack pairing code...",
+            "submit_label": "Connect",
+            "success_message": "Slack account connected.",
+            "error_message": "Invalid or expired Slack pairing code."
+        },
+        "command_aliases": ["slack", "slack account"]
+    });
+    let channel: RebornConnectableChannelInfo =
+        serde_json::from_value(value).expect("legacy channel json");
+
+    assert_eq!(
+        channel.connection_status,
+        RebornChannelConnectionStatus::Disconnected
+    );
+
+    let serialized = serde_json::to_value(&channel).expect("channel serializes");
+    assert!(
+        serialized.get("connection_status").is_none(),
+        "disconnected is the legacy omitted wire shape"
+    );
+}
+
+#[test]
 fn channel_connect_action_serializes_neutral_input_placeholder_and_accepts_legacy_code_placeholder()
 {
     let action = RebornChannelConnectAction {

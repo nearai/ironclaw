@@ -185,7 +185,9 @@ mod tests {
         HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
         HostManagedModelResponse,
     };
-    use ironclaw_product_workflow::WebUiAuthenticatedCaller;
+    use ironclaw_product_workflow::{
+        RebornServicesErrorCode, RebornServicesErrorKind, WebUiAuthenticatedCaller,
+    };
     use ironclaw_turns::run_profile::LoopCapabilityPort;
 
     use super::*;
@@ -331,6 +333,49 @@ mod tests {
         );
 
         runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn slack_connectable_channels_propagates_delivery_connection_error() {
+        let facade = SlackConnectableChannelsProductFacade::new(
+            vec![slack_inbound_proof_code_connectable_channel()],
+            Some(Arc::new(FailingDeliveryConnectionProvider)),
+        );
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new("slack-webui-tenant").expect("tenant"),
+            UserId::new("slack-webui-owner").expect("user"),
+            Some(AgentId::new("slack-webui-agent").expect("agent")),
+            None,
+        );
+
+        let error = facade
+            .list_connectable_channels(caller)
+            .await
+            .expect_err("delivery lookup errors should reach the WebUI facade");
+
+        assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
+        assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
+        assert_eq!(error.status_code, 503);
+        assert!(error.retryable);
+    }
+
+    struct FailingDeliveryConnectionProvider;
+
+    #[async_trait::async_trait]
+    impl SlackDeliveryConnectionProvider for FailingDeliveryConnectionProvider {
+        async fn has_delivery_connection(
+            &self,
+            _caller: &WebUiAuthenticatedCaller,
+        ) -> Result<bool, RebornServicesError> {
+            Err(RebornServicesError {
+                code: RebornServicesErrorCode::Unavailable,
+                kind: RebornServicesErrorKind::ServiceUnavailable,
+                retryable: true,
+                status_code: 503,
+                field: None,
+                validation_code: None,
+            })
+        }
     }
 
     #[derive(Debug)]

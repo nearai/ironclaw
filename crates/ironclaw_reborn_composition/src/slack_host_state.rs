@@ -1197,6 +1197,60 @@ where
             .map_err(|_| SlackChannelRouteError::StoreUnavailable)?;
         Ok(Some(subject_user_id))
     }
+
+    async fn has_route_for_subject(
+        &self,
+        tenant_id: &TenantId,
+        installation_id: &AdapterInstallationId,
+        team_id: &str,
+        subject_user_id: &UserId,
+        _page_size: usize,
+    ) -> Result<bool, SlackChannelRouteError> {
+        if tenant_id != &self.scope.tenant_id {
+            return Ok(false);
+        }
+        let dir = Self::channel_route_team_dir_path(installation_id, team_id)
+            .map_err(map_route_fs_error)?;
+        let entries = match self.filesystem.list_dir(&self.scope, &dir).await {
+            Ok(entries) => entries,
+            Err(FilesystemError::NotFound { .. }) => return Ok(false),
+            Err(error) => return Err(map_route_fs_error(error)),
+        };
+        let mut paths = entries
+            .into_iter()
+            .filter_map(|entry| {
+                if entry.file_type != FileType::File {
+                    return None;
+                }
+                Some(Self::listed_channel_route_path(
+                    installation_id,
+                    team_id,
+                    &entry.name,
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(map_route_fs_error)?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        paths.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        for path in paths {
+            let Some((record, _)) = self
+                .read_record::<StoredSlackChannelRoute>(&path)
+                .await
+                .map_err(map_route_fs_error)?
+            else {
+                continue;
+            };
+            let Some(route) = stored_channel_route(record)? else {
+                continue;
+            };
+            if route.subject_user_id == subject_user_id.as_str() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 impl<F> FilesystemSlackHostState<F>

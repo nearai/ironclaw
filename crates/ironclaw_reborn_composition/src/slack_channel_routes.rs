@@ -247,6 +247,36 @@ pub(crate) trait SlackChannelRouteStore: Send + Sync + std::fmt::Debug {
         }
         Ok(result)
     }
+
+    async fn has_route_for_subject(
+        &self,
+        tenant_id: &TenantId,
+        installation_id: &AdapterInstallationId,
+        team_id: &str,
+        subject_user_id: &UserId,
+        page_size: usize,
+    ) -> Result<bool, SlackChannelRouteError> {
+        let mut cursor = 0;
+        loop {
+            let page = self
+                .list_routes(tenant_id, installation_id, team_id, cursor, page_size)
+                .await?;
+            if page
+                .routes
+                .iter()
+                .any(|route| route.subject_user_id == subject_user_id.as_str())
+            {
+                return Ok(true);
+            }
+            let Some(next_cursor) = page.next_cursor else {
+                return Ok(false);
+            };
+            if next_cursor <= cursor {
+                return Err(SlackChannelRouteError::StoreUnavailable);
+            }
+            cursor = next_cursor;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -368,6 +398,27 @@ impl SlackChannelRouteStore for InMemorySlackChannelRouteStore {
             .map_err(|_| SlackChannelRouteError::StoreUnavailable)?
             .get(key)
             .cloned())
+    }
+
+    async fn has_route_for_subject(
+        &self,
+        tenant_id: &TenantId,
+        installation_id: &AdapterInstallationId,
+        team_id: &str,
+        subject_user_id: &UserId,
+        _page_size: usize,
+    ) -> Result<bool, SlackChannelRouteError> {
+        Ok(self
+            .routes
+            .read()
+            .map_err(|_| SlackChannelRouteError::StoreUnavailable)?
+            .iter()
+            .any(|(key, current_subject)| {
+                &key.tenant_id == tenant_id
+                    && &key.installation_id == installation_id
+                    && key.team_id == team_id
+                    && current_subject == subject_user_id
+            }))
     }
 }
 

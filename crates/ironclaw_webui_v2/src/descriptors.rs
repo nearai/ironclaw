@@ -415,7 +415,7 @@ fn list_connectable_channels_descriptor() -> IngressRouteDescriptor {
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProjectionOnly,
+            AllowedEffectPath::ProductWorkflow,
             StreamingMode::None,
         ),
     )
