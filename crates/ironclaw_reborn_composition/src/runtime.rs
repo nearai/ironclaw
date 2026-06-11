@@ -3703,9 +3703,77 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn build_reborn_runtime_allows_validated_production_readiness() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Arc::new(
+            libsql::Builder::new_local(dir.path().join("reborn.db"))
+                .build()
+                .await
+                .expect("libsql db"),
+        );
+        let gateway = Arc::new(RecordingGateway {
+            reply: "validated production runtime".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::libsql(
+                crate::RebornCompositionProfile::Production,
+                "runtime-production-cutover-owner",
+                db,
+                dir.path().join("events.db").to_string_lossy(),
+                None,
+                ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
+            )
+            .with_production_trust_policy(Arc::new(
+                crate::builtin_first_party_trust_policy().expect("trust policy"),
+            ))
+            .with_runtime_policy(EffectiveRuntimePolicy {
+                deployment: DeploymentMode::HostedMultiTenant,
+                requested_profile: RuntimeProfile::SecureDefault,
+                resolved_profile: RuntimeProfile::SecureDefault,
+                filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+                process_backend: ProcessBackendKind::TenantSandbox,
+                network_mode: NetworkMode::Deny,
+                secret_mode: SecretMode::BrokeredHandles,
+                approval_policy: ApprovalPolicy::AskAlways,
+                audit_mode: AuditMode::Standard,
+            })
+            .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
+                ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(
+                    RecordingSandboxTransport,
+                )),
+            ))),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-production-cutover-tenant".to_string(),
+            agent_id: "runtime-production-cutover-agent".to_string(),
+            source_binding_id: "runtime-production-cutover-source".to_string(),
+            reply_target_binding_id: "runtime-production-cutover-reply".to_string(),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input)
+            .await
+            .expect("validated production readiness should start runtime");
+
+        assert_eq!(
+            runtime.services().readiness.state,
+            RebornReadinessState::ProductionValidated
+        );
+        assert!(runtime.services().readiness.diagnostics.is_empty());
+        assert!(runtime.services().readiness.workers.turn_runner);
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[cfg(feature = "libsql")]
     #[derive(Debug)]
     struct RecordingSandboxTransport;
 
+    #[cfg(feature = "libsql")]
     #[async_trait]
     impl ironclaw_host_runtime::SandboxCommandTransport for RecordingSandboxTransport {
         async fn run_command(
