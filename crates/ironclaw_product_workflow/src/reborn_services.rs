@@ -451,6 +451,27 @@ pub struct AutomationListRequest {
     pub run_limit: usize,
 }
 
+/// Stored scope of a trigger-fired thread, returned by
+/// `AutomationProductFacade::resolve_run_thread_scope`.
+///
+/// Trigger threads are written by `record_trigger_prompt` with:
+///  - `agent_id` = trigger record's `agent_id` (or default agent)
+///  - `project_id` = trigger record's `project_id`
+///  - `owner_user_id` = `Some(creator_user_id)` (the actor that fired it)
+///
+/// These three fields let the caller reconstruct the true `TurnScope` / `ThreadScope`
+/// needed to locate the thread in storage without guessing.
+#[derive(Debug, Clone)]
+pub struct TriggerRunThreadScope {
+    /// `agent_id` stored on the trigger record.
+    pub agent_id: Option<AgentId>,
+    /// `project_id` stored on the trigger record.
+    pub project_id: Option<ProjectId>,
+    /// `creator_user_id` stored on the trigger record, which equals
+    /// `owner_user_id` in the stored thread scope.
+    pub creator_user_id: UserId,
+}
+
 #[async_trait]
 pub trait AutomationProductFacade: Send + Sync {
     async fn list_automations(
@@ -458,6 +479,29 @@ pub trait AutomationProductFacade: Send + Sync {
         caller: ProductAgentBoundCaller,
         request: AutomationListRequest,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError>;
+
+    /// Looks up the stored trigger-thread scope for a given `thread_id`.
+    ///
+    /// Scans the caller-scoped triggers for one whose run history contains
+    /// `thread_id`, then returns the scope fields from that trigger record.
+    /// The lookup is caller-scoped via `list_scoped_triggers`, so authorization
+    /// is embedded: if the trigger exists for this caller and contains the run,
+    /// the caller is permitted to access it.
+    ///
+    /// Returns `None` when:
+    ///
+    /// - The automation facade is unavailable.
+    /// - No caller-scoped trigger has a run with this `thread_id`.
+    /// - The caller has no bound agent (cannot scope the repository lookup).
+    ///
+    /// The default implementation returns `None` so existing fakes compile.
+    async fn resolve_run_thread_scope(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _thread_id: &ThreadId,
+    ) -> Option<TriggerRunThreadScope> {
+        None
+    }
 }
 
 #[derive(Debug)]
@@ -2691,14 +2735,22 @@ async fn replay_accepted_message(
 impl RebornServices {
     /// Shared authorization check for automation-trigger threads.
     ///
-    /// Checks whether `scope.thread_id` appears in any recent run belonging to
-    /// the authenticated caller's automations. Returns the unscoped `TurnScope`
-    /// (i.e. `thread_owner = Ownerless`) if authorized, or
-    /// `original_not_found_error` if not.
+    /// Checks whether `scope.thread_id` belongs to one of the authenticated
+    /// caller's automation triggers and, if so, returns a `TurnScope` with the
+    /// TRUE stored scope (agent_id, project_id, and owner_user_id = creator).
     ///
-    /// This is the authorization half of the trigger-thread fallback. It does
-    /// not fetch history — callers that need the full transcript must call
-    /// `try_automation_trigger_timeline_fallback` instead.
+    /// Delegates to `AutomationProductFacade::resolve_run_thread_scope` which
+    /// is caller-scoped: authorization is embedded in the repository lookup.
+    /// If the trigger exists for this caller and contains the run, the returned
+    /// scope lets all downstream storage lookups (timeline, gate, cancel, SSE)
+    /// find the thread as stored rather than under the caller's session scope.
+    ///
+    /// Returns `original_not_found_error` when:
+    ///  - The caller has no bound agent.
+    ///  - `resolve_run_thread_scope` returns `None` (thread not in caller's triggers).
+    ///
+    /// This is the authorization half of the trigger-thread fallback. Callers
+    /// that need the full transcript call `try_automation_trigger_timeline_fallback`.
     async fn check_automation_trigger_access(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -2708,42 +2760,25 @@ impl RebornServices {
         let Some(bound_caller) = product_agent_bound_caller_from_webui(caller) else {
             return Err(original_not_found_error);
         };
-        let automations = match self
-            .automation_facade
-            .list_automations(
-                bound_caller,
-                AutomationListRequest {
-                    limit: AUTOMATION_LIST_MAX_PAGE_SIZE as usize,
-                    run_limit: AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE as usize,
-                },
-            )
-            .await
-        {
-            Ok(automations) => automations,
-            Err(_) => return Err(original_not_found_error),
-        };
-
         let thread_id = &scope.thread_id;
-        let authorized = automations.iter().any(|automation| {
-            automation
-                .recent_runs
-                .iter()
-                .any(|run| &run.thread_id == thread_id)
-        });
-
-        if !authorized {
+        let Some(trigger_scope) = self
+            .automation_facade
+            .resolve_run_thread_scope(bound_caller.clone(), thread_id)
+            .await
+        else {
             return Err(original_not_found_error);
-        }
-
-        // Return an ownerless TurnScope so callers routing to the turn
-        // coordinator find the run in the trigger (unscoped) scope rather than
-        // under the session user's scope.
+        };
+        // Use the trigger's stored agent_id; fall back to the caller's agent_id
+        // when the trigger record had no explicit agent.
+        let true_agent_id = trigger_scope
+            .agent_id
+            .or_else(|| Some(bound_caller.agent_id.clone()));
         Ok(TurnScope::new_with_owner(
             scope.tenant_id.clone(),
-            scope.agent_id.clone(),
-            scope.project_id.clone(),
+            true_agent_id,
+            trigger_scope.project_id,
             thread_id.clone(),
-            None, // ownerless — trigger thread
+            Some(trigger_scope.creator_user_id),
         ))
     }
 
@@ -2772,16 +2807,19 @@ impl RebornServices {
         scope: &TurnScope,
         original_not_found_error: RebornServicesError,
     ) -> Result<ThreadHistory, RebornServicesError> {
-        let unscoped_scope = self
+        let true_scope = self
             .check_automation_trigger_access(caller, scope, original_not_found_error)
             .await?;
-        // Authorized: re-fetch the history without the owner_user_id scope
-        // constraint so the backend can resolve the trigger-scoped thread.
-        let unscoped_thread_scope = thread_scope_from_turn_scope(&unscoped_scope, None)?;
+        // Authorized: re-fetch the history using the TRUE stored scope
+        // (owner_user_id = creator_user_id, not the caller's session user).
+        let true_thread_scope = thread_scope_from_turn_scope(
+            &true_scope,
+            true_scope.explicit_owner_user_id().cloned(),
+        )?;
         self.thread_service
             .list_thread_history(ThreadHistoryRequest {
-                scope: unscoped_thread_scope,
-                thread_id: unscoped_scope.thread_id.clone(),
+                scope: true_thread_scope,
+                thread_id: true_scope.thread_id.clone(),
             })
             .await
             .map_err(map_timeline_probe_error)
@@ -2819,11 +2857,14 @@ impl RebornServices {
             ) => {
                 let original_error =
                     RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false);
-                let unscoped_scope = self
+                let true_scope = self
                     .check_automation_trigger_access(caller, &scope, original_error)
                     .await?;
-                let unscoped_thread_scope = thread_scope_from_turn_scope(&unscoped_scope, None)?;
-                Ok((unscoped_scope, unscoped_thread_scope))
+                let true_thread_scope = thread_scope_from_turn_scope(
+                    &true_scope,
+                    true_scope.explicit_owner_user_id().cloned(),
+                )?;
+                Ok((true_scope, true_thread_scope))
             }
             Err(err) => Err(map_ownership_probe_error(err)),
         }

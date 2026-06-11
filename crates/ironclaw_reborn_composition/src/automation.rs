@@ -2,10 +2,11 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use ironclaw_host_api::ThreadId;
 use ironclaw_product_workflow::{
-    AutomationListRequest, AutomationProductFacade, ProductAgentBoundCaller, RebornAutomationInfo,
-    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornAutomationState, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind,
+    AUTOMATION_LIST_MAX_PAGE_SIZE, AutomationListRequest, AutomationProductFacade,
+    ProductAgentBoundCaller, RebornAutomationInfo, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    TriggerRunThreadScope,
 };
 use ironclaw_triggers::{
     TriggerError, TriggerId, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus,
@@ -13,6 +14,9 @@ use ironclaw_triggers::{
 };
 
 const AUTOMATION_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
+/// Number of recent runs scanned per trigger when resolving a thread's scope.
+/// Matches the window used by `list_automations` for consistency.
+const RESOLVE_SCOPE_RUN_HISTORY_LIMIT: usize = 100;
 
 /// WebUI panel facade for automation (trigger) listing.
 ///
@@ -120,6 +124,63 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
                 automation_info_from_record(record, &runs)
             })
             .collect())
+    }
+
+    async fn resolve_run_thread_scope(
+        &self,
+        caller: ProductAgentBoundCaller,
+        thread_id: &ThreadId,
+    ) -> Option<TriggerRunThreadScope> {
+        // Both repository calls share one deadline so the total budget is
+        // backend_timeout, not per call.
+        let deadline = tokio::time::Instant::now() + self.backend_timeout;
+        let records = tokio::time::timeout_at(
+            deadline,
+            self.trigger_repository.list_scoped_triggers(
+                caller.tenant_id.clone(),
+                caller.user_id.clone(),
+                Some(caller.agent_id.clone()),
+                caller.project_id.clone(),
+                AUTOMATION_LIST_MAX_PAGE_SIZE as usize,
+            ),
+        )
+        .await
+        .ok()?
+        .ok()?;
+
+        if records.is_empty() {
+            return None;
+        }
+
+        let trigger_ids: Vec<TriggerId> = records.iter().map(|r| r.trigger_id).collect();
+        let runs_by_trigger = tokio::time::timeout_at(
+            deadline,
+            self.trigger_repository.list_trigger_run_history_batch(
+                caller.tenant_id.clone(),
+                &trigger_ids,
+                RESOLVE_SCOPE_RUN_HISTORY_LIMIT,
+            ),
+        )
+        .await
+        .ok()?
+        .ok()?;
+
+        let thread_id_str = thread_id.as_str();
+        let matched_record = records.into_iter().find(|record| {
+            runs_by_trigger
+                .get(&record.trigger_id)
+                .map(|runs| {
+                    runs.iter()
+                        .any(|run| run.thread_id.as_str() == thread_id_str)
+                })
+                .unwrap_or(false)
+        })?;
+
+        Some(TriggerRunThreadScope {
+            agent_id: matched_record.agent_id,
+            project_id: matched_record.project_id,
+            creator_user_id: matched_record.creator_user_id,
+        })
     }
 }
 

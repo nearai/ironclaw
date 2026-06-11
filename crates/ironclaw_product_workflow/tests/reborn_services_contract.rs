@@ -51,11 +51,11 @@ use ironclaw_product_workflow::{
     RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest, RebornSubmitTurnResponse,
     RebornTimelineRequest, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SetActiveLlmRequest,
-    StaticConnectableChannelsProductFacade, UpsertLlmProviderRequest, WebUiAuthenticatedCaller,
-    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
-    automation_trigger_thread_metadata_json,
+    StaticConnectableChannelsProductFacade, TriggerRunThreadScope, UpsertLlmProviderRequest,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    approval_gate_ref, automation_trigger_thread_metadata_json,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -805,6 +805,24 @@ impl AutomationProductFacade for RecordingAutomationFacade {
 #[derive(Clone)]
 struct StaticAutomationFacade {
     output: Vec<RebornAutomationInfo>,
+    /// Scope returned by `resolve_run_thread_scope` for any thread_id query.
+    /// `None` means the trait default fires (returns `None`), simulating a
+    /// facade that does not recognise the thread.
+    resolve_scope: Option<TriggerRunThreadScope>,
+}
+
+impl StaticAutomationFacade {
+    fn new(output: Vec<RebornAutomationInfo>) -> Self {
+        Self {
+            output,
+            resolve_scope: None,
+        }
+    }
+
+    fn with_resolve_scope(mut self, scope: TriggerRunThreadScope) -> Self {
+        self.resolve_scope = Some(scope);
+        self
+    }
 }
 
 #[async_trait]
@@ -815,6 +833,14 @@ impl AutomationProductFacade for StaticAutomationFacade {
         _request: AutomationListRequest,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
         Ok(self.output.clone())
+    }
+
+    async fn resolve_run_thread_scope(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _thread_id: &ThreadId,
+    ) -> Option<TriggerRunThreadScope> {
+        self.resolve_scope.clone()
     }
 }
 
@@ -5143,35 +5169,59 @@ async fn operator_service_lifecycle_contract_is_implementable_from_crate_root() 
     assert_eq!(response.state, RebornServiceLifecycleState::Unsupported);
 }
 
-/// Build a `ThreadScope` scoped to the same tenant/agent/project as `caller`
-/// but with `owner_user_id = None`, mirroring how automation trigger threads
-/// are stored (they are not owned by any one WebUI user).
+/// External creator user id used in trigger-thread scope tests.
+///
+/// Trigger threads are stored with the `creator_user_id` of the actor that
+/// fired the trigger (e.g. a Slack user), which is intentionally different
+/// from the WebUI caller (`"user-alpha"`/`"user-alice"`/`"user-bob"`).
+/// Using a distinct value here proves the scope reconstruction uses the
+/// stored creator — not the caller — to build the `ThreadScope`.
+const TRIGGER_CREATOR_USER_ID: &str = "user-trigger-creator";
+
+/// Build a `ThreadScope` matching how `record_trigger_prompt` actually stores
+/// trigger-fired threads: same tenant/agent/project as the trigger record, but
+/// `owner_user_id` = the **external creator** (not the WebUI caller).
 fn trigger_thread_scope_for(caller: &WebUiAuthenticatedCaller) -> ThreadScope {
     ThreadScope {
         tenant_id: caller.tenant_id.clone(),
         agent_id: caller.agent_id.clone().expect("agent id"),
         project_id: caller.project_id.clone(),
-        owner_user_id: None,
+        owner_user_id: Some(
+            UserId::new(TRIGGER_CREATOR_USER_ID).expect("valid trigger creator user id"),
+        ),
         mission_id: None,
+    }
+}
+
+/// Build the `TriggerRunThreadScope` that `resolve_run_thread_scope` returns
+/// for a trigger whose thread was stored via `trigger_thread_scope_for`.
+fn trigger_run_thread_scope_for(caller: &WebUiAuthenticatedCaller) -> TriggerRunThreadScope {
+    TriggerRunThreadScope {
+        agent_id: caller.agent_id.clone(),
+        project_id: caller.project_id.clone(),
+        creator_user_id: UserId::new(TRIGGER_CREATOR_USER_ID)
+            .expect("valid trigger creator user id"),
     }
 }
 
 // Regression tests for the automation-trigger timeline fallback.
 // Bug: `get_timeline` scoped the thread lookup to the WebUI user's
-// `owner_user_id`, but trigger-fired threads are stored with
-// `owner_user_id = None`.  The user-scoped probe returned `UnknownThread`,
+// `owner_user_id`, but trigger-fired threads are stored with the external
+// creator's `owner_user_id`.  The user-scoped probe returned `UnknownThread`,
 // and the handler propagated `404` without checking whether the thread
 // belongs to one of the caller's automations.
 
 #[tokio::test]
 async fn get_timeline_succeeds_for_own_automation_trigger_thread() {
-    // The trigger thread is stored with owner_user_id=None — exactly how
-    // automation_trigger_thread_metadata_json() threads are created.
+    // Trigger thread stored with the EXTERNAL creator's owner_user_id — not the
+    // WebUI caller's.  The old guessing code would produce a caller-scoped
+    // ThreadScope and miss this thread; the new `resolve_run_thread_scope` path
+    // must reconstruct the true scope and return the history.
     let trigger_thread_id = ThreadId::new("thread-trigger-alpha").expect("valid trigger thread id");
     let caller = caller();
     let thread_service = Arc::new(InMemorySessionThreadService::default());
 
-    // Insert the trigger thread in the unscoped (trigger) scope.
+    // Store the trigger thread under the external creator's scope (not caller).
     thread_service
         .ensure_thread(EnsureThreadRequest {
             scope: trigger_thread_scope_for(&caller),
@@ -5185,13 +5235,14 @@ async fn get_timeline_succeeds_for_own_automation_trigger_thread() {
         .await
         .expect("trigger thread stored");
 
-    // The automation facade confirms this thread is in the caller's runs.
-    let automation_facade = Arc::new(StaticAutomationFacade {
-        output: vec![RebornAutomationInfo {
+    // The automation facade recognises the thread and returns the trigger scope.
+    let automation_facade = Arc::new(
+        StaticAutomationFacade::new(vec![RebornAutomationInfo {
             automation_id: "trigger-scheduled-alpha".to_string(),
             name: "Morning briefing".to_string(),
             source: RebornAutomationSource::Schedule {
                 cron: "0 9 * * *".to_string(),
+                timezone: "UTC".to_string(),
             },
             state: RebornAutomationState::Active,
             next_run_at: None,
@@ -5207,8 +5258,9 @@ async fn get_timeline_succeeds_for_own_automation_trigger_thread() {
             }],
             is_active: true,
             created_at: None,
-        }],
-    });
+        }])
+        .with_resolve_scope(trigger_run_thread_scope_for(&caller)),
+    );
 
     let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
         .with_automation_product_facade(automation_facade);
@@ -5249,10 +5301,9 @@ async fn get_timeline_rejects_other_users_automation_trigger_thread() {
         .await
         .expect("alice trigger thread stored");
 
-    // The automation facade returns alice's automations for alice, but Bob's
-    // `list_automations` call returns an empty list (he has no automations),
-    // so the fallback must not authorize Bob.
-    let automation_facade = Arc::new(StaticAutomationFacade { output: Vec::new() });
+    // Bob's facade returns no automations and no resolve_scope — the fallback
+    // must deny him because resolve_run_thread_scope returns None.
+    let automation_facade = Arc::new(StaticAutomationFacade::new(Vec::new()));
 
     let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
         .with_automation_product_facade(automation_facade);
@@ -5282,13 +5333,15 @@ async fn get_timeline_rejects_other_users_automation_trigger_thread() {
 
 fn automation_facade_with_trigger_thread(
     trigger_thread_id: ThreadId,
+    caller: &WebUiAuthenticatedCaller,
 ) -> Arc<StaticAutomationFacade> {
-    Arc::new(StaticAutomationFacade {
-        output: vec![RebornAutomationInfo {
+    Arc::new(
+        StaticAutomationFacade::new(vec![RebornAutomationInfo {
             automation_id: "trigger-gate-automation".to_string(),
             name: "Gate test automation".to_string(),
             source: RebornAutomationSource::Schedule {
                 cron: "0 9 * * *".to_string(),
+                timezone: "UTC".to_string(),
             },
             state: RebornAutomationState::Active,
             next_run_at: None,
@@ -5304,12 +5357,14 @@ fn automation_facade_with_trigger_thread(
             }],
             is_active: true,
             created_at: None,
-        }],
-    })
+        }])
+        .with_resolve_scope(trigger_run_thread_scope_for(caller)),
+    )
 }
 
-/// Set up a trigger thread stored in the unscoped (trigger) scope and return
-/// the thread_id.
+/// Set up a trigger thread stored under the external creator's scope and
+/// return the thread_id.  Mirrors `record_trigger_prompt` which sets
+/// `owner_user_id = Some(creator_user_id)`.
 async fn setup_trigger_thread(
     thread_service: &Arc<InMemorySessionThreadService>,
     caller: &WebUiAuthenticatedCaller,
@@ -5349,6 +5404,7 @@ async fn resolve_gate_approval_succeeds_for_own_automation_trigger_thread() {
     let services = RebornServices::new(thread_service, coordinator.clone())
         .with_automation_product_facade(automation_facade_with_trigger_thread(
             trigger_thread_id.clone(),
+            &caller,
         ))
         .with_approval_interactions(approval_interactions.clone());
 
@@ -5387,8 +5443,8 @@ async fn resolve_gate_rejects_other_users_automation_trigger_thread() {
     let trigger_thread_id =
         setup_trigger_thread(&thread_service, &alice, "thread-trigger-gate-beta").await;
 
-    // Bob has no automations — the fallback must deny him.
-    let bob_automation_facade = Arc::new(StaticAutomationFacade { output: Vec::new() });
+    // Bob has no automations — resolve_run_thread_scope returns None, fallback denies him.
+    let bob_automation_facade = Arc::new(StaticAutomationFacade::new(Vec::new()));
     let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
     let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
 
@@ -5421,12 +5477,67 @@ async fn resolve_gate_rejects_other_users_automation_trigger_thread() {
 }
 
 #[tokio::test]
+async fn get_timeline_rejects_thread_id_absent_from_callers_automations() {
+    // The thread_id does not appear in the caller's automation run history at
+    // all — `resolve_run_thread_scope` returns `None`.  The service must return
+    // 404 and must NOT fall back to guessing the thread scope.
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    // No threads stored anywhere.
+
+    // Automation facade knows about a DIFFERENT thread, not the requested one.
+    let unrelated_thread_id =
+        ThreadId::new("thread-unrelated-xyz").expect("valid unrelated thread id");
+    let automation_facade = Arc::new(
+        StaticAutomationFacade::new(vec![RebornAutomationInfo {
+            automation_id: "trigger-other".to_string(),
+            name: "Other automation".to_string(),
+            source: RebornAutomationSource::Schedule {
+                cron: "0 12 * * *".to_string(),
+                timezone: "UTC".to_string(),
+            },
+            state: RebornAutomationState::Active,
+            next_run_at: None,
+            last_run_at: None,
+            last_status: None,
+            recent_runs: vec![RebornAutomationRecentRunInfo {
+                run_id: Some(automation_run_id()),
+                thread_id: unrelated_thread_id,
+                fire_slot: None,
+                status: RebornAutomationRecentRunStatus::Ok,
+                submitted_at: "2026-06-10T12:00:00Z".parse().expect("submitted_at"),
+                completed_at: Some("2026-06-10T12:01:00Z".parse().expect("completed_at")),
+            }],
+            is_active: true,
+            created_at: None,
+        }]), // resolve_scope is None — the facade does not recognise the requested thread.
+    );
+
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(automation_facade);
+
+    let err = services
+        .get_timeline(
+            caller,
+            RebornTimelineRequest {
+                thread_id: "thread-absent-from-automations".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("unknown thread_id must return 404");
+
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+}
+
+#[tokio::test]
 async fn list_automations_returns_empty_list() {
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(Arc::new(StaticAutomationFacade { output: Vec::new() }));
+    .with_automation_product_facade(Arc::new(StaticAutomationFacade::new(Vec::new())));
 
     let listed = services
         .list_automations(caller(), WebUiListAutomationsRequest::default())
