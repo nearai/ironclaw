@@ -3703,9 +3703,11 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "libsql")]
     #[derive(Debug)]
     struct RecordingSandboxTransport;
 
+    #[cfg(feature = "libsql")]
     #[async_trait]
     impl ironclaw_host_runtime::SandboxCommandTransport for RecordingSandboxTransport {
         async fn run_command(
