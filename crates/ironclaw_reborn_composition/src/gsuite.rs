@@ -226,15 +226,22 @@ fn gsuite_credential_requirements(
         find_gsuite_capability(capability_id.as_str()).ok_or_else(|| {
             FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::UndeclaredCapability)
         })?;
-    let provider = RuntimeCredentialAccountProviderId::new(ironclaw_auth::GOOGLE_PROVIDER_ID)
-        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend))?;
     let requester_extension = ExtensionId::new(package.extension_id)
         .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend))?;
-    Ok(vec![RuntimeCredentialAuthRequirement {
-        provider,
-        requester_extension,
-        provider_scopes: required_provider_scopes(capability),
-    }])
+    let requirements = runtime_credentials(capability, package)
+        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend))?
+        .into_iter()
+        .filter(|credential| credential.required)
+        .filter_map(|credential| {
+            credential.product_auth_requirement_for(requester_extension.clone())
+        })
+        .collect::<Vec<_>>();
+    if requirements.is_empty() {
+        return Err(FirstPartyCapabilityError::new(
+            RuntimeDispatchErrorKind::Backend,
+        ));
+    }
+    Ok(requirements)
 }
 
 pub(crate) struct ProductAuthRuntimeGsuiteCredentialStager {

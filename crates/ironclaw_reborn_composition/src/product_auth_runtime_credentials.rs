@@ -80,7 +80,7 @@ async fn runtime_credential_auth_requirement_configured(
     let request = runtime_credential_account_selection_request(
         scope,
         &requirement.provider,
-        activation_auth_requirement_setup(requirement),
+        requirement.setup.clone(),
         &requirement.provider_scopes,
         &requirement.requester_extension,
     )?;
@@ -236,18 +236,6 @@ fn runtime_credential_account_selection_request(
         setup,
         provider_scopes,
     ))
-}
-
-fn activation_auth_requirement_setup(
-    requirement: &RuntimeCredentialAuthRequirement,
-) -> RuntimeCredentialAccountSetup {
-    if requirement.provider_scopes.is_empty() {
-        RuntimeCredentialAccountSetup::ManualToken
-    } else {
-        RuntimeCredentialAccountSetup::OAuth {
-            scopes: requirement.provider_scopes.clone(),
-        }
-    }
 }
 
 fn account_has_provider_scopes(
@@ -889,6 +877,7 @@ mod tests {
             &scope,
             vec![RuntimeCredentialAuthRequirement {
                 provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                setup: Default::default(),
                 requester_extension: ExtensionId::new("github").unwrap(),
                 provider_scopes: Vec::new(),
             }],

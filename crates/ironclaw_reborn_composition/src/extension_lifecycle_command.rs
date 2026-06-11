@@ -201,8 +201,17 @@ fn push_line(output: &mut String, args: std::fmt::Arguments<'_>) {
 
 #[cfg(test)]
 mod tests {
+    use ironclaw_auth::{
+        AuthContinuationRef, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
+    };
+    use ironclaw_host_api::{InvocationId, ResourceScope, TenantId, UserId};
+    use secrecy::SecretString;
+
     use super::*;
-    use crate::RebornServices;
+    use crate::{
+        RebornBuildInput, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
+        RebornServices, build_reborn_services,
+    };
 
     #[tokio::test]
     async fn extension_lifecycle_command_rejects_services_without_local_runtime() {
@@ -219,6 +228,76 @@ mod tests {
             error,
             RebornExtensionLifecycleCommandError::LocalRuntimeUnavailable
         ));
+    }
+
+    #[tokio::test]
+    async fn extension_lifecycle_command_activates_credentialed_extension_with_product_auth() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "reborn-cli",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let product_auth = services
+            .product_auth
+            .as_ref()
+            .expect("local-dev composes product auth");
+        let scope = AuthProductScope::new(
+            ResourceScope {
+                tenant_id: TenantId::new("reborn-cli").expect("tenant"),
+                user_id: UserId::new("reborn-cli").expect("user"),
+                agent_id: None,
+                project_id: None,
+                mission_id: None,
+                thread_id: None,
+                invocation_id: InvocationId::new(),
+            },
+            AuthSurface::Api,
+        );
+        let provider = AuthProviderId::new("github").expect("provider");
+        let challenge = product_auth
+            .request_manual_token_setup(RebornManualTokenSetupRequest {
+                scope: scope.clone(),
+                provider: provider.clone(),
+                label: CredentialAccountLabel::new("work github").expect("label"),
+                continuation: AuthContinuationRef::SetupOnly,
+                update_binding: None,
+                expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+            })
+            .await
+            .expect("manual-token setup challenge");
+        product_auth
+            .submit_manual_token(RebornManualTokenSubmitRequest::new(
+                scope,
+                challenge.interaction_id,
+                SecretString::from("github-token".to_string()),
+            ))
+            .await
+            .expect("manual-token submit");
+
+        execute_reborn_extension_lifecycle_command(
+            &services,
+            RebornExtensionLifecycleCommand::Install {
+                id: "github".to_string(),
+            },
+        )
+        .await
+        .expect("install credentialed extension");
+        let activate = execute_reborn_extension_lifecycle_command(
+            &services,
+            RebornExtensionLifecycleCommand::Activate {
+                id: "github".to_string(),
+            },
+        )
+        .await
+        .expect("activate uses product-auth credentials");
+
+        assert_eq!(activate.phase, LifecyclePhase::Active);
+        assert_eq!(
+            activate.payload,
+            Some(LifecycleProductPayload::ExtensionActivate { activated: true })
+        );
     }
 
     #[test]

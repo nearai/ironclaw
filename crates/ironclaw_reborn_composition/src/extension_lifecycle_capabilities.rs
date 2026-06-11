@@ -15,8 +15,10 @@ use ironclaw_host_runtime::{
 use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError};
 use serde::Deserialize;
 
-use crate::extension_lifecycle::ExtensionActivationMode;
-use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
+use crate::extension_lifecycle::{
+    ExtensionActivationCredentialPreflight, ExtensionActivationMode,
+    RebornLocalExtensionManagementPort,
+};
 use crate::product_auth_runtime_credentials::{
     RuntimeCredentialAccountSelectionService, missing_runtime_credential_auth_requirements,
 };
@@ -181,7 +183,16 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     request.scope.clone(),
                     request.services.runtime_http_egress.clone(),
                 );
-                self.extension_management.activate(package_ref, mode).await
+                self.extension_management
+                    .activate_with_credential_preflight(
+                        package_ref,
+                        mode,
+                        ExtensionActivationCredentialPreflight::new(
+                            request.scope.clone(),
+                            Arc::clone(&self.credential_accounts),
+                        ),
+                    )
+                    .await
             }
             EXTENSION_REMOVE_CAPABILITY_ID => {
                 let input: ExtensionIdInput = parse_input(request.input)?;

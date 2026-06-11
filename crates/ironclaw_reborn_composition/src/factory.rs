@@ -3596,7 +3596,10 @@ mod tests {
             .await
             .expect("install Gmail");
         extension_management
-            .activate(gmail_ref, ExtensionActivationMode::Static)
+            .activate_without_credential_preflight_for_test(
+                gmail_ref,
+                ExtensionActivationMode::Static,
+            )
             .await
             .expect("activate Gmail");
         extension_management
@@ -3604,7 +3607,10 @@ mod tests {
             .await
             .expect("install Google Calendar");
         extension_management
-            .activate(calendar_ref, ExtensionActivationMode::Static)
+            .activate_without_credential_preflight_for_test(
+                calendar_ref,
+                ExtensionActivationMode::Static,
+            )
             .await
             .expect("activate Google Calendar");
 
@@ -3725,7 +3731,10 @@ mod tests {
             .await
             .expect("install Notion MCP");
         extension_management
-            .activate(notion_ref, ExtensionActivationMode::Static)
+            .activate_without_credential_preflight_for_test(
+                notion_ref,
+                ExtensionActivationMode::Static,
+            )
             .await
             .expect("activate Notion MCP");
 
@@ -3776,7 +3785,10 @@ mod tests {
             .await
             .expect("install Web Access");
         extension_management
-            .activate(web_access_ref, ExtensionActivationMode::Static)
+            .activate_without_credential_preflight_for_test(
+                web_access_ref,
+                ExtensionActivationMode::Static,
+            )
             .await
             .expect("activate Web Access");
 

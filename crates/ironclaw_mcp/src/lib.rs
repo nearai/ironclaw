@@ -1467,12 +1467,12 @@ fn mcp_auth_context(
             RuntimeCredentialRequirementSource::SecretHandle => {
                 required_secrets.push(credential.handle.clone());
             }
-            RuntimeCredentialRequirementSource::ProductAuthAccount { provider, .. } => {
-                credential_requirements.push(RuntimeCredentialAuthRequirement {
-                    provider: provider.clone(),
-                    requester_extension: requester_extension.clone(),
-                    provider_scopes: credential.provider_scopes.clone(),
-                });
+            RuntimeCredentialRequirementSource::ProductAuthAccount { .. } => {
+                if let Some(requirement) =
+                    credential.product_auth_requirement_for(requester_extension.clone())
+                {
+                    credential_requirements.push(requirement);
+                }
             }
         }
     }

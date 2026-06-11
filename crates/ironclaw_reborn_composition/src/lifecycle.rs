@@ -19,7 +19,9 @@ use ironclaw_skills::{
     install_skill, list_skills, read_skill_content, remove_skill, search_skills, update_skill,
 };
 
-use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
+use crate::extension_lifecycle::{
+    ExtensionActivationCredentialPreflight, RebornLocalExtensionManagementPort,
+};
 use crate::product_auth_runtime_credentials::{
     RuntimeCredentialAccountSelectionService, missing_runtime_credential_auth_requirements,
 };
@@ -354,12 +356,13 @@ impl RebornLocalLifecycleFacade {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(Some(package_ref));
                 };
-                self.preflight_extension_activation_credentials(
-                    &context,
-                    extension_management,
-                    &package_ref,
-                )
-                .await?;
+                let credential_preflight = self
+                    .extension_activation_credential_preflight(
+                        &context,
+                        extension_management,
+                        &package_ref,
+                    )
+                    .await?;
                 if extension_management
                     .package_requires_hosted_mcp_discovery(&package_ref)
                     .await?
@@ -373,24 +376,37 @@ impl RebornLocalLifecycleFacade {
                         });
                     };
                     let scope = lifecycle_resource_scope(&context)?;
-                    return extension_management
-                        .activate(
-                            package_ref,
-                            crate::extension_lifecycle::ExtensionActivationMode::HostedMcpDiscovery {
-                                scope,
-                                runtime_http_egress,
-                            },
-                        )
-                        .await;
+                    let mode =
+                        crate::extension_lifecycle::ExtensionActivationMode::HostedMcpDiscovery {
+                            scope,
+                            runtime_http_egress,
+                        };
+                    return match credential_preflight {
+                        Some(credential_preflight) => {
+                            extension_management
+                                .activate_with_credential_preflight(
+                                    package_ref,
+                                    mode,
+                                    credential_preflight,
+                                )
+                                .await
+                        }
+                        None => extension_management.activate(package_ref, mode).await,
+                    };
                 }
-                // This projection facade has no runtime egress services, so it
-                // intentionally only supports static extension activation.
-                extension_management
-                    .activate(
-                        package_ref,
-                        crate::extension_lifecycle::ExtensionActivationMode::Static,
-                    )
-                    .await
+                let mode = crate::extension_lifecycle::ExtensionActivationMode::Static;
+                match credential_preflight {
+                    Some(credential_preflight) => {
+                        extension_management
+                            .activate_with_credential_preflight(
+                                package_ref,
+                                mode,
+                                credential_preflight,
+                            )
+                            .await
+                    }
+                    None => extension_management.activate(package_ref, mode).await,
+                }
             }
             LifecycleProductAction::ExtensionRemove { package_ref } => {
                 let Some(extension_management) = &self.extension_management else {
@@ -405,17 +421,17 @@ impl RebornLocalLifecycleFacade {
         }
     }
 
-    async fn preflight_extension_activation_credentials(
+    async fn extension_activation_credential_preflight(
         &self,
         context: &LifecycleProductContext,
         extension_management: &RebornLocalExtensionManagementPort,
         package_ref: &LifecyclePackageRef,
-    ) -> Result<(), ProductWorkflowError> {
+    ) -> Result<Option<ExtensionActivationCredentialPreflight>, ProductWorkflowError> {
         let requirements = extension_management
             .activation_credential_requirements(package_ref)
             .await?;
         if requirements.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let Some(credential_accounts) = &self.credential_accounts else {
             return Err(ProductWorkflowError::InvalidBindingRequest {
@@ -434,7 +450,10 @@ impl RebornLocalLifecycleFacade {
         .await
         .map_err(map_lifecycle_credential_stage_error)?;
         if missing_requirements.is_empty() {
-            return Ok(());
+            return Ok(Some(ExtensionActivationCredentialPreflight::new(
+                scope,
+                Arc::clone(credential_accounts),
+            )));
         }
         Err(ProductWorkflowError::InvalidBindingRequest {
             reason: format!(

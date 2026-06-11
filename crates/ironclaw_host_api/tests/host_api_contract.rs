@@ -1754,6 +1754,9 @@ fn dispatch_error_auth_required_debug_redacts_required_secrets() {
     );
     let requirement = RuntimeCredentialAuthRequirement {
         provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+        setup: RuntimeCredentialAccountSetup::OAuth {
+            scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
+        },
         requester_extension: ExtensionId::new("gmail").unwrap(),
         provider_scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
     };

@@ -407,6 +407,7 @@ async fn runtime_auth_gate_forwards_credential_requirements() {
     let provider_id = ExtensionId::new("demo").expect("provider id");
     let requirement = RuntimeCredentialAuthRequirement {
         provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        setup: Default::default(),
         requester_extension: provider_id.clone(),
         provider_scopes: Vec::new(),
     };
