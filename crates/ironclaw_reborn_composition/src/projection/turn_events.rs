@@ -429,7 +429,9 @@ async fn approval_gate_prompt(
             )
             .to_resource_scope();
             match store.get(&scope, request_id).await {
-                Ok(Some(record)) => approval_context_for_request(&record.request),
+                Ok(Some(record)) => {
+                    approval_context_for_request(&record.request, event.sanitized_reason.as_deref())
+                }
                 Ok(None) => None,
                 Err(error) => {
                     tracing::debug!(
@@ -452,20 +454,25 @@ async fn approval_gate_prompt(
     )
 }
 
-fn approval_context_for_request(request: &ApprovalRequest) -> Option<ApprovalPromptContextView> {
+fn approval_context_for_request(
+    request: &ApprovalRequest,
+    display_reason: Option<&str>,
+) -> Option<ApprovalPromptContextView> {
     let (tool_name, action, destination, details) =
         approval_action_context(request.action.as_ref())?;
-    Some(ApprovalPromptContextView {
+    ApprovalPromptContextView::new(
         tool_name,
         action,
-        scope: ApprovalPromptScopeView {
-            label: approval_scope_label(request).to_string(),
-            reusable: request.reusable_scope.is_some(),
-        },
-        reason: non_empty_string(&request.reason),
+        ApprovalPromptScopeView::new(
+            approval_scope_label(request),
+            request.reusable_scope.is_some(),
+        )
+        .ok()?,
+        display_reason.and_then(non_empty_string),
         destination,
         details,
-    })
+    )
+    .ok()
 }
 
 fn approval_action_context(
@@ -481,16 +488,13 @@ fn approval_action_context(
             capability,
             estimated_resources,
         } => {
-            let mut details = vec![detail("Capability", capability.as_str())];
+            let mut details = vec![detail("Capability", capability.as_str())?];
             if let Some(bytes) = estimated_resources.network_egress_bytes {
-                details.push(detail("Estimated network egress", format_bytes(bytes)));
+                details.push(detail("Estimated network egress", format_bytes(bytes))?);
             }
             Some((
                 capability.as_str().to_string(),
-                ApprovalPromptActionView {
-                    label: "Run tool".to_string(),
-                    method: None,
-                },
+                ApprovalPromptActionView::new("Run tool", None).ok()?,
                 None,
                 details,
             ))
@@ -499,16 +503,13 @@ fn approval_action_context(
             capability,
             estimated_resources,
         } => {
-            let mut details = vec![detail("Capability", capability.as_str())];
+            let mut details = vec![detail("Capability", capability.as_str())?];
             if let Some(process_count) = estimated_resources.process_count {
-                details.push(detail("Processes", process_count.to_string()));
+                details.push(detail("Processes", process_count.to_string())?);
             }
             Some((
                 capability.as_str().to_string(),
-                ApprovalPromptActionView {
-                    label: "Start tool".to_string(),
-                    method: None,
-                },
+                ApprovalPromptActionView::new("Start tool", None).ok()?,
                 None,
                 details,
             ))
@@ -518,17 +519,15 @@ fn approval_action_context(
             method,
             estimated_bytes,
         } => {
-            let destination = network_destination(method, target.scheme, &target.host, target.port);
-            let mut details = vec![detail("Method", method_label(method))];
+            let destination =
+                network_destination(method, target.scheme, &target.host, target.port)?;
+            let mut details = vec![detail("Method", method_label(method))?];
             if let Some(bytes) = estimated_bytes {
-                details.push(detail("Estimated transfer", format_bytes(*bytes)));
+                details.push(detail("Estimated transfer", format_bytes(*bytes))?);
             }
             Some((
                 "builtin.http".to_string(),
-                ApprovalPromptActionView {
-                    label: "Network request".to_string(),
-                    method: Some(*method),
-                },
+                ApprovalPromptActionView::new("Network request", Some(*method)).ok()?,
                 Some(destination),
                 details,
             ))
@@ -550,7 +549,7 @@ fn network_destination(
     scheme: NetworkScheme,
     host: &str,
     port: Option<u16>,
-) -> ApprovalPromptDestinationView {
+) -> Option<ApprovalPromptDestinationView> {
     let scheme = match scheme {
         NetworkScheme::Http => "http",
         NetworkScheme::Https => "https",
@@ -560,18 +559,16 @@ fn network_destination(
         None => host.to_string(),
     };
     let url = format!("{scheme}://{authority}");
-    ApprovalPromptDestinationView {
-        label: format!("{} {url}", method_label(method)),
-        url: Some(url),
-        domain: Some(host.to_string()),
-    }
+    ApprovalPromptDestinationView::new(
+        format!("{} {url}", method_label(method)),
+        Some(url),
+        Some(host.to_string()),
+    )
+    .ok()
 }
 
-fn detail(label: impl Into<String>, value: impl Into<String>) -> ApprovalPromptDetailView {
-    ApprovalPromptDetailView {
-        label: label.into(),
-        value: value.into(),
-    }
+fn detail(label: impl Into<String>, value: impl Into<String>) -> Option<ApprovalPromptDetailView> {
+    ApprovalPromptDetailView::new(label, value).ok()
 }
 
 fn method_label(method: &NetworkMethod) -> String {
