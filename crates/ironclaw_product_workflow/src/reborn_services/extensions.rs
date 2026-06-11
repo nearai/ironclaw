@@ -4,12 +4,12 @@ use futures::{StreamExt, TryStreamExt, stream};
 use ironclaw_host_api::ExtensionId;
 
 use crate::{
-    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageRef,
-    LifecyclePhase, LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-    LifecycleProductPayload, LifecycleProductResponse, LifecycleProductSurfaceContext,
-    RebornExtensionActionResponse, RebornExtensionInfo, RebornExtensionListResponse,
-    RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornServicesError,
-    WebUiAuthenticatedCaller,
+    LifecycleExtensionSummary, LifecycleExtensionSurfaceKind, LifecycleInstalledExtensionSummary,
+    LifecyclePackageRef, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
+    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleProductSurfaceContext, RebornExtensionActionResponse, RebornExtensionInfo,
+    RebornExtensionListResponse, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
+    RebornServicesError, WebUiAuthenticatedCaller,
 };
 
 use super::{
@@ -221,7 +221,7 @@ fn registry_entry(
     summary: LifecycleExtensionSummary,
     installed_ids: &HashSet<String>,
 ) -> RebornExtensionRegistryEntry {
-    let kind = summary.runtime_kind.wire_kind().to_string();
+    let kind = extension_kind(&summary).to_string();
     let installed = installed_ids.contains(summary.package_ref.id.as_str());
     RebornExtensionRegistryEntry {
         package_ref: summary.package_ref,
@@ -270,10 +270,11 @@ fn extension_info(
     let onboarding =
         extension_onboarding::for_installed_with_credential_status(&installed, readiness);
     let summary = installed.summary;
+    let kind = extension_kind(&summary).to_string();
     RebornExtensionInfo {
         package_ref: summary.package_ref,
         display_name: summary.name,
-        kind: summary.runtime_kind.wire_kind().to_string(),
+        kind,
         description: summary.description,
         authenticated,
         active: phase == LifecyclePhase::Active,
@@ -289,6 +290,17 @@ fn extension_info(
         version: Some(summary.version),
         onboarding_state: onboarding.state,
         onboarding: onboarding.onboarding,
+    }
+}
+
+fn extension_kind(summary: &LifecycleExtensionSummary) -> &'static str {
+    if summary
+        .surface_kinds
+        .contains(&LifecycleExtensionSurfaceKind::ProductAdapter)
+    {
+        "channel"
+    } else {
+        summary.runtime_kind.wire_kind()
     }
 }
 
@@ -339,9 +351,12 @@ fn action_response(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        collections::HashSet,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     use async_trait::async_trait;
@@ -353,8 +368,9 @@ mod tests {
         ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest,
         LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
         LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
-        LifecycleInstalledExtensionSummary, LifecyclePackageKind, ProductWorkflowError,
-        RebornExtensionOnboardingState, RebornServicesErrorCode, RebornServicesErrorKind,
+        LifecycleExtensionSurfaceKind, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
+        ProductWorkflowError, RebornExtensionOnboardingState, RebornServicesErrorCode,
+        RebornServicesErrorKind,
     };
 
     #[tokio::test]
@@ -494,6 +510,17 @@ mod tests {
             credentials.max_active.load(Ordering::SeqCst) <= EXTENSION_READINESS_CONCURRENCY,
             "readiness checks must stay bounded"
         );
+    }
+
+    #[test]
+    fn product_adapter_surface_projects_channel_kind() {
+        let mut summary = summary_with_onboarding();
+        summary.runtime_kind = LifecycleExtensionRuntimeKind::FirstParty;
+        summary.surface_kinds = vec![LifecycleExtensionSurfaceKind::ProductAdapter];
+
+        let entry = registry_entry(summary, &HashSet::new());
+
+        assert_eq!(entry.kind, "channel");
     }
 
     #[derive(Default)]
@@ -717,6 +744,7 @@ mod tests {
             description: "test extension".to_string(),
             source: LifecycleExtensionSource::HostBundled,
             runtime_kind: LifecycleExtensionRuntimeKind::WasmTool,
+            surface_kinds: Vec::new(),
             visible_capability_ids: Vec::new(),
             visible_read_only_capability_ids: Vec::new(),
             credential_requirements: vec![LifecycleExtensionCredentialRequirement {

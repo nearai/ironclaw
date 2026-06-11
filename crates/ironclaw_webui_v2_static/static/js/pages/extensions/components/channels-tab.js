@@ -10,22 +10,8 @@ function packageId(item) {
   return item.package_ref?.id || "";
 }
 
-export function isSlackChannelEnabled(enabledChannels) {
-  return ["slack", "slack_v2", "slack-v2"].some((channel) =>
-    enabledChannels.includes(channel)
-  );
-}
-
-export function slackBuiltinStatus(slackEnabled, connectAction) {
-  if (slackEnabled) {
-    return { label: "on", tone: "success" };
-  }
-  if (connectAction?.strategy === "admin_managed_channels") {
-    return { label: "manage", tone: "info" };
-  }
-  return connectAction
-    ? { label: "connect", tone: "info" }
-    : { label: "off", tone: "muted" };
+export function isSlackPackage(item) {
+  return packageId(item) === "slack";
 }
 
 export function isSlackAdminManagedAction(connectAction) {
@@ -51,7 +37,7 @@ export function findSlackConnectActions(connectableChannels) {
   return fallback ? [fallback] : [];
 }
 
-export function SlackBuiltInConnectAction({
+export function SlackConnectActionSections({
   slackConnectAction,
   slackConnectActions,
 }) {
@@ -86,10 +72,7 @@ export function ChannelsTab({
 }) {
   const t = useT();
   const enabledChannels = status.enabled_channels || [];
-  const slackEnabled = isSlackChannelEnabled(enabledChannels);
   const slackConnectActions = findSlackConnectActions(connectableChannels);
-  const slackConnectAction = slackConnectActions[0] || null;
-  const slackStatus = slackBuiltinStatus(slackEnabled, slackConnectAction);
 
   return html`
     <div className="space-y-5">
@@ -114,16 +97,6 @@ export function ChannelsTab({
           enabled=${enabledChannels.includes("http")}
           detail="ENABLE_HTTP=true"
         />
-        <${BuiltinRow}
-          name="Slack"
-          description=${t("channels.slackDesc") || "Tenant app channel for DMs and app mentions"}
-          enabled=${slackEnabled}
-          statusLabel=${slackStatus.label}
-          statusTone=${slackStatus.tone}
-          detail=${t("channels.slackDetail") || "Tenant Slack app install"}
-        >
-          <${SlackBuiltInConnectAction} slackConnectActions=${slackConnectActions} />
-        <//>
         <${BuiltinRow}
           name="CLI"
           description=${t("channels.cliDesc") || "Terminal interface with TUI or simple REPL"}
@@ -157,6 +130,10 @@ export function ChannelsTab({
                     onRemove=${onRemove}
                     isBusy=${isBusy}
                   />
+                  ${isSlackPackage(ch) &&
+                  html`<${SlackConnectActionSections}
+                    slackConnectActions=${slackConnectActions}
+                  />`}
                   ${(ch.onboarding_state === "pairing_required" ||
                     ch.onboarding_state === "pairing") &&
                   html` <${PairingSection} channel=${packageId(ch)} /> `}
@@ -177,12 +154,17 @@ export function ChannelsTab({
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-3">
             ${channelRegistry.map(
               (entry) => html`
-                <${RegistryCard}
-                  key=${packageId(entry)}
-                  entry=${entry}
-                  onInstall=${onInstall}
-                  isBusy=${isBusy}
-                />
+                <div key=${packageId(entry)} className="flex flex-col gap-3">
+                  <${RegistryCard}
+                    entry=${entry}
+                    onInstall=${onInstall}
+                    isBusy=${isBusy}
+                  />
+                  ${isSlackPackage(entry) &&
+                  html`<${SlackConnectActionSections}
+                    slackConnectActions=${slackConnectActions}
+                  />`}
+                </div>
               `
             )}
           </div>
