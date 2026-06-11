@@ -538,6 +538,10 @@ fn build_slack_events_route_mount_with_resolvers(
         runtime.webui_thread_service(),
         runtime.webui_turn_coordinator(),
     ));
+    let outbound = Arc::new(FilesystemOutboundStateStore::new(Arc::clone(
+        &local_runtime.host_state_filesystem,
+    )));
+    let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> = outbound.clone();
     let workflow = Arc::new(
         DefaultProductWorkflow::new(
             inbound,
@@ -562,12 +566,11 @@ fn build_slack_events_route_mount_with_resolvers(
         .with_approval_interaction_service(Arc::new(
             crate::delivered_gate_routing::DeliveredGateRoutingApprovalService::new(
                 runtime.webui_approval_interaction_service(),
-                Arc::new(FilesystemOutboundStateStore::new(Arc::clone(
-                    &local_runtime.host_state_filesystem,
-                ))),
+                route_store.clone(),
             ),
         ))
-        .with_auth_interaction_service(runtime.webui_auth_interaction_service()),
+        .with_auth_interaction_service(runtime.webui_auth_interaction_service())
+        .with_delivered_gate_routes(route_store.clone()),
     );
 
     let runner = Arc::new(NativeProductAdapterRunner::with_config(
@@ -587,11 +590,7 @@ fn build_slack_events_route_mount_with_resolvers(
     ));
 
     let egress = slack_protocol_egress(runtime, &config, token_handle)?;
-    let outbound = Arc::new(FilesystemOutboundStateStore::new(Arc::clone(
-        &local_runtime.host_state_filesystem,
-    )));
     let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
-    let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> = outbound.clone();
     let preferences: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository> = outbound;
     let delivery_sink: Arc<dyn OutboundDeliverySink> = Arc::new(NoopSlackDeliverySink);
     let observer = Arc::new(SlackFinalReplyDeliveryObserver::with_settings(

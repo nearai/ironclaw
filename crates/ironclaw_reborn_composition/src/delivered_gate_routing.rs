@@ -585,7 +585,8 @@ mod tests {
             Arc::new(FakeIdempotencyLedger::new()),
             Arc::clone(&binding) as _,
         )
-        .with_approval_interaction_service(routed_approval);
+        .with_approval_interaction_service(routed_approval)
+        .with_delivered_gate_routes(Arc::clone(&route_store) as _);
 
         // 6. Submit an approval resolution envelope (first attempt).
         let envelope = approval_envelope(gate_ref_str);
