@@ -8,7 +8,8 @@ PR #4608 added the WebUI v2 route shells and product-workflow DTOs for operator 
 
 `GET /api/webchat/v2/operator/status` should report a bounded, redacted snapshot of the current Reborn host.
 
-Required payload shape:
+Required payload shape, nested under the `operator_status` field of the root
+`RebornOperatorCommandPlaneResponse`:
 
 - `state`: one of the stable `RebornOperatorStatusState` values.
 - `checks`: individual readiness checks with stable ids, severity, status, message, and remediation.
@@ -23,7 +24,9 @@ Minimum backend inputs:
 
 ## Operator logs (#4597)
 
-`GET /api/webchat/v2/operator/logs` should return bounded, cursor-paginated, redacted log entries.
+`GET /api/webchat/v2/operator/logs` should return bounded, cursor-paginated,
+redacted log entries nested under the `logs` field of the root
+`RebornOperatorCommandPlaneResponse`.
 
 Required behavior:
 
@@ -41,7 +44,10 @@ Initial backend options:
 
 ## Service lifecycle (#4598)
 
-`POST /api/webchat/v2/operator/service` should expose lifecycle status and control only where the host deployment owns a manageable service unit.
+`POST /api/webchat/v2/operator/service` should expose lifecycle status and
+control only where the host deployment owns a manageable service unit, with the
+payload nested under the `service_lifecycle` field of the root
+`RebornOperatorCommandPlaneResponse`.
 
 Required behavior:
 
