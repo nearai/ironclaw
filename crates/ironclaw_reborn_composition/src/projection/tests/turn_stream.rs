@@ -163,13 +163,45 @@ async fn webui_event_stream_offers_always_for_typed_approval_gate() {
         None,
         thread_id.clone(),
     );
-    let gate_ref = GateRef::new(format!("gate:approval-{}", ApprovalRequestId::new())).unwrap();
+    let approval_request_id = ApprovalRequestId::new();
+    let gate_ref = GateRef::new(format!("gate:approval-{approval_request_id}")).unwrap();
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let capability = CapabilityId::new("builtin.http").unwrap();
+    approval_requests
+        .save_pending(
+            resource_scope(
+                &tenant_id,
+                &user_id,
+                &agent_id,
+                &thread_id,
+                InvocationId::new(),
+            ),
+            ApprovalRequest {
+                id: approval_request_id,
+                correlation_id: CorrelationId::new(),
+                requested_by: Principal::Extension(ExtensionId::new("builtin").unwrap()),
+                action: Box::new(Action::Dispatch {
+                    capability: capability.clone(),
+                    estimated_resources: ResourceEstimate {
+                        network_egress_bytes: Some(4096),
+                        ..ResourceEstimate::default()
+                    },
+                }),
+                invocation_fingerprint: None,
+                reason: "approval required for Dispatch of builtin.http".to_string(),
+                reusable_scope: None,
+            },
+        )
+        .await
+        .unwrap();
+    let approval_requests_dyn: Arc<dyn ApprovalRequestStore> = approval_requests;
     let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
     let actor = TurnActor::new(user_id.clone());
     let services = build_reborn_projection_services(
         event_log_dyn,
         ReplyTargetBindingRef::new("webui-events-approval-reply").unwrap(),
     )
+    .with_approval_requests(approval_requests_dyn)
     .with_turn_events(
         Arc::new(FakeTurnEventSource {
             events: vec![TurnLifecycleEvent {
@@ -207,16 +239,25 @@ async fn webui_event_stream_offers_always_for_typed_approval_gate() {
         .await
         .unwrap();
 
-    assert!(events.iter().any(|event| {
-        matches!(
-            event.payload(),
-            ProductOutboundPayload::GatePrompt(prompt)
-                if prompt.turn_run_id == turn_run
-                    && prompt.gate_ref == gate_ref.as_str()
-                    && prompt.headline == "Approval required"
-                    && prompt.body == "capability requires approval"
-                    && prompt.allow_always
-        )
+    let prompt = events
+        .iter()
+        .find_map(|event| match event.payload() {
+            ProductOutboundPayload::GatePrompt(prompt) => Some(prompt),
+            _ => None,
+        })
+        .expect("approval gate prompt");
+
+    assert_eq!(prompt.turn_run_id, turn_run);
+    assert_eq!(prompt.gate_ref, gate_ref.as_str());
+    assert_eq!(prompt.headline, "Approval required");
+    assert_eq!(prompt.body, "capability requires approval");
+    assert!(prompt.allow_always);
+    let context = prompt.approval_context.as_ref().expect("approval context");
+    assert_eq!(context.tool_name, "builtin.http");
+    assert_eq!(context.action.label, "Run tool");
+    assert_eq!(context.scope.label, "This request only");
+    assert!(context.details.iter().any(|detail| {
+        detail.label == "Estimated network egress" && detail.value == "4096 bytes"
     }));
 }
 

@@ -11,15 +11,16 @@ use ironclaw_event_projections::{
 };
 use ironclaw_events::{InMemoryDurableEventLog, RuntimeEvent};
 use ironclaw_host_api::{
-    AgentId, ApprovalRequestId, CapabilityId, ExtensionId, InvocationId, NetworkMethod,
-    ResourceScope, RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement,
-    RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, TenantId,
-    ThreadId, UserId,
+    Action, AgentId, ApprovalRequest, ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId,
+    InvocationId, NetworkMethod, Principal, ResourceEstimate, ResourceScope,
+    RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
+    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_adapters::{
     AuthPromptChallengeKind, CapabilityActivityStatusView, ProductOutboundEnvelope,
     ProductOutboundPayload, ProductProjectionItem,
 };
+use ironclaw_run_state::{ApprovalRequestStore, InMemoryApprovalRequestStore};
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor as TurnEventCursor,
     GateRef, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,

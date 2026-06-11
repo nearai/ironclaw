@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, InvocationId, ProcessId, RuntimeKind, ThreadId,
+    CapabilityId, ExtensionId, InvocationId, NetworkMethod, ProcessId, RuntimeKind, ThreadId,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, SanitizedFailure, TurnRunId};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -566,6 +566,49 @@ pub struct GatePromptView {
     pub body: String,
     #[serde(default)]
     pub allow_always: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_context: Option<ApprovalPromptContextView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalPromptContextView {
+    pub tool_name: String,
+    pub action: ApprovalPromptActionView,
+    pub scope: ApprovalPromptScopeView,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<ApprovalPromptDestinationView>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub details: Vec<ApprovalPromptDetailView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalPromptActionView {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<NetworkMethod>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalPromptScopeView {
+    pub label: String,
+    pub reusable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalPromptDestinationView {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalPromptDetailView {
+    pub label: String,
+    pub value: String,
 }
 
 /// Discriminator for the kind of auth challenge surfaced in an `AuthPromptView`.

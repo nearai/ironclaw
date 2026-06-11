@@ -19,7 +19,7 @@ import { classifyRisk } from "../lib/approval-risk.js";
 
 export function ApprovalCard({ gate, onApprove, onDeny, onAlways }) {
   const t = useT();
-  const { toolName, description, parameters, allowAlways } = gate;
+  const { toolName, description, parameters, allowAlways, approvalDetails = [] } = gate;
   const [always, setAlways] = React.useState(false);
 
   const risk = React.useMemo(
@@ -51,11 +51,25 @@ export function ApprovalCard({ gate, onApprove, onDeny, onAlways }) {
           className="ml-auto"
         />
       </div>
-      <div className="mb-1 font-mono text-sm font-medium text-iron-100">${toolName}</div>
+      ${toolName &&
+      html`<div className="mb-1 break-all font-mono text-sm font-medium text-iron-100">${toolName}</div>`}
       ${description &&
-      html`<div className="mb-3 text-sm text-iron-200">${description}</div>`}
-      ${parameters &&
-      html`<pre className="mb-3 overflow-x-auto rounded-md bg-iron-950 p-2 font-mono text-xs text-iron-100">${parameters}</pre>`}
+      html`<div className="mb-3 break-words text-sm text-iron-200">${description}</div>`}
+      ${approvalDetails.length > 0
+        ? html`
+            <dl className="mb-3 max-h-56 overflow-y-auto rounded-md border border-iron-800 bg-iron-950/80 text-xs">
+              ${approvalDetails.map(
+                (detail) => html`
+                  <div className="grid gap-1 border-b border-iron-800/70 px-3 py-2 last:border-b-0 sm:grid-cols-[7rem_1fr]">
+                    <dt className="font-medium text-iron-400">${detail.label}</dt>
+                    <dd className="min-w-0 break-all font-mono text-iron-100">${detail.value}</dd>
+                  </div>
+                `,
+              )}
+            </dl>
+          `
+        : parameters &&
+          html`<pre className="mb-3 max-h-56 overflow-auto whitespace-pre-wrap break-all rounded-md bg-iron-950 p-2 font-mono text-xs text-iron-100">${parameters}</pre>`}
 
       ${allowAlways &&
       html`
