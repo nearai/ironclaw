@@ -4,6 +4,7 @@ use ironclaw_reborn_config::RebornDoctorReport;
 use crate::context::RebornCliContext;
 
 pub(crate) mod init;
+pub(crate) mod validate;
 
 #[derive(Debug, Args)]
 pub(crate) struct ConfigCommand {
@@ -18,6 +19,9 @@ enum ConfigSubcommand {
     /// Write a commented stub `config.toml` and `providers.json` into
     /// the Reborn home directory. Refuses to clobber unless --force.
     Init(init::ConfigInitCommand),
+    /// Parse and validate a blueprint, resolve its file references, and print
+    /// the resulting lockfile. Defaults to `.ironclaw/blueprint.toml`.
+    Validate(validate::ConfigValidateCommand),
 }
 
 #[derive(Debug, Args)]
@@ -28,6 +32,7 @@ impl ConfigCommand {
         match self.command {
             ConfigSubcommand::Path(command) => command.execute(context),
             ConfigSubcommand::Init(command) => command.execute(context),
+            ConfigSubcommand::Validate(command) => command.execute(context),
         }
     }
 }
