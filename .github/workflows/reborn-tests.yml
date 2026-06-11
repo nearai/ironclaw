@@ -168,12 +168,20 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Run crate tests
+        env:
+          PACKAGE: ${{ matrix.package }}
         run: |
-          feature_flags="$(scripts/ci/package-feature-flags.sh "${{ matrix.package }}")"
+          feature_flags="$(scripts/ci/package-feature-flags.sh "$PACKAGE")"
+
+          if [ "$PACKAGE" = "ironclaw_reborn_composition" ]; then
+            echo "Serializing ironclaw_reborn_composition test builds to keep runner disk usage bounded."
+            export CARGO_BUILD_JOBS=1
+            export CARGO_INCREMENTAL=0
+          fi
 
           # shellcheck disable=SC2086 # feature_flags intentionally expands to zero or more Cargo args.
           timeout --signal=INT --kill-after=30s 28m \
-            cargo test -p "${{ matrix.package }}" ${feature_flags} --all-targets -- --nocapture
+            cargo test -p "$PACKAGE" ${feature_flags} --all-targets -- --nocapture
 
   root-reborn-parity-tests:
     name: Reborn root tests (${{ matrix.partition }})
