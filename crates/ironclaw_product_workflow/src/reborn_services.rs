@@ -8,6 +8,7 @@ use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::{Arc, Mutex as StdMutex, Weak},
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
@@ -111,11 +112,14 @@ type SkillActivationRecorder =
 type SkillActivationClearer =
     dyn Fn(&TurnScope, &AcceptedMessageRef) -> Result<(), RebornServicesError> + Send + Sync;
 type ThreadOperationLocks = StdMutex<HashMap<String, Weak<AsyncMutex<()>>>>;
+type TriggerRunThreadAccessCache = StdMutex<HashMap<String, TriggerRunThreadAccessCacheEntry>>;
 
 const OPERATOR_LOGS_DEFAULT_LIMIT: u32 = 100;
 const OPERATOR_LOGS_MAX_LIMIT: u32 = 500;
 const OPERATOR_LOGS_CURSOR_MAX_BYTES: usize = 512;
 const OPERATOR_LOGS_TARGET_MAX_BYTES: usize = 256;
+const TRIGGER_RUN_THREAD_ACCESS_CACHE_TTL: Duration = Duration::from_secs(5);
+const TRIGGER_RUN_THREAD_ACCESS_CACHE_MAX_ENTRIES: usize = 512;
 
 #[async_trait]
 pub trait ConnectableChannelsProductFacade: Send + Sync {
@@ -488,19 +492,18 @@ pub trait AutomationProductFacade: Send + Sync {
     /// is embedded: if the trigger exists for this caller and contains the run,
     /// the caller is permitted to access it.
     ///
-    /// Returns `None` when:
+    /// Returns `Ok(None)` when no caller-scoped trigger has a run with this
+    /// `thread_id`. Backend lookup failures should return a stable
+    /// `RebornServicesError` so outages do not masquerade as authorization
+    /// misses.
     ///
-    /// - The automation facade is unavailable.
-    /// - No caller-scoped trigger has a run with this `thread_id`.
-    /// - The caller has no bound agent (cannot scope the repository lookup).
-    ///
-    /// The default implementation returns `None` so existing fakes compile.
+    /// The default implementation returns `Ok(None)` so existing fakes compile.
     async fn resolve_run_thread_scope(
         &self,
         _caller: ProductAgentBoundCaller,
         _thread_id: &ThreadId,
-    ) -> Option<TriggerRunThreadScope> {
-        None
+    ) -> Result<Option<TriggerRunThreadScope>, RebornServicesError> {
+        Ok(None)
     }
 }
 
@@ -1280,6 +1283,7 @@ pub struct RebornServices {
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
     llm_config: Option<Arc<dyn LlmConfigService>>,
     thread_operation_locks: Arc<ThreadOperationLocks>,
+    trigger_run_thread_access_cache: Arc<TriggerRunThreadAccessCache>,
 }
 
 impl RebornServices {
@@ -1310,6 +1314,7 @@ impl RebornServices {
             skill_activation_clearer: None,
             llm_config: None,
             thread_operation_locks: Arc::new(StdMutex::new(HashMap::new())),
+            trigger_run_thread_access_cache: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 
@@ -1815,17 +1820,15 @@ impl RebornServicesApi for RebornServices {
             Ok(history) => history,
             // When the session-scoped lookup fails with NotFound, try the
             // automation-trigger fallback: automation-trigger threads are
-            // created under the trigger's scope (no owner_user_id), not the
-            // WebUI caller's session scope, so the user-scoped lookup always
-            // misses them. If the thread_id appears in any recent run of an
+            // created under the trigger creator's scope, not the WebUI
+            // caller's session scope, so the user-scoped lookup always misses
+            // them. If the thread_id appears in any recent run of an
             // automation that belongs to this caller, we know the caller is
             // authorized (list_automations applies the same authorization).
-            // We then re-fetch using an unscoped thread_scope (no
-            // owner_user_id constraint) so the production backend can resolve
-            // the thread. Both UnknownThread and ThreadScopeMismatch are
-            // treated as "not found in my scope" — only those are eligible for
-            // the automation fallback; backend/serialization errors propagate
-            // as-is.
+            // We then re-fetch using the trigger-owned thread scope. Both
+            // UnknownThread and ThreadScopeMismatch are treated as "not found
+            // in my scope" — only those are eligible for the automation
+            // fallback; backend/serialization errors propagate as-is.
             Err(
                 SessionThreadError::UnknownThread { .. }
                 | SessionThreadError::ThreadScopeMismatch { .. },
@@ -1864,11 +1867,16 @@ impl RebornServicesApi for RebornServices {
         // transcript. Without it a caller sharing (tenant, agent, project)
         // could read another user's projection feed by guessing thread_id.
         // The automation fallback allows the owner of an automation to stream
-        // events for a trigger-fired thread (which is stored ownerless). The
-        // returned scope may contain an explicit owner (the trigger creator)
-        // for trigger threads.
-        let (scope, _thread_scope) = self
-            .resolve_thread_access_for_caller(caller.clone(), caller.turn_scope(thread_id), &actor)
+        // events for a trigger-fired thread (which is stored under the trigger
+        // creator). The returned scope may contain an explicit owner for
+        // trigger threads.
+        let access = self
+            .resolve_thread_access_for_caller(
+                caller.clone(),
+                caller.turn_scope(thread_id),
+                &actor,
+                TriggerRunThreadAccessCacheMode::Use,
+            )
             .await?;
         let Some(event_stream) = &self.event_stream else {
             return Err(RebornServicesError::from_status_kind(
@@ -1887,18 +1895,10 @@ impl RebornServicesApi for RebornServices {
         //
         // For normal session threads `explicit_owner_user_id()` is `None` and
         // we fall back to the caller's id — behaviour is unchanged.
-        let projection_actor = match scope.explicit_owner_user_id() {
-            Some(owner_user_id) if owner_user_id != &actor.user_id => {
-                let mut owned_actor = actor.clone();
-                owned_actor.user_id = owner_user_id.clone();
-                owned_actor
-            }
-            _ => actor,
-        };
         let events = event_stream
             .drain(ProjectionSubscriptionRequest {
-                actor: projection_actor,
-                scope,
+                actor: access.run_actor,
+                scope: access.scope,
                 after_cursor: request.after_cursor,
             })
             .await
@@ -1918,17 +1918,18 @@ impl RebornServicesApi for RebornServices {
         };
         // Ownership probe with automation-trigger fallback. If the thread is a
         // trigger-fired thread belonging to the caller's automation, the probe
-        // succeeds and the returned scope is ownerless so the turn coordinator
-        // can find the trigger run. The request scope is updated to match so
-        // the cancel arrives at the correct run.
-        let (resolved_scope, _thread_scope) = self
+        // succeeds and returns the trigger-owned scope/actor so the cancel
+        // arrives at the actual run, not the browser caller's session scope.
+        let access = self
             .resolve_thread_access_for_caller(
                 caller_for_fallback,
                 request.scope.clone(),
                 &request.actor,
+                TriggerRunThreadAccessCacheMode::Bypass,
             )
             .await?;
-        request.scope = resolved_scope;
+        request.scope = access.scope;
+        request.actor = access.run_actor;
         let response = self
             .turn_coordinator
             .cancel_run(request)
@@ -1956,21 +1957,32 @@ impl RebornServicesApi for RebornServices {
             return Err(RebornServicesError::internal_invariant());
         };
 
-        // Ownership probe with automation-trigger fallback. The resolved scope
-        // may be ownerless for trigger threads; all gate resolution paths
-        // (approval, auth, generic) receive the resolved scope so they route to
-        // the correct run in the turn coordinator.
-        let (scope, _thread_scope) = self
-            .resolve_thread_access_for_caller(caller_for_fallback, scope, &actor)
+        // Ownership probe with automation-trigger fallback. Trigger threads
+        // return the trigger-owned scope and run actor; gate routing and resume
+        // paths must use that run actor while authorization remains tied to the
+        // WebUI caller's automation visibility.
+        let access = self
+            .resolve_thread_access_for_caller(
+                caller_for_fallback,
+                scope,
+                &actor,
+                TriggerRunThreadAccessCacheMode::Bypass,
+            )
             .await?;
         match self
-            .gate_resolution_route(&scope, &actor, run_id, &gate_ref, &resolution)
+            .gate_resolution_route(
+                &access.scope,
+                &access.run_actor,
+                run_id,
+                &gate_ref,
+                &resolution,
+            )
             .await?
         {
             GateResolutionRoute::Approval => {
                 self.resolve_approval_gate(
-                    scope,
-                    actor,
+                    access.scope,
+                    access.run_actor,
                     run_id,
                     gate_ref,
                     client_action_id,
@@ -1979,13 +1991,20 @@ impl RebornServicesApi for RebornServices {
                 .await
             }
             GateResolutionRoute::Auth => {
-                self.resolve_auth_gate(scope, actor, run_id, gate_ref, client_action_id, resolution)
-                    .await
+                self.resolve_auth_gate(
+                    access.scope,
+                    access.run_actor,
+                    run_id,
+                    gate_ref,
+                    client_action_id,
+                    resolution,
+                )
+                .await
             }
             GateResolutionRoute::Generic => {
                 self.resolve_generic_gate(
-                    scope,
-                    actor,
+                    access.scope,
+                    access.run_actor,
                     run_id,
                     gate_ref,
                     client_action_id,
@@ -2009,12 +2028,20 @@ impl RebornServicesApi for RebornServices {
         // any caller sharing (tenant, agent, project) could read another user's
         // run state by guessing thread_id and run_id. The fallback also allows
         // the owner of an automation to poll run state on a trigger-fired thread.
-        let (scope, _thread_scope) = self
-            .resolve_thread_access_for_caller(caller, scope, &actor)
+        let access = self
+            .resolve_thread_access_for_caller(
+                caller,
+                scope,
+                &actor,
+                TriggerRunThreadAccessCacheMode::Bypass,
+            )
             .await?;
         let state = self
             .turn_coordinator
-            .get_run_state(GetRunStateRequest { scope, run_id })
+            .get_run_state(GetRunStateRequest {
+                scope: access.scope,
+                run_id,
+            })
             .await
             .map_err(map_turn_error)?;
         Ok(state.into())
@@ -2737,6 +2764,28 @@ async fn replay_accepted_message(
         .map_err(map_thread_error)
 }
 
+struct ResolvedThreadAccess {
+    scope: TurnScope,
+    run_actor: TurnActor,
+}
+
+#[derive(Clone)]
+struct AutomationTriggerAccess {
+    scope: TurnScope,
+    run_actor: TurnActor,
+}
+
+struct TriggerRunThreadAccessCacheEntry {
+    access: AutomationTriggerAccess,
+    cached_at: Instant,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TriggerRunThreadAccessCacheMode {
+    Bypass,
+    Use,
+}
+
 // Owner-bound thread resolution shared by the WebUI-facing methods that
 // only need to prove a browser thread id belongs to the authenticated actor.
 // The actor is pinned as `owner_user_id` so a caller sharing (tenant, agent,
@@ -2796,15 +2845,22 @@ impl RebornServices {
         caller: WebUiAuthenticatedCaller,
         scope: &TurnScope,
         original_not_found_error: RebornServicesError,
-    ) -> Result<TurnScope, RebornServicesError> {
+        cache_mode: TriggerRunThreadAccessCacheMode,
+    ) -> Result<AutomationTriggerAccess, RebornServicesError> {
         let Some(bound_caller) = product_agent_bound_caller_from_webui(caller) else {
             return Err(original_not_found_error);
         };
         let thread_id = &scope.thread_id;
+        let cache_key = trigger_run_thread_access_cache_key(&bound_caller, thread_id);
+        if cache_mode == TriggerRunThreadAccessCacheMode::Use
+            && let Some(access) = self.cached_trigger_run_thread_access(&cache_key)?
+        {
+            return Ok(access);
+        }
         let Some(trigger_scope) = self
             .automation_facade
             .resolve_run_thread_scope(bound_caller.clone(), thread_id)
-            .await
+            .await?
         else {
             return Err(original_not_found_error);
         };
@@ -2813,19 +2869,27 @@ impl RebornServices {
         let true_agent_id = trigger_scope
             .agent_id
             .or_else(|| Some(bound_caller.agent_id.clone()));
-        Ok(TurnScope::new_with_owner(
-            scope.tenant_id.clone(),
-            true_agent_id,
-            trigger_scope.project_id,
-            thread_id.clone(),
-            Some(trigger_scope.creator_user_id),
-        ))
+        let run_actor = TurnActor::new(trigger_scope.creator_user_id.clone());
+        let access = AutomationTriggerAccess {
+            scope: TurnScope::new_with_owner(
+                scope.tenant_id.clone(),
+                true_agent_id,
+                trigger_scope.project_id,
+                thread_id.clone(),
+                Some(trigger_scope.creator_user_id),
+            ),
+            run_actor,
+        };
+        if cache_mode == TriggerRunThreadAccessCacheMode::Use {
+            self.store_trigger_run_thread_access(cache_key, access.clone())?;
+        }
+        Ok(access)
     }
 
     /// Fallback timeline fetch for automation-trigger threads.
     ///
-    /// Automation-trigger threads are created under the trigger's scope (no
-    /// `owner_user_id`), not the caller's session scope. The normal user-scoped
+    /// Automation-trigger threads are created under the trigger creator's
+    /// scope, not the caller's session scope. The normal user-scoped
     /// `list_thread_history` therefore always misses them. This fallback is
     /// only reached when the user-scoped lookup returned `UnknownThread` or
     /// `ThreadScopeMismatch`.
@@ -2835,31 +2899,34 @@ impl RebornServices {
     /// is the same authorization check the Automations list endpoint applies,
     /// so no new trust boundary is introduced.
     ///
-    /// On authorization success, the history is loaded without an
-    /// `owner_user_id` constraint so the backend can resolve trigger-owned
-    /// threads. On authorization failure (thread not in any of the caller's
-    /// automation runs, or automation facade unavailable), the
-    /// `original_not_found_error` is returned so the response is
-    /// indistinguishable from a genuinely absent thread.
+    /// On authorization success, the history is loaded with the trigger-owned
+    /// scope. On authorization failure (thread not in any of the caller's
+    /// automation runs), the `original_not_found_error` is returned so the
+    /// response is indistinguishable from a genuinely absent thread.
     async fn try_automation_trigger_timeline_fallback(
         &self,
         caller: WebUiAuthenticatedCaller,
         scope: &TurnScope,
         original_not_found_error: RebornServicesError,
     ) -> Result<ThreadHistory, RebornServicesError> {
-        let true_scope = self
-            .check_automation_trigger_access(caller, scope, original_not_found_error)
+        let access = self
+            .check_automation_trigger_access(
+                caller,
+                scope,
+                original_not_found_error,
+                TriggerRunThreadAccessCacheMode::Bypass,
+            )
             .await?;
         // Authorized: re-fetch the history using the TRUE stored scope
         // (owner_user_id = creator_user_id, not the caller's session user).
         let true_thread_scope = thread_scope_from_turn_scope(
-            &true_scope,
-            true_scope.explicit_owner_user_id().cloned(),
+            &access.scope,
+            access.scope.explicit_owner_user_id().cloned(),
         )?;
         self.thread_service
             .list_thread_history(ThreadHistoryRequest {
                 scope: true_thread_scope,
-                thread_id: true_scope.thread_id.clone(),
+                thread_id: access.scope.thread_id.clone(),
             })
             .await
             .map_err(map_timeline_probe_error)
@@ -2871,16 +2938,17 @@ impl RebornServices {
     /// Tries the primary user-scoped `read_thread` probe. On a 404-class miss
     /// (UnknownThread / ThreadScopeMismatch), falls back to the automation
     /// trigger authorization check. If the thread belongs to one of the
-    /// caller's automations, returns an unscoped `TurnScope` (with
-    /// `thread_owner = Ownerless`) so the turn coordinator can find the trigger
-    /// run. Non-owner callers and genuinely absent threads both receive the
-    /// same canonical NotFound response.
+    /// caller's automations, returns the trigger-owned `TurnScope` and run
+    /// actor so downstream turn operations address the submitted run. Non-owner
+    /// callers and genuinely absent threads both receive the same canonical
+    /// NotFound response.
     async fn resolve_thread_access_for_caller(
         &self,
         caller: WebUiAuthenticatedCaller,
         scope: TurnScope,
         actor: &TurnActor,
-    ) -> Result<(TurnScope, ThreadScope), RebornServicesError> {
+        cache_mode: TriggerRunThreadAccessCacheMode,
+    ) -> Result<ResolvedThreadAccess, RebornServicesError> {
         let thread_scope = thread_scope_from_turn_scope(&scope, Some(actor.user_id.clone()))?;
         match self
             .thread_service
@@ -2890,24 +2958,73 @@ impl RebornServices {
             })
             .await
         {
-            Ok(_) => Ok((scope, thread_scope)),
+            Ok(_) => Ok(ResolvedThreadAccess {
+                scope,
+                run_actor: actor.clone(),
+            }),
             Err(
                 SessionThreadError::UnknownThread { .. }
                 | SessionThreadError::ThreadScopeMismatch { .. },
             ) => {
                 let original_error =
                     RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false);
-                let true_scope = self
-                    .check_automation_trigger_access(caller, &scope, original_error)
+                let access = self
+                    .check_automation_trigger_access(caller, &scope, original_error, cache_mode)
                     .await?;
-                let true_thread_scope = thread_scope_from_turn_scope(
-                    &true_scope,
-                    true_scope.explicit_owner_user_id().cloned(),
-                )?;
-                Ok((true_scope, true_thread_scope))
+                Ok(ResolvedThreadAccess {
+                    scope: access.scope,
+                    run_actor: access.run_actor,
+                })
             }
             Err(err) => Err(map_ownership_probe_error(err)),
         }
+    }
+
+    fn cached_trigger_run_thread_access(
+        &self,
+        cache_key: &str,
+    ) -> Result<Option<AutomationTriggerAccess>, RebornServicesError> {
+        let now = Instant::now();
+        let mut cache = self
+            .trigger_run_thread_access_cache
+            .lock()
+            .map_err(|_| RebornServicesError::internal_invariant())?;
+        let Some(entry) = cache.get(cache_key) else {
+            return Ok(None);
+        };
+        if now.duration_since(entry.cached_at) <= TRIGGER_RUN_THREAD_ACCESS_CACHE_TTL {
+            return Ok(Some(entry.access.clone()));
+        }
+        cache.remove(cache_key);
+        Ok(None)
+    }
+
+    fn store_trigger_run_thread_access(
+        &self,
+        cache_key: String,
+        access: AutomationTriggerAccess,
+    ) -> Result<(), RebornServicesError> {
+        let mut cache = self
+            .trigger_run_thread_access_cache
+            .lock()
+            .map_err(|_| RebornServicesError::internal_invariant())?;
+        if cache.len() >= TRIGGER_RUN_THREAD_ACCESS_CACHE_MAX_ENTRIES
+            && !cache.contains_key(&cache_key)
+            && let Some(oldest_key) = cache
+                .iter()
+                .min_by_key(|(_, entry)| entry.cached_at)
+                .map(|(key, _)| key.clone())
+        {
+            cache.remove(&oldest_key);
+        }
+        cache.insert(
+            cache_key,
+            TriggerRunThreadAccessCacheEntry {
+                access,
+                cached_at: Instant::now(),
+            },
+        );
+        Ok(())
     }
 
     /// Ownership probe for `submit_turn` and `delete_thread` — these only
@@ -3148,6 +3265,29 @@ fn map_ownership_probe_error(error: SessionThreadError) -> RebornServicesError {
         }
         _ => map_thread_error(error),
     }
+}
+
+fn trigger_run_thread_access_cache_key(
+    caller: &ProductAgentBoundCaller,
+    thread_id: &ThreadId,
+) -> String {
+    let project_id = caller
+        .project_id
+        .as_ref()
+        .map(ProjectId::as_str)
+        .unwrap_or("");
+    format!(
+        "{}{}{}{}{}",
+        cache_segment("tenant", caller.tenant_id.as_str()),
+        cache_segment("user", caller.user_id.as_str()),
+        cache_segment("agent", caller.agent_id.as_str()),
+        cache_segment("project", project_id),
+        cache_segment("thread", thread_id.as_str())
+    )
+}
+
+fn cache_segment(name: &str, value: &str) -> String {
+    format!("{name}:{}:{value};", value.len())
 }
 
 fn validate_current_gate_ref(

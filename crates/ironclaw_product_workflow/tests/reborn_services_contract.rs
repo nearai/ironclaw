@@ -1,6 +1,7 @@
 //! Contract tests for WebUI-facing RebornServices facade.
 
 use std::{
+    collections::HashMap,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -320,6 +321,22 @@ impl FakeTurnCoordinator {
             .expect("lock")
             .last()
             .map(|request| request.scope.clone())
+    }
+
+    fn last_cancellation_scope(&self) -> Option<TurnScope> {
+        self.cancellations
+            .lock()
+            .expect("lock")
+            .last()
+            .map(|request| request.scope.clone())
+    }
+
+    fn last_cancellation_actor(&self) -> Option<TurnActor> {
+        self.cancellations
+            .lock()
+            .expect("lock")
+            .last()
+            .map(|request| request.actor.clone())
     }
 
     /// Returns the `TurnScope` from the most recent `get_run_state` call.
@@ -820,23 +837,33 @@ impl AutomationProductFacade for RecordingAutomationFacade {
 #[derive(Clone)]
 struct StaticAutomationFacade {
     output: Vec<RebornAutomationInfo>,
-    /// Scope returned by `resolve_run_thread_scope` for any thread_id query.
-    /// `None` means the trait default fires (returns `None`), simulating a
-    /// facade that does not recognise the thread.
-    resolve_scope: Option<TriggerRunThreadScope>,
+    /// Scopes returned by `resolve_run_thread_scope`, keyed by the queried
+    /// thread id so tests prove the lookup contract rather than accepting a
+    /// cached scope for any request.
+    resolve_scopes: HashMap<ThreadId, TriggerRunThreadScope>,
+    resolve_calls: Arc<Mutex<Vec<ThreadId>>>,
 }
 
 impl StaticAutomationFacade {
     fn new(output: Vec<RebornAutomationInfo>) -> Self {
         Self {
             output,
-            resolve_scope: None,
+            resolve_scopes: HashMap::new(),
+            resolve_calls: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    fn with_resolve_scope(mut self, scope: TriggerRunThreadScope) -> Self {
-        self.resolve_scope = Some(scope);
+    fn with_resolve_scope_for_thread(
+        mut self,
+        thread_id: ThreadId,
+        scope: TriggerRunThreadScope,
+    ) -> Self {
+        self.resolve_scopes.insert(thread_id, scope);
         self
+    }
+
+    fn resolve_calls(&self) -> Vec<ThreadId> {
+        self.resolve_calls.lock().expect("lock").clone()
     }
 }
 
@@ -853,9 +880,13 @@ impl AutomationProductFacade for StaticAutomationFacade {
     async fn resolve_run_thread_scope(
         &self,
         _caller: ProductAgentBoundCaller,
-        _thread_id: &ThreadId,
-    ) -> Option<TriggerRunThreadScope> {
-        self.resolve_scope.clone()
+        thread_id: &ThreadId,
+    ) -> Result<Option<TriggerRunThreadScope>, RebornServicesError> {
+        self.resolve_calls
+            .lock()
+            .expect("lock")
+            .push(thread_id.clone());
+        Ok(self.resolve_scopes.get(thread_id).cloned())
     }
 }
 
@@ -5274,7 +5305,10 @@ async fn get_timeline_succeeds_for_own_automation_trigger_thread() {
             is_active: true,
             created_at: None,
         }])
-        .with_resolve_scope(trigger_run_thread_scope_for(&caller)),
+        .with_resolve_scope_for_thread(
+            trigger_thread_id.clone(),
+            trigger_run_thread_scope_for(&caller),
+        ),
     );
 
     let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
@@ -5364,7 +5398,7 @@ fn automation_facade_with_trigger_thread(
             last_status: Some(RebornAutomationRunStatus::Ok),
             recent_runs: vec![RebornAutomationRecentRunInfo {
                 run_id: Some(automation_run_id()),
-                thread_id: trigger_thread_id,
+                thread_id: trigger_thread_id.clone(),
                 fire_slot: None,
                 status: RebornAutomationRecentRunStatus::Ok,
                 submitted_at: "2026-06-10T09:00:01Z".parse().expect("submitted_at"),
@@ -5373,7 +5407,10 @@ fn automation_facade_with_trigger_thread(
             is_active: true,
             created_at: None,
         }])
-        .with_resolve_scope(trigger_run_thread_scope_for(caller)),
+        .with_resolve_scope_for_thread(
+            trigger_thread_id.clone(),
+            trigger_run_thread_scope_for(caller),
+        ),
     )
 }
 
@@ -5423,6 +5460,7 @@ async fn resolve_gate_approval_succeeds_for_own_automation_trigger_thread() {
     // Program coordinator to report BlockedApproval with an approval gate.
     let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
     coordinator.set_parked_approval_gate(gate_ref.clone());
+    coordinator.set_run_state_actor(Some(turn_actor_for_user(TRIGGER_CREATOR_USER_ID)));
 
     let services = RebornServices::new(thread_service, coordinator.clone())
         .with_automation_product_facade(automation_facade_with_trigger_thread(
@@ -5473,6 +5511,109 @@ async fn resolve_gate_approval_succeeds_for_own_automation_trigger_thread() {
         Some(expected_trigger_scope),
         "get_run_state must receive the trigger-owned scope (owner = TRIGGER_CREATOR_USER_ID), \
          not the WebUI caller's session scope (owner = user-alpha)"
+    );
+    assert_eq!(
+        approval_interactions
+            .last_resolution()
+            .expect("approval resolution")
+            .actor
+            .user_id,
+        UserId::new(TRIGGER_CREATOR_USER_ID).expect("valid creator user id"),
+        "approval resolution must resume the run as the trigger creator, not the WebUI caller"
+    );
+}
+
+#[tokio::test]
+async fn cancel_run_succeeds_for_own_automation_trigger_thread() {
+    // The caller owns the automation, but the run itself belongs to the trigger
+    // creator. cancel_run must forward both the trigger-owned scope and the run
+    // actor to the turn coordinator.
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let trigger_thread_id =
+        setup_trigger_thread(&thread_service, &caller, "thread-trigger-cancel-alpha").await;
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+
+    let services =
+        RebornServices::new(thread_service, coordinator.clone()).with_automation_product_facade(
+            automation_facade_with_trigger_thread(trigger_thread_id.clone(), &caller),
+        );
+
+    let response = services
+        .cancel_run(
+            caller.clone(),
+            serde_json::from_value::<WebUiCancelRunRequest>(json!({
+                "client_action_id": "cancel-trigger-1",
+                "thread_id": trigger_thread_id.as_str(),
+                "run_id": run_id_string(),
+                "reason": "user_requested"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("automation owner should be able to cancel trigger thread run");
+
+    assert_eq!(response.status, TurnStatus::Cancelled);
+    let expected_trigger_scope = TurnScope::new_with_owner(
+        caller.tenant_id.clone(),
+        caller.agent_id.clone(),
+        caller.project_id.clone(),
+        trigger_thread_id,
+        Some(UserId::new(TRIGGER_CREATOR_USER_ID).expect("valid creator user id")),
+    );
+    assert_eq!(
+        coordinator.last_cancellation_scope(),
+        Some(expected_trigger_scope),
+        "cancel_run must receive the trigger-owned scope"
+    );
+    assert_eq!(
+        coordinator
+            .last_cancellation_actor()
+            .expect("cancel actor")
+            .user_id,
+        UserId::new(TRIGGER_CREATOR_USER_ID).expect("valid creator user id"),
+        "cancel_run must use the trigger creator actor, not the WebUI caller"
+    );
+}
+
+#[tokio::test]
+async fn get_run_state_succeeds_for_own_automation_trigger_thread() {
+    // get_run_state is read-only, but it still must resolve the browser thread
+    // id to the trigger-owned scope before querying the coordinator.
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let trigger_thread_id =
+        setup_trigger_thread(&thread_service, &caller, "thread-trigger-state-alpha").await;
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+
+    let services =
+        RebornServices::new(thread_service, coordinator.clone()).with_automation_product_facade(
+            automation_facade_with_trigger_thread(trigger_thread_id.clone(), &caller),
+        );
+
+    let response = services
+        .get_run_state(
+            caller.clone(),
+            RebornGetRunStateRequest {
+                thread_id: trigger_thread_id.as_str().to_string(),
+                run_id: run_id_string(),
+            },
+        )
+        .await
+        .expect("automation owner should be able to read trigger run state");
+
+    assert_eq!(response.status, TurnStatus::Queued);
+    let expected_trigger_scope = TurnScope::new_with_owner(
+        caller.tenant_id.clone(),
+        caller.agent_id.clone(),
+        caller.project_id.clone(),
+        trigger_thread_id,
+        Some(UserId::new(TRIGGER_CREATOR_USER_ID).expect("valid creator user id")),
+    );
+    assert_eq!(
+        coordinator.last_run_state_scope(),
+        Some(expected_trigger_scope),
+        "get_run_state must query the trigger-owned scope"
     );
 }
 
@@ -5579,6 +5720,52 @@ async fn stream_events_uses_trigger_creator_as_projection_identity() {
     assert_eq!(
         requests[0].scope.thread_id, trigger_thread_id,
         "projection scope thread_id must match the trigger thread"
+    );
+}
+
+#[tokio::test]
+async fn stream_events_reuses_cached_trigger_scope_for_repeated_polls() {
+    // The chat page polls stream_events frequently. Once automation ownership
+    // for a trigger thread has been proven, repeated polls from the same caller
+    // should not rescan the caller's trigger history every second.
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let trigger_thread_id = setup_trigger_thread(
+        &thread_service,
+        &caller,
+        "thread-trigger-stream-cache-alpha",
+    )
+    .await;
+
+    let automation_facade =
+        automation_facade_with_trigger_thread(trigger_thread_id.clone(), &caller);
+    let event_stream = Arc::new(RecordingProjectionStream::default());
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(automation_facade.clone())
+        .with_event_stream(event_stream.clone());
+
+    for _ in 0..2 {
+        services
+            .stream_events(
+                caller.clone(),
+                RebornStreamEventsRequest {
+                    thread_id: trigger_thread_id.as_str().to_string(),
+                    after_cursor: None,
+                },
+            )
+            .await
+            .expect("automation owner should be able to repeatedly stream trigger events");
+    }
+
+    assert_eq!(
+        automation_facade.resolve_calls(),
+        vec![trigger_thread_id],
+        "repeated stream_events polls should reuse the trigger scope access cache"
+    );
+    assert_eq!(
+        event_stream.requests().len(),
+        2,
+        "the cache must not suppress event polling itself"
     );
 }
 
