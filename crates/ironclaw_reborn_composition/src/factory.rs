@@ -55,9 +55,12 @@ use ironclaw_host_api::{HostApiError, MountAlias, MountGrant, ResourceScope};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeHttpEgressPort,
     HostRuntimeServices, LocalHostProcessPort, ProductAuthProviderRuntimePorts, TriggerCreateHook,
-    builtin_first_party_handlers_with_trigger_create_hook,
+    builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
+};
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_host_runtime::{
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
-    builtin_first_party_package, builtin_first_party_package_for_process_backend,
+    builtin_first_party_package_for_process_backend,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_loop_support::FilesystemCheckpointStateStore;
