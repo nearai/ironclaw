@@ -857,13 +857,16 @@ pub trait TriggerRepository: Send + Sync {
     /// or scope predicate before acting on the returned record (e.g., checking
     /// that the trigger belongs to the expected `creator_user_id`, `agent_id`,
     /// and `project_id`).
+    ///
+    /// Required (no default body): this lookup feeds the authorization path
+    /// for opening trigger-owned threads from the Automations panel. A
+    /// silently inherited `Ok(None)` would degrade every timeline/SSE/gate/
+    /// cancel access check to 404 on a backend that forgot to implement it.
     async fn find_trigger_run_by_thread_id(
         &self,
-        _tenant_id: TenantId,
-        _thread_id: &ThreadId,
-    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
-        Ok(None)
-    }
+        tenant_id: TenantId,
+        thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError>;
 
     /// Returns recent run-history rows for one tenant-scoped trigger.
     ///

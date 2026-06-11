@@ -1138,10 +1138,9 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
     assert_eq!(runs[2]["run_id"], json!(first_run_id.to_string()));
     assert_eq!(runs[2]["status"], json!("ok"));
     assert_ne!(runs[2]["completed_at"], Value::Null);
-    assert_eq!(
-        runs[0]["thread_id"].as_str().unwrap().len(),
-        64,
-        "trigger route thread ids are deterministic hex identifiers"
+    assert!(
+        uuid::Uuid::parse_str(runs[0]["thread_id"].as_str().unwrap()).is_ok(),
+        "run thread ids are canonical conversation thread UUIDs, not route placeholders"
     );
 }
 
@@ -6543,6 +6542,15 @@ fn trigger_backend_error() -> ironclaw_triggers::TriggerError {
 
 #[async_trait]
 impl TriggerRepository for RemoveFailingTriggerRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(
         &self,
         record: ironclaw_triggers::TriggerRecord,
@@ -6675,6 +6683,15 @@ impl TriggerRepository for RemoveFailingTriggerRepository {
 
 #[async_trait]
 impl TriggerRepository for BatchRunHistoryFailingTriggerRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(
         &self,
         record: ironclaw_triggers::TriggerRecord,
@@ -6815,6 +6832,15 @@ impl TriggerRepository for BatchRunHistoryFailingTriggerRepository {
 
 #[async_trait]
 impl TriggerRepository for FailingTriggerRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(
         &self,
         _record: ironclaw_triggers::TriggerRecord,
