@@ -1,5 +1,8 @@
 use super::*;
 
+use std::collections::VecDeque;
+use std::sync::Mutex;
+
 use ironclaw_host_api::ThreadId;
 use ironclaw_product_adapters::{
     AdapterInstallationId, ExternalConversationRef, ProductAdapterError, ProductAdapterId,
@@ -112,6 +115,29 @@ async fn openai_responses_retrieve_keeps_finalized_message_completion() {
 }
 
 #[tokio::test]
+async fn openai_responses_retrieve_keeps_completed_projection_in_progress_until_message() {
+    let fixture = ResponseReaderFixture::new("completed-lag").await;
+    let run_id = TurnRunId::new();
+    let reader = OpenAiResponsesThreadProjectionReader::new(
+        fixture.threads.clone(),
+        Arc::new(StaticProjectionStream::new(vec![run_status_envelope(
+            fixture.thread_id.as_str(),
+            run_id,
+            "completed",
+        )])),
+    );
+
+    let response = reader
+        .read_response(fixture.read_request(run_id))
+        .await
+        .expect("read response");
+
+    assert_eq!(response.status, OpenAiResponseStatus::InProgress);
+    assert!(response.output.is_empty());
+    assert!(response.error.is_none());
+}
+
+#[tokio::test]
 async fn openai_responses_wait_returns_terminal_projection_status_without_message() {
     let fixture = ResponseReaderFixture::new("wait-failed").await;
     let run_id = TurnRunId::new();
@@ -132,6 +158,33 @@ async fn openai_responses_wait_returns_terminal_projection_status_without_messag
     assert_eq!(projection.response.status, OpenAiResponseStatus::Failed);
     assert!(projection.response.output.is_empty());
     assert!(projection.response.error.is_some());
+}
+
+#[tokio::test]
+async fn openai_responses_wait_advances_projection_cursor_between_polls() {
+    let fixture = ResponseReaderFixture::new("wait-cursor").await;
+    let run_id = TurnRunId::new();
+    let first = run_status_envelope(fixture.thread_id.as_str(), TurnRunId::new(), "running");
+    let first_cursor = first.projection_cursor().clone();
+    let stream = Arc::new(SequencedProjectionStream::new(vec![
+        vec![first],
+        vec![run_status_envelope(
+            fixture.thread_id.as_str(),
+            run_id,
+            "failed",
+        )],
+    ]));
+    let mut reader =
+        OpenAiResponsesThreadProjectionReader::new(fixture.threads.clone(), stream.clone());
+    reader.poll_interval = Duration::from_millis(1);
+
+    let projection = reader
+        .wait_for_response_completion(fixture.wait_request(run_id))
+        .await
+        .expect("wait response");
+
+    assert_eq!(projection.response.status, OpenAiResponseStatus::Failed);
+    assert_eq!(stream.after_cursors(), vec![None, Some(first_cursor)]);
 }
 
 struct ResponseReaderFixture {
@@ -290,6 +343,43 @@ impl ProjectionStream for StaticProjectionStream {
         _request: ProjectionSubscriptionRequest,
     ) -> Result<Vec<ProductOutboundEnvelope>, ProductAdapterError> {
         Ok(self.envelopes.clone())
+    }
+}
+
+struct SequencedProjectionStream {
+    batches: Mutex<VecDeque<Vec<ProductOutboundEnvelope>>>,
+    after_cursors: Mutex<Vec<Option<ProjectionCursor>>>,
+}
+
+impl SequencedProjectionStream {
+    fn new(batches: Vec<Vec<ProductOutboundEnvelope>>) -> Self {
+        Self {
+            batches: Mutex::new(batches.into()),
+            after_cursors: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn after_cursors(&self) -> Vec<Option<ProjectionCursor>> {
+        self.after_cursors.lock().expect("after cursor log").clone()
+    }
+}
+
+#[async_trait]
+impl ProjectionStream for SequencedProjectionStream {
+    async fn drain(
+        &self,
+        request: ProjectionSubscriptionRequest,
+    ) -> Result<Vec<ProductOutboundEnvelope>, ProductAdapterError> {
+        self.after_cursors
+            .lock()
+            .expect("after cursor log")
+            .push(request.after_cursor);
+        Ok(self
+            .batches
+            .lock()
+            .expect("projection batches")
+            .pop_front()
+            .unwrap_or_default())
     }
 }
 

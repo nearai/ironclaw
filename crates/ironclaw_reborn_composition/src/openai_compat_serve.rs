@@ -16,7 +16,7 @@ use ironclaw_host_api::{
 use ironclaw_product_adapters::{
     AdapterInstallationId, ProductAdapterId, ProductInboundAck, ProductOutboundEnvelope,
     ProductOutboundPayload, ProductProjectionItem, ProductProjectionState, ProductWorkflow,
-    ProjectionReadRequest, ProjectionStream, ProjectionSubscriptionRequest,
+    ProjectionCursor, ProjectionReadRequest, ProjectionStream, ProjectionSubscriptionRequest,
 };
 use ironclaw_product_workflow::{
     DefaultInboundTurnService, DefaultProductWorkflow, ProductActorUserResolutionRequest,
@@ -343,19 +343,21 @@ impl OpenAiResponsesThreadProjectionReader {
         &self,
         request: &ProjectionReadRequest,
         submitted_run_id: &str,
-    ) -> Result<Option<OpenAiResponseStatus>, OpenAiCompatHttpError> {
+        after_cursor: Option<ProjectionCursor>,
+    ) -> Result<ProjectedResponseStatusRead, OpenAiCompatHttpError> {
         let events = self
             .projection_stream
             .drain(ProjectionSubscriptionRequest {
                 actor: request.actor.clone(),
                 scope: request.scope.clone(),
-                after_cursor: request.after_cursor.clone(),
+                after_cursor,
             })
             .await?;
-        Ok(response_status_from_projection_events(
-            &events,
-            submitted_run_id,
-        ))
+        let next_cursor = events.last().map(|event| event.projection_cursor().clone());
+        Ok(ProjectedResponseStatusRead {
+            status: response_status_from_projection_events(&events, submitted_run_id),
+            next_cursor,
+        })
     }
 }
 
@@ -371,6 +373,7 @@ impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
             } => submitted_run_id.to_string(),
             _ => return Err(OpenAiCompatHttpError::internal()),
         };
+        let mut projection_after_cursor = request.projection_read.after_cursor.clone();
         loop {
             if let Some(content) = self
                 .read_finalized_response_message(&request.projection_read, submitted_run_id.clone())
@@ -384,9 +387,17 @@ impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
                     Some(content),
                 )));
             }
-            if let Some(status) = self
-                .read_projected_response_status(&request.projection_read, &submitted_run_id)
-                .await?
+            let projected = self
+                .read_projected_response_status(
+                    &request.projection_read,
+                    &submitted_run_id,
+                    projection_after_cursor.clone(),
+                )
+                .await?;
+            if let Some(next_cursor) = projected.next_cursor {
+                projection_after_cursor = Some(next_cursor);
+            }
+            if let Some(status) = projected.status
                 && matches!(
                     status,
                     OpenAiResponseStatus::Failed | OpenAiResponseStatus::Cancelled
@@ -415,11 +426,19 @@ impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
         let projected_status = if content.is_some() {
             None
         } else {
-            self.read_projected_response_status(&request.projection_read, &submitted_run_id)
-                .await?
+            self.read_projected_response_status(
+                &request.projection_read,
+                &submitted_run_id,
+                request.projection_read.after_cursor.clone(),
+            )
+            .await?
+            .status
         };
         let status = match (content.is_some(), projected_status) {
             (true, _) => OpenAiResponseStatus::Completed,
+            (false, Some(OpenAiResponseStatus::Completed | OpenAiResponseStatus::InProgress)) => {
+                OpenAiResponseStatus::InProgress
+            }
             (false, Some(status)) => status,
             (false, None) => OpenAiResponseStatus::InProgress,
         };
@@ -433,6 +452,11 @@ impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
             content,
         ))
     }
+}
+
+struct ProjectedResponseStatusRead {
+    status: Option<OpenAiResponseStatus>,
+    next_cursor: Option<ProjectionCursor>,
 }
 
 fn response_turn_run_ref_from_mapping(
