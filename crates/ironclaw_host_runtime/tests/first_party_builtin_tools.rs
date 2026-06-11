@@ -532,6 +532,37 @@ async fn builtin_trigger_create_rejects_malformed_input_before_persistence() {
 }
 
 #[tokio::test]
+async fn builtin_trigger_create_rejects_invalid_timezone_before_persistence() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let error = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Invalid timezone trigger",
+            "prompt": "Run something",
+            "cron": "0 9 * * *",
+            "timezone": "Not/A/Timezone"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "no trigger should be persisted when timezone is invalid"
+    );
+}
+
+#[tokio::test]
 async fn builtin_trigger_create_rejects_blank_name_or_prompt_before_persistence() {
     let repository = Arc::new(InMemoryTriggerRepository::default());
     let runtime = runtime_with_trigger_repository(repository.clone());
