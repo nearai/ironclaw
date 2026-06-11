@@ -5737,17 +5737,21 @@ async fn run_operator_setup_rejects_internal_base_url_before_upsert() {
 }
 
 #[tokio::test]
-async fn upsert_llm_provider_rejects_internal_base_url_before_service() {
+async fn upsert_llm_provider_allows_loopback_base_url_for_self_hosted() {
+    // Loopback/private endpoints are the primary self-hosted use case (Ollama,
+    // vLLM): the guard must let them through to the service, not reject them as
+    // "internal". Only the always-blocked classes (metadata/link-local,
+    // multicast, unspecified) are rejected — see the metadata cases above.
     let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
     let services = services_with_setup_llm_config(llm_config.clone());
 
-    let err = services
+    services
         .upsert_llm_provider(
             caller(),
             UpsertLlmProviderRequest {
-                id: "openai".to_string(),
+                id: "ollama".to_string(),
                 name: None,
-                adapter: "open_ai_completions".to_string(),
+                adapter: "ollama".to_string(),
                 base_url: Some("http://127.0.0.1:11434/v1".to_string()),
                 default_model: None,
                 api_key: None,
@@ -5756,33 +5760,56 @@ async fn upsert_llm_provider_rejects_internal_base_url_before_service() {
             },
         )
         .await
-        .expect_err("loopback endpoint is rejected");
+        .expect("loopback endpoint reaches the service");
 
-    assert_setup_validation(err, "base_url", WebUiInboundValidationCode::InvalidValue);
-    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.upsert_provider_count(), 1);
 }
 
 #[tokio::test]
-async fn test_llm_connection_rejects_internal_base_url_before_service() {
+async fn test_llm_connection_allows_loopback_base_url_for_self_hosted() {
     let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
     let services = services_with_setup_llm_config(llm_config.clone());
 
-    let err = services
+    services
         .test_llm_connection(
             caller(),
             LlmProbeRequest {
-                adapter: "open_ai_completions".to_string(),
+                adapter: "ollama".to_string(),
                 base_url: Some("http://127.0.0.1:11434/v1".to_string()),
-                provider_id: "openai".to_string(),
-                model: Some("gpt-5-mini".to_string()),
-                api_key: Some(SecretString::from("sk-secret".to_string())),
+                provider_id: "ollama".to_string(),
+                model: Some("qwen3:latest".to_string()),
+                api_key: None,
             },
         )
         .await
-        .expect_err("loopback probe endpoint is rejected");
+        .expect("loopback probe reaches the service");
 
-    assert_setup_validation(err, "base_url", WebUiInboundValidationCode::InvalidValue);
-    assert_eq!(llm_config.test_connection_count(), 0);
+    assert_eq!(llm_config.test_connection_count(), 1);
+}
+
+#[tokio::test]
+async fn list_llm_models_allows_localhost_base_url_for_self_hosted() {
+    // Regression: `validate_llm_base_url` used to reject `localhost`, breaking
+    // the "Fetch models" button for self-hosted Ollama (the dialog showed
+    // "Invalid value (base_url)").
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    services
+        .list_llm_models(
+            caller(),
+            LlmProbeRequest {
+                adapter: "ollama".to_string(),
+                base_url: Some("http://localhost:11434".to_string()),
+                provider_id: "ollama".to_string(),
+                model: None,
+                api_key: None,
+            },
+        )
+        .await
+        .expect("localhost probe reaches the service");
+
+    assert_eq!(llm_config.list_models_count(), 1);
 }
 
 #[tokio::test]
