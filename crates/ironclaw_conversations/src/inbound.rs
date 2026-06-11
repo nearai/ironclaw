@@ -53,7 +53,8 @@ where
         &self,
         request: TrustedInboundTurnRequest,
     ) -> Result<InboundTurnResponse, InboundTurnError> {
-        let (request, trusted_agent_id, trusted_project_id) = request.into_parts();
+        let (request, trusted_agent_id, trusted_project_id, _trusted_owner_user_id) =
+            request.into_parts();
         self.handle_inbound_turn_inner(
             request,
             BindingResolutionPolicy::Trusted {
@@ -341,6 +342,7 @@ fn trusted_inbound_request_from_trigger(
         },
         fire.agent_id,
         fire.project_id,
+        None,
     ))
 }
 
@@ -890,6 +892,7 @@ mod tests {
             },
             trusted_agent_id,
             trusted_project_id,
+            None,
         )
     }
 
