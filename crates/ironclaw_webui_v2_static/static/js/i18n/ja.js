@@ -197,6 +197,8 @@ registerPack("ja", {
   "traceCommons.cardHeld": "{count} 件レビュー待ち",
   "traceCommons.heldTitle": "レビュー待ち",
   "traceCommons.heldDescription": "プライバシーリスクが高いため保留中です。確認して送信を承認してください。",
+  "traceCommons.authorize": "承認",
+  "traceCommons.authorizing": "承認中…",
   "traceCommons.lastSubmission": "最終提出",
   "traceCommons.lastSync": "最終クレジット同期",
   "traceCommons.lastSyncDesc": "最終同期時点のローカル表示",

@@ -72,6 +72,12 @@ pub struct TraceContributionEnvelope {
     pub training_dynamics: Option<TrainingDynamicsSignals>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_evaluation: Option<ProcessEvaluationLabels>,
+    /// Set when the user has explicitly authorized this held trace for
+    /// submission past the manual-review (High residual-PII-risk) gate. The
+    /// flag travels into the submitted trace so the server ledger records that
+    /// the contribution was made under explicit higher-risk authorization.
+    #[serde(default)]
+    pub manual_review_authorized: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2309,6 +2315,7 @@ impl TraceRedactor for DeterministicTraceRedactor {
             hindsight: None,
             training_dynamics: None,
             process_evaluation: None,
+            manual_review_authorized: false,
         })
     }
 }
@@ -4299,6 +4306,49 @@ fn retain_manual_review_holds(holds: Vec<TraceQueueHold>) -> Vec<TraceQueueHold>
         .into_iter()
         .filter(|hold| matches!(hold.kind, TraceQueueHoldKind::ManualReview))
         .collect()
+}
+
+/// Authorize a held manual-review trace for submission, promoting it as-is.
+///
+/// Stamps the queued envelope with `manual_review_authorized` (so
+/// [`trace_autonomous_eligibility`] submits it past every gate) and removes
+/// its `.held.json` sidecar. The envelope rewrite is the durable consent
+/// record and happens BEFORE the sidecar removal, so any failure leaves the
+/// trace held (fail closed). Returns `Ok(false)` when the submission has no
+/// `ManualReview` hold (nothing to authorize); errors only on IO failure.
+pub fn authorize_manual_review_hold_for_scope(
+    scope: Option<&str>,
+    submission_id: Uuid,
+) -> anyhow::Result<bool> {
+    let _guard = lock_trace_scope_for_mutation_blocking(scope);
+    let envelope_path = trace_queue_dir(scope).join(format!("{submission_id}.json"));
+    if !envelope_path.exists() {
+        return Ok(false);
+    }
+    let Some(sidecar) = read_trace_queue_hold_sidecar_for_envelope(&envelope_path)? else {
+        return Ok(false);
+    };
+    if trace_queue_hold_from_sidecar(submission_id, &sidecar).kind
+        != TraceQueueHoldKind::ManualReview
+    {
+        return Ok(false);
+    }
+
+    let mut envelope = load_trace_envelope(&envelope_path)?;
+    envelope.manual_review_authorized = true;
+    // Consent record first: persist the authorization before clearing the
+    // hold, so a crash between the two leaves the trace held, not submitted.
+    write_json_file(&envelope_path, &envelope, "authorized trace envelope")?;
+
+    let hold_path = trace_queue_hold_path_for_envelope_path(&envelope_path);
+    std::fs::remove_file(&hold_path).map_err(|error| {
+        anyhow::anyhow!(
+            "failed to remove trace hold sidecar {}: {}",
+            hold_path.display(),
+            error
+        )
+    })?;
+    Ok(true)
 }
 
 pub fn trace_queue_diagnostics_for_scope(
@@ -6667,6 +6717,13 @@ pub fn trace_autonomous_eligibility(
     envelope: &TraceContributionEnvelope,
     policy: &StandingTraceContributionPolicy,
 ) -> TraceQueueEligibility {
+    // An explicitly user-authorized held trace submits as-is, bypassing every
+    // gate (PII manual-review, score, tool-allowlist). The user reviewed the
+    // already-redacted trace and accepted its residual risk.
+    if envelope.manual_review_authorized {
+        return TraceQueueEligibility::Submit;
+    }
+
     if policy.require_manual_approval_when_pii_detected
         && envelope.privacy.residual_pii_risk == ResidualPiiRisk::High
     {
@@ -10777,6 +10834,82 @@ mod tests {
         let kept = retain_manual_review_holds(holds);
         assert_eq!(kept.len(), 1, "only the ManualReview hold is surfaced");
         assert_eq!(kept[0].kind, TraceQueueHoldKind::ManualReview);
+    }
+
+    #[tokio::test]
+    async fn authorize_manual_review_hold_promotes_envelope_past_all_gates() {
+        let scope = format!("trace-authorize-test-{}", Uuid::new_v4());
+        let raw = RawTraceContribution::from_recorded_trace(
+            &sample_trace(),
+            RecordedTraceContributionOptions::default(),
+        );
+        let mut envelope = DeterministicTraceRedactor::default()
+            .redact_trace(raw)
+            .await
+            .expect("redaction should succeed");
+        envelope.privacy.residual_pii_risk = ResidualPiiRisk::High;
+        apply_credit_estimate_to_envelope(&mut envelope);
+
+        let manual_policy = StandingTraceContributionPolicy {
+            enabled: true,
+            require_manual_approval_when_pii_detected: true,
+            ..StandingTraceContributionPolicy::default()
+        };
+
+        // Precondition: the High-PII trace is held for manual review.
+        queue_trace_envelope_as_held_for_scope(
+            Some(&scope),
+            &envelope,
+            "manual review required because residual privacy risk is high",
+        )
+        .expect("held envelope queues");
+        assert_eq!(
+            manual_review_holds_for_scope(Some(&scope)).unwrap().len(),
+            1
+        );
+        assert!(matches!(
+            trace_autonomous_eligibility(&envelope, &manual_policy),
+            TraceQueueEligibility::Hold {
+                kind: TraceQueueHoldKind::ManualReview,
+                ..
+            }
+        ));
+
+        // Authorize -> promotes as-is.
+        let authorized =
+            authorize_manual_review_hold_for_scope(Some(&scope), envelope.submission_id)
+                .expect("authorize succeeds");
+        assert!(authorized, "the held trace is authorized");
+
+        // Hold cleared, envelope stamped, eligibility now submits.
+        assert!(
+            manual_review_holds_for_scope(Some(&scope))
+                .unwrap()
+                .is_empty(),
+            "hold sidecar removed"
+        );
+        let reloaded_path =
+            trace_queue_dir(Some(&scope)).join(format!("{}.json", envelope.submission_id));
+        let reloaded = load_trace_envelope(&reloaded_path).expect("reload envelope");
+        assert!(
+            reloaded.manual_review_authorized,
+            "envelope stamped authorized"
+        );
+        assert!(
+            matches!(
+                trace_autonomous_eligibility(&reloaded, &manual_policy),
+                TraceQueueEligibility::Submit
+            ),
+            "authorized trace now submits despite High PII"
+        );
+
+        // Authorizing an unknown submission is a no-op, not an error.
+        assert!(
+            !authorize_manual_review_hold_for_scope(Some(&scope), Uuid::new_v4())
+                .expect("unknown submission is Ok(false)")
+        );
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
     }
 
     #[tokio::test]

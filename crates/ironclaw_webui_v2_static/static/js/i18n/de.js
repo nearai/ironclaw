@@ -197,6 +197,8 @@ registerPack("de", {
   "traceCommons.cardHeld": "{count} zur Prüfung",
   "traceCommons.heldTitle": "Zur Prüfung zurückgehalten",
   "traceCommons.heldDescription": "Wegen höheren Datenschutzrisikos zurückgehalten; prüfen und zum Senden freigeben.",
+  "traceCommons.authorize": "Freigeben",
+  "traceCommons.authorizing": "Wird freigegeben…",
   "traceCommons.lastSubmission": "Letzte Einreichung",
   "traceCommons.lastSync": "Letzte Guthaben-Synchronisierung",
   "traceCommons.lastSyncDesc": "Lokale Ansicht zum Zeitpunkt der letzten Synchronisierung",

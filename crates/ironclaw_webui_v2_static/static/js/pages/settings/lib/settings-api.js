@@ -123,6 +123,14 @@ export function removeSkill(name) {
 export function fetchTraceCredits() {
   return apiFetch("/api/webchat/v2/traces/credit");
 }
+// Authorize a held (manual-review) trace for submission. No request body —
+// the submission id is in the path. Returns { authorized: bool }.
+export function authorizeTraceHold(submissionId) {
+  return apiFetch(
+    `/api/webchat/v2/traces/holds/${encodeURIComponent(submissionId)}/authorize`,
+    { method: "POST" }
+  );
+}
 export function fetchUsers() {
   return Promise.resolve({ users: [], todo: true });
 }

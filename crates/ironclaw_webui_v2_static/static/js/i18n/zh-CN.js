@@ -197,6 +197,8 @@ registerPack("zh-CN", {
   "traceCommons.cardHeld": "{count} 待审核",
   "traceCommons.heldTitle": "待审核",
   "traceCommons.heldDescription": "因隐私风险较高而保留；请审核并授权提交。",
+  "traceCommons.authorize": "授权",
+  "traceCommons.authorizing": "授权中…",
   "traceCommons.lastSubmission": "最近提交",
   "traceCommons.lastSync": "最近积分同步",
   "traceCommons.lastSyncDesc": "截至最近同步的本地视图",

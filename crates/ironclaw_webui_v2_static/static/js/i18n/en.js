@@ -207,6 +207,8 @@ registerPack("en", {
   "traceCommons.cardHeld": "{count} held for review",
   "traceCommons.heldTitle": "Held for review",
   "traceCommons.heldDescription": "Held because of higher privacy risk; review and authorize to submit.",
+  "traceCommons.authorize": "Authorize",
+  "traceCommons.authorizing": "Authorizing…",
   "traceCommons.lastSubmission": "Last submission",
   "traceCommons.lastSync": "Last credit sync",
   "traceCommons.lastSyncDesc": "Local view as of last sync",

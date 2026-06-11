@@ -1,7 +1,8 @@
-import { useQuery } from "@tanstack/react-query";
-import { fetchTraceCredits } from "../lib/settings-api.js";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { authorizeTraceHold, fetchTraceCredits } from "../lib/settings-api.js";
 
 export function useTraceCredits() {
+  const queryClient = useQueryClient();
   const query = useQuery({
     queryKey: ["trace-credits"],
     queryFn: fetchTraceCredits,
@@ -13,8 +14,16 @@ export function useTraceCredits() {
     refetchOnWindowFocus: true,
   });
 
+  // Authorize a held manual-review trace; on success the credits query
+  // refetches so the held list and counts update without a manual reload.
+  const authorize = useMutation({
+    mutationFn: authorizeTraceHold,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["trace-credits"] }),
+  });
+
   return {
     credits: query.data || null,
     query,
+    authorize,
   };
 }

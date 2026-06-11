@@ -211,6 +211,18 @@ mod tests {
         assert!(tab.contains("traceCommons.heldDescription"));
         assert!(tab.contains("hold.submission_id"));
         assert!(tab.contains("hold.reason"));
+        // Per-hold Authorize button wired to the authorize mutation.
+        assert!(tab.contains("authorize.mutate(hold.submission_id)"));
+        assert!(tab.contains("traceCommons.authorize"));
+
+        // Authorize calls the POST endpoint and invalidates the credits query.
+        let settings_api = asset_text("js/pages/settings/lib/settings-api.js");
+        assert!(settings_api.contains("export function authorizeTraceHold"));
+        assert!(settings_api.contains("/authorize"));
+        assert!(settings_api.contains("method: \"POST\""));
+        let trace_hook = asset_text("js/pages/settings/hooks/useTraceCredits.js");
+        assert!(trace_hook.contains("authorizeTraceHold"));
+        assert!(trace_hook.contains("invalidateQueries({ queryKey: [\"trace-credits\"] })"));
 
         // The hook refetches so the card and Settings tab reflect new
         // accepted submissions without a manual reload.
@@ -225,6 +237,8 @@ mod tests {
         assert!(en.contains("\"traceCommons.cardHeld\""));
         assert!(en.contains("\"traceCommons.heldTitle\""));
         assert!(en.contains("\"traceCommons.heldDescription\""));
+        assert!(en.contains("\"traceCommons.authorize\""));
+        assert!(en.contains("\"traceCommons.authorizing\""));
     }
 
     #[test]

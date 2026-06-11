@@ -197,6 +197,8 @@ registerPack("ko", {
   "traceCommons.cardHeld": "{count}건 검토 대기",
   "traceCommons.heldTitle": "검토 대기",
   "traceCommons.heldDescription": "개인정보 위험이 높아 보류됨. 검토 후 제출을 승인하세요.",
+  "traceCommons.authorize": "승인",
+  "traceCommons.authorizing": "승인 중…",
   "traceCommons.lastSubmission": "마지막 제출",
   "traceCommons.lastSync": "마지막 크레딧 동기화",
   "traceCommons.lastSyncDesc": "마지막 동기화 기준 로컬 보기",

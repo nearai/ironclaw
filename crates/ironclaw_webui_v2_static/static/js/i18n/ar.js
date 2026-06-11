@@ -197,6 +197,8 @@ registerPack("ar", {
   "traceCommons.cardHeld": "{count} قيد المراجعة",
   "traceCommons.heldTitle": "محجوز للمراجعة",
   "traceCommons.heldDescription": "محجوز بسبب ارتفاع مخاطر الخصوصية؛ راجِعه وامنح الإذن للإرسال.",
+  "traceCommons.authorize": "تفويض",
+  "traceCommons.authorizing": "جارٍ التفويض…",
   "traceCommons.lastSubmission": "آخر مساهمة",
   "traceCommons.lastSync": "آخر مزامنة للرصيد",
   "traceCommons.lastSyncDesc": "عرض محلي حتى آخر مزامنة",

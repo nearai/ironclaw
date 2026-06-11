@@ -8,8 +8,8 @@
 
 use chrono::{DateTime, Utc};
 use ironclaw_reborn_traces::contribution::{
-    manual_review_holds_for_scope, read_local_trace_records_for_scope, read_trace_policy_for_scope,
-    trace_credit_report,
+    authorize_manual_review_hold_for_scope, manual_review_holds_for_scope,
+    read_local_trace_records_for_scope, read_trace_policy_for_scope, trace_credit_report,
 };
 use serde::{Deserialize, Serialize};
 
@@ -62,6 +62,28 @@ pub struct RebornTraceCreditsResponse {
 pub struct RebornTraceHold {
     pub submission_id: String,
     pub reason: String,
+}
+
+/// Result of authorizing a held trace for submission.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RebornTraceHoldAuthorizeResponse {
+    /// True when a held trace matching the submission id was found and
+    /// authorized for submission; false when there was no such held trace
+    /// (already authorized, already submitted, or never held).
+    pub authorized: bool,
+}
+
+/// Authorize the caller-scoped held manual-review trace for submission.
+///
+/// The trace scope is the caller's user id; the submission id is never an
+/// authority to cross scopes. Returns whether a matching `ManualReview` hold
+/// was found and promoted.
+pub(super) fn authorize_trace_hold_for_user(
+    user_id: &str,
+    submission_id: uuid::Uuid,
+) -> Result<bool, String> {
+    authorize_manual_review_hold_for_scope(Some(user_id), submission_id)
+        .map_err(|error| error.to_string())
 }
 
 /// Build the caller-scoped local Trace Commons credit view.

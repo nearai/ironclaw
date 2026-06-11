@@ -37,7 +37,7 @@ function StatRow({ label, value, description }) {
 
 export function TraceCommonsTab({ searchQuery = "" }) {
   const t = useT();
-  const { credits, query } = useTraceCredits();
+  const { credits, query, authorize } = useTraceCredits();
 
   if (
     !matchesSearch(searchQuery, [
@@ -154,12 +154,24 @@ export function TraceCommonsTab({ searchQuery = "" }) {
               (hold) => html`
                 <li
                   key=${hold.submission_id}
-                  className="rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2"
+                  className="flex items-start justify-between gap-3 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2"
                 >
-                  <div className="text-xs text-[var(--v2-text-strong)]">${hold.reason}</div>
-                  <div className="mt-0.5 font-mono text-[10px] text-[var(--v2-text-faint)]">
-                    ${hold.submission_id}
+                  <div className="min-w-0">
+                    <div className="text-xs text-[var(--v2-text-strong)]">${hold.reason}</div>
+                    <div className="mt-0.5 truncate font-mono text-[10px] text-[var(--v2-text-faint)]">
+                      ${hold.submission_id}
+                    </div>
                   </div>
+                  <button
+                    type="button"
+                    onClick=${() => authorize.mutate(hold.submission_id)}
+                    disabled=${authorize.isPending}
+                    className="shrink-0 rounded-lg border border-[var(--v2-accent-soft)] px-2.5 py-1 text-xs font-medium text-[var(--v2-accent-text)] transition-colors hover:bg-[var(--v2-accent-soft)] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    ${authorize.isPending
+                      ? t("traceCommons.authorizing")
+                      : t("traceCommons.authorize")}
+                  </button>
                 </li>
               `
             )}

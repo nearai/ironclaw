@@ -197,6 +197,8 @@ registerPack("uk", {
   "traceCommons.cardHeld": "{count} на розгляді",
   "traceCommons.heldTitle": "На розгляді",
   "traceCommons.heldDescription": "Затримано через вищий ризик конфіденційності; перегляньте та авторизуйте надсилання.",
+  "traceCommons.authorize": "Авторизувати",
+  "traceCommons.authorizing": "Авторизація…",
   "traceCommons.lastSubmission": "Останнє подання",
   "traceCommons.lastSync": "Остання синхронізація кредитів",
   "traceCommons.lastSyncDesc": "Локальний перегляд станом на останню синхронізацію",

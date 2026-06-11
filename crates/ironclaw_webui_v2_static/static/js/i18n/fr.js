@@ -197,6 +197,8 @@ registerPack("fr", {
   "traceCommons.cardHeld": "{count} en attente de révision",
   "traceCommons.heldTitle": "En attente de révision",
   "traceCommons.heldDescription": "Retenu en raison d'un risque de confidentialité plus élevé ; vérifiez et autorisez l'envoi.",
+  "traceCommons.authorize": "Autoriser",
+  "traceCommons.authorizing": "Autorisation…",
   "traceCommons.lastSubmission": "Dernière soumission",
   "traceCommons.lastSync": "Dernière synchronisation des crédits",
   "traceCommons.lastSyncDesc": "Vue locale à la dernière synchronisation",

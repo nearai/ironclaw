@@ -36,8 +36,8 @@ use ironclaw_product_workflow::{
     RebornServicesErrorKind, RebornSetupExtensionResponse, RebornSkillActionResponse,
     RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
     RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, RebornTraceCreditsResponse, SetActiveLlmRequest,
-    UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse,
+    SetActiveLlmRequest, UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
     WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
     WebUiSendMessageRequest, WebUiSetupExtensionRequest,
@@ -477,6 +477,24 @@ pub async fn trace_credits(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornTraceCreditsResponse>, WebUiV2HttpError> {
     let response = state.services().trace_credits(caller).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/traces/holds/{submission_id}/authorize`
+///
+/// Authorize a held manual-review trace for submission (promote-as-is). The
+/// trace scope is derived from the authenticated caller; the `submission_id`
+/// path segment is never authority to cross scopes. A missing/already-resolved
+/// hold returns `{ authorized: false }`, not an error.
+pub async fn authorize_trace_hold(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(submission_id): Path<String>,
+) -> Result<Json<RebornTraceHoldAuthorizeResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .authorize_trace_hold(caller, submission_id)
+        .await?;
     Ok(Json(response))
 }
 

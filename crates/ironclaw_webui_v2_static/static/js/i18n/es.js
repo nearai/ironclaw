@@ -197,6 +197,8 @@ registerPack("es", {
   "traceCommons.cardHeld": "{count} en revisión",
   "traceCommons.heldTitle": "En revisión",
   "traceCommons.heldDescription": "Retenido por mayor riesgo de privacidad; revísalo y autorízalo para enviar.",
+  "traceCommons.authorize": "Autorizar",
+  "traceCommons.authorizing": "Autorizando…",
   "traceCommons.lastSubmission": "Último envío",
   "traceCommons.lastSync": "Última sincronización de créditos",
   "traceCommons.lastSyncDesc": "Vista local a fecha de la última sincronización",

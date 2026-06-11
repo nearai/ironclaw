@@ -25,6 +25,7 @@ pub const WEBUI_V2_ROUTE_CANCEL_RUN: &str = "webui.v2.cancel_run";
 pub const WEBUI_V2_ROUTE_RESOLVE_GATE: &str = "webui.v2.resolve_gate";
 pub const WEBUI_V2_ROUTE_LIST_AUTOMATIONS: &str = "webui.v2.list_automations";
 pub const WEBUI_V2_ROUTE_TRACE_CREDITS: &str = "webui.v2.trace_credits";
+pub const WEBUI_V2_ROUTE_TRACE_HOLD_AUTHORIZE: &str = "webui.v2.authorize_trace_hold";
 pub const WEBUI_V2_ROUTE_LIST_CONNECTABLE_CHANNELS: &str = "webui.v2.list_connectable_channels";
 pub const WEBUI_V2_ROUTE_LIST_EXTENSIONS: &str = "webui.v2.list_extensions";
 pub const WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY: &str = "webui.v2.list_extension_registry";
@@ -74,6 +75,8 @@ pub const WEBUI_V2_PATTERN_RESOLVE_GATE: &str =
     "/api/webchat/v2/threads/{thread_id}/runs/{run_id}/gates/{gate_ref}/resolve";
 pub const WEBUI_V2_PATTERN_LIST_AUTOMATIONS: &str = "/api/webchat/v2/automations";
 pub const WEBUI_V2_PATTERN_TRACE_CREDITS: &str = "/api/webchat/v2/traces/credit";
+pub const WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE: &str =
+    "/api/webchat/v2/traces/holds/{submission_id}/authorize";
 pub const WEBUI_V2_PATTERN_LIST_CONNECTABLE_CHANNELS: &str = "/api/webchat/v2/channels/connectable";
 pub const WEBUI_V2_PATTERN_LIST_EXTENSIONS: &str = "/api/webchat/v2/extensions";
 pub const WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY: &str = "/api/webchat/v2/extensions/registry";
@@ -127,6 +130,7 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         resolve_gate_descriptor(),
         list_automations_descriptor(),
         trace_credits_descriptor(),
+        authorize_trace_hold_descriptor(),
         list_connectable_channels_descriptor(),
         list_extensions_descriptor(),
         list_extension_registry_descriptor(),
@@ -369,6 +373,21 @@ fn trace_credits_descriptor() -> IngressRouteDescriptor {
             AuditTraceClass::UserAction,
             AllowedEffectPath::ProductWorkflow,
             StreamingMode::None,
+        ),
+    )
+}
+
+fn authorize_trace_hold_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_TRACE_HOLD_AUTHORIZE,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE,
+        mutation_policy(
+            // The submission id is in the path; no request body.
+            BodyLimitPolicy::NoBody,
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
         ),
     )
 }

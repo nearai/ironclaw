@@ -197,6 +197,8 @@ registerPack("hi", {
   "traceCommons.cardHeld": "{count} समीक्षा हेतु रोके गए",
   "traceCommons.heldTitle": "समीक्षा हेतु रोका गया",
   "traceCommons.heldDescription": "अधिक गोपनीयता जोखिम के कारण रोका गया; सबमिट करने के लिए समीक्षा कर अधिकृत करें।",
+  "traceCommons.authorize": "अधिकृत करें",
+  "traceCommons.authorizing": "अधिकृत किया जा रहा है…",
   "traceCommons.lastSubmission": "अंतिम प्रस्तुति",
   "traceCommons.lastSync": "अंतिम क्रेडिट सिंक",
   "traceCommons.lastSyncDesc": "अंतिम सिंक के समय का स्थानीय दृश्य",
