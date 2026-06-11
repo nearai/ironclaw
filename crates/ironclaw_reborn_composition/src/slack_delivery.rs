@@ -208,6 +208,14 @@ impl SlackFinalReplyDeliveryObserver {
                 || event_kind == RunNotificationEventKind::AuthRequired)
                 && let Some(gate_ref_str) = gate_ref_for_routing.as_deref()
             {
+                // Derive the space id from the envelope's conversation ref so that
+                // posted-message refs carry the Slack team id (space_id). Inbound
+                // events set space_id = team_id, so without this the fingerprints
+                // would differ and a reply in the prompt thread would not match.
+                let envelope_space_id =
+                    conversations_ref_from_product_ref(envelope.external_conversation_ref())
+                        .ok()
+                        .and_then(|r| r.space_id().map(str::to_string));
                 record_gate_route_if_needed(
                     self.services.route_store.as_ref(),
                     run_id,
@@ -217,6 +225,7 @@ impl SlackFinalReplyDeliveryObserver {
                     &scope,
                     &posted_messages,
                     Some(envelope.external_conversation_ref()),
+                    envelope_space_id.as_deref(),
                 )
                 .await;
             }
@@ -500,10 +509,28 @@ async fn record_gate_route_if_needed(
     scope: &TurnScope,
     posted_messages: &[PostedSlackMessage],
     envelope_conv_ref: Option<&ExternalConversationRef>,
+    // Slack team id to attach to each posted-message conversation ref so that
+    // inbound replies (which carry team_id as space_id) match the fingerprint.
+    // A no-space fallback variant is always recorded too, for events that omit
+    // team_id; `push_unique_conversation_ref` deduplicates when the two are
+    // identical (i.e. when `posted_space_id` is None).
+    posted_space_id: Option<&str>,
 ) {
     let mut conversation_refs: Vec<ironclaw_conversations::ExternalConversationRef> = Vec::new();
 
     for msg in posted_messages {
+        // Record a space-qualified ref (matches inbound Slack events that carry team_id).
+        if let Some(space) = posted_space_id
+            && let Ok(conv_ref) = ironclaw_conversations::ExternalConversationRef::new(
+                Some(space),
+                &msg.channel,
+                Some(&msg.ts),
+                None,
+            )
+        {
+            push_unique_conversation_ref(&mut conversation_refs, conv_ref);
+        }
+        // Always record a no-space fallback ref for events that omit team_id.
         if let Ok(conv_ref) = ironclaw_conversations::ExternalConversationRef::new(
             None,
             &msg.channel,
@@ -1235,6 +1262,7 @@ async fn deliver_triggered_run(
         scope: scope.clone(),
         actor: actor.clone(),
         trigger_context: trigger_context.clone(),
+        resolved_space_id: std::sync::OnceLock::new(),
     };
 
     let mut delivered_blocked_marker: Option<BlockedActionableMarker> = None;
@@ -1314,9 +1342,14 @@ async fn deliver_triggered_run(
 
         match delivery_result {
             Ok(posted_messages) => {
-                if event_kind == RunNotificationEventKind::ApprovalNeeded
+                if (event_kind == RunNotificationEventKind::ApprovalNeeded
+                    || event_kind == RunNotificationEventKind::AuthRequired)
                     && let Some(gate_ref) = gate_ref_for_routing.as_deref()
                 {
+                    // Read the space id that was captured during target resolution.
+                    // The authority is constructed once per run, so this is set by
+                    // the time deliver_triggered_notification returns.
+                    let space_id = authority.resolved_space_id.get().and_then(|s| s.as_deref());
                     record_gate_route_if_needed(
                         services.route_store.as_ref(),
                         run_id,
@@ -1326,6 +1359,7 @@ async fn deliver_triggered_run(
                         &scope,
                         &posted_messages,
                         None,
+                        space_id,
                     )
                     .await;
                 }
@@ -1501,7 +1535,7 @@ async fn triggered_notification_for_state(
             Ok(Some(SlackActionableNotification {
                 event_kind: RunNotificationEventKind::AuthRequired,
                 payload: ProductOutboundPayload::AuthPrompt(view),
-                gate_ref_for_routing: None,
+                gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
             }))
         }
         _ => Ok(None),
@@ -1673,6 +1707,12 @@ struct TriggeredSlackReplyTargetAuthority {
     scope: TurnScope,
     actor: TurnActor,
     trigger_context: TriggerCommunicationContext,
+    /// Space id (Slack team id) captured during
+    /// `resolve_product_outbound_target_metadata`. Set once per authority
+    /// instance. Used after delivery to attach the team id to posted-message
+    /// gate-route refs so inbound replies (which carry team_id as space_id)
+    /// fingerprint-match the recorded ref.
+    resolved_space_id: std::sync::OnceLock<Option<String>>,
 }
 
 #[async_trait]
@@ -1710,6 +1750,10 @@ impl ProductOutboundTargetResolver for TriggeredSlackReplyTargetAuthority {
                 target.target().as_str()
             ),
         })?;
+        // Store the resolved space id so that, after deliver_triggered_notification
+        // returns posted messages, we can attach the team id to gate-route refs.
+        // OnceLock is set once per authority instance (constructed once per run).
+        let _ = self.resolved_space_id.set(space_id.clone());
         let external_conversation_ref =
             ExternalConversationRef::new(space_id.as_deref(), &conversation_id, None, None)
                 .map_err(|e| ProductWorkflowError::BindingResolutionFailed {
@@ -2815,5 +2859,318 @@ mod tests {
 
         assert_eq!(prompt.gate_ref, gate_ref.as_str());
         assert!(!prompt.allow_always);
+    }
+
+    // --- Bug-fix regression tests: gate-route refs carry team id (space_id) ----
+
+    /// Test A: triggered approval delivery records a gate-route that includes a
+    /// posted-message ref whose fingerprint matches an inbound-style ref carrying
+    /// the Slack team id (space_id = "T123").
+    ///
+    /// The test_slack_binding_ref helper encodes space = "T123", conversation = "D456".
+    /// After delivery the authority's `resolved_space_id` must be Some("T123"),
+    /// and the recorded route must contain a ref with space_id = Some("T123"),
+    /// conversation_id = the channel returned by Slack ("D456"), and thread_id =
+    /// the ts of the posted message ("1111.2222").
+    #[tokio::test]
+    async fn triggered_approval_route_ref_carries_resolved_space_id() {
+        let install = "test-install";
+        let gate_ref_str = "gate:approval-space-test";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+        let binding_ref =
+            test_slack_binding_ref(install, scope.agent_id.as_ref().expect("agent").as_str());
+
+        // First poll → BlockedApproval; second poll → Completed.
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![
+            scripted_state(TurnStatus::BlockedApproval, Some(gate_ref_str)),
+            scripted_state(TurnStatus::Completed, None),
+        ]));
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        seed_finalized_assistant_message(
+            &thread_service,
+            &scope,
+            run_id,
+            "Run complete after approval.",
+        )
+        .await;
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        seed_personal_preference(&outbound, &scope, binding_ref).await;
+
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // Approval-prompt response: channel D456, ts 1111.2222.
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D456", "1111.2222"),
+            )),
+        );
+        // Final-reply response.
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D456", "3333.4444"),
+            )),
+        );
+
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let services = make_services(
+            coordinator,
+            thread_service,
+            egress.clone(),
+            outbound,
+            install,
+        );
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        let fire = minimal_trigger_fire(None);
+        driver
+            .on_trigger_submitted(fire, run_id, scope.clone())
+            .await;
+        wait_for_delivery_record(&delivery_store, run_id).await;
+
+        let creator = ironclaw_host_api::UserId::new("creator-user").expect("user id");
+        let route = route_store
+            .load_delivered_gate_route(&scope.tenant_id, &creator, gate_ref_str)
+            .await
+            .expect("load route")
+            .expect("gate route was recorded");
+
+        // The binding ref encodes space = "T123", so the recorded route must
+        // contain a ref that fingerprint-matches an inbound-style ref with
+        // space_id = Some("T123"), conversation_id = "D456", thread_id = "1111.2222".
+        let expected_inbound_ref = ironclaw_conversations::ExternalConversationRef::new(
+            Some("T123"),
+            "D456",
+            Some("1111.2222"),
+            None,
+        )
+        .expect("expected inbound ref");
+        let expected_fingerprint = expected_inbound_ref.conversation_fingerprint();
+
+        assert!(
+            route
+                .delivered_conversation_refs
+                .iter()
+                .any(|r| r.conversation_fingerprint() == expected_fingerprint),
+            "recorded route must include a ref with space_id=T123 that matches the inbound fingerprint; refs={:?}",
+            route.delivered_conversation_refs,
+        );
+    }
+
+    /// Test B: triggered auth (BlockedAuth) delivery records a gate-route keyed
+    /// by the auth gate_ref. This is the Bug-2 regression: previously
+    /// `gate_ref_for_routing` was `None` for BlockedAuth so no route was
+    /// recorded, causing a `MissingGate` when the user replied "approve".
+    #[tokio::test]
+    async fn triggered_auth_delivery_records_gate_route() {
+        let install = "test-install";
+        let gate_ref_str = "gate:auth-route-regression";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+        let binding_ref =
+            test_slack_binding_ref(install, scope.agent_id.as_ref().expect("agent").as_str());
+
+        // First poll → BlockedAuth with gate_ref; second poll → Completed.
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![
+            scripted_state(TurnStatus::BlockedAuth, Some(gate_ref_str)),
+            scripted_state(TurnStatus::Completed, None),
+        ]));
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        seed_finalized_assistant_message(
+            &thread_service,
+            &scope,
+            run_id,
+            "Run complete after auth.",
+        )
+        .await;
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        seed_personal_preference(&outbound, &scope, binding_ref).await;
+
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // Auth-prompt delivery response.
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D456", "9999.1111"),
+            )),
+        );
+        // Final-reply response (after Completed).
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D456", "9999.2222"),
+            )),
+        );
+        // Auth message is deleted after final; need a delete response.
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                serde_json::json!({"ok": true}).to_string().into_bytes(),
+            )),
+        );
+
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let services = make_services(
+            coordinator,
+            thread_service,
+            egress.clone(),
+            outbound,
+            install,
+        );
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        let fire = minimal_trigger_fire(None);
+        driver
+            .on_trigger_submitted(fire, run_id, scope.clone())
+            .await;
+        wait_for_delivery_record(&delivery_store, run_id).await;
+
+        let creator = ironclaw_host_api::UserId::new("creator-user").expect("user id");
+        // A gate route for the auth gate_ref must have been recorded.
+        let route = route_store
+            .load_delivered_gate_route(&scope.tenant_id, &creator, gate_ref_str)
+            .await
+            .expect("load route")
+            .expect("auth gate route must be recorded (Bug 2 regression)");
+
+        assert_eq!(
+            route.gate_ref, gate_ref_str,
+            "recorded route must reference the auth gate_ref"
+        );
+        assert_eq!(route.run_id, run_id);
+    }
+
+    /// Test C: the `record_gate_route_if_needed` helper, called from the
+    /// observer path, stores a posted-message ref whose fingerprint matches an
+    /// inbound-style ref that carries the envelope's team id (space_id).
+    ///
+    /// This tests the observer call site directly (without driving the full
+    /// observer loop) to verify that `envelope_space_id` is extracted and
+    /// passed through.
+    #[tokio::test]
+    async fn observer_approval_route_ref_carries_envelope_space_id() {
+        let tenant_id = ironclaw_host_api::TenantId::new("test-tenant").expect("tenant");
+        let user_id = ironclaw_host_api::UserId::new("user-obs").expect("user");
+        let run_id = TurnRunId::new();
+        let gate_ref_str = "gate:observer-space-test";
+        let agent = ironclaw_host_api::AgentId::new("obs-agent").expect("agent");
+        let thread = ironclaw_host_api::ThreadId::new("obs-thread").expect("thread");
+        let scope = TurnScope::new_with_owner(tenant_id.clone(), Some(agent), None, thread, None);
+
+        // Simulate a posted message: channel D789, ts 5555.6666.
+        let posted = vec![PostedSlackMessage {
+            channel: "D789".to_string(),
+            ts: "5555.6666".to_string(),
+        }];
+
+        // Envelope conv ref carries space_id = "T999" (the team id).
+        let envelope_conv_ref =
+            ExternalConversationRef::new(Some("T999"), "D789", Some("5555.6666"), None)
+                .expect("envelope conv ref");
+
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+
+        // Derive space_id from the envelope ref — mirrors the observer call site.
+        let envelope_space_id = conversations_ref_from_product_ref(&envelope_conv_ref)
+            .ok()
+            .and_then(|r| r.space_id().map(str::to_string));
+        assert_eq!(
+            envelope_space_id.as_deref(),
+            Some("T999"),
+            "space_id must be extracted from envelope ref"
+        );
+
+        record_gate_route_if_needed(
+            route_store.as_ref(),
+            run_id,
+            &tenant_id,
+            &user_id,
+            gate_ref_str,
+            &scope,
+            &posted,
+            Some(&envelope_conv_ref),
+            envelope_space_id.as_deref(),
+        )
+        .await;
+
+        let route = route_store
+            .load_delivered_gate_route(&tenant_id, &user_id, gate_ref_str)
+            .await
+            .expect("load route")
+            .expect("route was recorded");
+
+        // Must contain a ref with space_id = "T999" matching the inbound fingerprint.
+        let expected_inbound_ref = ironclaw_conversations::ExternalConversationRef::new(
+            Some("T999"),
+            "D789",
+            Some("5555.6666"),
+            None,
+        )
+        .expect("inbound ref");
+        let expected_fingerprint = expected_inbound_ref.conversation_fingerprint();
+
+        assert!(
+            route
+                .delivered_conversation_refs
+                .iter()
+                .any(|r| r.conversation_fingerprint() == expected_fingerprint),
+            "recorded route must include a ref with space_id=T999; refs={:?}",
+            route.delivered_conversation_refs,
+        );
+
+        // Also verify that the no-space fallback variant is present (inbound
+        // events without team_id must still match).
+        let no_space_ref = ironclaw_conversations::ExternalConversationRef::new(
+            None,
+            "D789",
+            Some("5555.6666"),
+            None,
+        )
+        .expect("no-space ref");
+        let no_space_fingerprint = no_space_ref.conversation_fingerprint();
+        assert!(
+            route
+                .delivered_conversation_refs
+                .iter()
+                .any(|r| r.conversation_fingerprint() == no_space_fingerprint),
+            "recorded route must include the no-space fallback ref; refs={:?}",
+            route.delivered_conversation_refs,
+        );
     }
 }
