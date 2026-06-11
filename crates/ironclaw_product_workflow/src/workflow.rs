@@ -516,8 +516,7 @@ async fn resolve_via_delivered_approval_route(
             &derived_binding
         }
     };
-    let route =
-        load_delivered_route_for_envelope(envelope, binding, delivered_gate_routes).await?;
+    let route = load_delivered_route_for_envelope(envelope, binding, delivered_gate_routes).await?;
     if expected_gate_ref.is_some_and(|expected| expected != route.gate_ref) {
         debug!("delivered gate route fallback skipped route with non-matching gate ref");
         return None;
@@ -584,8 +583,7 @@ async fn resolve_via_delivered_auth_route(
             &derived_binding
         }
     };
-    let route =
-        load_delivered_route_for_envelope(envelope, binding, delivered_gate_routes).await?;
+    let route = load_delivered_route_for_envelope(envelope, binding, delivered_gate_routes).await?;
     if expected_gate_ref.is_some_and(|expected| expected != route.gate_ref) {
         debug!("delivered auth route fallback skipped route with non-matching gate ref");
         return None;
