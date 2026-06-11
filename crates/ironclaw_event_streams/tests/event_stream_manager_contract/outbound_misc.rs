@@ -144,6 +144,10 @@ async fn push_candidates_maps_outbound_store_failures() {
             FailingOutboundKind::Backend,
             ProjectionStreamError::Outbound,
         ),
+        (
+            FailingOutboundKind::PreferenceTargetMissing,
+            ProjectionStreamError::InvalidRequest { reason: "approval" },
+        ),
     ] {
         let manager = EventStreamManager::new(
             Arc::new(FakeProjectionService::new(projection_scope("thread-a"))),

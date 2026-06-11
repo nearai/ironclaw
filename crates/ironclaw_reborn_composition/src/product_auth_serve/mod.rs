@@ -882,6 +882,12 @@ pub(super) async fn scoped_update_binding_for_requester(
             CredentialAccountSelectionRequest::new(scope.clone(), provider.clone())
                 .for_extension(requester_extension.clone()),
             scope.clone(),
+            ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                scopes: provider_scopes
+                    .iter()
+                    .map(|scope| scope.as_str().to_string())
+                    .collect(),
+            },
             provider_scopes,
         ))
         .await;
@@ -1631,6 +1637,93 @@ mod tests {
             .expect("flow lookup")
             .expect("flow");
         assert!(flow.update_binding.is_none());
+    }
+
+    #[tokio::test]
+    async fn extension_google_oauth_start_binds_existing_configured_account_with_matching_scope() {
+        let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
+        let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+            shared.clone(),
+            Arc::new(NoopDispatcher),
+        ));
+        let state = ProductAuthRouteState::new(
+            product_auth,
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        )
+        .with_google_oauth(
+            GoogleOAuthRouteConfig::new(
+                "google-client.apps.googleusercontent.com",
+                "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
+            )
+            .expect("google oauth route config"),
+        );
+        let app = product_auth_route_mount(state)
+            .protected
+            .layer(axum::Extension(test_caller()));
+        let flow_invocation_id = InvocationId::new();
+        let mut existing_resource = test_resource_scope();
+        existing_resource.invocation_id = flow_invocation_id;
+        let existing_scope = AuthProductScope::new(existing_resource, AuthSurface::Callback);
+        let account = shared
+            .create_account(NewCredentialAccount {
+                scope: existing_scope.clone(),
+                provider: AuthProviderId::new(GOOGLE_PROVIDER_ID).expect("provider"),
+                label: CredentialAccountLabel::new("google-drive google").expect("label"),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(SecretHandle::new("google-drive-access").expect("secret")),
+                refresh_secret: Some(SecretHandle::new("google-drive-refresh").expect("secret")),
+                scopes: vec![
+                    ProviderScope::new("https://www.googleapis.com/auth/drive")
+                        .expect("provider scope"),
+                ],
+            })
+            .await
+            .expect("seed configured google account");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/extensions/google-drive/setup/oauth/start")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "provider": GOOGLE_PROVIDER_ID,
+                            "account_label": "google-drive google",
+                            "scopes": ["https://www.googleapis.com/auth/drive"],
+                            "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
+                            "invocation_id": flow_invocation_id.to_string(),
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("route response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("start json");
+        let flow_id = AuthFlowId::from_uuid(
+            Uuid::parse_str(json["flow_id"].as_str().expect("flow id")).expect("flow uuid"),
+        );
+        let flow = shared
+            .get_flow(&existing_scope, flow_id)
+            .await
+            .expect("flow lookup")
+            .expect("flow");
+        let update_binding = flow
+            .update_binding
+            .expect("matching account should be bound for OAuth reconnect");
+        assert_eq!(update_binding.account_id, account.id);
+        assert_eq!(update_binding.ownership, CredentialOwnership::UserReusable);
     }
 
     #[tokio::test]

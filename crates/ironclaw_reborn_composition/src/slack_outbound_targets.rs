@@ -11,9 +11,10 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
-use ironclaw_product_adapters::{AdapterInstallationId, ExternalActorRef, ExternalConversationRef};
-#[cfg(test)]
-use ironclaw_product_adapters::{EgressCredentialHandle, ProtocolHttpEgress};
+use ironclaw_product_adapters::{
+    AdapterInstallationId, EgressCredentialHandle, ExternalActorRef, ExternalConversationRef,
+    ProtocolHttpEgress,
+};
 use ironclaw_product_workflow::{
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
     RebornOutboundDeliveryTargetSummary, RebornServicesError, RebornServicesErrorCode,
@@ -27,9 +28,7 @@ use crate::outbound_preferences::{OutboundDeliveryTargetEntry, OutboundDeliveryT
 use crate::slack_channel_routes::{
     SlackChannelRouteError, SlackChannelRouteKey, SlackChannelRouteStore,
 };
-use crate::slack_dm_open::validate_slack_dm_channel_id;
-#[cfg(test)]
-use crate::slack_dm_open::{SlackDmOpenError, open_slack_dm_channel};
+use crate::slack_dm_open::{SlackDmOpenError, open_slack_dm_channel, validate_slack_dm_channel_id};
 use crate::slack_serve::{SlackTeamId, SlackUserId};
 
 pub(crate) const SLACK_OUTBOUND_TARGET_LIST_PAGE_SIZE: usize = 500;
@@ -116,8 +115,6 @@ pub(crate) enum SlackPersonalDmTargetError {
     #[error("Slack personal DM target store unavailable")]
     StoreUnavailable,
     #[error("Slack personal DM provisioning failed: {0}")]
-    // arch-exempt: dead_code, reserved for explicit Slack DM provisioning product route, plan #4600
-    #[allow(dead_code)]
     ProvisioningFailed(String),
 }
 
@@ -128,8 +125,6 @@ pub(crate) trait SlackPersonalDmTargetStore: Send + Sync + std::fmt::Debug {
         key: &SlackPersonalDmTargetKey,
     ) -> Result<Option<SlackPersonalDmTarget>, SlackPersonalDmTargetError>;
 
-    // arch-exempt: dead_code, reserved for explicit Slack DM provisioning product route, plan #4600
-    #[allow(dead_code)]
     async fn upsert_personal_dm_target(
         &self,
         target: SlackPersonalDmTarget,
@@ -176,7 +171,6 @@ impl SlackPersonalDmTargetStore for InMemorySlackPersonalDmTargetStore {
     }
 }
 
-#[cfg(test)]
 pub(crate) struct SlackPersonalDmTargetProvisioner {
     tenant_id: TenantId,
     installation_id: AdapterInstallationId,
@@ -186,7 +180,6 @@ pub(crate) struct SlackPersonalDmTargetProvisioner {
     store: Arc<dyn SlackPersonalDmTargetStore>,
 }
 
-#[cfg(test)]
 impl std::fmt::Debug for SlackPersonalDmTargetProvisioner {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -201,7 +194,6 @@ impl std::fmt::Debug for SlackPersonalDmTargetProvisioner {
     }
 }
 
-#[cfg(test)]
 impl SlackPersonalDmTargetProvisioner {
     pub(crate) fn new(
         tenant_id: TenantId,
@@ -804,6 +796,40 @@ fn take_product_binding_segment<'a>(raw: &'a str, name: &str) -> Option<(&'a str
     let value = raw.get(..length)?;
     let raw = raw.get(length..)?.strip_prefix(';')?;
     Some((value, raw))
+}
+
+/// Extract the Slack channel ID encoded in a Slack reply-target binding ref.
+///
+/// Parses the length-prefixed segment format produced by
+/// [`slack_shared_channel_reply_target_binding_ref`] /
+/// [`slack_personal_dm_reply_target_binding_ref`] without requiring the full
+/// config for validation. Used by the triggered-run delivery path to
+/// reconstruct the outbound `ExternalConversationRef` from a stored
+/// preference.
+///
+/// Returns `None` if the ref is not a Slack reply target or is malformed.
+pub(crate) fn slack_conversation_id_from_reply_target_binding_ref(
+    target: &ironclaw_turns::ReplyTargetBindingRef,
+) -> Option<(String, Option<String>)> {
+    let mut raw = target.as_str().strip_prefix("reply:")?;
+    // Skip adapter, installation, agent, project — we don't validate them here.
+    for name in &["adapter", "installation", "agent", "project"] {
+        let (_, rest) = take_product_binding_segment(raw, name)?;
+        raw = rest;
+    }
+    let (space_id, rest) = take_product_binding_segment(raw, "space")?;
+    let (conversation_id, _) = take_product_binding_segment(rest, "conversation")?;
+    if conversation_id.is_empty() {
+        return None;
+    }
+    Some((
+        conversation_id.to_string(),
+        if space_id.is_empty() {
+            None
+        } else {
+            Some(space_id.to_string())
+        },
+    ))
 }
 
 fn map_slack_target_route_error(error: SlackChannelRouteError) -> RebornServicesError {

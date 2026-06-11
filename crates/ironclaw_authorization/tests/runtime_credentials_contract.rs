@@ -211,6 +211,56 @@ async fn capability_access_resolves_product_auth_account_runtime_credentials() {
         &[Obligation::InjectCredentialAccountOnce {
             handle: slot,
             provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            setup: Default::default(),
+            provider_scopes: vec!["repo".to_string()],
+            requester_extension: ExtensionId::new("echo").unwrap(),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn capability_access_preserves_oauth_product_auth_account_setup() {
+    let slot = SecretHandle::new("github_runtime_token").unwrap();
+    let oauth_setup = RuntimeCredentialAccountSetup::OAuth {
+        scopes: vec!["repo".to_string()],
+    };
+    let descriptor = CapabilityDescriptor {
+        effects: vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
+        runtime_credentials: vec![RuntimeCredentialRequirement {
+            source: RuntimeCredentialRequirementSource::ProductAuthAccount {
+                provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                setup: oauth_setup.clone(),
+            },
+            provider_scopes: vec!["repo".to_string()],
+            ..runtime_credential(slot.clone(), github_audience(), true)
+        }],
+        ..wasm_descriptor()
+    };
+    let grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(ExtensionId::new("caller").unwrap()),
+        vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
+    );
+
+    let decision = GrantAuthorizer::new()
+        .authorize_dispatch(
+            &execution_context(CapabilitySet {
+                grants: vec![grant],
+            }),
+            &descriptor,
+            &ResourceEstimate::default(),
+        )
+        .await;
+
+    let Decision::Allow { obligations } = decision else {
+        panic!("expected allow decision, got {decision:?}");
+    };
+    assert_eq!(
+        obligations.as_slice(),
+        &[Obligation::InjectCredentialAccountOnce {
+            handle: slot,
+            provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            setup: oauth_setup,
             provider_scopes: vec!["repo".to_string()],
             requester_extension: ExtensionId::new("echo").unwrap(),
         }]

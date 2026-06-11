@@ -299,6 +299,12 @@ pub struct RebornRuntime {
     worker_handle: JoinHandle<()>,
     worker_cancel: CancellationToken,
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
+    /// Late-binding slot shared with the poller's `PostSubmitHookWrappedSubmitter`.
+    /// `set_trigger_post_submit_hook` fills this after `build_reborn_runtime` returns.
+    /// `None` when the trigger poller is not enabled.
+    #[cfg(feature = "slack-v2-host-beta")]
+    post_submit_hook_slot:
+        Option<Arc<std::sync::OnceLock<Arc<dyn crate::slack_delivery::PostSubmitDeliveryHook>>>>,
     #[cfg(any(test, feature = "test-support"))]
     trigger_conversation_pairing:
         Option<Arc<dyn ironclaw_conversations::ConversationActorPairingService>>,
@@ -344,6 +350,13 @@ type LocalDevSkillExecutionAdapter =
 struct TriggerPollerServices {
     materializer: Arc<dyn ironclaw_triggers::TriggerPromptMaterializer>,
     trusted_submitter: Arc<dyn ironclaw_triggers::TrustedTriggerFireSubmitter>,
+    /// Late-binding slot for the post-submit hook. Created here and shared with
+    /// the poller wrapper; filled later by `RebornRuntime::set_trigger_post_submit_hook`
+    /// so `build_slack_host_beta_mounts` (called after runtime build) can wire the
+    /// hook without restarting the poller.
+    #[cfg(feature = "slack-v2-host-beta")]
+    post_submit_hook_slot:
+        Arc<std::sync::OnceLock<Arc<dyn crate::slack_delivery::PostSubmitDeliveryHook>>>,
     /// Test-support handle on the SAME conversation services instance the
     /// poller-side materializer/submitter use, so integration tests can call
     /// the production `pair_external_actor` API to seed the trigger
@@ -391,6 +404,8 @@ async fn build_trigger_poller_services(
         Ok(TriggerPollerServices {
             materializer,
             trusted_submitter,
+            #[cfg(feature = "slack-v2-host-beta")]
+            post_submit_hook_slot: Arc::new(std::sync::OnceLock::new()),
             #[cfg(any(test, feature = "test-support"))]
             pairing_service,
         })
@@ -416,6 +431,8 @@ async fn build_trigger_poller_services(
         Ok(TriggerPollerServices {
             materializer,
             trusted_submitter,
+            #[cfg(feature = "slack-v2-host-beta")]
+            post_submit_hook_slot: Arc::new(std::sync::OnceLock::new()),
             #[cfg(any(test, feature = "test-support"))]
             pairing_service,
         })
@@ -970,6 +987,33 @@ impl RebornRuntime {
             .product_auth
             .as_ref()
             .and_then(|product_auth| product_auth.as_auth_challenge_provider())
+    }
+
+    /// Wire the triggered-run delivery hook into the already-spawned trigger
+    /// poller. Must be called after [`build_reborn_runtime`] returns and after
+    /// the hook itself is constructed (e.g. inside
+    /// [`crate::slack_host_beta::build_slack_host_beta_mounts`]). The hook is
+    /// idempotent: a second call is silently ignored. Returns `false` when the
+    /// trigger poller is not enabled (slot is `None`) or the slot is already
+    /// occupied, `true` on first successful set.
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub fn set_trigger_post_submit_hook(
+        &self,
+        hook: Arc<dyn crate::slack_delivery::PostSubmitDeliveryHook>,
+    ) -> bool {
+        let Some(slot) = self.post_submit_hook_slot.as_ref() else {
+            tracing::debug!("set_trigger_post_submit_hook: trigger poller not enabled, ignoring");
+            return false;
+        };
+        match slot.set(hook) {
+            Ok(()) => true,
+            Err(_) => {
+                tracing::debug!(
+                    "set_trigger_post_submit_hook: slot already occupied, ignoring (idempotent)"
+                );
+                false
+            }
+        }
     }
 
     #[cfg(test)]
@@ -2198,13 +2242,17 @@ pub async fn build_reborn_runtime(
     };
     services.turn_coordinator = Some(Arc::clone(&planned_turn_coordinator));
 
-    // Both `trigger_poller_handle` and the test-support
+    // `trigger_poller_handle`, `post_submit_hook_slot`, and the test-support
     // `trigger_conversation_pairing_value` are produced atomically inside
     // a single `if trigger_poller.enabled` expression. Avoid a
     // `let mut … = None` sentinel pattern flagged by code review
     // (review f-ptr-3): the `let X;` deferred-init form is single-assign
     // per branch and Rust's borrow checker prevents reads before init.
     let trigger_poller_handle: Option<TriggerPollerRuntimeHandle>;
+    #[cfg(feature = "slack-v2-host-beta")]
+    let runtime_post_submit_hook_slot: Option<
+        Arc<std::sync::OnceLock<Arc<dyn crate::slack_delivery::PostSubmitDeliveryHook>>>,
+    >;
     #[cfg(any(test, feature = "test-support"))]
     let trigger_conversation_pairing_value: Option<
         Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
@@ -2234,6 +2282,12 @@ pub async fn build_reborn_runtime(
             trigger_conversation_pairing_value =
                 Some(Arc::clone(&trigger_poller_services.pairing_service));
         }
+        #[cfg(feature = "slack-v2-host-beta")]
+        let hook_slot = Arc::clone(&trigger_poller_services.post_submit_hook_slot);
+        #[cfg(feature = "slack-v2-host-beta")]
+        {
+            runtime_post_submit_hook_slot = Some(Arc::clone(&hook_slot));
+        }
         trigger_poller_handle = spawn_trigger_poller(
             trigger_poller,
             TriggerPollerCompositionDeps {
@@ -2241,6 +2295,8 @@ pub async fn build_reborn_runtime(
                 materializer: trigger_poller_services.materializer,
                 trusted_submitter: trigger_poller_services.trusted_submitter,
                 active_run_lookup,
+                #[cfg(feature = "slack-v2-host-beta")]
+                post_submit_hook_slot: hook_slot,
             },
         )
         .map_err(|error| RebornRuntimeError::InvalidArgument {
@@ -2248,6 +2304,10 @@ pub async fn build_reborn_runtime(
         })?;
     } else {
         trigger_poller_handle = None;
+        #[cfg(feature = "slack-v2-host-beta")]
+        {
+            runtime_post_submit_hook_slot = None;
+        }
         #[cfg(any(test, feature = "test-support"))]
         {
             trigger_conversation_pairing_value = None;
@@ -2291,6 +2351,8 @@ pub async fn build_reborn_runtime(
         worker_handle,
         worker_cancel,
         trigger_poller_handle,
+        #[cfg(feature = "slack-v2-host-beta")]
+        post_submit_hook_slot: runtime_post_submit_hook_slot,
         #[cfg(any(test, feature = "test-support"))]
         trigger_conversation_pairing: trigger_conversation_pairing_value,
         budget_event_projection,
@@ -5613,7 +5675,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_webui_services_without_host_runtime_returns_503_on_list_automations() {
+    async fn build_webui_services_without_local_runtime_returns_503_on_list_automations() {
         let root = tempfile::tempdir().expect("tempdir");
         let gateway = Arc::new(RecordingGateway {
             reply: "unused".to_string(),
@@ -5639,7 +5701,7 @@ mod tests {
         .with_model_gateway_override(gateway);
 
         let mut runtime = build_reborn_runtime(input).await.expect("runtime builds");
-        runtime.services.host_runtime = None;
+        runtime.services.local_runtime = None;
         let bundle = build_webui_services(&runtime, None).expect("webui bundle");
         let caller = WebUiAuthenticatedCaller::new(
             TenantId::new("runtime-webui-no-host-tenant").unwrap(),
