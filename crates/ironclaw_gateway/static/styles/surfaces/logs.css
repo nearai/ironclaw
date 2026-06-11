@@ -102,7 +102,7 @@
 .log-target {
   color: var(--text-secondary);
   flex-shrink: 0;
-  max-width: 200px;
+  max-width: 400px;
   overflow: hidden;
   text-overflow: ellipsis;
 }
