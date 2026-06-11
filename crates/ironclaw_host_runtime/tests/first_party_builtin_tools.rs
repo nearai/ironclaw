@@ -285,7 +285,8 @@ async fn builtin_trigger_create_stamps_caller_scope_and_persists_record() {
         json!({
             "name": "Daily summary",
             "prompt": "Summarize yesterday",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         context.clone(),
     )
@@ -332,7 +333,8 @@ async fn builtin_trigger_create_runs_create_hook_after_persistence() {
         json!({
             "name": "Hooked trigger",
             "prompt": "Pair trigger creator",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         context.clone(),
     )
@@ -376,7 +378,8 @@ async fn builtin_trigger_create_maps_create_hook_error_to_backend_and_rolls_back
         json!({
             "name": "Hook failure",
             "prompt": "Do not persist this trigger",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         context.clone(),
     )
@@ -408,7 +411,8 @@ async fn builtin_trigger_create_surfaces_rollback_error_when_cleanup_fails() {
         json!({
             "name": "Rollback failure",
             "prompt": "Surface the rollback failure as the user-visible cause",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         context.clone(),
     )
@@ -442,7 +446,8 @@ async fn builtin_trigger_create_rejects_sub_minute_schedule_before_persistence()
         json!({
             "name": "Too fast",
             "prompt": "Run constantly",
-            "cron": "* * * * * *"
+            "cron": "* * * * * *",
+            "timezone": "UTC"
         }),
         context.clone(),
     )
@@ -479,7 +484,8 @@ async fn builtin_trigger_create_rejects_schedule_with_no_future_slot_before_pers
         json!({
             "name": "Expired finite schedule",
             "prompt": "Run once in the finite year",
-            "cron": format!("0 0 8 * * * {future_year}")
+            "cron": format!("0 0 8 * * * {future_year}"),
+            "timezone": "UTC"
         }),
         context.clone(),
     )
@@ -507,7 +513,8 @@ async fn builtin_trigger_create_rejects_malformed_input_before_persistence() {
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "Missing prompt",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         context.clone(),
     )
@@ -525,6 +532,37 @@ async fn builtin_trigger_create_rejects_malformed_input_before_persistence() {
 }
 
 #[tokio::test]
+async fn builtin_trigger_create_rejects_invalid_timezone_before_persistence() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let error = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Invalid timezone trigger",
+            "prompt": "Run something",
+            "cron": "0 9 * * *",
+            "timezone": "Not/A/Timezone"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "no trigger should be persisted when timezone is invalid"
+    );
+}
+
+#[tokio::test]
 async fn builtin_trigger_create_rejects_blank_name_or_prompt_before_persistence() {
     let repository = Arc::new(InMemoryTriggerRepository::default());
     let runtime = runtime_with_trigger_repository(repository.clone());
@@ -534,12 +572,14 @@ async fn builtin_trigger_create_rejects_blank_name_or_prompt_before_persistence(
         json!({
             "name": " ",
             "prompt": "Run work",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         json!({
             "name": "Blank prompt",
             "prompt": " ",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
     ] {
         let error = invoke_with_context(
@@ -572,12 +612,14 @@ async fn builtin_trigger_create_rejects_oversized_name_or_prompt_before_persiste
         json!({
             "name": "x".repeat(MAX_TRIGGER_NAME_BYTES + 1),
             "prompt": "Run work",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         json!({
             "name": "Oversized prompt",
             "prompt": "x".repeat(MAX_TRIGGER_PROMPT_BYTES + 1),
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
     ] {
         let error = invoke_with_context(
@@ -613,6 +655,7 @@ async fn builtin_trigger_create_applies_first_party_input_size_bound() {
             "name": "Large ignored field",
             "prompt": "Run work",
             "cron": "0 8 * * *",
+            "timezone": "UTC",
             "padding": "x".repeat(1_048_576)
         }),
         context.clone(),
@@ -650,7 +693,8 @@ async fn builtin_trigger_list_and_remove_are_caller_scoped() {
         json!({
             "name": "Owned trigger",
             "prompt": "Run owned work",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         owner_context.clone(),
     )
@@ -733,7 +777,8 @@ async fn builtin_trigger_list_shows_active_state_without_run_identifiers() {
         json!({
             "name": "Active trigger",
             "prompt": "Run active work",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         context.clone(),
     )
@@ -795,7 +840,8 @@ async fn builtin_trigger_create_list_and_remove_use_full_request_scope() {
         json!({
             "name": "Scoped trigger",
             "prompt": "Run scoped work",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         owner_context.clone(),
     )
@@ -877,7 +923,8 @@ async fn builtin_trigger_create_round_trips_nullable_agent_and_project_scope() {
         json!({
             "name": "Unscoped trigger",
             "prompt": "Run unscoped work",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         context,
     )
@@ -902,7 +949,8 @@ async fn builtin_trigger_list_applies_user_surface_limit_boundaries() {
             json!({
                 "name": format!("Trigger {index}"),
                 "prompt": "Run work",
-                "cron": "0 8 * * *"
+                "cron": "0 8 * * *",
+                "timezone": "UTC"
             }),
             context.clone(),
         )
@@ -964,7 +1012,8 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
         json!({
             "name": "Historical trigger",
             "prompt": "Create history rows",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         context.clone(),
     )
@@ -1105,7 +1154,8 @@ async fn builtin_trigger_list_with_zero_run_limit_returns_empty_recent_runs() {
         json!({
             "name": "Zero run limit trigger",
             "prompt": "Create history rows",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         context.clone(),
     )
@@ -1144,7 +1194,8 @@ async fn builtin_trigger_list_clamps_oversized_run_limit_to_max() {
         json!({
             "name": "Oversized run limit trigger",
             "prompt": "Create many history rows",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         context.clone(),
     )
@@ -1321,7 +1372,8 @@ async fn builtin_trigger_management_maps_repository_errors_to_backend() {
         json!({
             "name": "Backend create",
             "prompt": "Run work",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         context.clone(),
     )
@@ -1362,7 +1414,8 @@ async fn builtin_trigger_list_maps_batch_run_history_repository_error_to_backend
         json!({
             "name": "Batch history failure",
             "prompt": "Create trigger before listing history",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         context.clone(),
     )

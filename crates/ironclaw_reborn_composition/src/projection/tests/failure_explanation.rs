@@ -1,4 +1,7 @@
 use super::*;
+use ironclaw_reborn::failure_categories::{
+    MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
+};
 
 #[tokio::test]
 async fn webui_event_stream_projects_failed_run_failure_summary() {
@@ -35,6 +38,21 @@ async fn assert_failed_run_status_summary(
     failure_category: &str,
     expected_summary: &str,
 ) {
+    assert_failed_run_status_summary_with_explainer(
+        thread_id,
+        failure_category,
+        expected_summary,
+        None,
+    )
+    .await;
+}
+
+async fn assert_failed_run_status_summary_with_explainer(
+    thread_id: &str,
+    failure_category: &str,
+    expected_summary: &str,
+    failure_explainer: Option<Arc<dyn FailureExplanationProvider>>,
+) {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -70,6 +88,11 @@ async fn assert_failed_run_status_summary(
             state: turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(1)),
         }),
     );
+    let services = if let Some(failure_explainer) = failure_explainer {
+        services.with_failure_explainer(failure_explainer)
+    } else {
+        services
+    };
 
     let events = services
         .webui_event_stream()
@@ -102,70 +125,35 @@ async fn assert_failed_run_status_summary(
 
 #[tokio::test]
 async fn webui_event_stream_projects_model_credit_exhaustion_failure_summary() {
-    let tenant_id = TenantId::new("webui-events-tenant").unwrap();
-    let user_id = UserId::new("webui-events-user").unwrap();
-    let agent_id = AgentId::new("webui-events-agent").unwrap();
-    let thread_id = ThreadId::new("webui-events-credit-failed-thread").unwrap();
-    let turn_run = TurnRunId::new();
-    let scope = TurnScope::new(
-        tenant_id.clone(),
-        Some(agent_id.clone()),
-        None,
-        thread_id.clone(),
-    );
-    let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
-    let actor = TurnActor::new(user_id.clone());
-    let services = build_reborn_projection_services(
-        event_log_dyn,
-        ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
+    assert_failed_run_status_summary(
+        "webui-events-credit-failed-thread",
+        MODEL_CREDITS_EXHAUSTED_CATEGORY,
+        "The AI provider account is out of credits. Add credits or switch providers and try again.",
     )
-    .with_turn_events(
-        Arc::new(FakeTurnEventSource {
-            events: vec![TurnLifecycleEvent {
-                cursor: TurnEventCursor(1),
-                scope: scope.clone(),
-                occurred_at: Some(chrono::Utc::now()),
-                owner_user_id: Some(user_id.clone()),
-                run_id: turn_run,
-                status: TurnStatus::Failed,
-                kind: TurnEventKind::Failed,
-                blocked_gate: None,
-                sanitized_reason: Some("model_credits_exhausted".to_string()),
-            }],
-        }),
-        Arc::new(FakeTurnCoordinator {
-            state: turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(1)),
-        }),
-    );
+    .await;
+}
 
-    let events = services
-        .webui_event_stream()
-        .drain(ProjectionSubscriptionRequest {
-            actor,
-            scope,
-            after_cursor: None,
-        })
-        .await
-        .unwrap();
+#[tokio::test]
+async fn webui_event_stream_projects_model_credentials_failure_summary() {
+    assert_failed_run_status_summary(
+        "webui-events-model-credentials-thread",
+        MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
+        "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL.",
+    )
+    .await;
+}
 
-    assert!(events.iter().any(|event| match event.payload() {
-        ProductOutboundPayload::ProjectionUpdate { state } => state.items.iter().any(|item| {
-            matches!(
-                item,
-                ProductProjectionItem::RunStatus {
-                    run_id,
-                    status,
-                    failure_category: Some(category),
-                    failure_summary: Some(summary),
-                } if *run_id == turn_run
-                    && status == "failed"
-                    && category.category() == "model_credits_exhausted"
-                    && summary
-                        == "The AI provider account is out of credits. Add credits or switch providers and try again."
-            )
-        }),
-        _ => false,
-    }));
+#[tokio::test]
+async fn webui_event_stream_pins_model_credentials_summary_before_explainer() {
+    assert_failed_run_status_summary_with_explainer(
+        "webui-events-pinned-model-credentials-thread",
+        MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
+        "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL.",
+        Some(Arc::new(FakeFailureExplainer {
+            explanation: "SENTINEL explainer output should not be used".to_string(),
+        })),
+    )
+    .await;
 }
 
 #[tokio::test]

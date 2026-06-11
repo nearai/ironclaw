@@ -404,7 +404,8 @@ async fn builtin_trigger_create_pairs_creator_and_poller_submits_turn() {
         json!({
             "name": "trigger-e2e-created-by-tool",
             "prompt": TRIGGER_PROMPT,
-            "cron": "* * * * *"
+            "cron": "* * * * *",
+            "timezone": "UTC"
         }),
     )
     .await;

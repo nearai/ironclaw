@@ -1049,6 +1049,7 @@ fn automation_info(automation_id: &str, name: &str, cron: &str) -> RebornAutomat
         name: name.to_string(),
         source: RebornAutomationSource::Schedule {
             cron: cron.to_string(),
+            timezone: "UTC".to_string(),
         },
         state: RebornAutomationState::Active,
         next_run_at: None,

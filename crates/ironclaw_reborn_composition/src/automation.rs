@@ -158,8 +158,12 @@ fn automation_info_from_record(
 fn automation_source_from_record(record: &TriggerRecord) -> Option<RebornAutomationSource> {
     match record.source {
         TriggerSourceKind::Schedule => match &record.schedule {
-            TriggerSchedule::Cron { expression } => Some(RebornAutomationSource::Schedule {
+            TriggerSchedule::Cron {
+                expression,
+                timezone,
+            } => Some(RebornAutomationSource::Schedule {
                 cron: expression.clone(),
+                timezone: timezone.clone(),
             }),
         },
     }
@@ -328,6 +332,7 @@ mod tests {
             source: TriggerSourceKind::Schedule,
             schedule: TriggerSchedule::Cron {
                 expression: cron.to_string(),
+                timezone: "UTC".to_string(),
             },
             completion_policy: ironclaw_triggers::TriggerCompletionPolicy::Recurring,
             prompt: "run the daily task".to_string(),
@@ -573,7 +578,8 @@ mod tests {
         assert_eq!(
             result[0].source,
             RebornAutomationSource::Schedule {
-                cron: "0 9 * * *".to_string()
+                cron: "0 9 * * *".to_string(),
+                timezone: "UTC".to_string(),
             }
         );
         assert_eq!(result[0].state, RebornAutomationState::Scheduled);
@@ -842,7 +848,29 @@ mod tests {
         assert_eq!(
             source,
             RebornAutomationSource::Schedule {
-                cron: "*/5 * * * *".to_string()
+                cron: "*/5 * * * *".to_string(),
+                timezone: "UTC".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn automation_source_from_record_includes_non_utc_timezone() {
+        use ironclaw_triggers::TriggerSchedule;
+        let c = caller();
+        let id = TriggerId::new();
+        let mut record = make_record(id, &c, TriggerState::Scheduled, "TZ test", "0 9 * * *");
+        record.schedule = TriggerSchedule::cron_with_timezone("0 9 * * *", "America/New_York")
+            .expect("valid tz schedule");
+
+        let source = super::automation_source_from_record(&record)
+            .expect("cron schedule must map to Schedule source");
+
+        assert_eq!(
+            source,
+            RebornAutomationSource::Schedule {
+                cron: "0 9 * * *".to_string(),
+                timezone: "America/New_York".to_string(),
             }
         );
     }
