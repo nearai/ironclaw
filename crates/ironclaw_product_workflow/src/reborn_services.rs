@@ -8,7 +8,6 @@ use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::{Arc, Mutex as StdMutex, Weak},
-    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
@@ -112,14 +111,11 @@ type SkillActivationRecorder =
 type SkillActivationClearer =
     dyn Fn(&TurnScope, &AcceptedMessageRef) -> Result<(), RebornServicesError> + Send + Sync;
 type ThreadOperationLocks = StdMutex<HashMap<String, Weak<AsyncMutex<()>>>>;
-type TriggerRunThreadAccessCache = StdMutex<HashMap<String, TriggerRunThreadAccessCacheEntry>>;
 
 const OPERATOR_LOGS_DEFAULT_LIMIT: u32 = 100;
 const OPERATOR_LOGS_MAX_LIMIT: u32 = 500;
 const OPERATOR_LOGS_CURSOR_MAX_BYTES: usize = 512;
 const OPERATOR_LOGS_TARGET_MAX_BYTES: usize = 256;
-const TRIGGER_RUN_THREAD_ACCESS_CACHE_TTL: Duration = Duration::from_secs(5);
-const TRIGGER_RUN_THREAD_ACCESS_CACHE_MAX_ENTRIES: usize = 512;
 
 #[async_trait]
 pub trait ConnectableChannelsProductFacade: Send + Sync {
@@ -497,14 +493,16 @@ pub trait AutomationProductFacade: Send + Sync {
     /// `RebornServicesError` so outages do not masquerade as authorization
     /// misses.
     ///
-    /// The default implementation returns `Ok(None)` so existing fakes compile.
+    /// Implementors that do not support trigger-thread access must provide an
+    /// explicit `Ok(None)` body with a short comment noting the unsupported
+    /// state. No default body is provided here so a future production facade
+    /// cannot silently forget to implement this method and degrade
+    /// timeline/SSE/gate/cancel/run-state to 404.
     async fn resolve_run_thread_scope(
         &self,
-        _caller: ProductAgentBoundCaller,
-        _thread_id: &ThreadId,
-    ) -> Result<Option<TriggerRunThreadScope>, RebornServicesError> {
-        Ok(None)
-    }
+        caller: ProductAgentBoundCaller,
+        thread_id: &ThreadId,
+    ) -> Result<Option<TriggerRunThreadScope>, RebornServicesError>;
 }
 
 #[derive(Debug)]
@@ -524,6 +522,15 @@ impl AutomationProductFacade for UnsupportedAutomationProductFacade {
         _request: AutomationListRequest,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
         Err(automation_unavailable())
+    }
+
+    async fn resolve_run_thread_scope(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<TriggerRunThreadScope>, RebornServicesError> {
+        // Trigger-thread access is unsupported when no automation facade is wired.
+        Ok(None)
     }
 }
 
@@ -1283,7 +1290,6 @@ pub struct RebornServices {
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
     llm_config: Option<Arc<dyn LlmConfigService>>,
     thread_operation_locks: Arc<ThreadOperationLocks>,
-    trigger_run_thread_access_cache: Arc<TriggerRunThreadAccessCache>,
 }
 
 impl RebornServices {
@@ -1314,7 +1320,6 @@ impl RebornServices {
             skill_activation_clearer: None,
             llm_config: None,
             thread_operation_locks: Arc::new(StdMutex::new(HashMap::new())),
-            trigger_run_thread_access_cache: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 
@@ -1870,13 +1875,12 @@ impl RebornServicesApi for RebornServices {
         // events for a trigger-fired thread (which is stored under the trigger
         // creator). The returned scope may contain an explicit owner for
         // trigger threads.
+        //
+        // Authorization is revalidated on every poll — no caching — so a
+        // caller that loses automation visibility between polls cannot keep
+        // draining the trigger-owned stream.
         let access = self
-            .resolve_thread_access_for_caller(
-                caller.clone(),
-                caller.turn_scope(thread_id),
-                &actor,
-                TriggerRunThreadAccessCacheMode::Use,
-            )
+            .resolve_thread_access_for_caller(caller.clone(), caller.turn_scope(thread_id), &actor)
             .await?;
         let Some(event_stream) = &self.event_stream else {
             return Err(RebornServicesError::from_status_kind(
@@ -1925,7 +1929,6 @@ impl RebornServicesApi for RebornServices {
                 caller_for_fallback,
                 request.scope.clone(),
                 &request.actor,
-                TriggerRunThreadAccessCacheMode::Bypass,
             )
             .await?;
         request.scope = access.scope;
@@ -1962,12 +1965,7 @@ impl RebornServicesApi for RebornServices {
         // paths must use that run actor while authorization remains tied to the
         // WebUI caller's automation visibility.
         let access = self
-            .resolve_thread_access_for_caller(
-                caller_for_fallback,
-                scope,
-                &actor,
-                TriggerRunThreadAccessCacheMode::Bypass,
-            )
+            .resolve_thread_access_for_caller(caller_for_fallback, scope, &actor)
             .await?;
         match self
             .gate_resolution_route(
@@ -2029,12 +2027,7 @@ impl RebornServicesApi for RebornServices {
         // run state by guessing thread_id and run_id. The fallback also allows
         // the owner of an automation to poll run state on a trigger-fired thread.
         let access = self
-            .resolve_thread_access_for_caller(
-                caller,
-                scope,
-                &actor,
-                TriggerRunThreadAccessCacheMode::Bypass,
-            )
+            .resolve_thread_access_for_caller(caller, scope, &actor)
             .await?;
         let state = self
             .turn_coordinator
@@ -2775,17 +2768,6 @@ struct AutomationTriggerAccess {
     run_actor: TurnActor,
 }
 
-struct TriggerRunThreadAccessCacheEntry {
-    access: AutomationTriggerAccess,
-    cached_at: Instant,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TriggerRunThreadAccessCacheMode {
-    Bypass,
-    Use,
-}
-
 // Owner-bound thread resolution shared by the WebUI-facing methods that
 // only need to prove a browser thread id belongs to the authenticated actor.
 // The actor is pinned as `owner_user_id` so a caller sharing (tenant, agent,
@@ -2802,6 +2784,10 @@ enum TriggerRunThreadAccessCacheMode {
 // resolve, run-state) route through it so the reconstructed `TurnScope` (with
 // `owner_user_id = Some(creator_user_id)`) is returned to callers that need
 // to act on a trigger run.
+//
+// Authorization is revalidated on every call — no caching of the authz result
+// — so a caller that loses automation visibility between polls cannot keep
+// accessing the trigger-owned thread.
 //
 // Scope reconstruction field-by-field match against `record_trigger_prompt`
 // (trigger_poller_trusted_submit.rs:285-291):
@@ -2834,6 +2820,9 @@ impl RebornServices {
     /// scope lets all downstream storage lookups (timeline, gate, cancel, SSE)
     /// find the thread as stored rather than under the caller's session scope.
     ///
+    /// Authorization is revalidated on every call (no caching) so a caller
+    /// that loses automation visibility cannot keep acting on the thread.
+    ///
     /// Returns `original_not_found_error` when:
     ///  - The caller has no bound agent.
     ///  - `resolve_run_thread_scope` returns `None` (thread not in caller's triggers).
@@ -2845,18 +2834,11 @@ impl RebornServices {
         caller: WebUiAuthenticatedCaller,
         scope: &TurnScope,
         original_not_found_error: RebornServicesError,
-        cache_mode: TriggerRunThreadAccessCacheMode,
     ) -> Result<AutomationTriggerAccess, RebornServicesError> {
         let Some(bound_caller) = product_agent_bound_caller_from_webui(caller) else {
             return Err(original_not_found_error);
         };
         let thread_id = &scope.thread_id;
-        let cache_key = trigger_run_thread_access_cache_key(&bound_caller, thread_id);
-        if cache_mode == TriggerRunThreadAccessCacheMode::Use
-            && let Some(access) = self.cached_trigger_run_thread_access(&cache_key)?
-        {
-            return Ok(access);
-        }
         let Some(trigger_scope) = self
             .automation_facade
             .resolve_run_thread_scope(bound_caller.clone(), thread_id)
@@ -2870,7 +2852,7 @@ impl RebornServices {
             .agent_id
             .or_else(|| Some(bound_caller.agent_id.clone()));
         let run_actor = TurnActor::new(trigger_scope.creator_user_id.clone());
-        let access = AutomationTriggerAccess {
+        Ok(AutomationTriggerAccess {
             scope: TurnScope::new_with_owner(
                 scope.tenant_id.clone(),
                 true_agent_id,
@@ -2879,11 +2861,7 @@ impl RebornServices {
                 Some(trigger_scope.creator_user_id),
             ),
             run_actor,
-        };
-        if cache_mode == TriggerRunThreadAccessCacheMode::Use {
-            self.store_trigger_run_thread_access(cache_key, access.clone())?;
-        }
-        Ok(access)
+        })
     }
 
     /// Fallback timeline fetch for automation-trigger threads.
@@ -2897,7 +2875,8 @@ impl RebornServices {
     /// Authorization: the thread_id must appear in at least one `recent_run`
     /// for an automation returned by `list_automations` for this caller. That
     /// is the same authorization check the Automations list endpoint applies,
-    /// so no new trust boundary is introduced.
+    /// so no new trust boundary is introduced. Authorization is revalidated on
+    /// every call — no caching.
     ///
     /// On authorization success, the history is loaded with the trigger-owned
     /// scope. On authorization failure (thread not in any of the caller's
@@ -2910,12 +2889,7 @@ impl RebornServices {
         original_not_found_error: RebornServicesError,
     ) -> Result<ThreadHistory, RebornServicesError> {
         let access = self
-            .check_automation_trigger_access(
-                caller,
-                scope,
-                original_not_found_error,
-                TriggerRunThreadAccessCacheMode::Bypass,
-            )
+            .check_automation_trigger_access(caller, scope, original_not_found_error)
             .await?;
         // Authorized: re-fetch the history using the TRUE stored scope
         // (owner_user_id = creator_user_id, not the caller's session user).
@@ -2942,12 +2916,15 @@ impl RebornServices {
     /// actor so downstream turn operations address the submitted run. Non-owner
     /// callers and genuinely absent threads both receive the same canonical
     /// NotFound response.
+    ///
+    /// Authorization is revalidated on every call — no caching of the authz
+    /// result — so a caller that loses automation visibility cannot keep
+    /// acting on the thread after their access is revoked.
     async fn resolve_thread_access_for_caller(
         &self,
         caller: WebUiAuthenticatedCaller,
         scope: TurnScope,
         actor: &TurnActor,
-        cache_mode: TriggerRunThreadAccessCacheMode,
     ) -> Result<ResolvedThreadAccess, RebornServicesError> {
         let thread_scope = thread_scope_from_turn_scope(&scope, Some(actor.user_id.clone()))?;
         match self
@@ -2969,7 +2946,7 @@ impl RebornServices {
                 let original_error =
                     RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false);
                 let access = self
-                    .check_automation_trigger_access(caller, &scope, original_error, cache_mode)
+                    .check_automation_trigger_access(caller, &scope, original_error)
                     .await?;
                 Ok(ResolvedThreadAccess {
                     scope: access.scope,
@@ -2978,53 +2955,6 @@ impl RebornServices {
             }
             Err(err) => Err(map_ownership_probe_error(err)),
         }
-    }
-
-    fn cached_trigger_run_thread_access(
-        &self,
-        cache_key: &str,
-    ) -> Result<Option<AutomationTriggerAccess>, RebornServicesError> {
-        let now = Instant::now();
-        let mut cache = self
-            .trigger_run_thread_access_cache
-            .lock()
-            .map_err(|_| RebornServicesError::internal_invariant())?;
-        let Some(entry) = cache.get(cache_key) else {
-            return Ok(None);
-        };
-        if now.duration_since(entry.cached_at) <= TRIGGER_RUN_THREAD_ACCESS_CACHE_TTL {
-            return Ok(Some(entry.access.clone()));
-        }
-        cache.remove(cache_key);
-        Ok(None)
-    }
-
-    fn store_trigger_run_thread_access(
-        &self,
-        cache_key: String,
-        access: AutomationTriggerAccess,
-    ) -> Result<(), RebornServicesError> {
-        let mut cache = self
-            .trigger_run_thread_access_cache
-            .lock()
-            .map_err(|_| RebornServicesError::internal_invariant())?;
-        if cache.len() >= TRIGGER_RUN_THREAD_ACCESS_CACHE_MAX_ENTRIES
-            && !cache.contains_key(&cache_key)
-            && let Some(oldest_key) = cache
-                .iter()
-                .min_by_key(|(_, entry)| entry.cached_at)
-                .map(|(key, _)| key.clone())
-        {
-            cache.remove(&oldest_key);
-        }
-        cache.insert(
-            cache_key,
-            TriggerRunThreadAccessCacheEntry {
-                access,
-                cached_at: Instant::now(),
-            },
-        );
-        Ok(())
     }
 
     /// Ownership probe for `submit_turn` and `delete_thread` — these only
@@ -3265,29 +3195,6 @@ fn map_ownership_probe_error(error: SessionThreadError) -> RebornServicesError {
         }
         _ => map_thread_error(error),
     }
-}
-
-fn trigger_run_thread_access_cache_key(
-    caller: &ProductAgentBoundCaller,
-    thread_id: &ThreadId,
-) -> String {
-    let project_id = caller
-        .project_id
-        .as_ref()
-        .map(ProjectId::as_str)
-        .unwrap_or("");
-    format!(
-        "{}{}{}{}{}",
-        cache_segment("tenant", caller.tenant_id.as_str()),
-        cache_segment("user", caller.user_id.as_str()),
-        cache_segment("agent", caller.agent_id.as_str()),
-        cache_segment("project", project_id),
-        cache_segment("thread", thread_id.as_str())
-    )
-}
-
-fn cache_segment(name: &str, value: &str) -> String {
-    format!("{name}:{}:{value};", value.len())
 }
 
 fn validate_current_gate_ref(

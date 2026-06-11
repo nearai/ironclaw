@@ -832,6 +832,15 @@ impl AutomationProductFacade for RecordingAutomationFacade {
             Some(RebornAutomationRunStatus::Ok),
         )])
     }
+
+    async fn resolve_run_thread_scope(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<TriggerRunThreadScope>, RebornServicesError> {
+        // Trigger-thread access is not wired in the recording facade.
+        Ok(None)
+    }
 }
 
 #[derive(Clone)]
@@ -887,6 +896,60 @@ impl AutomationProductFacade for StaticAutomationFacade {
             .expect("lock")
             .push(thread_id.clone());
         Ok(self.resolve_scopes.get(thread_id).cloned())
+    }
+}
+
+/// An automation facade that initially exposes one trigger thread scope but can
+/// have that scope revoked via `revoke()`. Used to verify that the service
+/// revalidates authorization on every call rather than caching the result.
+struct RevocableAutomationFacade {
+    thread_id: ThreadId,
+    scope: TriggerRunThreadScope,
+    revoked: Mutex<bool>,
+}
+
+impl RevocableAutomationFacade {
+    fn new(thread_id: ThreadId, caller: &WebUiAuthenticatedCaller) -> Self {
+        let scope = TriggerRunThreadScope {
+            agent_id: caller.agent_id.clone(),
+            project_id: caller.project_id.clone(),
+            creator_user_id: caller.user_id.clone(),
+        };
+        Self {
+            thread_id,
+            scope,
+            revoked: Mutex::new(false),
+        }
+    }
+
+    fn revoke(&self) {
+        *self.revoked.lock().expect("lock") = true;
+    }
+}
+
+#[async_trait]
+impl AutomationProductFacade for RevocableAutomationFacade {
+    async fn list_automations(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _request: AutomationListRequest,
+    ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
+        Ok(Vec::new())
+    }
+
+    async fn resolve_run_thread_scope(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        thread_id: &ThreadId,
+    ) -> Result<Option<TriggerRunThreadScope>, RebornServicesError> {
+        if *self.revoked.lock().expect("lock") {
+            return Ok(None);
+        }
+        if thread_id == &self.thread_id {
+            Ok(Some(self.scope.clone()))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -5724,16 +5787,16 @@ async fn stream_events_uses_trigger_creator_as_projection_identity() {
 }
 
 #[tokio::test]
-async fn stream_events_reuses_cached_trigger_scope_for_repeated_polls() {
-    // The chat page polls stream_events frequently. Once automation ownership
-    // for a trigger thread has been proven, repeated polls from the same caller
-    // should not rescan the caller's trigger history every second.
+async fn stream_events_revalidates_facade_on_every_poll() {
+    // Every stream_events poll must call resolve_run_thread_scope — there is no
+    // authorization cache. This ensures a caller that loses automation
+    // visibility between polls cannot keep draining the trigger-owned stream.
     let caller = caller();
     let thread_service = Arc::new(InMemorySessionThreadService::default());
     let trigger_thread_id = setup_trigger_thread(
         &thread_service,
         &caller,
-        "thread-trigger-stream-cache-alpha",
+        "thread-trigger-stream-revalidate-alpha",
     )
     .await;
 
@@ -5744,7 +5807,7 @@ async fn stream_events_reuses_cached_trigger_scope_for_repeated_polls() {
         .with_automation_product_facade(automation_facade.clone())
         .with_event_stream(event_stream.clone());
 
-    for _ in 0..2 {
+    for _ in 0..3 {
         services
             .stream_events(
                 caller.clone(),
@@ -5759,14 +5822,76 @@ async fn stream_events_reuses_cached_trigger_scope_for_repeated_polls() {
 
     assert_eq!(
         automation_facade.resolve_calls(),
-        vec![trigger_thread_id],
-        "repeated stream_events polls should reuse the trigger scope access cache"
+        vec![
+            trigger_thread_id.clone(),
+            trigger_thread_id.clone(),
+            trigger_thread_id.clone()
+        ],
+        "every stream_events poll must call resolve_run_thread_scope (no authz caching)"
     );
     assert_eq!(
         event_stream.requests().len(),
-        2,
-        "the cache must not suppress event polling itself"
+        3,
+        "event polling must not be suppressed"
     );
+}
+
+#[tokio::test]
+async fn stream_events_fails_when_visibility_revoked_between_polls() {
+    // If the caller's automation visibility is revoked between polls,
+    // the next poll must fail with not_found — the authz result is not cached.
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let trigger_thread_id = setup_trigger_thread(
+        &thread_service,
+        &caller,
+        "thread-trigger-stream-revoke-alpha",
+    )
+    .await;
+
+    // A facade that starts with the scope available but can revoke it.
+    let revocable_facade = Arc::new(RevocableAutomationFacade::new(
+        trigger_thread_id.clone(),
+        &caller,
+    ));
+    let event_stream = Arc::new(RecordingProjectionStream::default());
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(revocable_facade.clone())
+        .with_event_stream(event_stream.clone());
+
+    // First poll succeeds — caller still has automation visibility.
+    services
+        .stream_events(
+            caller.clone(),
+            RebornStreamEventsRequest {
+                thread_id: trigger_thread_id.as_str().to_string(),
+                after_cursor: None,
+            },
+        )
+        .await
+        .expect("first poll must succeed while scope is visible");
+
+    // Revoke visibility.
+    revocable_facade.revoke();
+
+    // Second poll must fail — visibility was revoked and there is no cached authz.
+    let err = services
+        .stream_events(
+            caller.clone(),
+            RebornStreamEventsRequest {
+                thread_id: trigger_thread_id.as_str().to_string(),
+                after_cursor: None,
+            },
+        )
+        .await
+        .expect_err("second poll must fail after visibility is revoked");
+
+    assert_eq!(
+        err.code,
+        RebornServicesErrorCode::NotFound,
+        "revoked visibility must surface as not_found, not a stale cached grant"
+    );
+    assert_eq!(err.status_code, 404);
 }
 
 #[tokio::test]
