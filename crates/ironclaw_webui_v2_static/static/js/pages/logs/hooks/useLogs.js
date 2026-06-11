@@ -1,18 +1,10 @@
 import { React } from "../../../lib/html.js";
 import { queryOperatorLogs } from "../../../lib/api.js";
+import { normalizeOperatorLogsResponse } from "../lib/logs-data.js";
 
 const POLL_INTERVAL_MS = 2000;
 const LOG_LIMIT = 500;
-
-function normalizeEntry(entry) {
-  return {
-    id: String(entry.id ?? `${entry.timestamp}:${entry.target}:${entry.message}`),
-    timestamp: entry.timestamp || "",
-    level: String(entry.level || "info").toLowerCase(),
-    target: entry.target || "",
-    message: entry.message || "",
-  };
-}
+const HIDDEN_ENTRY_ID_CAP = 2000;
 
 export function useLogs() {
   const [entries, setEntries] = React.useState([]);
@@ -36,9 +28,8 @@ export function useLogs() {
       });
       if (requestId !== requestIdRef.current) return;
       const hidden = hiddenEntryIdsRef.current;
-      const nextEntries = (response.entries || [])
-        .map(normalizeEntry)
-        .filter((entry) => !hidden.has(entry.id));
+      const logs = normalizeOperatorLogsResponse(response);
+      const nextEntries = logs.entries.filter((entry) => !hidden.has(entry.id));
       setEntries(nextEntries);
       setError(null);
     } catch (err) {
@@ -63,10 +54,11 @@ export function useLogs() {
   }, []);
 
   const clearEntries = React.useCallback(() => {
-    hiddenEntryIdsRef.current = new Set([
+    const hidden = [
       ...hiddenEntryIdsRef.current,
       ...entries.map((entry) => entry.id),
-    ]);
+    ].slice(-HIDDEN_ENTRY_ID_CAP);
+    hiddenEntryIdsRef.current = new Set(hidden);
     setEntries([]);
   }, [entries]);
 

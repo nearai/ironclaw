@@ -87,12 +87,19 @@ export function LogsPage() {
   } = useLogs();
 
   const outputRef = React.useRef(null);
+  const followLatestRef = React.useRef(true);
 
   React.useEffect(() => {
-    if (autoScroll && outputRef.current) {
+    if (autoScroll && followLatestRef.current && outputRef.current) {
       outputRef.current.scrollTop = 0;
     }
   }, [entries, autoScroll]);
+
+  const handleOutputScroll = React.useCallback((event) => {
+    followLatestRef.current = event.currentTarget.scrollTop <= 48;
+  }, []);
+
+  const hasEntries = entries.length > 0;
 
   return html`
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -181,9 +188,22 @@ export function LogsPage() {
       <!-- Log output -->
       <div
         ref=${outputRef}
+        onScroll=${handleOutputScroll}
         className="min-h-0 flex-1 overflow-y-auto bg-[var(--v2-canvas)]"
       >
-        ${error
+        ${error && hasEntries
+          ? html`
+              <div
+                className="sticky top-0 z-10 border-b border-red-500/25 bg-red-950/70 px-4 py-2 text-xs text-red-100 backdrop-blur"
+              >
+                ${t("error.loadFailed", {
+                  what: t("nav.logs"),
+                  message: error.message || error.statusText || "Request failed",
+                })}
+              </div>
+            `
+          : null}
+        ${error && !hasEntries
           ? html`
               <div
                 className="flex h-full items-center justify-center px-6 text-center text-sm text-red-300"
@@ -194,7 +214,7 @@ export function LogsPage() {
                 })}
               </div>
             `
-          : isLoading && entries.length === 0
+          : isLoading && !hasEntries
             ? html`
                 <div
                   className="flex h-full items-center justify-center text-sm text-[var(--v2-text-muted)]"
@@ -202,7 +222,7 @@ export function LogsPage() {
                   ${t("common.loading")}
                 </div>
               `
-            : entries.length === 0
+            : !hasEntries
           ? html`
               <div
                 className="flex h-full items-center justify-center text-sm text-[var(--v2-text-muted)]"
