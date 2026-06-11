@@ -144,7 +144,7 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             &self.fallback_user_id,
         ))
         .map_err(host_api_agent_loop_error)?;
-        Ok(Arc::new(RefreshingLocalDevCapabilityPort {
+        let port = Arc::new(RefreshingLocalDevCapabilityPort {
             runtime: Arc::clone(&self.runtime),
             run_context: run_context.clone(),
             fallback_user_id: self.fallback_user_id.clone(),
@@ -158,7 +158,12 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             milestone_sink: Arc::clone(&self.milestone_sink),
             skill_activation_source: self.skill_activation_source.clone(),
             current: StdMutex::new(None),
-        }))
+        });
+        let (initial, _) = port
+            .refresh_with_surface(VisibleCapabilityRequest {})
+            .await?;
+        port.replace_current(initial)?;
+        Ok(port)
     }
 }
 
@@ -179,7 +184,7 @@ struct RefreshingLocalDevCapabilityPort {
 }
 
 impl RefreshingLocalDevCapabilityPort {
-    async fn refresh_inner(&self) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+    async fn build_inner(&self) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         let extension_surface = self
             .extension_surface_source
             .snapshot()
@@ -232,6 +237,15 @@ impl RefreshingLocalDevCapabilityPort {
         ))
     }
 
+    async fn refresh_with_surface(
+        &self,
+        request: VisibleCapabilityRequest,
+    ) -> Result<(Arc<dyn LoopCapabilityPort>, VisibleCapabilitySurface), AgentLoopHostError> {
+        let port = self.build_inner().await?;
+        let surface = port.visible_capabilities(request).await?;
+        Ok((port, surface))
+    }
+
     fn current_port(&self) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         self.current
             .lock()
@@ -248,6 +262,20 @@ impl RefreshingLocalDevCapabilityPort {
     fn replace_current(&self, port: Arc<dyn LoopCapabilityPort>) -> Result<(), AgentLoopHostError> {
         *self.current.lock().map_err(|_| capability_io_error())? = Some(port);
         Ok(())
+    }
+
+    async fn current_or_refresh(&self) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        match self.current_port() {
+            Ok(port) => Ok(port),
+            Err(error) if error.kind == AgentLoopHostErrorKind::StaleSurface => {
+                let (port, _) = self
+                    .refresh_with_surface(VisibleCapabilityRequest {})
+                    .await?;
+                self.replace_current(port.clone())?;
+                Ok(port)
+            }
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -280,7 +308,8 @@ impl LoopCapabilityPort for RefreshingLocalDevCapabilityPort {
         &self,
         tool_call: ProviderToolCall,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        self.current_port()?
+        self.current_or_refresh()
+            .await?
             .register_provider_tool_call(tool_call)
             .await
     }
@@ -289,8 +318,7 @@ impl LoopCapabilityPort for RefreshingLocalDevCapabilityPort {
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        let port = self.refresh_inner().await?;
-        let surface = port.visible_capabilities(request).await?;
+        let (port, surface) = self.refresh_with_surface(request).await?;
         self.replace_current(port)?;
         Ok(surface)
     }
@@ -299,14 +327,20 @@ impl LoopCapabilityPort for RefreshingLocalDevCapabilityPort {
         &self,
         request: CapabilityInvocation,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
-        self.current_port()?.invoke_capability(request).await
+        self.current_or_refresh()
+            .await?
+            .invoke_capability(request)
+            .await
     }
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
     ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-        self.current_port()?.invoke_capability_batch(request).await
+        self.current_or_refresh()
+            .await?
+            .invoke_capability_batch(request)
+            .await
     }
 }
 

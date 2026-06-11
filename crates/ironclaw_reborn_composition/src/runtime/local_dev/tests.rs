@@ -211,6 +211,18 @@ mod tests {
             .create_capability_port(run_context)
             .await
             .expect("capability port");
+        let initial_tool_definition_ids = port
+            .tool_definitions()
+            .expect("initial tool definitions")
+            .into_iter()
+            .map(|definition| definition.capability_id.as_str().to_string())
+            .collect::<Vec<_>>();
+        assert!(
+            initial_tool_definition_ids
+                .iter()
+                .any(|id| id == "github.search_issues"),
+            "fresh capability ports must initialize active extension tools for auth-resume replay"
+        );
         let surface = port
             .visible_capabilities(VisibleCapabilityRequest {})
             .await
