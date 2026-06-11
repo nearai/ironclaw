@@ -2237,6 +2237,7 @@ impl RebornServicesApi for RebornServices {
             .llm_config
             .as_ref()
             .ok_or_else(llm_config::llm_config_unavailable)?;
+        validate_llm_base_url(request.base_url.as_deref())?;
         service
             .test_connection(caller, request)
             .await
@@ -2252,6 +2253,7 @@ impl RebornServicesApi for RebornServices {
             .llm_config
             .as_ref()
             .ok_or_else(llm_config::llm_config_unavailable)?;
+        validate_llm_base_url(request.base_url.as_deref())?;
         service
             .list_models(caller, request)
             .await

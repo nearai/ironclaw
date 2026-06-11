@@ -853,7 +853,9 @@ pub struct LlmProviderPath {
 pub async fn get_llm_config(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().get_llm_config(caller).await?;
     Ok(Json(response))
 }
@@ -862,8 +864,10 @@ pub async fn get_llm_config(
 pub async fn upsert_llm_provider(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<UpsertLlmProviderRequest>,
 ) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().upsert_llm_provider(caller, body).await?;
     Ok(Json(response))
 }
@@ -872,8 +876,10 @@ pub async fn upsert_llm_provider(
 pub async fn delete_llm_provider(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Path(LlmProviderPath { provider_id }): Path<LlmProviderPath>,
 ) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state
         .services()
         .delete_llm_provider(caller, provider_id)
@@ -885,8 +891,10 @@ pub async fn delete_llm_provider(
 pub async fn set_active_llm(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<SetActiveLlmRequest>,
 ) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().set_active_llm(caller, body).await?;
     Ok(Json(response))
 }
@@ -895,8 +903,10 @@ pub async fn set_active_llm(
 pub async fn test_llm_connection(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<LlmProbeRequest>,
 ) -> Result<Json<LlmProbeResult>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().test_llm_connection(caller, body).await?;
     Ok(Json(response))
 }
@@ -905,8 +915,10 @@ pub async fn test_llm_connection(
 pub async fn list_llm_models(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<LlmProbeRequest>,
 ) -> Result<Json<LlmModelsResult>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().list_llm_models(caller, body).await?;
     Ok(Json(response))
 }
@@ -915,8 +927,10 @@ pub async fn list_llm_models(
 pub async fn start_nearai_login(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<NearAiLoginRequest>,
 ) -> Result<Json<NearAiLoginStart>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().start_nearai_login(caller, body).await?;
     Ok(Json(response))
 }
@@ -929,8 +943,10 @@ pub async fn start_nearai_login(
 pub async fn complete_nearai_wallet_login(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<NearAiWalletLoginRequest>,
 ) -> Result<Json<NearAiWalletLoginResult>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state
         .services()
         .complete_nearai_wallet_login(caller, body)
@@ -945,7 +961,9 @@ pub async fn complete_nearai_wallet_login(
 pub async fn start_codex_login(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<CodexLoginStart>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().start_codex_login(caller).await?;
     Ok(Json(response))
 }

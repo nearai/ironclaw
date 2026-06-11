@@ -5323,6 +5323,8 @@ struct SetupRecordingLlmConfigService {
     snapshot_calls: Mutex<usize>,
     upsert_provider_calls: Mutex<Vec<SetupUpsertCall>>,
     set_active_calls: Mutex<Vec<SetupSetActiveCall>>,
+    test_connection_calls: Mutex<usize>,
+    list_models_calls: Mutex<usize>,
     snapshot: Mutex<LlmConfigSnapshot>,
     next_snapshot_error: Mutex<Option<LlmConfigServiceError>>,
     next_upsert_error: Mutex<Option<LlmConfigServiceError>>,
@@ -5335,6 +5337,8 @@ impl Default for SetupRecordingLlmConfigService {
             snapshot_calls: Mutex::new(0),
             upsert_provider_calls: Mutex::new(Vec::new()),
             set_active_calls: Mutex::new(Vec::new()),
+            test_connection_calls: Mutex::new(0),
+            list_models_calls: Mutex::new(0),
             snapshot: Mutex::new(Self::empty_snapshot()),
             next_snapshot_error: Mutex::new(None),
             next_upsert_error: Mutex::new(None),
@@ -5354,6 +5358,14 @@ impl SetupRecordingLlmConfigService {
 
     fn set_active_count(&self) -> usize {
         self.set_active_calls.lock().expect("lock").len()
+    }
+
+    fn test_connection_count(&self) -> usize {
+        *self.test_connection_calls.lock().expect("lock")
+    }
+
+    fn list_models_count(&self) -> usize {
+        *self.list_models_calls.lock().expect("lock")
     }
 
     fn use_active_snapshot(&self, provider_id: &str, model: &str) {
@@ -5470,7 +5482,11 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
         _caller: WebUiAuthenticatedCaller,
         _request: LlmProbeRequest,
     ) -> Result<LlmProbeResult, LlmConfigServiceError> {
-        panic!("test_connection is not used by operator setup tests")
+        *self.test_connection_calls.lock().expect("lock") += 1;
+        Ok(LlmProbeResult {
+            ok: true,
+            message: "ok".to_string(),
+        })
     }
 
     async fn list_models(
@@ -5478,7 +5494,12 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
         _caller: WebUiAuthenticatedCaller,
         _request: LlmProbeRequest,
     ) -> Result<LlmModelsResult, LlmConfigServiceError> {
-        panic!("list_models is not used by operator setup tests")
+        *self.list_models_calls.lock().expect("lock") += 1;
+        Ok(LlmModelsResult {
+            ok: true,
+            models: vec!["model-a".to_string()],
+            message: String::new(),
+        })
     }
 
     async fn start_nearai_login(
@@ -5735,6 +5756,52 @@ async fn upsert_llm_provider_rejects_internal_base_url_before_service() {
 
     assert_setup_validation(err, "base_url", WebUiInboundValidationCode::InvalidValue);
     assert_eq!(llm_config.upsert_provider_count(), 0);
+}
+
+#[tokio::test]
+async fn test_llm_connection_rejects_internal_base_url_before_service() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .test_llm_connection(
+            caller(),
+            LlmProbeRequest {
+                adapter: "open_ai_completions".to_string(),
+                base_url: Some("http://127.0.0.1:11434/v1".to_string()),
+                provider_id: "openai".to_string(),
+                model: Some("gpt-5-mini".to_string()),
+                api_key: Some(SecretString::from("sk-secret".to_string())),
+            },
+        )
+        .await
+        .expect_err("loopback probe endpoint is rejected");
+
+    assert_setup_validation(err, "base_url", WebUiInboundValidationCode::InvalidValue);
+    assert_eq!(llm_config.test_connection_count(), 0);
+}
+
+#[tokio::test]
+async fn list_llm_models_rejects_internal_base_url_before_service() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .list_llm_models(
+            caller(),
+            LlmProbeRequest {
+                adapter: "open_ai_completions".to_string(),
+                base_url: Some("http://169.254.169.254/latest/meta-data/".to_string()),
+                provider_id: "openai".to_string(),
+                model: Some("gpt-5-mini".to_string()),
+                api_key: Some(SecretString::from("sk-secret".to_string())),
+            },
+        )
+        .await
+        .expect_err("metadata probe endpoint is rejected");
+
+    assert_setup_validation(err, "base_url", WebUiInboundValidationCode::InvalidValue);
+    assert_eq!(llm_config.list_models_count(), 0);
 }
 
 #[tokio::test]

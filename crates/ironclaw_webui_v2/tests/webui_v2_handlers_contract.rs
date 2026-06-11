@@ -2270,7 +2270,12 @@ async fn get_extension_setup_rejects_malformed_package_id_with_400() {
 #[tokio::test]
 async fn llm_provider_routes_dispatch_to_facade_methods() {
     let services = Arc::new(StubServices::default());
-    let router = router_with(services.clone());
+    let router = router_with_capabilities(
+        services.clone(),
+        WebUiV2Capabilities {
+            operator_webui_config: true,
+        },
+    );
 
     let get_response = router
         .clone()
@@ -2398,6 +2403,90 @@ async fn llm_provider_routes_dispatch_to_facade_methods() {
             .expect("lock")
             .as_slice(),
         ["openai"]
+    );
+}
+
+#[tokio::test]
+async fn llm_provider_routes_require_operator_capability() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+
+    let upsert_body = r#"{"id":"acme","name":"Acme","adapter":"open_ai_completions","base_url":"https://api.acme.test/v1","default_model":"acme-1","api_key":"sk-test","set_active":true,"model":"acme-1"}"#;
+    let active_body = r#"{"provider_id":"openai","model":"gpt-5"}"#;
+    let probe_body = r#"{"provider_id":"openai","adapter":"open_ai_completions","base_url":"https://api.openai.com/v1","model":"gpt-5","api_key":"sk-test"}"#;
+    let nearai_login_body = r#"{"provider":"github","origin":"https://app.example"}"#;
+    let nearai_wallet_body = r#"{"account_id":"alice.near","public_key":"ed25519:test","signature":"AA==","message":"login","recipient":"near.ai","nonce":[]}"#;
+    let cases = [
+        ("GET", "/api/webchat/v2/llm/providers", None),
+        ("POST", "/api/webchat/v2/llm/providers", Some(upsert_body)),
+        ("POST", "/api/webchat/v2/llm/providers/acme/delete", None),
+        ("POST", "/api/webchat/v2/llm/active", Some(active_body)),
+        (
+            "POST",
+            "/api/webchat/v2/llm/test-connection",
+            Some(probe_body),
+        ),
+        ("POST", "/api/webchat/v2/llm/list-models", Some(probe_body)),
+        (
+            "POST",
+            "/api/webchat/v2/llm/nearai/login",
+            Some(nearai_login_body),
+        ),
+        (
+            "POST",
+            "/api/webchat/v2/llm/nearai/wallet",
+            Some(nearai_wallet_body),
+        ),
+        ("POST", "/api/webchat/v2/llm/codex/login", None),
+    ];
+
+    for (method, uri, body) in cases {
+        let mut builder = Request::builder().method(method).uri(uri);
+        if body.is_some() {
+            builder = builder.header("content-type", "application/json");
+        }
+        let request = builder
+            .body(body.map_or_else(Body::empty, Body::from))
+            .expect("request");
+        let response = router.clone().oneshot(request).await.expect("oneshot");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {uri}");
+    }
+
+    assert_eq!(*services.get_llm_config_calls.lock().expect("lock"), 0);
+    assert!(
+        services
+            .upsert_llm_provider_calls
+            .lock()
+            .expect("lock")
+            .is_empty()
+    );
+    assert!(
+        services
+            .delete_llm_provider_calls
+            .lock()
+            .expect("lock")
+            .is_empty()
+    );
+    assert!(
+        services
+            .set_active_llm_calls
+            .lock()
+            .expect("lock")
+            .is_empty()
+    );
+    assert!(
+        services
+            .test_llm_connection_calls
+            .lock()
+            .expect("lock")
+            .is_empty()
+    );
+    assert!(
+        services
+            .list_llm_models_calls
+            .lock()
+            .expect("lock")
+            .is_empty()
     );
 }
 
