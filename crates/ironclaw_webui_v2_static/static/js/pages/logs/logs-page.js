@@ -211,7 +211,7 @@ export function LogsPage() {
               </div>
             `
           : entries.map(
-              (entry, i) => html`<${LogEntry} key=${i} entry=${entry} />`
+              (entry) => html`<${LogEntry} key=${entry.id} entry=${entry} />`
             )}
       </div>
     </div>
