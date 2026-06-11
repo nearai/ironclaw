@@ -36,7 +36,7 @@ pub(crate) const OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID: &str =
     "builtin.outbound_delivery_target_set";
 const OUTBOUND_DELIVERY_TARGET_SET_PROVIDER_TOOL_NAME: &str =
     "builtin__outbound_delivery_target_set";
-const OUTBOUND_DELIVERY_TARGET_SET_DESCRIPTION: &str = "Set the current user's final-reply outbound delivery target, such as a Slack DM or Slack channel. Approval may be required before the preference is changed.";
+const OUTBOUND_DELIVERY_TARGET_SET_DESCRIPTION: &str = "Set the current user's final-reply outbound delivery target, such as a Slack DM or Slack channel, to an id returned by builtin__outbound_delivery_targets_list. Use after the user asks to send replies or routine/trigger results through that product or channel, and before creating the routine or trigger. Approval may be required before the preference is changed.";
 
 pub(super) fn outbound_delivery_capabilities(
     facade: Arc<dyn OutboundPreferencesProductFacade>,

@@ -75,6 +75,18 @@ async fn local_dev_runtime_injects_default_system_prompt_into_model_request() {
     );
     assert!(
         recorded_requests[0].messages.iter().any(|message| {
+            message.role == HostManagedModelMessageRole::System
+                && message
+                    .content
+                    .contains("builtin__outbound_delivery_targets_list")
+                && message
+                    .content
+                    .contains("before creating the routine or trigger")
+        }),
+        "local-dev runtime should tell the model how to select outbound delivery targets before triggers"
+    );
+    assert!(
+        recorded_requests[0].messages.iter().any(|message| {
             message.role == HostManagedModelMessageRole::User && message.content == "ping"
         }),
         "test should observe the real model request for the submitted user turn"

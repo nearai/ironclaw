@@ -1305,14 +1305,33 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(descriptor_ids.contains(&OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID));
         assert!(descriptor_ids.contains(&OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID));
-        let tool_definition_names = port
-            .tool_definitions()
-            .expect("tool definitions")
-            .into_iter()
-            .map(|definition| definition.name)
+        let tool_definitions = port.tool_definitions().expect("tool definitions");
+        let tool_definition_names = tool_definitions
+            .iter()
+            .map(|definition| definition.name.clone())
             .collect::<Vec<_>>();
         assert!(tool_definition_names.contains(&"builtin__outbound_delivery_targets_list".into()));
         assert!(tool_definition_names.contains(&"builtin__outbound_delivery_target_set".into()));
+        let list_tool = tool_definitions
+            .iter()
+            .find(|definition| definition.name == "builtin__outbound_delivery_targets_list")
+            .expect("list tool definition should exist");
+        assert!(
+            list_tool
+                .description
+                .contains("before builtin.trigger_create"),
+            "list tool description should steer delivery requests before trigger creation"
+        );
+        let set_tool = tool_definitions
+            .iter()
+            .find(|definition| definition.name == "builtin__outbound_delivery_target_set")
+            .expect("set tool definition should exist");
+        assert!(
+            set_tool
+                .description
+                .contains("before creating the routine or trigger"),
+            "set tool description should steer delivery requests before trigger creation"
+        );
 
         let malformed_list = port
             .register_provider_tool_call(provider_tool_call_with_name(
