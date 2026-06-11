@@ -103,7 +103,7 @@ impl ModelsEndpoint {
     /// shape. Network, auth, and parse failures map to `LlmError` so the caller
     /// can surface a real message instead of an empty list.
     async fn fetch_models(&self) -> Result<Vec<String>, LlmError> {
-        crate::url_check::check_models_url(&self.provider_id, &self.url)?;
+        crate::url_check::check_models_url(&self.provider_id, &self.url).await?;
 
         // `check_models_url` validates only the initial URL. Disable redirect
         // following so a host that passes the guard cannot 3xx-redirect the

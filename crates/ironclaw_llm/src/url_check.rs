@@ -1,35 +1,48 @@
-//! Baseline base-URL validation for provider model-discovery requests.
+//! Base-URL SSRF validation for provider model-discovery requests.
 //!
-//! This is a **defense-in-depth** SSRF check, not the full operator policy.
-//! The binary applies a richer, operator-tunable policy
-//! (`validate_operator_base_url` in `src/config/helpers.rs`) at config-resolve
-//! time; this module covers the model-listing egress point in
-//! [`crate::rig_adapter`], which both the Reborn provider probe and the v1
-//! `/v1/models` proxy reach through `LlmProvider::list_models`.
+//! This is the operator base-URL policy applied at the model-listing **egress
+//! point** in [`crate::rig_adapter`] — which both the Reborn provider
+//! probe/list/test path and the v1 `/v1/models` proxy reach through
+//! `LlmProvider::list_models`. It mirrors the binary's `validate_operator_base_url`
+//! (`src/config/helpers.rs`, `AllowPrivateNetwork` posture) so the same policy
+//! runs even though this crate cannot depend on the binary.
 //!
 //! What this enforces:
-//! - URL parses
-//! - Scheme is `http` or `https`
-//! - Host (when it is a literal IP) is not in the `AlwaysBlocked` class:
-//!   cloud-metadata (`169.254.169.254`), link-local, multicast, the
-//!   unspecified `0.0.0.0`/`::`. These are *never* legitimate provider
-//!   endpoints, regardless of policy.
+//! - URL parses; scheme is `http` or `https`.
+//! - The host — a literal IP **or a hostname resolved via DNS** — is not in the
+//!   `AlwaysBlocked` class: cloud-metadata (`169.254.169.254`), link-local,
+//!   multicast, the unspecified `0.0.0.0`/`::`. This is what stops a hostname
+//!   that *resolves* to a blocked address from reaching it.
+//! - Non-TLS `http` is allowed only for localhost or private/loopback endpoints
+//!   (so self-hosted Ollama keeps working) and rejected for public hosts.
 //!
-//! What this does NOT do:
-//! - DNS-resolve hostnames (the binary's policy does that; doing it here would
-//!   couple the crate to a runtime and a DNS-availability heuristic).
-//! - Reject private/loopback IPs — those are legitimate for self-hosted Ollama
-//!   and similar setups; the operator-tunable policy in the binary makes that
-//!   call.
+//! Private/loopback IPs are intentionally allowed (self-hosted Ollama, vLLM).
+//! When DNS is globally unavailable (egress-proxy / offline environments that
+//! resolve on the caller's behalf), IP validation is skipped — the syntactic
+//! checks still apply and the proxy resolves at request time.
 
 use std::net::{IpAddr, Ipv4Addr};
 
 use crate::error::LlmError;
 
 /// Validate a base/endpoint URL before issuing an outbound model-discovery
-/// request. Returns `LlmError::RequestFailed` on parse failure, non-http(s)
-/// scheme, missing host, or an `AlwaysBlocked` literal IP host.
-pub(crate) fn check_models_url(provider_id: &str, url: &str) -> Result<(), LlmError> {
+/// request. This is the operator base-URL SSRF policy applied at the egress
+/// point (mirrors the binary's `validate_operator_base_url` with the
+/// `AllowPrivateNetwork` posture), so the Reborn provider probe/list/test path
+/// and the v1 `/v1/models` proxy — which both reach `LlmProvider::list_models`
+/// — are covered in one place.
+///
+/// Enforced: parses; scheme is http/https; the host, whether a literal IP **or
+/// a hostname resolved via DNS**, is not in the `AlwaysBlocked` class
+/// (cloud-metadata, link-local, multicast, unspecified); and non-TLS `http` is
+/// allowed only for localhost or private/loopback endpoints (so self-hosted
+/// Ollama keeps working) but rejected for public hosts.
+///
+/// When DNS resolution is entirely unavailable (sandboxed CI / egress-proxy
+/// environments that resolve on the caller's behalf), IP validation is skipped
+/// — the syntactic checks still apply and the proxy resolves at request time —
+/// so model discovery does not break where names cannot be resolved locally.
+pub(crate) async fn check_models_url(provider_id: &str, url: &str) -> Result<(), LlmError> {
     let reject = |reason: String| LlmError::RequestFailed {
         provider: provider_id.to_string(),
         reason,
@@ -48,17 +61,75 @@ pub(crate) fn check_models_url(provider_id: &str, url: &str) -> Result<(), LlmEr
     let host = parsed
         .host_str()
         .ok_or_else(|| reject("models URL is missing a host".to_string()))?;
-
     let normalized_host = host.trim_start_matches('[').trim_end_matches(']');
-    if let Ok(ip) = normalized_host.parse::<IpAddr>()
-        && is_always_blocked(&ip)
-    {
+    let port = parsed
+        .port()
+        .unwrap_or(if scheme == "http" { 80 } else { 443 });
+
+    let ips = if let Ok(ip) = normalized_host.parse::<IpAddr>() {
+        vec![ip]
+    } else {
+        match resolve_host_ips(normalized_host, port).await {
+            HostResolution::Resolved(ips) => ips,
+            HostResolution::Unresolvable => {
+                return Err(reject(format!("could not resolve models host '{host}'")));
+            }
+            HostResolution::DnsUnavailable => {
+                tracing::debug!(
+                    host = %host,
+                    provider = %provider_id,
+                    "DNS resolution unavailable; skipping SSRF IP validation for model-discovery URL"
+                );
+                return Ok(());
+            }
+        }
+    };
+
+    enforce_resolved_policy(provider_id, scheme, host, normalized_host, &ips)
+}
+
+/// Apply the IP-class / scheme policy to a host's literal or DNS-resolved IPs.
+/// Split out from [`check_models_url`] (no DNS, no IO) so the security decision
+/// is unit-testable against synthetic resolved-IP sets.
+fn enforce_resolved_policy(
+    provider_id: &str,
+    scheme: &str,
+    host_display: &str,
+    normalized_host: &str,
+    ips: &[IpAddr],
+) -> Result<(), LlmError> {
+    let reject = |reason: String| LlmError::RequestFailed {
+        provider: provider_id.to_string(),
+        reason,
+    };
+
+    if ips.iter().any(is_always_blocked) {
         return Err(reject(format!(
-            "host '{host}' is not a permitted model-discovery endpoint"
+            "host '{host_display}' resolves to a blocked address and is not a permitted model-discovery endpoint"
         )));
     }
 
+    // Non-TLS http only for localhost or private/internal endpoints; public
+    // hosts must use https. Mirrors the binary's AllowPrivateNetwork posture so
+    // self-hosted Ollama over http keeps working.
+    if scheme == "http" && !host_is_localhost_name(normalized_host) {
+        let all_private = !ips.is_empty()
+            && ips
+                .iter()
+                .all(|ip| matches!(classify_ip(ip), IpClass::PrivateOrLoopback));
+        if !all_private {
+            return Err(reject(format!(
+                "HTTP (non-TLS) model discovery is only allowed for localhost or private endpoints, got '{host_display}'; use HTTPS for public endpoints"
+            )));
+        }
+    }
+
     Ok(())
+}
+
+fn host_is_localhost_name(normalized_host: &str) -> bool {
+    let host = normalized_host.to_ascii_lowercase();
+    host == "localhost" || host == "127.0.0.1" || host == "::1" || host.ends_with(".localhost")
 }
 
 /// Whether a model-discovery URL targets a loopback / `localhost` host.
@@ -111,69 +182,204 @@ pub(crate) fn build_http_client(
     })
 }
 
-fn is_always_blocked(ip: &IpAddr) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IpClass {
+    /// Never a legitimate provider endpoint: cloud-metadata, link-local,
+    /// multicast, unspecified.
+    AlwaysBlocked,
+    /// Private or loopback — legitimate for self-hosted providers over http.
+    PrivateOrLoopback,
+    /// Public, routable address.
+    Public,
+}
+
+fn classify_ip(ip: &IpAddr) -> IpClass {
     match ip {
         IpAddr::V4(v4) => {
-            v4.is_unspecified()
+            if v4.is_unspecified()
                 || v4.is_multicast()
                 || v4.is_link_local()
                 || *v4 == Ipv4Addr::new(169, 254, 169, 254)
+            {
+                IpClass::AlwaysBlocked
+            } else if v4.is_private()
+                || v4.is_loopback()
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64)
+            {
+                IpClass::PrivateOrLoopback
+            } else {
+                IpClass::Public
+            }
         }
         IpAddr::V6(v6) => {
-            // `to_ipv4()` (not `to_ipv4_mapped()`) so both embedded-IPv4 forms
-            // are unwrapped and checked against the V4 rules: IPv4-mapped
-            // (`::ffff:a.b.c.d`) and IPv4-compatible (`::a.b.c.d`). The latter
-            // would otherwise sail past as a plain v6 address — e.g.
-            // `::169.254.169.254` reaching the metadata endpoint.
-            if let Some(v4) = v6.to_ipv4() {
-                return is_always_blocked(&IpAddr::V4(v4));
+            // Check v6-native classes (incl. loopback `::1` and ULA) before
+            // unwrapping embedded IPv4, so loopback stays loopback rather than
+            // mapping to `0.0.0.1`.
+            if v6.is_unspecified()
+                || v6.octets()[0] == 0xff
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+            {
+                IpClass::AlwaysBlocked
+            } else if v6.is_loopback() || (v6.octets()[0] & 0xfe) == 0xfc {
+                IpClass::PrivateOrLoopback
+            } else if let Some(v4) = v6.to_ipv4() {
+                // `to_ipv4()` (not `to_ipv4_mapped()`) covers both embedded
+                // forms — IPv4-mapped (`::ffff:a.b.c.d`) and IPv4-compatible
+                // (`::a.b.c.d`). The latter would otherwise classify as a plain
+                // (Public) v6 address, letting `::169.254.169.254` reach the
+                // metadata endpoint.
+                classify_ip(&IpAddr::V4(v4))
+            } else {
+                IpClass::Public
             }
-            v6.is_unspecified() || v6.octets()[0] == 0xff || (v6.segments()[0] & 0xffc0) == 0xfe80
         }
     }
+}
+
+fn is_always_blocked(ip: &IpAddr) -> bool {
+    matches!(classify_ip(ip), IpClass::AlwaysBlocked)
+}
+
+/// Result of resolving a hostname to IPs for SSRF validation.
+enum HostResolution {
+    Resolved(Vec<IpAddr>),
+    /// The name did not resolve, but DNS itself is working — a genuine
+    /// "unknown host".
+    Unresolvable,
+    /// DNS resolution is globally unavailable (proxy/offline env); the caller
+    /// should skip IP validation rather than reject.
+    DnsUnavailable,
+}
+
+async fn resolve_host_ips(host: &str, port: u16) -> HostResolution {
+    match tokio::net::lookup_host((host, port)).await {
+        Ok(addrs) => {
+            let ips: Vec<IpAddr> = addrs.map(|addr| addr.ip()).collect();
+            if ips.is_empty() {
+                HostResolution::Unresolvable
+            } else {
+                HostResolution::Resolved(ips)
+            }
+        }
+        // The target itself didn't resolve — distinguish "DNS is down" (skip
+        // validation) from "this hostname is invalid" (reject) via a generic
+        // probe of a well-known name.
+        Err(_) if dns_probe_available().await => HostResolution::Unresolvable,
+        Err(_) => HostResolution::DnsUnavailable,
+    }
+}
+
+/// Time-to-live for the cached DNS-availability probe. Re-probing every 5
+/// minutes ensures a transient DNS outage doesn't permanently disable SSRF
+/// validation for the process.
+const DNS_PROBE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Whether external DNS resolution is functional, cached for [`DNS_PROBE_TTL`].
+async fn dns_probe_available() -> bool {
+    use std::sync::Mutex;
+    static PROBE: Mutex<Option<(bool, std::time::Instant)>> = Mutex::new(None);
+
+    {
+        let guard = PROBE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((available, expires_at)) = *guard
+            && std::time::Instant::now() < expires_at
+        {
+            return available;
+        }
+    }
+
+    let available = tokio::net::lookup_host(("one.one.one.one", 443))
+        .await
+        .is_ok();
+
+    let mut guard = PROBE.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = Some((available, std::time::Instant::now() + DNS_PROBE_TTL));
+    available
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn accepts_normal_and_local_endpoints() {
-        check_models_url("p", "https://api.openai.com/v1/models").unwrap();
-        check_models_url("p", "http://localhost:11434/api/tags").unwrap();
-        check_models_url("p", "http://127.0.0.1:11434/api/tags").unwrap();
-        check_models_url("p", "http://192.168.1.50:8000/models").unwrap();
+    #[tokio::test]
+    async fn accepts_normal_and_local_endpoints() {
+        // Literal public over https, plus local/private endpoints (localhost
+        // resolves through the system resolver, no network).
+        check_models_url("p", "https://93.184.216.34/v1/models").await.unwrap();
+        check_models_url("p", "http://localhost:11434/api/tags").await.unwrap();
+        check_models_url("p", "http://127.0.0.1:11434/api/tags").await.unwrap();
+        check_models_url("p", "http://192.168.1.50:8000/models").await.unwrap();
     }
 
-    #[test]
-    fn rejects_metadata_link_local_multicast_unspecified() {
-        check_models_url("p", "https://169.254.169.254/models").expect_err("metadata IP");
-        check_models_url("p", "https://[fe80::1]/models").expect_err("link-local v6");
-        check_models_url("p", "http://224.0.0.1/models").expect_err("multicast");
-        check_models_url("p", "http://0.0.0.0/models").expect_err("unspecified");
+    #[tokio::test]
+    async fn rejects_metadata_link_local_multicast_unspecified() {
+        check_models_url("p", "https://169.254.169.254/models").await.expect_err("metadata IP");
+        check_models_url("p", "https://[fe80::1]/models").await.expect_err("link-local v6");
+        check_models_url("p", "http://224.0.0.1/models").await.expect_err("multicast");
+        check_models_url("p", "http://0.0.0.0/models").await.expect_err("unspecified");
     }
 
-    #[test]
-    fn rejects_embedded_ipv4_metadata_in_both_v6_forms() {
+    #[tokio::test]
+    async fn rejects_public_http_endpoint() {
+        // Public host over non-TLS http is rejected even though the IP is not
+        // in the always-blocked class; use https for public endpoints.
+        check_models_url("p", "http://8.8.8.8/models").await.expect_err("public http");
+    }
+
+    #[tokio::test]
+    async fn rejects_embedded_ipv4_metadata_in_both_v6_forms() {
         // IPv4-mapped (::ffff:a.b.c.d) and IPv4-compatible (::a.b.c.d) both
         // embed the metadata address; neither may bypass the V4 block rules.
         check_models_url("p", "https://[::ffff:169.254.169.254]/models")
+            .await
             .expect_err("ipv4-mapped metadata");
         check_models_url("p", "https://[::169.254.169.254]/models")
+            .await
             .expect_err("ipv4-compatible metadata");
     }
 
+    #[tokio::test]
+    async fn allows_ipv6_loopback() {
+        // ::1 classifies as loopback (private), so self-hosted providers on the
+        // IPv6 loopback stay reachable over http.
+        check_models_url("p", "http://[::1]:11434/api/tags").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejects_non_http_and_unparseable() {
+        check_models_url("p", "file:///etc/passwd").await.expect_err("file scheme");
+        check_models_url("p", "not a url").await.expect_err("garbage");
+    }
+
+    // The crux of the SSRF fix: a *hostname* (not a literal IP) whose resolved
+    // address is blocked must be rejected. enforce_resolved_policy is the pure
+    // decision the resolving check feeds, so this is hermetic — no real DNS.
     #[test]
-    fn allows_ipv6_loopback() {
-        // ::1 maps to 0.0.0.1 under to_ipv4(), which is not in the blocked
-        // class — self-hosted providers on IPv6 loopback stay reachable.
-        check_models_url("p", "http://[::1]:11434/api/tags").unwrap();
+    fn enforce_policy_blocks_hostname_resolving_to_metadata() {
+        let metadata: IpAddr = "169.254.169.254".parse().unwrap();
+        enforce_resolved_policy("p", "https", "evil.example", "evil.example", &[metadata])
+            .expect_err("hostname resolving to the metadata IP is blocked even over https");
     }
 
     #[test]
-    fn rejects_non_http_and_unparseable() {
-        check_models_url("p", "file:///etc/passwd").expect_err("file scheme");
-        check_models_url("p", "not a url").expect_err("garbage");
+    fn enforce_policy_blocks_public_http_but_allows_private_and_https() {
+        let public: IpAddr = "8.8.8.8".parse().unwrap();
+        let private: IpAddr = "192.168.1.50".parse().unwrap();
+        // Public host over http -> rejected.
+        enforce_resolved_policy("p", "http", "cdn.example", "cdn.example", &[public])
+            .expect_err("public http rejected");
+        // Public host over https -> allowed.
+        enforce_resolved_policy("p", "https", "api.example", "api.example", &[public]).unwrap();
+        // Private host over http (self-hosted Ollama) -> allowed.
+        enforce_resolved_policy("p", "http", "ollama.lan", "ollama.lan", &[private]).unwrap();
+    }
+
+    #[test]
+    fn classify_ip_handles_v6_loopback_and_embedded_metadata() {
+        assert_eq!(classify_ip(&"::1".parse().unwrap()), IpClass::PrivateOrLoopback);
+        assert_eq!(classify_ip(&"::169.254.169.254".parse().unwrap()), IpClass::AlwaysBlocked);
+        assert_eq!(classify_ip(&"::ffff:127.0.0.1".parse().unwrap()), IpClass::PrivateOrLoopback);
+        assert_eq!(classify_ip(&"8.8.8.8".parse().unwrap()), IpClass::Public);
     }
 
     #[test]
