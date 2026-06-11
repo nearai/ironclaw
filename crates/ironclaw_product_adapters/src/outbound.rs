@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, InvocationId, ProcessId, RuntimeKind, ThreadId,
+    CapabilityId, ExtensionId, InvocationId, NetworkMethod, ProcessId, RuntimeKind, ThreadId,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, SanitizedFailure, TurnRunId};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -30,6 +30,8 @@ pub const CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES: usize = 2 * 1024;
 pub const CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES: usize = 16 * 1024;
 pub const CAPABILITY_DISPLAY_KIND_MAX_BYTES: usize = 32;
 pub const CAPABILITY_DISPLAY_RESULT_REF_MAX_BYTES: usize = 256;
+const APPROVAL_PROMPT_TEXT_MAX_BYTES: usize = 2 * 1024;
+const APPROVAL_PROMPT_DETAIL_MAX_ITEMS: usize = 16;
 
 fn serialize_failure_category<S>(
     value: &Option<SanitizedFailure>,
@@ -566,6 +568,301 @@ pub struct GatePromptView {
     pub body: String,
     #[serde(default)]
     pub allow_always: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_context: Option<ApprovalPromptContextView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ApprovalPromptContextView {
+    pub tool_name: String,
+    pub action: ApprovalPromptActionView,
+    pub scope: ApprovalPromptScopeView,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<ApprovalPromptDestinationView>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub details: Vec<ApprovalPromptDetailView>,
+}
+
+impl ApprovalPromptContextView {
+    pub fn new(
+        tool_name: impl Into<String>,
+        action: ApprovalPromptActionView,
+        scope: ApprovalPromptScopeView,
+        reason: Option<String>,
+        destination: Option<ApprovalPromptDestinationView>,
+        details: Vec<ApprovalPromptDetailView>,
+    ) -> Result<Self, ProductAdapterError> {
+        let view = Self {
+            tool_name: tool_name.into(),
+            action,
+            scope,
+            reason,
+            destination,
+            details,
+        };
+        view.validate()?;
+        Ok(view)
+    }
+
+    fn validate(&self) -> Result<(), ProductAdapterError> {
+        validate_bounded_text(
+            "approval_prompt_tool_name",
+            &self.tool_name,
+            APPROVAL_PROMPT_TEXT_MAX_BYTES,
+        )?;
+        self.action.validate()?;
+        self.scope.validate()?;
+        validate_optional_display_text(
+            "approval_prompt_reason",
+            self.reason.as_deref(),
+            APPROVAL_PROMPT_TEXT_MAX_BYTES,
+        )?;
+        if let Some(destination) = &self.destination {
+            destination.validate()?;
+        }
+        if self.details.len() > APPROVAL_PROMPT_DETAIL_MAX_ITEMS {
+            return Err(invalid(
+                "approval_prompt_details",
+                format!("must contain at most {APPROVAL_PROMPT_DETAIL_MAX_ITEMS} items"),
+            ));
+        }
+        for detail in &self.details {
+            detail.validate()?;
+        }
+        Ok(())
+    }
+}
+
+impl<'de> Deserialize<'de> for ApprovalPromptContextView {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            tool_name: String,
+            action: ApprovalPromptActionView,
+            scope: ApprovalPromptScopeView,
+            #[serde(default)]
+            reason: Option<String>,
+            #[serde(default)]
+            destination: Option<ApprovalPromptDestinationView>,
+            #[serde(default)]
+            details: Vec<ApprovalPromptDetailView>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        ApprovalPromptContextView::new(
+            wire.tool_name,
+            wire.action,
+            wire.scope,
+            wire.reason,
+            wire.destination,
+            wire.details,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ApprovalPromptActionView {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<NetworkMethod>,
+}
+
+impl ApprovalPromptActionView {
+    pub fn new(
+        label: impl Into<String>,
+        method: Option<NetworkMethod>,
+    ) -> Result<Self, ProductAdapterError> {
+        let view = Self {
+            label: label.into(),
+            method,
+        };
+        view.validate()?;
+        Ok(view)
+    }
+
+    fn validate(&self) -> Result<(), ProductAdapterError> {
+        validate_bounded_text(
+            "approval_prompt_action_label",
+            &self.label,
+            APPROVAL_PROMPT_TEXT_MAX_BYTES,
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for ApprovalPromptActionView {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            label: String,
+            #[serde(default)]
+            method: Option<NetworkMethod>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        ApprovalPromptActionView::new(wire.label, wire.method).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ApprovalPromptScopeView {
+    pub label: String,
+    pub reusable: bool,
+}
+
+impl ApprovalPromptScopeView {
+    pub fn new(label: impl Into<String>, reusable: bool) -> Result<Self, ProductAdapterError> {
+        let view = Self {
+            label: label.into(),
+            reusable,
+        };
+        view.validate()?;
+        Ok(view)
+    }
+
+    fn validate(&self) -> Result<(), ProductAdapterError> {
+        validate_bounded_text(
+            "approval_prompt_scope_label",
+            &self.label,
+            APPROVAL_PROMPT_TEXT_MAX_BYTES,
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for ApprovalPromptScopeView {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            label: String,
+            reusable: bool,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        ApprovalPromptScopeView::new(wire.label, wire.reusable).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ApprovalPromptDestinationView {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+}
+
+impl ApprovalPromptDestinationView {
+    pub fn new(
+        label: impl Into<String>,
+        url: Option<String>,
+        domain: Option<String>,
+    ) -> Result<Self, ProductAdapterError> {
+        let view = Self {
+            label: label.into(),
+            url,
+            domain,
+        };
+        view.validate()?;
+        Ok(view)
+    }
+
+    fn validate(&self) -> Result<(), ProductAdapterError> {
+        validate_bounded_text(
+            "approval_prompt_destination_label",
+            &self.label,
+            APPROVAL_PROMPT_TEXT_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "approval_prompt_destination_url",
+            self.url.as_deref(),
+            APPROVAL_PROMPT_TEXT_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "approval_prompt_destination_domain",
+            self.domain.as_deref(),
+            APPROVAL_PROMPT_TEXT_MAX_BYTES,
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for ApprovalPromptDestinationView {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            label: String,
+            #[serde(default)]
+            url: Option<String>,
+            #[serde(default)]
+            domain: Option<String>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        ApprovalPromptDestinationView::new(wire.label, wire.url, wire.domain)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ApprovalPromptDetailView {
+    pub label: String,
+    pub value: String,
+}
+
+impl ApprovalPromptDetailView {
+    pub fn new(
+        label: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<Self, ProductAdapterError> {
+        let view = Self {
+            label: label.into(),
+            value: value.into(),
+        };
+        view.validate()?;
+        Ok(view)
+    }
+
+    fn validate(&self) -> Result<(), ProductAdapterError> {
+        validate_bounded_text(
+            "approval_prompt_detail_label",
+            &self.label,
+            APPROVAL_PROMPT_TEXT_MAX_BYTES,
+        )?;
+        validate_bounded_text(
+            "approval_prompt_detail_value",
+            &self.value,
+            APPROVAL_PROMPT_TEXT_MAX_BYTES,
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for ApprovalPromptDetailView {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            label: String,
+            value: String,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        ApprovalPromptDetailView::new(wire.label, wire.value).map_err(serde::de::Error::custom)
+    }
 }
 
 /// Discriminator for the kind of auth challenge surfaced in an `AuthPromptView`.
@@ -1204,6 +1501,96 @@ mod tests {
                 allow_always: false,
             }]
         );
+    }
+
+    #[test]
+    fn gate_prompt_view_round_trips_approval_context() {
+        let view = GatePromptView {
+            turn_run_id: TurnRunId::new(),
+            gate_ref: "gate:approval-test".to_string(),
+            headline: "Approval required".to_string(),
+            body: "capability requires approval".to_string(),
+            allow_always: true,
+            approval_context: Some(
+                ApprovalPromptContextView::new(
+                    "builtin.http",
+                    ApprovalPromptActionView::new("Network request", Some(NetworkMethod::Post))
+                        .expect("valid action"),
+                    ApprovalPromptScopeView::new("Reusable grant", true).expect("valid scope"),
+                    Some("capability requires approval".to_string()),
+                    Some(
+                        ApprovalPromptDestinationView::new(
+                            "POST https://example.com",
+                            Some("https://example.com".to_string()),
+                            Some("example.com".to_string()),
+                        )
+                        .expect("valid destination"),
+                    ),
+                    vec![
+                        ApprovalPromptDetailView::new("Method", "POST").expect("valid detail"),
+                        ApprovalPromptDetailView::new("Estimated transfer", "4096 bytes")
+                            .expect("valid detail"),
+                    ],
+                )
+                .expect("valid approval context"),
+            ),
+        };
+
+        let value = serde_json::to_value(&view).expect("serialize");
+        assert_eq!(
+            value["approval_context"]["action"]["method"],
+            serde_json::json!("post")
+        );
+        assert_eq!(
+            value["approval_context"]["destination"]["domain"],
+            "example.com"
+        );
+
+        let decoded: GatePromptView =
+            serde_json::from_value(value).expect("deserialize approval prompt");
+        assert_eq!(decoded, view);
+    }
+
+    #[test]
+    fn approval_prompt_context_rejects_oversized_display_text() {
+        let json = serde_json::json!({
+            "tool_name": "x".repeat(APPROVAL_PROMPT_TEXT_MAX_BYTES + 1),
+            "action": {
+                "label": "Run tool"
+            },
+            "scope": {
+                "label": "This request only",
+                "reusable": false
+            },
+            "details": []
+        });
+
+        assert!(serde_json::from_value::<ApprovalPromptContextView>(json).is_err());
+    }
+
+    #[test]
+    fn approval_prompt_context_rejects_excessive_details() {
+        let details = (0..=APPROVAL_PROMPT_DETAIL_MAX_ITEMS)
+            .map(|index| {
+                serde_json::json!({
+                    "label": format!("Detail {index}"),
+                    "value": "value"
+                })
+            })
+            .collect::<Vec<_>>();
+        let json = serde_json::json!({
+            "tool_name": "builtin.http",
+            "action": {
+                "label": "Run tool"
+            },
+            "scope": {
+                "label": "This request only",
+                "reusable": false
+            },
+            "details": details
+        });
+
+        assert!(serde_json::from_value::<ApprovalPromptContextView>(json).is_err());
     }
 
     #[test]

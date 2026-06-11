@@ -18,7 +18,7 @@ pub fn approval_gate_ref(request_id: ApprovalRequestId) -> Result<GateRef, Produ
         .map_err(|_| approval_rejected(ApprovalInteractionRejectionKind::InvalidGateRef))
 }
 
-pub(super) fn approval_request_id_from_gate_ref(
+pub fn approval_request_id_from_gate_ref(
     gate_ref: &GateRef,
 ) -> Result<ApprovalRequestId, ProductWorkflowError> {
     let Some(value) = gate_ref.as_str().strip_prefix(APPROVAL_GATE_PREFIX) else {

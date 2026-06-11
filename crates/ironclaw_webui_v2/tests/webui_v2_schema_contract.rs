@@ -82,6 +82,7 @@ fn gate_prompt() -> GatePromptView {
         headline: "Approve action".to_string(),
         body: "Review the requested action.".to_string(),
         allow_always: true,
+        approval_context: None,
     }
 }
 

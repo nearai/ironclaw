@@ -2009,10 +2009,15 @@ pub async fn build_reborn_runtime(
     if trusted_laptop_access {
         append_trusted_laptop_access_audit(&audit_log, &thread_scope, &actor_user_id).await?;
     }
-    let projection_services = build_reborn_projection_services(
+    let mut projection_services = build_reborn_projection_services(
         Arc::clone(&event_log),
         validated_identity.reply_target_binding_ref.clone(),
     );
+    if let Some(local_runtime) = local_runtime {
+        projection_services = projection_services
+            .with_approval_requests(Arc::clone(&local_runtime.approval_requests)
+                as Arc<dyn ironclaw_run_state::ApprovalRequestStore>);
+    }
     let live_projection_publisher =
         projection_services.live_projection_publisher(actor_user_id.clone());
     if let Some(skill_activation_source) = &skill_activation_source {

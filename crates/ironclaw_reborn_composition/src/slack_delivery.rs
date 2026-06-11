@@ -696,6 +696,7 @@ fn slack_approval_gate_prompt_view(run_id: TurnRunId, gate_ref: &GateRef) -> Gat
         headline: "Approval needed".to_string(),
         body: "A step in the workflow requires your approval to resume.".to_string(),
         allow_always: is_approval_gate_ref(gate_ref),
+        approval_context: None,
     }
 }
 
@@ -1366,6 +1367,7 @@ async fn triggered_notification_for_state(
                     headline: "Approval needed".to_string(),
                     body: format!("Reply `approve {gate_ref_str}` to continue."),
                     allow_always: is_approval_gate_ref(gate_ref),
+                    approval_context: None,
                 }),
                 gate_ref_for_routing: Some(gate_ref_str),
             }))
