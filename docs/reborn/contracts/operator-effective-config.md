@@ -35,6 +35,15 @@ The API should report effective values after this precedence has been applied. I
 - `validate` returns an empty diagnostics list for supported keys that are currently writable.
 - Unsupported, deprecated, immutable, missing-active-provider, and secret-not-supported keys return stable diagnostics.
 
+## Key validation constraints
+
+All operator config keys must satisfy the boundary-level validation rules:
+
+- Must not be empty.
+- Must not exceed 128 bytes. The limit is byte-based, matching the handler boundary check.
+- Must not be the reserved word `validate`.
+- Must contain only ASCII lowercase letters, digits, underscores (`_`), dots (`.`), or hyphens (`-`).
+
 ## Stable diagnostic reason codes
 
 Existing reason codes remain stable:
