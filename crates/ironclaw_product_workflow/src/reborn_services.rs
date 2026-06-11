@@ -1815,17 +1815,15 @@ impl RebornServicesApi for RebornServices {
     ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
         let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
         let actor = caller.actor();
-        // Metadata-only ownership probe: the SSE handler calls
-        // stream_events once per poll, and using list_thread_history here
-        // would load the full message transcript + summary artifacts per
-        // call — for an active stream that is hundreds of rows per second
-        // per caller. resolve_webui_thread_metadata uses the cheap
-        // read_thread probe; without it a caller sharing
-        // (tenant, agent, project) could still read another user's
-        // projection feed by guessing thread_id, so the probe itself
-        // stays.
+        // Ownership probe: the SSE handler calls stream_events once per poll,
+        // so the cheap read_thread probe is used rather than loading the full
+        // transcript. Without it a caller sharing (tenant, agent, project)
+        // could read another user's projection feed by guessing thread_id.
+        // The automation fallback allows the owner of an automation to stream
+        // events for a trigger-fired thread (which is stored ownerless). The
+        // returned scope may be unscoped (Ownerless) for trigger threads.
         let (scope, _thread_scope) = self
-            .resolve_webui_thread_metadata(caller.turn_scope(thread_id), &actor)
+            .resolve_thread_access_for_caller(caller.clone(), caller.turn_scope(thread_id), &actor)
             .await?;
         let Some(event_stream) = &self.event_stream else {
             return Err(RebornServicesError::from_status_kind(
@@ -1851,14 +1849,24 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         request: WebUiCancelRunRequest,
     ) -> Result<RebornCancelRunResponse, RebornServicesError> {
+        let caller_for_fallback = caller.clone();
         let command = request.into_command(caller)?;
-        let WebUiInboundCommand::CancelRun { request } = command else {
+        let WebUiInboundCommand::CancelRun { mut request } = command else {
             return Err(RebornServicesError::internal_invariant());
         };
-        // Metadata-only ownership probe — cancel_run has no use for the
-        // message transcript and the load would be wasted work.
-        self.resolve_webui_thread_metadata(request.scope.clone(), &request.actor)
+        // Ownership probe with automation-trigger fallback. If the thread is a
+        // trigger-fired thread belonging to the caller's automation, the probe
+        // succeeds and the returned scope is ownerless so the turn coordinator
+        // can find the trigger run. The request scope is updated to match so
+        // the cancel arrives at the correct run.
+        let (resolved_scope, _thread_scope) = self
+            .resolve_thread_access_for_caller(
+                caller_for_fallback,
+                request.scope.clone(),
+                &request.actor,
+            )
             .await?;
+        request.scope = resolved_scope;
         let response = self
             .turn_coordinator
             .cancel_run(request)
@@ -1872,6 +1880,7 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         request: WebUiResolveGateRequest,
     ) -> Result<RebornResolveGateResponse, RebornServicesError> {
+        let caller_for_fallback = caller.clone();
         let command = request.into_command(caller)?;
         let WebUiInboundCommand::ResolveGate {
             scope,
@@ -1885,9 +1894,12 @@ impl RebornServicesApi for RebornServices {
             return Err(RebornServicesError::internal_invariant());
         };
 
-        // Metadata-only ownership probe — resolve_gate has no use for
-        // the message transcript and the load would be wasted work.
-        self.resolve_webui_thread_metadata(scope.clone(), &actor)
+        // Ownership probe with automation-trigger fallback. The resolved scope
+        // may be ownerless for trigger threads; all gate resolution paths
+        // (approval, auth, generic) receive the resolved scope so they route to
+        // the correct run in the turn coordinator.
+        let (scope, _thread_scope) = self
+            .resolve_thread_access_for_caller(caller_for_fallback, scope, &actor)
             .await?;
         match self
             .gate_resolution_route(&scope, &actor, run_id, &gate_ref, &resolution)
@@ -1931,12 +1943,12 @@ impl RebornServicesApi for RebornServices {
         let run_id = parse_run_id_field("run_id", request.run_id)?;
         let scope = caller.turn_scope(thread_id);
         let actor = caller.actor();
-        // TurnScope has no owner_user_id, so without this gate any caller
-        // sharing the (tenant, agent, project) scope could read another user's
-        // run state by guessing thread_id and run_id. Mirrors the ownership
-        // probe `cancel_run` and `resolve_gate` already perform.
-        // Metadata-only — get_run_state has no use for the transcript.
-        self.resolve_webui_thread_metadata(scope.clone(), &actor)
+        // Ownership probe with automation-trigger fallback. Without this gate
+        // any caller sharing (tenant, agent, project) could read another user's
+        // run state by guessing thread_id and run_id. The fallback also allows
+        // the owner of an automation to poll run state on a trigger-fired thread.
+        let (scope, _thread_scope) = self
+            .resolve_thread_access_for_caller(caller, scope, &actor)
             .await?;
         let state = self
             .turn_coordinator
@@ -2669,7 +2681,72 @@ async fn replay_accepted_message(
 // project) cannot act on a thread it does not own; `map_ownership_probe_error`
 // collapses both UnknownThread and ThreadScopeMismatch into NotFound so the
 // response cannot be used as an existence oracle.
+//
+// Automation-trigger threads are an exception: they are stored with
+// `owner_user_id = None` under the trigger's scope, so the user-scoped probe
+// always misses them. `resolve_thread_access_for_caller` handles that case via
+// the shared automation fallback path; all interaction endpoints (stream,
+// cancel, gate resolve, run-state) route through it so the unscoped `TurnScope`
+// is returned to callers that need to act on a trigger run.
 impl RebornServices {
+    /// Shared authorization check for automation-trigger threads.
+    ///
+    /// Checks whether `scope.thread_id` appears in any recent run belonging to
+    /// the authenticated caller's automations. Returns the unscoped `TurnScope`
+    /// (i.e. `thread_owner = Ownerless`) if authorized, or
+    /// `original_not_found_error` if not.
+    ///
+    /// This is the authorization half of the trigger-thread fallback. It does
+    /// not fetch history — callers that need the full transcript must call
+    /// `try_automation_trigger_timeline_fallback` instead.
+    async fn check_automation_trigger_access(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        scope: &TurnScope,
+        original_not_found_error: RebornServicesError,
+    ) -> Result<TurnScope, RebornServicesError> {
+        let Some(bound_caller) = product_agent_bound_caller_from_webui(caller) else {
+            return Err(original_not_found_error);
+        };
+        let automations = match self
+            .automation_facade
+            .list_automations(
+                bound_caller,
+                AutomationListRequest {
+                    limit: AUTOMATION_LIST_MAX_PAGE_SIZE as usize,
+                    run_limit: AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE as usize,
+                },
+            )
+            .await
+        {
+            Ok(automations) => automations,
+            Err(_) => return Err(original_not_found_error),
+        };
+
+        let thread_id = &scope.thread_id;
+        let authorized = automations.iter().any(|automation| {
+            automation
+                .recent_runs
+                .iter()
+                .any(|run| &run.thread_id == thread_id)
+        });
+
+        if !authorized {
+            return Err(original_not_found_error);
+        }
+
+        // Return an ownerless TurnScope so callers routing to the turn
+        // coordinator find the run in the trigger (unscoped) scope rather than
+        // under the session user's scope.
+        Ok(TurnScope::new_with_owner(
+            scope.tenant_id.clone(),
+            scope.agent_id.clone(),
+            scope.project_id.clone(),
+            thread_id.clone(),
+            None, // ownerless — trigger thread
+        ))
+    }
+
     /// Fallback timeline fetch for automation-trigger threads.
     ///
     /// Automation-trigger threads are created under the trigger's scope (no
@@ -2695,57 +2772,66 @@ impl RebornServices {
         scope: &TurnScope,
         original_not_found_error: RebornServicesError,
     ) -> Result<ThreadHistory, RebornServicesError> {
-        // Authorization gate: does this thread_id appear in any recent run
-        // belonging to the caller's automations?
-        let Some(bound_caller) = product_agent_bound_caller_from_webui(caller) else {
-            // Without an agent binding we cannot call list_automations at all;
-            // fall through to NotFound so the error is the same as a normal miss.
-            return Err(original_not_found_error);
-        };
-        let automations = match self
-            .automation_facade
-            .list_automations(
-                bound_caller,
-                AutomationListRequest {
-                    limit: AUTOMATION_LIST_MAX_PAGE_SIZE as usize,
-                    run_limit: AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE as usize,
-                },
-            )
-            .await
-        {
-            Ok(automations) => automations,
-            Err(_) => {
-                // Automation facade unavailable — deny silently; the caller
-                // already got a not-found from the primary lookup path.
-                return Err(original_not_found_error);
-            }
-        };
-
-        let thread_id = &scope.thread_id;
-        let authorized = automations.iter().any(|automation| {
-            automation
-                .recent_runs
-                .iter()
-                .any(|run| &run.thread_id == thread_id)
-        });
-
-        if !authorized {
-            // thread_id is not in any of the caller's automations.
-            return Err(original_not_found_error);
-        }
-
+        let unscoped_scope = self
+            .check_automation_trigger_access(caller, scope, original_not_found_error)
+            .await?;
         // Authorized: re-fetch the history without the owner_user_id scope
         // constraint so the backend can resolve the trigger-scoped thread.
-        let unscoped_thread_scope = thread_scope_from_turn_scope(scope, None)?;
+        let unscoped_thread_scope = thread_scope_from_turn_scope(&unscoped_scope, None)?;
         self.thread_service
             .list_thread_history(ThreadHistoryRequest {
                 scope: unscoped_thread_scope,
-                thread_id: thread_id.clone(),
+                thread_id: unscoped_scope.thread_id.clone(),
             })
             .await
             .map_err(map_timeline_probe_error)
     }
 
+    /// Ownership probe for interaction endpoints (stream, cancel, gate resolve,
+    /// run-state).
+    ///
+    /// Tries the primary user-scoped `read_thread` probe. On a 404-class miss
+    /// (UnknownThread / ThreadScopeMismatch), falls back to the automation
+    /// trigger authorization check. If the thread belongs to one of the
+    /// caller's automations, returns an unscoped `TurnScope` (with
+    /// `thread_owner = Ownerless`) so the turn coordinator can find the trigger
+    /// run. Non-owner callers and genuinely absent threads both receive the
+    /// same canonical NotFound response.
+    async fn resolve_thread_access_for_caller(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        scope: TurnScope,
+        actor: &TurnActor,
+    ) -> Result<(TurnScope, ThreadScope), RebornServicesError> {
+        let thread_scope = thread_scope_from_turn_scope(&scope, Some(actor.user_id.clone()))?;
+        match self
+            .thread_service
+            .read_thread(ThreadHistoryRequest {
+                scope: thread_scope.clone(),
+                thread_id: scope.thread_id.clone(),
+            })
+            .await
+        {
+            Ok(_) => Ok((scope, thread_scope)),
+            Err(
+                SessionThreadError::UnknownThread { .. }
+                | SessionThreadError::ThreadScopeMismatch { .. },
+            ) => {
+                let original_error =
+                    RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false);
+                let unscoped_scope = self
+                    .check_automation_trigger_access(caller, &scope, original_error)
+                    .await?;
+                let unscoped_thread_scope = thread_scope_from_turn_scope(&unscoped_scope, None)?;
+                Ok((unscoped_scope, unscoped_thread_scope))
+            }
+            Err(err) => Err(map_ownership_probe_error(err)),
+        }
+    }
+
+    /// Ownership probe for `submit_turn` and `delete_thread` — these only
+    /// operate on session-owned threads (not trigger threads), so the probe
+    /// is user-scoped with no automation fallback.
     async fn resolve_webui_thread_metadata(
         &self,
         scope: TurnScope,

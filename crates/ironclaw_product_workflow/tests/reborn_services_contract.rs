@@ -5272,6 +5272,154 @@ async fn get_timeline_rejects_other_users_automation_trigger_thread() {
     assert_eq!(err.status_code, 404);
 }
 
+// Regression tests for the automation-trigger gate/approval interaction
+// fallback.  Bug: `resolve_gate`, `cancel_run`, `get_run_state`, and
+// `stream_events` all called `resolve_webui_thread_metadata` (user-scoped
+// probe only) rather than `resolve_thread_access_for_caller` (user-scoped
+// probe + automation fallback). Any gate-approval or auth-submit action on a
+// trigger-fired thread therefore returned 404, even when the caller owned the
+// automation that produced the thread.
+
+fn automation_facade_with_trigger_thread(
+    trigger_thread_id: ThreadId,
+) -> Arc<StaticAutomationFacade> {
+    Arc::new(StaticAutomationFacade {
+        output: vec![RebornAutomationInfo {
+            automation_id: "trigger-gate-automation".to_string(),
+            name: "Gate test automation".to_string(),
+            source: RebornAutomationSource::Schedule {
+                cron: "0 9 * * *".to_string(),
+            },
+            state: RebornAutomationState::Active,
+            next_run_at: None,
+            last_run_at: None,
+            last_status: Some(RebornAutomationRunStatus::Ok),
+            recent_runs: vec![RebornAutomationRecentRunInfo {
+                run_id: Some(automation_run_id()),
+                thread_id: trigger_thread_id,
+                fire_slot: None,
+                status: RebornAutomationRecentRunStatus::Ok,
+                submitted_at: "2026-06-10T09:00:01Z".parse().expect("submitted_at"),
+                completed_at: None,
+            }],
+            is_active: true,
+            created_at: None,
+        }],
+    })
+}
+
+/// Set up a trigger thread stored in the unscoped (trigger) scope and return
+/// the thread_id.
+async fn setup_trigger_thread(
+    thread_service: &Arc<InMemorySessionThreadService>,
+    caller: &WebUiAuthenticatedCaller,
+    thread_id: &str,
+) -> ThreadId {
+    let tid = ThreadId::new(thread_id).expect("valid trigger thread id");
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: trigger_thread_scope_for(caller),
+            thread_id: Some(tid.clone()),
+            created_by_actor_id: "system".to_string(),
+            title: Some("Gate test trigger thread".to_string()),
+            metadata_json: Some(automation_trigger_thread_metadata_json(
+                "trigger-gate-automation",
+            )),
+        })
+        .await
+        .expect("trigger thread stored");
+    tid
+}
+
+#[tokio::test]
+async fn resolve_gate_approval_succeeds_for_own_automation_trigger_thread() {
+    // The caller owns the automation that produced the trigger thread. Approval
+    // of a gate on that thread must succeed via the automation fallback.
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let trigger_thread_id =
+        setup_trigger_thread(&thread_service, &caller, "thread-trigger-gate-alpha").await;
+
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
+    // Program coordinator to report BlockedApproval with an approval gate.
+    let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
+    coordinator.set_parked_approval_gate(gate_ref.clone());
+
+    let services = RebornServices::new(thread_service, coordinator.clone())
+        .with_automation_product_facade(automation_facade_with_trigger_thread(
+            trigger_thread_id.clone(),
+        ))
+        .with_approval_interactions(approval_interactions.clone());
+
+    let response = services
+        .resolve_gate(
+            caller,
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "approval-trigger-1",
+                "thread_id": trigger_thread_id.as_str(),
+                "run_id": run_id_string(),
+                "gate_ref": gate_ref.as_str(),
+                "resolution": "approved"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("automation owner should be able to approve gate on trigger thread");
+
+    assert!(
+        matches!(response, RebornResolveGateResponse::Resumed(_)),
+        "expected Resumed, got {response:?}"
+    );
+    assert_eq!(
+        approval_interactions.resolution_count(),
+        1,
+        "approval interaction should have been called"
+    );
+}
+
+#[tokio::test]
+async fn resolve_gate_rejects_other_users_automation_trigger_thread() {
+    // Alice owns the trigger thread. Bob should get 404, not a gate resolution.
+    let alice = caller_for_user("user-alice");
+    let bob = caller_for_user("user-bob");
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let trigger_thread_id =
+        setup_trigger_thread(&thread_service, &alice, "thread-trigger-gate-beta").await;
+
+    // Bob has no automations — the fallback must deny him.
+    let bob_automation_facade = Arc::new(StaticAutomationFacade { output: Vec::new() });
+    let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
+    let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
+
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(bob_automation_facade)
+        .with_approval_interactions(approval_interactions.clone());
+
+    let err = services
+        .resolve_gate(
+            bob,
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "approval-trigger-rejected",
+                "thread_id": trigger_thread_id.as_str(),
+                "run_id": run_id_string(),
+                "gate_ref": gate_ref.as_str(),
+                "resolution": "approved"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("non-owner must not resolve gate on another user's trigger thread");
+
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+    assert_eq!(
+        approval_interactions.resolution_count(),
+        0,
+        "approval interaction must not be called for unauthorized caller"
+    );
+}
+
 #[tokio::test]
 async fn list_automations_returns_empty_list() {
     let services = RebornServices::new(
