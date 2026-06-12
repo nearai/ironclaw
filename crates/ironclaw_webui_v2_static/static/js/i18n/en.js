@@ -89,6 +89,8 @@ registerPack("en", {
   "chat.modeAutoReview": "Auto-review",
   "chat.runtimeLocal": "Work locally",
   "chat.statusWorking": "Working",
+  "chat.identityUser": "You",
+  "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "Jump to latest",
   "shortcuts.title": "Keyboard shortcuts",
   "shortcuts.send": "Send message",
@@ -985,5 +987,8 @@ registerPack("en", {
   "extensions.emptyInstalledDesc": "Browse the Registry tab to discover and install WASM tools, channels, and MCP servers.",
   "extensions.emptyMcpTitle": "No MCP servers",
   "extensions.emptyMcpDesc": "MCP servers extend the agent with additional tool capabilities over the Model Context Protocol. Install them from the registry.",
+  "common.dismiss": "Dismiss",
+  "common.pin": "Pin",
+  "common.unpin": "Unpin",
   "common.remove": "Remove"
 });

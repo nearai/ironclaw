@@ -18,6 +18,7 @@ import { RecoveryNotice } from "./components/recovery-notice.js";
 import { SuggestionChips } from "./components/suggestion-chips.js";
 import { TypingIndicator } from "./components/typing-indicator.js";
 import { useChat } from "./hooks/useChat.js";
+import { NEW_DRAFT_KEY } from "./lib/draft-store.js";
 import { buildRuntimeContext } from "./lib/runtime-context.js";
 
 export function Chat({
@@ -70,6 +71,9 @@ export function Chat({
   const composerDisabled = (isProcessing && !pendingGate) || cooldownSeconds > 0;
   const composerStatusText =
     cooldownSeconds > 0 ? `Retry in ${cooldownSeconds}s` : undefined;
+  // Scope the persisted composer draft to the open thread (or the
+  // shared new-conversation slot when there's no active thread yet).
+  const composerDraftKey = activeThreadId || NEW_DRAFT_KEY;
   const canCancelRun = Boolean(
     activeThreadId &&
       activeRun?.runId &&
@@ -181,6 +185,7 @@ export function Chat({
             disabled=${composerDisabled}
             initialText=${composerDraft}
             resetKey=${composerResetKey}
+            draftKey=${composerDraftKey}
             context=${runtimeContext}
             statusText=${composerStatusText}
             canCancel=${canCancelRun}
@@ -195,6 +200,7 @@ export function Chat({
             hasMore=${hasMore}
             onLoadMore=${loadMore}
             onRetryMessage=${retryMessage}
+            pending=${isProcessing}
           >
             ${recoveryNotice &&
             html`
@@ -260,6 +266,7 @@ export function Chat({
             disabled=${composerDisabled}
             initialText=${composerDraft}
             resetKey=${composerResetKey}
+            draftKey=${composerDraftKey}
             context=${runtimeContext}
             statusText=${composerStatusText}
             canCancel=${canCancelRun}
