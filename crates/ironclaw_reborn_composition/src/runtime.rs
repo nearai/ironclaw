@@ -6608,4 +6608,264 @@ mod tests {
 
         runtime.shutdown().await.expect("runtime shutdown");
     }
+
+    /// Multi-call model response with a mid-register surface change must not kill the run.
+    ///
+    /// Scenario: the scripted gateway (a) registers tool call #1, (b) activates an extension
+    /// (deterministic surface-content change), (c) registers tool call #2, then returns both
+    /// candidates together.  Before the fix, register #2 rebuilt the inner port, wiping the
+    /// snapshot that candidate #1 referred to; the executor hit StaleSurface on the first
+    /// candidate and collapsed to a terminal HostUnavailable failure.  After the fix, both
+    /// candidates carry the same (prompt-stage) surface version and the run completes.
+    #[tokio::test]
+    async fn multi_tool_call_response_survives_surface_change_mid_register() {
+        use ironclaw_product_workflow::{
+            LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
+            LifecycleProductSurfaceContext,
+        };
+        use std::sync::OnceLock;
+
+        // Gateway state seeded after runtime build.
+        struct LifecycleFacadeHandle {
+            facade: crate::lifecycle::RebornLocalLifecycleFacade,
+        }
+
+        impl std::fmt::Debug for LifecycleFacadeHandle {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("LifecycleFacadeHandle").finish()
+            }
+        }
+
+        struct MultiToolCallGateway {
+            calls: StdMutex<usize>,
+            facade_slot: Arc<OnceLock<LifecycleFacadeHandle>>,
+        }
+
+        #[async_trait]
+        impl HostManagedModelGateway for MultiToolCallGateway {
+            async fn stream_model(
+                &self,
+                _request: HostManagedModelRequest,
+            ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+                Err(HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    "expected capability-aware model path",
+                ))
+            }
+
+            async fn stream_model_with_capabilities(
+                &self,
+                _request: HostManagedModelRequest,
+                capabilities: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+            ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+                let call_index = {
+                    let mut calls = self.calls.lock().expect("multi-tool gateway lock poisoned");
+                    let idx = *calls;
+                    *calls += 1;
+                    idx
+                };
+
+                if call_index > 0 {
+                    // Second model call: capability results have been fed back — finish the run.
+                    return Ok(HostManagedModelResponse::assistant_reply(
+                        "multi-tool surface-change ok",
+                    ));
+                }
+
+                // ── First model call ──────────────────────────────────────────────────
+                // Trigger prompt-stage surface snapshot (establishes V1).
+                capabilities
+                    .visible_capabilities(VisibleCapabilityRequest)
+                    .await
+                    .map_err(model_capability_error)?;
+
+                // Find the builtin echo tool.
+                let echo_id =
+                    ironclaw_host_api::CapabilityId::new("builtin.echo").expect("echo id");
+                let echo_tool = capabilities
+                    .tool_definitions()
+                    .map_err(model_capability_error)?
+                    .into_iter()
+                    .find(|def| def.capability_id == echo_id)
+                    .expect("echo provider tool definition");
+
+                // Register call #1 — candidate carries surface version V1.
+                let mut call1 = ProviderToolCall {
+                    provider_id: "test-provider".to_string(),
+                    provider_model_id: "test-model".to_string(),
+                    turn_id: Some("provider-turn-multi".to_string()),
+                    id: "call-multi-1".to_string(),
+                    name: echo_tool.name.clone(),
+                    arguments: serde_json::json!({"message": "hello from call 1"}),
+                    response_reasoning: None,
+                    reasoning: None,
+                    signature: None,
+                };
+                let candidate1 = capabilities
+                    .register_provider_tool_call(call1.clone())
+                    .await
+                    .map_err(model_capability_error)?;
+
+                // Activate the github extension — deterministic surface-content change.
+                // Pre-fix: this rebuilds the inner port, wiping candidate1's snapshot.
+                let facade_handle = self
+                    .facade_slot
+                    .get()
+                    .expect("lifecycle facade must be seeded before send_user_message");
+                let package_ref =
+                    LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
+                        .expect("valid github ref");
+                let ctx = LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
+                    tenant_id: TenantId::new("tenant-multi-tool-surface").expect("tenant id"),
+                    user_id: UserId::new("user-multi-tool-surface").expect("user id"),
+                    agent_id: None,
+                    project_id: None,
+                });
+                facade_handle
+                    .facade
+                    .execute(
+                        ctx.clone(),
+                        LifecycleProductAction::ExtensionInstall {
+                            package_ref: package_ref.clone(),
+                        },
+                    )
+                    .await
+                    .expect("install github extension");
+                facade_handle
+                    .facade
+                    .execute(
+                        ctx,
+                        LifecycleProductAction::ExtensionActivate { package_ref },
+                    )
+                    .await
+                    .expect("activate github extension");
+
+                // Register call #2 — after surface change.
+                // Post-fix: reuses current port, so both candidates carry the same surface version.
+                call1.id = "call-multi-2".to_string();
+                call1.arguments = serde_json::json!({"message": "hello from call 2"});
+                let candidate2 = capabilities
+                    .register_provider_tool_call(call1)
+                    .await
+                    .map_err(model_capability_error)?;
+
+                // Both candidates must carry the same surface version after the fix.
+                // (We cannot assert this here without breaking the pre-fix path,
+                //  so we rely on the run-completion assertion in the test body.)
+                Ok(HostManagedModelResponse::capability_calls(
+                    vec![candidate1, candidate2],
+                    "",
+                ))
+            }
+        }
+
+        // ── Test body ──────────────────────────────────────────────────────────────
+        let root = tempfile::tempdir().expect("tempdir");
+        let facade_slot: Arc<OnceLock<LifecycleFacadeHandle>> = Arc::new(OnceLock::new());
+        let gateway = Arc::new(MultiToolCallGateway {
+            calls: StdMutex::new(0),
+            facade_slot: Arc::clone(&facade_slot),
+        });
+        let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway;
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-multi-tool-surface-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-multi-tool-surface-tenant".to_string(),
+            agent_id: "runtime-multi-tool-surface-agent".to_string(),
+            source_binding_id: "runtime-multi-tool-surface-source".to_string(),
+            reply_target_binding_id: "runtime-multi-tool-surface-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(10),
+        })
+        .with_model_gateway_override(gateway_for_runtime);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+
+        // Seed the lifecycle facade before the model gateway runs.
+        let local_runtime = runtime
+            .services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management")
+            .clone();
+        let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
+            local_runtime.skill_management.clone(),
+        )
+        .with_extension_management(extension_management)
+        .with_runtime_credential_accounts(Arc::new(MultiToolConfiguredCredentials));
+        facade_slot
+            .set(LifecycleFacadeHandle { facade })
+            .expect("facade slot should be empty before seeding");
+
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            RUNTIME_SEND_TIMEOUT,
+            runtime.send_user_message(&conversation, "use echo tool twice"),
+        )
+        .await
+        .expect("runtime send should finish within timeout")
+        .expect("runtime send should succeed");
+
+        assert_eq!(
+            reply.status,
+            TurnStatus::Completed,
+            "multi-tool response with mid-register surface change must not produce terminal failure; status={:?} text={:?}",
+            reply.status,
+            reply.text,
+        );
+        assert_eq!(reply.text.as_deref(), Some("multi-tool surface-change ok"));
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    struct MultiToolConfiguredCredentials;
+
+    #[async_trait]
+    impl crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionService
+        for MultiToolConfiguredCredentials
+    {
+        async fn select_unique_configured_runtime_account(
+            &self,
+            _request: crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest,
+        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            let now = chrono::Utc::now();
+            Ok(ironclaw_auth::CredentialAccount {
+                id: ironclaw_auth::CredentialAccountId::new(),
+                scope: ironclaw_auth::AuthProductScope::new(
+                    ironclaw_host_api::ResourceScope::local_default(
+                        UserId::new("multi-tool-credential-user").expect("user id"),
+                        ironclaw_host_api::InvocationId::new(),
+                    )
+                    .expect("resource scope"),
+                    ironclaw_auth::AuthSurface::Api,
+                ),
+                provider: ironclaw_auth::AuthProviderId::new("test-provider").expect("provider id"),
+                label: ironclaw_auth::CredentialAccountLabel::new("test-provider")
+                    .expect("account label"),
+                status: ironclaw_auth::CredentialAccountStatus::Configured,
+                ownership: ironclaw_auth::CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(
+                    ironclaw_host_api::SecretHandle::new("test-secret").expect("secret handle"),
+                ),
+                refresh_secret: None,
+                scopes: Vec::new(),
+                created_at: now,
+                updated_at: now,
+            })
+        }
+    }
 }
