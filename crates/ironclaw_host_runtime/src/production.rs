@@ -23,9 +23,9 @@ use ironclaw_approvals::{
 };
 use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_capabilities::{
-    CapabilityHost, CapabilityInvocationError, CapabilityInvocationRequest,
-    CapabilityInvocationResult, CapabilityObligationHandler, CapabilityResumeRequest,
-    CapabilitySpawnRequest, CapabilitySpawnResult,
+    CapabilityAuthResumeRequest, CapabilityHost, CapabilityInvocationError,
+    CapabilityInvocationRequest, CapabilityInvocationResult, CapabilityObligationHandler,
+    CapabilityResumeRequest, CapabilitySpawnRequest, CapabilitySpawnResult,
 };
 use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::RootFilesystem;
@@ -52,11 +52,11 @@ use crate::{
     BuiltinObligationHandler, BuiltinObligationServices, CancelRuntimeWorkOutcome,
     CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime, HostRuntimeError,
     HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeAuthGate,
-    RuntimeBackendHealth, RuntimeBlockedReason, RuntimeCapabilityCompleted,
-    RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeGateId, RuntimeStatusRequest,
-    RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest, VisibleCapabilitySurface,
-    plan_capability, surface::CapabilityCatalog,
+    RuntimeBackendHealth, RuntimeBlockedReason, RuntimeCapabilityAuthResumeRequest,
+    RuntimeCapabilityCompleted, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
+    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeGateId,
+    RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest,
+    VisibleCapabilitySurface, plan_capability, surface::CapabilityCatalog,
 };
 
 /// Default production wiring for [`HostRuntime`].
@@ -573,6 +573,92 @@ impl HostRuntime for DefaultHostRuntime {
                     error_kind = failure_kind_from(&error).as_str(),
                     idempotency_key = idempotency_key.as_deref().unwrap_or(""),
                     "capability resume failed"
+                );
+                match error {
+                    CapabilityInvocationError::AuthorizationRequiresAuth {
+                        capability,
+                        required_secrets,
+                        credential_requirements,
+                    } => Ok(auth_required_outcome(
+                        capability,
+                        required_secrets,
+                        credential_requirements,
+                    )),
+                    other => Ok(RuntimeCapabilityOutcome::Failed(failure_from(
+                        other,
+                        capability_id,
+                    ))),
+                }
+            }
+        }
+    }
+
+    async fn auth_resume_capability(
+        &self,
+        request: RuntimeCapabilityAuthResumeRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        let RuntimeCapabilityAuthResumeRequest {
+            mut context,
+            capability_id,
+            estimate,
+            input,
+            idempotency_key,
+            trust_decision: _caller_trust_decision,
+            approval_request_id,
+        } = request;
+        let idempotency_key = idempotency_key.map(|key| key.as_str().to_string());
+        if let Some(key) = idempotency_key.as_deref() {
+            tracing::debug!(
+                capability_id = %capability_id,
+                approval_request_id = approval_request_id.map(|id| id.to_string()).as_deref().unwrap_or("none"),
+                idempotency_key = %key,
+                "capability auth-resume accepted advisory idempotency key (not yet enforced)"
+            );
+        }
+
+        if let Err(error) = self.enforce_runtime_policy(&capability_id) {
+            tracing::debug!(
+                capability_id = %capability_id,
+                runtime_policy_error_kind = error.kind(),
+                "capability runtime policy rejected auth-resume before dispatch"
+            );
+            return Ok(runtime_policy_failure(capability_id, error));
+        }
+
+        let trust_decision = match self.evaluate_invocation_trust(&capability_id) {
+            Ok(host_decision) => host_decision,
+            Err(error) => {
+                tracing::debug!(
+                    capability_id = %capability_id,
+                    trust_error_kind = error.kind(),
+                    "capability trust evaluation failed before auth-resume"
+                );
+                return Ok(trust_evaluation_failure(capability_id, error));
+            }
+        };
+        context.trust = trust_decision.effective_trust.class();
+
+        let registry = self.registry.snapshot();
+        let host = self.capability_host(&registry);
+        let auth_resume = CapabilityAuthResumeRequest {
+            context,
+            capability_id: capability_id.clone(),
+            estimate,
+            input,
+            trust_decision,
+            approval_request_id,
+        };
+
+        match host.auth_resume_json(auth_resume).await {
+            Ok(result) => Ok(RuntimeCapabilityOutcome::Completed(Box::new(
+                completed_outcome_from(result, capability_id),
+            ))),
+            Err(error) => {
+                tracing::debug!(
+                    capability_id = %capability_id,
+                    error_kind = failure_kind_from(&error).as_str(),
+                    idempotency_key = idempotency_key.as_deref().unwrap_or(""),
+                    "capability auth-resume failed"
                 );
                 match error {
                     CapabilityInvocationError::AuthorizationRequiresAuth {
