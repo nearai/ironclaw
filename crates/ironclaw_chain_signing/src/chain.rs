@@ -4,6 +4,8 @@
 use ironclaw_attestation::DecodedTransaction;
 use serde::{Deserialize, Serialize};
 
+use crate::kms::SignatureAlg;
+
 /// A chain / network identity string, e.g. `eip155:1`, `solana:mainnet-beta`,
 /// `near:mainnet`.
 ///
@@ -115,6 +117,22 @@ impl ChainFamily {
             DecodedTransaction::Evm(_) => ChainFamily::Evm,
             DecodedTransaction::Solana(_) => ChainFamily::Solana,
             DecodedTransaction::Near(_) => ChainFamily::Near,
+        }
+    }
+
+    /// The native signature algorithm/curve for this family. `Evm` is secp256k1;
+    /// `Solana`/`Near` are ed25519. `Unknown` has no native curve and so cannot
+    /// resolve one (it never reaches signing — the exact-binding check fails
+    /// closed first).
+    ///
+    /// This is the single source of truth for the family↔curve binding, used by
+    /// the custodial signer to run the KMS curve-capability check up front (before
+    /// claiming the one-shot grant) and to select the alg inside each `sign_*`.
+    pub fn signing_alg(self) -> Option<SignatureAlg> {
+        match self {
+            ChainFamily::Evm => Some(SignatureAlg::Secp256k1),
+            ChainFamily::Solana | ChainFamily::Near => Some(SignatureAlg::Ed25519),
+            ChainFamily::Unknown => None,
         }
     }
 }

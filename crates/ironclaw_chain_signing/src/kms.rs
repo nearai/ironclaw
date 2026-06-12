@@ -88,6 +88,29 @@ pub trait KmsSigner: Send + Sync {
     /// host memory (`false`). The ship-gate consults this to allow mainnet.
     fn is_secure_custody(&self) -> bool;
 
+    /// Whether this backend can sign with the given signature algorithm/curve.
+    ///
+    /// The custodial signer consults this on the mainnet/KMS path BEFORE handing
+    /// over a digest, failing closed if the configured backend cannot service the
+    /// chain's native curve — rather than discovering it via a runtime sign error
+    /// (and never via a hot-key fallback). This matters because a real cloud
+    /// backend may be curve-limited: e.g. AWS KMS supports secp256k1 (EVM) but
+    /// NOT ed25519 (Solana/NEAR), so it must fail closed for the ed25519 mainnet
+    /// chains instead of silently routing to a key it cannot sign.
+    ///
+    /// Defaults to `true` (supports everything); curve-limited backends override
+    /// it to report exactly the curves they can sign. [`LocalKmsSigner`] supports
+    /// both secp256k1 and ed25519, so it keeps the default.
+    ///
+    /// The exhaustive match (rather than a `_` wildcard) is deliberate: adding a
+    /// new [`SignatureAlg`] variant must break compilation here so the default's
+    /// "supports everything" assumption is re-reviewed for each new curve.
+    fn supports_alg(&self, alg: SignatureAlg) -> bool {
+        match alg {
+            SignatureAlg::Secp256k1 | SignatureAlg::Ed25519 => true,
+        }
+    }
+
     /// Sign a 32-byte `digest` with the key referenced by `key_ref` under
     /// `alg`, returning the raw signature bytes. `key_ref` is an opaque backend
     /// handle — NOT key material.
@@ -545,6 +568,44 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ChainSigningError::Sign { .. }));
+    }
+
+    #[test]
+    fn local_kms_supports_both_curves_by_default() {
+        let kms = secure();
+        assert!(kms.supports_alg(SignatureAlg::Secp256k1));
+        assert!(kms.supports_alg(SignatureAlg::Ed25519));
+    }
+
+    #[test]
+    fn curve_limited_backend_reports_unsupported_alg() {
+        struct Secp256k1Only;
+        #[async_trait]
+        impl KmsSigner for Secp256k1Only {
+            fn backend_id(&self) -> &str {
+                "secp256k1-only"
+            }
+            fn is_secure_custody(&self) -> bool {
+                true
+            }
+            fn supports_alg(&self, alg: SignatureAlg) -> bool {
+                match alg {
+                    SignatureAlg::Secp256k1 => true,
+                    SignatureAlg::Ed25519 => false,
+                }
+            }
+            async fn sign_digest(
+                &self,
+                _key_ref: &str,
+                _digest: &[u8; 32],
+                _alg: SignatureAlg,
+            ) -> Result<Vec<u8>, ChainSigningError> {
+                Ok(vec![0u8; 64])
+            }
+        }
+        let b = Secp256k1Only;
+        assert!(b.supports_alg(SignatureAlg::Secp256k1));
+        assert!(!b.supports_alg(SignatureAlg::Ed25519));
     }
 
     #[test]
