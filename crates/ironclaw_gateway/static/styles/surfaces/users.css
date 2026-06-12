@@ -17,3 +17,13 @@
 .btn-primary:hover { opacity: 0.9; }
 .btn-secondary { background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border); padding: 0.4rem 0.8rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem; }
 
+/* Users table has 10 columns — biggest data table in the app. Same
+   mobile scroll pattern as .jobs-container / .missions-container /
+   .routines-container: give the subpanel its own horizontal scroll
+   so the table stays fully browsable on ≤768px. */
+@media (max-width: 768px) {
+  #settings-users {
+    overflow-x: auto;
+  }
+}
+

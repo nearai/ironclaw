@@ -150,32 +150,60 @@
   color: var(--text-primary);
 }
 
+/* Touch devices: no hover to reveal Copy, so keep it visible but blended
+   into the bubble. The default styling (bg-primary + border) reads as a
+   detached chip stuck on top of the message; on a short user bubble like
+   "fire now" the contrast against accent-soft is jarring. Strip the chrome
+   and inherit the bubble's text color — Copy becomes a quiet label that's
+   still tappable. */
 @media (hover: none) {
   .message.user .message-copy-btn,
   .message.assistant .message-copy-btn {
-    opacity: 1;
+    opacity: 0.75;
     pointer-events: auto;
+    background: transparent;
+    border-color: transparent;
+    color: inherit;
+  }
+
+  .message.user .message-copy-btn:active,
+  .message.assistant .message-copy-btn:active {
+    opacity: 1;
   }
 }
 
+/* Timestamp lives in the gap above the bubble — `.chat-messages` already
+   reserves `gap: var(--space-4)` between messages, so the label sits in
+   that whitespace and never overlaps content or the Copy button. Anchoring
+   to the bubble's near corner (right for user, left for assistant) keeps
+   the time visually attached to its message on both sides. */
 .message-timestamp {
   position: absolute;
-  top: 8px;
-  right: 52px;
+  top: -14px;
   font-size: var(--text-xs);
+  line-height: 1;
   color: var(--text-muted);
   opacity: 0;
   transition: opacity 150ms ease;
   pointer-events: none;
 }
 
+.message.assistant .message-timestamp {
+  left: 0;
+}
+
+.message.user .message-timestamp {
+  right: 0;
+}
+
 .message:hover .message-timestamp {
   opacity: 0.7;
 }
 
-.message.user .message-timestamp {
-  right: auto;
-  left: -80px;
+@media (hover: none) {
+  .message-timestamp {
+    opacity: 0.55;
+  }
 }
 
 .time-separator {
