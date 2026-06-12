@@ -398,7 +398,7 @@ pub enum LifecycleExtensionSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LifecycleExtensionSurfaceKind {
-    ProductAdapter,
+    ExternalChannel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

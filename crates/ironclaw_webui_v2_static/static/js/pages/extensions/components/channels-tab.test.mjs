@@ -10,7 +10,7 @@ function channelsTabSourceForTest() {
     if (line.startsWith("import ")) continue;
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { SlackConnectActionSections, isSlackPackage, isSlackAdminManagedAction, isSlackInboundProofCodeAction, findSlackConnectAction, findSlackConnectActions };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { ChannelsTab, SlackConnectActionSections, isSlackPackage, isSlackAdminManagedAction, isSlackInboundProofCodeAction, findSlackConnectAction, findSlackConnectActions };`;
 }
 
 function slackConnectActionSectionsForTest(slackConnectAction, slackConnectActions) {
@@ -31,6 +31,45 @@ function slackConnectActionSectionsForTest(slackConnectAction, slackConnectActio
     SlackChannelPicker: context.SlackChannelPicker,
     SlackPairingSection: context.SlackPairingSection,
   };
+}
+
+function channelsTabForTest(props) {
+  const context = {
+    ExtensionCard() {},
+    PairingSection() {},
+    RegistryCard() {},
+    SlackChannelPicker() {},
+    SlackPairingSection() {},
+    StatusPill() {},
+    globalThis: {},
+    html(strings, ...values) {
+      return { strings: Array.from(strings), values };
+    },
+    useT: () => (key) => key,
+  };
+  vm.runInNewContext(channelsTabSourceForTest(), context);
+  return {
+    rendered: context.globalThis.__testExports.ChannelsTab(props),
+    RegistryCard: context.RegistryCard,
+  };
+}
+
+function renderedValueAfter(rendered, fragment) {
+  if (!rendered || typeof rendered !== "object") {
+    return undefined;
+  }
+  if (Array.isArray(rendered.strings)) {
+    if (rendered.strings.some((part) => part.includes(fragment))) {
+      return rendered;
+    }
+  }
+  if (Array.isArray(rendered.values)) {
+    for (const value of rendered.values) {
+      const found = renderedValueAfter(value, fragment);
+      if (found !== undefined) return found;
+    }
+  }
+  return undefined;
 }
 
 test("isSlackPackage recognizes the Slack extension package", () => {
@@ -103,4 +142,28 @@ test("SlackConnectActionSections renders every supported Slack action", () => {
     action: {},
   });
   assert.equal(unhandledView.rendered, null);
+});
+
+test("ChannelsTab renders registry cards directly without Slack connect actions", () => {
+  const view = channelsTabForTest({
+    status: { enabled_channels: [], sse_connections: 0, ws_connections: 0 },
+    channels: [],
+    connectableChannels: [{ channel: "slack", strategy: "admin_managed_channels", action: {} }],
+    channelRegistry: [{ package_ref: { id: "slack" } }],
+    isBusy: false,
+    onActivate() {},
+    onConfigure() {},
+    onInstall() {},
+    onRemove() {},
+  });
+
+  const registrySection = renderedValueAfter(view.rendered, "Available channels");
+  assert.notEqual(registrySection, undefined, "expected available channels section");
+  const registryCard = registrySection.values[0][0];
+
+  assert.equal(registryCard.values[0], view.RegistryCard);
+  assert.equal(
+    registryCard.strings.some((part) => part.includes("flex flex-col gap-3")),
+    false,
+  );
 });

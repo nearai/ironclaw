@@ -36,6 +36,14 @@ test("primaryExtensionAction leaves manifest-backed channels to channel setup fl
     }),
     null,
   );
+  assert.equal(
+    primaryExtensionAction({
+      package_ref: { kind: "extension", id: "telegram" },
+      kind: "wasm_channel",
+      activation_status: "installed",
+    }),
+    null,
+  );
 });
 
 test("primaryExtensionAction hides activation for active extensions", () => {

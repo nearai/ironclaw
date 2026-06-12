@@ -296,7 +296,7 @@ fn extension_info(
 fn extension_kind(summary: &LifecycleExtensionSummary) -> &'static str {
     if summary
         .surface_kinds
-        .contains(&LifecycleExtensionSurfaceKind::ProductAdapter)
+        .contains(&LifecycleExtensionSurfaceKind::ExternalChannel)
     {
         "channel"
     } else {
@@ -516,11 +516,32 @@ mod tests {
     fn product_adapter_surface_projects_channel_kind() {
         let mut summary = summary_with_onboarding();
         summary.runtime_kind = LifecycleExtensionRuntimeKind::FirstParty;
-        summary.surface_kinds = vec![LifecycleExtensionSurfaceKind::ProductAdapter];
+        summary.surface_kinds = vec![LifecycleExtensionSurfaceKind::ExternalChannel];
 
         let entry = registry_entry(summary, &HashSet::new());
 
         assert_eq!(entry.kind, "channel");
+    }
+
+    #[tokio::test]
+    async fn list_projects_external_channel_surface_kind_through_extension_info() {
+        let mut summary = summary_with_onboarding();
+        summary.runtime_kind = LifecycleExtensionRuntimeKind::FirstParty;
+        summary.surface_kinds = vec![LifecycleExtensionSurfaceKind::ExternalChannel];
+        summary.credential_requirements = Vec::new();
+        let facade = ListingFacade {
+            extension: LifecycleInstalledExtensionSummary {
+                summary,
+                phase: LifecyclePhase::Active,
+            },
+        };
+
+        let response = list_extensions(Arc::new(facade), None, caller())
+            .await
+            .expect("list extensions");
+        let extension = response.extensions.first().expect("one extension");
+
+        assert_eq!(extension.kind, "channel");
     }
 
     #[derive(Default)]

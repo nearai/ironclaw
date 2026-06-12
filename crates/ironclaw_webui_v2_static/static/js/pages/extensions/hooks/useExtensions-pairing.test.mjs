@@ -33,6 +33,7 @@ function contextFor(mutationState, queryCalls) {
     fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
+    isChannelExtensionKind: (kind) => kind === "wasm_channel" || kind === "channel",
     installExtension: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},

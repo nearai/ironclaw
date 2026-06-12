@@ -1,12 +1,16 @@
 use ironclaw_extensions::{
     CapabilityDeclV2, CapabilityVisibility, ExtensionAssetPath, ExtensionManifest,
-    ExtensionPackage, ExtensionRuntime, ManifestSource,
+    ExtensionManifestRecord, ExtensionPackage, ExtensionRuntime, HostApiContractRegistry,
+    ManifestSource,
 };
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_first_party_extensions::is_gsuite_extension_id;
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, RuntimeCredentialAccountProviderId, VirtualPath, sha256_digest_token,
+    CapabilityId, ExtensionId, HostPortCatalog, RuntimeCredentialAccountProviderId, VirtualPath,
+    sha256_digest_token,
 };
+use ironclaw_product_adapter_registry::product_adapter_sections;
+use ironclaw_product_adapters::ProductSurfaceKind;
 use ironclaw_product_workflow::{
     LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
     LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
@@ -59,7 +63,6 @@ const NEARAI_MCP_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/nearai-mcp/manifest.toml");
 const SLACK_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/slack/manifest.toml");
-const PRODUCT_ADAPTER_HOST_API_ID: &str = "ironclaw.product_adapter/v1";
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct AvailableExtensionAsset {
@@ -78,6 +81,7 @@ pub(crate) struct AvailableExtensionPackage {
     pub(crate) package_ref: LifecyclePackageRef,
     pub(crate) manifest_toml: String,
     pub(crate) package: ExtensionPackage,
+    pub(crate) surface_kinds: Vec<LifecycleExtensionSurfaceKind>,
     pub(crate) assets: Vec<AvailableExtensionAsset>,
 }
 
@@ -96,7 +100,7 @@ impl AvailableExtensionPackage {
             description: self.package.manifest.description.clone(),
             source: LifecycleExtensionSource::HostBundled,
             runtime_kind: runtime_kind(&self.package.manifest.runtime),
-            surface_kinds: surface_kinds(&self.package.manifest),
+            surface_kinds: self.surface_kinds.clone(),
             visible_capability_ids,
             visible_read_only_capability_ids,
             credential_requirements: credential_requirements(self),
@@ -178,18 +182,6 @@ fn runtime_kind(runtime: &ExtensionRuntime) -> LifecycleExtensionRuntimeKind {
         ExtensionRuntime::FirstParty { .. } => LifecycleExtensionRuntimeKind::FirstParty,
         ExtensionRuntime::System { .. } => LifecycleExtensionRuntimeKind::System,
         ExtensionRuntime::Script { .. } => LifecycleExtensionRuntimeKind::Script,
-    }
-}
-
-fn surface_kinds(manifest: &ExtensionManifest) -> Vec<LifecycleExtensionSurfaceKind> {
-    if manifest
-        .host_apis
-        .iter()
-        .any(|host_api| host_api.id.as_str() == PRODUCT_ADAPTER_HOST_API_ID)
-    {
-        vec![LifecycleExtensionSurfaceKind::ProductAdapter]
-    } else {
-        Vec::new()
     }
 }
 
@@ -593,6 +585,13 @@ fn bundled_extension_package(
     .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
         reason: format!("bundled {label} extension manifest is invalid: {error}"),
     })?;
+    let surface_kinds = surface_kinds_from_manifest_toml(
+        manifest_toml,
+        ManifestSource::HostBundled,
+        &host_ports,
+        &contracts,
+        label,
+    )?;
     let package =
         ExtensionPackage::from_manifest_toml(manifest, root, manifest_toml).map_err(|error| {
             ProductWorkflowError::InvalidBindingRequest {
@@ -603,8 +602,41 @@ fn bundled_extension_package(
         package_ref,
         manifest_toml: manifest_toml.to_string(),
         package,
+        surface_kinds,
         assets,
     })
+}
+
+fn surface_kinds_from_manifest_toml(
+    manifest_toml: &str,
+    source: ManifestSource,
+    host_ports: &HostPortCatalog,
+    contracts: &HostApiContractRegistry,
+    label: &str,
+) -> Result<Vec<LifecycleExtensionSurfaceKind>, ProductWorkflowError> {
+    let record = ExtensionManifestRecord::from_toml_with_contracts(
+        manifest_toml,
+        source,
+        host_ports,
+        None,
+        contracts,
+    )
+    .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+        reason: format!("{label} extension manifest is invalid: {error}"),
+    })?;
+    let adapters = product_adapter_sections(&record).map_err(|error| {
+        ProductWorkflowError::InvalidBindingRequest {
+            reason: format!("{label} ProductAdapter manifest projection is invalid: {error}"),
+        }
+    })?;
+    let mut surface_kinds = Vec::new();
+    if adapters
+        .iter()
+        .any(|adapter| adapter.surface_kind() == ProductSurfaceKind::ExternalChannel)
+    {
+        surface_kinds.push(LifecycleExtensionSurfaceKind::ExternalChannel);
+    }
+    Ok(surface_kinds)
 }
 
 fn github_assets() -> Vec<AvailableExtensionAsset> {
@@ -1418,6 +1450,13 @@ where
             &contracts,
         )
         .map_err(map_binding_error)?;
+        let surface_kinds = surface_kinds_from_manifest_toml(
+            &manifest_toml,
+            ManifestSource::HostBundled,
+            &host_ports,
+            &contracts,
+            entry.name.as_str(),
+        )?;
         let package = ExtensionPackage::from_manifest_toml(manifest, entry.path, &manifest_toml)
             .map_err(map_binding_error)?;
         let mut assets = vec![AvailableExtensionAsset {
@@ -1440,6 +1479,7 @@ where
             )?,
             manifest_toml,
             package,
+            surface_kinds,
             assets,
         });
     }
@@ -1814,16 +1854,53 @@ mod tests {
         ));
         assert_eq!(package.package.manifest.capabilities.len(), 0);
         assert!(package.package.manifest.host_apis.iter().any(|host_api| {
-            host_api.id.as_str() == PRODUCT_ADAPTER_HOST_API_ID
+            host_api.id.as_str() == "ironclaw.product_adapter/v1"
                 && host_api.section.as_str() == "product_adapter.host_beta"
         }));
 
         let summary = package.summary();
         assert_eq!(
             summary.surface_kinds,
-            vec![LifecycleExtensionSurfaceKind::ProductAdapter]
+            vec![LifecycleExtensionSurfaceKind::ExternalChannel]
         );
         assert_eq!(summary.visible_capability_ids, Vec::<String>::new());
+    }
+
+    #[test]
+    fn non_channel_product_adapter_surface_does_not_project_channel_surface() {
+        const MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "web-product"
+name = "Web Product"
+version = "0.1.0"
+description = "A web product adapter."
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "web_product"
+
+[[host_api]]
+id = "ironclaw.product_adapter/v1"
+section = "product_adapter.web"
+
+[product_adapter.web]
+surface_kind = "web"
+
+[product_adapter.web.auth]
+kind = "bearer_token"
+
+[product_adapter.web.capabilities]
+flags = ["inbound_messages"]
+
+[[product_adapter.web.required_credentials]]
+handle = "web_token"
+"#;
+
+        let package = bundled_extension_package("web-product", "Web Product", MANIFEST, Vec::new())
+            .expect("valid package");
+
+        assert_eq!(package.summary().surface_kinds, Vec::new());
     }
 
     #[tokio::test]
@@ -2212,6 +2289,7 @@ output_schema_ref = "schemas/write.output.json"
                 .unwrap(),
             manifest_toml: MANIFEST.to_string(),
             package,
+            surface_kinds: Vec::new(),
             assets: vec![
                 AvailableExtensionAsset {
                     path: "manifest.toml".to_string(),

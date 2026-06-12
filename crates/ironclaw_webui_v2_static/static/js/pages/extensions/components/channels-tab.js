@@ -154,17 +154,12 @@ export function ChannelsTab({
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-3">
             ${channelRegistry.map(
               (entry) => html`
-                <div key=${packageId(entry)} className="flex flex-col gap-3">
-                  <${RegistryCard}
-                    entry=${entry}
-                    onInstall=${onInstall}
-                    isBusy=${isBusy}
-                  />
-                  ${isSlackPackage(entry) &&
-                  html`<${SlackConnectActionSections}
-                    slackConnectActions=${slackConnectActions}
-                  />`}
-                </div>
+                <${RegistryCard}
+                  key=${packageId(entry)}
+                  entry=${entry}
+                  onInstall=${onInstall}
+                  isBusy=${isBusy}
+                />
               `
             )}
           </div>

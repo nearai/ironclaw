@@ -15,6 +15,10 @@ export const KIND_LABELS = {
   channel_relay: "Relay",
 };
 
+export function isChannelExtensionKind(kind) {
+  return kind === "wasm_channel" || kind === "channel";
+}
+
 export const STATE_TONES = {
   active: "success",
   ready: "success",

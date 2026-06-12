@@ -2,6 +2,7 @@ import { React } from "../../../lib/html.js";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { gatewayStatus } from "../../../lib/api.js";
 import { listConnectableChannels } from "../../../lib/channel-connect.js";
+import { isChannelExtensionKind } from "../lib/extensions-schema.js";
 import {
   fetchExtensions,
   fetchExtensionRegistry,
@@ -127,7 +128,7 @@ export function useExtensions() {
   const registry = registryQuery.data?.entries || [];
   const connectableChannels = connectableChannelsQuery.data?.channels || [];
 
-  const isChannel = (entry) => entry.kind === "wasm_channel" || entry.kind === "channel";
+  const isChannel = (entry) => isChannelExtensionKind(entry.kind);
   const channels = extensions.filter(isChannel);
   const mcpServers = extensions.filter((e) => e.kind === "mcp_server");
   const tools = extensions.filter((e) => !isChannel(e) && e.kind !== "mcp_server");
