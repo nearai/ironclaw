@@ -116,6 +116,8 @@ const OPERATOR_LOGS_DEFAULT_LIMIT: u32 = 100;
 const OPERATOR_LOGS_MAX_LIMIT: u32 = 500;
 const OPERATOR_LOGS_CURSOR_MAX_BYTES: usize = 512;
 const OPERATOR_LOGS_TARGET_MAX_BYTES: usize = 256;
+const OPERATOR_LOGS_CONTEXT_MAX_BYTES: usize = 256;
+const OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX: &str = " ... [truncated]";
 
 #[async_trait]
 pub trait ConnectableChannelsProductFacade: Send + Sync {
@@ -3859,6 +3861,12 @@ fn bounded_operator_logs_query(query: RebornOperatorLogsQuery) -> RebornLogQuery
         cursor: bounded_operator_logs_string(query.cursor, OPERATOR_LOGS_CURSOR_MAX_BYTES),
         level: query.level,
         target: bounded_operator_logs_string(query.target, OPERATOR_LOGS_TARGET_MAX_BYTES),
+        thread_id: bounded_operator_logs_context_string(query.thread_id),
+        run_id: bounded_operator_logs_context_string(query.run_id),
+        turn_id: bounded_operator_logs_context_string(query.turn_id),
+        tool_call_id: bounded_operator_logs_context_string(query.tool_call_id),
+        tool_name: bounded_operator_logs_context_string(query.tool_name),
+        source: bounded_operator_logs_context_string(query.source),
         tail: false,
     }
 }
@@ -3876,14 +3884,47 @@ fn bounded_operator_logs_string(value: Option<String>, max_bytes: usize) -> Opti
     })
 }
 
+fn bounded_operator_logs_context_string(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(normalize_operator_log_context_value(trimmed))
+        }
+    })
+}
+
+pub fn normalize_operator_log_context_value(value: &str) -> String {
+    truncate_utf8_with_suffix(value, OPERATOR_LOGS_CONTEXT_MAX_BYTES)
+}
+
 fn truncate_utf8_to_bytes(value: &str, max_bytes: usize) -> String {
-    let end = value
-        .char_indices()
-        .map(|(index, _)| index)
-        .take_while(|index| *index <= max_bytes)
-        .last()
-        .unwrap_or(0);
+    let mut end = max_bytes.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
     value[..end].to_string()
+}
+
+fn truncate_utf8_with_suffix(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+
+    if max_bytes <= OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX.len() {
+        return OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX[..max_bytes].to_string();
+    }
+
+    let mut end = max_bytes - OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX.len();
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    let mut truncated = String::with_capacity(max_bytes);
+    truncated.push_str(&value[..end]);
+    truncated.push_str(OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX);
+    truncated
 }
 
 fn product_agent_bound_caller_from_webui(
