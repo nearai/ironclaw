@@ -87,7 +87,7 @@ use ironclaw_turns::{
     LoopGateRef, ReplyTargetBindingRef, RunProfileResolutionRequest, SanitizedCancelReason,
     SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
     TurnEventProjectionSource, TurnId, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord,
-    TurnScope, TurnSpawnTreeStateStore, TurnStatus,
+    TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStatus,
     run_profile::{LoopHostMilestoneSink, LoopRunContext},
 };
 
@@ -263,6 +263,7 @@ pub struct AssistantReply {
     pub conversation: ConversationId,
     pub run_id: TurnRunId,
     pub status: TurnStatus,
+    pub failure_category: Option<String>,
     pub text: Option<String>,
 }
 
@@ -1005,6 +1006,17 @@ impl RebornRuntime {
         self.thread_service.clone()
     }
 
+    /// Test-only accessor for the session thread service shared by the trigger
+    /// poller, REPL, and WebUI paths. Integration tests use this to enumerate
+    /// threads stored by `record_trigger_prompt` without going through the WebUI
+    /// `/api/webchat/v2/threads` endpoint (which filters automation threads out
+    /// of the list response). The returned handle is the same `Arc` the
+    /// production code uses; writes made through it are visible to all paths.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn session_thread_service(&self) -> Arc<dyn ironclaw_threads::SessionThreadService> {
+        Arc::clone(&self.thread_service)
+    }
+
     pub(crate) fn webui_turn_coordinator(&self) -> Arc<dyn TurnCoordinator> {
         self.turn_coordinator.clone()
     }
@@ -1332,7 +1344,7 @@ impl RebornRuntime {
         self.wake_sender.wake();
 
         let reply = async {
-            let terminal_status = self
+            let terminal_state = self
                 .wait_for_terminal(&scope, run_id, &cancellation)
                 .await?;
             let assistant_text = self
@@ -1342,7 +1354,11 @@ impl RebornRuntime {
             Ok(AssistantReply {
                 conversation: conversation.clone(),
                 run_id,
-                status: terminal_status,
+                status: terminal_state.status,
+                failure_category: terminal_state
+                    .failure
+                    .as_ref()
+                    .map(|failure| failure.category().to_string()),
                 text: assistant_text,
             })
         }
@@ -1467,7 +1483,7 @@ impl RebornRuntime {
         scope: &TurnScope,
         run_id: TurnRunId,
         cancellation: &CancellationToken,
-    ) -> Result<TurnStatus, RebornRuntimeError> {
+    ) -> Result<TurnRunState, RebornRuntimeError> {
         let start = std::time::Instant::now();
         loop {
             if self.worker_handle.is_finished() {
@@ -1481,7 +1497,7 @@ impl RebornRuntime {
                 })
                 .await?;
             if state.status.is_terminal() {
-                return Ok(state.status);
+                return Ok(state);
             }
             // TurnStatus::RecoveryRequired is now terminal (is_terminal() returns true)
             // so the branch above handles it; no special cancel-to-release-lock is needed.
@@ -1768,6 +1784,9 @@ pub async fn build_reborn_runtime(
     let trusted_laptop_access = services_input.grants_trusted_laptop_access();
     let owner_id = services_input.owner_id().to_string();
     let mut services = build_reborn_services(services_input).await?;
+    #[cfg(feature = "root-llm-provider")]
+    let llm =
+        apply_startup_stored_llm_key(llm, crate::LlmKeyStore::new(services.secret_store())).await?;
     enforce_runtime_cutover_gate(profile, &services.readiness)?;
 
     let runtime_parts = match profile {
@@ -2567,6 +2586,26 @@ fn local_dev_filesystem_skill_context_source(
     })
 }
 
+#[cfg(feature = "root-llm-provider")]
+async fn apply_startup_stored_llm_key(
+    llm: Option<ResolvedRebornLlm>,
+    keys: crate::LlmKeyStore,
+) -> Result<Option<ResolvedRebornLlm>, RebornRuntimeError> {
+    let Some(mut llm) = llm else {
+        return Ok(None);
+    };
+
+    if let Some(stored) = keys
+        .read(llm.provider_id())
+        .await
+        .map_err(|error| RebornRuntimeError::LlmProvider(error.to_string()))?
+    {
+        crate::llm_catalog::apply_stored_api_key(&mut llm.config, stored);
+    }
+
+    Ok(Some(llm))
+}
+
 struct ValidatedRuntimeIdentity {
     tenant_id: TenantId,
     agent_id: AgentId,
@@ -3321,6 +3360,12 @@ mod tests {
             ironclaw_common::env_helpers::set_runtime_env(name, value);
             Self { name, previous }
         }
+
+        fn unset(name: &'static str) -> Self {
+            let previous = ironclaw_common::env_helpers::env_or_override(name);
+            ironclaw_common::env_helpers::remove_runtime_env(name);
+            Self { name, previous }
+        }
     }
 
     #[cfg(feature = "root-llm-provider")]
@@ -3643,6 +3688,98 @@ mod tests {
             .expect("chat request should be captured")
             .expect("auth header should be sent by capture server");
         assert_eq!(auth_header, "Bearer sess_reborn_env_token");
+    }
+
+    #[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
+    #[tokio::test]
+    async fn local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart() {
+        let _session_token_guard = RuntimeEnvGuard::unset("NEARAI_SESSION_TOKEN");
+        let _api_key_guard = RuntimeEnvGuard::unset("NEARAI_API_KEY");
+        let root = tempfile::tempdir().expect("tempdir");
+        let local_dev_root = root.path().join("local-dev");
+        let session_dir = tempfile::tempdir().expect("session tempdir");
+        let (base_url, auth_rx) = start_nearai_auth_capture_server().await;
+
+        let services = crate::build_reborn_services(
+            RebornBuildInput::local_dev("runtime-nearai-stored-key-owner", local_dev_root.clone())
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .await
+        .expect("services build for stored key seed");
+        crate::LlmKeyStore::new(services.secret_store())
+            .put(
+                "nearai",
+                ironclaw_secrets::SecretMaterial::from("sk-reborn-stored-nearai-key"),
+            )
+            .await
+            .expect("stored key seeded");
+        drop(services);
+
+        let config = ironclaw_llm::LlmConfig {
+            backend: "nearai".to_string(),
+            session: ironclaw_llm::SessionConfig {
+                auth_base_url: base_url.clone(),
+                session_path: session_dir.path().join("session.json"),
+            },
+            nearai: ironclaw_llm::NearAiConfig {
+                model: "test-model".to_string(),
+                cheap_model: None,
+                base_url,
+                api_key: None,
+                fallback_model: None,
+                max_retries: 0,
+                circuit_breaker_threshold: None,
+                circuit_breaker_recovery_secs: 30,
+                response_cache_enabled: false,
+                response_cache_ttl_secs: 3600,
+                response_cache_max_entries: 1000,
+                failover_cooldown_secs: 300,
+                failover_cooldown_threshold: 3,
+                smart_routing_cascade: false,
+            },
+            provider: None,
+            bedrock: None,
+            gemini_oauth: None,
+            openai_codex: None,
+            request_timeout_secs: 5,
+            cheap_model: None,
+            smart_routing_cascade: false,
+            max_retries: 0,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+        };
+        let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config);
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-nearai-stored-key-owner", local_dev_root)
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_resolved_llm(llm)
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-nearai-stored-key-tenant".to_string(),
+            agent_id: "runtime-nearai-stored-key-agent".to_string(),
+            source_binding_id: "runtime-nearai-stored-key-source".to_string(),
+            reply_target_binding_id: "runtime-nearai-stored-key-reply".to_string(),
+        });
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = runtime
+            .send_user_message(&conversation, "hi")
+            .await
+            .expect("message sends");
+
+        assert!(reply.is_successful_final_reply(), "reply: {reply:?}");
+        let auth_header = tokio::time::timeout(Duration::from_secs(5), auth_rx)
+            .await
+            .expect("chat request should be captured")
+            .expect("auth header should be sent by capture server");
+        assert_eq!(auth_header, "Bearer sk-reborn-stored-nearai-key");
+
+        runtime.shutdown().await.expect("runtime shutdown");
     }
 
     #[cfg(feature = "libsql")]
@@ -5515,34 +5652,24 @@ mod tests {
             )
             .await
             .expect("google setup extension lifecycle projection");
-        assert_eq!(google_setup.secrets.len(), 2);
-        let google_oauth_setups = google_setup
-            .secrets
-            .iter()
-            .map(|secret| {
-                assert_eq!(secret.provider, "google");
-                assert!(!secret.provided);
-                match &secret.setup {
-                    RebornExtensionCredentialSetup::OAuth {
-                        account_label,
-                        scopes,
-                        ..
-                    } => (account_label.clone(), scopes.clone()),
-                    RebornExtensionCredentialSetup::ManualToken => {
-                        panic!("Google setup secret should use OAuth")
-                    }
-                }
-            })
-            .collect::<Vec<_>>();
+        assert_eq!(google_setup.secrets.len(), 1);
+        let google_secret = &google_setup.secrets[0];
+        assert_eq!(google_secret.provider, "google");
+        assert!(!google_secret.provided);
+        let RebornExtensionCredentialSetup::OAuth { scopes, .. } = &google_secret.setup else {
+            panic!("Google setup secret should use OAuth")
+        };
         assert_eq!(
-            google_oauth_setups
+            scopes
                 .iter()
-                .map(|(_, scopes)| scopes.clone())
-                .collect::<Vec<_>>(),
-            vec![
-                vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()],
-                vec![GOOGLE_CALENDAR_EVENTS_SCOPE.to_string()],
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            [
+                GOOGLE_CALENDAR_EVENTS_SCOPE.to_string(),
+                GOOGLE_CALENDAR_READONLY_SCOPE.to_string(),
             ]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
         );
         let google_setup_json =
             serde_json::to_value(&google_setup.secrets[0]).expect("serialize setup secret");

@@ -18,6 +18,14 @@ import {
 // selection, `builtin`, and `api_key_set`. Overrides are no longer a separate
 // client-side merge — the backend resolves them — so `builtinOverrides` is kept
 // as an empty object purely for the shared helper signatures.
+//
+// Must be a stable reference: it is threaded down to the provider dialog's reset
+// effect dependency array, so a fresh `{}` each render would re-run that effect
+// on every parent re-render and wipe the in-progress form (the model the user
+// just picked, the base URL they typed). A frozen module-level singleton keeps
+// the identity constant across renders.
+const EMPTY_BUILTIN_OVERRIDES = Object.freeze({});
+
 export function useLlmProviders({ settings: _settings, gatewayStatus, enabled = true }) {
   const queryClient = useQueryClient();
   const providersQuery = useQuery({
@@ -35,7 +43,7 @@ export function useLlmProviders({ settings: _settings, gatewayStatus, enabled = 
   // "no LLM configured" — the provider may be set operator-side at boot — so
   // callers must not treat the failure as a reason to onboard.
   const isError = enabled && providersQuery.isError;
-  const builtinOverrides = {};
+  const builtinOverrides = EMPTY_BUILTIN_OVERRIDES;
   // Map the wire view onto the field names the components/helpers expect.
   const allProviders = (snapshot.providers || []).map((provider) => ({
     ...provider,

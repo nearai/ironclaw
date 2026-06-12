@@ -184,7 +184,7 @@ pub use reborn_services::{
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest,
     SkillsProductFacade, StaticConnectableChannelsProductFacade, StaticOperatorStatusService,
-    UnsupportedAutomationProductFacade, UnsupportedOperatorLogsService,
+    TriggerRunThreadScope, UnsupportedAutomationProductFacade, UnsupportedOperatorLogsService,
     UnsupportedOperatorServiceLifecycleService, UnsupportedOperatorStatusService,
     UnsupportedOutboundPreferencesProductFacade, UpsertLlmProviderRequest,
 };

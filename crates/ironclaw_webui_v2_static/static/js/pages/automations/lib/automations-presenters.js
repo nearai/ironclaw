@@ -241,7 +241,12 @@ function normalizeRuns(runs) {
         fired_label: formatAutomationDate(timestampSource, "Unscheduled"),
         submitted_label: formatAutomationDate(run?.submitted_at, "Not submitted"),
         completed_label: formatAutomationDate(run?.completed_at, "Not completed"),
-        chat_path: run?.thread_id ? `/chat/${encodeURIComponent(run.thread_id)}` : null,
+        // Only emit chat_path when a canonical thread_id is present. The backend sets
+        // thread_id only after fire acceptance; pre-acceptance and pre-submit-failure rows
+        // carry null/absent thread_id, which is falsy and suppresses the link.
+        chat_path: run?.thread_id
+          ? `/chat/${encodeURIComponent(run.thread_id)}`
+          : null,
       };
     })
     .sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0));

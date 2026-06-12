@@ -818,7 +818,11 @@ pub enum RebornAutomationRecentRunStatus {
 pub struct RebornAutomationRecentRunInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<TurnRunId>,
-    pub thread_id: ThreadId,
+    /// Canonical thread id for this run, or `None` if no canonical conversation
+    /// thread has been established yet (e.g. pre-acceptance or failed runs).
+    /// The WebUI panel must not render a chat link when this field is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<ThreadId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fire_slot: Option<DateTime<Utc>>,
     #[serde(default)]

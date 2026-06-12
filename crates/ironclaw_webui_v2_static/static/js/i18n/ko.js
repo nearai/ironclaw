@@ -195,6 +195,7 @@ registerPack("ko", {
   "settings.restartRequired": "일부 변경사항은 재시작이 필요합니다.",
   "settings.restartNow": "지금 다시 시작",
   "settings.restartStarting": "다시 시작 중...",
+  "settings.restartUnavailable": "웹 UI에서의 다시 시작은 아직 지원되지 않습니다. 대기 중인 변경 사항을 적용하려면 게이트웨이 프로세스를 수동으로 다시 시작하세요.",
 
   // Restart dialog
   "restart.title": "IronClaw 다시 시작",
@@ -272,6 +273,7 @@ registerPack("ko", {
   "onboarding.nearaiWaiting": "열린 탭에서 NEAR AI 로그인을 기다리는 중…",
   "onboarding.nearaiTimeout": "NEAR AI 로그인 시간이 초과되었습니다. 다시 시도해 주세요.",
   "onboarding.nearaiFailed": "NEAR AI 로그인에 실패했습니다. 다시 시도해 주세요.",
+  "onboarding.nearaiLocalSso": "브라우저 기반 NEAR AI 로그인(GitHub, Google, NEAR 지갑)은 localhost에서 지원되지 않습니다. NEAR AI가 로컬 콜백 URL을 거부하기 때문입니다. 대신 NEAR AI API 키를 추가하거나 공개 URL에서 실행하세요.",
   "onboarding.codexSignIn": "ChatGPT로 로그인",
   "onboarding.codexEnterCode": "승인하려면 열린 탭에 다음 코드를 입력하세요:",
   "onboarding.codexWaiting": "열린 탭에서 ChatGPT 승인을 기다리는 중…",

@@ -35,6 +35,17 @@ function findComponent(node, component) {
   return null;
 }
 
+function findNode(node, predicate) {
+  if (!node || typeof node !== "object") return null;
+  if (Array.isArray(node.strings) && predicate(node)) return node;
+  if (!Array.isArray(node.values)) return null;
+  for (const value of node.values) {
+    const found = findNode(value, predicate);
+    if (found) return found;
+  }
+  return null;
+}
+
 function componentProps(node, component) {
   const props = {};
   const start = node.values.indexOf(component);
@@ -183,6 +194,42 @@ test("Chat keeps composer cancel disabled while a gate owns the run decision", (
   const chatInput = findComponent(tree, components.ChatInput);
   const props = componentProps(chatInput, components.ChatInput);
   assert.equal(props.canCancel, false);
+});
+
+test("Chat renders a timeline load failure as an alert instead of the empty landing", () => {
+  const historyLoadError = "Failed to load conversation history.";
+  const { tree, components } = renderChat({
+    hookState: {
+      messages: [],
+      isProcessing: false,
+      pendingGate: null,
+      channelConnectAction: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      historyLoadError,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: null,
+      send: async () => ({}),
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+      dismissChannelConnectAction: () => {},
+    },
+  });
+
+  const alert = findNode(tree, (node) =>
+    node.strings.some((part) => part.includes('role="alert"')),
+  );
+  assert.ok(alert, "history load failure should render a role=alert banner");
+  assert.ok(alert.values.includes(historyLoadError));
+  assert.equal(findComponent(tree, components.EmptyState), null);
 });
 
 test("Chat deny gate callback routes through approve compatibility path", () => {

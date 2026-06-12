@@ -202,6 +202,7 @@ registerPack("en", {
   "settings.restartRequired": "Some changes require a restart to take effect.",
   "settings.restartNow": "Restart now",
   "settings.restartStarting": "Restarting...",
+  "settings.restartUnavailable": "Restart from the web UI isn't available yet. Restart the gateway process manually to apply pending changes.",
 
   // Restart dialog
   "restart.title": "Restart IronClaw",
@@ -279,6 +280,7 @@ registerPack("en", {
   "onboarding.nearaiWaiting": "Waiting for NEAR AI sign-in in the opened tab…",
   "onboarding.nearaiTimeout": "NEAR AI sign-in timed out. Please try again.",
   "onboarding.nearaiFailed": "NEAR AI sign-in failed. Please try again.",
+  "onboarding.nearaiLocalSso": "NEAR AI browser sign-in (GitHub, Google, NEAR Wallet) isn't supported on localhost — NEAR AI rejects local callback URLs. Add a NEAR AI API key instead, or run behind a public URL.",
   "onboarding.codexSignIn": "Sign in with ChatGPT",
   "onboarding.codexEnterCode": "Enter this code in the opened tab to authorize:",
   "onboarding.codexWaiting": "Waiting for ChatGPT authorization in the opened tab…",

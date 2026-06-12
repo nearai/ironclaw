@@ -200,6 +200,18 @@ function renderProviderManagement({ providers, activeProviderId = "nearai", sear
   return { rendered, cardProps };
 }
 
+function evalIsLocalDevOrigin({ hostname }) {
+  const context = { globalThis: {} };
+  if (hostname !== undefined) {
+    context.window = { location: { hostname } };
+  }
+  vm.runInNewContext(
+    sourceForTest("../hooks/useProviderLogin.js", ["isLocalDevOrigin"]),
+    context
+  );
+  return context.globalThis.__testExports.isLocalDevOrigin();
+}
+
 function groupLabels(rendered) {
   return collectScalars(rendered).filter((value) => PROVIDER_GROUP_LABELS.includes(value));
 }
@@ -593,4 +605,120 @@ test("NearAiSetupMenu closes the setup dropdown on Escape", () => {
 
   harness.state.listeners.keydown({ key: "Escape" });
   assert.equal(harness.state.open, false);
+});
+
+test("isLocalDevOrigin detects loopback origins so NEAR AI SSO fails fast there", () => {
+  assert.equal(evalIsLocalDevOrigin({ hostname: "localhost" }), true);
+  assert.equal(evalIsLocalDevOrigin({ hostname: "127.0.0.1" }), true);
+  // The whole 127.0.0.0/8 block is loopback, not just 127.0.0.1.
+  assert.equal(evalIsLocalDevOrigin({ hostname: "127.0.1.1" }), true);
+  assert.equal(evalIsLocalDevOrigin({ hostname: "127.255.255.254" }), true);
+  assert.equal(evalIsLocalDevOrigin({ hostname: "::1" }), true);
+  assert.equal(evalIsLocalDevOrigin({ hostname: "api.localhost" }), true);
+  assert.equal(evalIsLocalDevOrigin({ hostname: "app.example.com" }), false);
+  assert.equal(evalIsLocalDevOrigin({ hostname: "192.168.1.50" }), false);
+  // No window (SSR / non-browser): never treat as local.
+  assert.equal(evalIsLocalDevOrigin({ hostname: undefined }), false);
+});
+
+// Drive the real useProviderLogin hook in a VM with a minimal React stub so we
+// can assert caller behavior (per .claude/rules/testing.md "Test Through the
+// Caller"): isLocalDevOrigin gates the NEAR AI login HTTP call, not just a
+// helper return value. setTimeout fires synchronously so the remote-origin
+// control path's poll resolves immediately.
+function runProviderLogin({ hostname, activeProviderId = null }) {
+  const stateLog = [];
+  const httpCalls = [];
+  let stateIndex = 0;
+  const context = {
+    console,
+    Date,
+    Math,
+    Promise,
+    setTimeout: (cb) => {
+      cb();
+      return 0;
+    },
+    clearTimeout: () => {},
+    setInterval: () => 0,
+    clearInterval: () => {},
+    React: {
+      useState(init) {
+        const idx = stateIndex++;
+        return [init, (value) => stateLog.push({ idx, value })];
+      },
+      useCallback: (fn) => fn,
+      useRef: (init) => ({ current: init }),
+    },
+    useT: () => (key) => key,
+    useQueryClient: () => ({ invalidateQueries: async () => {} }),
+    startNearaiLogin: async () => {
+      httpCalls.push("startNearaiLogin");
+      return { auth_url: "http://auth.example" };
+    },
+    completeNearaiWalletLogin: async () => {
+      httpCalls.push("completeNearaiWalletLogin");
+      return {};
+    },
+    fetchLlmProviders: async () => ({
+      active: activeProviderId ? { provider_id: activeProviderId } : null,
+    }),
+    startCodexLogin: async () => ({ user_code: "c", verification_uri: "http://v" }),
+    window: {
+      location: { hostname, origin: `http://${hostname}` },
+      open: () => {
+        httpCalls.push("open");
+        // A usable popup handle for the synchronous-open + sever-opener +
+        // navigate pattern: a settable location/opener and a no-op close.
+        return { location: { href: "" }, opener: null, closed: false, close() {} };
+      },
+      crypto: { randomUUID: () => "uuid" },
+    },
+  };
+  context.globalThis = context;
+  vm.runInNewContext(
+    sourceForTest("../hooks/useProviderLogin.js", ["useProviderLogin"]),
+    context
+  );
+  // nearaiError is the 2nd useState (index 1).
+  const NEARAI_ERROR_SLOT = 1;
+  const NEARAI_BUSY_SLOT = 0;
+  return {
+    hook: context.globalThis.__testExports.useProviderLogin({}),
+    httpCalls,
+    nearaiErrors: () =>
+      stateLog.filter((e) => e.idx === NEARAI_ERROR_SLOT).map((e) => e.value),
+    busySetTrue: () =>
+      stateLog.some((e) => e.idx === NEARAI_BUSY_SLOT && e.value === true),
+  };
+}
+
+test("startNearai bails on a loopback origin without firing the login HTTP call", async () => {
+  const run = runProviderLogin({ hostname: "localhost" });
+  await run.hook.startNearai("github");
+  assert.deepEqual(run.httpCalls, [], "no login request and no tab opened");
+  assert.ok(
+    run.nearaiErrors().includes("onboarding.nearaiLocalSso"),
+    "surfaces the translated local-SSO notice"
+  );
+  assert.equal(run.busySetTrue(), false, "never enters the busy state");
+});
+
+test("startNearaiWallet proceeds on a loopback origin (wallet is not hosted SSO)", async () => {
+  // Wallet login signs in a same-origin popup and relays through our backend —
+  // it does not use a NEAR AI frontend_callback redirect, so the localhost
+  // guard must NOT apply (unlike GitHub/Google SSO).
+  const run = runProviderLogin({ hostname: "127.0.0.1" });
+  await run.hook.startNearaiWallet();
+  assert.ok(run.httpCalls.includes("open"), "wallet popup opens on localhost");
+  assert.ok(
+    !run.nearaiErrors().includes("onboarding.nearaiLocalSso"),
+    "no hosted-SSO local block for the wallet path"
+  );
+});
+
+test("startNearai fires the login HTTP call on a remote origin (predicate is the gate)", async () => {
+  const run = runProviderLogin({ hostname: "app.example.com", activeProviderId: "nearai" });
+  await run.hook.startNearai("github");
+  assert.ok(run.httpCalls.includes("startNearaiLogin"), "remote origin proceeds to login");
 });

@@ -145,11 +145,25 @@ export function useChatEvents({
           return;
         }
 
-        case "cancelled":
-        case "failed": {
+        case "cancelled": {
           setPendingGate(null);
           setIsProcessing(false);
           setActiveRun?.(null);
+          return;
+        }
+
+        case "failed": {
+          const runState = frame.run_state || {};
+          const runId = runState.run_id || activeRunRef?.current?.runId || null;
+          setPendingGate(null);
+          setIsProcessing(false);
+          setActiveRun?.(null);
+          appendRunFailureMessage(setMessages, {
+            runId,
+            status: runState.status || "failed",
+            failureCategory: failureCategoryFromRunState(runState),
+            failureSummary: null,
+          });
           return;
         }
 
@@ -313,36 +327,11 @@ function applyProjectionItems({
           onRunCompleted(runId);
         }
         if (status === "failed" || status === "recovery_required") {
-          // Dedup by `err-<runId>` so replays of the same projection
-          // (SSE reconnect with `last-event-id`, or repeated updates
-          // carrying the same terminal status) collapse to one
-          // bubble instead of stacking.
-          const messageId = `err-${runId || "unknown"}`;
-          setMessages((prev) => {
-            const existing = prev.findIndex((m) => m.id === messageId);
-            const content = failureMessageForRunStatus({
-              status,
-              failureCategory,
-              failureSummary,
-            });
-            if (existing >= 0) {
-              if (!failureSummary || prev[existing].content === content) return prev;
-              const next = [...prev];
-              next[existing] = {
-                ...next[existing],
-                content,
-              };
-              return next;
-            }
-            return [
-              ...prev,
-              {
-                id: messageId,
-                role: "error",
-                content,
-                timestamp: new Date().toISOString(),
-              },
-            ];
+          appendRunFailureMessage(setMessages, {
+            runId,
+            status,
+            failureCategory,
+            failureSummary,
           });
         }
       } else if (!PROMPT_RUN_STATUSES.has(status)) {
@@ -456,6 +445,56 @@ function applyProjectionItems({
   if (latestRunIdRef && activeRunId) {
     latestRunIdRef.current = activeRunId;
   }
+}
+
+function failureCategoryFromRunState(runState) {
+  const failure = runState?.failure;
+  if (typeof failure === "string" && failure.trim()) return failure.trim();
+  if (
+    failure &&
+    typeof failure === "object" &&
+    typeof failure.category === "string" &&
+    failure.category.trim()
+  ) {
+    return failure.category.trim();
+  }
+  return null;
+}
+
+function appendRunFailureMessage(
+  setMessages,
+  { runId, status, failureCategory, failureSummary },
+) {
+  // Dedup by `err-<runId>` so replays of the same projection
+  // (SSE reconnect with `last-event-id`, or repeated updates carrying
+  // the same terminal status) collapse to one bubble instead of stacking.
+  const messageId = `err-${runId || "unknown"}`;
+  setMessages((prev) => {
+    const existing = prev.findIndex((m) => m.id === messageId);
+    const content = failureMessageForRunStatus({
+      status,
+      failureCategory,
+      failureSummary,
+    });
+    if (existing >= 0) {
+      if (!failureSummary || prev[existing].content === content) return prev;
+      const next = [...prev];
+      next[existing] = {
+        ...next[existing],
+        content,
+      };
+      return next;
+    }
+    return [
+      ...prev,
+      {
+        id: messageId,
+        role: "error",
+        content,
+        timestamp: new Date().toISOString(),
+      },
+    ];
+  });
 }
 
 function upsertToolFromPreview(setMessages, invocationId, card) {

@@ -10,6 +10,11 @@ export function useHistory(threadId, options = {}) {
     messages: [],
     nextCursor: null,
     isLoading: false,
+    // Non-null when an initial or cursor-load failed. Reset to null on a
+    // successful load or when the threadId changes. The chat page renders
+    // this as a user-visible error banner so timeline failures are never
+    // silently swallowed.
+    loadError: null,
   });
   // Synchronous reentrancy guard — `isLoading` in state is async so
   // it can't gate overlapping calls (scroll-to-load + onRunCompleted
@@ -21,7 +26,7 @@ export function useHistory(threadId, options = {}) {
   const loadHistory = React.useCallback(
     async (cursor) => {
       if (!threadId) {
-        setState({ messages: [], nextCursor: null, isLoading: false });
+        setState({ messages: [], nextCursor: null, isLoading: false, loadError: null });
         return;
       }
       if (loadingRef.current) return;
@@ -49,13 +54,16 @@ export function useHistory(threadId, options = {}) {
             messages: merged,
             nextCursor: data.next_cursor || null,
             isLoading: false,
+            loadError: null,
           };
         });
       } catch (err) {
-        setState((s) => ({ ...s, isLoading: false }));
-        // Stay loud — surface to the SPA error boundary rather than
-        // silently masking timeline outages.
         console.error("Failed to load timeline:", err);
+        setState((s) => ({
+          ...s,
+          isLoading: false,
+          loadError: "Failed to load conversation history.",
+        }));
       } finally {
         loadingRef.current = false;
       }
@@ -68,6 +76,7 @@ export function useHistory(threadId, options = {}) {
       messages: [],
       nextCursor: null,
       isLoading: Boolean(threadId),
+      loadError: null,
     });
     if (threadId) loadHistory();
   }, [threadId, loadHistory]);
@@ -77,6 +86,7 @@ export function useHistory(threadId, options = {}) {
     hasMore: Boolean(state.nextCursor),
     nextCursor: state.nextCursor,
     isLoading: state.isLoading,
+    loadError: state.loadError,
     loadHistory,
     setMessages: (updater) =>
       setState((s) => ({
