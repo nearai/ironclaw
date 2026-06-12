@@ -1072,6 +1072,7 @@ mod tests {
             (ProductRejectionKind::UnknownInstallation, "workspace"),
             (ProductRejectionKind::InvalidRequest, "approve"),
             (ProductRejectionKind::PolicyDenied, "policy"),
+            (ProductRejectionKind::AmbiguousResolution, "approve gate:"),
         ];
         for (kind, expected_substr) in &cases {
             let hint = kind.user_facing_hint();
@@ -1119,6 +1120,13 @@ mod tests {
         assert!(
             !invalid_hint.contains("approve"),
             "InvalidRequest auth hint must not contain approval command, got: {invalid_hint}"
+        );
+
+        // AmbiguousResolution must also return auth-specific guidance, not approval text.
+        let ambiguous_hint = ProductRejectionKind::AmbiguousResolution.user_facing_auth_hint();
+        assert!(
+            ambiguous_hint.contains("auth deny"),
+            "AmbiguousResolution auth hint must reference 'auth deny', got: {ambiguous_hint}"
         );
 
         // All other kinds fall through to user_facing_hint().

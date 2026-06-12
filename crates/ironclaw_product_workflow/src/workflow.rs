@@ -419,6 +419,13 @@ async fn delivered_route_base_binding(
     envelope: &ProductInboundEnvelope,
     binding_service: &dyn ConversationBindingService,
 ) -> Option<ResolvedBinding> {
+    // AUTHZ INVARIANT: the returned binding's `actor_user_id` is the
+    // authenticated external actor resolved by the pairing/binding service
+    // (never a shared subject or an agent user). `load_delivered_routes_for_envelope`
+    // filters routes using `binding.actor_user_id`, and the authorization of
+    // the delivered-route fallback depends on this invariant holding. The
+    // interaction services remain the resolution authority for the downstream
+    // approve/deny operation.
     let request = match direct_base_binding_request(resolve_binding_request(envelope)) {
         Ok(request) => request,
         Err(error) => {
@@ -435,7 +442,7 @@ async fn delivered_route_base_binding(
             debug!(
                 error = %error,
                 "delivered gate route fallback skipped because base binding was not resolved"
-            );
+            ); // silent-ok: best-effort fallback lookup; original rejection still surfaces to the user
             None
         }
     }
@@ -495,6 +502,13 @@ async fn load_delivered_routes_for_envelope(
             if r.is_expired(now) {
                 return false;
             }
+            // AUTHZ INVARIANT: `binding.actor_user_id` is the authenticated
+            // external actor resolved by the pairing/binding service (see
+            // `delivered_route_base_binding`). This filter's authorization
+            // depends on that invariant: only routes owned by the authenticated
+            // actor are eligible. The inner interaction services remain the
+            // resolution authority for the downstream approve/deny operation.
+            //
             // A non-owner actor in a shared conversation (e.g. a third party
             // typing "approve" in a channel where a gate prompt was delivered)
             // reaches this lookup and is dropped here without user-facing
@@ -539,7 +553,6 @@ async fn resolve_via_delivered_approval_route(
     approval_interaction_service: &dyn ApprovalInteractionService,
     decision: ApprovalInteractionDecision,
     action_fingerprint: &ActionFingerprintKey,
-    dispatch_kind: ActionDispatchKind,
     expected_gate_ref: Option<&str>,
     pre_resolved_binding: Option<&ResolvedBinding>,
 ) -> Option<Result<DispatchedAction, ProductWorkflowError>> {
@@ -601,6 +614,10 @@ async fn resolve_via_delivered_approval_route(
         Err(error) => return Some(Err(error)),
     };
     let submitted_run_id = run_id_from_approval_resolution(response);
+    let dispatch_kind = match ActionDispatchKind::try_from_payload(envelope.payload()) {
+        Ok(kind) => kind,
+        Err(error) => return Some(Err(error)),
+    };
     Some(
         interaction_accepted_message_ref("approval", envelope).map(|accepted_message_ref| {
             DispatchedAction {
@@ -864,7 +881,6 @@ async fn dispatch_approval_resolution(
                 approval_interaction_service,
                 decision,
                 &action_fingerprint,
-                ActionDispatchKind::try_from_payload(envelope.payload())?,
                 Some(payload.gate_ref.as_str()),
                 None,
             )
@@ -923,7 +939,6 @@ async fn dispatch_scoped_approval_resolution(
                 approval_interaction_service,
                 decision,
                 &action_fingerprint,
-                ActionDispatchKind::ScopedApprovalResolution,
                 None,
                 None,
             )
@@ -953,7 +968,6 @@ async fn dispatch_scoped_approval_resolution(
                 approval_interaction_service,
                 decision,
                 &action_fingerprint,
-                ActionDispatchKind::ScopedApprovalResolution,
                 None,
                 Some(&binding),
             )

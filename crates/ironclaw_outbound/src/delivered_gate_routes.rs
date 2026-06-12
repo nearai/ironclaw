@@ -179,14 +179,14 @@ pub trait DeliveredGateRouteStore: Send + Sync {
 ///
 /// `conversation_index` is one-to-many: a single conversation fingerprint can
 /// map to multiple route keys when a user has more than one pending gate
-/// delivered to the same Slack DM/channel. `reverse_conv_index` tracks which
+/// delivered to the same Slack DM/channel. `reverse_conversation_index` tracks which
 /// conversation keys each route key owns so that removing one route touches
 /// only its own entries in the shared conversation slot.
 #[derive(Default)]
 pub struct InMemoryDeliveredGateRouteStore {
     records: Mutex<HashMap<RouteKey, DeliveredGateRouteRecord>>,
     conversation_index: Mutex<HashMap<ConversationIndexKey, BTreeSet<RouteKey>>>,
-    reverse_conv_index: Mutex<HashMap<RouteKey, Vec<ConversationIndexKey>>>,
+    reverse_conversation_index: Mutex<HashMap<RouteKey, Vec<ConversationIndexKey>>>,
 }
 
 #[async_trait::async_trait]
@@ -209,24 +209,19 @@ impl DeliveredGateRouteStore for InMemoryDeliveredGateRouteStore {
             .conversation_index
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut reverse_conv_index = self
-            .reverse_conv_index
+        let mut reverse_conversation_index = self
+            .reverse_conversation_index
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         // Remove this route's old conversation index entries (idempotent
         // re-record: replace old finger- prints without touching sibling
         // routes that share any of the same conversation slots).
-        if let Some(old_conv_keys) = reverse_conv_index.remove(&key) {
-            for old_conv_key in old_conv_keys {
-                if let Some(slot) = conversation_index.get_mut(&old_conv_key) {
-                    slot.remove(&key);
-                    if slot.is_empty() {
-                        conversation_index.remove(&old_conv_key);
-                    }
-                }
-            }
-        }
+        remove_key_from_conversation_indexes(
+            &key,
+            &mut conversation_index,
+            &mut reverse_conversation_index,
+        );
 
         records.insert(key.clone(), record);
         for conversation_key in conversation_keys {
@@ -234,7 +229,7 @@ impl DeliveredGateRouteStore for InMemoryDeliveredGateRouteStore {
                 .entry(conversation_key.clone())
                 .or_default()
                 .insert(key.clone());
-            reverse_conv_index
+            reverse_conversation_index
                 .entry(key.clone())
                 .or_default()
                 .push(conversation_key);
@@ -300,22 +295,17 @@ impl DeliveredGateRouteStore for InMemoryDeliveredGateRouteStore {
             .conversation_index
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut reverse_conv_index = self
-            .reverse_conv_index
+        let mut reverse_conversation_index = self
+            .reverse_conversation_index
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         records.remove(&key);
-        if let Some(old_conv_keys) = reverse_conv_index.remove(&key) {
-            for old_conv_key in old_conv_keys {
-                if let Some(slot) = conversation_index.get_mut(&old_conv_key) {
-                    slot.remove(&key);
-                    if slot.is_empty() {
-                        conversation_index.remove(&old_conv_key);
-                    }
-                }
-            }
-        }
+        remove_key_from_conversation_indexes(
+            &key,
+            &mut conversation_index,
+            &mut reverse_conversation_index,
+        );
         Ok(())
     }
 
@@ -331,8 +321,8 @@ impl DeliveredGateRouteStore for InMemoryDeliveredGateRouteStore {
             .conversation_index
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut reverse_conv_index = self
-            .reverse_conv_index
+        let mut reverse_conversation_index = self
+            .reverse_conversation_index
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let before = records.len();
@@ -342,27 +332,49 @@ impl DeliveredGateRouteStore for InMemoryDeliveredGateRouteStore {
             .collect();
         for key in &expired_keys {
             records.remove(key);
-            if let Some(old_conv_keys) = reverse_conv_index.remove(key) {
-                for old_conv_key in old_conv_keys {
-                    if let Some(slot) = conversation_index.get_mut(&old_conv_key) {
-                        slot.remove(key);
-                        if slot.is_empty() {
-                            conversation_index.remove(&old_conv_key);
-                        }
-                    }
-                }
-            }
+            remove_key_from_conversation_indexes(
+                key,
+                &mut conversation_index,
+                &mut reverse_conversation_index,
+            );
         }
         Ok(before - records.len())
     }
 }
 
+/// Remove all conversation-index entries owned by `key`.
+///
+/// Removes `key` from `reverse_conversation_index`, then for each
+/// conversation slot that `key` owned, removes `key` from the
+/// `conversation_index` slot and drops the slot when it becomes empty.
+/// This is the single authoritative implementation shared by
+/// `record_delivered_gate_route` (idempotent re-record cleanup),
+/// `remove_delivered_gate_route`, and `sweep_expired_delivered_gate_routes`.
+fn remove_key_from_conversation_indexes(
+    key: &RouteKey,
+    conversation_index: &mut HashMap<ConversationIndexKey, BTreeSet<RouteKey>>,
+    reverse_conversation_index: &mut HashMap<RouteKey, Vec<ConversationIndexKey>>,
+) {
+    if let Some(old_conv_keys) = reverse_conversation_index.remove(key) {
+        for old_conv_key in old_conv_keys {
+            if let Some(slot) = conversation_index.get_mut(&old_conv_key) {
+                slot.remove(key);
+                if slot.is_empty() {
+                    conversation_index.remove(&old_conv_key);
+                }
+            }
+        }
+    }
+}
+
 fn conversation_keys_for_record(record: &DeliveredGateRouteRecord) -> Vec<ConversationIndexKey> {
-    let mut keys = Vec::new();
+    use std::collections::HashSet;
+    let mut seen: HashSet<ConversationIndexKey> = HashSet::new();
+    let mut keys: Vec<ConversationIndexKey> = Vec::new();
     for conversation_fingerprint in &record.delivered_conversation_fingerprints {
         let key =
             ConversationIndexKey::new(record.tenant_id.clone(), conversation_fingerprint.clone());
-        if !keys.iter().any(|existing| existing == &key) {
+        if seen.insert(key.clone()) {
             keys.push(key);
         }
     }

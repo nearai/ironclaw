@@ -1092,20 +1092,30 @@ where
         let path = delivered_gate_route_path(tenant_id, user_id, gate_ref)
             .map_err(|e| format!("delivered gate route path: {e}"))?;
         let resource_scope = delivered_gate_route_resource_scope(tenant_id, user_id);
-        if let Some(old_record) = self
+        // Read the old record first so we know which conversation indexes to
+        // clean up. Then delete the primary record, then remove the indexes.
+        //
+        // This order is deliberate: a crash between the primary delete and the
+        // index cleanup leaves a dangling index entry pointing at a record that
+        // no longer exists. The lookup's membership check turns that into a
+        // harmless miss. The inverse order (delete indexes first) would leave a
+        // primary record with no index, silently disabling bare-reply routing —
+        // the worse failure mode.
+        let old_record = self
             .get_json::<DeliveredGateRouteRecord>(&resource_scope, &path)
             .await
-            .map_err(|e| format!("delivered gate route read before delete: {e}"))?
-        {
+            .map_err(|e| format!("delivered gate route read before delete: {e}"))?;
+        match self.filesystem.delete(&resource_scope, &path).await {
+            Ok(()) => {}
+            Err(FilesystemError::NotFound { .. }) => {}
+            Err(e) => return Err(format!("delivered gate route delete: {e}")),
+        }
+        if let Some(old_record) = old_record {
             let fingerprints: Vec<String> = old_record.delivered_conversation_fingerprints.to_vec();
             self.delete_delivered_gate_route_conversation_indexes(&old_record, &fingerprints)
                 .await?;
         }
-        match self.filesystem.delete(&resource_scope, &path).await {
-            Ok(()) => Ok(()),
-            Err(FilesystemError::NotFound { .. }) => Ok(()),
-            Err(e) => Err(format!("delivered gate route delete: {e}")),
-        }
+        Ok(())
     }
 
     /// Sweep expired route records from the filesystem store.
@@ -1563,6 +1573,113 @@ mod tests {
             .await
             .expect("lookup must not error");
         assert!(!hit.is_empty(), "delivered conversation must still resolve");
+    }
+
+    #[tokio::test]
+    async fn filesystem_gate_route_post_write_pre_cleanup_dangling_index_is_harmless_miss() {
+        // Simulates the crash window inside `remove_delivered_gate_route`:
+        // the primary record has been deleted (route B is gone) but the OLD
+        // conversation-index for conversation A still points at it.  A lookup
+        // by conversation A must return empty (membership check: record is
+        // absent → miss), and a lookup by conversation B (the one the updated
+        // record was delivered to) must also return empty after the primary is
+        // gone.
+        //
+        // Concrete scenario:
+        //   1. Record route for (tenant, user, gate) delivered to conv_a.
+        //   2. Update the same key to conv_b; conv_a index is cleaned up by the
+        //      store (normal overwrite path).
+        //   3. Simulate the crash: raw-write the OLD conv_a index back so it
+        //      again points at the record (which now only lists conv_b).
+        //   4. Assert conv_a lookup is a miss (membership check filters it out).
+        //   5. Assert conv_b lookup returns the route.
+        let tenant_id = TenantId::new("fs-crash-window-tenant").expect("tenant");
+        let user_id = UserId::new("fs-crash-window-user").expect("user");
+        let thread_id = ThreadId::new("fs-crash-window-thread").expect("thread");
+        let gate_ref = "gate:fs-crash-window-001";
+        let conv_a = gate_route_conversation_fingerprint("thread-crash-a");
+        let conv_b = gate_route_conversation_fingerprint("thread-crash-b");
+
+        let store = build_gate_route_store(&tenant_id, &user_id);
+        let scope = TurnScope::new_with_owner(
+            tenant_id.clone(),
+            None,
+            None,
+            thread_id,
+            Some(user_id.clone()),
+        );
+
+        // Step 1: record the route delivered to conv_a.
+        let mut record_a = gate_route_record(
+            tenant_id.clone(),
+            user_id.clone(),
+            gate_ref,
+            TurnRunId::new(),
+            scope.clone(),
+        );
+        record_a.delivered_conversation_fingerprints = vec![conv_a.clone()];
+        store
+            .record_delivered_gate_route(record_a.clone())
+            .await
+            .expect("initial record must succeed");
+
+        // Step 2: overwrite the route with conv_b (normal path; conv_a index is cleaned).
+        let mut record_b = gate_route_record(
+            tenant_id.clone(),
+            user_id.clone(),
+            gate_ref,
+            TurnRunId::new(),
+            scope.clone(),
+        );
+        record_b.delivered_conversation_fingerprints = vec![conv_b.clone()];
+        store
+            .record_delivered_gate_route(record_b.clone())
+            .await
+            .expect("overwrite to conv_b must succeed");
+
+        // Confirm conv_b is live and conv_a is gone after the normal overwrite.
+        let before_crash = store
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &conv_a)
+            .await
+            .expect("lookup must not error");
+        assert!(
+            before_crash.is_empty(),
+            "conv_a must be gone after overwrite to conv_b"
+        );
+
+        // Step 3: simulate the crash window by injecting a dangling conv_a index
+        // back (mirrors the pattern from filesystem_gate_route_stale_conversation_index_is_harmless_miss).
+        // record_a still lists conv_a, so write_delivered_gate_route_conversation_indexes
+        // re-adds the conv_a index even though the primary record now lists conv_b.
+        store
+            .write_delivered_gate_route_conversation_indexes(&record_a)
+            .await
+            .expect("raw index injection must succeed");
+
+        // Step 4: conv_a lookup must be a miss — the primary record lists conv_b,
+        // so the membership check filters out the dangling index.
+        let after_crash_a = store
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &conv_a)
+            .await
+            .expect("lookup must not error");
+        assert!(
+            after_crash_a.is_empty(),
+            "dangling conv_a index after crash must be a miss, not a route"
+        );
+
+        // Step 5: conv_b lookup must still return the live route.
+        let after_crash_b = store
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &conv_b)
+            .await
+            .expect("lookup must not error");
+        assert!(
+            !after_crash_b.is_empty(),
+            "conv_b must still resolve after crash-window injection"
+        );
+        assert_eq!(
+            after_crash_b[0].gate_ref, gate_ref,
+            "conv_b route must match the recorded gate_ref"
+        );
     }
 
     #[tokio::test]
