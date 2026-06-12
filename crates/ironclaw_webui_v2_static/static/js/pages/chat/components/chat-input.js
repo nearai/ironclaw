@@ -2,6 +2,7 @@ import { Icon } from "../../../design-system/icons.js";
 import { Button } from "../../../design-system/button.js";
 import { React, html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
+import { authScope } from "../../../lib/auth-scope.js";
 import {
   NEW_DRAFT_KEY,
   clearDraft,
@@ -32,10 +33,10 @@ export function ChatInput({
 
   // Debounce draft persistence: localStorage writes are synchronous and
   // disk-backed, so writing on every keystroke can add typing latency. We
-  // hold the latest {key, text} and flush after a short idle, but also flush
-  // immediately on unmount / thread switch so navigating away never drops the
-  // last keystrokes, and cancel outright on send so a queued write can't
-  // resurrect a just-sent draft.
+  // hold the latest {key, text, scope} and flush after a short idle, but also
+  // flush immediately on unmount / thread switch so navigating away never
+  // drops the last keystrokes, and cancel outright on send so a queued write
+  // can't resurrect a just-sent draft.
   const pendingDraftRef = React.useRef(null);
   const draftTimerRef = React.useRef(null);
   const flushDraft = React.useCallback(() => {
@@ -43,9 +44,14 @@ export function ChatInput({
       window.clearTimeout(draftTimerRef.current);
       draftTimerRef.current = null;
     }
-    if (pendingDraftRef.current) {
-      setDraft(pendingDraftRef.current.key, pendingDraftRef.current.text);
-      pendingDraftRef.current = null;
+    const pending = pendingDraftRef.current;
+    pendingDraftRef.current = null;
+    // Drop the write if the authenticated identity changed since the draft
+    // was queued (sign-out / 401 / token swap). Otherwise a flush triggered
+    // by the unmount during auth teardown would re-persist the previous
+    // user's text after the caches were purged.
+    if (pending && pending.scope === authScope()) {
+      setDraft(pending.key, pending.text);
     }
   }, []);
   const cancelPendingDraft = React.useCallback(() => {
@@ -123,7 +129,8 @@ export function ChatInput({
       const next = e.target.value;
       setText(next);
       // Queue a debounced persist instead of writing on every keystroke.
-      pendingDraftRef.current = { key: draftKey, text: next };
+      // Capture the scope so a flush after an identity change is dropped.
+      pendingDraftRef.current = { key: draftKey, text: next, scope: authScope() };
       if (draftTimerRef.current) window.clearTimeout(draftTimerRef.current);
       draftTimerRef.current = window.setTimeout(flushDraft, 300);
     },

@@ -7,7 +7,7 @@ import {
   readStoredToken,
   storeToken,
 } from "../lib/api.js";
-import { setAuthScope } from "../lib/auth-scope.js";
+import { authScope, setAuthScope } from "../lib/auth-scope.js";
 import { clearHistoryCache } from "../pages/chat/hooks/useHistory.js";
 import { clearAllDrafts } from "../pages/chat/lib/draft-store.js";
 
@@ -193,12 +193,22 @@ export function useAuthSession() {
     };
   }, [token, isExchanging]);
 
-  // Mirror the resolved identity into the cache scope so per-session client
-  // state (history cache, drafts) is namespaced by user. Covers every
-  // session transition, not just explicit sign-out: login, token swap, and
-  // 401 re-auth all flow through `session`.
+  // Mirror the resolved identity into the cache scope and purge the previous
+  // identity's per-session client state (history cache, drafts) whenever the
+  // authenticated identity is invalidated or replaced. This covers every
+  // teardown path, not just the explicit sign-out button: a 401/403 from
+  // `fetchSession` and a token swap both flow through `session` here.
+  // Namespacing already isolates reads by identity; this also frees the
+  // stale entries so they never linger.
+  const lastScopeRef = React.useRef(null);
   React.useEffect(() => {
     setAuthScope(session);
+    const nextScope = authScope();
+    if (lastScopeRef.current !== null && lastScopeRef.current !== nextScope) {
+      clearHistoryCache();
+      clearAllDrafts();
+    }
+    lastScopeRef.current = nextScope;
   }, [session]);
 
   const signIn = React.useCallback((nextToken) => {
@@ -223,11 +233,8 @@ export function useAuthSession() {
     setSession(null);
     setError("");
     queryClient.clear();
-    // Drop per-session client state so a different user signing in on the
-    // same tab (no full reload) can't observe the previous session's cached
-    // conversations or unsent drafts.
-    clearHistoryCache();
-    clearAllDrafts();
+    // Per-session client state (history cache, drafts) is purged by the
+    // identity-change effect above when `session` drops to null.
   }, []);
 
   return {
