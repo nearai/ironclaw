@@ -4931,6 +4931,9 @@ mod tests {
         .expect("runtime send should finish")
         .expect("runtime send should succeed");
         assert_eq!(reply.status, TurnStatus::Completed);
+        // Shut down before inspecting the recorded callbacks so the std-Mutex
+        // guards are never held across an `.await` (clippy::await_holding_lock).
+        runtime.shutdown().await.expect("runtime shutdown");
 
         let echo_id = CapabilityId::new("builtin.echo").unwrap();
 
@@ -4957,8 +4960,6 @@ mod tests {
             output.to_string().contains("hello from tool"),
             "observer should receive the staged capability output, got {output}"
         );
-
-        runtime.shutdown().await.expect("runtime shutdown");
     }
 
     /// Caller-level guard for the **default** (safe-preview) observer path:
@@ -5000,6 +5001,9 @@ mod tests {
         .expect("runtime send should finish")
         .expect("runtime send should succeed");
         assert_eq!(reply.status, TurnStatus::Completed);
+        // Shut down before inspecting the recorded callbacks so the std-Mutex
+        // guards are never held across an `.await` (clippy::await_holding_lock).
+        runtime.shutdown().await.expect("runtime shutdown");
 
         let original_len = LARGE_ECHO_MESSAGE.repeat(100).len();
 
@@ -5018,8 +5022,6 @@ mod tests {
             results[0].2.to_string().contains("[truncated"),
             "observer should receive a truncated preview of the large result"
         );
-
-        runtime.shutdown().await.expect("runtime shutdown");
     }
 
     #[tokio::test]
