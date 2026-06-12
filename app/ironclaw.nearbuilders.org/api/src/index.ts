@@ -1,120 +1,17 @@
-import { and, count, desc, eq } from "drizzle-orm";
+import { count, desc, eq } from "drizzle-orm";
 import { createPlugin } from "every-plugin";
 import { Effect } from "every-plugin/effect";
-import { MemoryPublisher } from "every-plugin/orpc";
+import { ORPCError } from "every-plugin/orpc";
 import { z } from "every-plugin/zod";
-import { contract, type VoteEventSchema } from "./contract";
+import { contract } from "./contract";
 import { loadMigrations } from "./db/load-migrations";
 import { migrate } from "./db/migrator";
-import { upvotes } from "./db/schema";
+import { registrations, submissions } from "./db/schema";
 import { createAuthMiddleware } from "./lib/auth";
 import type { PluginsClient } from "./lib/plugins-types.gen";
 
-type VoteEventDetail = z.infer<typeof VoteEventSchema>;
-
-type VoteEvents = {
-  vote: VoteEventDetail;
-};
-
 function generateId(): string {
-  return `uv_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-}
-
-function createUpvoteService(db: any, publisher: MemoryPublisher<VoteEvents>) {
-  return {
-    async upvoteThing(thingId: string, userId: string) {
-      try {
-        await db.insert(upvotes).values({
-          id: generateId(),
-          thingId,
-          userId,
-        });
-      } catch {
-        // unique constraint violation — already upvoted
-      }
-
-      const [result] = await db
-        .select({ count: count() })
-        .from(upvotes)
-        .where(eq(upvotes.thingId, thingId));
-
-      const totalCount = result?.count ?? 0;
-
-      await publisher.publish("vote", {
-        type: "upvote",
-        thingId,
-        userId,
-        timestamp: new Date().toISOString(),
-        totalCount,
-      });
-
-      return { thingId, userId, totalCount };
-    },
-
-    async downvoteThing(thingId: string, userId: string) {
-      await db.delete(upvotes).where(and(eq(upvotes.thingId, thingId), eq(upvotes.userId, userId)));
-
-      const [result] = await db
-        .select({ count: count() })
-        .from(upvotes)
-        .where(eq(upvotes.thingId, thingId));
-
-      const totalCount = result?.count ?? 0;
-
-      await publisher.publish("vote", {
-        type: "downvote",
-        thingId,
-        userId,
-        timestamp: new Date().toISOString(),
-        totalCount,
-      });
-
-      return { thingId, totalCount };
-    },
-
-    async getUpvoteCount(thingId: string) {
-      const [result] = await db
-        .select({ count: count() })
-        .from(upvotes)
-        .where(eq(upvotes.thingId, thingId));
-
-      return { thingId, totalCount: result?.count ?? 0 };
-    },
-
-    async getUserVote(thingId: string, userId: string) {
-      const [result] = await db
-        .select({ count: count() })
-        .from(upvotes)
-        .where(and(eq(upvotes.thingId, thingId), eq(upvotes.userId, userId)));
-      return { thingId, hasUpvote: (result?.count ?? 0) > 0 };
-    },
-
-    async getUpvoteFeed(limit = 50, _cursor?: string) {
-      const pageLimit = Math.min(limit, 100);
-      const records = await db
-        .select()
-        .from(upvotes)
-        .orderBy(desc(upvotes.createdAt))
-        .limit(pageLimit + 1);
-
-      const hasMore = records.length > pageLimit;
-      const data = records.slice(0, pageLimit).map((r: any) => ({
-        id: r.id,
-        thingId: r.thingId,
-        userId: r.userId,
-        createdAt: r.createdAt instanceof Date ? r.createdAt.toISOString() : String(r.createdAt),
-      }));
-
-      return {
-        data,
-        meta: {
-          total: data.length,
-          hasMore,
-          nextCursor: hasMore ? (data[data.length - 1]?.id ?? null) : null,
-        },
-      };
-    },
-  };
+  return `hc_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 }
 
 export default createPlugin.withPlugins<PluginsClient>()({
@@ -152,15 +49,8 @@ export default createPlugin.withPlugins<PluginsClient>()({
 
       const { auth, ...restPlugins } = plugins;
       console.log("[API] Services Initialized");
-      console.log("[API] Auth client available:", Boolean(auth));
-      console.log("[API] Plugins available:", Object.keys(restPlugins).join(", ") || "none");
 
-      const publisher = new MemoryPublisher<VoteEvents>({
-        resumeRetentionSeconds: 120,
-      });
-      const upvoteService = createUpvoteService(driver.db, publisher);
-
-      return { auth, plugins: restPlugins, db: driver.db, upvoteService, publisher, driver };
+      return { auth, plugins: restPlugins, db: driver.db, driver };
     }),
 
   shutdown: (services) =>
@@ -171,46 +61,128 @@ export default createPlugin.withPlugins<PluginsClient>()({
 
   createRouter: (services, builder) => {
     const { requireAuth } = createAuthMiddleware(builder);
-    const { publisher } = services;
 
     return {
       ping: builder.ping.handler(async () => ({
-        status: "ok",
+        status: "ok" as const,
         timestamp: new Date().toISOString(),
       })),
 
-      authHealth: builder.authHealth.use(requireAuth).handler(async () => ({
-        status: "ok",
-        emailConfigured: !!process.env.EMAIL_PROVIDER,
-        smsConfigured: !!process.env.SMS_PROVIDER,
-      })),
+      hackathon: {
+        register: builder.hackathon.register
+          .use(requireAuth)
+          .handler(async ({ input, context }) => {
+            const db = (services as any).db;
 
-      upvoteThing: builder.upvoteThing.use(requireAuth).handler(async ({ input, context }) => {
-        return await services.upvoteService.upvoteThing(input.thingId, context.userId!);
-      }),
+            const existing = await db
+              .select({ count: count() })
+              .from(registrations)
+              .where(eq(registrations.agentId, input.agentId));
 
-      downvoteThing: builder.downvoteThing.use(requireAuth).handler(async ({ input, context }) => {
-        return await services.upvoteService.downvoteThing(input.thingId, context.userId!);
-      }),
+            if (existing[0]?.count > 0) {
+              throw new ORPCError("BAD_REQUEST", {
+                message: `Agent "${input.agentId}" is already registered`,
+              });
+            }
 
-      getUpvoteCount: builder.getUpvoteCount.handler(async ({ input }) => {
-        return await services.upvoteService.getUpvoteCount(input.thingId);
-      }),
+            await db.insert(registrations).values({
+              id: generateId(),
+              agentId: input.agentId,
+              participantName: input.participantName,
+              novaAccountId: input.novaAccountId,
+              userId: context.userId!,
+            });
 
-      getUserVote: builder.getUserVote.use(requireAuth).handler(async ({ input, context }) => {
-        return await services.upvoteService.getUserVote(input.thingId, context.userId!);
-      }),
+            return {
+              success: true,
+              message: `Registered "${input.agentId}" — send your NOVA account ID (${input.novaAccountId}) to hackathon staff to be added to the submission group.`,
+            };
+          }),
 
-      getUpvoteFeed: builder.getUpvoteFeed.handler(async ({ input }) => {
-        return await services.upvoteService.getUpvoteFeed(input.limit, input.cursor);
-      }),
+        submit: builder.hackathon.submit
+          .use(requireAuth)
+          .handler(async ({ input, context }) => {
+            const db = (services as any).db;
 
-      subscribeUpvotes: builder.subscribeUpvotes.handler(async function* ({ signal, lastEventId }) {
-        const iterator = publisher.subscribe("vote", { signal, lastEventId });
-        for await (const event of iterator) {
-          yield event;
-        }
-      }),
+            const reg = await db
+              .select()
+              .from(registrations)
+              .where(eq(registrations.agentId, input.agentId));
+
+            if (reg.length === 0) {
+              throw new ORPCError("BAD_REQUEST", {
+                message: `Agent "${input.agentId}" is not registered. Register first.`,
+              });
+            }
+
+            const existing = await db
+              .select({ count: count() })
+              .from(submissions)
+              .where(eq(submissions.agentId, input.agentId));
+
+            if (existing[0]?.count > 0) {
+              throw new ORPCError("BAD_REQUEST", {
+                message: `Already submitted for "${input.agentId}". You can only submit once.`,
+              });
+            }
+
+            await db.insert(submissions).values({
+              id: generateId(),
+              agentId: input.agentId,
+              userId: context.userId!,
+              projectTitle: input.projectTitle,
+              description: input.description,
+              demoUrl: input.demoUrl,
+              githubUrl: input.githubUrl,
+              skillsList: input.skillsList,
+              demoNotes: input.demoNotes,
+              cid: "",
+            });
+
+            return {
+              success: true,
+              cid: "pending-upload",
+              message: `Submission for "${input.agentId}" recorded. Use the nova-submit extension to upload your encrypted submission file.`,
+            };
+          }),
+
+        leaderboard: builder.hackathon.leaderboard.handler(async () => {
+          const db = (services as any).db;
+
+          const results = await db
+            .select({
+              agentId: submissions.agentId,
+              projectTitle: submissions.projectTitle,
+              userId: submissions.userId,
+              createdAt: submissions.createdAt,
+            })
+            .from(submissions)
+            .orderBy(desc(submissions.createdAt));
+
+          const participantNames = await db
+            .select({
+              agentId: registrations.agentId,
+              participantName: registrations.participantName,
+            })
+            .from(registrations);
+
+          const nameMap = new Map(
+            participantNames.map((r: any) => [r.agentId, r.participantName]),
+          );
+
+          return {
+            entries: results.map((r: any) => ({
+              agentId: r.agentId,
+              participantName: nameMap.get(r.agentId) ?? r.agentId,
+              projectTitle: r.projectTitle,
+              submittedAt:
+                r.createdAt instanceof Date
+                  ? r.createdAt.toISOString()
+                  : String(r.createdAt),
+            })),
+          };
+        }),
+      },
     };
   },
 });

@@ -1,13 +1,30 @@
-import { BAD_REQUEST, NOT_FOUND, UNAUTHORIZED } from "every-plugin/errors";
-import { eventIterator, oc } from "every-plugin/orpc";
+import { BAD_REQUEST, UNAUTHORIZED } from "every-plugin/errors";
+import { oc } from "every-plugin/orpc";
 import { z } from "every-plugin/zod";
 
-export const VoteEventSchema = z.object({
-  type: z.enum(["upvote", "downvote"]),
-  thingId: z.string(),
-  userId: z.string(),
-  timestamp: z.string(),
-  totalCount: z.number().int().nonnegative(),
+export const RegisterInputSchema = z.object({
+  agentId: z.string().min(1).max(64),
+  participantName: z.string().min(1).max(128),
+  novaAccountId: z.string().min(1).max(128),
+});
+
+export const SubmitInputSchema = z.object({
+  agentId: z.string().min(1).max(64),
+  novaAccountId: z.string().min(1).max(128),
+  novaApiKey: z.string().min(1),
+  projectTitle: z.string().min(1).max(256),
+  description: z.string().min(1).max(280),
+  demoUrl: z.string().url(),
+  githubUrl: z.string().url().optional(),
+  skillsList: z.string().optional(),
+  demoNotes: z.string().optional(),
+});
+
+export const LeaderboardEntrySchema = z.object({
+  agentId: z.string(),
+  participantName: z.string(),
+  projectTitle: z.string(),
+  submittedAt: z.iso.datetime(),
 });
 
 export const contract = oc.router({
@@ -18,90 +35,36 @@ export const contract = oc.router({
     }),
   ),
 
-  authHealth: oc
-    .route({ method: "GET", path: "/auth/health" })
-    .output(
-      z.object({
-        status: z.string(),
-        emailConfigured: z.boolean(),
-        smsConfigured: z.boolean(),
-      }),
-    )
-    .errors({ UNAUTHORIZED }),
-
-  upvoteThing: oc
-    .route({ method: "POST", path: "/upvotes" })
-    .input(z.object({ thingId: z.string() }))
-    .output(
-      z.object({
-        thingId: z.string(),
-        userId: z.string(),
-        totalCount: z.number().int().nonnegative(),
-      }),
-    )
-    .errors({ UNAUTHORIZED, BAD_REQUEST }),
-
-  downvoteThing: oc
-    .route({ method: "DELETE", path: "/upvotes/{thingId}" })
-    .input(z.object({ thingId: z.string() }))
-    .output(
-      z.object({
-        thingId: z.string(),
-        totalCount: z.number().int().nonnegative(),
-      }),
-    )
-    .errors({ UNAUTHORIZED, NOT_FOUND }),
-
-  getUpvoteCount: oc
-    .route({ method: "GET", path: "/upvotes/{thingId}/count" })
-    .input(z.object({ thingId: z.string() }))
-    .output(
-      z.object({
-        thingId: z.string(),
-        totalCount: z.number().int().nonnegative(),
-      }),
-    ),
-
-  getUserVote: oc
-    .route({ method: "GET", path: "/upvotes/{thingId}/me" })
-    .input(z.object({ thingId: z.string() }))
-    .output(
-      z.object({
-        thingId: z.string(),
-        hasUpvote: z.boolean(),
-      }),
-    )
-    .errors({ UNAUTHORIZED }),
-
-  getUpvoteFeed: oc
-    .route({ method: "GET", path: "/upvotes/feed" })
-    .input(
-      z.object({
-        limit: z.number().int().min(1).max(100).optional(),
-        cursor: z.string().optional(),
-      }),
-    )
-    .output(
-      z.object({
-        data: z.array(
-          z.object({
-            id: z.string(),
-            thingId: z.string(),
-            userId: z.string(),
-            createdAt: z.iso.datetime(),
-          }),
-        ),
-        meta: z.object({
-          total: z.number().int().nonnegative(),
-          hasMore: z.boolean(),
-          nextCursor: z.string().nullable(),
+  hackathon: {
+    register: oc
+      .route({ method: "POST", path: "/hackathon/register" })
+      .input(RegisterInputSchema)
+      .output(
+        z.object({
+          success: z.boolean(),
+          message: z.string(),
         }),
+      )
+      .errors({ UNAUTHORIZED, BAD_REQUEST }),
+
+    submit: oc
+      .route({ method: "POST", path: "/hackathon/submit" })
+      .input(SubmitInputSchema)
+      .output(
+        z.object({
+          success: z.boolean(),
+          cid: z.string(),
+          message: z.string(),
+        }),
+      )
+      .errors({ UNAUTHORIZED, BAD_REQUEST }),
+
+    leaderboard: oc.route({ method: "GET", path: "/hackathon/leaderboard" }).output(
+      z.object({
+        entries: z.array(LeaderboardEntrySchema),
       }),
     ),
-
-  subscribeUpvotes: oc
-    .route({ method: "GET", path: "/upvotes/stream" })
-    .output(eventIterator(VoteEventSchema)),
+  },
 });
 
 export type ContractType = typeof contract;

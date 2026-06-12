@@ -294,12 +294,34 @@ impl ServeCommand {
         // CORS allow-origin list. Empty = fail-closed on every
         // cross-origin preflight; operators MUST opt in to the
         // specific origins the host installation actually serves.
+        // Falls back to the IRONCLAW_REBORN_CORS_ORIGINS env var
+        // (comma-separated) when the config file does not set
+        // [webui].allowed_origins.
         let allowed_origins_raw = webui_section
             .and_then(|section| section.allowed_origins.as_ref())
             .cloned()
             .unwrap_or_default();
-        let allowed_origins = WebuiServeConfig::parse_allowed_origins(&allowed_origins_raw)
-            .map_err(|err| anyhow!("[webui].allowed_origins parse failure: {err}"))?;
+        let allowed_origins = if allowed_origins_raw.is_empty() {
+            match std::env::var("IRONCLAW_REBORN_CORS_ORIGINS") {
+                Ok(val) => {
+                    let parsed: Vec<String> = val.split(',').map(|s| s.trim().to_string()).collect();
+                    if parsed.is_empty() {
+                        Vec::new()
+                    } else {
+                        eprintln!(
+                            "[config] CORS allow-origins from IRONCLAW_REBORN_CORS_ORIGINS env: {}",
+                            parsed.join(", "),
+                        );
+                        WebuiServeConfig::parse_allowed_origins(&parsed)
+                            .map_err(|err| anyhow!("IRONCLAW_REBORN_CORS_ORIGINS parse failure: {err}"))?
+                    }
+                }
+                Err(_) => Vec::new(),
+            }
+        } else {
+            WebuiServeConfig::parse_allowed_origins(&allowed_origins_raw)
+                .map_err(|err| anyhow!("[webui].allowed_origins parse failure: {err}"))?
+        };
 
         let csp_override = webui_section.and_then(|section| section.csp_header_override.as_deref());
 
@@ -439,11 +461,20 @@ impl ServeCommand {
             )
             .await?;
 
+            let cors_origins_for_banner: Vec<String> = if allowed_origins_raw.is_empty() {
+                std::env::var("IRONCLAW_REBORN_CORS_ORIGINS")
+                    .ok()
+                    .map(|val| val.split(',').map(|s| s.trim().to_string()).collect())
+                    .unwrap_or_default()
+            } else {
+                allowed_origins_raw.clone()
+            };
+
             print_serve_banner(
                 listen_addr,
                 env_token_var,
                 env_user_id_var,
-                &allowed_origins_raw,
+                &cors_origins_for_banner,
                 &bundle.readiness,
             );
 

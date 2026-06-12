@@ -34,5 +34,15 @@
       ]
     }
   },
-  "plugins": {}
+  "plugins": {
+    "apps": {
+      "extends": "bos://work.efiz.near/nearbuilders.org"
+    },
+    "projects": {
+      "extends": "bos://work.efiz.near/nearbuilders.org"
+    },
+    "settings": {
+      "extends": "bos://work.efiz.near/nearbuilders.org"
+    }
+  }
 }
