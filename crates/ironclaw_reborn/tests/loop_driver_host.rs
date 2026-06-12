@@ -213,7 +213,7 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
         })
         .await
         .unwrap();
-    assert_eq!(prompt_bundle.messages.len(), 2);
+    assert_eq!(prompt_bundle.messages.len(), 3);
     assert!(prompt_bundle.instruction_fingerprint.is_some());
 
     let model_response = host_dyn
@@ -855,7 +855,7 @@ async fn text_only_model_reply_driver_runs_prompt_model_transcript_path() {
 
     let requests = fixture.gateway.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].messages.len(), 2);
+    assert_eq!(requests[0].messages.len(), 3);
     assert!(requests[0].messages.iter().any(|message| {
         message.content == "RAW_PROMPT_TEXT_SENTINEL sk-prompt-secret /host/path tool_input"
     }));
@@ -3594,7 +3594,7 @@ async fn text_only_host_prompt_accepts_empty_surface_version() {
         .await
         .unwrap();
 
-    assert_eq!(prompt_bundle.messages.len(), 2);
+    assert_eq!(prompt_bundle.messages.len(), 3);
 }
 
 #[tokio::test]
@@ -4436,7 +4436,7 @@ async fn text_only_host_skill_context_does_not_expand_capability_surface() {
         })
         .await
         .unwrap();
-    assert_eq!(prompt_bundle.messages.len(), 3);
+    assert_eq!(prompt_bundle.messages.len(), 4);
 
     let surface = host
         .visible_capabilities(VisibleCapabilityRequest)
@@ -4508,7 +4508,7 @@ async fn text_only_host_prompt_bundle_includes_surface_metadata_and_still_stream
 
     assert!(prompt_bundle.instruction_fingerprint.is_some());
     assert_eq!(prompt_bundle.surface_version, Some(surface.version.clone()));
-    assert_eq!(prompt_bundle.messages.len(), 3);
+    assert_eq!(prompt_bundle.messages.len(), 4);
 
     host.stream_model(LoopModelRequest {
         messages: prompt_bundle.messages,
