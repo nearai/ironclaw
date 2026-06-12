@@ -283,7 +283,7 @@ async fn replay_routine_phrase(case: &QaPhrase, cron_fragment: &str) {
         .expect("list triggers after replay");
     assert!(
         triggers.iter().any(|record| {
-            let ironclaw_triggers::TriggerSchedule::Cron { expression } = &record.schedule;
+            let ironclaw_triggers::TriggerSchedule::Cron { expression, .. } = &record.schedule;
             expression.contains(cron_fragment)
         }),
         "replayed {} should create a routine scheduled {cron_fragment}; triggers: {triggers:#?}",
