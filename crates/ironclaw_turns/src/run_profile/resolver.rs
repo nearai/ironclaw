@@ -323,8 +323,6 @@ fn interactive_profile() -> RunProfileDefinition {
         steering_policy: SteeringPolicy {
             allow_steering: true,
             allow_interrupt: true,
-            // ZDBG(nudge isolation A/B): nudge DISABLED to measure its marginal
-            // contribution vs the http + multi-call fixes.
             allow_driver_specific_nudges: false,
         },
         cancellation_policy: CancellationPolicy {

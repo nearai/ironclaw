@@ -222,12 +222,6 @@ impl LoopCapabilityPort for RefreshingLocalDevCapabilityPort {
         &self,
         tool_call: ProviderToolCall,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        // Reuse the current inner port instead of rebuilding it on every model
-        // tool call. Each rebuild mints a fresh HostRuntimeLoopCapabilityPort
-        // with an empty ProviderToolCallInputResolver store, so registering N
-        // parallel tool calls leaves only the last call's input staged and the
-        // earlier ones fail to resolve (ScopeMismatch -> HostUnavailable, whole
-        // batch aborts). Matches the fix already on main (PR #4790).
         self.current_or_refresh()
             .await?
             .register_provider_tool_call(tool_call)
