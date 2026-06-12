@@ -1220,6 +1220,54 @@ mod tests {
         assert_eq!(models, ["only-display", "meta/Llama-4"]);
     }
 
+    #[test]
+    fn parse_models_resolves_model_id_alias() {
+        // `model_id` (and its `modelId` camelCase alias) as the sole identifier.
+        let body = r#"[{"model_id":"vendor/x"},{"modelId":"vendor/y"}]"#;
+        let models: Vec<_> = parse_nearai_models(body)
+            .into_iter()
+            .map(|m| m.name)
+            .collect();
+        assert_eq!(models, ["vendor/x", "vendor/y"]);
+    }
+
+    #[test]
+    fn parse_models_resolves_model_name_aliases() {
+        // `model_name` and its `modelName` camelCase alias, used only when no
+        // id-shaped field is present.
+        let body = r#"[{"model_name":"qwen-turbo"},{"modelName":"glm-5"}]"#;
+        let models: Vec<_> = parse_nearai_models(body)
+            .into_iter()
+            .map(|m| m.name)
+            .collect();
+        assert_eq!(models, ["qwen-turbo", "glm-5"]);
+    }
+
+    #[test]
+    fn parse_models_resolves_metadata_fields_as_last_resort() {
+        // Nested metadata is the final fallback; metadata.model_name wins over
+        // metadata.name, mirroring the top-level id-over-display preference.
+        let body = r#"[
+            {"metadata":{"model_name":"meta-model"}},
+            {"metadata":{"name":"meta-display"}}
+        ]"#;
+        let models: Vec<_> = parse_nearai_models(body)
+            .into_iter()
+            .map(|m| m.name)
+            .collect();
+        assert_eq!(models, ["meta-model", "meta-display"]);
+    }
+
+    #[test]
+    fn parse_models_returns_empty_for_unrecognized_or_invalid_bodies() {
+        // No recognizable identifier field, malformed JSON, and empty input
+        // all yield an empty list (the caller then surfaces InvalidResponse).
+        assert!(parse_nearai_models(r#"{"foo":"bar"}"#).is_empty());
+        assert!(parse_nearai_models(r#"[{"unknown":"x"}]"#).is_empty());
+        assert!(parse_nearai_models("not json").is_empty());
+        assert!(parse_nearai_models("").is_empty());
+    }
+
     fn test_nearai_config(base_url: &str) -> NearAiConfig {
         NearAiConfig {
             model: "test-model".to_string(),
