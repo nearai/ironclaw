@@ -629,6 +629,11 @@ test("isLocalDevOrigin detects loopback origins so NEAR AI SSO fails fast there"
 function runProviderLogin({ hostname, activeProviderId = null, popupClosed = false }) {
   const stateLog = [];
   const httpCalls = [];
+  // Capture every window.open URL and the popup handles so tests can assert the
+  // open-blank-then-navigate pattern (a popup opened straight onto an external
+  // URL keeps a live `window.opener` and is a reverse-tabnabbing vector).
+  const openedUrls = [];
+  const popups = [];
   let stateIndex = 0;
   const context = {
     console,
@@ -666,13 +671,16 @@ function runProviderLogin({ hostname, activeProviderId = null, popupClosed = fal
     startCodexLogin: async () => ({ user_code: "c", verification_uri: "http://v" }),
     window: {
       location: { hostname, origin: `http://${hostname}` },
-      open: () => {
+      open: (url) => {
         httpCalls.push("open");
+        openedUrls.push(url);
         // A usable popup handle for the synchronous-open + sever-opener +
         // navigate pattern: a settable location/opener and a no-op close.
         // `popupClosed` simulates the user closing the tab so the
-        // close-detection path can be driven (#4706).
-        return { location: { href: "" }, opener: null, closed: popupClosed, close() {} };
+        // close-detection path can be driven.
+        const handle = { location: { href: "" }, opener: null, closed: popupClosed, close() {} };
+        popups.push(handle);
+        return handle;
       },
       crypto: { randomUUID: () => "uuid" },
     },
@@ -691,6 +699,8 @@ function runProviderLogin({ hostname, activeProviderId = null, popupClosed = fal
   return {
     hook: context.globalThis.__testExports.useProviderLogin({}),
     httpCalls,
+    openedUrls,
+    popups,
     nearaiErrors: () =>
       stateLog.filter((e) => e.idx === NEARAI_ERROR_SLOT).map((e) => e.value),
     codexErrors: () =>
@@ -736,7 +746,7 @@ test("startNearai fires the login HTTP call on a remote origin (predicate is the
   assert.ok(run.httpCalls.includes("startNearaiLogin"), "remote origin proceeds to login");
 });
 
-test("startNearai recovers when the user closes the sign-in tab (#4706)", async () => {
+test("startNearai recovers when the user closes the sign-in tab", async () => {
   // Closed popup + no active provider: the flow must conclude promptly with a
   // retryable error and clear the busy flag instead of polling out the full
   // five-minute deadline with the buttons stuck disabled.
@@ -749,10 +759,24 @@ test("startNearai recovers when the user closes the sign-in tab (#4706)", async 
   assert.ok(run.nearaiBusyCleared(), "the busy flag is cleared so retry needs no refresh");
 });
 
-test("startCodex recovers when the user closes the verification tab (#4706)", async () => {
+test("startCodex recovers when the user closes the verification tab", async () => {
   const run = runProviderLogin({ hostname: "app.example.com", popupClosed: true });
   await run.hook.startCodex();
   assert.ok(run.httpCalls.includes("open"), "opens the verification tab");
+  // Opens a blank popup and navigates it, rather than opening the external
+  // verification URL directly — the latter keeps a live `window.opener` and is
+  // a reverse-tabnabbing vector.
+  assert.equal(
+    run.openedUrls[0],
+    "about:blank",
+    "opens a blank popup first, not the external verification URL"
+  );
+  assert.equal(
+    run.popups[0].location.href,
+    "http://v",
+    "then navigates the blank popup to the verification URI"
+  );
+  assert.equal(run.popups[0].opener, null, "severs opener before navigating");
   assert.ok(
     run.codexErrors().includes("onboarding.codexFailed"),
     "a closed verification tab surfaces a retryable error instead of waiting out the deadline"
@@ -760,7 +784,7 @@ test("startCodex recovers when the user closes the verification tab (#4706)", as
   assert.ok(run.codexBusyCleared(), "the busy flag is cleared so retry needs no refresh");
 });
 
-test("starting a new sign-in clears a prior provider's stale error (#4706)", async () => {
+test("starting a new sign-in clears a prior provider's stale error", async () => {
   // The status surface renders the NEAR AI and Codex errors together, so a
   // failed attempt's message must not linger once the user starts a different
   // sign-in. localhost makes the NEAR AI hosted-SSO attempt fail fast with a

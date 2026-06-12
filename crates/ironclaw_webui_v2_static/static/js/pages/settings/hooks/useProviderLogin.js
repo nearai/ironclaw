@@ -89,7 +89,7 @@ const POLL_INTERVAL_MS = 2000;
 // Poll the LLM snapshot until `providerId` becomes the active provider, the
 // login popup is closed, or the deadline passes. When a `popup` handle is
 // given, a closed window short-circuits the wait so the UI recovers the instant
-// the user cancels instead of staying disabled until the full deadline (#4706).
+// the user cancels instead of staying disabled until the full deadline.
 // Returns "active", "closed", or "timeout".
 async function pollUntilActive(providerId, deadlineMs, popup) {
   const deadline = Date.now() + deadlineMs;
@@ -256,25 +256,32 @@ export function useProviderLogin({ onSuccess } = {}) {
 
   const startCodex = React.useCallback(async () => {
     resetLoginFeedback();
+    // Open the popup synchronously inside the click gesture: browsers only
+    // allow gesture-time opens, so opening after the awaited backend call could
+    // be blocked. Keep the handle (no `noopener`, which would null the return)
+    // so a closed tab can short-circuit the wait instead of leaving the button
+    // disabled for the full device-code deadline. Sever `opener` while the
+    // popup is still same-origin `about:blank` — setting it on the cross-origin
+    // verification page can be rejected, so nulling it before navigating is
+    // what closes the reverse-tabnabbing hole. If the popup is blocked, `popup`
+    // is null and the wait falls back to polling alone; the device code is
+    // still shown so the user can complete it elsewhere. Mirrors the NEAR AI
+    // flow above.
+    const popup = window.open("about:blank", "_blank");
+    if (popup) {
+      try {
+        popup.opener = null;
+      } catch (_e) {
+        // Ignore: some engines disallow setting opener; navigation still works.
+      }
+    }
     setCodexBusy(true);
     try {
       const { user_code: userCode, verification_uri: verificationUri } =
         await startCodexLogin();
       setCodexCode({ userCode, verificationUri });
-      // Keep the window handle (no `noopener`, which makes `window.open` return
-      // null) so a closed tab can short-circuit the wait instead of leaving the
-      // button disabled for the full device-code deadline (#4706). Sever
-      // `opener` as reverse-tabnabbing defense before navigating to the
-      // external verification page. If the popup is blocked, `popup` is null
-      // and the wait falls back to polling alone — the device code stays shown
-      // so the user can still complete it elsewhere.
-      const popup = window.open(verificationUri, "_blank");
       if (popup) {
-        try {
-          popup.opener = null;
-        } catch (_e) {
-          // Ignore: some engines disallow setting opener; the flow still works.
-        }
+        popup.location.href = verificationUri;
       }
       const outcome = await pollUntilActive("openai_codex", CODEX_POLL_DEADLINE_MS, popup);
       if (outcome === "active") {
@@ -288,6 +295,9 @@ export function useProviderLogin({ onSuccess } = {}) {
         t(outcome === "closed" ? "onboarding.codexFailed" : "onboarding.codexTimeout")
       );
     } catch (_err) {
+      if (popup) {
+        popup.close();
+      }
       setCodexError(t("onboarding.codexFailed"));
     } finally {
       setCodexBusy(false);
