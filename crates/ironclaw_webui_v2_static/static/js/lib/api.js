@@ -209,12 +209,14 @@ export function setOutboundPreferences({ finalReplyTargetId } = {}) {
 
 // --- Operator logs ---
 
-export function queryOperatorLogs({ limit, cursor, level, target } = {}) {
+export function queryOperatorLogs({ limit, cursor, level, target, tail, follow } = {}) {
   const url = new URL(`${V2_BASE}/operator/logs`, window.location.origin);
   if (limit != null) url.searchParams.set("limit", String(limit));
   if (cursor) url.searchParams.set("cursor", cursor);
   if (level) url.searchParams.set("level", level);
   if (target) url.searchParams.set("target", target);
+  if (tail) url.searchParams.set("tail", "true");
+  if (follow) url.searchParams.set("follow", "true");
   return apiFetch(url.pathname + url.search);
 }
 

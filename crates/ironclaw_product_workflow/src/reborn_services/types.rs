@@ -76,6 +76,8 @@ pub struct RebornLogQueryRequest {
     pub target: Option<String>,
     #[serde(default)]
     pub tail: bool,
+    #[serde(default)]
+    pub follow: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1264,6 +1266,8 @@ pub struct RebornOperatorLogsQuery {
     pub target: Option<String>,
     #[serde(default)]
     pub tail: bool,
+    #[serde(default)]
+    pub follow: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

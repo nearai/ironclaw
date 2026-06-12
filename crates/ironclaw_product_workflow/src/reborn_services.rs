@@ -3859,7 +3859,8 @@ fn bounded_operator_logs_query(query: RebornOperatorLogsQuery) -> RebornLogQuery
         cursor: bounded_operator_logs_string(query.cursor, OPERATOR_LOGS_CURSOR_MAX_BYTES),
         level: query.level,
         target: bounded_operator_logs_string(query.target, OPERATOR_LOGS_TARGET_MAX_BYTES),
-        tail: false,
+        tail: query.tail,
+        follow: query.follow,
     }
 }
 

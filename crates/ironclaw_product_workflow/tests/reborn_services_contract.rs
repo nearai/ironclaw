@@ -5287,6 +5287,7 @@ async fn query_operator_logs_bounds_query_before_logs_service() {
                 level: Some(RebornLogLevel::Warn),
                 target: Some(oversized_target),
                 tail: true,
+                follow: true,
             },
         )
         .await
@@ -5299,10 +5300,8 @@ async fn query_operator_logs_bounds_query_before_logs_service() {
     assert_eq!(requests[0].cursor.as_ref().map(String::len), Some(512));
     assert_eq!(requests[0].target.as_ref().map(String::len), Some(256));
     assert_eq!(requests[0].level, Some(RebornLogLevel::Warn));
-    assert!(
-        !requests[0].tail,
-        "unsupported streaming must not reach the logs backend"
-    );
+    assert!(requests[0].tail);
+    assert!(requests[0].follow);
 }
 
 #[tokio::test]
