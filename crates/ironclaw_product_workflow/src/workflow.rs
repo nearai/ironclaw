@@ -441,11 +441,24 @@ async fn delivered_route_base_binding(
     }
 }
 
-async fn load_delivered_route_for_envelope(
+/// Outcome of a conversation-fingerprint lookup for delivered gate route
+/// fallback.
+enum DeliveredRouteOutcome {
+    /// No live routes matched this conversation + actor.
+    Miss,
+    /// Exactly one live route matched — proceed with it.
+    Single(Box<ironclaw_outbound::DeliveredGateRouteRecord>),
+    /// More than one live route matched — fail closed; user must specify an
+    /// explicit gate ref.
+    Ambiguous,
+}
+
+async fn load_delivered_routes_for_envelope(
     envelope: &ProductInboundEnvelope,
     binding: &ResolvedBinding,
     delivered_gate_routes: &dyn ironclaw_outbound::DeliveredGateRouteStore,
-) -> Option<ironclaw_outbound::DeliveredGateRouteRecord> {
+    expected_gate_ref: Option<&str>,
+) -> DeliveredRouteOutcome {
     let conversation_ref = match delivered_route_conversation_ref(envelope) {
         Ok(conversation_ref) => conversation_ref,
         Err(error) => {
@@ -453,44 +466,68 @@ async fn load_delivered_route_for_envelope(
                 error = %error,
                 "delivered gate route fallback skipped because conversation reference was invalid"
             );
-            return None;
+            return DeliveredRouteOutcome::Miss;
         }
     };
     let conversation_fingerprint = conversation_ref.conversation_fingerprint();
-    let route = match delivered_gate_routes
+    let now = Utc::now();
+    let all_routes = match delivered_gate_routes
         .load_delivered_gate_route_by_conversation_fingerprint(
             &binding.tenant_id,
             &conversation_fingerprint,
         )
         .await
     {
-        Ok(Some(route)) => route,
-        Ok(None) => {
-            debug!("delivered gate route fallback found no route for conversation");
-            return None;
-        }
+        Ok(routes) => routes,
         Err(error) => {
             debug!(
                 error = %error,
                 "delivered gate route fallback lookup failed"
             );
-            return None;
+            return DeliveredRouteOutcome::Miss;
         }
     };
-    if route.is_expired(Utc::now()) {
-        debug!("delivered gate route fallback skipped expired route");
-        return None;
+    // Filter: non-expired, tenant+actor match, and (if explicit ref supplied)
+    // gate_ref match.
+    let live: Vec<ironclaw_outbound::DeliveredGateRouteRecord> = all_routes
+        .into_iter()
+        .filter(|r| {
+            if r.is_expired(now) {
+                return false;
+            }
+            // A non-owner actor in a shared conversation (e.g. a third party
+            // typing "approve" in a channel where a gate prompt was delivered)
+            // reaches this lookup and is dropped here without user-facing
+            // feedback. That silence is deliberate: replying "not authorized"
+            // to arbitrary channel chatter would be noise, and the inner
+            // interaction services authorize again.
+            if r.tenant_id != binding.tenant_id || r.user_id != binding.actor_user_id {
+                return false;
+            }
+            if let Some(expected) = expected_gate_ref
+                && r.gate_ref != expected
+            {
+                return false;
+            }
+            true
+        })
+        .collect();
+    match live.as_slice() {
+        [] => {
+            debug!("delivered gate route fallback found no live route for conversation");
+            DeliveredRouteOutcome::Miss
+        }
+        [_] => DeliveredRouteOutcome::Single(Box::new(
+            live.into_iter().next().expect("checked len == 1"),
+        )),
+        _ => {
+            debug!(
+                count = live.len(),
+                "delivered gate route fallback found multiple live routes — ambiguous"
+            );
+            DeliveredRouteOutcome::Ambiguous
+        }
     }
-    // A non-owner actor in a shared conversation (e.g. a third party typing
-    // "approve" in a channel where a gate prompt was delivered) reaches this
-    // lookup and is dropped here without user-facing feedback. That silence
-    // is deliberate: replying "not authorized" to arbitrary channel chatter
-    // would be noise, and the inner interaction services authorize again.
-    if route.tenant_id != binding.tenant_id || route.user_id != binding.actor_user_id {
-        debug!("delivered gate route fallback skipped route for different tenant or actor");
-        return None;
-    }
-    Some(route)
 }
 
 // arch-exempt: too_many_args, needs a DeliveredRouteResolutionContext bundle (services + dispatch identity), plan docs/plans/2026-06-10-slack-gate-feedback-and-routing.md Phase C
@@ -520,11 +557,22 @@ async fn resolve_via_delivered_approval_route(
             &derived_binding
         }
     };
-    let route = load_delivered_route_for_envelope(envelope, binding, delivered_gate_routes).await?;
-    if expected_gate_ref.is_some_and(|expected| expected != route.gate_ref) {
-        debug!("delivered gate route fallback skipped route with non-matching gate ref");
-        return None;
-    }
+    let route = match load_delivered_routes_for_envelope(
+        envelope,
+        binding,
+        delivered_gate_routes,
+        expected_gate_ref,
+    )
+    .await
+    {
+        DeliveredRouteOutcome::Miss => return None,
+        DeliveredRouteOutcome::Single(route) => *route,
+        DeliveredRouteOutcome::Ambiguous => {
+            return Some(Err(ProductWorkflowError::ApprovalInteractionRejected {
+                kind: ApprovalInteractionRejectionKind::AmbiguousGate,
+            }));
+        }
+    };
     let gate_ref = GateRef::new(route.gate_ref.clone()).map_err(|_| {
         ProductWorkflowError::ApprovalInteractionRejected {
             kind: ApprovalInteractionRejectionKind::InvalidGateRef,
@@ -587,11 +635,22 @@ async fn resolve_via_delivered_auth_route(
             &derived_binding
         }
     };
-    let route = load_delivered_route_for_envelope(envelope, binding, delivered_gate_routes).await?;
-    if expected_gate_ref.is_some_and(|expected| expected != route.gate_ref) {
-        debug!("delivered auth route fallback skipped route with non-matching gate ref");
-        return None;
-    }
+    let route = match load_delivered_routes_for_envelope(
+        envelope,
+        binding,
+        delivered_gate_routes,
+        expected_gate_ref,
+    )
+    .await
+    {
+        DeliveredRouteOutcome::Miss => return None,
+        DeliveredRouteOutcome::Single(route) => *route,
+        DeliveredRouteOutcome::Ambiguous => {
+            return Some(Err(ProductWorkflowError::AuthInteractionRejected {
+                kind: AuthInteractionRejectionKind::AmbiguousAuth,
+            }));
+        }
+    };
     let gate_ref = GateRef::new(route.gate_ref.clone()).map_err(|_| {
         ProductWorkflowError::AuthInteractionRejected {
             kind: AuthInteractionRejectionKind::InvalidGateRef,
@@ -1309,7 +1368,8 @@ fn rejection_kind_for_auth_interaction(kind: AuthInteractionRejectionKind) -> Pr
     match kind {
         AuthInteractionRejectionKind::MissingAuth => ProductRejectionKind::BindingRequired,
         AuthInteractionRejectionKind::CrossScopeDenied => ProductRejectionKind::AccessDenied,
-        AuthInteractionRejectionKind::StaleAuth
+        AuthInteractionRejectionKind::AmbiguousAuth
+        | AuthInteractionRejectionKind::StaleAuth
         | AuthInteractionRejectionKind::InvalidGateRef
         | AuthInteractionRejectionKind::InvalidCredentialRef
         | AuthInteractionRejectionKind::InvalidCallbackRef
