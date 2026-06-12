@@ -319,6 +319,8 @@ pub struct ExtensionSetupSchema {
 /// setup fields. Everything else must be under `extensions.<name>.*`.
 const ALLOWED_GLOBAL_SETUP_SETTING_PATHS: &[&str] = &["llm_backend", "selected_model"];
 
+const MCP_AUTHORIZATION_HEADER_FIELD: &str = "authorization_header";
+
 #[cfg(test)]
 type TestWasmChannelLoader =
     Arc<dyn Fn(&str) -> Result<LoadedChannel, ExtensionError> + Send + Sync>;
@@ -1983,6 +1985,18 @@ impl ExtensionManager {
         Err(err)
     }
 
+    pub(crate) async fn install_mcp_from_url_with_headers(
+        &self,
+        name: &str,
+        url: &str,
+        headers: std::collections::HashMap<String, String>,
+        user_id: &str,
+    ) -> Result<InstallResult, ExtensionError> {
+        let name = canonicalize_extension_name(name)?;
+        self.install_mcp_from_url_inner(&name, url, headers, user_id)
+            .await
+    }
+
     /// Check auth status for an installed extension.
     ///
     /// Read-only for WASM extensions; may initiate OAuth for MCP servers.
@@ -3575,12 +3589,23 @@ impl ExtensionManager {
         url: &str,
         user_id: &str,
     ) -> Result<InstallResult, ExtensionError> {
+        self.install_mcp_from_url_inner(name, url, std::collections::HashMap::new(), user_id)
+            .await
+    }
+
+    async fn install_mcp_from_url_inner(
+        &self,
+        name: &str,
+        url: &str,
+        headers: std::collections::HashMap<String, String>,
+        user_id: &str,
+    ) -> Result<InstallResult, ExtensionError> {
         // Check if already installed
         if self.get_mcp_server(name, user_id).await.is_ok() {
             return Err(ExtensionError::AlreadyInstalled(name.to_string()));
         }
 
-        let config = McpServerConfig::new(name, url);
+        let config = McpServerConfig::new(name, url).with_headers(headers);
         config
             .validate()
             .map_err(|e| ExtensionError::InvalidUrl(e.to_string()))?;
@@ -5918,6 +5943,23 @@ impl ExtensionManager {
         name: &str,
         user_id: &str,
     ) -> Result<ActivateResult, ExtensionError> {
+        self.activate_mcp_inner(name, user_id, false).await
+    }
+
+    async fn reactivate_mcp(
+        &self,
+        name: &str,
+        user_id: &str,
+    ) -> Result<ActivateResult, ExtensionError> {
+        self.activate_mcp_inner(name, user_id, true).await
+    }
+
+    async fn activate_mcp_inner(
+        &self,
+        name: &str,
+        user_id: &str,
+        refresh_existing_client: bool,
+    ) -> Result<ActivateResult, ExtensionError> {
         // Serialise activate/remove on this server so a concurrent
         // `remove` (last-user-out, unregistering global tool wrappers)
         // can't interleave with our `insert + register` below and leave
@@ -5932,7 +5974,7 @@ impl ExtensionManager {
         // tool wrappers are already registered. We still need to insert
         // *this* user's client below so per-user dispatch routes to the
         // right credential.
-        if self.mcp_clients.contains(user_id, name).await {
+        if self.mcp_clients.contains(user_id, name).await && !refresh_existing_client {
             // Already connected, just return the tool names
             // Use the same normalization as `mcp_tool_id` for the
             // prefix filter so hyphenated server names match the
@@ -7561,6 +7603,30 @@ impl ExtensionManager {
                     interactive_login: None,
                 })
             }
+            ExtensionKind::McpServer => {
+                let server = self
+                    .get_mcp_server(name, user_id)
+                    .await
+                    .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
+                if !server.has_custom_auth_header() {
+                    return Ok(ExtensionSetupSchema {
+                        secrets: Vec::new(),
+                        fields: Vec::new(),
+                        interactive_login: None,
+                    });
+                }
+                Ok(ExtensionSetupSchema {
+                    secrets: Vec::new(),
+                    fields: vec![crate::channels::web::types::SetupFieldInfo {
+                        name: MCP_AUTHORIZATION_HEADER_FIELD.to_string(),
+                        prompt: "Authorization header value".to_string(),
+                        optional: true,
+                        provided: true,
+                        input_type: crate::tools::wasm::ToolSetupFieldInputType::Password,
+                    }],
+                    interactive_login: None,
+                })
+            }
             _ => Ok(ExtensionSetupSchema {
                 secrets: Vec::new(),
                 fields: Vec::new(),
@@ -7859,7 +7925,18 @@ impl ExtensionManager {
                     .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
                 let mut names = std::collections::HashSet::new();
                 names.insert(server.token_secret_name());
-                (names, Vec::new())
+                let fields = if server.has_custom_auth_header() {
+                    vec![crate::tools::wasm::ToolFieldSetupSchema {
+                        name: MCP_AUTHORIZATION_HEADER_FIELD.to_string(),
+                        prompt: "Authorization header value".to_string(),
+                        optional: true,
+                        setting_path: None,
+                        input_type: crate::tools::wasm::ToolSetupFieldInputType::Password,
+                    }]
+                } else {
+                    Vec::new()
+                };
+                (names, fields)
             }
             ExtensionKind::ChannelRelay => {
                 let relay_fields = vec![crate::tools::wasm::ToolFieldSetupSchema {
@@ -8024,6 +8101,8 @@ impl ExtensionManager {
         }
 
         let mut stored_fields = self.load_tool_setup_fields(&name).await.unwrap_or_default();
+        let mut stored_fields_changed = false;
+        let mut mcp_authorization_header_updated = false;
 
         for (field_name, field_value) in fields {
             if !allowed_fields.contains(field_name.as_str()) {
@@ -8035,13 +8114,38 @@ impl ExtensionManager {
             let trimmed = field_value.trim();
             let field_def = setup_field_defs.get(field_name);
 
+            if kind == ExtensionKind::McpServer && field_name == MCP_AUTHORIZATION_HEADER_FIELD {
+                if !trimmed.is_empty() {
+                    let mut server = self
+                        .get_mcp_server(&name, user_id)
+                        .await
+                        .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
+                    let authorization_unchanged = server.headers.iter().any(|(key, value)| {
+                        key.eq_ignore_ascii_case("authorization") && value == trimmed
+                    });
+                    if !authorization_unchanged {
+                        server
+                            .headers
+                            .retain(|key, _| !key.eq_ignore_ascii_case("authorization"));
+                        server
+                            .headers
+                            .insert("Authorization".to_string(), trimmed.to_string());
+                        self.update_mcp_server(server, user_id)
+                            .await
+                            .map_err(|e| ExtensionError::Config(e.to_string()))?;
+                        mcp_authorization_header_updated = true;
+                    }
+                }
+                continue;
+            }
+
             // Empty value on an optional field with a setting_path: clear the
             // stored override so the system reverts to the env/default value.
             if trimmed.is_empty() {
                 if let Some(def) = field_def
                     && def.optional
                 {
-                    stored_fields.remove(field_name);
+                    stored_fields_changed |= stored_fields.remove(field_name).is_some();
                     if let Some(setting_path) = &def.setting_path {
                         Self::validate_setup_setting_path(&name, setting_path)?;
                         if let Some(store) = self.settings_store() {
@@ -8052,7 +8156,8 @@ impl ExtensionManager {
                 continue;
             }
 
-            stored_fields.insert(field_name.clone(), trimmed.to_string());
+            stored_fields_changed |= stored_fields.insert(field_name.clone(), trimmed.to_string())
+                != Some(trimmed.to_string());
 
             if let Some(field_def) = field_def
                 && let Some(setting_path) = &field_def.setting_path
@@ -8079,7 +8184,7 @@ impl ExtensionManager {
             }
         }
 
-        if !allowed_fields.is_empty() && !fields.is_empty() {
+        if stored_fields_changed {
             self.save_tool_setup_fields(&name, &stored_fields).await?;
         }
 
@@ -8290,6 +8395,9 @@ impl ExtensionManager {
         // Dispatch by kind — WasmTool was already handled above with an early return.
         let activate_result = match kind {
             ExtensionKind::WasmChannel => self.activate_wasm_channel(&name, user_id).await,
+            ExtensionKind::McpServer if mcp_authorization_header_updated => {
+                self.reactivate_mcp(&name, user_id).await
+            }
             ExtensionKind::McpServer => self.activate_mcp(&name, user_id).await,
             ExtensionKind::ChannelRelay => self.activate_channel_relay(&name, user_id).await,
             ExtensionKind::WasmTool | ExtensionKind::AcpAgent => {
@@ -10343,6 +10451,70 @@ mod tests {
             assert_eq!(
                 server.headers.get("Authorization").map(String::as_str),
                 Some("Bearer test-nearai-key")
+            );
+        });
+    }
+
+    #[test]
+    fn test_configure_updates_custom_mcp_authorization_header() {
+        tokio_test::block_on(async {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let (store, _db_dir) = make_test_store().await;
+            let mgr = make_test_manager_with_dirs(
+                None,
+                dir.path().join("tools"),
+                dir.path().join("channels"),
+                Some(Arc::clone(&store)),
+            );
+
+            let server = McpServerConfig::new("custom_mcp", "http://127.0.0.1:9/mcp").with_headers(
+                std::collections::HashMap::from([(
+                    "Authorization".to_string(),
+                    "Bearer old-token".to_string(),
+                )]),
+            );
+            mgr.add_mcp_server(server, "test")
+                .await
+                .expect("install custom MCP server");
+
+            let setup = mgr
+                .get_setup_schema("custom_mcp", "test")
+                .await
+                .expect("load setup schema");
+            assert_eq!(setup.secrets.len(), 0);
+            assert_eq!(setup.fields.len(), 1);
+            assert_eq!(setup.fields[0].name, super::MCP_AUTHORIZATION_HEADER_FIELD);
+            assert!(setup.fields[0].provided);
+
+            let fields = std::collections::HashMap::from([(
+                super::MCP_AUTHORIZATION_HEADER_FIELD.to_string(),
+                "Bearer new-token".to_string(),
+            )]);
+            mgr.configure(
+                "custom_mcp",
+                &std::collections::HashMap::new(),
+                &fields,
+                "test",
+            )
+            .await
+            .expect("save custom MCP authorization header");
+
+            let servers =
+                crate::tools::mcp::config::load_mcp_servers_from_db(store.as_ref(), "test")
+                    .await
+                    .expect("load mcp servers");
+            let server = servers.get("custom_mcp").expect("custom MCP server");
+            assert_eq!(
+                server.headers.get("Authorization").map(String::as_str),
+                Some("Bearer new-token")
+            );
+            assert_eq!(
+                store
+                    .get_setting("test", "extensions.custom_mcp.setup_fields")
+                    .await
+                    .expect("read setup fields"),
+                None,
+                "custom Authorization header must not be duplicated into plain setup fields"
             );
         });
     }
