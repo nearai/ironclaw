@@ -614,10 +614,13 @@ async fn gateway_repairs_oversized_provider_tool_arguments_before_registration()
             "error": "arguments omitted because they exceeded the host provider-tool limit"
         })
     );
-    assert!(
-        repair_tool_calls
-            .iter()
-            .all(|call| call.reasoning.is_none())
+    assert_eq!(
+        repair_tool_calls[0].reasoning.as_deref(),
+        Some("valid call reasoning")
+    );
+    assert_eq!(
+        repair_tool_calls[1].reasoning.as_deref(),
+        Some("oversized call reasoning")
     );
     let repair_tool_result = repair_messages
         .iter()

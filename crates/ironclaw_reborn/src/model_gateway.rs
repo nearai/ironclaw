@@ -1271,7 +1271,7 @@ fn provider_tool_call_for_repair(tool_call: &ToolCall) -> ToolCall {
         id: tool_call.id.clone(),
         name: tool_call.name.clone(),
         arguments,
-        reasoning: None,
+        reasoning: tool_call.reasoning.clone(),
         signature: tool_call.signature.clone(),
         arguments_parse_error: tool_call.arguments_parse_error.clone(),
     }
