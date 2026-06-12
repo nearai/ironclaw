@@ -4904,11 +4904,8 @@ mod tests {
         let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
         let observer = Arc::new(RecordingTrajectoryObserver::default());
         let input = RebornRuntimeInput::from_services(
-            RebornBuildInput::local_dev(
-                "runtime-trajectory-owner",
-                root.path().join("local-dev"),
-            )
-            .with_runtime_policy(local_dev_runtime_policy()),
+            RebornBuildInput::local_dev("runtime-trajectory-owner", root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
         )
         .with_identity(RebornRuntimeIdentity {
             tenant_id: "runtime-trajectory-tenant".to_string(),
@@ -4976,11 +4973,8 @@ mod tests {
         let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
         let observer = Arc::new(RecordingTrajectoryObserver::default());
         let input = RebornRuntimeInput::from_services(
-            RebornBuildInput::local_dev(
-                "runtime-preview-owner",
-                root.path().join("local-dev"),
-            )
-            .with_runtime_policy(local_dev_runtime_policy()),
+            RebornBuildInput::local_dev("runtime-preview-owner", root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
         )
         .with_identity(RebornRuntimeIdentity {
             tenant_id: "runtime-preview-tenant".to_string(),

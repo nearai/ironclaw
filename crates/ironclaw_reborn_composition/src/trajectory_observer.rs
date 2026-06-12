@@ -142,7 +142,10 @@ fn safe_preview_inner(
             if map.len() > bounded.len() {
                 bounded.insert(
                     "…".to_string(),
-                    Value::String(format!("{} more entries omitted", map.len() - bounded.len())),
+                    Value::String(format!(
+                        "{} more entries omitted",
+                        map.len() - bounded.len()
+                    )),
                 );
             }
             Value::Object(bounded)
@@ -283,7 +286,10 @@ mod tests {
         // capped entries + one "…" marker entry
         assert_eq!(obj.len(), SAFE_PREVIEW_MAX_OBJECT_ENTRIES + 1);
         assert!(
-            obj.get("…").and_then(|v| v.as_str()).unwrap().contains("10 more entries"),
+            obj.get("…")
+                .and_then(|v| v.as_str())
+                .unwrap()
+                .contains("10 more entries"),
             "object cap should report the dropped count"
         );
     }
@@ -303,10 +309,14 @@ mod tests {
         while let Some(next) = cur.get("next") {
             cur = next;
             levels += 1;
-            assert!(levels <= SAFE_PREVIEW_MAX_DEPTH, "must not exceed max depth");
+            assert!(
+                levels <= SAFE_PREVIEW_MAX_DEPTH,
+                "must not exceed max depth"
+            );
         }
         assert!(
-            cur.as_str().is_some_and(|s| s.contains("at max depth") || s == "leaf"),
+            cur.as_str()
+                .is_some_and(|s| s.contains("at max depth") || s == "leaf"),
             "deepest visited node should be a collapse marker or the leaf, got {cur}"
         );
     }

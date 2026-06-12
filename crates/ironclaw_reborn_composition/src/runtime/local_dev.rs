@@ -166,7 +166,6 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             trajectory_observer: self.trajectory_observer.clone(),
         })
         .await
-
     }
 }
 
@@ -229,10 +228,7 @@ impl LocalDevCapabilityIo {
     }
 
     /// Attach a trajectory observer (no-op when `None`).
-    fn with_observer(
-        mut self,
-        observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
-    ) -> Self {
+    fn with_observer(mut self, observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>) -> Self {
         self.observer = observer;
         self
     }
@@ -839,6 +835,7 @@ fn ensure_local_dev_ref_scope(
     if reference.starts_with(&expected_prefix) {
         Ok(())
     } else {
+        eprintln!("ZDBG scope-mismatch: prefix={prefix:?} reference={reference:?} expected={expected_prefix:?}");
         Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::ScopeMismatch,
             "capability input ref is not scoped to this loop run",
