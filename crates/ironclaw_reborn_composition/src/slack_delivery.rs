@@ -585,6 +585,18 @@ async fn record_gate_route_if_needed(
         {
             conversation_fingerprints.insert(conv_ref.conversation_fingerprint());
         }
+        // Also record the root conversation for bare replies sent directly in
+        // the DM/channel instead of as a threaded reply to the prompt.
+        if let Some(space) = posted_space_id
+            && let Ok(conv_ref) = ironclaw_conversations::ExternalConversationRef::new(
+                Some(space),
+                &msg.channel,
+                None,
+                None,
+            )
+        {
+            conversation_fingerprints.insert(conv_ref.conversation_fingerprint());
+        }
         // Always record a no-space fallback ref for events that omit team_id.
         if let Ok(conv_ref) = ironclaw_conversations::ExternalConversationRef::new(
             None,
@@ -592,6 +604,11 @@ async fn record_gate_route_if_needed(
             Some(&msg.ts),
             None,
         ) {
+            conversation_fingerprints.insert(conv_ref.conversation_fingerprint());
+        }
+        if let Ok(conv_ref) =
+            ironclaw_conversations::ExternalConversationRef::new(None, &msg.channel, None, None)
+        {
             conversation_fingerprints.insert(conv_ref.conversation_fingerprint());
         }
     }
@@ -1429,7 +1446,7 @@ async fn deliver_triggered_run(
         scope: scope.clone(),
         actor: actor.clone(),
         trigger_context: trigger_context.clone(),
-        resolved_space_id: std::sync::OnceLock::new(),
+        resolved_space_id: std::sync::Mutex::new(None),
     };
 
     let mut delivered_blocked_marker: Option<BlockedActionableMarker> = None;
@@ -1514,9 +1531,13 @@ async fn deliver_triggered_run(
                     && let Some(gate_ref) = gate_ref_for_routing.as_deref()
                 {
                     // Read the space id that was captured during target resolution.
-                    // The authority is constructed once per run, so this is set by
-                    // the time deliver_triggered_notification returns.
-                    let space_id = authority.resolved_space_id.get().and_then(|s| s.as_deref());
+                    let space_id = {
+                        let space_id_guard = authority
+                            .resolved_space_id
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        space_id_guard.clone()
+                    };
                     record_gate_route_if_needed(
                         services.route_store.as_ref(),
                         run_id,
@@ -1526,7 +1547,7 @@ async fn deliver_triggered_run(
                         &scope,
                         &posted_messages,
                         None,
-                        space_id,
+                        space_id.as_deref(),
                     )
                     .await;
                 }
@@ -1876,11 +1897,11 @@ struct TriggeredSlackReplyTargetAuthority {
     actor: TurnActor,
     trigger_context: TriggerCommunicationContext,
     /// Space id (Slack team id) captured during
-    /// `resolve_product_outbound_target_metadata`. Set once per authority
-    /// instance. Used after delivery to attach the team id to posted-message
-    /// gate-route refs so inbound replies (which carry team_id as space_id)
+    /// `resolve_product_outbound_target_metadata`. Updated on every resolution.
+    /// Used after delivery to attach the team id to posted-message gate-route
+    /// refs so inbound replies (which carry team_id as space_id)
     /// fingerprint-match the recorded ref.
-    resolved_space_id: std::sync::OnceLock<Option<String>>,
+    resolved_space_id: std::sync::Mutex<Option<String>>,
 }
 
 #[async_trait]
@@ -1920,8 +1941,10 @@ impl ProductOutboundTargetResolver for TriggeredSlackReplyTargetAuthority {
         })?;
         // Store the resolved space id so that, after deliver_triggered_notification
         // returns posted messages, we can attach the team id to gate-route refs.
-        // OnceLock is set once per authority instance (constructed once per run).
-        let _ = self.resolved_space_id.set(space_id.clone());
+        *self
+            .resolved_space_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = space_id.clone();
         let external_conversation_ref =
             ExternalConversationRef::new(space_id.as_deref(), &conversation_id, None, None)
                 .map_err(|e| ProductWorkflowError::BindingResolutionFailed {
@@ -4181,11 +4204,25 @@ mod tests {
                 .expect("channel root ref");
         let channel_root_fingerprint = channel_root_ref.conversation_fingerprint();
         assert!(
-            !route
+            route
                 .delivered_conversation_fingerprints
                 .iter()
                 .any(|fingerprint| fingerprint == &channel_root_fingerprint),
-            "recorded route must not include the channel-root fingerprint for a threaded prompt; fingerprints={:?}",
+            "recorded route must include the space-qualified channel-root fingerprint for bare replies; fingerprints={:?}",
+            route.delivered_conversation_fingerprints,
+        );
+
+        let no_space_channel_root_ref =
+            ironclaw_conversations::ExternalConversationRef::new(None, "D789", None, None)
+                .expect("no-space channel root ref");
+        let no_space_channel_root_fingerprint =
+            no_space_channel_root_ref.conversation_fingerprint();
+        assert!(
+            route
+                .delivered_conversation_fingerprints
+                .iter()
+                .any(|fingerprint| fingerprint == &no_space_channel_root_fingerprint),
+            "recorded route must include the no-space channel-root fingerprint for bare replies; fingerprints={:?}",
             route.delivered_conversation_fingerprints,
         );
     }
