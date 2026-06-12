@@ -713,6 +713,7 @@ pub enum ProductRejectionKind {
     UnknownInstallation,
     InvalidRequest,
     PolicyDenied,
+    AmbiguousResolution,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -766,6 +767,9 @@ impl ProductRejectionKind {
                 "I couldn't read that request. Use `approve` / `deny`, optionally with `gate:<ref>`."
             }
             Self::PolicyDenied => "That request was declined by policy.",
+            Self::AmbiguousResolution => {
+                "Multiple requests are pending in this conversation. Use `approve gate:<ref>` or `deny gate:<ref>` to pick one."
+            }
         }
     }
 
@@ -779,6 +783,9 @@ impl ProductRejectionKind {
             }
             Self::InvalidRequest => {
                 "I couldn't read that request. Use `auth deny <auth-request-ref>` to decline an auth request."
+            }
+            Self::AmbiguousResolution => {
+                "Multiple auth requests are pending in this conversation. Use `auth deny <auth-request-ref>` to target a specific one."
             }
             _ => self.user_facing_hint(),
         }

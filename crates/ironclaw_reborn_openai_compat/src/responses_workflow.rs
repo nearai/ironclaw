@@ -953,6 +953,14 @@ fn error_from_rejection(rejection: ProductRejection) -> OpenAiCompatHttpError {
         ProductRejectionKind::InvalidRequest => {
             OpenAiCompatHttpError::invalid_request(Some("input".to_string()))
         }
+        ProductRejectionKind::AmbiguousResolution => {
+            OpenAiCompatHttpError::from_workflow_rejection(
+                ProductWorkflowRejectionKind::Ambiguous,
+                409,
+                false,
+                None,
+            )
+        }
     }
 }
 

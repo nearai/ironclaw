@@ -1368,8 +1368,8 @@ fn rejection_kind_for_auth_interaction(kind: AuthInteractionRejectionKind) -> Pr
     match kind {
         AuthInteractionRejectionKind::MissingAuth => ProductRejectionKind::BindingRequired,
         AuthInteractionRejectionKind::CrossScopeDenied => ProductRejectionKind::AccessDenied,
-        AuthInteractionRejectionKind::AmbiguousAuth
-        | AuthInteractionRejectionKind::StaleAuth
+        AuthInteractionRejectionKind::AmbiguousAuth => ProductRejectionKind::AmbiguousResolution,
+        AuthInteractionRejectionKind::StaleAuth
         | AuthInteractionRejectionKind::InvalidGateRef
         | AuthInteractionRejectionKind::InvalidCredentialRef
         | AuthInteractionRejectionKind::InvalidCallbackRef
@@ -1385,8 +1385,10 @@ fn rejection_kind_for_approval_interaction(
     match kind {
         ApprovalInteractionRejectionKind::MissingGate => ProductRejectionKind::BindingRequired,
         ApprovalInteractionRejectionKind::CrossScopeDenied => ProductRejectionKind::AccessDenied,
-        ApprovalInteractionRejectionKind::AmbiguousGate
-        | ApprovalInteractionRejectionKind::StaleGate
+        ApprovalInteractionRejectionKind::AmbiguousGate => {
+            ProductRejectionKind::AmbiguousResolution
+        }
+        ApprovalInteractionRejectionKind::StaleGate
         | ApprovalInteractionRejectionKind::InvalidGateRef
         | ApprovalInteractionRejectionKind::AlwaysAllowUnsupported
         | ApprovalInteractionRejectionKind::UnsupportedAction

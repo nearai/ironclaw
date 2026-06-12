@@ -159,7 +159,9 @@ impl OpenAiCompatHttpError {
             ProductWorkflowRejectionKind::Unauthorized => OpenAiCompatErrorKind::PermissionDenied,
             ProductWorkflowRejectionKind::InvalidRequest => OpenAiCompatErrorKind::Validation,
             ProductWorkflowRejectionKind::Unavailable => OpenAiCompatErrorKind::ServiceUnavailable,
-            ProductWorkflowRejectionKind::Conflict => OpenAiCompatErrorKind::Conflict,
+            ProductWorkflowRejectionKind::Conflict | ProductWorkflowRejectionKind::Ambiguous => {
+                OpenAiCompatErrorKind::Conflict
+            }
         };
         Self::from_kind(status_code, retryable, error_kind, param)
     }

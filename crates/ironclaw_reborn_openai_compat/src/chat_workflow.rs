@@ -642,6 +642,14 @@ fn error_from_rejection(rejection: ProductRejection) -> OpenAiCompatHttpError {
             false,
             None,
         ),
+        ProductRejectionKind::AmbiguousResolution => {
+            OpenAiCompatHttpError::from_workflow_rejection(
+                ProductWorkflowRejectionKind::Ambiguous,
+                409,
+                false,
+                None,
+            )
+        }
     }
 }
 

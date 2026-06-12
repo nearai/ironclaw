@@ -51,10 +51,10 @@ impl AuthInteractionRejectionKind {
     pub fn workflow_rejection_kind(self) -> ProductWorkflowRejectionKind {
         match self {
             Self::MissingAuth => ProductWorkflowRejectionKind::ScopeNotFound,
+            Self::AmbiguousAuth => ProductWorkflowRejectionKind::Ambiguous,
             Self::StaleAuth => ProductWorkflowRejectionKind::Conflict,
             Self::CrossScopeDenied => ProductWorkflowRejectionKind::Unauthorized,
-            Self::AmbiguousAuth
-            | Self::InvalidGateRef
+            Self::InvalidGateRef
             | Self::InvalidCredentialRef
             | Self::InvalidCallbackRef
             | Self::UnsupportedResult
@@ -67,10 +67,9 @@ impl AuthInteractionRejectionKind {
         match self {
             Self::MissingAuth => 404,
             Self::CrossScopeDenied => 403,
-            Self::StaleAuth => 409,
+            Self::AmbiguousAuth | Self::StaleAuth => 409,
             Self::FlowUnavailable => 503,
-            Self::AmbiguousAuth
-            | Self::InvalidGateRef
+            Self::InvalidGateRef
             | Self::InvalidCredentialRef
             | Self::InvalidCallbackRef
             | Self::UnsupportedResult

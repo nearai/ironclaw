@@ -1313,7 +1313,7 @@ async fn scoped_approval_resolution_rejects_ambiguous_gate() {
     assert!(matches!(
         err,
         ProductAdapterError::WorkflowRejected {
-            kind: ProductWorkflowRejectionKind::Conflict,
+            kind: ProductWorkflowRejectionKind::Ambiguous,
             status_code: 409,
             retryable: false,
             ..
@@ -1632,13 +1632,13 @@ async fn scoped_approval_two_live_routes_same_conversation_rejects_ambiguous() {
         matches!(
             err,
             ProductAdapterError::WorkflowRejected {
-                kind: ProductWorkflowRejectionKind::Conflict,
+                kind: ProductWorkflowRejectionKind::Ambiguous,
                 status_code: 409,
                 retryable: false,
                 ..
             }
         ),
-        "expected Conflict/409 for ambiguous delivered route, got: {err:?}"
+        "expected Ambiguous/409 for ambiguous delivered route, got: {err:?}"
     );
     assert!(
         approval_service.resolutions().is_empty(),
@@ -1870,13 +1870,13 @@ async fn auth_two_live_routes_same_conversation_rejects_ambiguous() {
         matches!(
             err,
             ProductAdapterError::WorkflowRejected {
-                kind: ProductWorkflowRejectionKind::InvalidRequest,
-                status_code: 400,
+                kind: ProductWorkflowRejectionKind::Ambiguous,
+                status_code: 409,
                 retryable: false,
                 ..
             }
         ),
-        "expected InvalidRequest/400 for ambiguous auth delivered route, got: {err:?}"
+        "expected Ambiguous/409 for ambiguous auth delivered route, got: {err:?}"
     );
     // The auth service receives one initial call (the normal-path attempt that
     // returns MissingAuth), which then triggers the delivered-route fallback
