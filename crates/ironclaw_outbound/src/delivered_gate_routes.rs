@@ -49,8 +49,8 @@ pub const DELIVERED_GATE_ROUTE_TTL: Duration = Duration::hours(48);
 ///
 /// Defends against prompt-flood accumulation: a legitimate workload has far
 /// fewer concurrent gate prompts in a single conversation than this bound.
-/// Mirrors the `CONV_IDX_LOOKUP_CAP` constant in `filesystem_store.rs`.
-const CONV_IDX_LOOKUP_CAP: usize = 32;
+/// Used by both the in-memory and filesystem store implementations.
+pub(crate) const DELIVERED_GATE_ROUTE_CONVERSATION_LOOKUP_CAP: usize = 32;
 
 /// A route record mapping a delivered gate prompt back to the run and scope
 /// it was delivered for.
@@ -290,7 +290,7 @@ impl DeliveredGateRouteStore for InMemoryDeliveredGateRouteStore {
             .map(|route_keys| {
                 route_keys
                     .iter()
-                    .take(CONV_IDX_LOOKUP_CAP)
+                    .take(DELIVERED_GATE_ROUTE_CONVERSATION_LOOKUP_CAP)
                     .filter_map(|rk| state.records.get(rk))
                     .cloned()
                     .collect::<Vec<_>>()
@@ -880,7 +880,7 @@ mod tests {
     #[tokio::test]
     async fn in_memory_conv_lookup_capped_at_32_entries() {
         // Write 33 routes for the same conversation fingerprint. The lookup cap
-        // (CONV_IDX_LOOKUP_CAP = 32) must limit the returned set to at most 32
+        // (DELIVERED_GATE_ROUTE_CONVERSATION_LOOKUP_CAP = 32) must limit the returned set to at most 32
         // records and must not panic.
         let store = InMemoryDeliveredGateRouteStore::default();
         let shared = conversation_fingerprint("thread-cap-33-entries");

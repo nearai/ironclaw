@@ -1146,11 +1146,12 @@ where
             None => return Ok(Vec::new()),
         };
         let entries = index_file.into_routes();
-        // 32-entry cap as defense-in-depth. The index is now per-(tenant, user),
+        // Cap as defense-in-depth. The index is now per-(tenant, user),
         // so legitimate overflow is implausible; the cap guards against a
         // corrupt or adversarially written index file.
-        const CONV_IDX_LOOKUP_CAP: usize = 32;
-        let entries = entries.into_iter().take(CONV_IDX_LOOKUP_CAP);
+        let entries = entries
+            .into_iter()
+            .take(crate::delivered_gate_routes::DELIVERED_GATE_ROUTE_CONVERSATION_LOOKUP_CAP);
         let mut records = Vec::new();
         for entry in entries {
             // Tenant + user defense-in-depth: the index path already binds
