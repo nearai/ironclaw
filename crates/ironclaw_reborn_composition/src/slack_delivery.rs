@@ -61,6 +61,7 @@ const SLACK_DELIVERY_TIMEOUT_MESSAGE: &str =
     "This is taking longer than expected — check the WebUI for the result.";
 const SLACK_DELIVERY_ERROR_MESSAGE: &str =
     "Something went wrong delivering the result here. Check the WebUI.";
+const SLACK_DEFERRED_BUSY_MESSAGE: &str = "I'm waiting on a pending approval before I can take new messages — reply `approve` or `deny` (or `approve gate:<ref>`) to resume.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BlockedActionableMarker {
@@ -946,6 +947,26 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
         {
             return;
         }
+        // A2b: DeferredBusy feedback — the user's message was silently dropped
+        // because a run is blocked on a pending gate. Post a one-shot hint so the
+        // user knows to approve/deny rather than being left in silence. Same
+        // best-effort semantics as A2: post failure → debug! only, no recursion.
+        if let Some(hint) = deferred_busy_hint_for_user_message(&envelope, &ack) {
+            if let Err(post_err) = post_slack_message(
+                self.services.egress.as_ref(),
+                envelope.external_conversation_ref(),
+                hint,
+            )
+            .await
+            {
+                tracing::debug!(
+                    target = "ironclaw::reborn::slack_delivery",
+                    error = %post_err,
+                    "failed to post deferred-busy hint to Slack (best-effort)"
+                );
+            }
+            return;
+        }
         let Ok(_permit) = self.delivery_permits.clone().acquire_owned().await else {
             tracing::warn!(
                 target = "ironclaw::reborn::slack_delivery",
@@ -1149,6 +1170,31 @@ fn rejection_hint_for_resolution(
         _ => effective_rejection.kind.user_facing_hint(),
     };
     Some(hint)
+}
+
+/// Returns the user-facing hint to post when an inbound user message is deferred
+/// because a run for the same conversation is blocked on a pending gate.
+///
+/// Returns `None` for non-UserMessage payloads (resolution/control payloads must
+/// stay silent) and for `Duplicate` acks (transport retries must not double-post).
+fn deferred_busy_hint_for_user_message(
+    envelope: &ProductInboundEnvelope,
+    ack: &ProductInboundAck,
+) -> Option<&'static str> {
+    // Unwrap one layer of Duplicate so a Slack transport retry of the same
+    // event that originally produced DeferredBusy does not re-post the hint.
+    let effective = match ack {
+        ProductInboundAck::Duplicate { prior } => prior.as_ref(),
+        other => other,
+    };
+    if !matches!(effective, ProductInboundAck::DeferredBusy { .. }) {
+        return None;
+    }
+    // Only reply to user messages — resolution/control/noop payloads must stay silent.
+    if !matches!(envelope.payload(), ProductInboundPayload::UserMessage(_)) {
+        return None;
+    }
+    Some(SLACK_DEFERRED_BUSY_MESSAGE)
 }
 
 fn rejection_ack_for_workflow_error(error: &ProductAdapterError) -> Option<ProductInboundAck> {
@@ -3148,6 +3194,127 @@ mod tests {
         assert!(
             !calls.iter().any(|c| c.path == "/api/chat.postMessage"),
             "no chat.postMessage expected for rejected user-message payload"
+        );
+    }
+
+    // ── DeferredBusy ack feedback tests ───────────────────────────────────────
+
+    fn deferred_busy_ack() -> ProductInboundAck {
+        ProductInboundAck::DeferredBusy {
+            accepted_message_ref: AcceptedMessageRef::new("slack:deferred").expect("ref"),
+            active_run_id: TurnRunId::new(),
+        }
+    }
+
+    /// DeferredBusy ack + UserMessage payload → exactly one Slack post containing
+    /// "waiting on a pending approval".
+    #[tokio::test]
+    async fn deferred_busy_ack_with_user_message_posts_hint() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "2000.1"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::Running,
+        ));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+        let env = envelope(user_message_payload());
+        let ack = deferred_busy_ack();
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "expected exactly one chat.postMessage for DeferredBusy + UserMessage"
+        );
+        let body = std::str::from_utf8(&post_calls[0].body).expect("utf8 body");
+        assert!(
+            body.contains("waiting on a pending approval"),
+            "deferred-busy hint must mention 'waiting on a pending approval', got: {body}"
+        );
+    }
+
+    /// DeferredBusy ack + non-UserMessage payload → no post (resolution payloads
+    /// already have their own feedback path and must stay silent here).
+    #[tokio::test]
+    async fn deferred_busy_ack_with_resolution_payload_posts_nothing() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::Running,
+        ));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+        let env = envelope(scoped_approval_resolution_payload());
+        let ack = deferred_busy_ack();
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        let calls = egress.calls();
+        assert!(
+            !calls.iter().any(|c| c.path == "/api/chat.postMessage"),
+            "no chat.postMessage expected for DeferredBusy with non-UserMessage payload"
+        );
+    }
+
+    /// Duplicate { prior: DeferredBusy } + UserMessage → exactly one post
+    /// (transport retry of the original DeferredBusy event behaves like the inner
+    /// ack so the user still gets feedback).
+    #[tokio::test]
+    async fn duplicate_deferred_busy_with_user_message_posts_hint() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "2000.2"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::Running,
+        ));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+        let env = envelope(user_message_payload());
+        let ack = ProductInboundAck::Duplicate {
+            prior: Box::new(deferred_busy_ack()),
+        };
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "Duplicate{{DeferredBusy}} + UserMessage must produce exactly one hint post"
+        );
+        let body = std::str::from_utf8(&post_calls[0].body).expect("utf8 body");
+        assert!(
+            body.contains("waiting on a pending approval"),
+            "hint must mention 'waiting on a pending approval', got: {body}"
         );
     }
 
