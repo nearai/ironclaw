@@ -14,7 +14,7 @@
 #   docker run --env-file .env -p 3000:3000 ironclaw:latest
 
 # Stage 1: Install cargo-chef
-FROM rust:1.92-bookworm AS chef
+FROM rust:1.92-trixie@sha256:f58923369ba295ae1f60bc49d03f2c955a5c93a0b7d49acfb2b2a65bebaf350d AS chef
 
 RUN rustup target add wasm32-wasip2 \
     && cargo install --locked cargo-chef@0.1.77 wasm-tools@1.246.1
@@ -119,7 +119,7 @@ RUN set -eux; \
     [ "$count" -gt 0 ] || { echo "ERROR: No WASM extensions were built"; exit 1; }
 
 # Stage 5a: Shared runtime base
-FROM debian:bookworm-slim AS runtime-base
+FROM debian:trixie-slim@sha256:109e2c65005bf160609e4ba6acf7783752f8502ad218e298253428690b9eaa4b AS runtime-base
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
