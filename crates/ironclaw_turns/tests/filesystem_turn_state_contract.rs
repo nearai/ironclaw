@@ -89,6 +89,7 @@ fn submit_request_for(scope: TurnScope, idempotency_key: &str) -> SubmitTurnRequ
         parent_run_id: None,
         subagent_depth: 0,
         spawn_tree_root_run_id: None,
+        run_origin: None,
     }
 }
 

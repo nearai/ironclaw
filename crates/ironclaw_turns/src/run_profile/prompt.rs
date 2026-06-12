@@ -581,6 +581,7 @@ mod tests {
                 .with_ymd_and_hms(2026, 6, 11, 21, 32, 0)
                 .unwrap(),
             user_timezone: None,
+            communication: None,
         };
 
         let port_with = HostManagedLoopPromptPort::new(
@@ -660,6 +661,7 @@ mod tests {
                 .with_ymd_and_hms(2026, 6, 11, 21, 32, 0)
                 .unwrap(),
             user_timezone: None,
+            communication: None,
         };
 
         let port = HostManagedLoopPromptPort::new(

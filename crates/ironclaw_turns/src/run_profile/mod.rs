@@ -31,6 +31,7 @@ mod system_inference;
 
 pub use crate::CapabilityActivityId;
 
+pub use crate::TurnRunOrigin;
 pub use compaction::{
     CompactionInitiator, LoopCompactionError, LoopCompactionMode, LoopCompactionOutcome,
     LoopCompactionPort, LoopCompactionRequest, LoopCompactionResponse, LoopSummaryArtifactId,
@@ -110,7 +111,10 @@ pub use resolver::{
     InMemoryRunProfileRegistry, InMemoryRunProfileResolver, RunProfileDefinition,
     RunProfileRegistryError, RunProfileResolutionRequest, RunProfileResolver,
 };
-pub use runtime_context::LoopRuntimeContext;
+pub use runtime_context::{
+    CommunicationRuntimeContext, ConnectedChannelSummary, ConnectedChannelsState,
+    DeliveryTargetState, DeliveryTargetSummary, LoopRuntimeContext,
+};
 pub use skill_context::{
     InstalledSkillSnapshot, NoopSkillContextSource, SkillActivationState, SkillContextBudget,
     SkillContextError, SkillContextService, SkillContextSnippet, SkillContextSource,

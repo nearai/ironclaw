@@ -15,7 +15,7 @@ use thiserror::Error;
 use crate::{
     AcceptedMessageRef, LoopDiagnosticRef, LoopGateRef, LoopMessageRef, LoopResultRef,
     RedactedCheckpointPayload, RunProfileVersion, TurnActor, TurnCheckpointId, TurnId, TurnRunId,
-    TurnScope,
+    TurnRunOrigin, TurnScope,
 };
 
 use super::{
@@ -548,6 +548,8 @@ pub struct LoopRunContext {
     pub loop_driver_version: RunProfileVersion,
     pub checkpoint_schema_id: CheckpointSchemaId,
     pub checkpoint_schema_version: RunProfileVersion,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_origin: Option<TurnRunOrigin>,
 }
 
 impl LoopRunContext {
@@ -575,6 +577,7 @@ impl LoopRunContext {
             loop_driver_version,
             checkpoint_schema_id,
             checkpoint_schema_version,
+            run_origin: None,
         }
     }
 
@@ -594,6 +597,11 @@ impl LoopRunContext {
 
     pub fn with_resolved_model_route(mut self, snapshot: LoopModelRouteSnapshot) -> Self {
         self.resolved_model_route = Some(snapshot);
+        self
+    }
+
+    pub fn with_run_origin(mut self, run_origin: TurnRunOrigin) -> Self {
+        self.run_origin = Some(run_origin);
         self
     }
 }

@@ -6,7 +6,7 @@ use ironclaw_host_api::RuntimeCredentialAuthRequirement;
 use crate::{
     AcceptedMessageRef, GateRef, ReplyTargetBindingRef, ResolvedRunProfile, RunProfileId,
     RunProfileVersion, SourceBindingRef, TurnActor, TurnAdmissionClass, TurnCheckpointId, TurnId,
-    TurnRunId, TurnScope, events::EventCursor, request::TurnTimestamp,
+    TurnRunId, TurnRunOrigin, TurnScope, events::EventCursor, request::TurnTimestamp,
     run_profile::LoopModelRouteSnapshot,
 };
 
@@ -320,6 +320,8 @@ pub struct TurnRunState {
     pub credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
     pub failure: Option<SanitizedFailure>,
     pub event_cursor: EventCursor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_origin: Option<TurnRunOrigin>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

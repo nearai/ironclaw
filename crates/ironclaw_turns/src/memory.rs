@@ -134,6 +134,7 @@ struct RunRecord {
     parent_run_id: Option<TurnRunId>,
     subagent_depth: u32,
     spawn_tree_root_run_id: Option<TurnRunId>,
+    run_origin: Option<crate::TurnRunOrigin>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -621,6 +622,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
             parent_run_id: None,
             subagent_depth: 0,
             spawn_tree_root_run_id: None,
+            run_origin: request.run_origin,
         };
         inner.turns.insert(turn_id, turn_record);
         inner.active_locks.insert(
@@ -797,6 +799,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
                 spawn_tree_root_run_id: Some(
                     parent.spawn_tree_root_run_id.unwrap_or(parent.run_id),
                 ),
+                run_origin: None,
             }
         };
 
@@ -1037,6 +1040,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
             parent_run_id: Some(parent_run_id),
             subagent_depth,
             spawn_tree_root_run_id: Some(root_run_id),
+            run_origin: None,
         };
         inner.turns.insert(turn_id, turn_record);
         inner.active_locks.insert(
@@ -1466,6 +1470,7 @@ impl Inner {
                     parent_run_id: run.parent_run_id,
                     subagent_depth: run.subagent_depth,
                     spawn_tree_root_run_id: run.spawn_tree_root_run_id,
+                    run_origin: None,
                 },
             );
         }
@@ -2606,6 +2611,7 @@ impl RunRecord {
             credential_requirements: self.credential_requirements.clone(),
             failure: self.failure.clone(),
             event_cursor: self.event_cursor,
+            run_origin: self.run_origin.clone(),
         }
     }
 }
