@@ -13,14 +13,20 @@
  * "anon" before/without a session.
  */
 
-let currentScope = "anon";
+/** The scope used before/without a resolved session (logged-out / unresolved).
+ * It never holds a real user's content, so leaving it must not trigger a
+ * purge — otherwise the anon→user transition on every reload would wipe the
+ * just-resolved user's namespaced drafts/pins. */
+export const ANON_SCOPE = "anon";
+
+let currentScope = ANON_SCOPE;
 
 /** Update the active scope from the resolved session (or null to reset). */
 export function setAuthScope(session) {
   currentScope =
     session && session.tenant_id && session.user_id
       ? `${session.tenant_id}:${session.user_id}`
-      : "anon";
+      : ANON_SCOPE;
 }
 
 /** The active scope string, e.g. `"<tenant_id>:<user_id>"` or `"anon"`. */

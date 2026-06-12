@@ -57,12 +57,13 @@ export function useHistory(threadId, options = {}) {
     // silently swallowed.
     loadError: null,
   });
-  // Synchronous reentrancy guard — `isLoading` in state is async so
-  // it can't gate overlapping calls (scroll-to-load + onRunCompleted
-  // refetch can fire in the same tick). The ref flips before the
-  // first await and clears in `finally` so a thrown timeline call
-  // doesn't permanently wedge the next load.
-  const loadingRef = React.useRef(false);
+  // Synchronous reentrancy guard, tracked PER THREAD — `isLoading` in state is
+  // async so it can't gate overlapping calls (scroll-to-load + onRunCompleted
+  // refetch can fire in the same tick). It must be per-thread, not a single
+  // boolean: a boolean held by an in-flight load of thread A would block a
+  // switch to an uncached thread B, leaving B stuck loading. Each entry is
+  // added before the first await and removed in `finally`.
+  const loadingRef = React.useRef(new Set());
   // Tracks the currently-active thread so a fetch that resolves after
   // the user has switched threads doesn't clobber the live view (its
   // result still goes into the cache, keyed by its own thread id).
@@ -75,8 +76,14 @@ export function useHistory(threadId, options = {}) {
         setState({ messages: [], nextCursor: null, isLoading: false, loadError: null });
         return;
       }
-      if (loadingRef.current) return;
-      loadingRef.current = true;
+      if (loadingRef.current.has(threadId)) return;
+      loadingRef.current.add(threadId);
+      // Capture the issuing identity + cache key BEFORE the await. If the
+      // user signs out / in (or swaps tokens) while this request is in
+      // flight, the response belongs to the previous user: we must neither
+      // render it for the new user nor write it under the new user's key.
+      const issuingScope = authScope();
+      const key = cacheKey(threadId);
       setState((s) => ({ ...s, isLoading: true }));
       try {
         const data = await fetchTimeline({
@@ -84,6 +91,9 @@ export function useHistory(threadId, options = {}) {
           limit: PAGE_SIZE,
           cursor,
         });
+
+        // Identity changed during the fetch — discard the response entirely.
+        if (authScope() !== issuingScope) return;
 
         const pendingMessages = cursor ? [] : getPendingMessages?.() || [];
         const renderable = messagesFromTimeline(data.messages || [], pendingMessages);
@@ -95,9 +105,9 @@ export function useHistory(threadId, options = {}) {
 
         // A full (non-paginated) load can be cached without the previous
         // state, so refresh the cache even if the user has since switched
-        // threads.
+        // threads. Always under the issuing identity's key.
         if (!cursor) {
-          putCache(cacheKey(threadId), { messages: renderable, nextCursor });
+          putCache(key, { messages: renderable, nextCursor });
         }
 
         setState((prev) => {
@@ -107,7 +117,7 @@ export function useHistory(threadId, options = {}) {
           const merged = cursor
             ? mergePage(renderable, prev.messages)
             : renderable;
-          if (cursor) putCache(cacheKey(threadId), { messages: merged, nextCursor });
+          if (cursor) putCache(key, { messages: merged, nextCursor });
           return {
             messages: merged,
             nextCursor,
@@ -117,6 +127,8 @@ export function useHistory(threadId, options = {}) {
         });
       } catch (err) {
         console.error("Failed to load timeline:", err);
+        // Identity changed mid-flight — the error isn't the new user's.
+        if (authScope() !== issuingScope) return;
         // Stay loud — surface a user-visible error rather than silently
         // masking timeline outages. Ignore a stale resolve for a thread the
         // user already navigated away from (its data is already cached).
@@ -130,7 +142,7 @@ export function useHistory(threadId, options = {}) {
             : s,
         );
       } finally {
-        loadingRef.current = false;
+        loadingRef.current.delete(threadId);
       }
     },
     [threadId, getPendingMessages, setPendingMessages],
