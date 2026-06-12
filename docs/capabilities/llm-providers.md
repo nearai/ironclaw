@@ -27,7 +27,7 @@ ironclaw onboard --provider-only
 | io.net                | `ionet`             | `IONET_API_KEY`        | Intelligence API                |
 | Mistral               | `mistral`           | `MISTRAL_API_KEY`      | Mistral models                  |
 | Yandex AI Studio      | `yandex`            | `YANDEX_API_KEY`       | YandexGPT models                |
-| MiniMax               | `minimax`           | `MINIMAX_API_KEY`      | MiniMax-M2.7 models             |
+| MiniMax               | `minimax`           | `MINIMAX_API_KEY`      | MiniMax-M3 models               |
 | Cloudflare Workers AI | `cloudflare`        | `CLOUDFLARE_API_KEY`   | Access to Workers AI            |
 | GitHub Copilot        | `github_copilot`    | `GITHUB_COPILOT_TOKEN` | Multi-models                    |
 | Ollama                | `ollama`            | No                     | Local inference                 |
@@ -169,7 +169,7 @@ LLM_BACKEND=minimax
 MINIMAX_API_KEY=...
 ```
 
-Available models: `MiniMax-M2.7` (default), `MiniMax-M2.7-highspeed`, `MiniMax-M2.5`, `MiniMax-M2.5-highspeed`
+Available models: `MiniMax-M3` (default), `MiniMax-M2.7`, `MiniMax-M2.7-highspeed`
 
 To use the China mainland endpoint, set:
 

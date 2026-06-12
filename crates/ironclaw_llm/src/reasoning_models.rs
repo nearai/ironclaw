@@ -62,7 +62,7 @@ pub fn has_native_thinking(model: &str) -> bool {
         "glm-5",
         "nanbeige",
         "step-3.5",
-        "minimax-m2",
+        "minimax-m",
     ];
     let lower = model.to_ascii_lowercase();
     NATIVE_THINKING_PATTERNS.iter().any(|p| lower.contains(p))
@@ -207,6 +207,7 @@ mod tests {
         assert!(has_native_thinking("minimax-m2.5-139b"));
         assert!(has_native_thinking("MiniMax-M2.7"));
         assert!(has_native_thinking("MiniMax-M2.7-highspeed"));
+        assert!(has_native_thinking("MiniMax-M3"));
     }
 
     #[test]
