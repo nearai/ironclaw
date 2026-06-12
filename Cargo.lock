@@ -4843,6 +4843,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -5022,6 +5023,7 @@ dependencies = [
  "tower 0.5.3",
  "tower-http 0.6.11",
  "tracing",
+ "tracing-subscriber",
  "tracing-test",
  "url",
  "uuid",
@@ -5376,6 +5378,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "chrono-tz",
  "cron",
  "deadpool-postgres",
  "hex",
@@ -5432,6 +5435,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "chrono-tz",
  "hex",
  "ironclaw_filesystem",
  "ironclaw_host_api",

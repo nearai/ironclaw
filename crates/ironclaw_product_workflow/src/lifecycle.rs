@@ -308,9 +308,13 @@ pub enum LifecycleProductPayload {
     ExtensionInstall {
         installed: bool,
         visible_capability_ids: Vec<String>,
+        #[serde(default)]
+        next_step: String,
     },
     ExtensionActivate {
         activated: bool,
+        #[serde(default)]
+        visible_capability_ids: Vec<String>,
     },
     ExtensionRemove {
         removed: bool,

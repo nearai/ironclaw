@@ -36,8 +36,8 @@ use ironclaw_turns::{
         LoopModelGatewayError, LoopModelGatewayRequest, LoopModelMessage, LoopModelPolicyGuard,
         LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort,
         LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest,
-        LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort,
-        ModelWorkOutcome, ModelWorkRequest, ParentLoopOutput, PromptMode,
+        LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopRuntimeContext, LoopSafeSummary,
+        LoopTranscriptPort, ModelWorkOutcome, ModelWorkRequest, ParentLoopOutput, PromptMode,
         PromptSkillContextMetadata, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::{ClaimRunRequest, TurnRunTransitionPort},
@@ -415,6 +415,7 @@ async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministical
                 .unwrap(),
         ),
         inline_messages: Vec::new(),
+        runtime_context: None,
     };
 
     let builder = InstructionBundleBuilder::new(context);
@@ -494,6 +495,301 @@ async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministical
     assert_eq!(first.skill_context[0].source_name, "alpha");
 }
 
+#[tokio::test]
+async fn instruction_bundle_renders_runtime_context_section() {
+    let context = claimed_run_context().await;
+    let builder = InstructionBundleBuilder::new(context);
+    let request = InstructionBundleRequest {
+        context_bundle: LoopContextBundle {
+            identity_messages: vec![LoopContextMessage {
+                message_ref: Some(LoopMessageRef::new("msg:identity").unwrap()),
+                role: "system".to_string(),
+                safe_summary: "identity safe".to_string(),
+                compaction: None,
+            }],
+            messages: Vec::new(),
+            compaction_message_index: Vec::new(),
+            instruction_snippets: vec![LoopContextSnippet {
+                snippet_ref: "instruction:system".to_string(),
+                model_content: "system rule".to_string(),
+                safe_summary: "system rule".to_string(),
+                metadata: None,
+            }],
+            memory_snippets: Vec::new(),
+        },
+        visible_surface: None,
+        safety_context: None,
+        inline_messages: Vec::new(),
+        runtime_context: Some(LoopRuntimeContext {
+            loop_started_at_utc: chrono::Utc
+                .with_ymd_and_hms(2026, 6, 11, 21, 32, 0)
+                .unwrap(),
+            user_timezone: None,
+        }),
+    };
+
+    let first = builder.build(request.clone()).unwrap();
+    let second = builder.build(request.clone()).unwrap();
+    assert_eq!(
+        first.fingerprint, second.fingerprint,
+        "same request must produce same fingerprint"
+    );
+
+    let runtime_idx = first
+        .materialized_messages
+        .iter()
+        .position(|m| m.content_ref.as_str().starts_with("msg:runtime."))
+        .expect("runtime section message must exist");
+    assert_eq!(first.materialized_messages[runtime_idx].role, "system");
+    assert!(
+        first.materialized_messages[runtime_idx]
+            .model_content
+            .contains("Current date/time at loop start: 2026-06-11T21:32Z"),
+        "model_content: {}",
+        first.materialized_messages[runtime_idx].model_content
+    );
+
+    let identity_idx = first
+        .messages
+        .iter()
+        .rposition(|m| m.content_ref.as_str() == "msg:identity")
+        .expect("identity message must exist");
+    let instruction_idx = first
+        .messages
+        .iter()
+        .position(|m| m.content_ref.as_str().starts_with("msg:instruction."))
+        .expect("instruction snippet message must exist");
+    let runtime_msg_idx = first
+        .messages
+        .iter()
+        .position(|m| m.content_ref.as_str().starts_with("msg:runtime."))
+        .expect("runtime message must exist in messages list");
+    assert!(
+        runtime_msg_idx > identity_idx,
+        "runtime must be after last identity message"
+    );
+    assert!(
+        runtime_msg_idx < instruction_idx,
+        "runtime must be before first instruction snippet"
+    );
+}
+
+#[tokio::test]
+async fn instruction_bundle_runtime_fingerprint_stable_within_minute() {
+    // Two requests that differ only in the seconds component within the same
+    // minute must produce identical rendered model_content, identical runtime
+    // message content_ref, and an identical whole-bundle fingerprint.
+    let context = claimed_run_context().await;
+    let builder = InstructionBundleBuilder::new(context);
+
+    let base_bundle = LoopContextBundle {
+        identity_messages: vec![LoopContextMessage {
+            message_ref: Some(LoopMessageRef::new("msg:identity").unwrap()),
+            role: "system".to_string(),
+            safe_summary: "identity safe".to_string(),
+            compaction: None,
+        }],
+        messages: Vec::new(),
+        compaction_message_index: Vec::new(),
+        instruction_snippets: vec![LoopContextSnippet {
+            snippet_ref: "instruction:system".to_string(),
+            model_content: "system rule".to_string(),
+            safe_summary: "system rule".to_string(),
+            metadata: None,
+        }],
+        memory_snippets: Vec::new(),
+    };
+
+    let request_early = InstructionBundleRequest {
+        context_bundle: base_bundle.clone(),
+        visible_surface: None,
+        safety_context: None,
+        inline_messages: Vec::new(),
+        runtime_context: Some(LoopRuntimeContext {
+            loop_started_at_utc: chrono::Utc
+                .with_ymd_and_hms(2026, 6, 11, 21, 32, 7)
+                .unwrap(),
+            user_timezone: None,
+        }),
+    };
+
+    let request_late = InstructionBundleRequest {
+        context_bundle: base_bundle,
+        visible_surface: None,
+        safety_context: None,
+        inline_messages: Vec::new(),
+        runtime_context: Some(LoopRuntimeContext {
+            loop_started_at_utc: chrono::Utc
+                .with_ymd_and_hms(2026, 6, 11, 21, 32, 46)
+                .unwrap(),
+            user_timezone: None,
+        }),
+    };
+
+    let bundle_early = builder.build(request_early).unwrap();
+    let bundle_late = builder.build(request_late).unwrap();
+
+    let runtime_early = bundle_early
+        .materialized_messages
+        .iter()
+        .find(|m| m.content_ref.as_str().starts_with("msg:runtime."))
+        .expect("runtime materialized message must exist (early)");
+    let runtime_late = bundle_late
+        .materialized_messages
+        .iter()
+        .find(|m| m.content_ref.as_str().starts_with("msg:runtime."))
+        .expect("runtime materialized message must exist (late)");
+
+    assert_eq!(
+        runtime_early.model_content, runtime_late.model_content,
+        "rendered runtime model_content must be identical within the same minute"
+    );
+    assert_eq!(
+        runtime_early.content_ref, runtime_late.content_ref,
+        "runtime message content_ref must be identical within the same minute"
+    );
+    assert_eq!(
+        bundle_early.fingerprint, bundle_late.fingerprint,
+        "whole-bundle fingerprint must be identical when loop_started_at_utc differs only in seconds within the same minute"
+    );
+}
+
+#[tokio::test]
+async fn instruction_bundle_renders_runtime_context_exactly_once_per_build() {
+    // Regression guard: each InstructionBundleBuilder::build call must embed
+    // exactly one msg:runtime.* ref and exactly one materialized message whose
+    // model_content contains the "Current date/time at loop start:" line.
+    // This catches any accidental accumulation (e.g. two calls to
+    // push_runtime_context, or the section being added both as a synthetic ref
+    // and as a transcript message).
+    let context = claimed_run_context().await;
+    let builder = InstructionBundleBuilder::new(context);
+    let request = InstructionBundleRequest {
+        context_bundle: LoopContextBundle {
+            identity_messages: vec![LoopContextMessage {
+                message_ref: Some(LoopMessageRef::new("msg:identity").unwrap()),
+                role: "system".to_string(),
+                safe_summary: "identity safe".to_string(),
+                compaction: None,
+            }],
+            messages: Vec::new(),
+            compaction_message_index: Vec::new(),
+            instruction_snippets: vec![LoopContextSnippet {
+                snippet_ref: "instruction:system".to_string(),
+                model_content: "system rule".to_string(),
+                safe_summary: "system rule".to_string(),
+                metadata: None,
+            }],
+            memory_snippets: Vec::new(),
+        },
+        visible_surface: None,
+        safety_context: None,
+        inline_messages: Vec::new(),
+        runtime_context: Some(LoopRuntimeContext {
+            loop_started_at_utc: chrono::Utc
+                .with_ymd_and_hms(2026, 6, 11, 21, 32, 0)
+                .unwrap(),
+            user_timezone: None,
+        }),
+    };
+
+    // Simulate what a real loop does: the prompt bundle is rebuilt on every
+    // model call (for checkpointing / surface-version refresh). Neither the
+    // messages list nor the materialized_messages list must accumulate extra
+    // runtime entries across two build() calls on the same builder.
+    let bundle_iter1 = builder.build(request.clone()).unwrap();
+    let bundle_iter2 = builder.build(request.clone()).unwrap();
+
+    for (bundle, iteration) in [(&bundle_iter1, 1usize), (&bundle_iter2, 2usize)] {
+        let ref_count = bundle
+            .messages
+            .iter()
+            .filter(|m| m.content_ref.as_str().starts_with("msg:runtime."))
+            .count();
+        assert_eq!(
+            ref_count, 1,
+            "bundle for iteration {iteration} must contain exactly one msg:runtime.* message ref, found {ref_count}"
+        );
+
+        let materialized_count = bundle
+            .materialized_messages
+            .iter()
+            .filter(|m| m.model_content.contains("Current date/time at loop start:"))
+            .count();
+        assert_eq!(
+            materialized_count, 1,
+            "bundle for iteration {iteration} must contain exactly one materialized message with 'Current date/time at loop start:', found {materialized_count}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn instruction_bundle_without_runtime_context_renders_no_runtime_section() {
+    let context = claimed_run_context().await;
+    let builder = InstructionBundleBuilder::new(context);
+    let request = InstructionBundleRequest {
+        context_bundle: LoopContextBundle {
+            identity_messages: vec![LoopContextMessage {
+                message_ref: Some(LoopMessageRef::new("msg:identity").unwrap()),
+                role: "system".to_string(),
+                safe_summary: "identity safe".to_string(),
+                compaction: None,
+            }],
+            messages: Vec::new(),
+            compaction_message_index: Vec::new(),
+            instruction_snippets: vec![LoopContextSnippet {
+                snippet_ref: "instruction:system".to_string(),
+                model_content: "system rule".to_string(),
+                safe_summary: "system rule".to_string(),
+                metadata: None,
+            }],
+            memory_snippets: Vec::new(),
+        },
+        visible_surface: None,
+        safety_context: None,
+        inline_messages: Vec::new(),
+        runtime_context: None,
+    };
+
+    let first = builder.build(request.clone()).unwrap();
+    let second = builder.build(request.clone()).unwrap();
+    assert_eq!(
+        first.fingerprint, second.fingerprint,
+        "None runtime context must be deterministic"
+    );
+
+    assert!(
+        !first
+            .materialized_messages
+            .iter()
+            .any(|m| m.content_ref.as_str().starts_with("msg:runtime.")),
+        "no runtime section message should appear when runtime_context is None"
+    );
+
+    assert!(
+        !first
+            .messages
+            .iter()
+            .any(|m| m.content_ref.as_str().starts_with("msg:runtime.")),
+        "no runtime section ref should appear in messages vec when runtime_context is None"
+    );
+
+    let with_runtime_request = InstructionBundleRequest {
+        runtime_context: Some(LoopRuntimeContext {
+            loop_started_at_utc: chrono::Utc
+                .with_ymd_and_hms(2026, 6, 11, 21, 32, 0)
+                .unwrap(),
+            user_timezone: None,
+        }),
+        ..request
+    };
+    let with_runtime = builder.build(with_runtime_request).unwrap();
+    assert_ne!(
+        first.fingerprint, with_runtime.fingerprint,
+        "fingerprint must differ when runtime_context is Some vs None"
+    );
+}
+
 #[test]
 fn instruction_bundle_fingerprint_deserialize_rejects_invalid_values() {
     let error = serde_json::from_value::<InstructionBundleFingerprint>(serde_json::json!(
@@ -532,6 +828,7 @@ async fn instruction_bundle_builder_allows_safe_domain_terms_in_summaries() {
             visible_surface: None,
             safety_context: None,
             inline_messages: Vec::new(),
+            runtime_context: None,
         })
         .unwrap();
 }
@@ -558,6 +855,7 @@ async fn instruction_bundle_builder_allows_terms_inside_larger_words() {
             visible_surface: None,
             safety_context: None,
             inline_messages: Vec::new(),
+            runtime_context: None,
         })
         .unwrap();
 }
@@ -584,6 +882,7 @@ async fn instruction_bundle_builder_rejects_secret_credential_phrases() {
             visible_surface: None,
             safety_context: None,
             inline_messages: Vec::new(),
+            runtime_context: None,
         })
         .unwrap_err();
 
@@ -644,6 +943,7 @@ async fn instruction_bundle_serialization_hides_materialized_content() {
             visible_surface: None,
             safety_context: None,
             inline_messages: Vec::new(),
+            runtime_context: None,
         })
         .unwrap();
 
@@ -687,6 +987,7 @@ async fn instruction_bundle_materializes_oversized_snippet_content_separate_from
             visible_surface: None,
             safety_context: None,
             inline_messages: Vec::new(),
+            runtime_context: None,
         })
         .unwrap();
 
@@ -723,6 +1024,7 @@ fn skill_instruction_request(
         visible_surface: None,
         safety_context: None,
         inline_messages: Vec::new(),
+        runtime_context: None,
     }
 }
 
@@ -749,6 +1051,7 @@ async fn instruction_bundle_rejects_empty_model_content() {
             visible_surface: None,
             safety_context: None,
             inline_messages: Vec::new(),
+            runtime_context: None,
         })
         .unwrap_err();
 
@@ -782,6 +1085,7 @@ async fn instruction_bundle_rejects_oversized_model_content() {
             visible_surface: None,
             safety_context: None,
             inline_messages: Vec::new(),
+            runtime_context: None,
         })
         .unwrap_err();
 
@@ -894,6 +1198,7 @@ async fn instruction_bundle_rejects_generic_model_content_security_vocabulary() 
             visible_surface: None,
             safety_context: None,
             inline_messages: Vec::new(),
+            runtime_context: None,
         })
         .unwrap_err();
 
@@ -943,6 +1248,7 @@ async fn instruction_bundle_orders_snippets_by_model_content_when_summary_matche
             visible_surface: None,
             safety_context: None,
             inline_messages: Vec::new(),
+            runtime_context: None,
         })
         .unwrap();
 
@@ -979,6 +1285,7 @@ async fn instruction_bundle_builder_rejects_unsafe_instruction_context() {
             visible_surface: None,
             safety_context: None,
             inline_messages: Vec::new(),
+            runtime_context: None,
         })
         .unwrap_err();
 

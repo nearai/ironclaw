@@ -25,9 +25,9 @@ use super::{
     append_capability_result_ref, append_capability_safe_summary_ref, batch_policy_kind,
     cancelled_exit, capability_batch_counts, capability_call_signature, capability_error_class,
     capability_failure_kind, capability_host_error, capability_invocation_from_candidate,
-    capability_is_visible, capability_summary, failed_exit, honor_retry_alteration,
-    model_visible_capability_failure_observation, push_call_signature_once, push_completed_result,
-    sanitized_strategy_summary,
+    capability_is_visible, capability_summary, clear_matching_pending_auth_resume, failed_exit,
+    honor_retry_alteration, model_visible_capability_failure_observation, push_call_signature_once,
+    push_completed_result, sanitized_strategy_summary,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -129,7 +129,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             .await;
 
         let mut pending_approval_resume = state.pending_approval_resume.clone();
-        let batch = ctx
+        let batch_result = ctx
             .host
             .invoke_capability_batch(CapabilityBatchInvocation {
                 invocations: visible_calls
@@ -153,8 +153,48 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     .collect(),
                 stop_on_first_suspension,
             })
-            .await
-            .map_err(capability_host_error)?;
+            .await;
+
+        let batch = match batch_result {
+            Ok(batch) => batch,
+            Err(ref error)
+                if error.kind
+                    == ironclaw_turns::run_profile::AgentLoopHostErrorKind::StaleSurface =>
+            {
+                let stale_summary = SanitizedStrategySummary::from_trusted_static(
+                    "capability surface changed before execution; re-issue the call",
+                );
+                for call in visible_calls {
+                    push_call_signature_once(&mut state, &mut signatures, &call)?;
+                    state
+                        .recent_failure_kinds
+                        .push(LoopFailureKind::PolicyDenied);
+                    let summary = CapabilityErrorSummary {
+                        class: CapabilityErrorClass::PolicyDenied,
+                        safe_summary: stale_summary.clone(),
+                        diagnostic_ref: None,
+                    };
+                    match self
+                        .handle_capability_error(
+                            ctx,
+                            state,
+                            call,
+                            summary,
+                            None,
+                            &mut capability_batch,
+                        )
+                        .await?
+                    {
+                        BatchStep::Continue(next) => state = *next,
+                        BatchStep::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
+                    }
+                }
+                return self
+                    .completed_turn(ctx, state, result_refs_start, capability_batch)
+                    .await;
+            }
+            Err(error) => return Err(capability_host_error(error)),
+        };
 
         if batch.outcomes.is_empty()
             || batch.outcomes.len() > visible_calls.len()
@@ -202,6 +242,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     CapabilityOutcome::Completed(result) => {
                         push_call_signature_once(&mut state, &mut signatures, &call)?;
                         clear_matching_pending_approval_resume(&mut state, &call);
+                        clear_matching_pending_auth_resume(&mut state, &call);
                         append_completed_capability_result(
                             ctx.host,
                             &mut state,
@@ -219,6 +260,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     } => {
                         push_call_signature_once(&mut state, &mut signatures, &call)?;
                         clear_matching_pending_approval_resume(&mut state, &call);
+                        clear_matching_pending_auth_resume(&mut state, &call);
                         append_spawned_child_result(
                             ctx.host,
                             &mut state,
@@ -241,6 +283,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     {
                         push_call_signature_once(&mut state, &mut signatures, &call)?;
                         clear_matching_pending_approval_resume(&mut state, &call);
+                        clear_matching_pending_auth_resume(&mut state, &call);
                         let result = CapabilityResultMessage {
                             result_ref,
                             safe_summary,
@@ -399,6 +442,7 @@ impl CapabilityStage {
         match outcome {
             CapabilityOutcome::Completed(result) => {
                 clear_matching_pending_approval_resume(&mut state, &call);
+                clear_matching_pending_auth_resume(&mut state, &call);
                 append_completed_capability_result(
                     ctx.host,
                     &mut state,
@@ -416,6 +460,7 @@ impl CapabilityStage {
                 ..
             } => {
                 clear_matching_pending_approval_resume(&mut state, &call);
+                clear_matching_pending_auth_resume(&mut state, &call);
                 append_spawned_child_result(
                     ctx.host,
                     &mut state,
@@ -452,6 +497,10 @@ impl CapabilityStage {
                 credential_requirements,
                 ..
             } => {
+                // Clearing here keeps the clear-on-every-outcome invariant; for auth
+                // outcomes GateStage re-populates the record when it blocks.
+                clear_matching_pending_approval_resume(&mut state, &call);
+                clear_matching_pending_auth_resume(&mut state, &call);
                 GateStage
                     .process(
                         ctx,
@@ -565,6 +614,7 @@ impl CapabilityStage {
         capability_batch: &mut CapabilityBatchTurnSummary,
     ) -> Result<BatchStep, AgentLoopExecutorError> {
         clear_matching_pending_approval_resume(&mut state, &call);
+        clear_matching_pending_auth_resume(&mut state, &call);
         for _ in 0..MAX_CAPABILITY_RETRIES {
             match ctx
                 .planner
@@ -640,11 +690,28 @@ impl CapabilityStage {
                             })?,
                         )
                         .await;
-                    let retry = ctx
+                    let retry_result = ctx
                         .host
                         .invoke_capability(capability_invocation_from_candidate(call.clone(), None))
-                        .await
-                        .map_err(capability_host_error)?;
+                        .await;
+                    let retry = match retry_result {
+                        Ok(outcome) => outcome,
+                        Err(ref error)
+                            if error.kind
+                                == ironclaw_turns::run_profile::AgentLoopHostErrorKind::StaleSurface =>
+                        {
+                            summary = CapabilityErrorSummary {
+                                class: CapabilityErrorClass::PolicyDenied,
+                                safe_summary: SanitizedStrategySummary::from_trusted_static(
+                                    "capability surface changed before execution; re-issue the call",
+                                ),
+                                diagnostic_ref: None,
+                            };
+                            model_observation = None;
+                            continue;
+                        }
+                        Err(error) => return Err(capability_host_error(error)),
+                    };
                     match retry {
                         CapabilityOutcome::Failed(failure) => {
                             if failure.error_kind == CapabilityFailureKind::Cancelled {

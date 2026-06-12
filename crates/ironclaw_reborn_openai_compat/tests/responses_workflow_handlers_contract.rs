@@ -449,6 +449,111 @@ async fn responses_create_ack_error_paths_are_sanitized() {
 }
 
 #[tokio::test]
+async fn responses_binding_required_rejection_carries_input_param() {
+    // BindingRequired on the Responses surface must carry param="input" so API
+    // consumers can identify which request field is the root cause.
+    let workflow = Arc::new(FixedAckWorkflow::new(rejected_ack(
+        ProductRejectionKind::BindingRequired,
+    )));
+    let service = OpenAiResponsesWorkflow::new(
+        workflow,
+        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        Arc::new(StaticResponsesReader::completed("ok")),
+    );
+    let router =
+        openai_compat_router_with_state(OpenAiCompatRouterState::with_responses(Arc::new(service)))
+            .layer(axum::Extension(caller()));
+
+    let response = router
+        .oneshot(response_create_request(
+            "/api/v1/responses",
+            json!({"model": "gpt-reborn", "input": "hello"}),
+            None,
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::NOT_FOUND);
+    let body = json_body(response).await;
+    assert_eq!(
+        body["error"]["param"], "input",
+        "BindingRequired on responses must carry param=input"
+    );
+}
+
+#[tokio::test]
+async fn responses_invalid_request_rejection_carries_input_param() {
+    // InvalidRequest on the Responses surface must carry param="input" so API
+    // consumers can identify which request field is the root cause.
+    let workflow = Arc::new(FixedAckWorkflow::new(rejected_ack(
+        ProductRejectionKind::InvalidRequest,
+    )));
+    let service = OpenAiResponsesWorkflow::new(
+        workflow,
+        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        Arc::new(StaticResponsesReader::completed("ok")),
+    );
+    let router =
+        openai_compat_router_with_state(OpenAiCompatRouterState::with_responses(Arc::new(service)))
+            .layer(axum::Extension(caller()));
+
+    let response = router
+        .oneshot(response_create_request(
+            "/api/v1/responses",
+            json!({"model": "gpt-reborn", "input": "hello"}),
+            None,
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert_eq!(
+        body["error"]["param"], "input",
+        "InvalidRequest on responses must carry param=input"
+    );
+}
+
+#[tokio::test]
+async fn responses_create_ambiguous_resolution_rejection_returns_409() {
+    // ProductInboundAck::Rejected with AmbiguousResolution must map to HTTP
+    // 409 Conflict with a "conflict" error code. This test exercises the
+    // handler-level mapping through assert_fixed_ack_status to ensure no
+    // composition layer silently remaps the status code.
+    assert_fixed_ack_status(
+        rejected_ack(ProductRejectionKind::AmbiguousResolution),
+        http::StatusCode::CONFLICT,
+    )
+    .await;
+
+    // Also verify the wire body contains the canonical error code.
+    let workflow = Arc::new(FixedAckWorkflow::new(rejected_ack(
+        ProductRejectionKind::AmbiguousResolution,
+    )));
+    let service = OpenAiResponsesWorkflow::new(
+        workflow,
+        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        Arc::new(StaticResponsesReader::completed("ok")),
+    );
+    let router =
+        openai_compat_router_with_state(OpenAiCompatRouterState::with_responses(Arc::new(service)))
+            .layer(axum::Extension(caller()));
+
+    let response = router
+        .oneshot(response_create_request(
+            "/api/v1/responses",
+            json!({"model": "gpt-reborn", "input": "hello"}),
+            None,
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::CONFLICT);
+    let body = json_body(response).await;
+    assert_eq!(body["error"]["code"], "conflict");
+}
+
+#[tokio::test]
 async fn previous_response_id_must_be_authorized_before_product_workflow() {
     let workflow = Arc::new(FakeProductWorkflow::new());
     let router = test_router(

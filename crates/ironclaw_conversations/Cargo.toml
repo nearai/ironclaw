@@ -29,5 +29,6 @@ uuid = { version = "1", features = ["v4", "serde"] }
 default = []
 
 [dev-dependencies]
+ironclaw_triggers = { path = "../ironclaw_triggers", version = "0.1.0", features = ["test-support"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "sync"] }

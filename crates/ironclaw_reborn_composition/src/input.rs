@@ -181,6 +181,7 @@ pub struct RebornBuildInput {
     pub(crate) product_auth_ports: Option<RebornProductAuthServicePorts>,
     pub(crate) oauth_provider_configs: Vec<OAuthProviderBackendConfig>,
     pub(crate) oauth_dcr_provider_configs: Vec<OAuthDcrProviderBackendConfig>,
+    pub(crate) nearai_mcp_bootstrap_config: Option<crate::nearai_mcp::NearAiMcpBootstrapConfig>,
 }
 
 pub(crate) enum RebornStorageInput {
@@ -505,6 +506,22 @@ impl RebornBuildInput {
         self
     }
 
+    pub fn with_nearai_mcp_bootstrap_config(
+        mut self,
+        config: crate::nearai_mcp::NearAiMcpBootstrapConfig,
+    ) -> Self {
+        self.nearai_mcp_bootstrap_config = Some(config);
+        self
+    }
+
+    pub fn with_optional_nearai_mcp_bootstrap_config(
+        mut self,
+        config: Option<crate::nearai_mcp::NearAiMcpBootstrapConfig>,
+    ) -> Self {
+        self.nearai_mcp_bootstrap_config = config;
+        self
+    }
+
     #[cfg(all(test, feature = "slack-v2-host-beta"))]
     pub(crate) fn with_host_runtime_http_egress_for_test(
         mut self,
@@ -616,6 +633,7 @@ impl RebornBuildInput {
             product_auth_ports: None,
             oauth_provider_configs: Vec::new(),
             oauth_dcr_provider_configs: Vec::new(),
+            nearai_mcp_bootstrap_config: None,
         }
     }
 }

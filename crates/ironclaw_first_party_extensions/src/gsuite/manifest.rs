@@ -1,8 +1,13 @@
 use ironclaw_host_api::{
-    EffectKind, PermissionMode, ResourceCeiling, ResourceEstimate, ResourceProfile, SandboxQuota,
+    EffectKind, ExtensionId, PermissionMode, ResourceCeiling, ResourceEstimate, ResourceProfile,
+    SandboxQuota,
 };
 
 pub const CALENDAR_EXTENSION_ID: &str = "google-calendar";
+pub const GOOGLE_DOCS_EXTENSION_ID: &str = "google-docs";
+pub const GOOGLE_DRIVE_EXTENSION_ID: &str = "google-drive";
+pub const GOOGLE_SHEETS_EXTENSION_ID: &str = "google-sheets";
+pub const GOOGLE_SLIDES_EXTENSION_ID: &str = "google-slides";
 pub const GMAIL_EXTENSION_ID: &str = "gmail";
 
 pub const GSUITE_RESPONSE_BODY_LIMIT: u64 = 1024 * 1024;
@@ -218,6 +223,18 @@ pub const GSUITE_PROVIDER_SCOPES: &[&str] = &[
     ironclaw_auth::GOOGLE_GMAIL_SEND_SCOPE,
     ironclaw_auth::GOOGLE_GMAIL_MODIFY_SCOPE,
 ];
+pub const GSUITE_EXTENSION_IDS: &[&str] = &[
+    CALENDAR_EXTENSION_ID,
+    GMAIL_EXTENSION_ID,
+    GOOGLE_DOCS_EXTENSION_ID,
+    GOOGLE_DRIVE_EXTENSION_ID,
+    GOOGLE_SHEETS_EXTENSION_ID,
+    GOOGLE_SLIDES_EXTENSION_ID,
+];
+
+pub fn is_gsuite_extension_id(extension: &ExtensionId) -> bool {
+    GSUITE_EXTENSION_IDS.contains(&extension.as_str())
+}
 
 pub fn gsuite_package_specs() -> &'static [GsuitePackageSpec] {
     &GSUITE_PACKAGE_SPECS

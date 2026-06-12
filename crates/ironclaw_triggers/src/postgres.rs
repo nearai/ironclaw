@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use deadpool_postgres::GenericClient;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
 use ironclaw_turns::TurnRunId;
 use tokio_postgres::Row;
 
@@ -11,8 +11,8 @@ use crate::{
     ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire,
     ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
     FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerCompletionPolicy, TriggerError,
-    TriggerId, TriggerRecord, TriggerRepository, TriggerRouteThreadId, TriggerRunHistoryStatus,
-    TriggerRunRecord, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
+    TriggerId, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord,
+    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
     reject_failed_result_after_active_run, reject_non_future_next_run_at, reject_run_ref_rewrite,
     trigger_run_history_status_text,
 };
@@ -21,7 +21,7 @@ const TRIGGER_TABLE: &str = "trigger_records";
 const TRIGGER_RUN_TABLE: &str = "trigger_run_history";
 const TRIGGER_COLUMNS: &str = "\
     trigger_id, tenant_id, creator_user_id, agent_id, project_id, \
-    name, source, schedule_expression, completion_policy, prompt, \
+    name, source, schedule_expression, schedule_timezone, completion_policy, prompt, \
     state, next_run_at, last_run_at, last_fired_slot, last_status, \
     active_fire_slot, active_run_ref, created_at";
 const TRIGGER_RUN_COLUMNS: &str = "\
@@ -78,6 +78,7 @@ impl TriggerRepository for PostgresTriggerRepository {
         let project_id = record.project_id.as_ref().map(ProjectId::as_str);
         let source = source_kind_text(record.source);
         let schedule_expression = schedule_expression_text(&record.schedule);
+        let schedule_timezone = schedule_timezone_text(&record.schedule);
         let completion_policy = completion_policy_text(record.completion_policy);
         let state = state_text(record.state);
         let next_run_at = fmt_ts(&record.next_run_at);
@@ -93,14 +94,14 @@ impl TriggerRepository for PostgresTriggerRepository {
                 r#"
                 INSERT INTO trigger_records (
                     trigger_id, tenant_id, creator_user_id, agent_id, project_id,
-                    name, source, schedule_expression, completion_policy, prompt,
+                    name, source, schedule_expression, schedule_timezone, completion_policy, prompt,
                     state, next_run_at, last_run_at, last_fired_slot, last_status,
                     active_fire_slot, active_run_ref, created_at
                 ) VALUES (
                     $1, $2, $3, $4, $5,
                     $6, $7, $8, $9, $10,
                     $11, $12, $13, $14, $15,
-                    $16, $17, $18
+                    $16, $17, $18, $19
                 )
                 ON CONFLICT (tenant_id, trigger_id) DO UPDATE SET
                     creator_user_id = EXCLUDED.creator_user_id,
@@ -109,6 +110,7 @@ impl TriggerRepository for PostgresTriggerRepository {
                     name = EXCLUDED.name,
                     source = EXCLUDED.source,
                     schedule_expression = EXCLUDED.schedule_expression,
+                    schedule_timezone = EXCLUDED.schedule_timezone,
                     completion_policy = EXCLUDED.completion_policy,
                     prompt = EXCLUDED.prompt,
                     state = EXCLUDED.state,
@@ -128,6 +130,7 @@ impl TriggerRepository for PostgresTriggerRepository {
                     &record.name,
                     &source,
                     &schedule_expression,
+                    &schedule_timezone,
                     &completion_policy,
                     &record.prompt,
                     &state,
@@ -486,17 +489,15 @@ impl TriggerRepository for PostgresTriggerRepository {
             },
         )
         .await?;
-        upsert_run_history(
-            &tx,
-            &TriggerRunRecord::running(
-                request.tenant_id.clone(),
-                request.trigger_id,
-                request.fire_slot,
-                Some(request.run_id),
-                record.last_run_at.unwrap_or(request.submitted_at),
-            ),
-        )
-        .await?;
+        let mut run_record = TriggerRunRecord::running(
+            request.tenant_id.clone(),
+            request.trigger_id,
+            request.fire_slot,
+            Some(request.run_id),
+            record.last_run_at.unwrap_or(request.submitted_at),
+        );
+        run_record.thread_id = Some(request.thread_id);
+        upsert_run_history(&tx, &run_record).await?;
         tx.commit()
             .await
             .map_err(|error| backend_error("commit accepted trigger fire", error))?;
@@ -539,17 +540,15 @@ impl TriggerRepository for PostgresTriggerRepository {
             },
         )
         .await?;
-        upsert_run_history(
-            &tx,
-            &TriggerRunRecord::running(
-                request.tenant_id.clone(),
-                request.trigger_id,
-                request.fire_slot,
-                Some(request.original_run_id),
-                record.last_run_at.unwrap_or(request.replayed_at),
-            ),
-        )
-        .await?;
+        let mut run_record = TriggerRunRecord::running(
+            request.tenant_id.clone(),
+            request.trigger_id,
+            request.fire_slot,
+            Some(request.original_run_id),
+            record.last_run_at.unwrap_or(request.replayed_at),
+        );
+        run_record.thread_id = request.thread_id;
+        upsert_run_history(&tx, &run_record).await?;
         tx.commit()
             .await
             .map_err(|error| backend_error("commit replayed trigger fire", error))?;
@@ -817,6 +816,48 @@ impl TriggerRepository for PostgresTriggerRepository {
         }
     }
 
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        tenant_id: TenantId,
+        thread_id: &crate::ThreadId,
+    ) -> Result<Option<(crate::TriggerRecord, crate::TriggerRunRecord)>, crate::TriggerError> {
+        let client = self.connect().await?;
+        // Look up the run row by (tenant_id, thread_id) using the dedicated index.
+        let run_row = client
+            .query_opt(
+                &format!(
+                    "SELECT {TRIGGER_RUN_COLUMNS}
+                     FROM {TRIGGER_RUN_TABLE}
+                     WHERE tenant_id = $1 AND thread_id = $2
+                     LIMIT 1"
+                ),
+                &[&tenant_id.as_str(), &thread_id.as_str()],
+            )
+            .await
+            .map_err(|error| backend_error("query trigger run by thread_id", error))?;
+        let Some(run_row) = run_row else {
+            return Ok(None);
+        };
+        let run = row_to_run_record(&run_row)?;
+        // Then load the parent trigger record.
+        let trigger_row = client
+            .query_opt(
+                &format!(
+                    "SELECT {TRIGGER_COLUMNS}
+                     FROM {TRIGGER_TABLE}
+                     WHERE tenant_id = $1 AND trigger_id = $2
+                     LIMIT 1"
+                ),
+                &[&tenant_id.as_str(), &run.trigger_id.to_string()],
+            )
+            .await
+            .map_err(|error| backend_error("query parent trigger for thread_id lookup", error))?;
+        match trigger_row {
+            Some(row) => Ok(Some((row_to_record(&row)?, run))),
+            None => Ok(None),
+        }
+    }
+
     async fn list_trigger_run_history(
         &self,
         tenant_id: TenantId,
@@ -971,7 +1012,7 @@ async fn upsert_run_history(
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 ON CONFLICT (tenant_id, trigger_id, fire_slot) DO UPDATE SET
                     run_id = EXCLUDED.run_id,
-                    thread_id = EXCLUDED.thread_id,
+                    thread_id = COALESCE(EXCLUDED.thread_id, {TRIGGER_RUN_TABLE}.thread_id),
                     status = EXCLUDED.status,
                     submitted_at = EXCLUDED.submitted_at,
                     completed_at = EXCLUDED.completed_at"
@@ -981,7 +1022,7 @@ async fn upsert_run_history(
                 &run.trigger_id.to_string(),
                 &fmt_ts(&run.fire_slot),
                 &run_id,
-                &run.thread_id.as_str(),
+                &run.thread_id.as_ref().map(|t| t.as_str()),
                 &status,
                 &submitted_at,
                 &completed_at,
@@ -1003,13 +1044,11 @@ async fn complete_run_history(
     completed_at: Timestamp,
 ) -> Result<(), TriggerError> {
     let run_id_text = run_id.as_ref().map(ToString::to_string);
-    let thread_id =
-        TriggerRunRecord::running(tenant_id.clone(), trigger_id, fire_slot, run_id, fire_slot)
-            .thread_id;
     let status = trigger_run_history_status_text(status);
     let fire_slot_text = fmt_ts(&fire_slot);
     let completed_at = fmt_ts(&completed_at);
     let submitted_at_fallback = completed_at.clone();
+    let thread_id: Option<&str> = None;
     client
         .execute(
             &format!(
@@ -1026,7 +1065,7 @@ async fn complete_run_history(
                 &trigger_id.to_string(),
                 &fire_slot_text,
                 &run_id_text,
-                &thread_id.as_str(),
+                &thread_id,
                 &status,
                 &submitted_at_fallback,
                 &completed_at,
@@ -1077,7 +1116,11 @@ fn row_to_run_record(row: &Row) -> Result<TriggerRunRecord, TriggerError> {
     let run_id = optional_text(row, "run_id")?
         .map(|value| parse_turn_run_id_with_field(&value, "run_id"))
         .transpose()?;
-    let thread_id = TriggerRouteThreadId::new(required_text(row, "thread_id")?)?;
+    let thread_id = optional_text(row, "thread_id")?
+        .map(|value| {
+            ThreadId::new(value).map_err(|error| invalid_record("thread_id", error.to_string()))
+        })
+        .transpose()?;
     let status = parse_run_history_status(&required_text(row, "status")?)?;
     let submitted_at = parse_timestamp(&required_text(row, "submitted_at")?, "submitted_at")?;
     let completed_at = optional_text(row, "completed_at")?
@@ -1111,7 +1154,10 @@ fn row_to_record(row: &Row) -> Result<TriggerRecord, TriggerError> {
             ProjectId::new(value).map_err(|error| invalid_record("project_id", error.to_string()))
         })
         .transpose()?;
-    let schedule = TriggerSchedule::cron(required_text(row, "schedule_expression")?)?;
+    let schedule = TriggerSchedule::cron_with_timezone(
+        required_text(row, "schedule_expression")?,
+        required_text(row, "schedule_timezone")?,
+    )?;
     let last_run_at = optional_text(row, "last_run_at")?
         .map(|value| parse_timestamp(&value, "last_run_at"))
         .transpose()?;
@@ -1266,7 +1312,13 @@ fn parse_run_history_status(value: &str) -> Result<TriggerRunHistoryStatus, Trig
 
 fn schedule_expression_text(schedule: &TriggerSchedule) -> String {
     match schedule {
-        TriggerSchedule::Cron { expression } => expression.clone(),
+        TriggerSchedule::Cron { expression, .. } => expression.clone(),
+    }
+}
+
+fn schedule_timezone_text(schedule: &TriggerSchedule) -> String {
+    match schedule {
+        TriggerSchedule::Cron { timezone, .. } => timezone.clone(),
     }
 }
 
@@ -1292,6 +1344,7 @@ CREATE TABLE IF NOT EXISTS trigger_records (
     name TEXT NOT NULL,
     source TEXT NOT NULL,
     schedule_expression TEXT NOT NULL,
+    schedule_timezone TEXT NOT NULL DEFAULT 'UTC',
     completion_policy TEXT NOT NULL,
     prompt TEXT NOT NULL,
     state TEXT NOT NULL,
@@ -1304,6 +1357,8 @@ CREATE TABLE IF NOT EXISTS trigger_records (
     created_at TEXT NOT NULL,
     PRIMARY KEY (tenant_id, trigger_id)
 );
+
+ALTER TABLE trigger_records ADD COLUMN IF NOT EXISTS schedule_timezone TEXT NOT NULL DEFAULT 'UTC';
 
 CREATE INDEX IF NOT EXISTS trigger_records_state_next_run_at_idx
     ON trigger_records (state, next_run_at, tenant_id, trigger_id);
@@ -1332,4 +1387,12 @@ CREATE TABLE IF NOT EXISTS trigger_run_history (
 
 CREATE INDEX IF NOT EXISTS trigger_run_history_trigger_fire_slot_idx
     ON trigger_run_history (tenant_id, trigger_id, fire_slot DESC);
+
+-- Index supporting find_trigger_run_by_thread_id.
+-- thread_id is nullable; WHERE tenant_id = $1 AND thread_id = $2
+-- naturally skips NULL rows so no partial-index condition is needed.
+CREATE INDEX IF NOT EXISTS trigger_run_history_tenant_thread_id_idx
+    ON trigger_run_history (tenant_id, thread_id);
+
+ALTER TABLE trigger_run_history ALTER COLUMN thread_id DROP NOT NULL;
 "#;

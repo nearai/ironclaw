@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::ack_helpers::internal_refs_from_ack;
+use crate::error::product_rejection_to_openai_error;
 use crate::identity::{
     OPENAI_COMPAT_ACTOR_KIND, OPENAI_COMPAT_ADAPTER_ID, OPENAI_COMPAT_INSTALLATION_ID,
 };
@@ -37,9 +38,8 @@ use ironclaw_product_adapters::{
     ParsedProductInbound, ProductAdapterId, ProductControlActionPayload, ProductInboundAck,
     ProductInboundEnvelope, ProductInboundPayload, ProductProjectionReadInput,
     ProductProjectionSubject, ProductProjectionSubscribeInput, ProductRejection,
-    ProductRejectionKind, ProductTriggerReason, ProductWorkflow, ProductWorkflowRejectionKind,
-    ProjectionReadRequest, ProjectionSubscriptionRequest, TrustedInboundContext,
-    UserMessagePayload,
+    ProductTriggerReason, ProductWorkflow, ProjectionReadRequest, ProjectionSubscriptionRequest,
+    TrustedInboundContext, UserMessagePayload,
 };
 
 const DEFAULT_RESPONSES_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -932,28 +932,7 @@ fn accepted_cancel_ack_from_ack(mut ack: ProductInboundAck) -> Result<(), OpenAi
 }
 
 fn error_from_rejection(rejection: ProductRejection) -> OpenAiCompatHttpError {
-    match rejection.kind {
-        ProductRejectionKind::BindingRequired => {
-            OpenAiCompatHttpError::not_found(Some("input".to_string()))
-        }
-        ProductRejectionKind::AccessDenied | ProductRejectionKind::PolicyDenied => {
-            OpenAiCompatHttpError::from_workflow_rejection(
-                ProductWorkflowRejectionKind::Unauthorized,
-                403,
-                false,
-                None,
-            )
-        }
-        ProductRejectionKind::UnknownInstallation => OpenAiCompatHttpError::from_kind(
-            503,
-            true,
-            crate::OpenAiCompatErrorKind::ServiceUnavailable,
-            None,
-        ),
-        ProductRejectionKind::InvalidRequest => {
-            OpenAiCompatHttpError::invalid_request(Some("input".to_string()))
-        }
-    }
+    product_rejection_to_openai_error(&rejection, Some("input"))
 }
 
 fn bind_internal_refs_unavailable() -> OpenAiCompatHttpError {

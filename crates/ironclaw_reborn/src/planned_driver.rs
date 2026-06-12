@@ -25,9 +25,7 @@ use ironclaw_turns::{
     },
 };
 
-use crate::failure_categories::{
-    MODEL_CREDITS_EXHAUSTED_CATEGORY, MODEL_CREDITS_EXHAUSTED_REASON_KIND,
-};
+use crate::model_failure_mapping::model_stage_failure_category;
 
 pub const PLANNED_DRIVER_DEFAULT_ID: &str = "reborn:planned-default";
 const PLANNED_DRIVER_VERSION: u64 = 1;
@@ -246,10 +244,11 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
                 safe_summary = %safe_summary,
                 "planned driver host stage unavailable"
             );
-            if stage == HostStage::Model && reason_kind == Some(MODEL_CREDITS_EXHAUSTED_REASON_KIND)
+            if let Some(category) =
+                model_stage_failure_category(stage == HostStage::Model, kind, reason_kind)
             {
                 return AgentLoopDriverError::Failed {
-                    reason_kind: MODEL_CREDITS_EXHAUSTED_CATEGORY.to_string(),
+                    reason_kind: category.to_string(),
                 };
             }
             AgentLoopDriverError::Unavailable {
@@ -329,6 +328,10 @@ fn resumable_checkpoint_kind_from_host(kind: LoopCheckpointKind) -> Result<Check
 mod tests {
     use super::*;
     use crate::app_loop_family::build_loop_family_registry;
+    use crate::failure_categories::{
+        MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
+        MODEL_CREDITS_EXHAUSTED_REASON_KIND,
+    };
     use ironclaw_agent_loop::test_support::{
         MockAgentLoopDriverHost, MockHostCall, test_run_context,
     };
@@ -435,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn executor_host_diagnostics_map_to_actionable_unavailable_reason() {
+    fn executor_model_credential_diagnostics_map_to_credentials_category() {
         let mapped = map_executor_error(AgentLoopExecutorError::HostUnavailableWithDiagnostics {
             stage: HostStage::Model,
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
@@ -446,8 +449,8 @@ mod tests {
 
         assert_eq!(
             mapped,
-            AgentLoopDriverError::Unavailable {
-                reason: "Model: model credentials are unavailable".to_string()
+            AgentLoopDriverError::Failed {
+                reason_kind: MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY.to_string()
             }
         );
     }
@@ -486,6 +489,25 @@ mod tests {
             mapped,
             AgentLoopDriverError::Unavailable {
                 reason: format!("Prompt: {CREDIT_SUMMARY}")
+            }
+        );
+    }
+
+    #[test]
+    fn non_model_stage_with_credential_unavailable_maps_to_unavailable() {
+        const CREDENTIAL_SUMMARY: &str = "model credentials are unavailable";
+        let mapped = map_executor_error(AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Prompt,
+            kind: AgentLoopHostErrorKind::CredentialUnavailable,
+            safe_summary: LoopSafeSummary::new(CREDENTIAL_SUMMARY).expect("safe"),
+            reason_kind: None,
+            diagnostic_ref: None,
+        });
+
+        assert_eq!(
+            mapped,
+            AgentLoopDriverError::Unavailable {
+                reason: format!("Prompt: {CREDENTIAL_SUMMARY}")
             }
         );
     }

@@ -208,6 +208,7 @@ async fn filesystem_runtime_account_selection_matches_setup_invocation_account()
         .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
             CredentialAccountSelectionRequest::new(runtime_scope.clone(), google_provider()),
             runtime_scope,
+            ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
             Vec::new(),
         ))
         .await
@@ -253,6 +254,7 @@ async fn filesystem_runtime_account_selection_matches_new_thread_reusable_accoun
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &runtime_scope.resource,
             provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            setup: &ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
             provider_scopes: &[],
             requester_extension: &ExtensionId::new("google-calendar").unwrap(),
         })
@@ -869,6 +871,9 @@ async fn filesystem_runtime_account_selection_tolerates_many_session_account_roo
         .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
             CredentialAccountSelectionRequest::new(runtime_scope.clone(), google_provider()),
             runtime_scope,
+            ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                scopes: vec!["drive.readonly".to_string()],
+            },
             vec![ProviderScope::new("drive.readonly").unwrap()],
         ))
         .await
@@ -913,6 +918,9 @@ async fn filesystem_runtime_account_selection_tolerates_many_account_records_per
         .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
             CredentialAccountSelectionRequest::new(runtime_scope.clone(), google_provider()),
             runtime_scope,
+            ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                scopes: vec!["drive.readonly".to_string()],
+            },
             vec![ProviderScope::new("drive.readonly").unwrap()],
         ))
         .await
