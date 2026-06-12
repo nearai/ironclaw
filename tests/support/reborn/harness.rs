@@ -148,7 +148,7 @@ const TEST_CAPABILITY_ID: &str = "test.echo";
 const TEST_CAPABILITY_SURFACE_VERSION: &str = "trace_replay_v1";
 const SUBAGENT_ALLOWED_TEST_TOOL_NAME: &str = "test_read_file";
 
-type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+pub(crate) type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 type HarnessCapabilityParts = (
     Arc<dyn LoopCapabilityPortFactory>,
     Arc<dyn CapabilitySurfaceProfileResolver>,
@@ -1380,6 +1380,10 @@ impl RebornBinaryE2EHarness {
 
     pub fn milestones(&self) -> Vec<LoopHostMilestone> {
         self.milestone_sink.milestones()
+    }
+
+    pub(crate) fn turn_store(&self) -> Arc<FilesystemTurnStateStore<LocalFilesystem>> {
+        Arc::clone(&self.turn_store)
     }
 }
 
