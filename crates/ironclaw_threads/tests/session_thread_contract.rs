@@ -2527,6 +2527,7 @@ async fn list_deferred_busy_messages_empty_when_no_messages() {
         .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
             scope: scope("a"),
             thread_id: thread.thread_id,
+            limit: None,
         })
         .await
         .unwrap();
@@ -2585,6 +2586,7 @@ async fn list_deferred_busy_messages_returns_only_deferred_busy() {
         .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
             scope: scope("a"),
             thread_id: thread.thread_id,
+            limit: None,
         })
         .await
         .unwrap();
@@ -2632,6 +2634,7 @@ async fn list_deferred_busy_messages_ordered_oldest_first() {
         .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
             scope: scope("a"),
             thread_id: thread.thread_id,
+            limit: None,
         })
         .await
         .unwrap();
@@ -2681,9 +2684,75 @@ async fn list_deferred_busy_messages_wrong_scope_returns_empty() {
         .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
             scope: scope("b"),
             thread_id: thread.thread_id,
+            limit: None,
         })
         .await
         .unwrap();
 
     assert!(result.is_empty());
+}
+
+#[tokio::test]
+async fn list_deferred_busy_messages_limit_caps_results() {
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("a"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    // Defer three messages in sequence order.
+    for label in ["alpha", "beta", "gamma"] {
+        let msg = service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: scope("a"),
+                thread_id: thread.thread_id.clone(),
+                actor_id: "actor-a".into(),
+                source_binding_id: None,
+                reply_target_binding_id: None,
+                external_event_id: None,
+                content: user_message(label),
+            })
+            .await
+            .unwrap();
+        service
+            .mark_message_deferred_busy(&scope("a"), &thread.thread_id, msg.message_id)
+            .await
+            .unwrap();
+    }
+
+    // Request with limit=2 — must return oldest two only.
+    let result = service
+        .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            limit: Some(2),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.len(), 2, "limit=2 must cap at 2");
+    // Must be oldest first.
+    let seqs: Vec<_> = result.iter().map(|m| m.sequence).collect();
+    assert!(
+        seqs.windows(2).all(|w| w[0] < w[1]),
+        "limited results not in ascending sequence order: {seqs:?}"
+    );
+
+    // Request with limit=0 — must return empty.
+    let empty = service
+        .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id,
+            limit: Some(0),
+        })
+        .await
+        .unwrap();
+
+    assert!(empty.is_empty(), "limit=0 must return empty");
 }

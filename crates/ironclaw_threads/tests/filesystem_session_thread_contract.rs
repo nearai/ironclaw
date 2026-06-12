@@ -1131,6 +1131,7 @@ async fn filesystem_list_deferred_busy_messages_empty_when_no_messages() {
         .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
             scope: scope("ldb-empty"),
             thread_id: thread.thread_id,
+            limit: None,
         })
         .await
         .unwrap();
@@ -1189,6 +1190,7 @@ async fn filesystem_list_deferred_busy_messages_returns_only_deferred_busy() {
         .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
             scope: scope("ldb-filter"),
             thread_id: thread.thread_id,
+            limit: None,
         })
         .await
         .unwrap();
@@ -1237,6 +1239,7 @@ async fn filesystem_list_deferred_busy_messages_ordered_oldest_first() {
         .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
             scope: scope("ldb-order"),
             thread_id: thread.thread_id,
+            limit: None,
         })
         .await
         .unwrap();
@@ -1287,11 +1290,77 @@ async fn filesystem_list_deferred_busy_messages_wrong_scope_returns_empty() {
         .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
             scope: scope("ldb-scope-wrong"),
             thread_id: thread.thread_id,
+            limit: None,
         })
         .await
         .unwrap();
 
     assert!(result.is_empty());
+}
+
+#[tokio::test]
+async fn filesystem_list_deferred_busy_messages_limit_caps_results() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-ldb-limit", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("ldb-limit"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    for label in ["first", "second", "third"] {
+        let msg = service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: scope("ldb-limit"),
+                thread_id: thread.thread_id.clone(),
+                actor_id: "actor-a".into(),
+                source_binding_id: None,
+                reply_target_binding_id: None,
+                external_event_id: None,
+                content: MessageContent::text(label),
+            })
+            .await
+            .unwrap();
+        service
+            .mark_message_deferred_busy(&scope("ldb-limit"), &thread.thread_id, msg.message_id)
+            .await
+            .unwrap();
+    }
+
+    // limit=2 — oldest two returned, sequence-ascending.
+    let result = service
+        .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
+            scope: scope("ldb-limit"),
+            thread_id: thread.thread_id.clone(),
+            limit: Some(2),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.len(), 2, "limit=2 must cap at 2");
+    let seqs: Vec<_> = result.iter().map(|m| m.sequence).collect();
+    assert!(
+        seqs.windows(2).all(|w| w[0] < w[1]),
+        "limited results not in ascending sequence order: {seqs:?}"
+    );
+
+    // limit=0 — empty.
+    let empty = service
+        .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
+            scope: scope("ldb-limit"),
+            thread_id: thread.thread_id,
+            limit: Some(0),
+        })
+        .await
+        .unwrap();
+
+    assert!(empty.is_empty(), "limit=0 must return empty");
 }
 
 fn scoped_threads_fs_at<F>(backend: Arc<F>, tenant: &str, user: &str) -> Arc<ScopedFilesystem<F>>

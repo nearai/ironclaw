@@ -908,6 +908,9 @@ where
             .filter(|m| m.status == MessageStatus::DeferredBusy && m.kind == MessageKind::User)
             .collect();
         messages.sort_by_key(|m| m.sequence);
+        if let Some(limit) = request.limit {
+            messages.truncate(limit);
+        }
         Ok(messages)
     }
 

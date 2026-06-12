@@ -426,8 +426,16 @@ pub struct UpdateThreadGoalRequest {
 /// Used by the deferred-busy drain: after the blocking run reaches a terminal
 /// state the drain picks up the oldest waiting message and resubmits it
 /// through the normal inbound path.
+///
+/// `limit` caps the number of records returned after sequence-order sort.
+/// When `None` all matching records are returned (unbounded).  Callers that
+/// only need the first N messages (e.g. drain loops that try-skip invalid
+/// entries) should pass a small bound to avoid full-thread scans.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListDeferredBusyMessagesRequest {
     pub scope: ThreadScope,
     pub thread_id: ThreadId,
+    /// Maximum number of `DeferredBusy` records to return after
+    /// sequence-ascending sort.  `None` means unbounded.
+    pub limit: Option<usize>,
 }
