@@ -32,6 +32,7 @@ mod budget;
 mod budget_events;
 mod bundled_skills;
 mod default_system_prompt;
+mod deferred_busy_drain;
 mod error;
 mod extension_activation_credentials;
 mod extension_credential_requirements;

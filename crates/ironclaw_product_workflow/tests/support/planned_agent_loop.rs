@@ -304,6 +304,7 @@ impl ProductLiveAgentLoopHarness {
             hook_dispatcher_builder_factory: None,
             hook_security_audit_sink: None,
             turn_event_sink: None,
+            additional_required_observers: vec![],
         })
         .expect("product-live planned AgentLoop harness should build");
 

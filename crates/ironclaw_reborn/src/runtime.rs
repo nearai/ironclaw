@@ -123,6 +123,10 @@ where
     /// the hook framework dormant: no dispatcher is composed and the runtime
     /// behaves exactly as it did before hooks existed.
     pub hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
+    /// Additional required observers subscribed to the lifecycle bus alongside
+    /// [`SubagentCompletionObserver`].  Each observer receives every committed
+    /// event/state; use `observes_event` / `observes_state` to filter.
+    pub additional_required_observers: Vec<Arc<dyn TurnCommittedEventObserver>>,
 }
 
 pub trait RuntimeSubagentGoalStore:
@@ -412,6 +416,13 @@ where
     lifecycle_bus
         .subscribe_required(Arc::clone(&subagent_completion_observer))
         .map_err(|error| DefaultPlannedRuntimeBuildError::SubagentCompletion(error.to_string()))?;
+    for observer in &parts.additional_required_observers {
+        lifecycle_bus
+            .subscribe_required(Arc::clone(observer))
+            .map_err(|error| {
+                DefaultPlannedRuntimeBuildError::SubagentCompletion(error.to_string())
+            })?;
+    }
     if let Some(turn_event_sink) = parts.turn_event_sink.clone() {
         lifecycle_bus
             .subscribe_best_effort(turn_event_sink)

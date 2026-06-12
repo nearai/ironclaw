@@ -1305,6 +1305,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
         hook_dispatcher_builder_factory: None,
         hook_security_audit_sink: None,
         turn_event_sink: None,
+        additional_required_observers: vec![],
     })
     .expect("adapter bundle should satisfy the product-live readiness gate");
 

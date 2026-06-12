@@ -2146,6 +2146,19 @@ pub async fn build_reborn_runtime(
         None
     };
 
+    // Build the DeferredBusyDrainObserver unbound.  Two Arcs share the same
+    // underlying allocation (and therefore the same `OnceLock`): one is
+    // coerced to `Arc<dyn TurnCommittedEventObserver>` for the lifecycle bus,
+    // the other keeps the concrete type so `bind_coordinator` can be called
+    // after the coordinator is created.
+    let drain_observer_for_bind = Arc::new(
+        crate::deferred_busy_drain::DeferredBusyDrainObserver::new_unbound(Arc::clone(
+            &thread_service,
+        )),
+    );
+    let drain_observer: Arc<dyn ironclaw_turns::TurnCommittedEventObserver> =
+        Arc::clone(&drain_observer_for_bind) as Arc<dyn ironclaw_turns::TurnCommittedEventObserver>;
+
     let planned_runtime_parts = DefaultPlannedRuntimeParts {
         turn_state: Arc::clone(&turn_state_store),
         thread_service: Arc::clone(&thread_service),
@@ -2199,6 +2212,7 @@ pub async fn build_reborn_runtime(
         hook_security_audit_sink: Some(Arc::new(ironclaw_events::TracingSecurityAuditSink)),
         turn_event_sink: None,
         hook_dispatcher_builder_factory,
+        additional_required_observers: vec![drain_observer],
     };
     let composition = match planned_runtime_wake_channel {
         Some(wake_channel) => {
@@ -2206,6 +2220,11 @@ pub async fn build_reborn_runtime(
         }
         None => build_default_planned_runtime(planned_runtime_parts),
     }?;
+    drain_observer_for_bind
+        .bind_coordinator(Arc::clone(&composition.coordinator))
+        .map_err(|error| RebornRuntimeError::MalformedConfig {
+            reason: format!("deferred busy drain observer coordinator binding failed: {error}"),
+        })?;
     let default_resolved_run_profile = composition
         .run_profile_resolver
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
