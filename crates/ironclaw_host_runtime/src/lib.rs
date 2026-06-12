@@ -105,7 +105,7 @@ pub use process_port::{
     CommandExecutionOutput, CommandExecutionRequest, LocalHostProcessPort, RuntimeProcessError,
     RuntimeProcessPort, SandboxCommandTransport, TenantSandboxProcessPort,
 };
-pub use production::DefaultHostRuntime;
+pub use production::{DefaultHostRuntime, capability_credential_requirements};
 pub use sandbox_process::{
     RebornSandboxConfig, RebornSandboxContainerIdentity, RebornSandboxNetworkBroker,
     RebornSandboxScopeKey, RebornSandboxSecretBroker, RebornSandboxWorkspaceMode,

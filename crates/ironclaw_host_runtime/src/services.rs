@@ -584,6 +584,9 @@ where
         if let Some(policies) = &self.persistent_approval_policies {
             runtime = runtime.with_persistent_approval_policies(Arc::clone(policies));
         }
+        if let Some(secret_store) = &self.secret_store {
+            runtime = runtime.with_credential_preflight_store(Arc::clone(secret_store));
+        }
         runtime.with_obligation_handler(Arc::new(self.builtin_obligation_handler()))
     }
 
