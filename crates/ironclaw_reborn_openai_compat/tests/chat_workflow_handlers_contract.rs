@@ -531,6 +531,38 @@ async fn chat_completion_policy_denied_rejection_returns_403() {
 }
 
 #[tokio::test]
+async fn chat_completion_ambiguous_resolution_rejection_returns_409() {
+    // ProductInboundAck::Rejected with AmbiguousResolution must map to HTTP
+    // 409 Conflict with an "conflict" error code — not to a 4xx like
+    // AccessDenied (403) or a 5xx. This test exercises the handler-level
+    // mapping to catch any layer between error_from_rejection() and the
+    // axum response that could accidentally suppress or remap the code.
+    let workflow = Arc::new(FixedAckWorkflow::new(rejected_ack(
+        ProductRejectionKind::AmbiguousResolution,
+    )));
+    let router = test_router_with_workflow(
+        workflow.clone(),
+        Arc::new(StaticChatProjectionReader::text("unused")),
+    );
+
+    let response = router
+        .oneshot(chat_request(
+            json!({
+                "model": "gpt-reborn",
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            None,
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::CONFLICT);
+    let body = json_body(response).await;
+    assert_eq!(body["error"]["code"], "conflict");
+    assert_eq!(workflow.seen_count(), 1);
+}
+
+#[tokio::test]
 async fn chat_completion_projection_reader_error_is_propagated_as_response() {
     let workflow = Arc::new(FixedAckWorkflow::new(accepted_ack()));
     let router = test_router_with_workflow(
