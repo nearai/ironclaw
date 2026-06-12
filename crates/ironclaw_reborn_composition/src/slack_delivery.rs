@@ -61,7 +61,7 @@ const SLACK_DELIVERY_TIMEOUT_MESSAGE: &str =
     "This is taking longer than expected — check the WebUI for the result.";
 const SLACK_DELIVERY_ERROR_MESSAGE: &str =
     "Something went wrong delivering the result here. Check the WebUI.";
-const SLACK_DEFERRED_BUSY_MESSAGE: &str = "I'm waiting on a pending approval before I can take new messages — reply `approve` or `deny` (or `approve gate:<ref>`) to resume.";
+const SLACK_DEFERRED_BUSY_MESSAGE: &str = "Ironclaw is waiting on a pending approval before taking new messages — reply `approve` or `deny` (or `approve gate:<ref>`) to resume.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BlockedActionableMarker {
@@ -1176,24 +1176,29 @@ fn rejection_hint_for_resolution(
 /// because a run for the same conversation is blocked on a pending gate.
 ///
 /// Returns `None` for non-UserMessage payloads (resolution/control payloads must
-/// stay silent) and for `Duplicate` acks (transport retries must not double-post).
+/// stay silent) and for ALL `Duplicate` acks (the idempotency ledger never settles
+/// `DeferredBusy`, so Slack transport retries re-process as a fresh plain
+/// `DeferredBusy`, never `Duplicate{DeferredBusy}`; returning `None` for every
+/// `Duplicate` is the safe invariant that matches `rejection_hint_for_resolution`).
+/// Returns `Some` only for a plain `DeferredBusy` ack + `UserMessage` payload.
 fn deferred_busy_hint_for_user_message(
     envelope: &ProductInboundEnvelope,
     ack: &ProductInboundAck,
 ) -> Option<&'static str> {
-    // Unwrap one layer of Duplicate so a Slack transport retry of the same
-    // event that originally produced DeferredBusy does not re-post the hint.
-    let effective = match ack {
-        ProductInboundAck::Duplicate { prior } => prior.as_ref(),
-        other => other,
-    };
-    if !matches!(effective, ProductInboundAck::DeferredBusy { .. }) {
+    // All Duplicate acks are suppressed — same pattern as rejection_hint_for_resolution.
+    if matches!(ack, ProductInboundAck::Duplicate { .. }) {
+        return None;
+    }
+    if !matches!(ack, ProductInboundAck::DeferredBusy { .. }) {
         return None;
     }
     // Only reply to user messages — resolution/control/noop payloads must stay silent.
     if !matches!(envelope.payload(), ProductInboundPayload::UserMessage(_)) {
         return None;
     }
+    // Each delivery of a DeferredBusy ack posts the hint: a user sending multiple
+    // messages while blocked gets a hint for each one (desired feedback). Rare
+    // transport retries may double-post — accepted as benign best-effort.
     Some(SLACK_DEFERRED_BUSY_MESSAGE)
 }
 
@@ -3273,21 +3278,18 @@ mod tests {
         );
     }
 
-    /// Duplicate { prior: DeferredBusy } + UserMessage → exactly one post
-    /// (transport retry of the original DeferredBusy event behaves like the inner
-    /// ack so the user still gets feedback).
+    /// Duplicate { prior: DeferredBusy } + UserMessage → nothing posted.
+    ///
+    /// `should_settle_ack` returns false for DeferredBusy, so the idempotency
+    /// ledger never settles it. Slack transport retries re-process as a fresh
+    /// plain DeferredBusy (never Duplicate{DeferredBusy}), making this case
+    /// unreachable in practice. We still enforce None-for-all-Duplicate for
+    /// safety, matching the invariant in `rejection_hint_for_resolution`.
     #[tokio::test]
-    async fn duplicate_deferred_busy_with_user_message_posts_hint() {
+    async fn duplicate_deferred_busy_with_user_message_posts_nothing() {
         let install = "test-install";
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         egress.allow_credential_handle("slack_bot_token");
-        egress.program_response(
-            "slack.com",
-            Ok(EgressResponse::new(
-                200,
-                slack_post_ok_json("D123", "2000.2"),
-            )),
-        );
 
         let outbound = Arc::new(InMemoryOutboundStateStore::default());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
@@ -3302,19 +3304,63 @@ mod tests {
         observer.observe_workflow_ack(env, ack).await;
 
         let calls = egress.calls();
+        assert!(
+            !calls.iter().any(|c| c.path == "/api/chat.postMessage"),
+            "Duplicate{{DeferredBusy}} must NOT post a hint (None-for-all-Duplicate invariant)"
+        );
+    }
+
+    /// Two distinct plain DeferredBusy + UserMessage envelopes → two posts.
+    ///
+    /// Each delivery of a DeferredBusy ack posts the hint: a user sending
+    /// multiple messages while blocked gets a hint for each one (desired
+    /// feedback). Rare transport retries may double-post — accepted as benign
+    /// best-effort. This is a deliberate design choice: feedback density beats
+    /// silent suppression for the common case.
+    #[tokio::test]
+    async fn two_distinct_deferred_busy_user_messages_post_two_hints() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "2000.1"),
+            )),
+        );
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "2000.2"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::Running,
+        ));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+
+        // First distinct user message while blocked.
+        observer
+            .observe_workflow_ack(envelope(user_message_payload()), deferred_busy_ack())
+            .await;
+        // Second distinct user message while blocked (different event, new ack).
+        observer
+            .observe_workflow_ack(envelope(user_message_payload()), deferred_busy_ack())
+            .await;
+
+        let calls = egress.calls();
         let post_calls: Vec<_> = calls
             .iter()
             .filter(|c| c.path == "/api/chat.postMessage")
             .collect();
         assert_eq!(
             post_calls.len(),
-            1,
-            "Duplicate{{DeferredBusy}} + UserMessage must produce exactly one hint post"
-        );
-        let body = std::str::from_utf8(&post_calls[0].body).expect("utf8 body");
-        assert!(
-            body.contains("waiting on a pending approval"),
-            "hint must mention 'waiting on a pending approval', got: {body}"
+            2,
+            "two distinct DeferredBusy + UserMessage deliveries must each post a hint"
         );
     }
 
