@@ -35,6 +35,10 @@ pub struct InMemorySessionThreadService {
 struct InMemoryState {
     threads: HashMap<ThreadId, StoredThread>,
     inbound_idempotency: HashMap<InboundIdempotencyKey, InboundIdempotencyRecord>,
+    /// Presence markers: threads that have at least one `DeferredBusy` message.
+    /// Mirrors the `deferred-busy.marker` file used by the filesystem backend —
+    /// `list_deferred_busy_messages` skips the per-message scan when absent.
+    deferred_threads: HashSet<(ThreadScope, ThreadId)>,
 }
 
 #[derive(Debug, Clone)]
@@ -162,6 +166,8 @@ impl SessionThreadService for InMemorySessionThreadService {
             tool_result_provider_call: None,
             content: Some(request.content.into_text()),
             redaction_ref: None,
+            turn_source_binding_ref: None,
+            turn_reply_target_binding_ref: None,
         });
 
         if let Some(key) = key {
@@ -240,13 +246,22 @@ impl SessionThreadService for InMemorySessionThreadService {
         scope: &ThreadScope,
         thread_id: &ThreadId,
         message_id: ThreadMessageId,
+        turn_source_binding_ref: Option<String>,
+        turn_reply_target_binding_ref: Option<String>,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         let mut state = self.state.lock().await;
+        // Record presence marker before mutating — mirrors filesystem backend
+        // so `list_deferred_busy_messages` can skip the scan when absent.
+        state
+            .deferred_threads
+            .insert((scope.clone(), thread_id.clone()));
         let message = get_message_mut(&mut state, scope, thread_id, message_id)?;
         ensure_user_accepted(message, "mark_message_deferred_busy")?;
         message.status = MessageStatus::DeferredBusy;
         message.turn_id = None;
         message.turn_run_id = None;
+        message.turn_source_binding_ref = turn_source_binding_ref;
+        message.turn_reply_target_binding_ref = turn_reply_target_binding_ref;
         Ok(message.clone())
     }
 
@@ -254,20 +269,38 @@ impl SessionThreadService for InMemorySessionThreadService {
         &self,
         request: ListDeferredBusyMessagesRequest,
     ) -> Result<Vec<ThreadMessageRecord>, SessionThreadError> {
-        let state = self.state.lock().await;
+        let mut state = self.state.lock().await;
+        // Fast path: skip per-message scan if the thread has never been marked.
+        if !state
+            .deferred_threads
+            .contains(&(request.scope.clone(), request.thread_id.clone()))
+        {
+            return Ok(Vec::new());
+        }
         let thread = match state.threads.get(&request.thread_id) {
             Some(thread) if thread.record.scope == request.scope => thread,
             _ => return Ok(Vec::new()),
         };
+        let after_seq = request.after_sequence.unwrap_or(0);
         let mut messages: Vec<ThreadMessageRecord> = thread
             .messages
             .iter()
-            .filter(|m| m.status == MessageStatus::DeferredBusy && m.kind == MessageKind::User)
+            .filter(|m| {
+                m.status == MessageStatus::DeferredBusy
+                    && m.kind == MessageKind::User
+                    && m.sequence > after_seq
+            })
             .cloned()
             .collect();
         messages.sort_by_key(|m| m.sequence);
         if let Some(limit) = request.limit {
             messages.truncate(limit);
+        }
+        // Tombstone: evict marker when no deferred messages remain.
+        if messages.is_empty() {
+            state
+                .deferred_threads
+                .remove(&(request.scope.clone(), request.thread_id.clone()));
         }
         Ok(messages)
     }
@@ -300,6 +333,8 @@ impl SessionThreadService for InMemorySessionThreadService {
             tool_result_provider_call: None,
             content: Some(request.content.into_text()),
             redaction_ref: None,
+            turn_source_binding_ref: None,
+            turn_reply_target_binding_ref: None,
         };
         thread.next_sequence += 1;
         thread.messages.push(message.clone());
@@ -380,6 +415,8 @@ impl SessionThreadService for InMemorySessionThreadService {
             tool_result_provider_call: provider_call,
             content: Some(content),
             redaction_ref: None,
+            turn_source_binding_ref: None,
+            turn_reply_target_binding_ref: None,
         };
         thread.next_sequence += 1;
         thread.messages.push(message.clone());
@@ -427,6 +464,8 @@ impl SessionThreadService for InMemorySessionThreadService {
             tool_result_provider_call: None,
             content: Some(content),
             redaction_ref: None,
+            turn_source_binding_ref: None,
+            turn_reply_target_binding_ref: None,
         };
         thread.next_sequence += 1;
         thread.messages.push(message.clone());
@@ -1019,6 +1058,8 @@ fn history_message(message: &ThreadMessageRecord) -> ThreadMessageRecord {
         tool_result_provider_call: None,
         content: message.content.clone(),
         redaction_ref: message.redaction_ref.clone(),
+        turn_source_binding_ref: message.turn_source_binding_ref.clone(),
+        turn_reply_target_binding_ref: message.turn_reply_target_binding_ref.clone(),
     }
 }
 

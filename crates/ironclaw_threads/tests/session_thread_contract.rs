@@ -847,7 +847,13 @@ async fn busy_message_is_visible_deferred_and_not_tied_to_a_run() {
         .unwrap();
 
     service
-        .mark_message_deferred_busy(&scope("a"), &thread.thread_id, accepted.message_id)
+        .mark_message_deferred_busy(
+            &scope("a"),
+            &thread.thread_id,
+            accepted.message_id,
+            None,
+            None,
+        )
         .await
         .unwrap();
 
@@ -886,7 +892,7 @@ async fn deferred_busy_rejects_non_user_and_non_accepted_messages() {
         .unwrap();
 
     let result = service
-        .mark_message_deferred_busy(&scope("a"), &thread.thread_id, draft.message_id)
+        .mark_message_deferred_busy(&scope("a"), &thread.thread_id, draft.message_id, None, None)
         .await;
 
     assert!(result.is_err());
@@ -2528,6 +2534,7 @@ async fn list_deferred_busy_messages_empty_when_no_messages() {
             scope: scope("a"),
             thread_id: thread.thread_id,
             limit: None,
+            after_sequence: None,
         })
         .await
         .unwrap();
@@ -2563,7 +2570,7 @@ async fn list_deferred_busy_messages_returns_only_deferred_busy() {
         .await
         .unwrap();
     service
-        .mark_message_deferred_busy(&scope("a"), &thread.thread_id, msg_a.message_id)
+        .mark_message_deferred_busy(&scope("a"), &thread.thread_id, msg_a.message_id, None, None)
         .await
         .unwrap();
 
@@ -2587,6 +2594,7 @@ async fn list_deferred_busy_messages_returns_only_deferred_busy() {
             scope: scope("a"),
             thread_id: thread.thread_id,
             limit: None,
+            after_sequence: None,
         })
         .await
         .unwrap();
@@ -2625,7 +2633,7 @@ async fn list_deferred_busy_messages_ordered_oldest_first() {
             .await
             .unwrap();
         service
-            .mark_message_deferred_busy(&scope("a"), &thread.thread_id, msg.message_id)
+            .mark_message_deferred_busy(&scope("a"), &thread.thread_id, msg.message_id, None, None)
             .await
             .unwrap();
     }
@@ -2635,6 +2643,7 @@ async fn list_deferred_busy_messages_ordered_oldest_first() {
             scope: scope("a"),
             thread_id: thread.thread_id,
             limit: None,
+            after_sequence: None,
         })
         .await
         .unwrap();
@@ -2675,7 +2684,7 @@ async fn list_deferred_busy_messages_wrong_scope_returns_empty() {
         .await
         .unwrap();
     service
-        .mark_message_deferred_busy(&scope("a"), &thread.thread_id, msg.message_id)
+        .mark_message_deferred_busy(&scope("a"), &thread.thread_id, msg.message_id, None, None)
         .await
         .unwrap();
 
@@ -2685,6 +2694,7 @@ async fn list_deferred_busy_messages_wrong_scope_returns_empty() {
             scope: scope("b"),
             thread_id: thread.thread_id,
             limit: None,
+            after_sequence: None,
         })
         .await
         .unwrap();
@@ -2721,7 +2731,7 @@ async fn list_deferred_busy_messages_limit_caps_results() {
             .await
             .unwrap();
         service
-            .mark_message_deferred_busy(&scope("a"), &thread.thread_id, msg.message_id)
+            .mark_message_deferred_busy(&scope("a"), &thread.thread_id, msg.message_id, None, None)
             .await
             .unwrap();
     }
@@ -2732,6 +2742,7 @@ async fn list_deferred_busy_messages_limit_caps_results() {
             scope: scope("a"),
             thread_id: thread.thread_id.clone(),
             limit: Some(2),
+            after_sequence: None,
         })
         .await
         .unwrap();
@@ -2750,9 +2761,142 @@ async fn list_deferred_busy_messages_limit_caps_results() {
             scope: scope("a"),
             thread_id: thread.thread_id,
             limit: Some(0),
+            after_sequence: None,
         })
         .await
         .unwrap();
 
     assert!(empty.is_empty(), "limit=0 must return empty");
+}
+
+// ── Presence-marker fast path ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn list_deferred_busy_skips_scan_when_marker_absent() {
+    // A freshly-created thread with no deferred messages must return empty
+    // via the fast path (without scanning messages).
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("marker-absent"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    // Accept a message but do NOT defer it.
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("marker-absent"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("no defer"),
+        })
+        .await
+        .unwrap();
+
+    let result = service
+        .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
+            scope: scope("marker-absent"),
+            thread_id: thread.thread_id,
+            limit: None,
+            after_sequence: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        result.is_empty(),
+        "marker absent — must return empty without scanning"
+    );
+}
+
+#[tokio::test]
+async fn list_deferred_busy_tombstones_marker_after_last_deferred_resolved() {
+    // After deferring a message and then submitting it, the next
+    // `list_deferred_busy_messages` call must find zero records and clear
+    // the marker.  A subsequent call must still return empty (idempotent).
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("marker-tombstone"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let msg = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("marker-tombstone"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("defer-then-submit"),
+        })
+        .await
+        .unwrap();
+
+    service
+        .mark_message_deferred_busy(
+            &scope("marker-tombstone"),
+            &thread.thread_id,
+            msg.message_id,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Resolve the deferred message by marking it submitted.
+    service
+        .mark_message_submitted(
+            &scope("marker-tombstone"),
+            &thread.thread_id,
+            msg.message_id,
+            "turn-1".to_string(),
+            "run-1".to_string(),
+        )
+        .await
+        .unwrap();
+
+    // First list after resolution must find zero records and tombstone marker.
+    let after_resolve = service
+        .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
+            scope: scope("marker-tombstone"),
+            thread_id: thread.thread_id.clone(),
+            limit: None,
+            after_sequence: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        after_resolve.is_empty(),
+        "no deferred after submit — must return empty"
+    );
+
+    // Second call must also return empty (marker tombstone is idempotent).
+    let after_tombstone = service
+        .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
+            scope: scope("marker-tombstone"),
+            thread_id: thread.thread_id,
+            limit: None,
+            after_sequence: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        after_tombstone.is_empty(),
+        "repeated call after tombstone must still be empty"
+    );
 }

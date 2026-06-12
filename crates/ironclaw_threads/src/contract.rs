@@ -127,6 +127,18 @@ pub struct ThreadMessageRecord {
     pub tool_result_provider_call: Option<ProviderToolCallReferenceEnvelope>,
     pub content: Option<String>,
     pub redaction_ref: Option<String>,
+    /// Canonical `SourceBindingRef` string persisted at defer time so the drain
+    /// can replay verbatim without re-deriving the prefix.
+    ///
+    /// `None` on records written before this field was added (legacy). The drain
+    /// warns and skips those entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_source_binding_ref: Option<String>,
+    /// Canonical `ReplyTargetBindingRef` string persisted at defer time.
+    ///
+    /// See `turn_source_binding_ref` for the None/legacy semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_reply_target_binding_ref: Option<String>,
 }
 
 /// Summary artifact over a stable transcript sequence range.
@@ -431,6 +443,10 @@ pub struct UpdateThreadGoalRequest {
 /// When `None` all matching records are returned (unbounded).  Callers that
 /// only need the first N messages (e.g. drain loops that try-skip invalid
 /// entries) should pass a small bound to avoid full-thread scans.
+///
+/// `after_sequence` (when `Some`) skips all deferred records whose `sequence`
+/// is ≤ the given value.  The drain uses this to advance past windows that
+/// contain only invalid/skipped entries without re-examining them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListDeferredBusyMessagesRequest {
     pub scope: ThreadScope,
@@ -438,4 +454,7 @@ pub struct ListDeferredBusyMessagesRequest {
     /// Maximum number of `DeferredBusy` records to return after
     /// sequence-ascending sort.  `None` means unbounded.
     pub limit: Option<usize>,
+    /// When `Some(seq)`, only return records with `sequence > seq`.
+    /// Enables the drain to page past already-examined invalid windows.
+    pub after_sequence: Option<u64>,
 }

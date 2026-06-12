@@ -1132,6 +1132,7 @@ async fn filesystem_list_deferred_busy_messages_empty_when_no_messages() {
             scope: scope("ldb-empty"),
             thread_id: thread.thread_id,
             limit: None,
+            after_sequence: None,
         })
         .await
         .unwrap();
@@ -1168,7 +1169,13 @@ async fn filesystem_list_deferred_busy_messages_returns_only_deferred_busy() {
         .await
         .unwrap();
     service
-        .mark_message_deferred_busy(&scope("ldb-filter"), &thread.thread_id, msg_a.message_id)
+        .mark_message_deferred_busy(
+            &scope("ldb-filter"),
+            &thread.thread_id,
+            msg_a.message_id,
+            None,
+            None,
+        )
         .await
         .unwrap();
 
@@ -1191,6 +1198,7 @@ async fn filesystem_list_deferred_busy_messages_returns_only_deferred_busy() {
             scope: scope("ldb-filter"),
             thread_id: thread.thread_id,
             limit: None,
+            after_sequence: None,
         })
         .await
         .unwrap();
@@ -1230,7 +1238,13 @@ async fn filesystem_list_deferred_busy_messages_ordered_oldest_first() {
             .await
             .unwrap();
         service
-            .mark_message_deferred_busy(&scope("ldb-order"), &thread.thread_id, msg.message_id)
+            .mark_message_deferred_busy(
+                &scope("ldb-order"),
+                &thread.thread_id,
+                msg.message_id,
+                None,
+                None,
+            )
             .await
             .unwrap();
     }
@@ -1240,6 +1254,7 @@ async fn filesystem_list_deferred_busy_messages_ordered_oldest_first() {
             scope: scope("ldb-order"),
             thread_id: thread.thread_id,
             limit: None,
+            after_sequence: None,
         })
         .await
         .unwrap();
@@ -1281,7 +1296,13 @@ async fn filesystem_list_deferred_busy_messages_wrong_scope_returns_empty() {
         .await
         .unwrap();
     service
-        .mark_message_deferred_busy(&scope("ldb-scope"), &thread.thread_id, msg.message_id)
+        .mark_message_deferred_busy(
+            &scope("ldb-scope"),
+            &thread.thread_id,
+            msg.message_id,
+            None,
+            None,
+        )
         .await
         .unwrap();
 
@@ -1291,6 +1312,7 @@ async fn filesystem_list_deferred_busy_messages_wrong_scope_returns_empty() {
             scope: scope("ldb-scope-wrong"),
             thread_id: thread.thread_id,
             limit: None,
+            after_sequence: None,
         })
         .await
         .unwrap();
@@ -1328,7 +1350,13 @@ async fn filesystem_list_deferred_busy_messages_limit_caps_results() {
             .await
             .unwrap();
         service
-            .mark_message_deferred_busy(&scope("ldb-limit"), &thread.thread_id, msg.message_id)
+            .mark_message_deferred_busy(
+                &scope("ldb-limit"),
+                &thread.thread_id,
+                msg.message_id,
+                None,
+                None,
+            )
             .await
             .unwrap();
     }
@@ -1339,6 +1367,7 @@ async fn filesystem_list_deferred_busy_messages_limit_caps_results() {
             scope: scope("ldb-limit"),
             thread_id: thread.thread_id.clone(),
             limit: Some(2),
+            after_sequence: None,
         })
         .await
         .unwrap();
@@ -1356,6 +1385,7 @@ async fn filesystem_list_deferred_busy_messages_limit_caps_results() {
             scope: scope("ldb-limit"),
             thread_id: thread.thread_id,
             limit: Some(0),
+            after_sequence: None,
         })
         .await
         .unwrap();

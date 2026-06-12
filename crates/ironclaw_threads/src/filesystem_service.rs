@@ -763,6 +763,8 @@ where
             tool_result_provider_call: None,
             content: Some(request.content.clone().into_text()),
             redaction_ref: None,
+            turn_source_binding_ref: None,
+            turn_reply_target_binding_ref: None,
         };
         self.write_new_message(&request.scope, &request.thread_id, &message, "message")
             .await?;
@@ -872,17 +874,36 @@ where
         scope: &ThreadScope,
         thread_id: &ThreadId,
         message_id: ThreadMessageId,
+        turn_source_binding_ref: Option<String>,
+        turn_reply_target_binding_ref: Option<String>,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         self.read_thread_versioned(scope, thread_id)
             .await?
             .ok_or_else(|| SessionThreadError::UnknownThread {
                 thread_id: thread_id.clone(),
             })?;
+        // Write presence marker BEFORE flipping the message status so that
+        // `list_deferred_busy_messages` can skip the expensive full-thread
+        // scan on threads that have never had a deferred message. An absent
+        // marker means "no deferred messages" — writing it here (idempotent)
+        // ensures the invariant holds even if the status update below fails
+        // and the caller retries.
+        let marker_path = deferred_busy_marker_path(scope, thread_id)?;
+        self.filesystem
+            .put(
+                &scope.to_resource_scope(),
+                &marker_path,
+                Entry::bytes(vec![]),
+                CasExpectation::Any,
+            )
+            .await?;
         self.apply_message_update(scope, thread_id, message_id, |message| {
             ensure_user_accepted(message, "mark_message_deferred_busy")?;
             message.status = MessageStatus::DeferredBusy;
             message.turn_id = None;
             message.turn_run_id = None;
+            message.turn_source_binding_ref = turn_source_binding_ref.clone();
+            message.turn_reply_target_binding_ref = turn_reply_target_binding_ref.clone();
             Ok(())
         })
         .await
@@ -892,24 +913,44 @@ where
         &self,
         request: ListDeferredBusyMessagesRequest,
     ) -> Result<Vec<ThreadMessageRecord>, SessionThreadError> {
-        // Return empty if the thread does not exist — callers must not treat
-        // an absent thread as an error here.
-        let thread_exists = self
-            .read_thread_versioned(&request.scope, &request.thread_id)
+        // Fast path: if the presence marker is absent, this thread has never
+        // had a deferred message — skip the full thread scan and return empty.
+        // (Threads that don't exist also have no marker, so the thread-existence
+        // check that previously lived here is subsumed by this one.)
+        let marker_path = deferred_busy_marker_path(&request.scope, &request.thread_id)?;
+        let marker_present = self
+            .filesystem
+            .get(&request.scope.to_resource_scope(), &marker_path)
             .await?
             .is_some();
-        if !thread_exists {
+        if !marker_present {
             return Ok(Vec::new());
         }
+        let after_seq = request.after_sequence.unwrap_or(0);
         let mut messages: Vec<ThreadMessageRecord> = self
             .list_thread_messages(&request.scope, &request.thread_id)
             .await?
             .into_iter()
-            .filter(|m| m.status == MessageStatus::DeferredBusy && m.kind == MessageKind::User)
+            .filter(|m| {
+                m.status == MessageStatus::DeferredBusy
+                    && m.kind == MessageKind::User
+                    && m.sequence > after_seq
+            })
             .collect();
         messages.sort_by_key(|m| m.sequence);
         if let Some(limit) = request.limit {
             messages.truncate(limit);
+        }
+        // Tombstone: if the scan came up empty (all deferred messages have
+        // since been submitted or otherwise resolved), delete the marker so
+        // future terminal events skip the scan.
+        if messages.is_empty() {
+            // Best-effort: ignore delete errors (marker may already be gone
+            // or the thread deleted); the worst case is one extra scan.
+            let _ = self
+                .filesystem
+                .delete(&request.scope.to_resource_scope(), &marker_path)
+                .await;
         }
         Ok(messages)
     }
@@ -950,6 +991,8 @@ where
             tool_result_provider_call: None,
             content: Some(request.content.into_text()),
             redaction_ref: None,
+            turn_source_binding_ref: None,
+            turn_reply_target_binding_ref: None,
         };
         self.write_new_message(
             &request.scope,
@@ -1059,6 +1102,8 @@ where
             tool_result_provider_call: provider_call,
             content: Some(content),
             redaction_ref: None,
+            turn_source_binding_ref: None,
+            turn_reply_target_binding_ref: None,
         };
         self.write_new_message(
             &request.scope,
@@ -1115,6 +1160,8 @@ where
             tool_result_provider_call: None,
             content: Some(content),
             redaction_ref: None,
+            turn_source_binding_ref: None,
+            turn_reply_target_binding_ref: None,
         };
         let path = message_record_path(&request.scope, &request.thread_id, message.message_id)?;
         let entry = Self::message_entry(&message)?;
@@ -1771,6 +1818,19 @@ fn idempotency_record_path(record_key: &str) -> Result<ScopedPath, SessionThread
     scoped_path(&format!("{}/idempotency/{record_key}.json", THREADS_PREFIX))
 }
 
+/// Presence-marker path: written BEFORE a message is flipped to
+/// `DeferredBusy` so that `list_deferred_busy_messages` can skip the full
+/// thread scan on threads that have never had a deferred message.
+fn deferred_busy_marker_path(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&format!(
+        "{}/deferred-busy.marker",
+        thread_root_string(scope, thread_id)
+    ))
+}
+
 /// Build the alias-relative per-thread root for a scope under `/threads`.
 fn thread_root_string(scope: &ThreadScope, thread_id: &ThreadId) -> String {
     let mut base = scope_axes_string(scope);
@@ -2031,6 +2091,8 @@ fn history_message(message: &ThreadMessageRecord) -> ThreadMessageRecord {
         tool_result_provider_call: None,
         content: message.content.clone(),
         redaction_ref: message.redaction_ref.clone(),
+        turn_source_binding_ref: message.turn_source_binding_ref.clone(),
+        turn_reply_target_binding_ref: message.turn_reply_target_binding_ref.clone(),
     }
 }
 
