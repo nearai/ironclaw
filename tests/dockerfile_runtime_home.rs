@@ -124,9 +124,9 @@ fn reborn_dockerfile_uses_feature_matched_cache_and_loopback_default() {
 
     assert!(
         dockerfile.contains(
-            "cargo chef cook \\\n    --profile dist \\\n    --features webui-v2-beta,slack-v2-host-beta"
+            "cargo chef cook \\\n    --profile dist \\\n    --package ironclaw_reborn_cli \\\n    --features webui-v2-beta,slack-v2-host-beta"
         ),
-        "cargo chef cook must use the same Reborn features as the final build"
+        "cargo chef cook must target the Reborn CLI package with the same features as the final build"
     );
     assert!(
         dockerfile.contains("IRONCLAW_REBORN_SERVE_HOST=127.0.0.1"),
@@ -213,6 +213,40 @@ fn reborn_entrypoint_passes_explicit_args_through() {
     assert_eq!(
         std::fs::read_to_string(&fake.args_file).expect("captured args"),
         "serve\n--help\n"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn reborn_entrypoint_resolves_known_env_placeholders_in_explicit_args() {
+    let fake = setup_fake_entrypoint();
+    let output = Command::new("sh")
+        .arg(repo_file("docker/reborn/entrypoint.sh"))
+        .args([
+            "serve",
+            "--host",
+            "$IRONCLAW_REBORN_SERVE_HOST",
+            "--port",
+            "$PORT",
+        ])
+        .env_clear()
+        .env("PATH", fake.path_env())
+        .env("IRONCLAW_REBORN_HOME", &fake.home_dir)
+        .env("IRONCLAW_REBORN_DEFAULT_CONFIG", &fake.default_config)
+        .env("IRONCLAW_REBORN_SERVE_HOST", "0.0.0.0")
+        .env("PORT", "4321")
+        .env("IRONCLAW_REBORN_TEST_ARGS_FILE", &fake.args_file)
+        .output()
+        .expect("entrypoint should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&fake.args_file).expect("captured args"),
+        "serve\n--host\n0.0.0.0\n--port\n4321\n"
     );
 }
 

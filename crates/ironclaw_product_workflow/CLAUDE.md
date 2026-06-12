@@ -27,7 +27,7 @@ handling, gate routing, mission routing, and redacted acknowledgements.
 | `ApprovalInteractionService` / `DefaultApprovalInteractionService` | Approval-only product/WebUI boundary for listing redacted pending approval gates and resolving click approve/deny through canonical approval resolver + turn coordinator ports |
 | `RunStateApprovalInteractionReadModel` | Canonical read model that returns status-bearing approval gates from scoped approval-request records plus the parked turn-run locator; `ApprovalInteractionService::list_pending` filters those records to pending UI DTOs |
 | `AuthInteractionService` / `DefaultAuthInteractionService` | Auth-required product/WebUI boundary for listing redacted pending auth gates and resolving credential/callback/cancel decisions through typed auth-flow manager + turn coordinator ports |
-| `RebornServicesApi` / `RebornServices` | Native WebChat v2 facade — stable surface beta WebUI route handlers consume in place of reaching into turn coordination, thread stores, runtime lanes, dispatchers, or capability hosts. Enforces caller ownership of the thread before any turn mutation; exposes connectable channel metadata for deterministic UI actions; rejects stale or attacker-supplied `gate_ref` on denied/cancelled gate resolutions; refuses persistent (`always: true`) approvals until an approval-policy port lands |
+| `RebornServicesApi` / `RebornServices` | Native WebChat v2 facade — stable surface beta WebUI route handlers consume in place of reaching into turn coordination, thread stores, runtime lanes, dispatchers, or capability hosts. Enforces caller ownership of the thread before any turn mutation; exposes connectable channel metadata for deterministic UI actions; rejects stale or attacker-supplied `gate_ref` on denied/cancelled gate resolutions; routes approval-gate `always: true` resolutions through the approval interaction policy path while keeping generic gate fallback one-shot only |
 
 ## Dependencies
 
@@ -63,9 +63,12 @@ Approval interactions are click-approval only. Pending approval DTOs must be
 redacted, scoped, and derived from canonical run-state/approval records or a
 projection read model built from them. Approve/deny decisions must go through
 `ApprovalResolutionPort` and `TurnCoordinator`; product/WebUI code must not
-directly execute tools, mutate approval stores ad hoc, or implement
-`AlwaysAllow` before a durable approval-policy port exists. High-value signing
-and attested approvals require a separate service shape with canonical payload
+directly execute tools or mutate approval stores ad hoc. `AlwaysAllow` is
+limited to approval gates backed by the durable persistent approval-policy port;
+generic gate fallback remains one-shot only. Persistent approval policy checks
+must be performed before approval/resume side effects and must fail closed when
+the capability manifest does not allow durable reuse. High-value signing and
+attested approvals require a separate service shape with canonical payload
 attestation and must not be folded into this redacted click-approval DTO.
 
 Auth interactions are auth-required gates only. Pending auth DTOs must be
@@ -93,6 +96,36 @@ WebUI-facing facade methods must bind browser thread ids through
 caller before accepting messages, streaming events, canceling runs, or resolving
 gates. Browser/session metadata is not authority by itself, and send-message
 must not implicitly create missing threads.
+
+### Trigger-thread exception
+
+Automation trigger-fired threads are stored by `record_trigger_prompt` with
+`owner_user_id = Some(creator_user_id)` — the user who fired the trigger — not
+the WebUI caller's session user. The caller-scoped `SessionThreadService` probe
+therefore misses them.
+
+When a thread lookup misses under the caller's session scope, `RebornServices`
+falls back to `AutomationProductFacade::resolve_run_thread_scope`. That method
+is caller-scoped: it scans only the triggers visible to the authenticated caller,
+so the authorization check is embedded in the lookup. If a matching trigger run
+is found, the service reconstructs a `TurnScope` with:
+
+- `owner_user_id = Some(trigger creator_user_id)` — NOT the session caller
+- `agent_id` / `project_id` from the trigger record
+
+and substitutes the trigger creator as the `run_actor` for all downstream turn
+operations (timeline, SSE stream, gate resolve, cancel, run-state). The
+authorization model is automation visibility (`list_automations` semantics), not
+thread-owner == caller.
+
+**No caching.** Every call revalidates automation visibility through the facade.
+A caller that loses automation visibility mid-session cannot keep accessing the
+trigger-owned thread after their access is revoked. Caching the authz result
+is explicitly forbidden.
+
+**Backend/timeout errors** from `resolve_run_thread_scope` surface as
+`Unavailable` (503, retryable), never as 404. Only `Ok(None)` (thread not in
+any caller-visible trigger) produces a 404 response.
 
 WebUI-facing facade errors must expose stable, sanitized taxonomy. Keep
 `RebornServicesErrorCode` aligned with coarse transport/status shape and

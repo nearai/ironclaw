@@ -1607,6 +1607,13 @@ fn sanitized_driver_failure_returns_credits_exhausted_for_known_category() {
 }
 
 #[test]
+fn sanitized_driver_failure_returns_model_credentials_for_known_category() {
+    let result = sanitized_driver_failure(MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY);
+    let failure = result.expect("should return Some for model credentials category");
+    assert_eq!(failure.category(), MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY);
+}
+
+#[test]
 fn sanitized_driver_failure_returns_driver_failed_for_unknown_category() {
     let result = sanitized_driver_failure("some_unknown_driver_category");
     let failure = result.expect("should return Some fallback for unknown category");

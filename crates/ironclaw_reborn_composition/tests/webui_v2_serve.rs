@@ -35,8 +35,8 @@ use ironclaw_product_workflow::{
     WebUiSendMessageRequest, WebUiSetupExtensionRequest,
 };
 use ironclaw_reborn_composition::{
-    PublicRouteMount, RebornReadiness, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig,
-    webui_v2_app,
+    PublicRouteMount, RebornReadiness, RebornWebuiBundle, WebuiAuthentication, WebuiAuthenticator,
+    WebuiServeConfig, webui_v2_app,
 };
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use ironclaw_turns::{EventCursor, RunProfileId, RunProfileVersion, TurnRunId, TurnStatus};
@@ -65,15 +65,17 @@ struct OnlyValidToken;
 
 #[async_trait]
 impl WebuiAuthenticator for OnlyValidToken {
-    async fn authenticate(&self, token: &str) -> Option<UserId> {
+    async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
         if token == VALID_TOKEN {
-            Some(UserId::new(USER).expect("user id"))
+            Some(WebuiAuthentication::operator(
+                UserId::new(USER).expect("user id"),
+            ))
         } else {
             None
         }
     }
 
-    fn allows_operator_webui_config(&self) -> bool {
+    fn mounts_operator_webui_config_routes(&self) -> bool {
         true
     }
 }
@@ -82,9 +84,11 @@ struct MultiUserToken;
 
 #[async_trait]
 impl WebuiAuthenticator for MultiUserToken {
-    async fn authenticate(&self, token: &str) -> Option<UserId> {
+    async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
         if token == VALID_TOKEN {
-            Some(UserId::new(USER).expect("user id"))
+            Some(WebuiAuthentication::user(
+                UserId::new(USER).expect("user id"),
+            ))
         } else {
             None
         }
@@ -130,6 +134,10 @@ mod openai_compat_mount_tests {
         ProductAdapterError, ProductInboundAck, ProductInboundEnvelope, ProductProjectionReadInput,
         ProductProjectionSubject, ProductWorkflow, ProjectionReadRequest, RedactedString,
     };
+    use ironclaw_product_workflow::{
+        ConversationBindingService, DefaultInboundTurnService, DefaultProductWorkflow,
+        FakeIdempotencyLedger, ProductWorkflowError, ResolveBindingRequest, ResolvedBinding,
+    };
     use ironclaw_reborn_composition::ProtectedRouteMount;
     use ironclaw_reborn_openai_compat::{
         InMemoryOpenAiCompatRefStore, OpenAiChatCompletionProjection,
@@ -140,7 +148,13 @@ mod openai_compat_mount_tests {
         OpenAiResponseWaitRequest, OpenAiResponsesMessageRole, OpenAiResponsesProjectionReader,
         OpenAiResponsesWorkflow, openai_compat_router_with_state, openai_compat_routes,
     };
-    use ironclaw_turns::{AcceptedMessageRef, TurnActor, TurnRunId, TurnScope};
+    use ironclaw_threads::InMemorySessionThreadService;
+    use ironclaw_turns::runner::{ClaimRunRequest, CompleteRunRequest, TurnRunTransitionPort};
+    use ironclaw_turns::{
+        AcceptedMessageRef, DefaultTurnCoordinator, InMemoryTurnStateStore,
+        StaticTurnAdmissionLimitProvider, TurnActor, TurnAdmissionAxisKind, TurnLeaseToken,
+        TurnRunId, TurnRunnerId, TurnScope,
+    };
 
     const AGENT: &str = "agent-alpha";
     const PROJECT: &str = "project-alpha";
@@ -200,6 +214,108 @@ mod openai_compat_mount_tests {
     }
 
     #[tokio::test]
+    async fn openai_chat_timeout_keeps_shared_turn_admission_until_terminal_release() {
+        let limits = StaticTurnAdmissionLimitProvider::default()
+            .with_total_limit(TurnAdmissionAxisKind::Tenant, 1);
+        let turn_state = Arc::new(InMemoryTurnStateStore::with_admission_limit_provider(
+            Arc::new(limits),
+        ));
+        let turn_coordinator = Arc::new(DefaultTurnCoordinator::new(turn_state.clone()));
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let binding = AdmissionTestBindingService;
+        let inbound = Arc::new(DefaultInboundTurnService::new(
+            binding.clone(),
+            thread_service,
+            turn_coordinator,
+        ));
+        let workflow: Arc<dyn ProductWorkflow> = Arc::new(DefaultProductWorkflow::new(
+            inbound,
+            Arc::new(FakeIdempotencyLedger::new()),
+            Arc::new(binding),
+        ));
+        let chat = Arc::new(
+            OpenAiChatCompletionsWorkflow::new(
+                workflow,
+                Arc::new(InMemoryOpenAiCompatRefStore::new()),
+                Arc::new(NeverCompletingChatProjectionReader),
+            )
+            .with_wait_timeout(Duration::from_millis(1)),
+        );
+        let mount = ProtectedRouteMount::new(
+            openai_compat_router_with_state(OpenAiCompatRouterState::with_chat_completions(chat)),
+            openai_compat_routes(),
+        );
+        let bundle = RebornWebuiBundle {
+            api: Arc::new(StubServices::default()),
+            product_auth: None,
+            readiness: RebornReadiness::disabled(),
+        };
+        let config = WebuiServeConfig::new(
+            TenantId::new(TENANT).expect("tenant"),
+            Arc::new(OnlyValidToken),
+            vec![HeaderValue::from_static("http://localhost:3000")],
+        )
+        .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+        .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+        .with_protected_route_mount(mount);
+        let app = webui_v2_app(bundle, config).expect("webui v2 app");
+
+        let timed_out = app
+            .clone()
+            .oneshot(chat_request(Some(VALID_TOKEN)))
+            .await
+            .expect("timed-out chat response");
+        assert_eq!(timed_out.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(turn_state.active_admission_reservations().len(), 1);
+
+        let denied = app
+            .clone()
+            .oneshot(chat_request(Some(VALID_TOKEN)))
+            .await
+            .expect("admission-denied chat response");
+        assert_eq!(denied.status(), StatusCode::TOO_MANY_REQUESTS);
+        let denied_body = to_bytes(denied.into_body(), 4096)
+            .await
+            .expect("denied body");
+        let denied_body: serde_json::Value =
+            serde_json::from_slice(&denied_body).expect("denied json");
+        assert_eq!(denied_body["error"]["code"], "rate_limited");
+        assert_eq!(turn_state.active_admission_reservations().len(), 1);
+
+        let runner_id = TurnRunnerId::new();
+        let lease_token = TurnLeaseToken::new();
+        let claimed = turn_state
+            .claim_next_run(ClaimRunRequest {
+                runner_id,
+                lease_token,
+                scope_filter: None,
+            })
+            .await
+            .expect("claim active run")
+            .expect("active run should be claimable");
+        turn_state
+            .complete_run(CompleteRunRequest {
+                run_id: claimed.state.run_id,
+                runner_id,
+                lease_token,
+            })
+            .await
+            .expect("complete active run");
+        assert!(turn_state.active_admission_reservations().is_empty());
+
+        let accepted_after_release = app
+            .oneshot(chat_request(Some(VALID_TOKEN)))
+            .await
+            .expect("chat response after release");
+        assert_eq!(
+            accepted_after_release.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the route still times out waiting for projection, but admission accepted a new turn"
+        );
+        assert_eq!(turn_state.active_admission_reservations().len(), 1);
+    }
+
+    #[tokio::test]
     async fn openai_responses_mount_uses_webui_auth_and_product_workflow() {
         let workflow = Arc::new(GatewayOpenAiWorkflow::default());
         let responses = Arc::new(OpenAiResponsesWorkflow::new(
@@ -251,6 +367,57 @@ mod openai_compat_mount_tests {
         );
         assert_eq!(workflow.submit_count(), 1);
         assert_eq!(workflow.read_count(), 1);
+    }
+
+    #[derive(Clone)]
+    struct AdmissionTestBindingService;
+
+    #[async_trait]
+    impl ConversationBindingService for AdmissionTestBindingService {
+        async fn resolve_binding(
+            &self,
+            request: ResolveBindingRequest,
+        ) -> Result<ResolvedBinding, ProductWorkflowError> {
+            self.resolve(request)
+        }
+
+        async fn lookup_binding(
+            &self,
+            request: ResolveBindingRequest,
+        ) -> Result<ResolvedBinding, ProductWorkflowError> {
+            self.resolve(request)
+        }
+    }
+
+    impl AdmissionTestBindingService {
+        fn resolve(
+            &self,
+            request: ResolveBindingRequest,
+        ) -> Result<ResolvedBinding, ProductWorkflowError> {
+            Ok(ResolvedBinding {
+                tenant_id: TenantId::new(TENANT).map_err(binding_error("test OpenAI tenant id"))?,
+                actor_user_id: UserId::new(request.external_actor_ref.id())
+                    .map_err(binding_error("test OpenAI actor user id"))?,
+                subject_user_id: Some(
+                    UserId::new(request.external_actor_ref.id())
+                        .map_err(binding_error("test OpenAI subject user id"))?,
+                ),
+                thread_id: ThreadId::new(format!("thread-{}", request.external_event_id.as_str()))
+                    .map_err(binding_error("test OpenAI thread id"))?,
+                agent_id: Some(AgentId::new(AGENT).map_err(binding_error("test OpenAI agent id"))?),
+                project_id: Some(
+                    ProjectId::new(PROJECT).map_err(binding_error("test OpenAI project id"))?,
+                ),
+            })
+        }
+    }
+
+    fn binding_error(
+        field: &'static str,
+    ) -> impl FnOnce(ironclaw_host_api::HostApiError) -> ProductWorkflowError + 'static {
+        move |reason| ProductWorkflowError::BindingResolutionFailed {
+            reason: format!("{field}: {reason}"),
+        }
     }
 
     fn chat_request(token: Option<&str>) -> Request<Body> {
@@ -386,6 +553,22 @@ mod openai_compat_mount_tests {
             ironclaw_reborn_openai_compat::OpenAiCompatHttpError,
         > {
             Ok(self.projection.clone())
+        }
+    }
+
+    struct NeverCompletingChatProjectionReader;
+
+    #[async_trait]
+    impl OpenAiChatCompletionProjectionReader for NeverCompletingChatProjectionReader {
+        async fn read_chat_completion_projection(
+            &self,
+            _request: OpenAiChatCompletionProjectionRequest,
+        ) -> Result<
+            OpenAiChatCompletionProjection,
+            ironclaw_reborn_openai_compat::OpenAiCompatHttpError,
+        > {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok(OpenAiChatCompletionProjection::text("late"))
         }
     }
 
@@ -1281,14 +1464,15 @@ async fn cors_allows_configured_origin() {
 async fn malformed_user_id_from_authenticator_rejects_with_401() {
     // If a host authenticator returns a user id that doesn't satisfy
     // `UserId`'s grammar at construction time it never reaches the
-    // composition. The authenticator's contract is `Option<UserId>`,
-    // so the only way to produce a "malformed" id is to return None —
-    // which the composition treats as auth failure. This test locks
-    // the contract: a `None` decision becomes 401, never 500.
+    // composition. The authenticator's contract only accepts validated
+    // `UserId`s inside `WebuiAuthentication`, so the only way to
+    // produce a "malformed" id is to return None — which the
+    // composition treats as auth failure. This test locks the contract:
+    // a `None` decision becomes 401, never 500.
     struct AlwaysReject;
     #[async_trait]
     impl WebuiAuthenticator for AlwaysReject {
-        async fn authenticate(&self, _token: &str) -> Option<UserId> {
+        async fn authenticate(&self, _token: &str) -> Option<WebuiAuthentication> {
             None
         }
     }
@@ -1753,10 +1937,12 @@ async fn rate_limit_is_independent_per_caller() {
     struct UserSwitch;
     #[async_trait]
     impl WebuiAuthenticator for UserSwitch {
-        async fn authenticate(&self, token: &str) -> Option<UserId> {
+        async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
             match token {
-                "tok-alice" => Some(UserId::new("alice").expect("user")),
-                "tok-bob" => Some(UserId::new("bob").expect("user")),
+                "tok-alice" => Some(WebuiAuthentication::user(
+                    UserId::new("alice").expect("user"),
+                )),
+                "tok-bob" => Some(WebuiAuthentication::user(UserId::new("bob").expect("user"))),
                 _ => None,
             }
         }
@@ -1869,7 +2055,7 @@ async fn every_webui_v2_descriptor_is_mounted_on_composed_app() {
 }
 
 #[tokio::test]
-async fn llm_config_routes_are_not_mounted_for_multi_user_authenticator() {
+async fn operator_routes_are_not_mounted_for_multi_user_authenticator() {
     let (app, _services) = build_app_with_authenticator(Arc::new(MultiUserToken));
 
     for (method, uri) in [
@@ -1882,6 +2068,22 @@ async fn llm_config_routes_are_not_mounted_for_multi_user_authenticator() {
         (Method::POST, "/api/webchat/v2/llm/nearai/login"),
         (Method::POST, "/api/webchat/v2/llm/nearai/wallet"),
         (Method::POST, "/api/webchat/v2/llm/codex/login"),
+        (Method::GET, "/api/webchat/v2/operator/setup"),
+        (Method::POST, "/api/webchat/v2/operator/setup"),
+        (Method::GET, "/api/webchat/v2/operator/config"),
+        (
+            Method::GET,
+            "/api/webchat/v2/operator/config/provider.default",
+        ),
+        (
+            Method::POST,
+            "/api/webchat/v2/operator/config/provider.default",
+        ),
+        (Method::POST, "/api/webchat/v2/operator/config/validate"),
+        (Method::GET, "/api/webchat/v2/operator/diagnostics"),
+        (Method::GET, "/api/webchat/v2/operator/status"),
+        (Method::GET, "/api/webchat/v2/operator/logs"),
+        (Method::POST, "/api/webchat/v2/operator/service"),
     ] {
         let mut builder = Request::builder()
             .method(method.clone())

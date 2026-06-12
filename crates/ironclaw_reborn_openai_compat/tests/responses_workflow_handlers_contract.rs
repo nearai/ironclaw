@@ -885,7 +885,11 @@ fn caller_for_user(user_id: &str) -> OpenAiCompatAuthenticatedCaller {
             Some(AgentId::new("agent-a").expect("agent")),
             Some(ProjectId::new("project-a").expect("project")),
         ),
-        ProtocolAuthEvidence::test_verified(AuthRequirement::BearerToken, user_id),
+        ProtocolAuthEvidence::test_verified_for_tenant(
+            AuthRequirement::BearerToken,
+            user_id,
+            TenantId::new("tenant-a").expect("tenant"),
+        ),
     )
     .expect("caller")
 }

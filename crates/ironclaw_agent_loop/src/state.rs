@@ -85,6 +85,8 @@ pub struct LoopExecutionState {
     pub gate_state: GateStrategyState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_approval_resume: Option<PendingApprovalResume>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_auth_resume: Option<PendingAuthResume>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -102,6 +104,24 @@ pub struct PendingApprovalResume {
     pub provider_replay: Option<ProviderToolCallReplay>,
     pub input: serde_json::Value,
     pub estimate: ResourceEstimate,
+}
+
+/// Auth-gated capability call parked at a blocked-auth checkpoint.
+///
+/// Unlike [`PendingApprovalResume`] there is no resume token: on resume the
+/// call is re-dispatched as a fresh invocation and the host re-evaluates the
+/// auth requirement (credentials now present → executes; still missing →
+/// blocks again).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingAuthResume {
+    pub gate_ref: LoopGateRef,
+    pub capability_id: CapabilityId,
+    pub surface_version: CapabilitySurfaceVersion,
+    pub input_ref: CapabilityInputRef,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effective_capability_ids: Vec<CapabilityId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_replay: Option<ProviderToolCallReplay>,
 }
 
 impl LoopExecutionState {
@@ -136,6 +156,7 @@ impl LoopExecutionState {
             stop_state: StopStrategyState::default(),
             gate_state: GateStrategyState::default(),
             pending_approval_resume: None,
+            pending_auth_resume: None,
         }
     }
 
@@ -631,6 +652,71 @@ mod tests {
         assert_eq!(
             restored.post_capability_state, state.post_capability_state,
             "entire PostCapabilityStageState must round-trip without loss"
+        );
+    }
+
+    #[test]
+    fn pending_auth_resume_round_trips_through_checkpoint_payload() {
+        let context = test_run_context();
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.pending_auth_resume = Some(PendingAuthResume {
+            gate_ref: LoopGateRef::new("gate:auth-test").expect("valid gate ref"),
+            capability_id: CapabilityId::new("gsuite.calendar.list_events").expect("valid cap id"),
+            surface_version: CapabilitySurfaceVersion::new("surface-v1")
+                .expect("valid surface version"),
+            input_ref: CapabilityInputRef::new("input:test").expect("valid input ref"),
+            effective_capability_ids: vec![],
+            provider_replay: None,
+        });
+        let payload = encode_payload(&state);
+        let restored =
+            LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::BeforeBlock)
+                .expect("decode checkpoint payload");
+        assert_eq!(
+            restored.pending_auth_resume, state.pending_auth_resume,
+            "PendingAuthResume must survive checkpoint encode/decode"
+        );
+    }
+
+    #[test]
+    fn checkpoint_payload_without_auth_resume_slot_decodes_to_none() {
+        // Encode a state with no pending_auth_resume; decode must yield None.
+        // Also exercise backward compat: a payload JSON object lacking the
+        // field entirely (as pre-existing checkpoints would) must decode
+        // with None rather than failing.
+        let context = test_run_context();
+        let state = LoopExecutionState::initial_for_run(&context);
+        assert!(
+            state.pending_auth_resume.is_none(),
+            "initial state must have no pending_auth_resume"
+        );
+
+        // Round-trip through the normal encode/decode path.
+        let payload = encode_payload(&state);
+        let restored =
+            LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::BeforeBlock)
+                .expect("decode checkpoint payload");
+        assert!(
+            restored.pending_auth_resume.is_none(),
+            "decoded state must have no pending_auth_resume when field was absent from payload"
+        );
+
+        // Explicitly remove the field from the JSON to simulate a checkpoint
+        // produced before PendingAuthResume was added. Decoding must still succeed.
+        let mut value: serde_json::Value = serde_json::from_slice(&payload).expect("parse");
+        value
+            .as_object_mut()
+            .expect("state serializes as object")
+            .remove("pending_auth_resume");
+        let stripped_payload = serde_json::to_vec(&value).expect("re-encode");
+        let from_legacy = LoopExecutionState::from_checkpoint_payload(
+            &stripped_payload,
+            CheckpointKind::BeforeBlock,
+        )
+        .expect("decode legacy checkpoint payload without pending_auth_resume");
+        assert!(
+            from_legacy.pending_auth_resume.is_none(),
+            "legacy checkpoint missing pending_auth_resume field must decode to None"
         );
     }
 }

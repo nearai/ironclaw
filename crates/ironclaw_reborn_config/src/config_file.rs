@@ -37,7 +37,8 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::de::{self, Visitor};
+use serde::{Deserialize, Deserializer};
 use thiserror::Error;
 
 use crate::secrets_guard::{InlineSecretError, reject_inline_secret};
@@ -67,6 +68,11 @@ pub struct RebornConfigFile {
     pub runner: Option<RunnerSection>,
     /// Skill activation selection settings for local-dev runtime skill context.
     pub skills: Option<SkillsSection>,
+    /// Durable storage selection for production Reborn boot.
+    ///
+    /// Credential-bearing database URLs must stay env-only. This section names
+    /// the backend and the environment variable that contains the URL.
+    pub storage: Option<StorageSection>,
     /// Per-slot LLM selection. Keyed by Reborn model slot name. Today
     /// composition wires only the `default` slot; the `mission` slot
     /// becomes live when the planned driver lands. Operators are free
@@ -156,6 +162,61 @@ pub struct SkillsSection {
     /// When false, regex activation criteria no longer auto-load full skill context.
     /// Keyword/tag activation and explicit skill mentions still work.
     pub regex_activation_enabled: Option<bool>,
+}
+
+/// Durable storage backend names accepted by the Reborn production boot config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StorageBackend {
+    Postgres,
+    #[doc(hidden)]
+    Unknown(String),
+}
+
+impl<'de> Deserialize<'de> for StorageBackend {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct StorageBackendVisitor;
+
+        impl Visitor<'_> for StorageBackendVisitor {
+            type Value = StorageBackend;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a storage backend name such as `postgres`")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                match value {
+                    "postgres" => Ok(StorageBackend::Postgres),
+                    candidate => Ok(StorageBackend::Unknown(candidate.to_string())),
+                }
+            }
+        }
+
+        deserializer.deserialize_str(StorageBackendVisitor)
+    }
+}
+
+/// Durable storage selection for production Reborn boot.
+///
+/// `url_env` and `secret_master_key_env` are environment variable NAMES, not
+/// credential-bearing values. The parser rejects raw URL-shaped values so
+/// credentials cannot be pasted into `config.toml`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StorageSection {
+    /// Storage backend name. First production slice supports `"postgres"`.
+    pub backend: Option<StorageBackend>,
+    /// Environment variable name containing the PostgreSQL connection URL.
+    pub url_env: Option<String>,
+    /// Environment variable name containing the Reborn secret master key.
+    pub secret_master_key_env: Option<String>,
+    /// PostgreSQL connection pool size for production storage. Defaults to 16.
+    pub pool_max_size: Option<usize>,
 }
 
 /// WebChat v2 HTTP gateway configuration.
@@ -642,6 +703,45 @@ impl RebornConfigFile {
                 }
             }
         }
+        if let Some(storage) = &self.storage {
+            if let Some(StorageBackend::Unknown(backend)) = &storage.backend {
+                check_non_empty_trimmed(Cow::Borrowed("storage.backend"), backend)?;
+                let reason = if backend.contains("://") {
+                    "must be a backend name, not a URL or inline secret value".to_string()
+                } else {
+                    format!("supports only \"postgres\" in this slice; got `{backend}`")
+                };
+                return Err(RebornConfigFileError::InvalidField {
+                    path: attributed_path.display().to_string(),
+                    field: "storage.backend".to_string(),
+                    reason,
+                });
+            }
+            if let Some(url_env) = &storage.url_env {
+                check_non_empty_trimmed(Cow::Borrowed("storage.url_env"), url_env)?;
+                validate_env_var_reference("storage.url_env", url_env, attributed_path)?;
+            }
+            if let Some(secret_master_key_env) = &storage.secret_master_key_env {
+                check_non_empty_trimmed(
+                    Cow::Borrowed("storage.secret_master_key_env"),
+                    secret_master_key_env,
+                )?;
+                validate_env_var_reference(
+                    "storage.secret_master_key_env",
+                    secret_master_key_env,
+                    attributed_path,
+                )?;
+            }
+            if let Some(pool_max_size) = storage.pool_max_size
+                && pool_max_size == 0
+            {
+                return Err(RebornConfigFileError::InvalidField {
+                    path: attributed_path.display().to_string(),
+                    field: "storage.pool_max_size".to_string(),
+                    reason: "must be greater than 0".to_string(),
+                });
+            }
+        }
         if let Some(webui) = &self.webui {
             if let Some(host) = &webui.listen_host {
                 check(Cow::Borrowed("webui.listen_host"), host)?;
@@ -979,6 +1079,26 @@ fn validate_api_version(found: &str, path: &Path) -> Result<(), RebornConfigFile
     Ok(())
 }
 
+fn validate_env_var_reference(
+    field: &str,
+    value: &str,
+    path: &Path,
+) -> Result<(), RebornConfigFileError> {
+    let mut chars = value.chars();
+    let valid = chars
+        .next()
+        .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
+        && chars.all(|character| character.is_ascii_alphanumeric() || character == '_');
+    if valid {
+        return Ok(());
+    }
+    Err(RebornConfigFileError::InvalidField {
+        path: path.display().to_string(),
+        field: field.to_string(),
+        reason: "must be an environment variable name, not an inline secret or URL".to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1006,6 +1126,7 @@ mod tests {
         assert!(cfg.harness.is_none());
         assert!(cfg.runner.is_none());
         assert!(cfg.skills.is_none());
+        assert!(cfg.storage.is_none());
         assert!(cfg.llm.is_none());
         assert!(cfg.slack.is_none());
     }
@@ -1041,6 +1162,12 @@ poll_interval_ms = 200
 
 [skills]
 regex_activation_enabled = false
+
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+pool_max_size = 32
 
 [llm.default]
 provider_id = "openai"
@@ -1085,6 +1212,17 @@ subject_user_id = "eng-team-agent"
             cfg.skills.as_ref().unwrap().regex_activation_enabled,
             Some(false)
         );
+        let storage = cfg.storage.as_ref().expect("storage section present");
+        assert_eq!(storage.backend, Some(StorageBackend::Postgres));
+        assert_eq!(
+            storage.url_env.as_deref(),
+            Some("IRONCLAW_REBORN_POSTGRES_URL")
+        );
+        assert_eq!(
+            storage.secret_master_key_env.as_deref(),
+            Some("IRONCLAW_REBORN_SECRET_MASTER_KEY")
+        );
+        assert_eq!(storage.pool_max_size, Some(32));
         let default_slot = cfg.default_llm_slot().expect("default slot present");
         assert_eq!(default_slot.provider_id.as_deref(), Some("openai"));
         assert_eq!(default_slot.model.as_deref(), Some("gpt-4o-mini"));
@@ -1256,6 +1394,152 @@ signing_secret_env = "sk-proj-1234567890abcdef1234567890"
         assert!(
             err.to_string().contains("slack.signing_secret_env"),
             "error should identify Slack field: {err}"
+        );
+    }
+
+    #[test]
+    fn parses_storage_postgres_env_reference() {
+        let toml = r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+pool_max_size = 24
+"#;
+        let cfg = RebornConfigFile::parse_text(toml, &attributed())
+            .expect("storage env reference must parse");
+        let storage = cfg.storage.expect("storage section");
+        assert_eq!(storage.backend, Some(StorageBackend::Postgres));
+        assert_eq!(
+            storage.url_env.as_deref(),
+            Some("IRONCLAW_REBORN_POSTGRES_URL")
+        );
+        assert_eq!(
+            storage.secret_master_key_env.as_deref(),
+            Some("IRONCLAW_REBORN_SECRET_MASTER_KEY")
+        );
+        assert_eq!(storage.pool_max_size, Some(24));
+    }
+
+    #[test]
+    fn rejects_zero_storage_pool_max_size() {
+        let toml = r#"
+[storage]
+backend = "postgres"
+pool_max_size = 0
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("zero pool_max_size must be rejected");
+        assert!(
+            err.to_string().contains("storage.pool_max_size"),
+            "error should identify storage.pool_max_size: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_whitespace_only_storage_backend() {
+        let toml = r#"
+[storage]
+backend = "   "
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("whitespace-only backend must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+        assert!(
+            err.to_string().contains("storage.backend"),
+            "error should identify storage.backend: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_url_shaped_storage_backend_without_echoing_credentials() {
+        let toml = r#"
+[storage]
+backend = "postgres://user:password@db.example.com/ironclaw"
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("backend must not accept raw URLs");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+        assert!(
+            err.to_string().contains("storage.backend"),
+            "error should identify storage.backend: {err}"
+        );
+        assert!(
+            !err.to_string().contains("password"),
+            "error must not echo credential-bearing backend value: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_whitespace_only_storage_secret_master_key_env() {
+        let toml = r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "   "
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("whitespace-only secret_master_key_env must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+        assert!(
+            err.to_string().contains("storage.secret_master_key_env"),
+            "error should identify storage.secret_master_key_env: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_whitespace_only_storage_url_env() {
+        let toml = r#"
+[storage]
+url_env = "   "
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("whitespace-only url_env must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+        assert!(
+            err.to_string().contains("storage.url_env"),
+            "error should identify storage.url_env: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_inline_postgres_url_in_storage_url_env() {
+        let toml = r#"
+[storage]
+backend = "postgres"
+url_env = "postgres://user:password@db.example.com/ironclaw?sslmode=require"
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("storage url_env must not accept raw URLs");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+        assert!(
+            err.to_string().contains("storage.url_env"),
+            "error should identify storage.url_env: {err}"
+        );
+        assert!(
+            !err.to_string().contains("password"),
+            "error must not echo credential-bearing URL: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_inline_secret_in_storage_secret_master_key_env() {
+        let toml = r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "postgres://user:password.example.com/ironclaw"
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("storage secret_master_key_env must not accept raw secrets");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+        assert!(
+            err.to_string().contains("storage.secret_master_key_env"),
+            "error should identify storage.secret_master_key_env: {err}"
+        );
+        assert!(
+            !err.to_string().contains("password"),
+            "error must not echo credential-bearing value: {err}"
         );
     }
 

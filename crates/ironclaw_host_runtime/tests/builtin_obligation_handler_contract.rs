@@ -1317,6 +1317,7 @@ async fn inject_credential_account_once_fails_when_no_resolver_wired() {
     let obligations = vec![Obligation::InjectCredentialAccountOnce {
         handle: ironclaw_host_api::SecretHandle::new("github_runtime_token").unwrap(),
         provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
         provider_scopes: Vec::new(),
         requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
     }];
@@ -1357,6 +1358,7 @@ async fn inject_credential_account_once_fails_when_resolver_returns_auth_require
     let obligations = vec![Obligation::InjectCredentialAccountOnce {
         handle: ironclaw_host_api::SecretHandle::new("github_runtime_token").unwrap(),
         provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
         provider_scopes: provider_scopes.clone(),
         requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
     }];
@@ -1419,6 +1421,7 @@ async fn inject_credential_account_once_resolves_and_stages_secret() {
     let obligations = vec![Obligation::InjectCredentialAccountOnce {
         handle: injection_slot.clone(),
         provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
         provider_scopes: Vec::new(),
         requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
     }];
@@ -1471,6 +1474,7 @@ async fn inject_credential_account_once_reads_from_resolved_source_scope() {
     let obligations = vec![Obligation::InjectCredentialAccountOnce {
         handle: injection_slot,
         provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
         provider_scopes: Vec::new(),
         requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
     }];
@@ -1512,6 +1516,7 @@ async fn inject_credential_account_once_maps_unknown_resolved_secret_to_auth_req
     let obligations = vec![Obligation::InjectCredentialAccountOnce {
         handle: ironclaw_host_api::SecretHandle::new("github_runtime_token").unwrap(),
         provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
         provider_scopes: Vec::new(),
         requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
     }];

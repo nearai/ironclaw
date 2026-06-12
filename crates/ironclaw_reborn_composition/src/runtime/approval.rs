@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_approvals::LeaseApproval;
+use ironclaw_approvals::{LeaseApproval, permission_mode_allows_persistent_approval};
+use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{EffectKind, MountView, Principal};
 use ironclaw_product_workflow::{
     ApprovalGateRecord, ApprovalInteractionRejectionKind, ApprovalLeaseTermsProvider,
@@ -17,6 +18,7 @@ use super::local_dev::extension_surface::LocalDevExtensionSurfaceSource;
 
 pub(super) struct LocalDevApprovalLeaseTermsProvider {
     policy: Arc<LocalDevCapabilityPolicy>,
+    registry: Arc<ExtensionRegistry>,
     workspace_mounts: MountView,
     skill_mounts: MountView,
     memory_mounts: MountView,
@@ -26,6 +28,7 @@ pub(super) struct LocalDevApprovalLeaseTermsProvider {
 impl LocalDevApprovalLeaseTermsProvider {
     pub(super) fn new(
         policy: Arc<LocalDevCapabilityPolicy>,
+        registry: Arc<ExtensionRegistry>,
         workspace_mounts: MountView,
         skill_mounts: MountView,
         memory_mounts: MountView,
@@ -33,6 +36,7 @@ impl LocalDevApprovalLeaseTermsProvider {
     ) -> Self {
         Self {
             policy,
+            registry,
             workspace_mounts,
             skill_mounts,
             memory_mounts,
@@ -88,6 +92,33 @@ impl LocalDevApprovalLeaseTermsProvider {
         }
         Ok(Some(local_dev_one_shot_lease_approval(grant.constraints)))
     }
+
+    async fn active_extension_persistent_approval_allowed(
+        &self,
+        action: LocalDevApprovalPolicyAction<'_>,
+    ) -> Result<bool, ProductWorkflowError> {
+        let surface = self
+            .extension_surface_source
+            .snapshot()
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "local-dev extension approval surface is unavailable");
+                lease_terms_unavailable()
+            })?;
+        let Some(capability) = surface.capability(action.capability()) else {
+            return Ok(false);
+        };
+        if action.is_spawn_capability() && !capability.effects.contains(&EffectKind::SpawnProcess) {
+            tracing::error!(
+                capability = %action.capability(),
+                "local-dev extension spawn persistent approval lacks SpawnProcess"
+            );
+            return Ok(false);
+        }
+        Ok(permission_mode_allows_persistent_approval(
+            capability.default_permission,
+        ))
+    }
 }
 
 #[async_trait]
@@ -123,6 +154,34 @@ impl ApprovalLeaseTermsProvider for LocalDevApprovalLeaseTermsProvider {
             }
         }
     }
+
+    async fn persistent_approval_allowed(
+        &self,
+        gate: &ApprovalGateRecord,
+    ) -> Result<(), ProductWorkflowError> {
+        let action = LocalDevApprovalPolicyAction::from_host_action(gate.request().action.as_ref())
+            .ok_or(ProductWorkflowError::ApprovalInteractionRejected {
+                kind: ApprovalInteractionRejectionKind::UnsupportedAction,
+            })?;
+        if let Some(descriptor) = self.registry.get_capability(action.capability_id()) {
+            if permission_mode_allows_persistent_approval(descriptor.default_permission) {
+                return Ok(());
+            }
+            return Err(ProductWorkflowError::ApprovalInteractionRejected {
+                kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
+            });
+        }
+        if self
+            .active_extension_persistent_approval_allowed(action)
+            .await?
+        {
+            Ok(())
+        } else {
+            Err(ProductWorkflowError::ApprovalInteractionRejected {
+                kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
+            })
+        }
+    }
 }
 
 fn lease_terms_unavailable() -> ProductWorkflowError {
@@ -137,8 +196,8 @@ mod tests {
 
     use ironclaw_host_api::{
         Action, ApprovalRequest, ApprovalRequestId, CapabilityId, CorrelationId, EffectKind,
-        ExtensionId, InvocationId, ResourceEstimate, ResourceScope, SecretHandle, TenantId,
-        ThreadId, UserId,
+        ExtensionId, InvocationId, PermissionMode, ResourceEstimate, ResourceScope, SecretHandle,
+        TenantId, ThreadId, UserId,
     };
     use ironclaw_product_workflow::approval_gate_ref;
     use ironclaw_turns::{GateRef, TurnRunId};
@@ -163,11 +222,13 @@ mod tests {
                 id: capability.clone(),
                 provider,
                 effects: vec![EffectKind::Network, EffectKind::UseSecret],
+                default_permission: PermissionMode::Allow,
                 runtime_credentials: Vec::new(),
             }]),
         );
         let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
             Arc::new(local_dev_capability_policy().expect("policy parses")),
+            Arc::new(ExtensionRegistry::new()),
             MountView::default(),
             MountView::default(),
             MountView::default(),
@@ -216,6 +277,7 @@ mod tests {
                     EffectKind::Network,
                     EffectKind::UseSecret,
                 ],
+                default_permission: PermissionMode::Allow,
                 runtime_credentials: vec![ironclaw_host_api::RuntimeCredentialRequirement {
                     handle: secret.clone(),
                     source: ironclaw_host_api::RuntimeCredentialRequirementSource::SecretHandle,
@@ -235,6 +297,7 @@ mod tests {
         );
         let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
             Arc::new(local_dev_capability_policy().expect("policy parses")),
+            Arc::new(ExtensionRegistry::new()),
             MountView::default(),
             MountView::default(),
             MountView::default(),
@@ -266,6 +329,124 @@ mod tests {
             ]
         );
         assert_eq!(approval.secrets, vec![secret]);
+    }
+
+    #[tokio::test]
+    async fn active_extension_capability_allows_persistent_approval_when_manifest_allows() {
+        let capability = CapabilityId::new("gmail.send_message").expect("capability id");
+        let provider = ExtensionId::new("gmail").expect("provider id");
+        let caller = ExtensionId::new("caller").expect("caller id");
+        let source = LocalDevExtensionSurfaceSource::from_surface(
+            LocalDevExtensionSurface::from_active_capabilities(vec![ActiveExtensionCapability {
+                id: capability.clone(),
+                provider,
+                effects: vec![EffectKind::Network],
+                default_permission: PermissionMode::Allow,
+                runtime_credentials: Vec::new(),
+            }]),
+        );
+        let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
+            Arc::new(local_dev_capability_policy().expect("policy parses")),
+            Arc::new(ExtensionRegistry::new()),
+            MountView::default(),
+            MountView::default(),
+            MountView::default(),
+            source,
+        );
+        let gate = approval_gate_record(
+            ApprovalRequestId::new(),
+            Principal::Extension(caller),
+            Action::Dispatch {
+                capability,
+                estimated_resources: ResourceEstimate::default(),
+            },
+        );
+
+        terms_provider
+            .persistent_approval_allowed(&gate)
+            .await
+            .expect("active extension persistent approval should be allowed");
+    }
+
+    #[tokio::test]
+    async fn active_extension_capability_allows_persistent_approval_when_manifest_asks() {
+        let capability = CapabilityId::new("gmail.send_message").expect("capability id");
+        let provider = ExtensionId::new("gmail").expect("provider id");
+        let caller = ExtensionId::new("caller").expect("caller id");
+        let source = LocalDevExtensionSurfaceSource::from_surface(
+            LocalDevExtensionSurface::from_active_capabilities(vec![ActiveExtensionCapability {
+                id: capability.clone(),
+                provider,
+                effects: vec![EffectKind::Network],
+                default_permission: PermissionMode::Ask,
+                runtime_credentials: Vec::new(),
+            }]),
+        );
+        let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
+            Arc::new(local_dev_capability_policy().expect("policy parses")),
+            Arc::new(ExtensionRegistry::new()),
+            MountView::default(),
+            MountView::default(),
+            MountView::default(),
+            source,
+        );
+        let gate = approval_gate_record(
+            ApprovalRequestId::new(),
+            Principal::Extension(caller),
+            Action::Dispatch {
+                capability,
+                estimated_resources: ResourceEstimate::default(),
+            },
+        );
+
+        terms_provider
+            .persistent_approval_allowed(&gate)
+            .await
+            .expect("active extension default ask should allow explicit persistent approval");
+    }
+
+    #[tokio::test]
+    async fn active_extension_capability_rejects_persistent_approval_when_manifest_denies() {
+        let capability = CapabilityId::new("gmail.send_message").expect("capability id");
+        let provider = ExtensionId::new("gmail").expect("provider id");
+        let caller = ExtensionId::new("caller").expect("caller id");
+        let source = LocalDevExtensionSurfaceSource::from_surface(
+            LocalDevExtensionSurface::from_active_capabilities(vec![ActiveExtensionCapability {
+                id: capability.clone(),
+                provider,
+                effects: vec![EffectKind::Network],
+                default_permission: PermissionMode::Deny,
+                runtime_credentials: Vec::new(),
+            }]),
+        );
+        let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
+            Arc::new(local_dev_capability_policy().expect("policy parses")),
+            Arc::new(ExtensionRegistry::new()),
+            MountView::default(),
+            MountView::default(),
+            MountView::default(),
+            source,
+        );
+        let gate = approval_gate_record(
+            ApprovalRequestId::new(),
+            Principal::Extension(caller),
+            Action::Dispatch {
+                capability,
+                estimated_resources: ResourceEstimate::default(),
+            },
+        );
+
+        let error = terms_provider
+            .persistent_approval_allowed(&gate)
+            .await
+            .expect_err("active extension default deny should reject persistent approval");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::ApprovalInteractionRejected {
+                kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported
+            }
+        ));
     }
 
     fn approval_gate_record(

@@ -20,6 +20,7 @@ test-support = ["ironclaw_product_adapters/test-support"]
 [dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
 ironclaw_common = { path = "../ironclaw_common", version = "0.4.1" }
 ironclaw_approvals = { path = "../ironclaw_approvals", version = "0.1.0" }
 ironclaw_authorization = { path = "../ironclaw_authorization", version = "0.1.0" }
@@ -39,6 +40,7 @@ sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "time"] }
 tracing = "0.1"
+url = "2"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
 [dev-dependencies]

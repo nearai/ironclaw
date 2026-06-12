@@ -33,11 +33,14 @@ mod budget_events;
 mod bundled_skills;
 mod default_system_prompt;
 mod error;
+mod extension_activation_credentials;
+mod extension_credential_requirements;
 mod extension_installation_store;
 mod extension_lifecycle;
 mod extension_lifecycle_capabilities;
 mod extension_lifecycle_command;
 mod factory;
+mod failure_summary;
 mod google_oauth;
 mod gsuite;
 mod hooks;
@@ -68,6 +71,7 @@ mod oauth_gate;
 mod oauth_provider_client;
 #[cfg(feature = "openai-compat-beta")]
 mod openai_compat_serve;
+mod operator_logs;
 mod outbound_preferences;
 mod product_auth_durable;
 mod product_auth_providers;
@@ -81,6 +85,8 @@ mod profile;
 mod profile_approval_authorization;
 mod projection;
 pub use auth_prompt::{AuthChallengeProvider, AuthChallengeView};
+#[cfg(feature = "slack-v2-host-beta")]
+mod delivered_gate_routing;
 #[cfg(feature = "root-llm-provider")]
 mod provider_admin;
 #[cfg(feature = "root-llm-provider")]
@@ -101,11 +107,15 @@ mod slack_connectable_channel;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_delivery;
 #[cfg(feature = "slack-v2-host-beta")]
+mod slack_dm_open;
+#[cfg(feature = "slack-v2-host-beta")]
 mod slack_egress;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_host_beta;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_host_state;
+#[cfg(feature = "slack-v2-host-beta")]
+mod slack_outbound_targets;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_pairing_notifier;
 #[cfg(feature = "slack-v2-host-beta")]
@@ -127,6 +137,8 @@ mod webui;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_body_limit;
 mod webui_extension_credentials;
+#[cfg(feature = "webui-v2-beta")]
+mod webui_operator_auth;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_rate_limit;
 #[cfg(feature = "webui-v2-beta")]
@@ -153,7 +165,8 @@ pub use extension_lifecycle_command::{
 };
 #[cfg(feature = "test-support")]
 pub use factory::RebornLocalDevApprovalTestParts;
-pub use factory::{RebornServices, build_reborn_services};
+pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
+pub use failure_summary::reborn_failure_summary_for_category;
 pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
 pub use hooks::{
     HOOKS_ENABLED_ENV, HOOKS_THIRD_PARTY_ENABLED_ENV, HookDispatcherBuilderFactory,
@@ -169,11 +182,16 @@ pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
     LifecycleProductResponse,
 };
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub use ironclaw_runtime_policy::{
+    ResolveRequest as RuntimePolicyResolveRequest, resolve as resolve_runtime_policy,
+};
 pub use ironclaw_skills::{
     ManagedSkillSource as RebornSkillSource, SkillSummary as RebornSkillSummary,
     skill_summary_json as reborn_skill_summary_json,
 };
 pub use ironclaw_triggers::TriggerId;
+pub use ironclaw_turns::TurnStatus;
 #[cfg(feature = "root-llm-provider")]
 pub use llm_catalog::{
     RebornLlmCatalogError, resolve_against_registry, resolve_llm_selection_against_catalog,
@@ -188,8 +206,12 @@ pub use local_runtime_profile::{
     local_dev_yolo_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options,
 };
+pub use nearai_mcp::{
+    NearAiMcpBootstrapConfig, NearAiMcpBootstrapConfigError, nearai_mcp_bootstrap_config_from_env,
+};
 #[cfg(feature = "openai-compat-beta")]
 pub use openai_compat_serve::build_openai_compat_route_mount;
+pub use operator_logs::{capture_tracing_log, operator_log_buffer};
 pub use product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
     ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
@@ -210,7 +232,9 @@ pub use provider_admin_product_command::RebornProviderAdminProductCommandService
 #[cfg(feature = "root-llm-provider")]
 pub use provider_repo::{ProviderRepo, ProviderRepoError};
 pub use readiness::{
-    RebornFacadeReadiness, RebornReadiness, RebornReadinessState, RebornWorkerReadiness,
+    RebornFacadeReadiness, RebornReadiness, RebornReadinessDiagnostic,
+    RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
+    RebornReadinessDiagnosticStatus, RebornReadinessState, RebornWorkerReadiness,
 };
 pub use runtime::{
     AssistantReply, ConversationId, RebornRuntime, RebornRuntimeError, RebornSkillActivation,
@@ -241,6 +265,10 @@ pub use slack_connectable_channel::{
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_delivery::{
+    NoopPostSubmitDeliveryHook, PostSubmitDeliveryHook, TriggeredRunDeliveryDriver,
+};
+#[cfg(feature = "slack-v2-host-beta")]
+pub use slack_delivery::{
     SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
     SlackFinalReplyDeliverySettings,
 };
@@ -254,6 +282,7 @@ pub use slack_host_beta::{
     SlackHostBetaBuildError, SlackHostBetaChannelRoute, SlackHostBetaConfig,
     SlackHostBetaConfigInput, SlackHostBetaMounts, build_slack_events_route_mount,
     build_slack_events_route_mount_with_actor_user_resolver, build_slack_host_beta_mounts,
+    build_triggered_run_delivery_hook,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_personal_binding::{
@@ -294,9 +323,9 @@ pub use webui::{RebornWebuiBundle, build_webui_services};
 pub use webui_rate_limit::RateLimitConfigError;
 #[cfg(feature = "webui-v2-beta")]
 pub use webui_serve::{
-    ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount, WebuiAuthenticator,
-    WebuiServeConfig, WebuiServeConfigError, WebuiServeError, WebuiV2App, webui_v2_app,
-    webui_v2_app_with_lifecycle,
+    ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount,
+    WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, WebuiServeConfigError,
+    WebuiServeError, WebuiV2App, webui_v2_app, webui_v2_app_with_lifecycle,
 };
 
 /// Re-exported identity vocabulary host binaries need to construct
@@ -750,11 +779,6 @@ pub(crate) fn slack_host_state_mount_view(
             ))?,
             MountPermissions::read_write_list_delete(),
         ),
-        MountGrant::new(
-            MountAlias::new("/outbound")?,
-            VirtualPath::new(format!("/tenants/{tenant_id}/shared/slack-outbound"))?,
-            MountPermissions::read_write_list_delete(),
-        ),
     ])
 }
 
@@ -875,6 +899,29 @@ where
     factory::build_postgres_production_host_runtime_services(config).await
 }
 
+/// Open a PostgreSQL pool for Reborn production storage using the same
+/// TLS/cleartext policy enforced by the production event-store backend.
+///
+/// Callers are responsible for validating that production boot selected the
+/// PostgreSQL storage backend and that the URL came from an env-only config
+/// reference before passing it here.
+#[cfg(feature = "postgres")]
+pub fn open_reborn_postgres_pool(
+    url: secrecy::SecretString,
+) -> Result<deadpool_postgres::Pool, RebornCompositionError> {
+    Ok(ironclaw_reborn_event_store::open_postgres_pool(url)?)
+}
+
+/// Open a PostgreSQL pool for Reborn production storage with an explicit
+/// maximum connection count.
+#[cfg(feature = "postgres")]
+pub fn open_reborn_postgres_pool_with_max_size(
+    url: secrecy::SecretString,
+    max_size: usize,
+) -> Result<deadpool_postgres::Pool, RebornCompositionError> {
+    Ok(ironclaw_reborn_event_store::open_postgres_pool_with_max_size(url, max_size)?)
+}
+
 #[cfg(all(test, any(feature = "libsql", feature = "postgres")))]
 mod mount_view_tests {
     use super::*;
@@ -984,11 +1031,6 @@ mod mount_view_tests {
                 "/engine/product_workflow/idempotency/actions/action.json",
                 "slack-product-workflow/idempotency/actions/action.json",
             ),
-            (
-                "/outbound",
-                "/outbound/deliveries/delivery.json",
-                "slack-outbound/deliveries/delivery.json",
-            ),
         ] {
             let (resolved, grant) = view
                 .resolve_with_grant(&ScopedPath::new(path).unwrap())
@@ -1003,6 +1045,13 @@ mod mount_view_tests {
                 MountPermissions::read_write_list_delete()
             );
         }
+        // /outbound is no longer in the slack-host-state mount; outbound state is
+        // served via the composition-owned per-user scoped filesystem instead.
+        assert!(
+            view.resolve(&ScopedPath::new("/outbound/deliveries/delivery.json").unwrap())
+                .is_err(),
+            "/outbound must not resolve through the slack-host-state mount after store unification"
+        );
         assert!(
             view.resolve(&ScopedPath::new("/tenant-shared/other.json").unwrap())
                 .is_err()

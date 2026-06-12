@@ -13,7 +13,8 @@ use std::collections::HashSet;
 use crate::ApprovalRequest;
 use crate::{
     CapabilityId, ExtensionId, HostApiError, MountView, NetworkPolicy, ResourceCeiling,
-    ResourceReservationId, RuntimeCredentialAccountProviderId, SecretHandle,
+    ResourceReservationId, RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
+    SecretHandle,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -58,6 +59,8 @@ pub enum Obligation {
     InjectCredentialAccountOnce {
         handle: SecretHandle,
         provider: RuntimeCredentialAccountProviderId,
+        #[serde(default)]
+        setup: RuntimeCredentialAccountSetup,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         provider_scopes: Vec<String>,
         requester_extension: ExtensionId,
@@ -79,6 +82,8 @@ pub enum Obligation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeCredentialAuthRequirement {
     pub provider: RuntimeCredentialAccountProviderId,
+    #[serde(default)]
+    pub setup: RuntimeCredentialAccountSetup,
     pub requester_extension: ExtensionId,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_scopes: Vec<String>,

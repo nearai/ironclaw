@@ -22,6 +22,11 @@ use crate::descriptors::{
     WEBUI_V2_PATTERN_LIST_AUTOMATIONS, WEBUI_V2_PATTERN_LIST_CONNECTABLE_CHANNELS,
     WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY, WEBUI_V2_PATTERN_LIST_EXTENSIONS,
     WEBUI_V2_PATTERN_LIST_LLM_MODELS, WEBUI_V2_PATTERN_LIST_SKILLS,
+    WEBUI_V2_PATTERN_OPERATOR_CONFIG, WEBUI_V2_PATTERN_OPERATOR_CONFIG_KEY,
+    WEBUI_V2_PATTERN_OPERATOR_CONFIG_VALIDATE, WEBUI_V2_PATTERN_OPERATOR_DIAGNOSTICS,
+    WEBUI_V2_PATTERN_OPERATOR_LOGS, WEBUI_V2_PATTERN_OPERATOR_SERVICE_LIFECYCLE,
+    WEBUI_V2_PATTERN_OPERATOR_SETUP, WEBUI_V2_PATTERN_OPERATOR_STATUS,
+    WEBUI_V2_PATTERN_OUTBOUND_DELIVERY_TARGETS, WEBUI_V2_PATTERN_OUTBOUND_PREFERENCES,
     WEBUI_V2_PATTERN_REMOVE_EXTENSION, WEBUI_V2_PATTERN_RESOLVE_GATE,
     WEBUI_V2_PATTERN_SEARCH_SKILLS, WEBUI_V2_PATTERN_SEND_MESSAGE, WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
     WEBUI_V2_PATTERN_SETUP_EXTENSION, WEBUI_V2_PATTERN_SKILL_DETAIL,
@@ -35,18 +40,27 @@ use crate::sse_capacity::SseCapacity;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WebUiV2RouteOptions {
     pub mount_llm_config_routes: bool,
+    pub mount_operator_routes: bool,
 }
 
 impl WebUiV2RouteOptions {
     pub const fn all() -> Self {
         Self {
             mount_llm_config_routes: true,
+            mount_operator_routes: true,
         }
     }
 
+    // Also suppresses `operator/*` routes because the legacy LLM config
+    // surface and the operator command plane share one trusted-operator gate.
     pub const fn without_llm_config_routes() -> Self {
+        Self::without_operator_routes()
+    }
+
+    pub const fn without_operator_routes() -> Self {
         Self {
             mount_llm_config_routes: false,
+            mount_operator_routes: false,
         }
     }
 }
@@ -62,7 +76,6 @@ impl WebUiV2RouteOptions {
 pub struct WebUiV2State {
     services: Arc<dyn RebornServicesApi>,
     sse_capacity: Arc<SseCapacity>,
-    capabilities: WebUiV2Capabilities,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -73,13 +86,11 @@ pub struct WebUiV2Capabilities {
 impl WebUiV2State {
     pub fn new(
         services: Arc<dyn RebornServicesApi>,
-        capabilities: WebUiV2Capabilities,
         max_concurrent_streams_per_caller: usize,
     ) -> Self {
         Self {
             services,
             sse_capacity: Arc::new(SseCapacity::new(max_concurrent_streams_per_caller)),
-            capabilities,
         }
     }
 
@@ -89,10 +100,6 @@ impl WebUiV2State {
 
     pub(crate) fn sse_capacity(&self) -> &Arc<SseCapacity> {
         &self.sse_capacity
-    }
-
-    pub(crate) fn capabilities(&self) -> WebUiV2Capabilities {
-        self.capabilities
     }
 }
 
@@ -132,6 +139,14 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
         .route(
             WEBUI_V2_PATTERN_LIST_AUTOMATIONS,
             get(handlers::list_automations),
+        )
+        .route(
+            WEBUI_V2_PATTERN_OUTBOUND_PREFERENCES,
+            get(handlers::get_outbound_preferences).post(handlers::set_outbound_preferences),
+        )
+        .route(
+            WEBUI_V2_PATTERN_OUTBOUND_DELIVERY_TARGETS,
+            get(handlers::list_outbound_delivery_targets),
         )
         .route(
             WEBUI_V2_PATTERN_LIST_CONNECTABLE_CHANNELS,
@@ -211,6 +226,42 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             .route(
                 WEBUI_V2_PATTERN_START_CODEX_LOGIN,
                 post(handlers::start_codex_login),
+            );
+    }
+    if options.mount_operator_routes {
+        router = router
+            .route(
+                WEBUI_V2_PATTERN_OPERATOR_SETUP,
+                get(handlers::get_operator_setup).post(handlers::run_operator_setup),
+            )
+            .route(
+                WEBUI_V2_PATTERN_OPERATOR_CONFIG,
+                get(handlers::list_operator_config),
+            )
+            .route(
+                WEBUI_V2_PATTERN_OPERATOR_CONFIG_VALIDATE,
+                get(handlers::reject_reserved_operator_config_key)
+                    .post(handlers::validate_operator_config),
+            )
+            .route(
+                WEBUI_V2_PATTERN_OPERATOR_CONFIG_KEY,
+                get(handlers::get_operator_config_key).post(handlers::set_operator_config_key),
+            )
+            .route(
+                WEBUI_V2_PATTERN_OPERATOR_DIAGNOSTICS,
+                get(handlers::get_operator_diagnostics),
+            )
+            .route(
+                WEBUI_V2_PATTERN_OPERATOR_STATUS,
+                get(handlers::get_operator_status),
+            )
+            .route(
+                WEBUI_V2_PATTERN_OPERATOR_LOGS,
+                get(handlers::query_operator_logs),
+            )
+            .route(
+                WEBUI_V2_PATTERN_OPERATOR_SERVICE_LIFECYCLE,
+                post(handlers::run_operator_service_lifecycle),
             );
     }
     router.with_state(state)

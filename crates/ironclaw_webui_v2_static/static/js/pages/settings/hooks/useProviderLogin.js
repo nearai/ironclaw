@@ -10,6 +10,32 @@ import {
 
 const WALLET_LOGIN_TIMEOUT_MS = 300_000;
 
+// NEAR AI's hosted auth (private.near.ai) rejects `frontend_callback` URLs that
+// point at a loopback host, so its browser sign-in (GitHub / Google / NEAR
+// Wallet) cannot complete from a local dev origin. Detect that origin so we can
+// fail fast with a clear message on click — instead of opening a doomed tab and
+// polling for five minutes only to hit the opaque error (issue #4705).
+export function isLocalDevOrigin() {
+  if (typeof window === "undefined" || !window.location) return false;
+  const host = window.location.hostname;
+  // `window.location.hostname` exposes IPv6 hosts without brackets (e.g.
+  // `http://[::1]:3000/` -> `"::1"`), so a bracketed `"[::1]"` form never
+  // appears here.
+  //
+  // The entire `127.0.0.0/8` block is loopback, not just `127.0.0.1` — some
+  // setups serve the dev UI on `127.0.1.1` (Debian's default for the hostname)
+  // or other `127.*` addresses. Matching only `127.0.0.1` would let those
+  // origins open the doomed hosted-SSO flow and wait out the full timeout
+  // instead of failing fast.
+  return (
+    host === "localhost" ||
+    host === "0.0.0.0" ||
+    host === "::1" ||
+    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host) ||
+    host.endsWith(".localhost")
+  );
+}
+
 function walletLoginChannelName() {
   const suffix =
     typeof window.crypto?.randomUUID === "function"
@@ -100,19 +126,39 @@ export function useProviderLogin({ onSuccess } = {}) {
   const startNearai = React.useCallback(
     async (provider) => {
       setNearaiError("");
+      if (isLocalDevOrigin()) {
+        setNearaiError(t("onboarding.nearaiLocalSso"));
+        return;
+      }
+      // Open the popup synchronously inside the click gesture: browsers only
+      // allow gesture-time opens, so opening after the awaited backend call
+      // would be blocked. Navigate the blank popup to the auth URL once it
+      // returns. Sever `opener` (we keep the handle, so no `noopener` flag) as
+      // reverse-tabnabbing defense before sending it to the external page.
+      const popup = window.open("about:blank", "_blank");
+      if (!popup) {
+        setNearaiError(t("onboarding.nearaiFailed"));
+        return;
+      }
+      try {
+        popup.opener = null;
+      } catch (_e) {
+        // Ignore: some engines disallow setting opener; navigation still works.
+      }
       setNearaiBusy(true);
       try {
         const { auth_url: authUrl } = await startNearaiLogin({
           provider,
           origin: window.location.origin,
         });
-        window.open(authUrl, "_blank", "noopener");
+        popup.location.href = authUrl;
         if (await pollUntilActive("nearai", NEARAI_POLL_DEADLINE_MS)) {
           await finishActive();
           return;
         }
         setNearaiError(t("onboarding.nearaiTimeout"));
       } catch (_err) {
+        popup.close();
         setNearaiError(t("onboarding.nearaiFailed"));
       } finally {
         setNearaiBusy(false);
@@ -126,15 +172,34 @@ export function useProviderLogin({ onSuccess } = {}) {
   // message, then relay it to the backend (which exchanges it for a NEAR AI
   // session token, makes NEAR AI active, and hot-swaps the provider).
   const startNearaiWallet = React.useCallback(async () => {
+    // Unlike the GitHub/Google hosted SSO flow, wallet login does NOT depend on
+    // a NEAR AI `frontend_callback` redirect (which rejects loopback origins):
+    // NEP-413 signing happens in a same-origin popup and the signed message is
+    // relayed through our own backend. So it works on localhost — no local-dev
+    // guard here.
     setNearaiError("");
     setNearaiBusy(true);
     try {
       const channelName = walletLoginChannelName();
+      // Keep the window handle (no `noopener`/`noreferrer`, which would make
+      // `window.open` return null) so `awaitWalletSignature` can detect the
+      // user closing the popup instead of waiting out the full timeout. The
+      // popup is a same-origin route we control, so the handle is safe.
       const popup = window.open(
         `/v2/wallet/connect?channel=${encodeURIComponent(channelName)}`,
         "_blank",
-        "noopener,noreferrer,width=460,height=640"
+        "width=460,height=640"
       );
+      // A popup blocker makes window.open return null; fail fast instead of
+      // waiting out the full signature timeout on a window that never opened.
+      if (!popup) {
+        setNearaiError(t("onboarding.nearaiFailed"));
+        return;
+      }
+      // Defense-in-depth against reverse tabnabbing: sever the child's back
+      // reference to this window. The wallet page reports back over
+      // BroadcastChannel, not window.opener, so this doesn't affect the flow.
+      popup.opener = null;
       const signed = await awaitWalletSignature(popup, channelName);
       if (!signed) {
         setNearaiError(t("onboarding.nearaiFailed"));
