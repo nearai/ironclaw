@@ -139,6 +139,10 @@ pub use ironclaw_product_adapters::{
     ProductOutboundPayload, ProductProjectionItem, ProductProjectionState, ProductWorkSummaryPhase,
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
+/// Re-exported so public read surfaces (e.g. `ironclaw_webui_v2`) can
+/// reference the record type without depending directly on `ironclaw_threads`.
+pub use ironclaw_threads::ThreadMessageRecord;
+
 pub use reborn_services::{
     AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE,
     AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE,

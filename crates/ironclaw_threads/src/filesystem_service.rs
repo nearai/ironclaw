@@ -882,12 +882,29 @@ where
             .ok_or_else(|| SessionThreadError::UnknownThread {
                 thread_id: thread_id.clone(),
             })?;
-        // Write presence marker BEFORE flipping the message status so that
-        // `list_deferred_busy_messages` can skip the expensive full-thread
-        // scan on threads that have never had a deferred message. An absent
-        // marker means "no deferred messages" — writing it here (idempotent)
-        // ensures the invariant holds even if the status update below fails
-        // and the caller retries.
+        // Flip the message status first; only write the presence marker after
+        // the status commit succeeds.  Writing the marker before the status
+        // flip creates a race: a concurrent drain that runs between those two
+        // steps scans, finds no DeferredBusy rows, and tombstones the marker —
+        // leaving the message invisible to all future drains.
+        // Invariants: (i) marker is written after the DeferredBusy status
+        // commit; (ii) every defer refreshes the marker (idempotent put);
+        // (iii) marker is deleted only by a full (no-cursor) empty scan.
+        // Residual benign window: a terminal event that fires between the
+        // status commit and the marker write misses that single drain; the
+        // marker lands immediately after, so the next terminal event or defer
+        // recovers it.
+        let record = self
+            .apply_message_update(scope, thread_id, message_id, |message| {
+                ensure_user_accepted(message, "mark_message_deferred_busy")?;
+                message.status = MessageStatus::DeferredBusy;
+                message.turn_id = None;
+                message.turn_run_id = None;
+                message.turn_source_binding_ref = turn_source_binding_ref.clone();
+                message.turn_reply_target_binding_ref = turn_reply_target_binding_ref.clone();
+                Ok(())
+            })
+            .await?;
         let marker_path = deferred_busy_marker_path(scope, thread_id)?;
         self.filesystem
             .put(
@@ -897,16 +914,7 @@ where
                 CasExpectation::Any,
             )
             .await?;
-        self.apply_message_update(scope, thread_id, message_id, |message| {
-            ensure_user_accepted(message, "mark_message_deferred_busy")?;
-            message.status = MessageStatus::DeferredBusy;
-            message.turn_id = None;
-            message.turn_run_id = None;
-            message.turn_source_binding_ref = turn_source_binding_ref.clone();
-            message.turn_reply_target_binding_ref = turn_reply_target_binding_ref.clone();
-            Ok(())
-        })
-        .await
+        Ok(record)
     }
 
     async fn list_deferred_busy_messages(
@@ -941,10 +949,11 @@ where
         if let Some(limit) = request.limit {
             messages.truncate(limit);
         }
-        // Tombstone: if the scan came up empty (all deferred messages have
-        // since been submitted or otherwise resolved), delete the marker so
-        // future terminal events skip the scan.
-        if messages.is_empty() {
+        // Tombstone: delete the marker only on a full scan (no cursor) that
+        // finds zero DeferredBusy rows.  A cursor-filtered empty result means
+        // deferred messages may still exist below the cursor — evicting the
+        // marker there would hide them from all future drains.
+        if messages.is_empty() && request.after_sequence.is_none() {
             // Best-effort: ignore delete errors (marker may already be gone
             // or the thread deleted); the worst case is one extra scan.
             let _ = self
@@ -1818,9 +1827,24 @@ fn idempotency_record_path(record_key: &str) -> Result<ScopedPath, SessionThread
     scoped_path(&format!("{}/idempotency/{record_key}.json", THREADS_PREFIX))
 }
 
-/// Presence-marker path: written BEFORE a message is flipped to
-/// `DeferredBusy` so that `list_deferred_busy_messages` can skip the full
-/// thread scan on threads that have never had a deferred message.
+/// Presence-marker path for the per-thread DeferredBusy fast path.
+///
+/// Three invariants govern the marker lifecycle:
+///
+/// (i)  **Written after commit** — the marker is written only after the
+///      message's `DeferredBusy` status has been persisted.  Writing it
+///      before the status flip would let a concurrent drain tombstone the
+///      marker before the message is visible, permanently hiding it.
+///
+/// (ii) **Every defer refreshes** — each call to `mark_message_deferred_busy`
+///      issues an idempotent put, so the marker is always present while at
+///      least one message in the thread is `DeferredBusy`.
+///
+/// (iii) **Deleted only by a full empty scan** — the marker is removed only
+///       when `list_deferred_busy_messages` is called with `after_sequence =
+///       None` *and* the scan returns zero rows.  Cursor-filtered empty
+///       results must not delete the marker; messages below the cursor may
+///       still be `DeferredBusy`.
 fn deferred_busy_marker_path(
     scope: &ThreadScope,
     thread_id: &ThreadId,

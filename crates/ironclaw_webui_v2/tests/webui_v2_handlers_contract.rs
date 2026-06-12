@@ -253,6 +253,10 @@ struct StubServices {
     /// branches, or empty drains in a deterministic order.
     next_stream_events: Mutex<VecDeque<Result<RebornStreamEventsResponse, RebornServicesError>>>,
     stream_events_notify: Arc<Notify>,
+    /// Messages to include in the next `get_timeline` response.
+    /// When non-empty the list is swapped out and returned; subsequent calls
+    /// fall back to the default empty list.
+    next_timeline_messages: Mutex<Vec<ironclaw_threads::ThreadMessageRecord>>,
 }
 
 impl StubServices {
@@ -305,6 +309,11 @@ impl StubServices {
     /// until the client polls the body.
     fn stream_events_signal(&self) -> Arc<Notify> {
         self.stream_events_notify.clone()
+    }
+
+    /// Configure the messages the next `get_timeline` call will return.
+    fn set_next_timeline_messages(&self, messages: Vec<ironclaw_threads::ThreadMessageRecord>) {
+        *self.next_timeline_messages.lock().expect("lock") = messages;
     }
 }
 
@@ -391,6 +400,10 @@ impl RebornServicesApi for StubServices {
             .lock()
             .expect("lock")
             .push(request.clone());
+        let messages = {
+            let mut guard = self.next_timeline_messages.lock().expect("lock");
+            std::mem::take(&mut *guard)
+        };
         Ok(RebornTimelineResponse {
             thread: SessionThreadRecord {
                 thread_id: ironclaw_host_api::ThreadId::new(request.thread_id.clone())
@@ -407,7 +420,7 @@ impl RebornServicesApi for StubServices {
                 metadata_json: None,
                 goal: None,
             },
-            messages: Vec::new(),
+            messages,
             summary_artifacts: Vec::new(),
             next_cursor: None,
         })
@@ -3931,5 +3944,76 @@ async fn operator_setup_accepts_secret_request_without_echoing_values() {
             true,
             true,
         )]
+    );
+}
+
+// Regression: internal drain-replay routing refs must not reach browser clients.
+// Per `.claude/rules/testing.md` "Test Through the Caller", we drive the real
+// axum handler rather than testing `scrub_internal_refs` in isolation — the
+// point is to confirm the scrub is wired into the response assembly path, not
+// just that the helper compiles.
+#[tokio::test]
+async fn get_timeline_scrubs_internal_binding_refs_from_wire_response() {
+    use ironclaw_threads::{MessageKind, MessageStatus, ThreadMessageId, ThreadMessageRecord};
+
+    let services = Arc::new(StubServices::default());
+
+    // Build a message record that carries both internal replay-routing fields.
+    let message_with_refs = ThreadMessageRecord {
+        message_id: ThreadMessageId::new(),
+        thread_id: ThreadId::new("thread-deferred").expect("thread id"),
+        sequence: 1,
+        kind: MessageKind::User,
+        status: MessageStatus::DeferredBusy,
+        actor_id: None,
+        source_binding_id: None,
+        reply_target_binding_id: None,
+        turn_id: None,
+        turn_run_id: None,
+        tool_result_ref: None,
+        tool_result_provider_call: None,
+        content: Some("hello".to_string()),
+        redaction_ref: None,
+        // Internal fields the handler must strip before sending to the browser.
+        turn_source_binding_ref: Some("sbr://tenant/agent/source".to_string()),
+        turn_reply_target_binding_ref: Some("rtr://tenant/agent/reply".to_string()),
+    };
+    services.set_next_timeline_messages(vec![message_with_refs]);
+
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-deferred/timeline")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+
+    // The messages array must contain exactly the one record we injected.
+    let messages = body["messages"].as_array().expect("messages array");
+    assert_eq!(messages.len(), 1, "expected one message in timeline");
+
+    let msg = &messages[0];
+    // Payload-bearing fields must still be present.
+    assert_eq!(
+        msg["content"].as_str(),
+        Some("hello"),
+        "content must survive scrub"
+    );
+    // Internal refs must be absent from the wire JSON.
+    assert!(
+        msg.get("turn_source_binding_ref").is_none(),
+        "turn_source_binding_ref must not appear in the timeline wire response"
+    );
+    assert!(
+        msg.get("turn_reply_target_binding_ref").is_none(),
+        "turn_reply_target_binding_ref must not appear in the timeline wire response"
     );
 }

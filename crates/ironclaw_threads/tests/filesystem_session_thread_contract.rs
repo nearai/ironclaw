@@ -1533,6 +1533,228 @@ async fn filesystem_list_deferred_busy_messages_after_sequence_filters_earlier_r
     );
 }
 
+#[tokio::test]
+async fn filesystem_cursor_filtered_empty_scan_does_not_tombstone_marker() {
+    // Defer one message, then call list_deferred_busy_messages with an
+    // after_sequence cursor that places the deferred message below the cursor
+    // — the result is empty.  The marker must survive so that a subsequent
+    // no-cursor call returns the message.
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-cursor-no-tomb", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("cursor-no-tombstone"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let msg = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("cursor-no-tombstone"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("below-cursor"),
+        })
+        .await
+        .unwrap();
+    let rec = service
+        .mark_message_deferred_busy(
+            &scope("cursor-no-tombstone"),
+            &thread.thread_id,
+            msg.message_id,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Cursor set to the message's own sequence — strict-greater-than filter
+    // returns nothing, but the marker must not be deleted.
+    let empty = service
+        .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
+            scope: scope("cursor-no-tombstone"),
+            thread_id: thread.thread_id.clone(),
+            limit: None,
+            after_sequence: Some(rec.sequence),
+        })
+        .await
+        .unwrap();
+    assert!(
+        empty.is_empty(),
+        "cursor beyond message sequence must return empty"
+    );
+
+    // Full no-cursor scan must still find the deferred message (marker survived).
+    let full = service
+        .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
+            scope: scope("cursor-no-tombstone"),
+            thread_id: thread.thread_id,
+            limit: None,
+            after_sequence: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        full.len(),
+        1,
+        "marker must survive cursor-filtered empty scan; full scan must still return the deferred message"
+    );
+    assert_eq!(full[0].message_id, rec.message_id);
+}
+
+#[tokio::test]
+async fn filesystem_mark_message_deferred_busy_marker_present_immediately_after() {
+    // After mark_message_deferred_busy returns successfully, an immediate
+    // no-cursor list must return the deferred record — marker is present.
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-marker-post-commit", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("marker-post-commit"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let msg = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("marker-post-commit"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("check-marker"),
+        })
+        .await
+        .unwrap();
+    let deferred = service
+        .mark_message_deferred_busy(
+            &scope("marker-post-commit"),
+            &thread.thread_id,
+            msg.message_id,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let result = service
+        .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
+            scope: scope("marker-post-commit"),
+            thread_id: thread.thread_id,
+            limit: None,
+            after_sequence: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        result.len(),
+        1,
+        "marker must be present immediately after mark_message_deferred_busy returns"
+    );
+    assert_eq!(result[0].message_id, deferred.message_id);
+}
+
+#[tokio::test]
+async fn filesystem_tombstones_marker_after_last_deferred_resolved() {
+    // After deferring a message and then submitting it, the next
+    // list_deferred_busy_messages call (no cursor) must find zero records and
+    // clear the marker.  A subsequent call must still return empty.
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-marker-tombstone", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("fs-marker-tombstone"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let msg = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("fs-marker-tombstone"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("defer-then-submit"),
+        })
+        .await
+        .unwrap();
+
+    service
+        .mark_message_deferred_busy(
+            &scope("fs-marker-tombstone"),
+            &thread.thread_id,
+            msg.message_id,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Resolve the deferred message by marking it submitted.
+    service
+        .mark_message_submitted(
+            &scope("fs-marker-tombstone"),
+            &thread.thread_id,
+            msg.message_id,
+            "turn-1".to_string(),
+            "run-1".to_string(),
+        )
+        .await
+        .unwrap();
+
+    // First full no-cursor list after resolution must find zero records and
+    // tombstone the marker.
+    let after_resolve = service
+        .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
+            scope: scope("fs-marker-tombstone"),
+            thread_id: thread.thread_id.clone(),
+            limit: None,
+            after_sequence: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        after_resolve.is_empty(),
+        "no deferred after submit — must return empty"
+    );
+
+    // Second call must also return empty (tombstone is idempotent).
+    let after_tombstone = service
+        .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
+            scope: scope("fs-marker-tombstone"),
+            thread_id: thread.thread_id,
+            limit: None,
+            after_sequence: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        after_tombstone.is_empty(),
+        "repeated call after tombstone must still be empty"
+    );
+}
+
 fn scoped_threads_fs_at<F>(backend: Arc<F>, tenant: &str, user: &str) -> Arc<ScopedFilesystem<F>>
 where
     F: RootFilesystem,

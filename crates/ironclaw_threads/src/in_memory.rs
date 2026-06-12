@@ -250,11 +250,15 @@ impl SessionThreadService for InMemorySessionThreadService {
         turn_reply_target_binding_ref: Option<String>,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         let mut state = self.state.lock().await;
-        // Record presence marker before mutating — mirrors filesystem backend
-        // so `list_deferred_busy_messages` can skip the scan when absent.
-        state
-            .deferred_threads
-            .insert((scope.clone(), thread_id.clone()));
+        // Mutate the message status first; insert the presence marker only
+        // after the mutation succeeds (contract parity with the filesystem
+        // backend).  Inserting first would leave a spurious marker when
+        // validation (ensure_user_accepted) rejects the call — a full
+        // no-cursor scan would then tombstone it, hiding any real deferred
+        // messages that arrive later.
+        // Invariants: (i) marker written after DeferredBusy status commit;
+        // (ii) every defer refreshes the marker (idempotent insert);
+        // (iii) marker deleted only by a full (no-cursor) empty scan.
         let message = get_message_mut(&mut state, scope, thread_id, message_id)?;
         ensure_user_accepted(message, "mark_message_deferred_busy")?;
         message.status = MessageStatus::DeferredBusy;
@@ -262,7 +266,11 @@ impl SessionThreadService for InMemorySessionThreadService {
         message.turn_run_id = None;
         message.turn_source_binding_ref = turn_source_binding_ref;
         message.turn_reply_target_binding_ref = turn_reply_target_binding_ref;
-        Ok(message.clone())
+        let record = message.clone();
+        state
+            .deferred_threads
+            .insert((scope.clone(), thread_id.clone()));
+        Ok(record)
     }
 
     async fn list_deferred_busy_messages(
@@ -296,8 +304,12 @@ impl SessionThreadService for InMemorySessionThreadService {
         if let Some(limit) = request.limit {
             messages.truncate(limit);
         }
-        // Tombstone: evict marker when no deferred messages remain.
-        if messages.is_empty() {
+        // Tombstone: evict marker only on a full scan (no cursor) that finds
+        // zero DeferredBusy rows.  A cursor-filtered empty result must not
+        // delete the marker — messages below the cursor may still be
+        // DeferredBusy, and evicting here would hide them from all future
+        // drains.
+        if messages.is_empty() && request.after_sequence.is_none() {
             state
                 .deferred_threads
                 .remove(&(request.scope.clone(), request.thread_id.clone()));

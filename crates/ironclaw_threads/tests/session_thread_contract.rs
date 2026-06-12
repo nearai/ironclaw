@@ -3060,3 +3060,134 @@ async fn list_deferred_busy_tombstones_marker_after_last_deferred_resolved() {
         "repeated call after tombstone must still be empty"
     );
 }
+
+#[tokio::test]
+async fn cursor_filtered_empty_scan_does_not_tombstone_marker() {
+    // Defer one message, then call list_deferred_busy_messages with an
+    // after_sequence cursor that places the deferred message below the
+    // cursor — the result is empty.  The marker must survive so that a
+    // subsequent no-cursor call returns the message.
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("cursor-no-tombstone"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let msg = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("cursor-no-tombstone"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("below-cursor"),
+        })
+        .await
+        .unwrap();
+    let rec = service
+        .mark_message_deferred_busy(
+            &scope("cursor-no-tombstone"),
+            &thread.thread_id,
+            msg.message_id,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Cursor set to the message's own sequence — strict-greater-than filter
+    // returns nothing, but the marker must not be deleted.
+    let empty = service
+        .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
+            scope: scope("cursor-no-tombstone"),
+            thread_id: thread.thread_id.clone(),
+            limit: None,
+            after_sequence: Some(rec.sequence),
+        })
+        .await
+        .unwrap();
+    assert!(
+        empty.is_empty(),
+        "cursor beyond message sequence must return empty"
+    );
+
+    // Full no-cursor scan must still find the deferred message (marker survived).
+    let full = service
+        .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
+            scope: scope("cursor-no-tombstone"),
+            thread_id: thread.thread_id,
+            limit: None,
+            after_sequence: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        full.len(),
+        1,
+        "marker must survive cursor-filtered empty scan; full scan must still return the deferred message"
+    );
+    assert_eq!(full[0].message_id, rec.message_id);
+}
+
+#[tokio::test]
+async fn mark_message_deferred_busy_marker_present_immediately_after() {
+    // After mark_message_deferred_busy returns successfully, an immediate
+    // no-cursor list must return the deferred record — marker is present.
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("marker-post-commit"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let msg = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("marker-post-commit"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("check-marker"),
+        })
+        .await
+        .unwrap();
+    let deferred = service
+        .mark_message_deferred_busy(
+            &scope("marker-post-commit"),
+            &thread.thread_id,
+            msg.message_id,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let result = service
+        .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
+            scope: scope("marker-post-commit"),
+            thread_id: thread.thread_id,
+            limit: None,
+            after_sequence: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        result.len(),
+        1,
+        "marker must be present immediately after mark_message_deferred_busy returns"
+    );
+    assert_eq!(result[0].message_id, deferred.message_id);
+}
