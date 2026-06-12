@@ -36,10 +36,28 @@ pub fn init_cli_tracing() {
 /// Initialize tracing for worker/bridge processes (info level).
 pub fn init_worker_tracing() {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("ironclaw=info")),
-        )
+        .with_ansi(false)
+        .with_env_filter(worker_env_filter())
         .init();
+}
+
+fn worker_env_filter() -> EnvFilter {
+    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("ironclaw=info"))
+}
+
+#[cfg(test)]
+fn worker_tracing_subscriber_with_writer<W>(
+    writer: W,
+    env_filter: EnvFilter,
+) -> impl tracing::Subscriber + Send + Sync
+where
+    W: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
+{
+    tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_env_filter(env_filter)
+        .with_writer(writer)
+        .finish()
 }
 
 /// Maximum bytes per tracing event written to the terminal.
@@ -168,7 +186,9 @@ impl Drop for EventBuffer {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use crate::tracing_fmt::{EventBuffer, TruncatingStderr, utf8_floor};
+    use crate::tracing_fmt::{
+        EventBuffer, TruncatingStderr, utf8_floor, worker_tracing_subscriber_with_writer,
+    };
 
     use std::io::Write;
 
@@ -288,6 +308,68 @@ mod tests {
     fn test_default_max_bytes() {
         let writer = TruncatingStderr::default();
         assert_eq!(writer.max_bytes, 500);
+    }
+
+    #[derive(Clone)]
+    struct CapturingWriter {
+        sink: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturingWriter {
+        type Writer = CapturingSink;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            CapturingSink {
+                sink: Arc::clone(&self.sink),
+            }
+        }
+    }
+
+    struct CapturingSink {
+        sink: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for CapturingSink {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.sink.lock().unwrap().extend_from_slice(data);
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_worker_tracing_formatter_emits_no_ansi_escape_bytes() {
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = worker_tracing_subscriber_with_writer(
+            CapturingWriter {
+                sink: Arc::clone(&sink),
+            },
+            tracing_subscriber::EnvFilter::new("ironclaw=info"),
+        );
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(
+                target: "ironclaw",
+                status = 200,
+                body_len = 23,
+                "HTTP response received"
+            );
+        });
+
+        let output = sink.lock().unwrap().clone();
+        assert!(
+            !output.contains(&0x1b),
+            "worker tracing output must not contain ANSI ESC bytes: {:?}",
+            String::from_utf8_lossy(&output)
+        );
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("HTTP response received"));
+        assert!(output.contains("status=200"));
+        assert!(output.contains("body_len=23"));
     }
 
     #[test]

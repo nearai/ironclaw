@@ -45,7 +45,10 @@ RUN apt-get update \
 # Install Rust toolchain for the sandbox user
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:$PATH
+    PATH=/usr/local/cargo/bin:$PATH \
+    NO_COLOR=1 \
+    RUST_LOG_STYLE=never \
+    FORCE_COLOR=0
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.92.0 \
     && chmod -R a+r /usr/local/rustup /usr/local/cargo
 

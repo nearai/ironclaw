@@ -18,6 +18,12 @@ use crate::sandbox::connect_docker;
 
 use ironclaw_common::MAX_WORKER_ITERATIONS;
 
+const DISABLE_ANSI_COLOR_ENV: &[&str] = &["NO_COLOR=1", "RUST_LOG_STYLE=never", "FORCE_COLOR=0"];
+
+fn extend_disable_ansi_color_env(env_vec: &mut Vec<String>) {
+    env_vec.extend(DISABLE_ANSI_COLOR_ENV.iter().map(|entry| entry.to_string()));
+}
+
 /// Which mode a sandbox container runs in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobMode {
@@ -435,6 +441,7 @@ impl ContainerJobManager {
             format!("IRONCLAW_JOB_ID={}", job_id),
             format!("IRONCLAW_ORCHESTRATOR_URL={}", orchestrator_url),
         ];
+        extend_disable_ansi_color_env(&mut env_vec);
 
         // Build volume mounts (validate project_dir stays within ~/.ironclaw/projects/)
         let mut binds = Vec::new();
@@ -970,6 +977,16 @@ mod tests {
         let config = ContainerJobConfig::default();
         assert_eq!(config.orchestrator_port, 50051);
         assert_eq!(config.memory_limit_mb, 2048);
+    }
+
+    #[test]
+    fn test_worker_container_env_disables_ansi_colors() {
+        let mut env_vec = vec!["IRONCLAW_JOB_ID=test".to_string()];
+        extend_disable_ansi_color_env(&mut env_vec);
+
+        assert!(env_vec.contains(&"NO_COLOR=1".to_string()));
+        assert!(env_vec.contains(&"RUST_LOG_STYLE=never".to_string()));
+        assert!(env_vec.contains(&"FORCE_COLOR=0".to_string()));
     }
 
     #[test]
