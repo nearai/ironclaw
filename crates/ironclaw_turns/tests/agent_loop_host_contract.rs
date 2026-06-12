@@ -575,6 +575,75 @@ async fn instruction_bundle_renders_runtime_context_section() {
 }
 
 #[tokio::test]
+async fn instruction_bundle_renders_runtime_context_exactly_once_per_build() {
+    // Regression guard: each InstructionBundleBuilder::build call must embed
+    // exactly one msg:runtime.* ref and exactly one materialized message whose
+    // model_content contains the "Current date/time at loop start:" line.
+    // This catches any accidental accumulation (e.g. two calls to
+    // push_runtime_context, or the section being added both as a synthetic ref
+    // and as a transcript message).
+    let context = claimed_run_context().await;
+    let builder = InstructionBundleBuilder::new(context);
+    let request = InstructionBundleRequest {
+        context_bundle: LoopContextBundle {
+            identity_messages: vec![LoopContextMessage {
+                message_ref: Some(LoopMessageRef::new("msg:identity").unwrap()),
+                role: "system".to_string(),
+                safe_summary: "identity safe".to_string(),
+                compaction: None,
+            }],
+            messages: Vec::new(),
+            compaction_message_index: Vec::new(),
+            instruction_snippets: vec![LoopContextSnippet {
+                snippet_ref: "instruction:system".to_string(),
+                model_content: "system rule".to_string(),
+                safe_summary: "system rule".to_string(),
+                metadata: None,
+            }],
+            memory_snippets: Vec::new(),
+        },
+        visible_surface: None,
+        safety_context: None,
+        inline_messages: Vec::new(),
+        runtime_context: Some(LoopRuntimeContext {
+            loop_started_at_utc: chrono::Utc
+                .with_ymd_and_hms(2026, 6, 11, 21, 32, 0)
+                .unwrap(),
+            user_timezone: None,
+        }),
+    };
+
+    // Simulate what a real loop does: the prompt bundle is rebuilt on every
+    // model call (for checkpointing / surface-version refresh). Neither the
+    // messages list nor the materialized_messages list must accumulate extra
+    // runtime entries across two build() calls on the same builder.
+    let bundle_iter1 = builder.build(request.clone()).unwrap();
+    let bundle_iter2 = builder.build(request.clone()).unwrap();
+
+    for (bundle, iteration) in [(&bundle_iter1, 1usize), (&bundle_iter2, 2usize)] {
+        let ref_count = bundle
+            .messages
+            .iter()
+            .filter(|m| m.content_ref.as_str().starts_with("msg:runtime."))
+            .count();
+        assert_eq!(
+            ref_count, 1,
+            "bundle for iteration {iteration} must contain exactly one msg:runtime.* message ref, found {ref_count}"
+        );
+
+        let materialized_count = bundle
+            .materialized_messages
+            .iter()
+            .filter(|m| m.model_content.contains("Current date/time at loop start:"))
+            .count();
+        assert_eq!(
+            materialized_count, 1,
+            "bundle for iteration {iteration} must contain exactly one materialized message with 'Current date/time at loop start:', found {materialized_count}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn instruction_bundle_without_runtime_context_renders_no_runtime_section() {
     let context = claimed_run_context().await;
     let builder = InstructionBundleBuilder::new(context);
