@@ -370,3 +370,369 @@ fn resolve_actor_user_id(
 // already a dependency of `ironclaw_reborn_composition` transitively via the
 // `ironclaw_turns` and `ironclaw_threads` crate graph.
 use tracing::{debug, warn};
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
+    use ironclaw_threads::{
+        AcceptInboundMessageRequest, AcceptedInboundMessage, EnsureThreadRequest,
+        InMemorySessionThreadService, MessageContent, MessageStatus, SessionThreadService,
+        ThreadHistoryRequest, ThreadScope,
+    };
+    use ironclaw_turns::{
+        AcceptedMessageRef, CancelRunRequest, DefaultTurnCoordinator, DefaultTurnLifecycleEventBus,
+        IdempotencyKey, InMemoryTurnStateStore, LifecyclePublishingTurnStateStore,
+        ReplyTargetBindingRef, SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest,
+        SubmitTurnResponse, TurnActor, TurnCommittedEventObserver, TurnCoordinator,
+        TurnLifecycleEventBus, TurnRunId, TurnScope,
+    };
+
+    use super::DeferredBusyDrainObserver;
+
+    // -----------------------------------------------------------------------
+    // Test harness helpers
+    // -----------------------------------------------------------------------
+
+    fn tenant() -> TenantId {
+        TenantId::new("tenant-drain-test").unwrap()
+    }
+
+    fn agent() -> AgentId {
+        AgentId::new("agent-drain-test").unwrap()
+    }
+
+    fn actor() -> UserId {
+        UserId::new("user-drain-actor").unwrap()
+    }
+
+    fn owner() -> UserId {
+        UserId::new("user-drain-owner").unwrap()
+    }
+
+    fn thread_id() -> ThreadId {
+        ThreadId::new("thread-drain-test").unwrap()
+    }
+
+    fn thread_scope() -> ThreadScope {
+        ThreadScope {
+            tenant_id: tenant(),
+            agent_id: agent(),
+            project_id: None,
+            owner_user_id: Some(owner()),
+            mission_id: None,
+        }
+    }
+
+    fn turn_scope() -> TurnScope {
+        TurnScope::new_with_owner(tenant(), Some(agent()), None, thread_id(), Some(owner()))
+    }
+
+    /// Build a reusable coordinator + lifecycle bus + drain observer harness.
+    ///
+    /// Returns `(coordinator, thread_service)` ready for test assertions.
+    /// The drain observer is already subscribed and bound.
+    async fn build_harness() -> (Arc<dyn TurnCoordinator>, Arc<InMemorySessionThreadService>) {
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+
+        // Ensure the test thread exists.
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: thread_scope(),
+                thread_id: Some(thread_id()),
+                created_by_actor_id: actor().as_str().to_string(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .expect("ensure thread");
+
+        let turn_store = Arc::new(InMemoryTurnStateStore::default());
+        let lifecycle_bus = Arc::new(DefaultTurnLifecycleEventBus::new());
+
+        let drain_observer_for_bind = Arc::new(DeferredBusyDrainObserver::new_unbound(Arc::clone(
+            &thread_service,
+        )
+            as Arc<dyn ironclaw_threads::SessionThreadService>));
+        let drain_observer: Arc<dyn TurnCommittedEventObserver> =
+            Arc::clone(&drain_observer_for_bind) as Arc<dyn TurnCommittedEventObserver>;
+        lifecycle_bus
+            .subscribe_required(drain_observer)
+            .expect("subscribe drain observer");
+
+        let publishing_store = Arc::new(LifecyclePublishingTurnStateStore::new(
+            Arc::clone(&turn_store),
+            lifecycle_bus,
+        ));
+
+        let coordinator: Arc<dyn TurnCoordinator> =
+            Arc::new(DefaultTurnCoordinator::new(Arc::clone(&publishing_store)));
+
+        drain_observer_for_bind
+            .bind_coordinator(Arc::clone(&coordinator))
+            .expect("bind drain coordinator");
+
+        (coordinator, thread_service)
+    }
+
+    /// Submit a turn to the coordinator and return the run id.
+    async fn submit_run(
+        coordinator: &dyn TurnCoordinator,
+        idempotency_suffix: &str,
+        accepted_message_ref: AcceptedMessageRef,
+    ) -> TurnRunId {
+        let response = coordinator
+            .submit_turn(SubmitTurnRequest {
+                scope: turn_scope(),
+                actor: TurnActor::new(actor()),
+                accepted_message_ref,
+                source_binding_ref: SourceBindingRef::new("src:binding-drain").unwrap(),
+                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:binding-drain")
+                    .unwrap(),
+                requested_run_profile: None,
+                idempotency_key: IdempotencyKey::new(format!(
+                    "turn:drain-test-{idempotency_suffix}"
+                ))
+                .unwrap(),
+                received_at: chrono::Utc::now(),
+                requested_run_id: None,
+                parent_run_id: None,
+                subagent_depth: 0,
+                spawn_tree_root_run_id: None,
+            })
+            .await
+            .expect("submit_turn should succeed");
+        let SubmitTurnResponse::Accepted { run_id, .. } = response;
+        run_id
+    }
+
+    /// Accept a user message and return the `AcceptedInboundMessage`.
+    async fn accept_message(
+        thread_service: &InMemorySessionThreadService,
+        text: &str,
+        external_event_id: &str,
+    ) -> AcceptedInboundMessage {
+        thread_service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: thread_scope(),
+                thread_id: thread_id(),
+                actor_id: actor().as_str().to_string(),
+                source_binding_id: Some("src:binding-drain".to_string()),
+                reply_target_binding_id: Some("reply:binding-drain".to_string()),
+                external_event_id: Some(external_event_id.to_string()),
+                content: MessageContent::text(text),
+            })
+            .await
+            .expect("accept_inbound_message")
+    }
+
+    // -----------------------------------------------------------------------
+    // Scenario A: deferred message drained on terminal event
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn deferred_message_submitted_after_blocking_run_is_cancelled() {
+        let (coordinator, thread_service) = build_harness().await;
+
+        // Step 1: Accept and submit message A — thread lock acquired.
+        let msg_a = accept_message(&thread_service, "message A", "ext-event-a").await;
+        let msg_a_ref = AcceptedMessageRef::new(format!("msg:{}", msg_a.message_id)).unwrap();
+        let run_a = submit_run(coordinator.as_ref(), "a", msg_a_ref).await;
+
+        // Step 2: Accept message B — coordinator returns ThreadBusy.
+        let msg_b = accept_message(&thread_service, "message B", "ext-event-b").await;
+        let msg_b_ref = AcceptedMessageRef::new(format!("msg:{}", msg_b.message_id)).unwrap();
+        match coordinator
+            .submit_turn(SubmitTurnRequest {
+                scope: turn_scope(),
+                actor: TurnActor::new(actor()),
+                accepted_message_ref: msg_b_ref,
+                source_binding_ref: SourceBindingRef::new("src:binding-drain").unwrap(),
+                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:binding-drain")
+                    .unwrap(),
+                requested_run_profile: None,
+                idempotency_key: IdempotencyKey::new("turn:drain-test-b").unwrap(),
+                received_at: chrono::Utc::now(),
+                requested_run_id: None,
+                parent_run_id: None,
+                subagent_depth: 0,
+                spawn_tree_root_run_id: None,
+            })
+            .await
+        {
+            Err(ironclaw_turns::TurnError::ThreadBusy(_)) => {}
+            other => panic!("expected ThreadBusy, got {other:?}"),
+        }
+        thread_service
+            .mark_message_deferred_busy(&thread_scope(), &thread_id(), msg_b.message_id)
+            .await
+            .expect("mark deferred busy");
+
+        // Verify B is deferred before the drain.
+        let history_before = thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: thread_scope(),
+                thread_id: thread_id(),
+            })
+            .await
+            .unwrap();
+        let b_before = history_before
+            .messages
+            .iter()
+            .find(|m| m.message_id == msg_b.message_id)
+            .expect("message B in history");
+        assert_eq!(b_before.status, MessageStatus::DeferredBusy);
+
+        // Step 3: Cancel run A → terminal event → drain fires → B resubmitted.
+        coordinator
+            .cancel_run(CancelRunRequest {
+                scope: turn_scope(),
+                actor: TurnActor::new(actor()),
+                run_id: run_a,
+                reason: SanitizedCancelReason::UserRequested,
+                idempotency_key: IdempotencyKey::new("cancel:run-a-drain-test").unwrap(),
+            })
+            .await
+            .expect("cancel run A");
+
+        // Step 4: Assert message B is now Submitted.
+        let history_after = thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: thread_scope(),
+                thread_id: thread_id(),
+            })
+            .await
+            .unwrap();
+        let b_after = history_after
+            .messages
+            .iter()
+            .find(|m| m.message_id == msg_b.message_id)
+            .expect("message B in history after drain");
+        assert_eq!(
+            b_after.status,
+            MessageStatus::Submitted,
+            "DeferredBusy message must be Submitted after blocking run terminates"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Scenario B: idempotency — drain fired twice → message submitted once
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn drain_idempotency_second_terminal_event_does_not_double_submit() {
+        let (coordinator, thread_service) = build_harness().await;
+
+        // Step 1: Accept and submit message A — thread lock acquired.
+        let msg_a = accept_message(&thread_service, "message A-idem", "ext-event-a-idem").await;
+        let msg_a_ref = AcceptedMessageRef::new(format!("msg:{}", msg_a.message_id)).unwrap();
+        let run_a = submit_run(coordinator.as_ref(), "a-idem", msg_a_ref).await;
+
+        // Step 2: Accept B and defer.
+        let msg_b = accept_message(&thread_service, "message B-idem", "ext-event-b-idem").await;
+        let msg_b_ref = AcceptedMessageRef::new(format!("msg:{}", msg_b.message_id)).unwrap();
+        match coordinator
+            .submit_turn(SubmitTurnRequest {
+                scope: turn_scope(),
+                actor: TurnActor::new(actor()),
+                accepted_message_ref: msg_b_ref,
+                source_binding_ref: SourceBindingRef::new("src:binding-drain").unwrap(),
+                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:binding-drain")
+                    .unwrap(),
+                requested_run_profile: None,
+                idempotency_key: IdempotencyKey::new("turn:drain-test-b-idem").unwrap(),
+                received_at: chrono::Utc::now(),
+                requested_run_id: None,
+                parent_run_id: None,
+                subagent_depth: 0,
+                spawn_tree_root_run_id: None,
+            })
+            .await
+        {
+            Err(ironclaw_turns::TurnError::ThreadBusy(_)) => {}
+            other => panic!("expected ThreadBusy, got {other:?}"),
+        }
+        thread_service
+            .mark_message_deferred_busy(&thread_scope(), &thread_id(), msg_b.message_id)
+            .await
+            .expect("mark deferred busy");
+
+        // Step 3: First cancel (fires drain, B → Submitted, new run B_run acquired).
+        coordinator
+            .cancel_run(CancelRunRequest {
+                scope: turn_scope(),
+                actor: TurnActor::new(actor()),
+                run_id: run_a,
+                reason: SanitizedCancelReason::UserRequested,
+                idempotency_key: IdempotencyKey::new("cancel:run-a-idem-first").unwrap(),
+            })
+            .await
+            .expect("cancel run A (first)");
+
+        let history_mid = thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: thread_scope(),
+                thread_id: thread_id(),
+            })
+            .await
+            .unwrap();
+        let b_mid = history_mid
+            .messages
+            .iter()
+            .find(|m| m.message_id == msg_b.message_id)
+            .expect("message B in mid history");
+        assert_eq!(
+            b_mid.status,
+            MessageStatus::Submitted,
+            "B must be Submitted after first drain"
+        );
+        let b_run_id_str = b_mid
+            .turn_run_id
+            .clone()
+            .expect("B must have a run id after submission");
+
+        // Step 4: Cancel run B (the submitted run) — fires second drain but B is no
+        // longer DeferredBusy so drain returns early (empty list).
+        let b_run_id =
+            TurnRunId::from_uuid(uuid::Uuid::parse_str(&b_run_id_str).expect("valid uuid"));
+        coordinator
+            .cancel_run(CancelRunRequest {
+                scope: turn_scope(),
+                actor: TurnActor::new(actor()),
+                run_id: b_run_id,
+                reason: SanitizedCancelReason::UserRequested,
+                idempotency_key: IdempotencyKey::new("cancel:run-b-idem-second").unwrap(),
+            })
+            .await
+            .expect("cancel run B");
+
+        // B's status must still be Submitted (drain saw empty DeferredBusy list).
+        let history_after = thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: thread_scope(),
+                thread_id: thread_id(),
+            })
+            .await
+            .unwrap();
+        let b_after = history_after
+            .messages
+            .iter()
+            .find(|m| m.message_id == msg_b.message_id)
+            .expect("message B in final history");
+        assert_eq!(
+            b_after.status,
+            MessageStatus::Submitted,
+            "B must remain Submitted after second drain (idempotency)"
+        );
+        assert_eq!(
+            b_after.turn_run_id.as_deref(),
+            Some(b_run_id_str.as_str()),
+            "B's run_id must not change on second drain"
+        );
+    }
+}
