@@ -1,7 +1,15 @@
 import { React, html } from "../lib/html.js";
 import { Icon } from "../design-system/icons.js";
 import { useT } from "../lib/i18n.js";
-import { togglePin, usePinnedIds } from "../lib/pin-store.js";
+import { getPinnedIds, subscribePins, togglePin } from "../lib/pin-store.js";
+
+/* React adapter for the pinned-thread store. Lives here (not in pin-store.js)
+ * so the store stays a pure, unit-testable module free of a React import. */
+function usePinnedIds() {
+  const [set, setSet] = React.useState(getPinnedIds);
+  React.useEffect(() => subscribePins(setSet), []);
+  return set;
+}
 import { THREAD_STATE, useThreadStates } from "../lib/thread-state.js";
 import {
   byActivityDesc,

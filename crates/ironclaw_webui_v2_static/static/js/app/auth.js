@@ -8,6 +8,7 @@ import {
   storeToken,
 } from "../lib/api.js";
 import { authScope, setAuthScope } from "../lib/auth-scope.js";
+import { clearAllPins } from "../lib/pin-store.js";
 import { clearHistoryCache } from "../pages/chat/hooks/useHistory.js";
 import { clearAllDrafts } from "../pages/chat/lib/draft-store.js";
 
@@ -207,6 +208,7 @@ export function useAuthSession() {
     if (lastScopeRef.current !== null && lastScopeRef.current !== nextScope) {
       clearHistoryCache();
       clearAllDrafts();
+      clearAllPins();
     }
     lastScopeRef.current = nextScope;
   }, [session]);

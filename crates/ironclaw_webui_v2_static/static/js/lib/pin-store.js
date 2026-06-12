@@ -5,21 +5,31 @@
  * this store to decide which threads belong under PINNED — replacing the
  * previous behavior where the active thread was implicitly "pinned".
  *
- * Modeled on lib/thread-state.js: a module-level store with a snapshot-on-
- * notify subscription and a React adapter. Persistence is best-effort.
+ * Pure module (no React import) so it is unit-testable; the React adapter
+ * lives with its consumer. Keys are namespaced by the authenticated user
+ * (via lib/auth-scope.js) so one user's pins never surface for another in
+ * the same browser, matching the draft and history caches.
  */
 
-import { React } from "./html.js";
+import { authScope } from "./auth-scope.js";
 
-const STORAGE_KEY = "ironclaw:v2-thread-pins";
+const STORAGE_PREFIX = "ironclaw:v2-thread-pins:";
 
 const subscribers = new Set();
 /** @type {Set<string>} */
 const pinned = new Set();
+// The scope the in-memory set was last loaded for. The set is reloaded from
+// the current scope's storage whenever the authenticated identity changes,
+// so a different user reads their own pins (and never the previous user's).
+let loadedScope = null;
+
+function storageKey() {
+  return `${STORAGE_PREFIX}${authScope()}`;
+}
 
 function readPersisted() {
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
+    const raw = window.localStorage.getItem(storageKey());
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -32,17 +42,23 @@ function readPersisted() {
 function writePersisted() {
   try {
     if (pinned.size === 0) {
-      window.localStorage.removeItem(STORAGE_KEY);
+      window.localStorage.removeItem(storageKey());
     } else {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify([...pinned]));
+      window.localStorage.setItem(storageKey(), JSON.stringify([...pinned]));
     }
   } catch (_) {
     // Best-effort — never block the UI on storage failure.
   }
 }
 
-for (const id of readPersisted()) {
-  pinned.add(id);
+// Reload the in-memory set from the current scope's storage when the
+// authenticated identity has changed since the last access.
+function ensureScope() {
+  const scope = authScope();
+  if (scope === loadedScope) return;
+  pinned.clear();
+  for (const id of readPersisted()) pinned.add(id);
+  loadedScope = scope;
 }
 
 function snapshot() {
@@ -62,12 +78,14 @@ function emit() {
 
 /** Is this thread currently pinned? */
 export function isPinned(threadId) {
+  ensureScope();
   return pinned.has(threadId);
 }
 
 /** Toggle a thread's pinned status, persisting and notifying subscribers. */
 export function togglePin(threadId) {
   if (!threadId) return;
+  ensureScope();
   if (pinned.has(threadId)) {
     pinned.delete(threadId);
   } else {
@@ -77,8 +95,9 @@ export function togglePin(threadId) {
   emit();
 }
 
-/** Read-only snapshot of the pinned id set. */
+/** Read-only snapshot of the pinned id set for the current user. */
 export function getPinnedIds() {
+  ensureScope();
   return snapshot();
 }
 
@@ -90,9 +109,20 @@ export function subscribePins(listener) {
   };
 }
 
-/** React adapter for the pinned set. Re-renders on any pin/unpin. */
-export function usePinnedIds() {
-  const [set, setSet] = React.useState(getPinnedIds);
-  React.useEffect(() => subscribePins(setSet), []);
-  return set;
+/** Remove every persisted pin set (all scopes) and reset the in-memory set.
+ * Called on sign-out / identity change so pins can't carry across users. */
+export function clearAllPins() {
+  pinned.clear();
+  loadedScope = authScope();
+  try {
+    const keys = [];
+    for (let i = 0; i < window.localStorage.length; i += 1) {
+      const key = window.localStorage.key(i);
+      if (key && key.startsWith(STORAGE_PREFIX)) keys.push(key);
+    }
+    keys.forEach((key) => window.localStorage.removeItem(key));
+  } catch (_) {
+    // Best-effort.
+  }
+  emit();
 }
