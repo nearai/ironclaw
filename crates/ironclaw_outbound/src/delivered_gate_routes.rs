@@ -45,6 +45,13 @@ use serde::{Deserialize, Serialize};
 /// is ignored on load and removed lazily (or swept opportunistically).
 pub const DELIVERED_GATE_ROUTE_TTL: Duration = Duration::hours(48);
 
+/// Maximum number of index entries examined per conversation fingerprint lookup.
+///
+/// Defends against prompt-flood accumulation: a legitimate workload has far
+/// fewer concurrent gate prompts in a single conversation than this bound.
+/// Mirrors the `CONV_IDX_LOOKUP_CAP` constant in `filesystem_store.rs`.
+const CONV_IDX_LOOKUP_CAP: usize = 32;
+
 /// A route record mapping a delivered gate prompt back to the run and scope
 /// it was delivered for.
 ///
@@ -262,12 +269,16 @@ impl DeliveredGateRouteStore for InMemoryDeliveredGateRouteStore {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Cap the number of route keys examined per conversation to guard
+        // against prompt-flood accumulation. Legitimate concurrent gate prompts
+        // in the same conversation are far fewer than this limit.
         let result = state
             .conversation_index
             .get(&conversation_key)
             .map(|route_keys| {
                 route_keys
                     .iter()
+                    .take(CONV_IDX_LOOKUP_CAP)
                     .filter_map(|rk| state.records.get(rk))
                     .cloned()
                     .collect::<Vec<_>>()
@@ -848,6 +859,33 @@ mod tests {
         assert!(
             loaded.iter().any(|r| r.gate_ref == "gate:rerecord-b"),
             "route_b sibling must be undisturbed"
+        );
+    }
+
+    #[tokio::test]
+    async fn in_memory_conv_lookup_capped_at_32_entries() {
+        // Write 33 routes for the same conversation fingerprint. The lookup cap
+        // (CONV_IDX_LOOKUP_CAP = 32) must limit the returned set to at most 32
+        // records and must not panic.
+        let store = InMemoryDeliveredGateRouteStore::default();
+        let shared = conversation_fingerprint("thread-cap-33-entries");
+
+        for idx in 0..33u32 {
+            let rec = DeliveredGateRouteRecord {
+                delivered_conversation_fingerprints: vec![shared.clone()],
+                ..record(&format!("gate:cap-{idx:02}"))
+            };
+            store.record_delivered_gate_route(rec).await.unwrap();
+        }
+
+        let results = store
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &shared)
+            .await
+            .expect("lookup must not error");
+        assert!(
+            results.len() <= 32,
+            "in-memory lookup must cap returned records at 32, got {}",
+            results.len()
         );
     }
 }
