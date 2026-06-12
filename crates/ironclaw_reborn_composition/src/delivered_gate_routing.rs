@@ -706,6 +706,7 @@ mod tests {
         async fn load_delivered_gate_route_by_conversation_fingerprint(
             &self,
             _tenant_id: &ironclaw_host_api::TenantId,
+            _user_id: &ironclaw_host_api::UserId,
             _conversation_fingerprint: &str,
         ) -> Result<Vec<DeliveredGateRouteRecord>, String> {
             Ok(Vec::new())

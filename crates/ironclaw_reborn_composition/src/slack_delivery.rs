@@ -635,7 +635,9 @@ async fn record_gate_route_if_needed(
     };
 
     if let Err(error) = route_store.record_delivered_gate_route(record).await {
-        // best-effort: route write failure never fails delivery
+        // silent-ok: route recording is best-effort; resolution falls back to
+        // explicit gate refs and the hint path, so a write failure never
+        // aborts delivery.
         tracing::debug!(
             target = "ironclaw::reborn::slack_delivery",
             %run_id,
@@ -649,6 +651,8 @@ async fn record_gate_route_if_needed(
         .sweep_expired_delivered_gate_routes(Utc::now())
         .await
     {
+        // silent-ok: sweep is opportunistic; expired routes are filtered at
+        // lookup time, so a failed sweep never affects correctness.
         tracing::debug!(
             target = "ironclaw::reborn::slack_delivery",
             %run_id,

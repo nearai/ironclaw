@@ -100,13 +100,15 @@ struct RouteKey {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ConversationIndexKey {
     tenant_id: TenantId,
+    user_id: UserId,
     conversation_fingerprint: String,
 }
 
 impl ConversationIndexKey {
-    fn new(tenant_id: TenantId, conversation_fingerprint: String) -> Self {
+    fn new(tenant_id: TenantId, user_id: UserId, conversation_fingerprint: String) -> Self {
         Self {
             tenant_id,
+            user_id,
             conversation_fingerprint,
         }
     }
@@ -147,14 +149,20 @@ pub trait DeliveredGateRouteStore: Send + Sync {
     ) -> Result<Option<DeliveredGateRouteRecord>, String>;
 
     /// Load all live (non-expired-at-caller-discretion) route records delivered
-    /// into an external conversation, keyed by `(tenant_id,
+    /// into an external conversation, keyed by `(tenant_id, user_id,
     /// conversation_fingerprint)`. Returns the full set — the caller is
-    /// responsible for expiry filtering, actor matching, and ambiguity
-    /// detection. Returns an empty vec when no records exist for the
-    /// conversation (miss → forward unchanged).
+    /// responsible for expiry filtering and ambiguity detection. Returns an
+    /// empty vec when no records exist for the conversation (miss → forward
+    /// unchanged).
+    ///
+    /// The `user_id` parameter scopes the lookup to a single actor's routes.
+    /// This prevents one user's lingering routes in a shared conversation from
+    /// crowding out another user's valid routes under the index cap, and
+    /// provides defense-in-depth isolation between users.
     async fn load_delivered_gate_route_by_conversation_fingerprint(
         &self,
         tenant_id: &TenantId,
+        user_id: &UserId,
         conversation_fingerprint: &str,
     ) -> Result<Vec<DeliveredGateRouteRecord>, String>;
 
@@ -261,10 +269,14 @@ impl DeliveredGateRouteStore for InMemoryDeliveredGateRouteStore {
     async fn load_delivered_gate_route_by_conversation_fingerprint(
         &self,
         tenant_id: &TenantId,
+        user_id: &UserId,
         conversation_fingerprint: &str,
     ) -> Result<Vec<DeliveredGateRouteRecord>, String> {
-        let conversation_key =
-            ConversationIndexKey::new(tenant_id.clone(), conversation_fingerprint.to_string());
+        let conversation_key = ConversationIndexKey::new(
+            tenant_id.clone(),
+            user_id.clone(),
+            conversation_fingerprint.to_string(),
+        );
         let state = self
             .state
             .lock()
@@ -369,8 +381,11 @@ fn conversation_keys_for_record(record: &DeliveredGateRouteRecord) -> Vec<Conver
     let mut seen: HashSet<ConversationIndexKey> = HashSet::new();
     let mut keys: Vec<ConversationIndexKey> = Vec::new();
     for conversation_fingerprint in &record.delivered_conversation_fingerprints {
-        let key =
-            ConversationIndexKey::new(record.tenant_id.clone(), conversation_fingerprint.clone());
+        let key = ConversationIndexKey::new(
+            record.tenant_id.clone(),
+            record.user_id.clone(),
+            conversation_fingerprint.clone(),
+        );
         if seen.insert(key.clone()) {
             keys.push(key);
         }
@@ -616,11 +631,11 @@ mod tests {
             .expect("write succeeds");
 
         let loaded_a = store
-            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &conv_a)
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &user(), &conv_a)
             .await
             .expect("conversation lookup succeeds");
         let loaded_b = store
-            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &conv_b)
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &user(), &conv_b)
             .await
             .expect("conversation lookup succeeds");
 
@@ -634,7 +649,7 @@ mod tests {
         let unknown = conversation_fingerprint("thread-unknown");
 
         let loaded = store
-            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &unknown)
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &user(), &unknown)
             .await
             .expect("conversation lookup succeeds");
 
@@ -661,7 +676,7 @@ mod tests {
         assert_eq!(removed, 1);
 
         let loaded = store
-            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &conv)
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &user(), &conv)
             .await
             .expect("conversation lookup succeeds");
         assert!(loaded.is_empty());
@@ -707,11 +722,11 @@ mod tests {
             .unwrap();
 
         let loaded_a = store
-            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &conv_a)
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &user(), &conv_a)
             .await
             .expect("conversation lookup succeeds");
         let loaded_b = store
-            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &conv_b)
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &user(), &conv_b)
             .await
             .expect("conversation lookup succeeds");
 
@@ -743,7 +758,7 @@ mod tests {
             .unwrap();
 
         let loaded = store
-            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &shared)
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &user(), &shared)
             .await
             .expect("conversation lookup succeeds");
         assert_eq!(loaded, vec![new]);
@@ -772,7 +787,7 @@ mod tests {
             .unwrap();
 
         let mut loaded = store
-            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &shared)
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &user(), &shared)
             .await
             .expect("conversation lookup succeeds");
         loaded.sort_by(|a, b| a.gate_ref.cmp(&b.gate_ref));
@@ -808,7 +823,7 @@ mod tests {
             .unwrap();
 
         let loaded = store
-            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &shared)
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &user(), &shared)
             .await
             .expect("conversation lookup succeeds");
         assert_eq!(loaded, vec![route_b], "sibling route must survive removal");
@@ -847,7 +862,7 @@ mod tests {
             .unwrap();
 
         let mut loaded = store
-            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &shared)
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &user(), &shared)
             .await
             .expect("conversation lookup succeeds");
         loaded.sort_by(|a, b| a.gate_ref.cmp(&b.gate_ref));
@@ -879,7 +894,7 @@ mod tests {
         }
 
         let results = store
-            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &shared)
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &user(), &shared)
             .await
             .expect("lookup must not error");
         assert!(

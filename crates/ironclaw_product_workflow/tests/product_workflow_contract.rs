@@ -443,7 +443,13 @@ impl AuthInteractionService for MissingAuthThenRecordingAuthService {
 /// path, since the in-memory store deduplicates by `(tenant, user, gate_ref)`.
 struct TwoRecordDeliveredGateRouteStore {
     records: Vec<ironclaw_outbound::DeliveredGateRouteRecord>,
-    captured_args: std::sync::Mutex<Vec<(ironclaw_host_api::TenantId, String)>>,
+    captured_args: std::sync::Mutex<
+        Vec<(
+            ironclaw_host_api::TenantId,
+            ironclaw_host_api::UserId,
+            String,
+        )>,
+    >,
 }
 
 impl TwoRecordDeliveredGateRouteStore {
@@ -454,7 +460,13 @@ impl TwoRecordDeliveredGateRouteStore {
         }
     }
 
-    fn captured_args(&self) -> Vec<(ironclaw_host_api::TenantId, String)> {
+    fn captured_args(
+        &self,
+    ) -> Vec<(
+        ironclaw_host_api::TenantId,
+        ironclaw_host_api::UserId,
+        String,
+    )> {
         self.captured_args.lock().expect("lock").clone()
     }
 }
@@ -480,12 +492,14 @@ impl ironclaw_outbound::DeliveredGateRouteStore for TwoRecordDeliveredGateRouteS
     async fn load_delivered_gate_route_by_conversation_fingerprint(
         &self,
         tenant_id: &ironclaw_host_api::TenantId,
+        user_id: &ironclaw_host_api::UserId,
         conversation_fingerprint: &str,
     ) -> Result<Vec<ironclaw_outbound::DeliveredGateRouteRecord>, String> {
-        self.captured_args
-            .lock()
-            .expect("lock")
-            .push((tenant_id.clone(), conversation_fingerprint.to_string()));
+        self.captured_args.lock().expect("lock").push((
+            tenant_id.clone(),
+            user_id.clone(),
+            conversation_fingerprint.to_string(),
+        ));
         Ok(self.records.clone())
     }
 
@@ -529,6 +543,7 @@ impl ironclaw_outbound::DeliveredGateRouteStore for FailingRouteStore {
     async fn load_delivered_gate_route_by_conversation_fingerprint(
         &self,
         _tenant_id: &ironclaw_host_api::TenantId,
+        _user_id: &ironclaw_host_api::UserId,
         _conversation_fingerprint: &str,
     ) -> Result<Vec<ironclaw_outbound::DeliveredGateRouteRecord>, String> {
         Err("store backend unavailable".to_string())
@@ -1760,10 +1775,17 @@ async fn scoped_approval_two_live_routes_same_conversation_rejects_ambiguous() {
         approval_service.resolutions().is_empty(),
         "approval service must not be consulted on ambiguous route"
     );
+    // The binding resolves `ExternalActorRef("test", "user1")` → actor user
+    // `"user:user1"` via FakeConversationBindingService (see fakes.rs actor
+    // derivation: `"user:" + external_actor_ref.id()`).
     assert_eq!(
         route_store.captured_args(),
-        vec![(tenant_id, fingerprint)],
-        "conversation fallback must query by tenant and delivered conversation fingerprint"
+        vec![(
+            tenant_id,
+            UserId::new("user:user1").expect("actor user"),
+            fingerprint
+        )],
+        "conversation fallback must query by tenant, user, and delivered conversation fingerprint"
     );
 }
 
@@ -2014,10 +2036,17 @@ async fn auth_two_live_routes_same_conversation_rejects_ambiguous() {
         resolutions[0].run_id_hint, None,
         "the pre-ambiguity call must not have a run_id_hint from a delivered route"
     );
+    // The binding resolves `ExternalActorRef("test", "user1")` → actor user
+    // `"user:user1"` via FakeConversationBindingService (see fakes.rs actor
+    // derivation: `"user:" + external_actor_ref.id()`).
     assert_eq!(
         route_store.captured_args(),
-        vec![(tenant_id, expected_fingerprint)],
-        "auth fallback must query by tenant and delivered conversation fingerprint"
+        vec![(
+            tenant_id,
+            UserId::new("user:user1").expect("actor user"),
+            expected_fingerprint
+        )],
+        "auth fallback must query by tenant, user, and delivered conversation fingerprint"
     );
 }
 

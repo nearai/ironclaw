@@ -481,6 +481,7 @@ async fn load_delivered_routes_for_envelope(
     let all_routes = match delivered_gate_routes
         .load_delivered_gate_route_by_conversation_fingerprint(
             &binding.tenant_id,
+            &binding.actor_user_id,
             &conversation_fingerprint,
         )
         .await

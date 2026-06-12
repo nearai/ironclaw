@@ -270,9 +270,12 @@ where
             gate_ref: record.gate_ref.clone(),
         };
         for conversation_fingerprint in &record.delivered_conversation_fingerprints {
-            let idx_path =
-                delivered_gate_route_conv_idx_path(&record.tenant_id, conversation_fingerprint)
-                    .map_err(|e| format!("delivered gate route conversation index path: {e}"))?;
+            let idx_path = delivered_gate_route_conv_idx_path(
+                &record.tenant_id,
+                &record.user_id,
+                conversation_fingerprint,
+            )
+            .map_err(|e| format!("delivered gate route conversation index path: {e}"))?;
             let entry_to_add = new_entry.clone();
             self.retry_conv_idx(&resource_scope, &idx_path, |mut routes| {
                 if !routes.iter().any(|r| r == &entry_to_add) {
@@ -298,9 +301,12 @@ where
             gate_ref: record.gate_ref.clone(),
         };
         for conversation_fingerprint in conversation_fingerprints {
-            let idx_path =
-                delivered_gate_route_conv_idx_path(&record.tenant_id, conversation_fingerprint)
-                    .map_err(|e| format!("delivered gate route conversation index path: {e}"))?;
+            let idx_path = delivered_gate_route_conv_idx_path(
+                &record.tenant_id,
+                &record.user_id,
+                conversation_fingerprint,
+            )
+            .map_err(|e| format!("delivered gate route conversation index path: {e}"))?;
             let entry = entry_to_remove.clone();
             self.retry_conv_idx(&resource_scope, &idx_path, |mut routes| {
                 routes.retain(|r| r != &entry);
@@ -324,7 +330,8 @@ where
     /// `merge` receives the current route list (empty if the file is absent)
     /// and returns one of:
     /// - [`ConvIdxUpdate::Write`] — serialize and write back the updated list.
-    /// - [`ConvIdxUpdate::Delete`] — the list is empty; delete the index file.
+    /// - [`ConvIdxUpdate::Delete`] — the list is empty; garbage-collect the
+    ///   index file.
     ///
     /// The CAS expectation is:
     /// - `CasExpectation::Absent` when the file did not exist at read time.
@@ -333,6 +340,22 @@ where
     /// On a `CasConflict` the loop re-reads and re-applies `merge`; after
     /// `MAX_CONV_IDX_CAS_RETRIES` attempts the error is surfaced as a
     /// `String` and callers log it at best-effort.
+    ///
+    /// ## Delete handling
+    ///
+    /// The filesystem layer has no versioned-delete operation — `ScopedFilesystem::delete`
+    /// accepts no CAS argument. An unversioned delete on a now-empty index
+    /// races with a concurrent writer that added a sibling route between our
+    /// read and our delete: writer B's entry would be silently removed.
+    ///
+    /// To close the race we instead CAS-write an empty `V2 { routes: [] }` file
+    /// back with the version we read. A concurrent writer that won the slot
+    /// first will cause a `CasConflict`, which the loop handles by re-reading
+    /// and re-applying `merge` — the re-read will see the sibling entry and
+    /// return `Write` rather than `Delete`. Empty index files left behind are
+    /// harmless: the lookup's `into_routes()` returns an empty vec, which the
+    /// caller treats as a miss. A background sweep or the next write to the
+    /// same path will overwrite them.
     ///
     /// Note on `put_with_byte_fallback`: when the underlying mount is a
     /// `LocalFilesystem`, the fallback leg strips the CAS expectation and
@@ -365,28 +388,34 @@ where
                 None => (Vec::new(), CasExpectation::Absent),
             };
 
-            match merge(routes) {
+            // Determine what to write back (or skip if already absent).
+            let write_back = match merge(routes) {
                 ConvIdxUpdate::Write(updated) => {
-                    let file = DeliveredGateRouteConversationIndexFile::from_routes(updated);
-                    let body =
-                        serde_json::to_vec(&file).map_err(|_| OutboundError::Serialization)?;
-                    let entry = Entry::bytes(body).with_content_type(ContentType::json());
-                    match self
-                        .put_with_byte_fallback(resource_scope, idx_path, entry, cas)
-                        .await
-                    {
-                        Ok(()) => return Ok(()),
-                        Err(OutboundError::CasConflict) => continue,
-                        Err(e) => return Err(e),
-                    }
+                    DeliveredGateRouteConversationIndexFile::from_routes(updated)
                 }
                 ConvIdxUpdate::Delete => {
-                    // Nothing to write; delete the now-empty index file.
-                    match self.filesystem.delete(resource_scope, idx_path).await {
-                        Ok(()) | Err(FilesystemError::NotFound { .. }) => return Ok(()),
-                        Err(e) => return Err(map_fs_error(e)),
+                    // The filesystem layer has no versioned delete. CAS-write an
+                    // empty routes list instead so a concurrent sibling-add wins
+                    // the conflict and the retry loop re-merges rather than
+                    // blindly wiping the file. Empty index files are filtered out
+                    // on read and are garbage-collected lazily.
+                    if cas == CasExpectation::Absent {
+                        // File was already absent at read time; nothing to do.
+                        return Ok(());
                     }
+                    DeliveredGateRouteConversationIndexFile::from_routes(Vec::new())
                 }
+            };
+
+            let body = serde_json::to_vec(&write_back).map_err(|_| OutboundError::Serialization)?;
+            let entry = Entry::bytes(body).with_content_type(ContentType::json());
+            match self
+                .put_with_byte_fallback(resource_scope, idx_path, entry, cas)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(OutboundError::CasConflict) => continue,
+                Err(e) => return Err(e),
             }
         }
         Err(OutboundError::Backend)
@@ -795,10 +824,12 @@ fn delivered_gate_route_path(
 
 fn delivered_gate_route_conv_idx_path(
     tenant_id: &TenantId,
+    user_id: &UserId,
     conversation_fingerprint: &str,
 ) -> Result<ScopedPath, OutboundError> {
     let mut hasher = Sha256::new();
     update_hash_part(&mut hasher, tenant_id.as_str());
+    update_hash_part(&mut hasher, user_id.as_str());
     update_hash_part(&mut hasher, conversation_fingerprint);
     let digest = hex::encode(hasher.finalize());
     ScopedPath::new(format!(
@@ -1095,12 +1126,14 @@ where
     async fn load_delivered_gate_route_by_conversation_fingerprint(
         &self,
         tenant_id: &TenantId,
+        user_id: &UserId,
         conversation_fingerprint: &str,
     ) -> Result<Vec<DeliveredGateRouteRecord>, String> {
-        let idx_path = delivered_gate_route_conv_idx_path(tenant_id, conversation_fingerprint)
-            .map_err(|e| format!("delivered gate route conversation index path: {e}"))?;
+        let idx_path =
+            delivered_gate_route_conv_idx_path(tenant_id, user_id, conversation_fingerprint)
+                .map_err(|e| format!("delivered gate route conversation index path: {e}"))?;
         // Only the index file is read with the system scope (its path hash
-        // binds the tenant). Primary records are reloaded through
+        // binds the (tenant, user)). Primary records are reloaded through
         // load_delivered_gate_route so reads use the same tenant+user
         // resource scope as the write path.
         let resource_scope = ResourceScope::system();
@@ -1113,11 +1146,17 @@ where
             None => return Ok(Vec::new()),
         };
         let entries = index_file.into_routes();
+        // 32-entry cap as defense-in-depth. The index is now per-(tenant, user),
+        // so legitimate overflow is implausible; the cap guards against a
+        // corrupt or adversarially written index file.
         const CONV_IDX_LOOKUP_CAP: usize = 32;
         let entries = entries.into_iter().take(CONV_IDX_LOOKUP_CAP);
         let mut records = Vec::new();
         for entry in entries {
-            if entry.tenant_id != *tenant_id {
+            // Tenant + user defense-in-depth: the index path already binds
+            // (tenant, user) in its hash, so a mismatch here means the file
+            // was written by a different key version or was corrupted. Skip.
+            if entry.tenant_id != *tenant_id || entry.user_id != *user_id {
                 continue;
             }
             let record = match self
@@ -1264,6 +1303,8 @@ where
                 .delete_delivered_gate_route_conversation_indexes(&record, &fingerprints)
                 .await
             {
+                // silent-ok: stale index entries are filtered by the membership
+                // check and re-swept next pass.
                 tracing::debug!(
                     target = "ironclaw::outbound::filesystem_store",
                     name = %entry.name,
@@ -1279,6 +1320,8 @@ where
                     removed += 1;
                 }
                 Err(e) => {
+                    // silent-ok: the record will be re-visited on the next sweep
+                    // and filtered out at lookup time (is_expired check).
                     tracing::debug!(
                         target = "ironclaw::outbound::filesystem_store",
                         name = %entry.name,
@@ -1546,7 +1589,7 @@ mod tests {
             .expect("record must succeed");
 
         let hits = store
-            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &conv_a)
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &user_id, &conv_a)
             .await
             .expect("lookup must not error");
         assert_eq!(
@@ -1558,7 +1601,7 @@ mod tests {
         assert_eq!(hits[0].user_id, user_id);
 
         let miss = store
-            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &conv_b)
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &user_id, &conv_b)
             .await
             .expect("lookup must not error");
         assert!(miss.is_empty(), "undelivered conversation must miss");
@@ -1568,7 +1611,7 @@ mod tests {
             .await
             .expect("remove must succeed");
         let after_remove = store
-            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &conv_a)
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &user_id, &conv_a)
             .await
             .expect("lookup must not error");
         assert!(after_remove.is_empty(), "remove must clean the index");
@@ -1619,7 +1662,7 @@ mod tests {
             .expect("index write must succeed");
 
         let stale = store
-            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &conv_b)
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &user_id, &conv_b)
             .await
             .expect("lookup must not error");
         assert!(
@@ -1629,7 +1672,7 @@ mod tests {
 
         // The legitimate conversation still resolves.
         let hit = store
-            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &conv_a)
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &user_id, &conv_a)
             .await
             .expect("lookup must not error");
         assert!(!hit.is_empty(), "delivered conversation must still resolve");
@@ -1699,7 +1742,7 @@ mod tests {
 
         // Confirm conv_b is live and conv_a is gone after the normal overwrite.
         let before_crash = store
-            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &conv_a)
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &user_id, &conv_a)
             .await
             .expect("lookup must not error");
         assert!(
@@ -1719,7 +1762,7 @@ mod tests {
         // Step 4: conv_a lookup must be a miss — the primary record lists conv_b,
         // so the membership check filters out the dangling index.
         let after_crash_a = store
-            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &conv_a)
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &user_id, &conv_a)
             .await
             .expect("lookup must not error");
         assert!(
@@ -1729,7 +1772,7 @@ mod tests {
 
         // Step 5: conv_b lookup must still return the live route.
         let after_crash_b = store
-            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &conv_b)
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &user_id, &conv_b)
             .await
             .expect("lookup must not error");
         assert!(
@@ -1781,13 +1824,13 @@ mod tests {
             .expect("second record must succeed");
 
         let stale = store
-            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &conv_a)
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &user_id, &conv_a)
             .await
             .expect("lookup must not error");
         assert!(stale.is_empty(), "replaced conversation index must be gone");
 
         let fresh = store
-            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &conv_b)
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &user_id, &conv_b)
             .await
             .expect("lookup must not error");
         assert_eq!(fresh.len(), 1, "new conversation must resolve");
@@ -1842,7 +1885,7 @@ mod tests {
             .expect("old remove must succeed");
 
         let loaded = store
-            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &shared)
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &user_id, &shared)
             .await
             .expect("lookup must not error");
         assert_eq!(
@@ -1998,7 +2041,11 @@ mod tests {
             .expect("record b");
 
         let mut routes = store
-            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &shared_conv)
+            .load_delivered_gate_route_by_conversation_fingerprint(
+                &tenant_id,
+                &user_id,
+                &shared_conv,
+            )
             .await
             .expect("lookup must not error");
         routes.sort_by(|a, b| a.gate_ref.cmp(&b.gate_ref));
@@ -2013,7 +2060,11 @@ mod tests {
             .expect("remove a");
 
         let after = store
-            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &shared_conv)
+            .load_delivered_gate_route_by_conversation_fingerprint(
+                &tenant_id,
+                &user_id,
+                &shared_conv,
+            )
             .await
             .expect("lookup after remove");
         assert_eq!(after.len(), 1, "sibling must survive removal");
@@ -2051,7 +2102,11 @@ mod tests {
         }
 
         let results = store
-            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &shared_conv)
+            .load_delivered_gate_route_by_conversation_fingerprint(
+                &tenant_id,
+                &user_id,
+                &shared_conv,
+            )
             .await
             .expect("lookup must not error");
         assert!(
@@ -2158,7 +2213,11 @@ mod tests {
 
         // Both routes must appear in the conversation lookup.
         let mut routes = store_a
-            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, shared_conv)
+            .load_delivered_gate_route_by_conversation_fingerprint(
+                &tenant_id,
+                &user_id,
+                shared_conv,
+            )
             .await
             .expect("lookup must not error");
         routes.sort_by(|a, b| a.gate_ref.cmp(&b.gate_ref));
@@ -2240,7 +2299,11 @@ mod tests {
 
         // Both routes sharing the conversation fingerprint must be present.
         let mut routes = store_a
-            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, shared_conv)
+            .load_delivered_gate_route_by_conversation_fingerprint(
+                &tenant_id,
+                &user_id,
+                shared_conv,
+            )
             .await
             .expect("lookup must not error");
         routes.sort_by(|a, b| a.gate_ref.cmp(&b.gate_ref));
@@ -2252,6 +2315,184 @@ mod tests {
         );
         assert_eq!(routes[0].gate_ref, "gate:stale-ver-a");
         assert_eq!(routes[1].gate_ref, "gate:stale-ver-b");
+    }
+
+    #[tokio::test]
+    async fn filesystem_conv_idx_delete_vs_add_race_preserves_sibling() {
+        // Regression for the CAS-delete hole: writer A empties its entry from
+        // the conversation index (transition: Write → empty → Delete). Before
+        // the fix, Delete used an unversioned filesystem.delete() call. Writer B
+        // concurrently adds a sibling entry. Under the old code B's entry could
+        // be silently wiped; under the new code a Delete issues a
+        // CAS-versioned write of an empty file, so B's concurrent add wins the
+        // conflict and the retry loop re-reads a non-empty set and issues Write
+        // instead.
+        //
+        // We simulate this by:
+        //   1. store_a writes rec_a (conv index has rec_a).
+        //   2. store_b writes rec_b (conv index has rec_a + rec_b).
+        //   3. store_a removes rec_a (merge returns Delete because only rec_a
+        //      was present in store_a's snapshot). The CAS write of the empty
+        //      file conflicts with store_b's rec_b; the retry re-reads
+        //      [rec_b], removes rec_a (already gone), returns Write([rec_b]).
+        //   4. Lookup must return rec_b.
+        let tenant_id = TenantId::new("fs-delete-race-tenant").expect("tenant");
+        let user_id = UserId::new("fs-delete-race-user").expect("user");
+        let thread_id = ThreadId::new("fs-delete-race-thread").expect("thread");
+        let shared_conv = "fingerprint:delete-race-shared";
+
+        let scope = TurnScope::new_with_owner(
+            tenant_id.clone(),
+            None,
+            None,
+            thread_id,
+            Some(user_id.clone()),
+        );
+
+        let (store_a, store_b) = build_shared_backend_stores(&tenant_id, &user_id);
+
+        let mut rec_a = gate_route_record(
+            tenant_id.clone(),
+            user_id.clone(),
+            "gate:delete-race-a",
+            TurnRunId::new(),
+            scope.clone(),
+        );
+        rec_a.delivered_conversation_fingerprints = vec![shared_conv.to_string()];
+
+        let mut rec_b = gate_route_record(
+            tenant_id.clone(),
+            user_id.clone(),
+            "gate:delete-race-b",
+            TurnRunId::new(),
+            scope,
+        );
+        rec_b.delivered_conversation_fingerprints = vec![shared_conv.to_string()];
+
+        // Step 1: store_a records rec_a → conv index = [rec_a].
+        store_a
+            .record_delivered_gate_route(rec_a.clone())
+            .await
+            .expect("store_a initial write must succeed");
+
+        // Step 2: store_b records rec_b → conv index = [rec_a, rec_b].
+        store_b
+            .record_delivered_gate_route(rec_b.clone())
+            .await
+            .expect("store_b concurrent write must succeed");
+
+        // Step 3: store_a removes rec_a. Its snapshot (from step 1) only sees
+        // [rec_a], so merge returns Delete. The CAS-versioned empty-file write
+        // conflicts with store_b's version; the retry loop re-reads [rec_a,
+        // rec_b], removes rec_a, and writes back [rec_b].
+        store_a
+            .remove_delivered_gate_route(&tenant_id, &user_id, "gate:delete-race-a")
+            .await
+            .expect("store_a remove must succeed");
+
+        // Step 4: only rec_b must survive.
+        let remaining = store_a
+            .load_delivered_gate_route_by_conversation_fingerprint(
+                &tenant_id,
+                &user_id,
+                shared_conv,
+            )
+            .await
+            .expect("lookup must not error");
+        assert_eq!(
+            remaining.len(),
+            1,
+            "sibling rec_b must survive delete-vs-add race; got: {remaining:?}"
+        );
+        assert_eq!(remaining[0].gate_ref, "gate:delete-race-b");
+    }
+
+    #[tokio::test]
+    async fn filesystem_conv_idx_user_isolation_sibling_user_invisible() {
+        // Fix 2: the conversation index is now keyed per (tenant, user), so
+        // user A's routes in a shared conversation must not appear in user B's
+        // lookup and vice versa.
+        let tenant_id = TenantId::new("fs-user-isolation-tenant").expect("tenant");
+        let user_a = UserId::new("fs-user-isolation-a").expect("user_a");
+        let user_b = UserId::new("fs-user-isolation-b").expect("user_b");
+        let thread_id = ThreadId::new("fs-user-isolation-thread").expect("thread");
+        let shared_conv = "fingerprint:user-isolation-shared";
+
+        // Each store is scoped to its own user, but shares the same backend.
+        let backend = Arc::new(InMemoryBackend::new());
+        let store_a = FilesystemOutboundStateStore::new(build_scoped_fs_for_gate_routes(
+            backend.clone(),
+            &tenant_id,
+            &user_a,
+        ));
+        let store_b = FilesystemOutboundStateStore::new(build_scoped_fs_for_gate_routes(
+            backend, &tenant_id, &user_b,
+        ));
+
+        let scope = TurnScope::new_with_owner(
+            tenant_id.clone(),
+            None,
+            None,
+            thread_id,
+            Some(user_a.clone()),
+        );
+
+        let mut rec_a = gate_route_record(
+            tenant_id.clone(),
+            user_a.clone(),
+            "gate:user-isolation-a",
+            TurnRunId::new(),
+            scope.clone(),
+        );
+        rec_a.delivered_conversation_fingerprints = vec![shared_conv.to_string()];
+
+        let mut rec_b = gate_route_record(
+            tenant_id.clone(),
+            user_b.clone(),
+            "gate:user-isolation-b",
+            TurnRunId::new(),
+            scope,
+        );
+        rec_b.delivered_conversation_fingerprints = vec![shared_conv.to_string()];
+
+        store_a
+            .record_delivered_gate_route(rec_a.clone())
+            .await
+            .expect("user_a record must succeed");
+        store_b
+            .record_delivered_gate_route(rec_b.clone())
+            .await
+            .expect("user_b record must succeed");
+
+        // user_a lookup must return only rec_a.
+        let routes_a = store_a
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &user_a, shared_conv)
+            .await
+            .expect("lookup for user_a must not error");
+        assert_eq!(
+            routes_a.len(),
+            1,
+            "user_a lookup must return exactly 1 route; got {routes_a:?}"
+        );
+        assert_eq!(
+            routes_a[0].user_id, user_a,
+            "user_a result must be owned by user_a"
+        );
+
+        // user_b lookup must return only rec_b.
+        let routes_b = store_b
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &user_b, shared_conv)
+            .await
+            .expect("lookup for user_b must not error");
+        assert_eq!(
+            routes_b.len(),
+            1,
+            "user_b lookup must return exactly 1 route; got {routes_b:?}"
+        );
+        assert_eq!(
+            routes_b[0].user_id, user_b,
+            "user_b result must be owned by user_b"
+        );
     }
 
     #[test]
