@@ -314,6 +314,33 @@ pub fn account_is_authorized_for_requester(
     account.is_authorized_for_requester(requester_extension)
 }
 
+/// Selects the runtime default from duplicate reusable accounts for one provider.
+///
+/// Runtime credential gates cannot show an account picker, and historical OAuth
+/// setup can store the same login under capability-derived labels. When every
+/// candidate is reusable, unbound, and configured with an access secret, recency
+/// is the setup-time choice signal; mixed ownership still requires explicit
+/// account selection.
+pub fn select_latest_duplicate_user_reusable_account(
+    accounts: &[CredentialAccount],
+) -> Option<CredentialAccount> {
+    let first = accounts.first()?;
+    if !accounts.iter().all(|account| {
+        account.provider == first.provider
+            && account.status == crate::CredentialAccountStatus::Configured
+            && account.ownership == CredentialOwnership::UserReusable
+            && account.owner_extension.is_none()
+            && account.granted_extensions.is_empty()
+            && account.access_secret.is_some()
+    }) {
+        return None;
+    }
+    accounts
+        .iter()
+        .max_by_key(|account| (account.updated_at, account.created_at, account.id))
+        .cloned()
+}
+
 pub fn validate_new_credential_account(
     request: &NewCredentialAccount,
 ) -> Result<(), AuthProductError> {

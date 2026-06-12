@@ -8,14 +8,15 @@ use ironclaw_turns::{
 };
 
 use crate::{
-    state::{CheckpointKind, LoopExecutionState, PendingApprovalResume},
+    state::{CheckpointKind, LoopExecutionState, PendingApprovalResume, PendingAuthResume},
     strategies::{GateKind, GateOutcome},
 };
 
 use super::{
     AgentLoopExecutorError, BatchStep, CancelCheck, CheckpointStage, ExecutorStage, StageContext,
-    append_capability_result_ref, append_capability_safe_summary_ref, blocked_kind, exit_id,
-    failed_exit, gate_tool_result_summary, loop_gate_kind, push_completed_result,
+    append_capability_result_ref, append_capability_safe_summary_ref, blocked_kind,
+    clear_matching_pending_auth_resume, exit_id, failed_exit, gate_tool_result_summary,
+    loop_gate_kind, push_completed_result,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -75,6 +76,20 @@ impl ExecutorStage<GateInput> for GateStage {
                         input: resume.input,
                         estimate: resume.estimate,
                     });
+                if matches!(kind, GateKind::Auth) {
+                    state.pending_auth_resume = Some(PendingAuthResume {
+                        gate_ref: gate_ref.clone(),
+                        capability_id: call.capability_id.clone(),
+                        surface_version: call.surface_version.clone(),
+                        input_ref: call.input_ref.clone(),
+                        effective_capability_ids: call.effective_capability_ids.clone(),
+                        provider_replay: call.provider_replay.clone(),
+                    });
+                }
+                // Non-auth blocks do not invalidate a pending auth resume: a resource or
+                // approval gate can fire mid-re-dispatch, and clearing here would erase the
+                // record before it is consumed. Clearing on completion happens in the
+                // capability stage.
                 match CheckpointStage.cancel_if_requested(ctx, state).await? {
                     CancelCheck::Continue(next) => state = *next,
                     CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
@@ -102,6 +117,10 @@ impl ExecutorStage<GateInput> for GateStage {
             }
             GateOutcome::SkipAndContinue { gate } => {
                 state.gate_state = gate;
+                // A skipped gate bypasses all capability-outcome clear sites, so a
+                // pending_auth_resume for this call would survive and trigger an
+                // infinite re-dispatch loop on the next prompt iteration.
+                clear_matching_pending_auth_resume(&mut state, &call);
                 append_capability_safe_summary_ref(
                     ctx.host,
                     &mut state,
@@ -117,6 +136,9 @@ impl ExecutorStage<GateInput> for GateStage {
             }
             GateOutcome::Abort { gate, failure_kind } => {
                 state.gate_state = gate;
+                // Clear any pending auth resume so a stale record does not persist
+                // into the Final checkpoint for an aborted capability.
+                clear_matching_pending_auth_resume(&mut state, &call);
                 append_capability_safe_summary_ref(
                     ctx.host,
                     &mut state,

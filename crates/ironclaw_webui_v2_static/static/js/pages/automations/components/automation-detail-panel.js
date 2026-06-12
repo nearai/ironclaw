@@ -96,6 +96,7 @@ export function AutomationDetailPanel({ automation }) {
                       key=${recentRunKey(run)}
                       run=${run}
                       onOpenRun=${navigate}
+                      onOpenLogs=${navigate}
                     />
                   `)}
                 </div>

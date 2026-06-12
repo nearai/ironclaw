@@ -32,8 +32,10 @@ use ironclaw_product_workflow::{
     RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
     RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
     RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
-    RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetupExtensionResponse, RebornSkillActionResponse,
+    RebornOperatorSetupResponse, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundPreferencesResponse, RebornResolveGateResponse, RebornServicesApi,
+    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
     RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
     RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
     RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
@@ -472,6 +474,43 @@ pub async fn list_connectable_channels(
     Ok(Json(response))
 }
 
+/// `GET /api/webchat/v2/outbound/preferences`
+pub async fn get_outbound_preferences(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornOutboundPreferencesResponse>, WebUiV2HttpError> {
+    let response = state.services().get_outbound_preferences(caller).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/outbound/preferences`
+///
+/// Body shape: [`RebornSetOutboundPreferencesRequest`]. Sending
+/// `{"final_reply_target_id": null}` clears the configured final-reply target.
+pub async fn set_outbound_preferences(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<RebornSetOutboundPreferencesRequest>,
+) -> Result<Json<RebornOutboundPreferencesResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .set_outbound_preferences(caller, body)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/outbound/targets`
+pub async fn list_outbound_delivery_targets(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornOutboundDeliveryTargetListResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .list_outbound_delivery_targets(caller)
+        .await?;
+    Ok(Json(response))
+}
+
 /// `GET /api/webchat/v2/extensions`
 pub async fn list_extensions(
     State(state): State<WebUiV2State>,
@@ -648,11 +687,30 @@ pub async fn setup_extension(
     Ok(Json(response))
 }
 
+fn require_operator_webui_config(
+    capabilities: WebUiV2Capabilities,
+) -> Result<(), WebUiV2HttpError> {
+    if capabilities.operator_webui_config {
+        return Ok(());
+    }
+    Err(RebornServicesError {
+        code: RebornServicesErrorCode::Forbidden,
+        kind: RebornServicesErrorKind::ParticipantDenied,
+        status_code: 403,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    }
+    .into())
+}
+
 /// `GET /api/webchat/v2/operator/setup`
 pub async fn get_operator_setup(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
-) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+) -> Result<Json<RebornOperatorSetupResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().get_operator_setup(caller).await?;
     Ok(Json(response))
 }
@@ -661,8 +719,10 @@ pub async fn get_operator_setup(
 pub async fn run_operator_setup(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<RebornOperatorSetupRequest>,
-) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
+) -> Result<Json<RebornOperatorSetupResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().run_operator_setup(caller, body).await?;
     Ok(Json(response))
 }
@@ -671,7 +731,9 @@ pub async fn run_operator_setup(
 pub async fn list_operator_config(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<RebornOperatorConfigListResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().list_operator_config(caller).await?;
     Ok(Json(response))
 }
@@ -713,8 +775,10 @@ fn operator_config_key_error(code: WebUiInboundValidationCode) -> WebUiV2HttpErr
 pub async fn get_operator_config_key(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Path(OperatorConfigKeyPath { key }): Path<OperatorConfigKeyPath>,
 ) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let key = validate_operator_config_key(key)?;
     let response = state
         .services()
@@ -727,9 +791,11 @@ pub async fn get_operator_config_key(
 pub async fn set_operator_config_key(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Path(OperatorConfigKeyPath { key }): Path<OperatorConfigKeyPath>,
     Json(body): Json<RebornOperatorConfigSetRequest>,
 ) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let key = validate_operator_config_key(key)?;
     let response = state
         .services()
@@ -743,8 +809,10 @@ pub async fn set_operator_config_key(
 /// `validate` is reserved for the validation operation and is not a readable
 /// config key. This explicit static-path handler keeps axum static route
 /// priority from surfacing an ambiguous 405.
-pub async fn reject_reserved_operator_config_key()
--> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+pub async fn reject_reserved_operator_config_key(
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     Err(operator_config_key_error(
         WebUiInboundValidationCode::InvalidValue,
     ))
@@ -754,8 +822,10 @@ pub async fn reject_reserved_operator_config_key()
 pub async fn validate_operator_config(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<RebornOperatorConfigValidateRequest>,
 ) -> Result<Json<RebornOperatorConfigValidateResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state
         .services()
         .validate_operator_config(caller, body)
@@ -767,7 +837,9 @@ pub async fn validate_operator_config(
 pub async fn get_operator_diagnostics(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().get_operator_diagnostics(caller).await?;
     Ok(Json(response))
 }
@@ -776,7 +848,9 @@ pub async fn get_operator_diagnostics(
 pub async fn get_operator_status(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().get_operator_status(caller).await?;
     Ok(Json(response))
 }
@@ -785,8 +859,10 @@ pub async fn get_operator_status(
 pub async fn query_operator_logs(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Query(query): Query<RebornOperatorLogsQuery>,
 ) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().query_operator_logs(caller, query).await?;
     Ok(Json(response))
 }
@@ -795,8 +871,10 @@ pub async fn query_operator_logs(
 pub async fn run_operator_service_lifecycle(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<RebornOperatorServiceLifecycleRequest>,
 ) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state
         .services()
         .run_operator_service_lifecycle(caller, body)
@@ -814,7 +892,9 @@ pub struct LlmProviderPath {
 pub async fn get_llm_config(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().get_llm_config(caller).await?;
     Ok(Json(response))
 }
@@ -823,8 +903,10 @@ pub async fn get_llm_config(
 pub async fn upsert_llm_provider(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<UpsertLlmProviderRequest>,
 ) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().upsert_llm_provider(caller, body).await?;
     Ok(Json(response))
 }
@@ -833,8 +915,10 @@ pub async fn upsert_llm_provider(
 pub async fn delete_llm_provider(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Path(LlmProviderPath { provider_id }): Path<LlmProviderPath>,
 ) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state
         .services()
         .delete_llm_provider(caller, provider_id)
@@ -846,8 +930,10 @@ pub async fn delete_llm_provider(
 pub async fn set_active_llm(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<SetActiveLlmRequest>,
 ) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().set_active_llm(caller, body).await?;
     Ok(Json(response))
 }
@@ -856,8 +942,10 @@ pub async fn set_active_llm(
 pub async fn test_llm_connection(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<LlmProbeRequest>,
 ) -> Result<Json<LlmProbeResult>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().test_llm_connection(caller, body).await?;
     Ok(Json(response))
 }
@@ -866,8 +954,10 @@ pub async fn test_llm_connection(
 pub async fn list_llm_models(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<LlmProbeRequest>,
 ) -> Result<Json<LlmModelsResult>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().list_llm_models(caller, body).await?;
     Ok(Json(response))
 }
@@ -876,8 +966,23 @@ pub async fn list_llm_models(
 pub async fn start_nearai_login(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
-    Json(body): Json<NearAiLoginRequest>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+    headers: HeaderMap,
+    Json(mut body): Json<NearAiLoginRequest>,
 ) -> Result<Json<NearAiLoginStart>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    // The NEAR AI callback carries the login token in its redirect, so the
+    // callback origin must come from trusted request context, not arbitrary
+    // body input. This route's descriptor is `CorsPolicy::SameOriginOnly`, so a
+    // present `Origin` header has been gateway-validated as same-origin; prefer
+    // it over the body field (which stays as a fallback for non-browser callers).
+    if let Some(origin) = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+    {
+        body.origin = origin.to_string();
+    }
     let response = state.services().start_nearai_login(caller, body).await?;
     Ok(Json(response))
 }
@@ -890,8 +995,10 @@ pub async fn start_nearai_login(
 pub async fn complete_nearai_wallet_login(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<NearAiWalletLoginRequest>,
 ) -> Result<Json<NearAiWalletLoginResult>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state
         .services()
         .complete_nearai_wallet_login(caller, body)
@@ -906,7 +1013,9 @@ pub async fn complete_nearai_wallet_login(
 pub async fn start_codex_login(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<CodexLoginStart>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().start_codex_login(caller).await?;
     Ok(Json(response))
 }

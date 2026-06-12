@@ -1,5 +1,7 @@
 #![cfg(feature = "postgres")]
 
+mod support;
+
 use std::{sync::Arc, time::Duration};
 
 use deadpool_postgres::tokio_postgres;
@@ -19,6 +21,9 @@ use ironclaw_reborn_composition::{
 use ironclaw_reborn_event_store::RebornEventStoreConfig;
 use ironclaw_turns::{TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError};
 use secrecy::SecretString;
+use support::production_readiness::{
+    assert_required_backend_readiness_diagnostics, required_backend_parity_config,
+};
 use tokio::sync::Mutex;
 
 static SECRETS_MASTER_KEY_ENV_LOCK: Mutex<()> = Mutex::const_new(());
@@ -59,25 +64,7 @@ async fn postgres_substrate_builder_wires_production_components_without_local_on
         return;
     };
 
-    let services =
-        build_postgres_production_host_runtime_services(PostgresProductionSubstrateConfig {
-            pool,
-            event_store: RebornEventStoreConfig::Postgres {
-                url: SecretString::from(database_url),
-                tls_options: Default::default(),
-            },
-            secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),
-            trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
-            runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
-                production_runtime_policy(),
-                sandbox_process_port(),
-            )
-            .unwrap(),
-            turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
-            surface_version: CapabilitySurfaceVersion::new("test-surface").unwrap(),
-        })
-        .await
-        .unwrap();
+    let services = build_postgres_test_services(pool, database_url).await;
 
     let production_config = ProductionWiringConfig::new([])
         .require_runtime_http_egress()
@@ -85,6 +72,20 @@ async fn postgres_substrate_builder_wires_production_components_without_local_on
     services
         .validate_production_wiring(&production_config)
         .expect("postgres substrate production wiring should not use fake seams");
+}
+
+#[tokio::test]
+async fn postgres_substrate_readiness_diagnostics_cover_required_backend_gaps() {
+    let Some((_container, pool, database_url)) = postgres_pool_or_skip().await else {
+        return;
+    };
+    let services = build_postgres_test_services(pool, database_url).await;
+
+    let report = services
+        .validate_production_wiring(&required_backend_parity_config())
+        .expect_err("required runtime gaps should block production readiness");
+
+    assert_required_backend_readiness_diagnostics(&report);
 }
 
 #[tokio::test]
@@ -170,6 +171,30 @@ fn production_runtime_policy() -> EffectiveRuntimePolicy {
         approval_policy: ApprovalPolicy::AskDestructive,
         audit_mode: AuditMode::Standard,
     }
+}
+
+async fn build_postgres_test_services(
+    pool: deadpool_postgres::Pool,
+    database_url: String,
+) -> ironclaw_reborn_composition::PostgresProductionHostRuntimeServices {
+    build_postgres_production_host_runtime_services(PostgresProductionSubstrateConfig {
+        pool,
+        event_store: RebornEventStoreConfig::Postgres {
+            url: SecretString::from(database_url),
+            tls_options: Default::default(),
+        },
+        secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),
+        trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
+        runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
+            production_runtime_policy(),
+            sandbox_process_port(),
+        )
+        .unwrap(),
+        turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
+        surface_version: CapabilitySurfaceVersion::new("test-surface").unwrap(),
+    })
+    .await
+    .unwrap()
 }
 
 fn sandbox_process_port() -> Arc<ironclaw_host_runtime::TenantSandboxProcessPort> {

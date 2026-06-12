@@ -67,6 +67,16 @@ V1 schedule shape is cron-backed schedule intake only.
 - Second-level cron fields, sub-minute intervals, and any equivalent cadence below one minute are invalid in V1.
 - The create path must reject invalid schedules before persistence, not at poll time.
 
+#### 3.2.1 Timezone requirement
+
+`trigger_create` requires a valid IANA timezone string alongside the cron expression.
+
+- Invalid timezone strings — any string that `chrono-tz` does not recognise — are rejected at the tool boundary with an input error before persistence. The cadence and seconds-field rules above are unchanged and are validated in the same pre-persistence step.
+- Cron expressions are evaluated in the stored timezone; computed fire slots and `next_run_at` are always UTC instants.
+- Pre-existing persisted rows that lack an explicit timezone are treated as if `schedule_timezone = 'UTC'`; their behavior is identical to the pre-change UTC-only behavior.
+
+The `TriggerSchedule::Cron` variant stores both `expression` and `timezone` as the canonical schedule definition. `TriggerRecord.schedule` carries the full cron shape, including the IANA timezone string.
+
 ### 3.3 Trigger state
 
 `TriggerRecord.state` is the trigger-definition state, not the turn-run state.
@@ -362,11 +372,13 @@ messages directly.
 
 The trigger system must expose `trigger_create`, `trigger_list`, and `trigger_remove` as first-party Reborn capabilities.
 
-- `trigger_create` validates the schedule, captures caller scope, pairs the
-  caller as the host-trusted synthetic trigger actor used by the poller, and
-  persists the trigger. This pairing is composition-owned trigger management
-  wiring; trigger repositories remain storage-only, and the poller must still
-  fail closed for records whose creator actor was not paired.
+- `trigger_create` validates the schedule and timezone, captures caller scope,
+  pairs the caller as the host-trusted synthetic trigger actor used by the
+  poller, and persists the trigger. Schedule validation includes both cadence
+  rejection (sub-minute and second-level fields) and IANA timezone validation;
+  both are enforced before persistence. This pairing is composition-owned
+  trigger management wiring; trigger repositories remain storage-only, and the
+  poller must still fail closed for records whose creator actor was not paired.
 - `trigger_create` pairs the creator before persisting the trigger record. This
   intentionally fails closed before storage if the actor pairing cannot be
   established, instead of storing a trigger that the poller cannot fire. A

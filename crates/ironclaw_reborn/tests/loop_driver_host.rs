@@ -213,7 +213,7 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
         })
         .await
         .unwrap();
-    assert_eq!(prompt_bundle.messages.len(), 2);
+    assert_eq!(prompt_bundle.messages.len(), 3);
     assert!(prompt_bundle.instruction_fingerprint.is_some());
 
     let model_response = host_dyn
@@ -855,10 +855,17 @@ async fn text_only_model_reply_driver_runs_prompt_model_transcript_path() {
 
     let requests = fixture.gateway.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].messages.len(), 2);
+    assert_eq!(requests[0].messages.len(), 3);
     assert!(requests[0].messages.iter().any(|message| {
         message.content == "RAW_PROMPT_TEXT_SENTINEL sk-prompt-secret /host/path tool_input"
     }));
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|message| message.content.contains("Current date/time at loop start:")),
+        "model request must contain the runtime context message stamped by the production host"
+    );
     assert_eq!(
         fixture.milestone_names(),
         vec![
@@ -870,6 +877,79 @@ async fn text_only_model_reply_driver_runs_prompt_model_transcript_path() {
     );
     assert_public_milestones_hide_raw_payloads(&fixture.milestones());
     assert_driver_public_outputs_hide_raw_payloads(&completed);
+}
+
+/// Regression guard: the runtime context ("Current date/time at loop start:")
+/// must appear exactly once in every model request, including across multiple
+/// loop spawns over the same thread (where the transcript grows but the
+/// synthetic runtime section must NOT leak into it and reappear alongside the
+/// fresh section on the next spawn).
+///
+/// There is no existing test that drives 2+ model requests through
+/// HostFixture in a single turn worker run (all existing HostFixture-based
+/// tests assert requests.len() == 1). Instead, this test uses two independent
+/// build_host()+driver.run() calls over the same fixture to simulate two
+/// successive loop spawns. Each spawn sets a fresh LoopRuntimeContext on its
+/// prompt port; after the first run the assistant reply is persisted to the
+/// thread service transcript. The second spawn therefore sees a longer
+/// transcript, and we verify the runtime context still appears exactly once
+/// (not twice, which would happen if it had been stored in the transcript).
+#[tokio::test]
+async fn text_only_model_reply_driver_embeds_runtime_context_exactly_once_per_model_request() {
+    // --- spawn 1 ---
+    let mut fixture = HostFixture::new(
+        "thread-driver-runtime-once",
+        "first message RAW_PROMPT_TEXT_SENTINEL",
+    )
+    .await;
+    let driver = TextOnlyModelReplyDriver::default();
+    assign_driver_to_fixture(&mut fixture, driver.descriptor());
+
+    let host1 = fixture.build_host().await;
+    driver
+        .run(driver_request(&fixture.context), &host1)
+        .await
+        .unwrap();
+
+    let requests_after_spawn1 = fixture.gateway.requests();
+    assert_eq!(
+        requests_after_spawn1.len(),
+        1,
+        "spawn 1 should produce exactly one gateway request"
+    );
+    let occurrences_spawn1 = requests_after_spawn1[0]
+        .messages
+        .iter()
+        .filter(|message| message.content.contains("Current date/time at loop start:"))
+        .count();
+    assert_eq!(
+        occurrences_spawn1, 1,
+        "model request for spawn 1 must embed the runtime context exactly once, found {occurrences_spawn1}"
+    );
+
+    // --- spawn 2 (same thread, transcript now has the assistant reply from
+    // spawn 1; the runtime context from spawn 1 must NOT reappear) ---
+    let host2 = fixture.build_host().await;
+    driver
+        .run(driver_request(&fixture.context), &host2)
+        .await
+        .unwrap();
+
+    let requests_after_spawn2 = fixture.gateway.requests();
+    assert_eq!(
+        requests_after_spawn2.len(),
+        2,
+        "spawn 2 should add a second gateway request (cumulative total)"
+    );
+    let occurrences_spawn2 = requests_after_spawn2[1]
+        .messages
+        .iter()
+        .filter(|message| message.content.contains("Current date/time at loop start:"))
+        .count();
+    assert_eq!(
+        occurrences_spawn2, 1,
+        "model request for spawn 2 must embed the runtime context exactly once (not accumulated from spawn 1), found {occurrences_spawn2}"
+    );
 }
 
 #[tokio::test]
@@ -3594,7 +3674,7 @@ async fn text_only_host_prompt_accepts_empty_surface_version() {
         .await
         .unwrap();
 
-    assert_eq!(prompt_bundle.messages.len(), 2);
+    assert_eq!(prompt_bundle.messages.len(), 3);
 }
 
 #[tokio::test]
@@ -4436,7 +4516,7 @@ async fn text_only_host_skill_context_does_not_expand_capability_surface() {
         })
         .await
         .unwrap();
-    assert_eq!(prompt_bundle.messages.len(), 3);
+    assert_eq!(prompt_bundle.messages.len(), 4);
 
     let surface = host
         .visible_capabilities(VisibleCapabilityRequest)
@@ -4508,7 +4588,7 @@ async fn text_only_host_prompt_bundle_includes_surface_metadata_and_still_stream
 
     assert!(prompt_bundle.instruction_fingerprint.is_some());
     assert_eq!(prompt_bundle.surface_version, Some(surface.version.clone()));
-    assert_eq!(prompt_bundle.messages.len(), 3);
+    assert_eq!(prompt_bundle.messages.len(), 4);
 
     host.stream_model(LoopModelRequest {
         messages: prompt_bundle.messages,
@@ -5157,7 +5237,7 @@ async fn text_only_host_maps_explicit_unknown_runtime_outcome_to_failure() {
 }
 
 #[tokio::test]
-async fn text_only_host_preserves_host_runtime_error_kind_and_summary() {
+async fn text_only_host_preserves_invalid_request_and_returns_unavailable_as_failed_outcome() {
     let fixture = HostFixture::new("thread-host-runtime-capability-host-error", "hello").await;
     let capability_id = CapabilityId::new("demo.echo").unwrap();
     let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
@@ -5215,15 +5295,16 @@ async fn text_only_host_preserves_host_runtime_error_kind_and_summary() {
             approval_resume: None,
         })
         .await
-        .unwrap_err();
+        .unwrap();
 
     assert_eq!(invalid.kind, AgentLoopHostErrorKind::InvalidInvocation);
     assert_eq!(invalid.safe_summary, "capability input schema invalid");
-    assert_eq!(unavailable.kind, AgentLoopHostErrorKind::Unavailable);
-    assert_eq!(
-        unavailable.safe_summary,
-        "resource governor temporarily unavailable"
-    );
+    assert!(matches!(
+        unavailable,
+        CapabilityOutcome::Failed(failure)
+            if failure.error_kind == CapabilityFailureKind::Unavailable
+                && failure.safe_summary == "resource governor temporarily unavailable"
+    ));
 }
 
 #[tokio::test]

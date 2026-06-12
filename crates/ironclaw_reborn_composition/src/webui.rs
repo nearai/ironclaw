@@ -15,6 +15,8 @@ use ironclaw_product_workflow::{
     WebUiAuthenticatedCaller,
 };
 
+use ironclaw_triggers::TriggerRepository;
+
 use crate::{
     RebornAutomationProductFacade, RebornBuildError, RebornProductAuthServices, RebornReadiness,
     RebornRuntime,
@@ -77,10 +79,6 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     outbound_delivery_target_providers: Vec<Arc<dyn OutboundDeliveryTargetProvider>>,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
     let services = runtime.services();
-    let automation_facade = services
-        .host_runtime
-        .as_ref()
-        .map(|host_runtime| Arc::new(RebornAutomationProductFacade::new(Arc::clone(host_runtime))));
 
     let mut api = ProductRebornServices::new(
         runtime.webui_thread_service(),
@@ -129,6 +127,11 @@ pub(crate) fn build_webui_services_with_connectable_channels(
             lifecycle_facade =
                 lifecycle_facade.with_runtime_http_egress(runtime_http_egress.clone());
         }
+        if let Some(product_auth) = &services.product_auth {
+            lifecycle_facade = lifecycle_facade.with_runtime_credential_accounts(
+                product_auth.runtime_credential_account_selection_service(),
+            );
+        }
         api = api.with_lifecycle_product_facade(Arc::new(lifecycle_facade));
     }
     if let Some(skill_management) = &services.skill_management {
@@ -141,8 +144,26 @@ pub(crate) fn build_webui_services_with_connectable_channels(
             Arc::clone(product_auth),
         )));
     }
-    if let Some(automation_facade) = automation_facade {
-        api = api.with_automation_product_facade(automation_facade);
+    // Local-dev and production graphs both carry a trigger repository; whichever
+    // is wired backs the automations panel.
+    let automation_repository: Option<Arc<dyn TriggerRepository>> = {
+        let from_local = services
+            .local_runtime
+            .as_ref()
+            .map(|local_runtime| Arc::clone(&local_runtime.trigger_repository));
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        let from_local = from_local.or_else(|| {
+            services
+                .production_runtime
+                .as_ref()
+                .map(|production_runtime| production_runtime.trigger_repository())
+        });
+        from_local
+    };
+    if let Some(repository) = automation_repository {
+        api = api.with_automation_product_facade(Arc::new(RebornAutomationProductFacade::new(
+            repository,
+        )));
     }
     if let Some(local_runtime) = &services.local_runtime {
         api = api.with_outbound_preferences_facade(Arc::new(RebornOutboundPreferencesFacade::new(
@@ -163,6 +184,7 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     api = api.with_operator_status_service(Arc::new(ReadinessOperatorStatusService::new(
         services.readiness.clone(),
     )));
+    api = api.with_operator_logs_service(crate::operator_log_buffer());
 
     // Compose the operator LLM-config settings service when the runtime was
     // assembled with a boot config. The secret store stays private to this

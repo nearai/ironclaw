@@ -149,6 +149,7 @@ export function useChat(threadId) {
     hasMore,
     nextCursor,
     isLoading: historyLoading,
+    loadError: historyLoadError,
     loadHistory,
     setMessages,
   } = useHistory(threadId, { getPendingMessages, setPendingMessages });
@@ -554,6 +555,7 @@ export function useChat(threadId) {
     activeRun,
     sseStatus,
     historyLoading,
+    historyLoadError,
     hasMore,
     cooldownSeconds,
     send,

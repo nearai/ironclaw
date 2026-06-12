@@ -159,11 +159,20 @@ impl<'a> OutboundResolutionEngine<'a> {
         };
         let record = record.record;
 
+        // Gate prompts (approval/auth) fall back to the final-reply target
+        // when no explicit slot is configured: the delivery-defaults surface
+        // sets a single default, and a triggered run blocked on a gate must
+        // reach the same place its final reply would. An explicit slot, when
+        // present, always wins (see `communication-delivery-resolution.md`).
         let target = match kind {
             PreferenceTargetKind::FinalReply => record.final_reply_target,
             PreferenceTargetKind::Progress => record.progress_target,
-            PreferenceTargetKind::ApprovalPrompt => record.approval_prompt_target,
-            PreferenceTargetKind::AuthPrompt => record.auth_prompt_target,
+            PreferenceTargetKind::ApprovalPrompt => {
+                record.approval_prompt_target.or(record.final_reply_target)
+            }
+            PreferenceTargetKind::AuthPrompt => {
+                record.auth_prompt_target.or(record.final_reply_target)
+            }
         };
 
         target.ok_or_else(|| missing_preference_error(kind))
@@ -202,19 +211,13 @@ enum PreferenceTargetKind {
 
 #[allow(dead_code, reason = "wired into OutboundPolicyService in PR6")]
 fn missing_preference_error(kind: PreferenceTargetKind) -> OutboundError {
-    let reason = match kind {
-        PreferenceTargetKind::FinalReply => {
-            "communication preference final reply target is missing"
-        }
-        PreferenceTargetKind::Progress => "communication preference progress target is missing",
-        PreferenceTargetKind::ApprovalPrompt => {
-            "communication preference approval prompt target is missing"
-        }
-        PreferenceTargetKind::AuthPrompt => {
-            "communication preference auth prompt target is missing"
-        }
+    let kind = match kind {
+        PreferenceTargetKind::FinalReply => "final_reply",
+        PreferenceTargetKind::Progress => "progress",
+        PreferenceTargetKind::ApprovalPrompt => "approval_prompt",
+        PreferenceTargetKind::AuthPrompt => "auth_prompt",
     };
-    OutboundError::InvalidRequest { reason }
+    OutboundError::PreferenceTargetMissing { kind }
 }
 
 #[cfg(test)]
@@ -743,6 +746,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn triggered_from_source_route_approval_needed_falls_back_to_final_reply_target_when_slot_unset()
+     {
+        let store = InMemoryOutboundStateStore::default();
+        let engine = OutboundResolutionEngine::new(&store);
+
+        store
+            .put_communication_preference(preference_record(Some("reply:final"), None, None, None))
+            .await
+            .expect("seed preference");
+
+        assert_resolves_to(
+            &engine,
+            RunNotificationEventKind::ApprovalNeeded,
+            RunNotificationOrigin::TriggeredFromSourceRoute {
+                trigger: trigger_context(),
+                source_route: SourceRouteContext {
+                    reply_target_binding_ref: reply_ref("reply:source-route"),
+                },
+            },
+            "reply:final",
+            CommunicationDeliveryKind::ApprovalPrompt,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn triggered_from_source_route_auth_required_falls_back_to_final_reply_target_when_slot_unset()
+     {
+        let store = InMemoryOutboundStateStore::default();
+        let engine = OutboundResolutionEngine::new(&store);
+
+        store
+            .put_communication_preference(preference_record(Some("reply:final"), None, None, None))
+            .await
+            .expect("seed preference");
+
+        assert_resolves_to(
+            &engine,
+            RunNotificationEventKind::AuthRequired,
+            RunNotificationOrigin::TriggeredFromSourceRoute {
+                trigger: trigger_context(),
+                source_route: SourceRouteContext {
+                    reply_target_binding_ref: reply_ref("reply:source-route"),
+                },
+            },
+            "reply:final",
+            CommunicationDeliveryKind::AuthPrompt,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn triggered_approval_needed_falls_back_to_final_reply_target_when_slot_unset() {
+        let store = InMemoryOutboundStateStore::default();
+        let engine = OutboundResolutionEngine::new(&store);
+
+        store
+            .put_communication_preference(preference_record(Some("reply:final"), None, None, None))
+            .await
+            .expect("seed preference");
+
+        assert_resolves_to(
+            &engine,
+            RunNotificationEventKind::ApprovalNeeded,
+            RunNotificationOrigin::Triggered {
+                trigger: trigger_context(),
+            },
+            "reply:final",
+            CommunicationDeliveryKind::ApprovalPrompt,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn triggered_auth_required_falls_back_to_final_reply_target_when_slot_unset() {
+        let store = InMemoryOutboundStateStore::default();
+        let engine = OutboundResolutionEngine::new(&store);
+
+        store
+            .put_communication_preference(preference_record(Some("reply:final"), None, None, None))
+            .await
+            .expect("seed preference");
+
+        assert_resolves_to(
+            &engine,
+            RunNotificationEventKind::AuthRequired,
+            RunNotificationOrigin::Triggered {
+                trigger: trigger_context(),
+            },
+            "reply:final",
+            CommunicationDeliveryKind::AuthPrompt,
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn system_event_notifications_are_metadata_only_without_candidate() {
         let store = InMemoryOutboundStateStore::default();
         let engine = OutboundResolutionEngine::new(&store);
@@ -781,7 +880,7 @@ mod tests {
             .expect_err("missing preference record must fail closed");
         assert!(matches!(
             missing_record,
-            OutboundError::InvalidRequest { .. }
+            OutboundError::PreferenceTargetMissing { .. }
         ));
 
         store
@@ -800,7 +899,7 @@ mod tests {
             .expect_err("missing final reply target must fail closed");
         assert!(matches!(
             missing_target,
-            OutboundError::InvalidRequest { .. }
+            OutboundError::PreferenceTargetMissing { .. }
         ));
     }
 

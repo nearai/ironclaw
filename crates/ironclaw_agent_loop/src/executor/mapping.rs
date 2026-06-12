@@ -113,6 +113,11 @@ pub(super) fn capability_host_error(error: AgentLoopHostError) -> AgentLoopExecu
     if error.kind == AgentLoopHostErrorKind::Cancelled {
         return AgentLoopExecutorError::Cancelled;
     }
+    tracing::warn!(
+        kind = error.kind.as_str(),
+        safe_summary = error.safe_summary.as_str(),
+        "capability host error mapped to HostUnavailable"
+    );
     AgentLoopExecutorError::HostUnavailable {
         stage: HostStage::Capability,
     }

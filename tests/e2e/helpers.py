@@ -229,6 +229,13 @@ SEL_V2 = {
     "chat_composer":  "[data-testid='chat-composer']",  # message textarea on /chat
     "msg_user":       "[data-testid='msg-user']",       # user message bubble
     "msg_assistant":  "[data-testid='msg-assistant']",  # assistant message bubble
+    "logs_scope_toolbar": "[data-testid='logs-scope-toolbar']",
+    "logs_scope_chip": "[data-testid='logs-scope-chip'][data-scope-key='{key}']",
+    "logs_entry": "[data-testid='logs-entry']",
+    "logs_entry_row": "[data-testid='logs-entry-row']",
+    "logs_entry_message": "[data-testid='logs-entry-message']",
+    "logs_entry_context": "[data-testid='logs-entry-context']",
+    "logs_context_chip": "[data-testid='logs-context-chip'][data-context-key='{key}']",
 }
 
 

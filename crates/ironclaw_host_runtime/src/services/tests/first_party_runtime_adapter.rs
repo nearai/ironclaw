@@ -182,6 +182,9 @@ async fn first_party_adapter_forwards_required_secrets_from_auth_required_handle
 async fn first_party_adapter_forwards_credential_requirements_from_auth_required_handler() {
     let requirement = RuntimeCredentialAuthRequirement {
         provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+            scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
+        },
         requester_extension: ExtensionId::new("gmail").unwrap(),
         provider_scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
     };
