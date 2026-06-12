@@ -104,6 +104,10 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
         self.inner.model_name()
     }
 
+    fn provider_kind(&self) -> crate::provider::EmbeddingProviderKind {
+        self.inner.provider_kind()
+    }
+
     fn max_input_length(&self) -> usize {
         self.inner.max_input_length()
     }
@@ -270,6 +274,9 @@ mod tests {
         fn max_input_length(&self) -> usize {
             10_000
         }
+        fn provider_kind(&self) -> crate::provider::EmbeddingProviderKind {
+            crate::provider::EmbeddingProviderKind::NearAi
+        }
         async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
             self.embed_calls.fetch_add(1, Ordering::SeqCst);
             // Simple deterministic embedding: val = text.len() / 100.0
@@ -286,6 +293,20 @@ mod tests {
                 })
                 .collect()
         }
+    }
+
+    #[test]
+    fn provider_kind_delegates_to_inner() {
+        // The cache wrapper is the typical production wrapper; the auth-failure
+        // hint depends on it surfacing the inner provider's kind, not the default.
+        let cached = CachedEmbeddingProvider::new(
+            Arc::new(CountingMock::new(4, "m")),
+            EmbeddingCacheConfig { max_entries: 1 },
+        );
+        assert_eq!(
+            cached.provider_kind(),
+            crate::provider::EmbeddingProviderKind::NearAi
+        );
     }
 
     #[tokio::test]

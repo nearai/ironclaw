@@ -67,6 +67,10 @@ impl EmbeddingProvider for NearAiEmbeddings {
         &self.model
     }
 
+    fn provider_kind(&self) -> crate::provider::EmbeddingProviderKind {
+        crate::provider::EmbeddingProviderKind::NearAi
+    }
+
     fn max_input_length(&self) -> usize {
         32_000
     }
@@ -92,6 +96,8 @@ impl EmbeddingProvider for NearAiEmbeddings {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
+
+        crate::provider::ensure_batch_within_limit(texts, self.max_input_length())?;
 
         let request = NearAiEmbeddingRequest {
             model: &self.model,
@@ -140,5 +146,27 @@ impl EmbeddingProvider for NearAiEmbeddings {
         })?;
 
         Ok(result.data.into_iter().map(|d| d.embedding).collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_llm::{SessionConfig, SessionManager};
+
+    #[tokio::test]
+    async fn embed_batch_rejects_over_limit_item() {
+        // The batched override enforces the per-item byte cap before the token
+        // fetch or any network call (#3752).
+        let provider = NearAiEmbeddings::new(
+            "https://api.near.ai",
+            std::sync::Arc::new(SessionManager::new(SessionConfig::default())),
+        );
+        let oversized = "a".repeat(provider.max_input_length() + 1);
+        let err = provider
+            .embed_batch(&[oversized])
+            .await
+            .expect_err("over-limit item must be rejected");
+        assert!(matches!(err, EmbeddingError::TextTooLong { .. }));
     }
 }

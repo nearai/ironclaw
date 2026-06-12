@@ -58,6 +58,10 @@ impl EmbeddingProvider for OllamaEmbeddings {
         &self.model
     }
 
+    fn provider_kind(&self) -> crate::provider::EmbeddingProviderKind {
+        crate::provider::EmbeddingProviderKind::Ollama
+    }
+
     fn max_input_length(&self) -> usize {
         // Most Ollama embedding models support ~8192 tokens, budgeted
         // here as ~32_000 UTF-8 bytes (matches `str::len()` semantics —
@@ -84,6 +88,8 @@ impl EmbeddingProvider for OllamaEmbeddings {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
+
+        crate::provider::ensure_batch_within_limit(texts, self.max_input_length())?;
 
         let request = OllamaEmbedRequest {
             model: &self.model,
@@ -121,5 +127,23 @@ impl EmbeddingProvider for OllamaEmbeddings {
         }
 
         Ok(result.embeddings)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn embed_batch_rejects_over_limit_item() {
+        // The batched override enforces the per-item byte cap before any
+        // network call (#3752).
+        let provider = OllamaEmbeddings::new("http://localhost:11434");
+        let oversized = "a".repeat(provider.max_input_length() + 1);
+        let err = provider
+            .embed_batch(&[oversized])
+            .await
+            .expect_err("over-limit item must be rejected");
+        assert!(matches!(err, EmbeddingError::TextTooLong { .. }));
     }
 }

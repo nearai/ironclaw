@@ -81,7 +81,7 @@ impl OpenAiEmbeddings {
         let url = base_url.trim();
 
         // Auto-prepend https:// if no scheme is present.
-        let mut url = if !url.starts_with("http://") && !url.starts_with("https://") {
+        let url = if !url.starts_with("http://") && !url.starts_with("https://") {
             tracing::debug!(
                 "No scheme in embedding base URL '{}', prepending https://",
                 url
@@ -91,11 +91,13 @@ impl OpenAiEmbeddings {
             url.to_string()
         };
 
-        while url.ends_with('/') {
-            url.pop();
-        }
-
-        self.base_url = url;
+        // Normalize so the request path (`/v1/embeddings`) isn't doubled when an
+        // operator points EMBEDDING_BASE_URL at an OpenAI-compatible root that
+        // already ends in `/v1` (Together, Groq, OpenRouter, vLLM, llama.cpp) —
+        // otherwise we'd build `/v1/v1/embeddings` and 404 (#3754).
+        let normalized = url.trim_end_matches('/');
+        let normalized = normalized.strip_suffix("/v1").unwrap_or(normalized);
+        self.base_url = normalized.to_string();
         self
     }
 }
@@ -126,6 +128,10 @@ impl EmbeddingProvider for OpenAiEmbeddings {
         &self.model
     }
 
+    fn provider_kind(&self) -> crate::provider::EmbeddingProviderKind {
+        crate::provider::EmbeddingProviderKind::OpenAi
+    }
+
     fn max_input_length(&self) -> usize {
         // text-embedding-3-small/large + ada-002: ~8191 tokens, budgeted
         // here as ~32_000 UTF-8 bytes (matches `str::len()` semantics —
@@ -152,6 +158,8 @@ impl EmbeddingProvider for OpenAiEmbeddings {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
+
+        crate::provider::ensure_batch_within_limit(texts, self.max_input_length())?;
 
         let request = OpenAiEmbeddingRequest {
             model: &self.model,
@@ -236,7 +244,43 @@ mod tests {
 
     #[test]
     fn test_openai_with_base_url_schemeless_prepends_https() {
-        let provider = OpenAiEmbeddings::new("test-key").with_base_url("custom.example.com/v1");
-        assert_eq!(provider.base_url, "https://custom.example.com/v1");
+        let provider = OpenAiEmbeddings::new("test-key").with_base_url("custom.example.com");
+        assert_eq!(provider.base_url, "https://custom.example.com");
+    }
+
+    #[test]
+    fn test_openai_with_base_url_strips_trailing_v1() {
+        // OpenAI-compatible roots are commonly documented with a `/v1` suffix
+        // (Together, Groq, OpenRouter, vLLM, llama.cpp). The request path
+        // appends `/v1/embeddings`, so the suffix must be stripped to avoid
+        // `/v1/v1/embeddings` (#3754).
+        for input in [
+            "https://host.example.com/v1",
+            "https://host.example.com/v1/",
+            "host.example.com/v1",
+        ] {
+            let provider = OpenAiEmbeddings::new("test-key").with_base_url(input);
+            assert_eq!(
+                provider.base_url, "https://host.example.com",
+                "base_url for input {input:?}"
+            );
+        }
+
+        // http scheme is preserved while the trailing /v1 is still stripped.
+        let provider = OpenAiEmbeddings::new("test-key").with_base_url("http://localhost:8080/v1");
+        assert_eq!(provider.base_url, "http://localhost:8080");
+    }
+
+    #[tokio::test]
+    async fn test_openai_embed_batch_rejects_over_limit_item() {
+        // The batched override must enforce the per-item byte cap the same way
+        // `embed` does, before any network call (#3752).
+        let provider = OpenAiEmbeddings::new("test-key");
+        let oversized = "a".repeat(provider.max_input_length() + 1);
+        let err = provider
+            .embed_batch(&[oversized])
+            .await
+            .expect_err("over-limit item must be rejected");
+        assert!(matches!(err, EmbeddingError::TextTooLong { .. }));
     }
 }

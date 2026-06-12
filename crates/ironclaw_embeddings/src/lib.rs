@@ -27,4 +27,4 @@ pub use config::{DEFAULT_EMBEDDING_CACHE_SIZE, EmbeddingsConfig, default_dimensi
 pub use factory::{ProviderDeps, create_provider};
 #[cfg(any(test, feature = "testing"))]
 pub use mock::MockEmbeddings;
-pub use provider::{EmbeddingError, EmbeddingProvider};
+pub use provider::{EmbeddingError, EmbeddingProvider, EmbeddingProviderKind};
