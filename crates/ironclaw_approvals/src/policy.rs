@@ -937,6 +937,62 @@ mod tests {
         assert_eq!(derived_a.thread_id, None);
     }
 
+    #[test]
+    fn project_scoped_policy_key_serialization_stays_digest_stable() {
+        // Criterion 5 (#4825): the persistent-approval digest is
+        // `serde_json::to_vec(key)` and the on-disk path derives from it.
+        // Pre-existing project-scoped policies serialized the scope with
+        // `"thread_id": null` (an old project-scoped scope already blanked
+        // thread_id). The field is intentionally retained (always `None`) so the
+        // serialization — and thus the digest and storage path — is byte-identical
+        // after the upgrade. If this breaks, pre-existing project-scoped
+        // "always allow" policies orphan.
+        let key = key_for(&scope(Some("project-a"), Some("thread-ignored")));
+        let json = serde_json::to_string(&key).expect("serialize policy key");
+        assert!(
+            json.contains("\"thread_id\":null"),
+            "project-scoped key must serialize thread_id as null to preserve the digest; got {json}"
+        );
+
+        // Digest and tenant-scope path are independent of the originating thread,
+        // so a policy written before the upgrade is still located afterwards.
+        let digest_thread_one =
+            policy_digest(&key_for(&scope(Some("project-a"), Some("thread-1")))).expect("digest");
+        let digest_thread_two =
+            policy_digest(&key_for(&scope(Some("project-a"), Some("thread-2")))).expect("digest");
+        assert_eq!(digest_thread_one, digest_thread_two);
+        assert_eq!(
+            within_tenant_scope(&key.scope),
+            "agents/agent-a/projects/project-a"
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_project_scoped_policy_matches_in_new_thread_after_reload() {
+        // Criterion 5 (#4825): a project-scoped "always allow" persisted before
+        // thread_id was dropped from the scope must still match afterwards. A
+        // fresh store instance (simulating a restart/upgrade) looks the policy up
+        // from a DIFFERENT thread under the same project and finds it.
+        let backend = Arc::new(InMemoryBackend::new());
+        let scoped = scoped_fs(Arc::clone(&backend), "tenant-a", "alice");
+        let store = FilesystemPersistentApprovalPolicyStore::new(Arc::clone(&scoped));
+
+        let granted = store
+            .allow(input(scope(Some("project-a"), Some("thread-1"))))
+            .await
+            .expect("allow project-scoped policy");
+
+        let new_thread_key = key_for(&scope(Some("project-a"), Some("thread-2")));
+        let reloaded = FilesystemPersistentApprovalPolicyStore::new(scoped)
+            .lookup(&new_thread_key)
+            .await
+            .expect("lookup")
+            .expect("pre-existing project-scoped policy still matches in a new thread");
+
+        assert_eq!(reloaded, granted);
+        assert!(reloaded.active_grant().is_some());
+    }
+
     #[tokio::test]
     async fn policy_scope_without_project_is_thread_agnostic() {
         let scope_a = scope(None, Some("thread-a"));
