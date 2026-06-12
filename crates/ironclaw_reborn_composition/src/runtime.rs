@@ -3682,6 +3682,136 @@ mod tests {
         assert_eq!(auth_header, "Bearer sess_reborn_env_token");
     }
 
+    /// Counts how many times the runtime drives this provider and answers with a
+    /// fixed sentinel, so a test can prove an injected provider — not one built
+    /// from config — is the one the gateway actually calls.
+    #[cfg(feature = "root-llm-provider")]
+    struct CountingOverrideProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    #[async_trait::async_trait]
+    impl ironclaw_llm::LlmProvider for CountingOverrideProvider {
+        fn model_name(&self) -> &str {
+            "mock-override-model"
+        }
+
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: ironclaw_llm::CompletionRequest,
+        ) -> Result<ironclaw_llm::CompletionResponse, ironclaw_llm::LlmError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ironclaw_llm::CompletionResponse {
+                content: "override-driven".to_string(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
+                reasoning: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ironclaw_llm::ToolCompletionRequest,
+        ) -> Result<ironclaw_llm::ToolCompletionResponse, ironclaw_llm::LlmError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ironclaw_llm::ToolCompletionResponse {
+                content: Some("override-driven".to_string()),
+                tool_calls: Vec::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                reasoning: None,
+            })
+        }
+    }
+
+    /// The LLM-provider-injection seam: when a caller installs a provider via
+    /// `ResolvedRebornLlm::with_provider` (how the bench wraps an instrumented
+    /// provider to capture reasoning / tokens / cost / system-prompt / tool
+    /// definitions), the gateway must drive *that* provider and never build one
+    /// from config. The config here points at a dead endpoint, so if the
+    /// override were ignored the call would fail instead of returning the
+    /// mock's sentinel.
+    #[cfg(feature = "root-llm-provider")]
+    #[tokio::test]
+    async fn build_llm_gateway_drives_provider_override_not_config() {
+        let session_dir = tempfile::tempdir().expect("session tempdir");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mock: Arc<dyn ironclaw_llm::LlmProvider> = Arc::new(CountingOverrideProvider {
+            calls: Arc::clone(&calls),
+        });
+
+        let config = ironclaw_llm::LlmConfig {
+            backend: "nearai".to_string(),
+            session: ironclaw_llm::SessionConfig {
+                auth_base_url: "http://127.0.0.1:1".to_string(),
+                session_path: session_dir.path().join("session.json"),
+            },
+            nearai: ironclaw_llm::NearAiConfig {
+                model: "config-model-should-not-be-used".to_string(),
+                cheap_model: None,
+                base_url: "http://127.0.0.1:1".to_string(),
+                api_key: None,
+                fallback_model: None,
+                max_retries: 0,
+                circuit_breaker_threshold: None,
+                circuit_breaker_recovery_secs: 30,
+                response_cache_enabled: false,
+                response_cache_ttl_secs: 3600,
+                response_cache_max_entries: 1000,
+                failover_cooldown_secs: 300,
+                failover_cooldown_threshold: 3,
+                smart_routing_cascade: false,
+            },
+            provider: None,
+            bedrock: None,
+            gemini_oauth: None,
+            openai_codex: None,
+            request_timeout_secs: 5,
+            cheap_model: None,
+            smart_routing_cascade: false,
+            max_retries: 0,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+        };
+
+        let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config)
+            .with_provider(Arc::clone(&mock));
+        let bundle = super::build_llm_gateway(llm)
+            .await
+            .expect("gateway builds with the override provider");
+
+        let response = bundle
+            .gateway
+            .stream_model(nearai_gateway_test_request())
+            .await
+            .expect("gateway drives the override provider");
+
+        assert_eq!(
+            response.safe_text_deltas,
+            vec!["override-driven".to_string()],
+            "gateway must return the override provider's response, not a config-built one"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the override provider should be invoked exactly once"
+        );
+    }
+
     #[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
     #[tokio::test]
     async fn local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart() {
