@@ -9,7 +9,7 @@ use ironclaw_turns::{
         CapabilityFailureDetail, CapabilityFailureKind, CapabilityInputIssue,
         CapabilityInputIssueCode, CapabilityInputRepair, CapabilityInvocation,
         CapabilityRecoveryHint, CapabilityResultMessage, CapabilitySurfaceVersion,
-        ModelVisibleToolObservation, ObservationTrust, ProviderToolCallReference,
+        ModelVisibleToolObservation, ObservationTrust, ProviderToolCall, ProviderToolCallReference,
         SameCallRetryConstraint, ToolObservationDetail, ToolObservationStatus,
         ToolRecoveryObservation, VisibleCapabilitySurface,
     },
@@ -52,7 +52,42 @@ pub(super) fn pending_approval_resume_candidate(
     }
 }
 
-pub(super) fn pending_auth_resume_candidate(
+pub(super) async fn pending_auth_resume_candidate(
+    host: &(dyn AgentLoopDriverHost + Send + Sync),
+    resume: &PendingAuthResume,
+    surface_version: CapabilitySurfaceVersion,
+) -> Result<CapabilityCallCandidate, AgentLoopExecutorError> {
+    if let Some(replay) = resume.provider_replay.as_ref() {
+        let candidate = host
+            .register_provider_tool_call(ProviderToolCall {
+                provider_id: replay.provider_id.clone(),
+                provider_model_id: replay.provider_model_id.clone(),
+                turn_id: Some(replay.provider_turn_id.clone()),
+                id: replay.provider_call_id.clone(),
+                name: replay.provider_tool_name.clone(),
+                arguments: replay.arguments.clone(),
+                response_reasoning: replay.response_reasoning.clone(),
+                reasoning: replay.reasoning.clone(),
+                signature: replay.signature.clone(),
+            })
+            .await
+            .map_err(capability_host_error)?;
+        if candidate.capability_id != resume.capability_id
+            || candidate.effective_capability_ids != resume.effective_capability_ids
+        {
+            return Err(AgentLoopExecutorError::PlannerContract {
+                detail: "auth resume provider replay no longer matches blocked capability",
+            });
+        }
+        return Ok(candidate);
+    }
+    Ok(pending_auth_resume_staged_input_candidate(
+        resume,
+        surface_version,
+    ))
+}
+
+fn pending_auth_resume_staged_input_candidate(
     resume: &PendingAuthResume,
     surface_version: CapabilitySurfaceVersion,
 ) -> CapabilityCallCandidate {
@@ -502,7 +537,7 @@ mod tests {
         };
         let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
 
-        let candidate = pending_auth_resume_candidate(&resume, surface_version);
+        let candidate = pending_auth_resume_staged_input_candidate(&resume, surface_version);
 
         assert_eq!(
             candidate.effective_capability_ids,

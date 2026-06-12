@@ -3902,7 +3902,7 @@ async fn resume_after_auth_gate_redispatches_original_call_without_model_turn() 
     // that carries a pending_auth_resume record with the original input_ref.
     let gate_ref = LoopGateRef::new("gate:auth-resume-test").expect("valid");
     let completed_ref = LoopResultRef::new("result:auth-resumed").expect("valid");
-    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+    let host = MockHost::new(vec![provider_calls_response()]).with_batch_outcomes(vec![
         ironclaw_turns::run_profile::CapabilityBatchOutcome {
             outcomes: vec![CapabilityOutcome::AuthRequired {
                 gate_ref: gate_ref.clone(),
@@ -3951,18 +3951,31 @@ async fn resume_after_auth_gate_redispatches_original_call_without_model_turn() 
         "BeforeBlock checkpoint must carry pending_auth_resume"
     );
 
-    // Derive the expected input_ref from the BeforeBlock checkpoint before the
+    // Derive the stale input_ref from the BeforeBlock checkpoint before the
     // state is consumed by the phase 2 execute call.
-    let original_input_ref = before_block_state
+    let checkpoint_input_ref = before_block_state
         .pending_auth_resume
         .as_ref()
         .expect("pending_auth_resume set in BeforeBlock checkpoint")
         .input_ref
         .clone();
+    assert!(
+        before_block_state
+            .pending_auth_resume
+            .as_ref()
+            .expect("pending_auth_resume set")
+            .provider_replay
+            .is_some(),
+        "provider-backed auth resumes must checkpoint replay metadata"
+    );
+    assert!(
+        host.registered_provider_calls().is_empty(),
+        "phase 1 model response is already a candidate; registration happens on auth resume"
+    );
 
     // Phase 2 run — seeded from the BeforeBlock checkpoint state.
     // The prompt stage must detect pending_auth_resume and skip the model call,
-    // re-dispatching the original capability invocation directly.
+    // restaging the provider replay metadata before re-dispatching the capability.
     let second_exit = executor
         .execute_family(&crate::families::default(), &host, before_block_state)
         .await
@@ -3987,11 +4000,31 @@ async fn resume_after_auth_gate_redispatches_original_call_without_model_turn() 
         "expected two batch invocations (phase 1 block + phase 2 re-dispatch)"
     );
 
-    // The Phase 2 invocation must carry the original input_ref (derived from the
-    // BeforeBlock checkpoint, not a magic string literal).
+    // The Phase 2 invocation must carry a freshly staged input_ref. The
+    // checkpoint input_ref belonged to the old provider-call input resolver.
+    assert_ne!(
+        batch_invocations[1].invocations[0].input_ref, checkpoint_input_ref,
+        "provider-backed auth resume must not reuse the stale checkpoint input_ref"
+    );
     assert_eq!(
-        batch_invocations[1].invocations[0].input_ref, original_input_ref,
-        "re-dispatched invocation must carry the original input_ref"
+        batch_invocations[1].invocations[0].input_ref.as_str(),
+        "input:registered-provider-1",
+        "provider-backed auth resume must invoke with the restaged provider input"
+    );
+    let registered_provider_calls = host.registered_provider_calls();
+    assert_eq!(
+        registered_provider_calls.len(),
+        1,
+        "auth resume must restage exactly one provider tool call"
+    );
+    assert_eq!(
+        registered_provider_calls[0].name, "demo__echo",
+        "auth resume must restage the checkpointed provider tool name"
+    );
+    assert_eq!(
+        registered_provider_calls[0].arguments,
+        serde_json::json!({"message":"hello"}),
+        "auth resume must restage the checkpointed provider tool arguments"
     );
 
     // (c) Neither invocation carries an approval_resume token.
@@ -4017,6 +4050,75 @@ async fn resume_after_auth_gate_redispatches_original_call_without_model_turn() 
         final_state.result_refs,
         vec![completed_ref],
         "completed result ref must be recorded in final state"
+    );
+}
+
+#[tokio::test]
+async fn auth_resume_provider_registration_failure_fails_before_invocation() {
+    let gate_ref = LoopGateRef::new("gate:auth-resume-register-fails").expect("valid");
+    let completed_ref = LoopResultRef::new("result:unused-auth-resume").expect("valid");
+    let host = MockHost::new(vec![provider_calls_response()])
+        .with_batch_outcomes(vec![
+            ironclaw_turns::run_profile::CapabilityBatchOutcome {
+                outcomes: vec![CapabilityOutcome::AuthRequired {
+                    gate_ref: gate_ref.clone(),
+                    credential_requirements: Vec::new(),
+                    safe_summary: "auth required".to_string(),
+                }],
+                stopped_on_suspension: true,
+            },
+            ironclaw_turns::run_profile::CapabilityBatchOutcome {
+                outcomes: vec![CapabilityOutcome::Completed(
+                    ironclaw_turns::run_profile::CapabilityResultMessage {
+                        result_ref: completed_ref,
+                        safe_summary: "should not invoke".to_string(),
+                        progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                        terminate_hint: true,
+                        byte_len: 0,
+                    },
+                )],
+                stopped_on_suspension: false,
+            },
+        ])
+        .with_provider_registration_errors(vec![AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Internal,
+            "provider registration failed",
+        )]);
+    let executor = CanonicalAgentLoopExecutor;
+
+    let first_exit = executor
+        .execute_family(
+            &crate::families::default(),
+            &host,
+            LoopExecutionState::initial_for_run(host.run_context()),
+        )
+        .await
+        .expect("first execute blocks on auth gate");
+    assert!(
+        matches!(first_exit, LoopExit::Blocked(_)),
+        "expected Blocked exit, got {first_exit:?}"
+    );
+    let before_block_state = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+
+    let error = executor
+        .execute_family(&crate::families::default(), &host, before_block_state)
+        .await
+        .expect_err("provider registration failure should fail auth resume");
+
+    assert!(matches!(
+        error,
+        AgentLoopExecutorError::HostUnavailable {
+            stage: HostStage::Capability
+        }
+    ));
+    assert!(
+        host.registered_provider_calls().is_empty(),
+        "failed provider registration must not be recorded as staged"
+    );
+    assert_eq!(
+        host.batch_invocations().len(),
+        1,
+        "phase 2 must fail before invoking the resumed capability"
     );
 }
 

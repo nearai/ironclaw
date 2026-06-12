@@ -1779,6 +1779,7 @@ fn credential_stage_error_to_obligation_error(
                 .map(|obligation| {
                     vec![RuntimeCredentialAuthRequirement {
                         provider: obligation.provider.clone(),
+                        setup: obligation.setup.clone(),
                         requester_extension: obligation.requester_extension.clone(),
                         provider_scopes: obligation.provider_scopes.to_vec(),
                     }]

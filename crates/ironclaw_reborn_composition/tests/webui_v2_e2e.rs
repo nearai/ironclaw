@@ -828,28 +828,31 @@ async fn webui_v2_google_docs_setup_projects_oauth_before_install() {
     let secrets = setup_body["secrets"]
         .as_array()
         .expect("setup secrets should be an array");
-    let google_oauth_scopes = secrets
+    let mut google_oauth_scopes = secrets
         .iter()
         .filter(|secret| secret["provider"] == "google")
         .map(|secret| {
             let setup = &secret["setup"];
             assert_eq!(setup["kind"], "oauth", "secret should be OAuth: {secret}");
-            setup["scopes"]
+            let mut scopes = setup["scopes"]
                 .as_array()
                 .expect("OAuth scopes should be an array")
                 .iter()
                 .map(|scope| scope.as_str().expect("scope string").to_string())
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            scopes.sort();
+            scopes
         })
         .collect::<Vec<_>>();
+    google_oauth_scopes.sort();
 
     assert_eq!(
         google_oauth_scopes,
-        vec![
-            vec!["https://www.googleapis.com/auth/documents".to_string()],
-            vec!["https://www.googleapis.com/auth/documents.readonly".to_string()],
-        ],
-        "Google Docs setup should expose WASM-declared OAuth scopes before install: {setup_body}"
+        vec![vec![
+            "https://www.googleapis.com/auth/documents".to_string(),
+            "https://www.googleapis.com/auth/documents.readonly".to_string(),
+        ]],
+        "Google Docs setup should expose one OAuth credential with the WASM-declared scope union before install: {setup_body}"
     );
 
     harness
@@ -860,7 +863,7 @@ async fn webui_v2_google_docs_setup_projects_oauth_before_install() {
 }
 
 #[tokio::test]
-async fn webui_v2_google_drive_oauth_setup_projects_distinct_operation_scopes() {
+async fn webui_v2_google_drive_oauth_setup_coalesces_operation_scopes() {
     let harness = build_harness().await;
 
     let package_ref = json!({"kind": "extension", "id": "google-drive"});
@@ -886,41 +889,35 @@ async fn webui_v2_google_drive_oauth_setup_projects_distinct_operation_scopes() 
     let secrets = setup_body["secrets"]
         .as_array()
         .expect("setup secrets should be an array");
-    let google_oauth_setups = secrets
+    let google_oauth_scopes = secrets
         .iter()
         .filter(|secret| secret["provider"] == "google")
         .map(|secret| {
             let setup = &secret["setup"];
             assert_eq!(setup["kind"], "oauth", "secret should be OAuth: {secret}");
-            (
-                setup["account_label"]
-                    .as_str()
-                    .expect("OAuth account label")
-                    .to_string(),
-                setup["scopes"]
-                    .as_array()
-                    .expect("OAuth scopes should be an array")
-                    .iter()
-                    .map(|scope| scope.as_str().expect("scope string").to_string())
-                    .collect::<Vec<_>>(),
-            )
+            let mut scopes = setup["scopes"]
+                .as_array()
+                .expect("OAuth scopes should be an array")
+                .iter()
+                .map(|scope| scope.as_str().expect("scope string").to_string())
+                .collect::<Vec<_>>();
+            scopes.sort();
+            scopes
         })
         .collect::<Vec<_>>();
 
     assert_eq!(
-        google_oauth_setups
-            .iter()
-            .map(|(_, scopes)| scopes.clone())
-            .collect::<Vec<_>>(),
-        vec![
-            vec!["https://www.googleapis.com/auth/drive.readonly".to_string()],
-            vec!["https://www.googleapis.com/auth/drive".to_string()],
-        ],
-        "Google Drive setup should keep read-only and write OAuth scopes separate: {setup_body}"
+        google_oauth_scopes.len(),
+        1,
+        "Google Drive setup should coalesce read-only and write OAuth scopes into one credential: {setup_body}"
     );
-    assert_ne!(
-        google_oauth_setups[0].0, google_oauth_setups[1].0,
-        "split Google Drive setup credentials should have distinct account labels"
+    assert_eq!(
+        google_oauth_scopes[0],
+        vec![
+            "https://www.googleapis.com/auth/drive".to_string(),
+            "https://www.googleapis.com/auth/drive.readonly".to_string(),
+        ],
+        "Google Drive setup should expose one OAuth credential with the full scope union: {setup_body}"
     );
 
     harness

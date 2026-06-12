@@ -13,6 +13,7 @@ use secrecy::{ExposeSecret, SecretString};
 
 use crate::{
     RebornBuildError, RebornProductAuthServices,
+    extension_activation_credentials::RuntimeExtensionActivationCredentialGate,
     extension_lifecycle::{ExtensionActivationMode, RebornLocalExtensionManagementPort},
     webui_extension_credentials::ProductAuthExtensionCredentialSetup,
 };
@@ -223,14 +224,11 @@ pub(crate) async fn bootstrap_local_dev_nearai_mcp(
         }
     }
 
-    let scope = AuthProductScope::new(
-        ResourceScope::local_default(owner_user_id.clone(), InvocationId::new()).map_err(
-            |error| RebornBuildError::InvalidConfig {
-                reason: format!("NEAR AI MCP auto-enable scope could not be built: {error}"),
-            },
-        )?,
-        AuthSurface::Api,
-    );
+    let resource_scope = ResourceScope::local_default(owner_user_id.clone(), InvocationId::new())
+        .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("NEAR AI MCP auto-enable scope could not be built: {error}"),
+    })?;
+    let scope = AuthProductScope::new(resource_scope.clone(), AuthSurface::Api);
     let provider =
         AuthProviderId::new("nearai").map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("NEAR AI MCP provider id is invalid: {error}"),
@@ -289,7 +287,14 @@ pub(crate) async fn bootstrap_local_dev_nearai_mcp(
     match phase {
         LifecyclePhase::Discovered | LifecyclePhase::Installed => {
             extension_management
-                .activate(package_ref, ExtensionActivationMode::Static)
+                .activate_with_credential_gate(
+                    package_ref,
+                    ExtensionActivationMode::Static,
+                    RuntimeExtensionActivationCredentialGate::new(
+                        resource_scope,
+                        product_auth.runtime_credential_account_selection_service(),
+                    ),
+                )
                 .await
                 .map_err(|error| RebornBuildError::InvalidConfig {
                     reason: format!("NEAR AI MCP extension activation failed: {error}"),

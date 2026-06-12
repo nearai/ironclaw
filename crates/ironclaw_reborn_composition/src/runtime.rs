@@ -5648,34 +5648,24 @@ mod tests {
             )
             .await
             .expect("google setup extension lifecycle projection");
-        assert_eq!(google_setup.secrets.len(), 2);
-        let google_oauth_setups = google_setup
-            .secrets
-            .iter()
-            .map(|secret| {
-                assert_eq!(secret.provider, "google");
-                assert!(!secret.provided);
-                match &secret.setup {
-                    RebornExtensionCredentialSetup::OAuth {
-                        account_label,
-                        scopes,
-                        ..
-                    } => (account_label.clone(), scopes.clone()),
-                    RebornExtensionCredentialSetup::ManualToken => {
-                        panic!("Google setup secret should use OAuth")
-                    }
-                }
-            })
-            .collect::<Vec<_>>();
+        assert_eq!(google_setup.secrets.len(), 1);
+        let google_secret = &google_setup.secrets[0];
+        assert_eq!(google_secret.provider, "google");
+        assert!(!google_secret.provided);
+        let RebornExtensionCredentialSetup::OAuth { scopes, .. } = &google_secret.setup else {
+            panic!("Google setup secret should use OAuth")
+        };
         assert_eq!(
-            google_oauth_setups
+            scopes
                 .iter()
-                .map(|(_, scopes)| scopes.clone())
-                .collect::<Vec<_>>(),
-            vec![
-                vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()],
-                vec![GOOGLE_CALENDAR_EVENTS_SCOPE.to_string()],
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            [
+                GOOGLE_CALENDAR_EVENTS_SCOPE.to_string(),
+                GOOGLE_CALENDAR_READONLY_SCOPE.to_string(),
             ]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
         );
         let google_setup_json =
             serde_json::to_value(&google_setup.secrets[0]).expect("serialize setup secret");
