@@ -56,6 +56,10 @@ const WEB_ACCESS_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/web-access/manifest.toml");
 const NEARAI_MCP_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/nearai-mcp/manifest.toml");
+const NOVA_SUBMIT_MANIFEST: &str =
+    include_str!("../../ironclaw_first_party_extensions/assets/nova-submit/manifest.toml");
+const NOVA_SUBMIT_WASM_MODULE: &[u8] =
+    include_bytes!("../../ironclaw_first_party_extensions/assets/nova-submit/wasm/nova_submit.wasm");
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct AvailableExtensionAsset {
@@ -272,6 +276,7 @@ impl AvailableExtensionCatalog {
             google_sheets_package()?,
             google_slides_package()?,
             gmail_package()?,
+            nova_submit_package()?,
         ]))
     }
 
@@ -446,6 +451,34 @@ fn gmail_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     bundled_extension_package("gmail", "Gmail", GMAIL_MANIFEST, gmail_assets())
 }
 
+fn nova_submit_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    bundled_extension_package(
+        "nova-submit",
+        "Nova Submit",
+        NOVA_SUBMIT_MANIFEST,
+        nova_submit_assets(),
+    )
+}
+
+fn nova_submit_assets() -> Vec<AvailableExtensionAsset> {
+    vec![
+        bytes_asset("manifest.toml", NOVA_SUBMIT_MANIFEST.as_bytes()),
+        bytes_asset(
+            "schemas/nova-submit/submit_file.input.v1.json",
+            include_bytes!("../../ironclaw_first_party_extensions/assets/nova-submit/schemas/nova-submit/submit_file.input.v1.json"),
+        ),
+        bytes_asset(
+            "schemas/nova-submit/raw_output.v1.json",
+            include_bytes!("../../ironclaw_first_party_extensions/assets/nova-submit/schemas/nova-submit/raw_output.v1.json"),
+        ),
+        bytes_asset(
+            "prompts/nova-submit/submit_file.md",
+            include_bytes!("../../ironclaw_first_party_extensions/assets/nova-submit/prompts/nova-submit/submit_file.md"),
+        ),
+        bytes_asset("wasm/nova_submit.wasm", NOVA_SUBMIT_WASM_MODULE),
+    ]
+}
+
 pub(crate) fn google_calendar_manifest_digest() -> String {
     sha256_digest_token(GOOGLE_CALENDAR_MANIFEST.as_bytes())
 }
@@ -476,6 +509,11 @@ pub(crate) fn notion_mcp_manifest_digest() -> String {
 
 pub(crate) fn web_access_manifest_digest() -> String {
     sha256_digest_token(WEB_ACCESS_MANIFEST.as_bytes())
+}
+
+#[allow(dead_code)]
+pub(crate) fn nova_submit_manifest_digest() -> String {
+    sha256_digest_token(NOVA_SUBMIT_MANIFEST.as_bytes())
 }
 
 pub(crate) fn nearai_mcp_manifest_toml_for_config(
@@ -1419,7 +1457,7 @@ where
 fn reserved_host_bundled_extension_id(extension_id: &ExtensionId) -> bool {
     matches!(
         extension_id.as_str(),
-        "github" | "notion" | "web-access" | "nearai"
+        "github" | "notion" | "web-access" | "nearai" | "nova-submit"
     ) || is_gsuite_extension_id(extension_id)
 }
 

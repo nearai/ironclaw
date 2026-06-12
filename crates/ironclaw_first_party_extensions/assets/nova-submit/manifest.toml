@@ -1,0 +1,21 @@
+schema_version = "reborn.extension_manifest.v2"
+id = "nova-submit"
+name = "Nova Submit"
+version = "0.1.0"
+description = "Encrypt a file with AES-256-GCM and upload it to a NOVA group on NEAR."
+trust = "untrusted"
+
+[runtime]
+kind = "wasm"
+module = "wasm/nova_submit.wasm"
+
+[[capabilities]]
+id = "nova-submit.submit_file"
+description = "Encrypt a file with AES-256-GCM and upload it to a NOVA hackathon submission group on NEAR."
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/nova-submit/submit_file.input.v1.json"
+output_schema_ref = "schemas/nova-submit/raw_output.v1.json"
+prompt_doc_ref = "prompts/nova-submit/submit_file.md"
+required_host_ports = ["host.runtime.http_egress"]

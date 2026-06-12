@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
 # Launch IronClaw Reborn with the WebChat v2 web UI for local testing.
 #
+# Launches the standalone Reborn binary with the WebChat v2 web UI in
+# local-dev-yolo mode — skips onboarding, inherits host env, uses a fixed
+# bearer token and a default model route from env vars.
+#
 # Handles the setup footguns from docs/reborn-binary.md for you:
 #   - keeps the Reborn home OUTSIDE the repo (serve uses the cwd as the
 #     local-dev workspace root and rejects overlap with it);
-#   - configures the model route via `models set-provider`;
-#   - generates the WebUI bearer token and sets the WebUI user to the home's
-#     `[identity].default_owner` (falling back to `reborn-cli`, config init's
-#     default) so serve's owner check doesn't refuse to start.
+#   - seeds the config file via `models set-provider`;
+#   - sets the WebUI user to the home's `[identity].default_owner` (falling
+#     back to `reborn-cli`, config init's default) so serve's owner check
+#     doesn't refuse to start.
 #
 # Usage:
-#   scripts/run-reborn-webui.sh                 # NEAR AI defaults
+#   scripts/run-reborn-webui.sh                        # defaults below
 #   PROVIDER=openai scripts/run-reborn-webui.sh
 #   PROVIDER=anthropic MODEL=claude-sonnet-4-20250514 scripts/run-reborn-webui.sh
 #
@@ -19,12 +23,17 @@
 #
 # Overridable via environment:
 #   PROVIDER      provider id        (default: nearai)
-#   MODEL         model id           (default: provider catalog default)
+#   MODEL         model id           (default: $NEARAI_MODEL)
 #   REBORN_HOST   listen host        (default: 127.0.0.1)
 #   REBORN_PORT   listen port        (default: 3000)
 #   IRONCLAW_REBORN_HOME             (default: $HOME/.ironclaw-reborn-demo)
 #   IRONCLAW_REBORN_WEBUI_USER_ID    (default: home's [identity].default_owner)
-#   IRONCLAW_REBORN_WEBUI_TOKEN      (default: generated and printed)
+#   IRONCLAW_REBORN_WEBUI_TOKEN      (default: local-dev-token)
+#   NEARAI_MODEL                     (default: deepseek-ai/DeepSeek-V4-Flash)
+#   NEARAI_BASE_URL                  (default: https://cloud-api.near.ai)
+#   IRONCLAW_REBORN_PROFILE          (default: local-dev-yolo)
+#   IRONCLAW_REBORN_LOG              (default: info)
+#   IRONCLAW_TRIGGER_POLLER_ENABLED  (default: true)
 #
 # REBORN_HOST/REBORN_PORT are deliberately prefixed: a bare HOST would collide
 # with zsh's auto-set $HOST (the machine hostname), which could bind serve to a
@@ -36,6 +45,11 @@ PROVIDER="${PROVIDER:-nearai}"
 MODEL="${MODEL:-}"
 REBORN_HOST="${REBORN_HOST:-127.0.0.1}"
 REBORN_PORT="${REBORN_PORT:-3000}"
+NEARAI_MODEL="${NEARAI_MODEL:-deepseek-ai/DeepSeek-V4-Flash}"
+NEARAI_BASE_URL="${NEARAI_BASE_URL:-https://cloud-api.near.ai}"
+IRONCLAW_REBORN_PROFILE="${IRONCLAW_REBORN_PROFILE:-local-dev-yolo}"
+IRONCLAW_REBORN_LOG="${IRONCLAW_REBORN_LOG:-info}"
+IRONCLAW_TRIGGER_POLLER_ENABLED="${IRONCLAW_TRIGGER_POLLER_ENABLED:-true}"
 
 # This launcher prints a login URL for a browser, so a fixed port is required.
 # `serve --port 0` (kernel-picks-a-free-port) is for test harnesses only and
@@ -43,8 +57,7 @@ REBORN_PORT="${REBORN_PORT:-3000}"
 if [ "$REBORN_PORT" = "0" ]; then
   echo "error: REBORN_PORT=0 (kernel-assigned port) isn't usable for browser onboarding." >&2
   echo "       Set a fixed REBORN_PORT, or run the test-harness form directly:" >&2
-  echo "       cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta \\" >&2
-  echo "         --bin ironclaw-reborn -- serve --port 0" >&2
+  echo "       cargo run -p ironclaw_reborn_cli --features webui-v2-beta -- serve --port 0" >&2
   exit 1
 fi
 
@@ -78,12 +91,17 @@ if [ -n "$home_parent" ]; then
   esac
 fi
 
-# Generate a WebUI bearer token if the caller didn't supply one.
-if [ -z "${IRONCLAW_REBORN_WEBUI_TOKEN:-}" ]; then
-  export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"
-fi
+# Export runtime env vars that need to reach the spawned binary.
+export IRONCLAW_UNSAFE_RAW_HTTP_EGRESS_ERRORS=1
+export IRONCLAW_REBORN_LOG
+export IRONCLAW_REBORN_PROFILE
+export IRONCLAW_TRIGGER_POLLER_ENABLED
+export NEARAI_BASE_URL
+export NEARAI_MODEL
 
-CARGO=(cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn --)
+export IRONCLAW_REBORN_WEBUI_TOKEN="${IRONCLAW_REBORN_WEBUI_TOKEN:-local-dev-token}"
+
+CARGO=(cargo run -p ironclaw_reborn_cli --features webui-v2-beta --)
 
 # Configure the model route (compiles the binary on first run).
 set_provider_args=(models set-provider "$PROVIDER")
@@ -121,4 +139,4 @@ cat <<EOF
 
 EOF
 
-exec "${CARGO[@]}" serve --host "$REBORN_HOST" --port "$REBORN_PORT"
+exec "${CARGO[@]}" serve --confirm-host-access --host "$REBORN_HOST" --port "$REBORN_PORT"
