@@ -1921,6 +1921,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn slack_host_beta_stored_route_marks_connectable_slack_connected() {
+        let (runtime, _root) = runtime().await;
+        let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
+            .expect("mounts");
+        let route_mount = slack_channel_route_admin_route_mount(mounts.channel_routes.clone());
+        let bundle = build_webui_services_with_slack_host_beta_mounts(
+            &runtime,
+            None,
+            Some(&mounts),
+            SlackOperatorRouteVisibility::Hidden,
+        )
+        .expect("webui bundle");
+        upsert_slack_channel_route(&route_mount, "C0DYNAMIC", SHARED_SUBJECT).await;
+
+        let connectable = bundle
+            .api
+            .list_connectable_channels(shared_subject_caller())
+            .await
+            .expect("connectable channels");
+        let personal_slack = connectable
+            .channels
+            .iter()
+            .find(|channel| channel.strategy == RebornChannelConnectStrategy::InboundProofCode)
+            .expect("personal Slack channel");
+        assert_eq!(
+            personal_slack.connection_status,
+            RebornChannelConnectionStatus::Connected,
+            "a stored Slack route for the caller must mark personal Slack connected"
+        );
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
     async fn slack_host_beta_targets_page_multiple_route_store_pages() {
         let store = Arc::new(InMemorySlackChannelRouteStore::new());
         let tenant_id = TenantId::new(TENANT).expect("tenant");

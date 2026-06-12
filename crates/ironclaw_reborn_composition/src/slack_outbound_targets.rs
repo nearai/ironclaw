@@ -688,6 +688,8 @@ impl SlackDeliveryConnectionProvider for SlackHostBetaOutboundTargetProvider {
                 .has_active_shared_channel_route_for_caller(caller)
                 .await
             {
+                // silent-ok: connected-state projection is retryable, and an
+                // active shared route is independently sufficient Slack state.
                 Ok(true) => Ok(true),
                 Ok(false) => Err(personal_error),
                 Err(shared_error) => Err(shared_error),
