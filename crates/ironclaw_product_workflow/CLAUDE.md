@@ -97,6 +97,36 @@ caller before accepting messages, streaming events, canceling runs, or resolving
 gates. Browser/session metadata is not authority by itself, and send-message
 must not implicitly create missing threads.
 
+### Trigger-thread exception
+
+Automation trigger-fired threads are stored by `record_trigger_prompt` with
+`owner_user_id = Some(creator_user_id)` — the user who fired the trigger — not
+the WebUI caller's session user. The caller-scoped `SessionThreadService` probe
+therefore misses them.
+
+When a thread lookup misses under the caller's session scope, `RebornServices`
+falls back to `AutomationProductFacade::resolve_run_thread_scope`. That method
+is caller-scoped: it scans only the triggers visible to the authenticated caller,
+so the authorization check is embedded in the lookup. If a matching trigger run
+is found, the service reconstructs a `TurnScope` with:
+
+- `owner_user_id = Some(trigger creator_user_id)` — NOT the session caller
+- `agent_id` / `project_id` from the trigger record
+
+and substitutes the trigger creator as the `run_actor` for all downstream turn
+operations (timeline, SSE stream, gate resolve, cancel, run-state). The
+authorization model is automation visibility (`list_automations` semantics), not
+thread-owner == caller.
+
+**No caching.** Every call revalidates automation visibility through the facade.
+A caller that loses automation visibility mid-session cannot keep accessing the
+trigger-owned thread after their access is revoked. Caching the authz result
+is explicitly forbidden.
+
+**Backend/timeout errors** from `resolve_run_thread_scope` surface as
+`Unavailable` (503, retryable), never as 404. Only `Ok(None)` (thread not in
+any caller-visible trigger) produces a 404 response.
+
 WebUI-facing facade errors must expose stable, sanitized taxonomy. Keep
 `RebornServicesErrorCode` aligned with coarse transport/status shape and
 `RebornServicesErrorKind` aligned with M1-renderable user-safe families such as

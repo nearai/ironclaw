@@ -26,6 +26,7 @@ use crate::descriptors::{
     WEBUI_V2_PATTERN_OPERATOR_CONFIG_VALIDATE, WEBUI_V2_PATTERN_OPERATOR_DIAGNOSTICS,
     WEBUI_V2_PATTERN_OPERATOR_LOGS, WEBUI_V2_PATTERN_OPERATOR_SERVICE_LIFECYCLE,
     WEBUI_V2_PATTERN_OPERATOR_SETUP, WEBUI_V2_PATTERN_OPERATOR_STATUS,
+    WEBUI_V2_PATTERN_OUTBOUND_DELIVERY_TARGETS, WEBUI_V2_PATTERN_OUTBOUND_PREFERENCES,
     WEBUI_V2_PATTERN_REMOVE_EXTENSION, WEBUI_V2_PATTERN_RESOLVE_GATE,
     WEBUI_V2_PATTERN_SEARCH_SKILLS, WEBUI_V2_PATTERN_SEND_MESSAGE, WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
     WEBUI_V2_PATTERN_SETUP_EXTENSION, WEBUI_V2_PATTERN_SKILL_DETAIL,
@@ -144,6 +145,14 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
         .route(
             WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE,
             post(handlers::authorize_trace_hold),
+        )
+        .route(
+            WEBUI_V2_PATTERN_OUTBOUND_PREFERENCES,
+            get(handlers::get_outbound_preferences).post(handlers::set_outbound_preferences),
+        )
+        .route(
+            WEBUI_V2_PATTERN_OUTBOUND_DELIVERY_TARGETS,
+            get(handlers::list_outbound_delivery_targets),
         )
         .route(
             WEBUI_V2_PATTERN_LIST_CONNECTABLE_CHANNELS,

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::ack_helpers::internal_refs_from_ack;
+use crate::error::product_rejection_to_openai_error;
 use crate::identity::{
     OPENAI_COMPAT_ACTOR_KIND, OPENAI_COMPAT_ADAPTER_ID, OPENAI_COMPAT_INSTALLATION_ID,
 };
@@ -33,9 +34,8 @@ use ironclaw_product_adapters::{
     AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ExternalEventId,
     ParsedProductInbound, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
     ProductInboundPayload, ProductProjectionReadInput, ProductProjectionSubject,
-    ProductProjectionSubscribeInput, ProductRejection, ProductRejectionKind, ProductTriggerReason,
-    ProductWorkflow, ProductWorkflowRejectionKind, ProjectionReadRequest, ProtocolAuthEvidence,
-    TrustedInboundContext, UserMessagePayload,
+    ProductProjectionSubscribeInput, ProductRejection, ProductTriggerReason, ProductWorkflow,
+    ProjectionReadRequest, ProtocolAuthEvidence, TrustedInboundContext, UserMessagePayload,
 };
 
 const DEFAULT_CHAT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -617,32 +617,7 @@ fn accepted_ack_from_ack(
 }
 
 fn error_from_rejection(rejection: ProductRejection) -> OpenAiCompatHttpError {
-    match rejection.kind {
-        ProductRejectionKind::BindingRequired => {
-            OpenAiCompatHttpError::not_found(Some("messages".to_string()))
-        }
-        ProductRejectionKind::AccessDenied => OpenAiCompatHttpError::from_workflow_rejection(
-            ProductWorkflowRejectionKind::Unauthorized,
-            403,
-            false,
-            None,
-        ),
-        ProductRejectionKind::UnknownInstallation => OpenAiCompatHttpError::from_kind(
-            503,
-            true,
-            crate::OpenAiCompatErrorKind::ServiceUnavailable,
-            None,
-        ),
-        ProductRejectionKind::InvalidRequest => {
-            OpenAiCompatHttpError::invalid_request(Some("messages".to_string()))
-        }
-        ProductRejectionKind::PolicyDenied => OpenAiCompatHttpError::from_workflow_rejection(
-            ProductWorkflowRejectionKind::Unauthorized,
-            403,
-            false,
-            None,
-        ),
-    }
+    product_rejection_to_openai_error(&rejection, Some("messages"))
 }
 
 pub(crate) fn parse_chat_request(

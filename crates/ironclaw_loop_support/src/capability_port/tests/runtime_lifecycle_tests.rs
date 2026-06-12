@@ -22,8 +22,9 @@ use ironclaw_host_runtime::{
     RuntimeStatusRequest, VisibleCapabilitySurface,
 };
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureKind, CapabilityInputRef,
-    CapabilityOutcome, LoopCapabilityPort, LoopHostMilestoneSink, LoopRunContext,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityFailureKind,
+    CapabilityInputRef, CapabilityOutcome, LoopCapabilityPort, LoopHostMilestoneSink,
+    LoopRunContext,
 };
 
 #[tokio::test]
@@ -230,6 +231,168 @@ async fn runtime_capability_terminal_milestone_failure_is_retryable_without_rewr
 }
 
 #[tokio::test]
+async fn runtime_capability_batch_returns_runtime_unavailable_as_failed_outcome() {
+    let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+    let provider_id = ExtensionId::new("demo").expect("valid provider id");
+    let milestone_sink =
+        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+    let port = runtime_capability_port(
+        &capability_id,
+        &provider_id,
+        Arc::new(QueuedHostRuntime::new(
+            vec![visible_capability(
+                capability_id.clone(),
+                provider_id.clone(),
+            )],
+            vec![Err(HostRuntimeError::Unavailable {
+                reason: "runtime unavailable".to_string(),
+            })],
+        )),
+        Arc::new(RecordingResultWriter::default()),
+        milestone_sink.clone(),
+        "thread-runtime-capability-batch-runtime-unavailable",
+    )
+    .await;
+    let invocation = visible_runtime_invocation(&port).await;
+
+    let batch = port
+        .invoke_capability_batch(CapabilityBatchInvocation {
+            invocations: vec![invocation],
+            stop_on_first_suspension: false,
+        })
+        .await
+        .expect("runtime unavailability should be returned as a capability failure");
+
+    assert!(!batch.stopped_on_suspension);
+    assert_eq!(batch.outcomes.len(), 1);
+    assert!(matches!(
+        &batch.outcomes[0],
+        CapabilityOutcome::Failed(failure)
+            if failure.error_kind == CapabilityFailureKind::Unavailable
+                && failure.safe_summary == "runtime unavailable"
+    ));
+    let milestones = milestone_sink.milestones();
+    assert_eq!(milestones.len(), 2);
+    assert!(matches!(
+        &milestones[1].kind,
+        ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
+            activity_id: _,
+            capability_id: actual,
+            provider: Some(provider),
+            runtime: Some(RuntimeKind::FirstParty),
+            reason_kind
+        } if actual == &capability_id
+            && provider == &provider_id
+            && reason_kind == &CapabilityFailureKind::Unavailable
+    ));
+}
+
+#[tokio::test]
+async fn runtime_capability_batch_continues_after_runtime_failure_outcome() {
+    let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+    let provider_id = ExtensionId::new("demo").expect("valid provider id");
+    let milestone_sink =
+        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+    let port = runtime_capability_port(
+        &capability_id,
+        &provider_id,
+        Arc::new(QueuedHostRuntime::new(
+            vec![visible_capability(
+                capability_id.clone(),
+                provider_id.clone(),
+            )],
+            vec![
+                Err(HostRuntimeError::Unavailable {
+                    reason: "runtime unavailable".to_string(),
+                }),
+                Ok(RuntimeCapabilityOutcome::Completed(Box::new(
+                    RuntimeCapabilityCompleted {
+                        capability_id: capability_id.clone(),
+                        output: serde_json::json!({"ok": true}),
+                        display_preview: None,
+                        usage: ResourceUsage::default(),
+                    },
+                ))),
+            ],
+        )),
+        Arc::new(RecordingResultWriter::default()),
+        milestone_sink.clone(),
+        "thread-runtime-capability-batch-continues-after-runtime-failure",
+    )
+    .await;
+    port.visible_capabilities(VisibleCapabilityRequest {})
+        .await
+        .expect("visible capabilities load");
+    let mut second_call = provider_tool_call();
+    second_call.id = "call_2".to_string();
+    let first = port
+        .register_provider_tool_call(provider_tool_call())
+        .await
+        .expect("first provider tool call registers");
+    let second = port
+        .register_provider_tool_call(second_call)
+        .await
+        .expect("second provider tool call registers");
+
+    let batch = port
+        .invoke_capability_batch(CapabilityBatchInvocation {
+            invocations: vec![
+                CapabilityInvocation {
+                    surface_version: first.surface_version,
+                    capability_id: first.capability_id,
+                    input_ref: first.input_ref,
+                    approval_resume: None,
+                },
+                CapabilityInvocation {
+                    surface_version: second.surface_version,
+                    capability_id: second.capability_id,
+                    input_ref: second.input_ref,
+                    approval_resume: None,
+                },
+            ],
+            stop_on_first_suspension: false,
+        })
+        .await
+        .expect("runtime failure should not abort the remaining batch");
+
+    assert!(!batch.stopped_on_suspension);
+    assert_eq!(batch.outcomes.len(), 2);
+    assert!(matches!(
+        &batch.outcomes[0],
+        CapabilityOutcome::Failed(failure)
+            if failure.error_kind == CapabilityFailureKind::Unavailable
+                && failure.safe_summary == "runtime unavailable"
+    ));
+    assert!(matches!(
+        &batch.outcomes[1],
+        CapabilityOutcome::Completed(_)
+    ));
+    let milestones = milestone_sink.milestones();
+    assert_eq!(milestones.len(), 4);
+    assert!(matches!(
+        &milestones[1].kind,
+        ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
+            capability_id: actual,
+            provider: Some(provider),
+            runtime: Some(RuntimeKind::FirstParty),
+            reason_kind,
+            ..
+        } if actual == &capability_id
+            && provider == &provider_id
+            && reason_kind == &CapabilityFailureKind::Unavailable
+    ));
+    assert!(matches!(
+        &milestones[3].kind,
+        ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityCompleted {
+            capability_id: actual,
+            provider,
+            runtime: RuntimeKind::FirstParty,
+            ..
+        } if actual == &capability_id && provider == &provider_id
+    ));
+}
+
+#[tokio::test]
 async fn runtime_capability_failed_and_unknown_outcomes_emit_failure_milestones() {
     let cases = [
         (
@@ -407,6 +570,7 @@ async fn runtime_auth_gate_forwards_credential_requirements() {
     let provider_id = ExtensionId::new("demo").expect("provider id");
     let requirement = RuntimeCredentialAuthRequirement {
         provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        setup: Default::default(),
         requester_extension: provider_id.clone(),
         provider_scopes: Vec::new(),
     };
@@ -492,59 +656,93 @@ async fn runtime_capability_unknown_outcome_with_invalid_kind_does_not_emit_fail
 }
 
 #[tokio::test]
-async fn runtime_capability_host_error_emits_failure_milestone() {
-    let cases = [
-        (
-            HostRuntimeError::invalid_request("bad request"),
-            AgentLoopHostErrorKind::InvalidInvocation,
-        ),
-        (
-            HostRuntimeError::unavailable("runtime unavailable"),
-            AgentLoopHostErrorKind::Unavailable,
-        ),
-    ];
+async fn runtime_capability_unavailable_returns_failed_outcome_and_emits_failure_milestone() {
+    let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+    let provider_id = ExtensionId::new("demo").expect("valid provider id");
+    let milestone_sink =
+        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+    let port = runtime_capability_port(
+        &capability_id,
+        &provider_id,
+        Arc::new(QueuedHostRuntime::new(
+            vec![visible_capability(
+                capability_id.clone(),
+                provider_id.clone(),
+            )],
+            vec![Err(HostRuntimeError::unavailable("runtime unavailable"))],
+        )),
+        Arc::new(RecordingResultWriter::default()),
+        milestone_sink.clone(),
+        "thread-runtime-capability-unavailable-milestone",
+    )
+    .await;
 
-    for (runtime_error, expected_error_kind) in cases {
-        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
-        let provider_id = ExtensionId::new("demo").expect("valid provider id");
-        let milestone_sink =
-            Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
-        let port = runtime_capability_port(
-            &capability_id,
-            &provider_id,
-            Arc::new(QueuedHostRuntime::new(
-                vec![visible_capability(
-                    capability_id.clone(),
-                    provider_id.clone(),
-                )],
-                vec![Err(runtime_error)],
-            )),
-            Arc::new(RecordingResultWriter::default()),
-            milestone_sink.clone(),
-            "thread-runtime-capability-host-error-milestone",
-        )
-        .await;
+    let outcome = invoke_visible_runtime_capability(&port)
+        .await
+        .expect("host runtime unavailability should become a capability failure");
 
-        let error = invoke_visible_runtime_capability(&port)
-            .await
-            .expect_err("host runtime error propagates");
+    assert!(matches!(
+        outcome,
+        CapabilityOutcome::Failed(failure)
+            if failure.error_kind == CapabilityFailureKind::Unavailable
+    ));
+    let milestones = milestone_sink.milestones();
+    assert_eq!(milestones.len(), 2);
+    assert!(matches!(
+        &milestones[1].kind,
+        ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
+            activity_id: _,
+            capability_id: actual,
+            provider: Some(provider),
+            runtime: Some(RuntimeKind::FirstParty),
+            reason_kind
+        } if actual == &capability_id
+            && provider == &provider_id
+            && reason_kind == &CapabilityFailureKind::Unavailable
+    ));
+}
 
-        assert_eq!(error.kind, expected_error_kind);
-        let milestones = milestone_sink.milestones();
-        assert_eq!(milestones.len(), 2);
-        assert!(matches!(
-            &milestones[1].kind,
-            ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
-                activity_id: _,
-                capability_id: actual,
-                provider: Some(provider),
-                runtime: Some(RuntimeKind::FirstParty),
-                reason_kind
-            } if actual == &capability_id
-                && provider == &provider_id
-                && reason_kind.as_str() == expected_error_kind.as_str()
-        ));
-    }
+#[tokio::test]
+async fn runtime_capability_invalid_request_preserves_host_error_and_emits_failure_milestone() {
+    let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+    let provider_id = ExtensionId::new("demo").expect("valid provider id");
+    let milestone_sink =
+        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+    let port = runtime_capability_port(
+        &capability_id,
+        &provider_id,
+        Arc::new(QueuedHostRuntime::new(
+            vec![visible_capability(
+                capability_id.clone(),
+                provider_id.clone(),
+            )],
+            vec![Err(HostRuntimeError::invalid_request("bad request"))],
+        )),
+        Arc::new(RecordingResultWriter::default()),
+        milestone_sink.clone(),
+        "thread-runtime-capability-invalid-request-milestone",
+    )
+    .await;
+
+    let error = invoke_visible_runtime_capability(&port)
+        .await
+        .expect_err("host runtime invalid request should remain a host error");
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    let milestones = milestone_sink.milestones();
+    assert_eq!(milestones.len(), 2);
+    assert!(matches!(
+        &milestones[1].kind,
+        ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
+            activity_id: _,
+            capability_id: actual,
+            provider: Some(provider),
+            runtime: Some(RuntimeKind::FirstParty),
+            reason_kind
+        } if actual == &capability_id
+            && provider == &provider_id
+            && reason_kind.as_str() == AgentLoopHostErrorKind::InvalidInvocation.as_str()
+    ));
 }
 
 async fn runtime_capability_port(
@@ -687,6 +885,90 @@ async fn approval_resume_metadata_invokes_runtime_resume_with_original_invocatio
     );
 }
 
+#[tokio::test]
+async fn approval_resume_host_error_returns_failed_outcome_and_emits_failure_milestone() {
+    let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+    let provider_id = ExtensionId::new("demo").expect("valid provider id");
+    let approval_request_id = ApprovalRequestId::new();
+    let runtime = Arc::new(ApprovalResumeRecordingRuntime::new_with_resume_outcomes(
+        visible_capability(capability_id.clone(), provider_id.clone()),
+        approval_request_id,
+        vec![Err(HostRuntimeError::unavailable("runtime unavailable"))],
+    ));
+    let milestone_sink =
+        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+    let mut context = execution_context("thread-approval-resume-host-error");
+    let run_context = loop_run_context(&context).await;
+    let loop_driver_extension =
+        loop_driver_execution_extension_id(&run_context).expect("valid extension id");
+    context.grants.grants.push(dispatch_capability_grant(
+        &capability_id,
+        &loop_driver_extension,
+    ));
+    let port = HostRuntimeLoopCapabilityPortFactory::new(
+        runtime.clone(),
+        visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
+            provider_id.clone(),
+            dispatch_trust_decision(),
+        )])),
+        Arc::new(InputRefEchoResolver),
+        Arc::new(RecordingResultWriter::default()),
+        milestone_sink.clone(),
+    )
+    .port_for_run_context(run_context);
+
+    let first_invocation = visible_runtime_invocation(&port).await;
+    let first = port
+        .invoke_capability(first_invocation)
+        .await
+        .expect("first invocation returns approval gate");
+    let CapabilityOutcome::ApprovalRequired {
+        approval_resume: Some(resume),
+        ..
+    } = first
+    else {
+        panic!("approval gate must carry resume metadata, got {first:?}");
+    };
+
+    let surface = port
+        .visible_capabilities(VisibleCapabilityRequest {})
+        .await
+        .expect("visible capabilities load");
+    let resumed = port
+        .invoke_capability(CapabilityInvocation {
+            surface_version: surface.version,
+            capability_id: capability_id.clone(),
+            input_ref: CapabilityInputRef::new("input:approval-resume-host-error")
+                .expect("valid input ref"),
+            approval_resume: Some(resume),
+        })
+        .await
+        .expect("approval resume host error should become a capability failure");
+
+    assert!(matches!(
+        resumed,
+        CapabilityOutcome::Failed(failure)
+            if failure.error_kind == CapabilityFailureKind::Unavailable
+                && failure.safe_summary == "runtime unavailable"
+    ));
+    assert_eq!(runtime.invoke_count(), 1);
+    assert_eq!(runtime.resume_requests().len(), 1);
+    let milestones = milestone_sink.milestones();
+    assert_eq!(milestones.len(), 3);
+    assert!(matches!(
+        &milestones[2].kind,
+        ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
+            capability_id: actual,
+            provider: Some(provider),
+            runtime: Some(RuntimeKind::FirstParty),
+            reason_kind,
+            ..
+        } if actual == &capability_id
+            && provider == &provider_id
+            && reason_kind == &CapabilityFailureKind::Unavailable
+    ));
+}
+
 struct InputRefEchoResolver;
 
 #[async_trait]
@@ -705,15 +987,25 @@ struct ApprovalResumeRecordingRuntime {
     approval_request_id: ApprovalRequestId,
     invoke_count: AtomicUsize,
     resume_requests: Mutex<Vec<RuntimeCapabilityResumeRequest>>,
+    resume_outcomes: Mutex<VecDeque<Result<RuntimeCapabilityOutcome, HostRuntimeError>>>,
 }
 
 impl ApprovalResumeRecordingRuntime {
     fn new(capability: VisibleCapability, approval_request_id: ApprovalRequestId) -> Self {
+        Self::new_with_resume_outcomes(capability, approval_request_id, Vec::new())
+    }
+
+    fn new_with_resume_outcomes(
+        capability: VisibleCapability,
+        approval_request_id: ApprovalRequestId,
+        resume_outcomes: Vec<Result<RuntimeCapabilityOutcome, HostRuntimeError>>,
+    ) -> Self {
         Self {
             capability,
             approval_request_id,
             invoke_count: AtomicUsize::new(0),
             resume_requests: Mutex::new(Vec::new()),
+            resume_outcomes: Mutex::new(VecDeque::from(resume_outcomes)),
         }
     }
 
@@ -753,6 +1045,14 @@ impl HostRuntime for ApprovalResumeRecordingRuntime {
             .lock()
             .expect("resume requests lock")
             .push(request.clone());
+        if let Some(outcome) = self
+            .resume_outcomes
+            .lock()
+            .expect("resume outcomes lock")
+            .pop_front()
+        {
+            return outcome;
+        }
         Ok(RuntimeCapabilityOutcome::Completed(Box::new(
             RuntimeCapabilityCompleted {
                 capability_id: request.capability_id,

@@ -74,6 +74,18 @@ pub struct RebornLogQueryRequest {
     pub level: Option<RebornLogLevel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     #[serde(default)]
     pub tail: bool,
 }
@@ -85,6 +97,18 @@ pub struct RebornLogEntry {
     pub level: RebornLogLevel,
     pub target: String,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -818,7 +842,11 @@ pub enum RebornAutomationRecentRunStatus {
 pub struct RebornAutomationRecentRunInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<TurnRunId>,
-    pub thread_id: ThreadId,
+    /// Canonical thread id for this run, or `None` if no canonical conversation
+    /// thread has been established yet (e.g. pre-acceptance or failed runs).
+    /// The WebUI panel must not render a chat link when this field is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<ThreadId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fire_slot: Option<DateTime<Utc>>,
     #[serde(default)]
@@ -919,7 +947,12 @@ pub struct RebornAutomationInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RebornAutomationSource {
-    Schedule { cron: String },
+    Schedule {
+        cron: String,
+        /// IANA timezone name in which the cron expression is evaluated
+        /// (e.g. "America/New_York"). Always "UTC" for legacy rows.
+        timezone: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1199,6 +1232,44 @@ pub struct RebornOperatorSetupRequest {
     pub webui_access_token: Option<SecretString>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornOperatorSetupResponse {
+    pub area: RebornOperatorArea,
+    pub status: RebornOperatorSetupStatus,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<RebornOperatorSetupStep>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<RebornOperatorConfigDiagnostic>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornOperatorSetupStatus {
+    Complete,
+    Incomplete,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornOperatorSetupStep {
+    pub name: String,
+    pub status: RebornOperatorSetupStepStatus,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornOperatorSetupStepStatus {
+    Complete,
+    Required,
+    Unsupported,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornOperatorConfigValidateRequest {
     #[serde(default)]
@@ -1215,6 +1286,18 @@ pub struct RebornOperatorLogsQuery {
     pub level: Option<RebornLogLevel>,
     #[serde(default)]
     pub target: Option<String>,
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub run_id: Option<String>,
+    #[serde(default)]
+    pub turn_id: Option<String>,
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
+    #[serde(default)]
+    pub tool_name: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
     #[serde(default)]
     pub tail: bool,
 }

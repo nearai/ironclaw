@@ -18,7 +18,7 @@ use ironclaw_turns::{
         LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
         LoopModelResponse, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
         LoopRunContext, ModelProfileId, ModelStreamChunk, ParentLoopOutput, PromptMode,
-        ProviderToolCallReplay, RedactedRunProfileProvenance, ResolvedRunProfile,
+        ProviderToolCall, ProviderToolCallReplay, RedactedRunProfileProvenance, ResolvedRunProfile,
         ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
         RuntimeProfileConstraints, SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy,
         VisibleCapabilityRequest, VisibleCapabilitySurface,
@@ -57,6 +57,8 @@ pub(super) struct MockHost {
     checkpoints: Arc<Mutex<Vec<LoopCheckpointKind>>>,
     batch_invocations: Arc<Mutex<Vec<CapabilityBatchInvocation>>>,
     single_invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
+    registered_provider_calls: Arc<Mutex<Vec<ProviderToolCall>>>,
+    provider_registration_errors: Arc<Mutex<VecDeque<AgentLoopHostError>>>,
     staged_payloads: Arc<Mutex<Vec<StageCheckpointPayloadRequest>>>,
     appended_result_refs: Arc<Mutex<Vec<AppendCapabilityResultRef>>>,
     events: Arc<Mutex<Vec<String>>>,
@@ -75,6 +77,7 @@ pub(super) struct MockHost {
     fail_checkpoint: Arc<Mutex<Option<LoopCheckpointKind>>>,
     fail_visible_capabilities: bool,
     fail_prompt_bundle: bool,
+    fail_batch_with: Arc<Mutex<Option<AgentLoopHostErrorKind>>>,
 }
 
 impl MockHost {
@@ -93,6 +96,8 @@ impl MockHost {
             checkpoints: Arc::new(Mutex::new(Vec::new())),
             batch_invocations: Arc::new(Mutex::new(Vec::new())),
             single_invocations: Arc::new(Mutex::new(Vec::new())),
+            registered_provider_calls: Arc::new(Mutex::new(Vec::new())),
+            provider_registration_errors: Arc::new(Mutex::new(VecDeque::new())),
             staged_payloads: Arc::new(Mutex::new(Vec::new())),
             appended_result_refs: Arc::new(Mutex::new(Vec::new())),
             events: Arc::new(Mutex::new(Vec::new())),
@@ -111,6 +116,7 @@ impl MockHost {
             fail_checkpoint: Arc::new(Mutex::new(None)),
             fail_visible_capabilities: false,
             fail_prompt_bundle: false,
+            fail_batch_with: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -160,6 +166,16 @@ impl MockHost {
         self
     }
 
+    pub(super) fn fail_batch_with(self, kind: AgentLoopHostErrorKind) -> Self {
+        *self.fail_batch_with.lock().expect("lock") = Some(kind);
+        self
+    }
+
+    pub(super) fn with_provider_registration_errors(self, errors: Vec<AgentLoopHostError>) -> Self {
+        *self.provider_registration_errors.lock().expect("lock") = errors.into();
+        self
+    }
+
     pub(super) fn with_input_batches(self, batches: Vec<LoopInputBatch>) -> Self {
         *self.input_batches.lock().expect("lock") = batches.into();
         self
@@ -175,6 +191,10 @@ impl MockHost {
 
     pub(super) fn single_invocations(&self) -> Vec<CapabilityInvocation> {
         self.single_invocations.lock().expect("lock").clone()
+    }
+
+    pub(super) fn registered_provider_calls(&self) -> Vec<ProviderToolCall> {
+        self.registered_provider_calls.lock().expect("lock").clone()
     }
 
     pub(super) fn model_requests(&self) -> Vec<LoopModelRequest> {
@@ -572,6 +592,48 @@ impl ironclaw_turns::run_profile::LoopModelPort for MockHost {
 
 #[async_trait]
 impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
+    async fn register_provider_tool_call(
+        &self,
+        tool_call: ProviderToolCall,
+    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        if let Some(error) = self
+            .provider_registration_errors
+            .lock()
+            .expect("lock")
+            .pop_front()
+        {
+            return Err(error);
+        }
+        let provider_turn_id = tool_call.turn_id.clone().ok_or_else(|| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "provider tool call missing turn id",
+            )
+        })?;
+        let mut registered = self.registered_provider_calls.lock().expect("lock");
+        registered.push(tool_call.clone());
+        let input_ref =
+            CapabilityInputRef::new(format!("input:registered-provider-{}", registered.len()))
+                .expect("valid input ref");
+        Ok(CapabilityCallCandidate {
+            surface_version: self.visible_surface_version.clone(),
+            capability_id: capability_id(),
+            input_ref,
+            effective_capability_ids: vec![capability_id()],
+            provider_replay: Some(ProviderToolCallReplay {
+                provider_id: tool_call.provider_id,
+                provider_model_id: tool_call.provider_model_id,
+                provider_turn_id,
+                provider_call_id: tool_call.id,
+                provider_tool_name: tool_call.name,
+                arguments: tool_call.arguments,
+                response_reasoning: tool_call.response_reasoning,
+                reasoning: tool_call.reasoning,
+                signature: tool_call.signature,
+            }),
+        })
+    }
+
     async fn visible_capabilities(
         &self,
         _request: VisibleCapabilityRequest,
@@ -615,6 +677,9 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
         request: CapabilityBatchInvocation,
     ) -> Result<ironclaw_turns::run_profile::CapabilityBatchOutcome, AgentLoopHostError> {
         self.batch_invocations.lock().expect("lock").push(request);
+        if let Some(kind) = *self.fail_batch_with.lock().expect("lock") {
+            return Err(AgentLoopHostError::new(kind, "scripted batch failure"));
+        }
         let outcome = self
             .batch_outcomes
             .lock()

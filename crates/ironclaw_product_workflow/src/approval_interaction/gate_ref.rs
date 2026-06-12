@@ -18,7 +18,7 @@ pub fn approval_gate_ref(request_id: ApprovalRequestId) -> Result<GateRef, Produ
         .map_err(|_| approval_rejected(ApprovalInteractionRejectionKind::InvalidGateRef))
 }
 
-pub(super) fn approval_request_id_from_gate_ref(
+pub fn approval_request_id_from_gate_ref(
     gate_ref: &GateRef,
 ) -> Result<ApprovalRequestId, ProductWorkflowError> {
     let Some(value) = gate_ref.as_str().strip_prefix(APPROVAL_GATE_PREFIX) else {
@@ -50,4 +50,20 @@ pub(super) fn approval_reply_binding_ref(
         DEFAULT_BINDING_REF_RAW_MAX_BYTES,
     )
     .map_err(|_| approval_rejected(ApprovalInteractionRejectionKind::InvalidBindingRef))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_approval_gate_ref_accepts_only_typed_approval_prefix() {
+        let typed = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate");
+        let generic = GateRef::new("gate:approve-slack").expect("generic gate");
+        let adjacent = GateRef::new("gate:approvalish-test").expect("adjacent gate");
+
+        assert!(is_approval_gate_ref(&typed));
+        assert!(!is_approval_gate_ref(&generic));
+        assert!(!is_approval_gate_ref(&adjacent));
+    }
 }

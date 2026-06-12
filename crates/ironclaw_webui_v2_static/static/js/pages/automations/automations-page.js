@@ -1,14 +1,17 @@
 import { React, html } from "../../lib/html.js";
 import { useT } from "../../lib/i18n.js";
+import { AutomationDeliveryDefaultsPanel } from "./components/automation-delivery-defaults-panel.js";
 import { AutomationsList } from "./components/automations-list.js";
 import { AutomationsSummaryStrip } from "./components/automations-summary-strip.js";
 import { useAutomations } from "./hooks/useAutomations.js";
+import { useOutboundDeliveryDefaults } from "./hooks/useOutboundDeliveryDefaults.js";
 
 export function AutomationsPage() {
   const t = useT();
   const [filter, setFilter] = React.useState("all");
   const [selectedAutomationId, setSelectedAutomationId] = React.useState(null);
   const automationsState = useAutomations();
+  const deliveryState = useOutboundDeliveryDefaults();
   const showErrorOnly =
     automationsState.error &&
     !automationsState.isLoading &&
@@ -44,6 +47,7 @@ export function AutomationsPage() {
             ? null
             : html`
                 <${AutomationsSummaryStrip} summary=${automationsState.summary} />
+                <${AutomationDeliveryDefaultsPanel} deliveryState=${deliveryState} />
 
                 ${automationsState.isLoading
                   ? html`

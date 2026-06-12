@@ -21,6 +21,7 @@ pub use policy::{
     PersistentApprovalAction, PersistentApprovalPolicy, PersistentApprovalPolicyError,
     PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
     PersistentApprovalScope, permission_mode_allows_persistent_approval,
+    persistent_approval_grant_issuer,
 };
 
 pub struct ApprovalResolver<'a, A, L>

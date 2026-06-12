@@ -72,8 +72,8 @@ use ironclaw_turns::{
         LoopModelBudgetAccountant, LoopModelPolicyGuard, LoopModelPort, LoopModelRequest,
         LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
         LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopRunInfoPort, LoopTranscriptPort, NoOpBudgetAccountant, NoOpPolicyGuard,
-        ProviderToolCall, ProviderToolDefinition, RunScopedHookMilestoneSink,
+        LoopRunInfoPort, LoopRuntimeContext, LoopTranscriptPort, NoOpBudgetAccountant,
+        NoOpPolicyGuard, ProviderToolCall, ProviderToolDefinition, RunScopedHookMilestoneSink,
         StageCheckpointPayloadRequest, SystemInferencePort, UpdateAssistantDraft,
         VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
@@ -1506,7 +1506,12 @@ where
         .with_default_message_limit(max_messages)
         .with_current_surface_lookup(move || surface_state_for_prompt.current())
         .with_instruction_materialization_store(Arc::clone(&instruction_materialization_store))
-        .with_safety_context(self.safety_context.clone());
+        .with_safety_context(self.safety_context.clone())
+        // Stamped once per loop spawn; a resume creates a new host and restamps.
+        .with_runtime_context(LoopRuntimeContext {
+            loop_started_at_utc: chrono::Utc::now(),
+            user_timezone: None,
+        });
         let mut prompt: Arc<dyn LoopPromptPort> = Arc::new(prompt_port);
         if let Some(dispatcher) = per_build_dispatcher.as_ref() {
             // Pass a sink backed by the host's instruction materialization

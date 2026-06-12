@@ -369,7 +369,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn active_extension_capability_rejects_persistent_approval_when_manifest_asks() {
+    async fn active_extension_capability_allows_persistent_approval_when_manifest_asks() {
         let capability = CapabilityId::new("gmail.send_message").expect("capability id");
         let provider = ExtensionId::new("gmail").expect("provider id");
         let caller = ExtensionId::new("caller").expect("caller id");
@@ -399,10 +399,47 @@ mod tests {
             },
         );
 
+        terms_provider
+            .persistent_approval_allowed(&gate)
+            .await
+            .expect("active extension default ask should allow explicit persistent approval");
+    }
+
+    #[tokio::test]
+    async fn active_extension_capability_rejects_persistent_approval_when_manifest_denies() {
+        let capability = CapabilityId::new("gmail.send_message").expect("capability id");
+        let provider = ExtensionId::new("gmail").expect("provider id");
+        let caller = ExtensionId::new("caller").expect("caller id");
+        let source = LocalDevExtensionSurfaceSource::from_surface(
+            LocalDevExtensionSurface::from_active_capabilities(vec![ActiveExtensionCapability {
+                id: capability.clone(),
+                provider,
+                effects: vec![EffectKind::Network],
+                default_permission: PermissionMode::Deny,
+                runtime_credentials: Vec::new(),
+            }]),
+        );
+        let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
+            Arc::new(local_dev_capability_policy().expect("policy parses")),
+            Arc::new(ExtensionRegistry::new()),
+            MountView::default(),
+            MountView::default(),
+            MountView::default(),
+            source,
+        );
+        let gate = approval_gate_record(
+            ApprovalRequestId::new(),
+            Principal::Extension(caller),
+            Action::Dispatch {
+                capability,
+                estimated_resources: ResourceEstimate::default(),
+            },
+        );
+
         let error = terms_provider
             .persistent_approval_allowed(&gate)
             .await
-            .expect_err("active extension default ask should reject persistent approval");
+            .expect_err("active extension default deny should reject persistent approval");
 
         assert!(matches!(
             error,

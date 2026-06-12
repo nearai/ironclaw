@@ -1,4 +1,6 @@
 use ironclaw_product_adapters::{ProductAdapterError, ProductWorkflowRejectionKind};
+#[cfg(feature = "openai-compat-beta")]
+use ironclaw_product_adapters::{ProductRejection, ProductRejectionKind};
 use serde::{Deserialize, Serialize};
 
 use crate::OpenAiCompatRefError;
@@ -159,7 +161,9 @@ impl OpenAiCompatHttpError {
             ProductWorkflowRejectionKind::Unauthorized => OpenAiCompatErrorKind::PermissionDenied,
             ProductWorkflowRejectionKind::InvalidRequest => OpenAiCompatErrorKind::Validation,
             ProductWorkflowRejectionKind::Unavailable => OpenAiCompatErrorKind::ServiceUnavailable,
-            ProductWorkflowRejectionKind::Conflict => OpenAiCompatErrorKind::Conflict,
+            ProductWorkflowRejectionKind::Conflict | ProductWorkflowRejectionKind::Ambiguous => {
+                OpenAiCompatErrorKind::Conflict
+            }
         };
         Self::from_kind(status_code, retryable, error_kind, param)
     }
@@ -220,6 +224,48 @@ impl From<OpenAiCompatRefError> for OpenAiCompatHttpError {
                 Self::from_kind(503, true, OpenAiCompatErrorKind::ServiceUnavailable, None)
             }
             OpenAiCompatRefError::CorruptMapping => Self::internal(),
+        }
+    }
+}
+
+/// Translates a [`ProductRejection`] into an [`OpenAiCompatHttpError`].
+///
+/// `param` carries the surface-specific field name for `BindingRequired` and
+/// `InvalidRequest` rejections. Chat passes `Some("messages")`; Responses
+/// passes `Some("input")`.
+#[cfg(feature = "openai-compat-beta")]
+pub(crate) fn product_rejection_to_openai_error(
+    rejection: &ProductRejection,
+    param: Option<&str>,
+) -> OpenAiCompatHttpError {
+    match rejection.kind {
+        ProductRejectionKind::BindingRequired => {
+            OpenAiCompatHttpError::not_found(param.map(str::to_owned))
+        }
+        ProductRejectionKind::AccessDenied | ProductRejectionKind::PolicyDenied => {
+            OpenAiCompatHttpError::from_workflow_rejection(
+                ProductWorkflowRejectionKind::Unauthorized,
+                403,
+                false,
+                None,
+            )
+        }
+        ProductRejectionKind::UnknownInstallation => OpenAiCompatHttpError::from_kind(
+            503,
+            true,
+            OpenAiCompatErrorKind::ServiceUnavailable,
+            None,
+        ),
+        ProductRejectionKind::InvalidRequest => {
+            OpenAiCompatHttpError::invalid_request(param.map(str::to_owned))
+        }
+        ProductRejectionKind::AmbiguousResolution => {
+            OpenAiCompatHttpError::from_workflow_rejection(
+                ProductWorkflowRejectionKind::Ambiguous,
+                409,
+                false,
+                None,
+            )
         }
     }
 }

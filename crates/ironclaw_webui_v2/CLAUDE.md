@@ -87,6 +87,13 @@ browser-reachable.
 | `webui.v2.operator.logs` | GET | `/api/webchat/v2/operator/logs` | None | `ProjectionOnly` |
 | `webui.v2.operator.service_lifecycle` | POST | `/api/webchat/v2/operator/service` | None | `ProductWorkflow` |
 
+`webui.v2.operator.logs` accepts bounded `limit`, `cursor`, `level`, and `target`
+query parameters, the existing boolean `tail` flag from `RebornOperatorLogsQuery`,
+plus optional scoped filters for `thread_id`, `run_id`, `turn_id`, `tool_call_id`,
+`tool_name`, and `source`. Responses include the same correlation fields when the
+captured tracing context provides them and expose tail/follow capability through
+`tail_supported` and `follow_supported`.
+
 All routes require `BearerToken` auth with `AuthenticatedCaller`
 scope source. The host's bearer middleware is responsible for
 constructing the `WebUiAuthenticatedCaller`, carrying the matched
@@ -99,7 +106,11 @@ has an operator configuration surface, and must still authorize each
 request from the matched token's `operator_webui_config` capability.
 Multi-user session/OIDC authenticators should leave those routes
 unmounted or return non-operator capabilities until an admin role
-boundary exists. Unwired operator command-plane write, setup, log, and
+boundary exists. The route handlers also reject mounted operator
+requests with `403` when the injected `WebUiV2Capabilities` lacks
+`operator_webui_config`, so host composition and handler dispatch share
+the same fail-closed capability boundary.
+Unwired operator command-plane write, setup, log, and
 service-control methods fail closed with sanitized `503 service_unavailable`
 responses. Config validation plus read-only config, status, and diagnostics
 surfaces may instead return unavailable command-plane payloads with redacted
@@ -108,6 +119,9 @@ unsupported-config reason codes currently include
 `operator_config_service_not_wired`, `operator_config_secret_not_wired`,
 `operator_config_deprecated`, `operator_config_immutable`,
 `operator_config_not_wired`, and `operator_config_unknown_key`.
+`POST /api/webchat/v2/operator/setup` uses the typed LLM config service
+for provider/model setup; profile and WebUI access setup return redacted
+not-yet-wired diagnostics until those owning services are exposed.
 
 ### List-threads
 

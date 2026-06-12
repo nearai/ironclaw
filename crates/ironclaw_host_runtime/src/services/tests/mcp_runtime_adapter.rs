@@ -14,6 +14,9 @@ use super::*;
 async fn mcp_adapter_maps_executor_auth_required_to_dispatch_auth_required() {
     let requirement = RuntimeCredentialAuthRequirement {
         provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+            scopes: vec!["repo".to_string()],
+        },
         requester_extension: ExtensionId::new("mcp").unwrap(),
         provider_scopes: vec!["repo".to_string()],
     };
