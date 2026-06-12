@@ -2,9 +2,11 @@ import { createFileRoute, Link, Outlet, useRouterState } from "@tanstack/react-r
 import { getAccount, getActiveRuntime, getAppName, sessionQueryOptions } from "@/app";
 import builtOn from "@/assets/built_on.png";
 import builtOnRev from "@/assets/built_on_rev.png";
+import { IronclawStatus } from "@/components/ironclaw-status";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { UserNav } from "@/components/user-nav";
+import { useIronclawStatus } from "@/hooks/use-ironclaw-status";
 import { pluginSidebarItems, type SidebarItem, type SidebarRole } from "@/lib/plugin-sidebar.gen";
 
 function filterSidebarByRole(items: SidebarItem[], userRole: SidebarRole): SidebarItem[] {
@@ -48,6 +50,7 @@ function Layout() {
   const userRole = getUserRole(isAuthenticated, session?.user?.role === "admin");
   const visibleItems = filterSidebarByRole(pluginSidebarItems, userRole);
   const gatewayId = runtime?.gatewayId;
+  const { status: connectionStatus } = useIronclawStatus();
 
   const isActive = (item: SidebarItem) => {
     return pathname === item.to || (item.to !== "/" && pathname.startsWith(`${item.to}/`));
@@ -84,13 +87,26 @@ function Layout() {
               {visibleItems.map((item) => {
                 const Icon = item.icon;
                 const active = isActive(item);
-                const className = `flex items-center justify-center w-10 h-10 border-2 border-outset border-border-strong shadow-sm transition-all duration-200 ease-out hover:shadow-md ${active ? "bg-foreground text-background" : "bg-card text-foreground hover:bg-muted"}`;
+                const isIronclaw = item.to === "/ironclaw";
+                const className = `relative flex items-center justify-center w-10 h-10 border-2 border-outset border-border-strong shadow-sm transition-all duration-200 ease-out hover:shadow-md ${active ? "bg-foreground text-background" : "bg-card text-foreground hover:bg-muted"}`;
+
+                const statusDotColor =
+                  connectionStatus === "connected"
+                    ? "bg-[color:var(--near-green)]"
+                    : connectionStatus === "checking"
+                      ? "bg-muted-foreground"
+                      : "bg-destructive";
 
                 return (
                   <Tooltip key={item.label}>
                     <TooltipTrigger asChild>
                       <Link to={item.to} preload="intent" className={className}>
                         <Icon className="w-4 h-4" />
+                        {isIronclaw && (
+                          <span
+                            className={`absolute top-0.5 right-0.5 h-2 w-2 rounded-full border-2 border-card ${statusDotColor}`}
+                          />
+                        )}
                       </Link>
                     </TooltipTrigger>
                     <TooltipContent side="right">{item.label}</TooltipContent>
@@ -177,6 +193,7 @@ function Layout() {
               )}
 
               <div className="flex items-center gap-2">
+                {isAuthenticated && <IronclawStatus />}
                 <UserNav />
               </div>
             </div>
@@ -221,11 +238,26 @@ function Layout() {
                 {visibleItems.map((item) => {
                   const Icon = item.icon;
                   const active = isActive(item);
+                  const isIronclaw = item.to === "/ironclaw";
                   const className = `flex flex-col items-center justify-center gap-0.5 p-1.5 transition-colors duration-200 ${active ? "text-foreground" : "text-muted-foreground"}`;
+
+                  const statusDotColor =
+                    connectionStatus === "connected"
+                      ? "bg-[color:var(--near-green)]"
+                      : connectionStatus === "checking"
+                        ? "bg-muted-foreground"
+                        : "bg-destructive";
 
                   return (
                     <Link key={item.label} to={item.to} preload="intent" className={className}>
-                      <Icon className="w-4 h-4" />
+                      <div className="relative">
+                        <Icon className="w-4 h-4" />
+                        {isIronclaw && (
+                          <span
+                            className={`absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full border border-card ${statusDotColor}`}
+                          />
+                        )}
+                      </div>
                       <span className="text-[10px]">{item.label}</span>
                     </Link>
                   );

@@ -93,6 +93,7 @@ export const Route = createRootRouteWithContext<RouterContext>()({
           rel: "stylesheet",
           href: `${assetsUrl ?? ""}/static/css/style.css${runtimeConfig?.ui?.integrity ? `?v=${encodeURIComponent(runtimeConfig.ui.integrity)}` : ""}`,
         },
+        { rel: "preconnect", href: "https://api.fontshare.com" },
         { rel: "preconnect", href: "https://fonts.googleapis.com" },
         {
           rel: "preconnect",
