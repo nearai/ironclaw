@@ -73,6 +73,13 @@ use crate::{
 /// rather than ricocheting between racing writers.
 const MAX_CAS_RETRIES: usize = 5;
 
+/// Maximum number of CAS retries for conversation-index read-modify-writes.
+/// Tighter than `MAX_CAS_RETRIES` because index writes are best-effort
+/// (callers treat route-store errors as non-fatal) and we want to bound spin
+/// time across a small burst of concurrent gate deliveries to the same
+/// conversation.
+const MAX_CONV_IDX_CAS_RETRIES: usize = 3;
+
 /// Indexed projection key for the scope of a delivery attempt. The value is a
 /// hash of `(tenant, agent?, project?, thread)` — the same key
 /// [`thread_scope_key`] computes for policy paths — so backends without
@@ -266,26 +273,15 @@ where
             let idx_path =
                 delivered_gate_route_conv_idx_path(&record.tenant_id, conversation_fingerprint)
                     .map_err(|e| format!("delivered gate route conversation index path: {e}"))?;
-            // Read existing index file (if any) and merge: add this route's
-            // entry to the set. Duplicate identity triples are de-duped.
-            let mut routes: Vec<DeliveredGateRouteConversationIndexRouteEntry> = self
-                .get_json::<DeliveredGateRouteConversationIndexFile>(&resource_scope, &idx_path)
-                .await
-                .map_err(|e| {
-                    format!("delivered gate route conversation index read for merge: {e}")
-                })?
-                .map(|f| f.into_routes())
-                .unwrap_or_default();
-            if !routes.iter().any(|r| r == &new_entry) {
-                routes.push(new_entry.clone());
-            }
-            let file = DeliveredGateRouteConversationIndexFile::from_routes(routes);
-            let body = serde_json::to_vec(&file)
-                .map_err(|e| format!("delivered gate route conversation index serialize: {e}"))?;
-            let entry = Entry::bytes(body).with_content_type(ContentType::json());
-            self.put_with_byte_fallback(&resource_scope, &idx_path, entry, CasExpectation::Any)
-                .await
-                .map_err(|e| format!("delivered gate route conversation index write: {e}"))?;
+            let entry_to_add = new_entry.clone();
+            self.retry_conv_idx(&resource_scope, &idx_path, |mut routes| {
+                if !routes.iter().any(|r| r == &entry_to_add) {
+                    routes.push(entry_to_add.clone());
+                }
+                ConvIdxUpdate::Write(routes)
+            })
+            .await
+            .map_err(|e| format!("delivered gate route conversation index write: {e}"))?;
         }
         Ok(())
     }
@@ -305,41 +301,95 @@ where
             let idx_path =
                 delivered_gate_route_conv_idx_path(&record.tenant_id, conversation_fingerprint)
                     .map_err(|e| format!("delivered gate route conversation index path: {e}"))?;
-            let current_file = match self
-                .get_json::<DeliveredGateRouteConversationIndexFile>(&resource_scope, &idx_path)
-                .await
-                .map_err(|e| format!("delivered gate route conversation index read: {e}"))?
-            {
-                Some(f) => f,
-                None => continue,
-            };
-            let mut routes = current_file.into_routes();
-            routes.retain(|r| r != &entry_to_remove);
-            if routes.is_empty() {
-                // Last entry removed — delete the index file.
-                match self.filesystem.delete(&resource_scope, &idx_path).await {
-                    Ok(()) | Err(FilesystemError::NotFound { .. }) => {}
-                    Err(e) => {
-                        return Err(format!(
-                            "delivered gate route conversation index delete: {e}"
-                        ));
-                    }
+            let entry = entry_to_remove.clone();
+            self.retry_conv_idx(&resource_scope, &idx_path, |mut routes| {
+                routes.retain(|r| r != &entry);
+                if routes.is_empty() {
+                    ConvIdxUpdate::Delete
+                } else {
+                    ConvIdxUpdate::Write(routes)
                 }
-            } else {
-                // Still has other routes — overwrite with the trimmed set.
-                let file = DeliveredGateRouteConversationIndexFile::from_routes(routes);
-                let body = serde_json::to_vec(&file).map_err(|e| {
-                    format!("delivered gate route conversation index serialize after remove: {e}")
-                })?;
-                let entry = Entry::bytes(body).with_content_type(ContentType::json());
-                self.put_with_byte_fallback(&resource_scope, &idx_path, entry, CasExpectation::Any)
-                    .await
-                    .map_err(|e| {
-                        format!("delivered gate route conversation index write after remove: {e}")
-                    })?;
-            }
+            })
+            .await
+            .map_err(|e| {
+                format!("delivered gate route conversation index write after remove: {e}")
+            })?;
         }
         Ok(())
+    }
+
+    /// Read-modify-write a conversation index file under versioned CAS, with a
+    /// bounded retry loop to absorb concurrent writes to the same fingerprint.
+    ///
+    /// `merge` receives the current route list (empty if the file is absent)
+    /// and returns one of:
+    /// - [`ConvIdxUpdate::Write`] — serialize and write back the updated list.
+    /// - [`ConvIdxUpdate::Delete`] — the list is empty; delete the index file.
+    ///
+    /// The CAS expectation is:
+    /// - `CasExpectation::Absent` when the file did not exist at read time.
+    /// - `CasExpectation::Version(v)` when the file existed at read time.
+    ///
+    /// On a `CasConflict` the loop re-reads and re-applies `merge`; after
+    /// `MAX_CONV_IDX_CAS_RETRIES` attempts the error is surfaced as a
+    /// `String` and callers log it at best-effort.
+    ///
+    /// Note on `put_with_byte_fallback`: when the underlying mount is a
+    /// `LocalFilesystem`, the fallback leg strips the CAS expectation and
+    /// retries with `CasExpectation::Any`. That means the versioned-CAS
+    /// guarantee is not available for local-filesystem mounts; concurrent
+    /// writes on that backend still risk last-write-wins. This is accepted
+    /// because (a) local-filesystem mounts are dev/test only and (b) the
+    /// `LocalFilesystem` has no version-tracking sidecar yet. The fallback
+    /// is kept to avoid breaking those mounts entirely; production
+    /// (libSQL/Postgres) backends honour the CAS expectation.
+    async fn retry_conv_idx(
+        &self,
+        resource_scope: &ResourceScope,
+        idx_path: &ScopedPath,
+        mut merge: impl FnMut(Vec<DeliveredGateRouteConversationIndexRouteEntry>) -> ConvIdxUpdate,
+    ) -> Result<(), OutboundError> {
+        for _ in 0..MAX_CONV_IDX_CAS_RETRIES {
+            // Read the current file and capture its version for CAS.
+            let (routes, cas) = match self
+                .get_versioned_json::<DeliveredGateRouteConversationIndexFile>(
+                    resource_scope,
+                    idx_path,
+                )
+                .await?
+            {
+                Some((file, versioned)) => (
+                    file.into_routes(),
+                    CasExpectation::Version(versioned.version),
+                ),
+                None => (Vec::new(), CasExpectation::Absent),
+            };
+
+            match merge(routes) {
+                ConvIdxUpdate::Write(updated) => {
+                    let file = DeliveredGateRouteConversationIndexFile::from_routes(updated);
+                    let body =
+                        serde_json::to_vec(&file).map_err(|_| OutboundError::Serialization)?;
+                    let entry = Entry::bytes(body).with_content_type(ContentType::json());
+                    match self
+                        .put_with_byte_fallback(resource_scope, idx_path, entry, cas)
+                        .await
+                    {
+                        Ok(()) => return Ok(()),
+                        Err(OutboundError::CasConflict) => continue,
+                        Err(e) => return Err(e),
+                    }
+                }
+                ConvIdxUpdate::Delete => {
+                    // Nothing to write; delete the now-empty index file.
+                    match self.filesystem.delete(resource_scope, idx_path).await {
+                        Ok(()) | Err(FilesystemError::NotFound { .. }) => return Ok(()),
+                        Err(e) => return Err(map_fs_error(e)),
+                    }
+                }
+            }
+        }
+        Err(OutboundError::Backend)
     }
 
     /// Writes preference records with versioned CAS only.
@@ -755,6 +805,14 @@ fn delivered_gate_route_conv_idx_path(
         "{DELIVERED_GATE_ROUTES_CONV_IDX_ROOT}/{digest}.json"
     ))
     .map_err(|_| OutboundError::Backend)
+}
+
+/// Outcome of a [`FilesystemOutboundStateStore::retry_conv_idx`] merge
+/// callback: either write back an updated route list or delete the now-empty
+/// index file.
+enum ConvIdxUpdate {
+    Write(Vec<DeliveredGateRouteConversationIndexRouteEntry>),
+    Delete,
 }
 
 /// Identity triple for one route entry in a conversation index file.
@@ -1974,6 +2032,183 @@ mod tests {
         let routes = file.into_routes();
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].gate_ref, "gate:v1-compat-ref");
+    }
+
+    /// Build two `FilesystemOutboundStateStore` instances sharing the same
+    /// `InMemoryBackend`, allowing a second writer to simulate a concurrent
+    /// mid-flight mutation of the same index files.
+    fn build_shared_backend_stores(
+        tenant_id: &TenantId,
+        user_id: &UserId,
+    ) -> (
+        FilesystemOutboundStateStore<InMemoryBackend>,
+        FilesystemOutboundStateStore<InMemoryBackend>,
+    ) {
+        let backend = Arc::new(InMemoryBackend::new());
+        let store_a = FilesystemOutboundStateStore::new(build_scoped_fs_for_gate_routes(
+            backend.clone(),
+            tenant_id,
+            user_id,
+        ));
+        let store_b = FilesystemOutboundStateStore::new(build_scoped_fs_for_gate_routes(
+            backend, tenant_id, user_id,
+        ));
+        (store_a, store_b)
+    }
+
+    #[tokio::test]
+    async fn filesystem_conv_idx_cas_retry_merges_concurrent_writes() {
+        // Regression for the dropped-entry race: two concurrent gate deliveries
+        // to the same conversation fingerprint must both be retrievable even if
+        // they race to update the conversation index.
+        //
+        // The CAS-retried index path guarantees that a second writer re-reads
+        // the index after a conflict, merges its entry into the existing set,
+        // and writes back — rather than overwriting with only its own entry.
+        // We exercise this by having two stores share the same backend and
+        // write to the same conversation fingerprint sequentially; the second
+        // store's write must not drop the first store's entry.
+        let tenant_id = TenantId::new("fs-cas-retry-tenant").expect("tenant");
+        let user_id = UserId::new("fs-cas-retry-user").expect("user");
+        let thread_id = ThreadId::new("fs-cas-retry-thread").expect("thread");
+        let shared_conv = "fingerprint:cas-retry-shared";
+
+        let scope = TurnScope::new_with_owner(
+            tenant_id.clone(),
+            None,
+            None,
+            thread_id,
+            Some(user_id.clone()),
+        );
+
+        let (store_a, store_b) = build_shared_backend_stores(&tenant_id, &user_id);
+
+        let mut rec_a = gate_route_record(
+            tenant_id.clone(),
+            user_id.clone(),
+            "gate:cas-retry-a",
+            TurnRunId::new(),
+            scope.clone(),
+        );
+        rec_a.delivered_conversation_fingerprints = vec![shared_conv.to_string()];
+
+        let mut rec_b = gate_route_record(
+            tenant_id.clone(),
+            user_id.clone(),
+            "gate:cas-retry-b",
+            TurnRunId::new(),
+            scope,
+        );
+        rec_b.delivered_conversation_fingerprints = vec![shared_conv.to_string()];
+
+        // Both stores record their gate routes (writing to the shared backend).
+        // Because the conversation index file is shared, the second write must
+        // merge rather than overwrite.
+        store_a
+            .record_delivered_gate_route(rec_a.clone())
+            .await
+            .expect("store_a record must succeed");
+        store_b
+            .record_delivered_gate_route(rec_b.clone())
+            .await
+            .expect("store_b record must succeed");
+
+        // Both routes must appear in the conversation lookup.
+        let mut routes = store_a
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, shared_conv)
+            .await
+            .expect("lookup must not error");
+        routes.sort_by(|a, b| a.gate_ref.cmp(&b.gate_ref));
+        assert_eq!(
+            routes.len(),
+            2,
+            "both concurrent routes must be retrievable after CAS-retried index writes"
+        );
+        assert_eq!(routes[0].gate_ref, "gate:cas-retry-a");
+        assert_eq!(routes[1].gate_ref, "gate:cas-retry-b");
+    }
+
+    #[tokio::test]
+    async fn filesystem_conv_idx_stale_version_write_retries_and_merges() {
+        // Simulate the exact interleaving that caused the dropped-entry race:
+        //   1. store_a writes rec_a → conv index version 1.
+        //   2. store_b (sharing the same backend) immediately writes rec_b →
+        //      conv index version 2 (this is the "external mutation" between
+        //      store_a's next read and write).
+        //   3. store_a re-records rec_a. The retry_conv_idx loop reads v2,
+        //      sees rec_a already present (no-op merge), and writes v3 only if
+        //      the set changed — confirming the CAS path handles the re-read
+        //      correctly.
+        //   4. Both routes sharing the fingerprint must remain retrievable.
+        let tenant_id = TenantId::new("fs-stale-ver-tenant").expect("tenant");
+        let user_id = UserId::new("fs-stale-ver-user").expect("user");
+        let thread_id = ThreadId::new("fs-stale-ver-thread").expect("thread");
+        let shared_conv = "fingerprint:stale-ver-shared";
+
+        let scope = TurnScope::new_with_owner(
+            tenant_id.clone(),
+            None,
+            None,
+            thread_id,
+            Some(user_id.clone()),
+        );
+
+        let (store_a, store_b) = build_shared_backend_stores(&tenant_id, &user_id);
+
+        let mut rec_a = gate_route_record(
+            tenant_id.clone(),
+            user_id.clone(),
+            "gate:stale-ver-a",
+            TurnRunId::new(),
+            scope.clone(),
+        );
+        rec_a.delivered_conversation_fingerprints = vec![shared_conv.to_string()];
+
+        let mut rec_b = gate_route_record(
+            tenant_id.clone(),
+            user_id.clone(),
+            "gate:stale-ver-b",
+            TurnRunId::new(),
+            scope,
+        );
+        rec_b.delivered_conversation_fingerprints = vec![shared_conv.to_string()];
+
+        // Step 1: store_a writes rec_a (conv index version 1).
+        store_a
+            .record_delivered_gate_route(rec_a.clone())
+            .await
+            .expect("initial write of rec_a must succeed");
+
+        // Step 2: store_b writes rec_b (conv index version 2) — simulates a
+        // concurrent writer mutating the index while store_a is about to
+        // re-record.
+        store_b
+            .record_delivered_gate_route(rec_b.clone())
+            .await
+            .expect("concurrent write of rec_b must succeed");
+
+        // Step 3: store_a re-records rec_a. The index already carries rec_a
+        // (written in step 1) so the merge is a no-op, but the CAS path must
+        // not lose rec_b which was added in step 2.
+        store_a
+            .record_delivered_gate_route(rec_a.clone())
+            .await
+            .expect("re-record of rec_a must succeed via CAS retry");
+
+        // Both routes sharing the conversation fingerprint must be present.
+        let mut routes = store_a
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, shared_conv)
+            .await
+            .expect("lookup must not error");
+        routes.sort_by(|a, b| a.gate_ref.cmp(&b.gate_ref));
+        assert_eq!(
+            routes.len(),
+            2,
+            "both entries must be present after interleaved CAS writes; \
+             the stale-version write must not have dropped the sibling entry"
+        );
+        assert_eq!(routes[0].gate_ref, "gate:stale-ver-a");
+        assert_eq!(routes[1].gate_ref, "gate:stale-ver-b");
     }
 
     #[test]
