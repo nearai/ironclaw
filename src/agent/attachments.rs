@@ -5,6 +5,8 @@ use base64::Engine;
 use crate::channels::{AttachmentKind, IncomingAttachment};
 use ironclaw_llm::{ContentPart, ImageUrl};
 
+const MAX_INLINE_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+
 /// Result of processing attachments for the LLM pipeline.
 pub struct AugmentResult {
     /// Augmented text content with attachment metadata appended.
@@ -36,10 +38,10 @@ pub fn augment_with_attachments(
         text.push('\n');
         text.push_str(&format_attachment(i + 1, att));
 
-        // Build multimodal image part when image data is available
-        if att.kind == AttachmentKind::Image && !att.data.is_empty() {
+        // Build multimodal image part only for bounded, provider-supported images.
+        if let Some(mime) = inline_image_mime(att) {
             let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
-            let data_url = format!("data:{};base64,{}", att.mime_type, b64);
+            let data_url = format!("data:{mime};base64,{b64}");
             image_parts.push(ContentPart::ImageUrl {
                 image_url: ImageUrl {
                     url: data_url,
@@ -51,6 +53,32 @@ pub fn augment_with_attachments(
 
     text.push_str("\n</attachments>");
     Some(AugmentResult { text, image_parts })
+}
+
+fn inline_image_mime(att: &IncomingAttachment) -> Option<&'static str> {
+    if att.kind != AttachmentKind::Image
+        || att.data.is_empty()
+        || att.data.len() > MAX_INLINE_IMAGE_BYTES
+    {
+        return None;
+    }
+
+    allowed_inline_image_mime(&att.mime_type)
+}
+
+fn allowed_inline_image_mime(mime_type: &str) -> Option<&'static str> {
+    let mime = mime_type.split(';').next().unwrap_or("").trim();
+    if mime.eq_ignore_ascii_case("image/png") {
+        Some("image/png")
+    } else if mime.eq_ignore_ascii_case("image/jpeg") || mime.eq_ignore_ascii_case("image/jpg") {
+        Some("image/jpeg")
+    } else if mime.eq_ignore_ascii_case("image/webp") {
+        Some("image/webp")
+    } else if mime.eq_ignore_ascii_case("image/gif") {
+        Some("image/gif")
+    } else {
+        None
+    }
 }
 
 /// Escape a string for use as an XML attribute value.
@@ -108,16 +136,10 @@ fn format_attachment(index: usize, att: &IncomingAttachment) -> String {
                 .map(|s| format!(" size=\"{}\"", format_size(s)))
                 .unwrap_or_default();
 
-            // Pick the right prompt for the agent based on whether the
-            // image bytes reached the model. Engine v2 persists the file to
-            // disk but leaves `data` populated so `augment_with_attachments`
-            // can emit a multimodal `image_parts` entry — that's the path
-            // that actually sends the image to the LLM. An empty `data`
-            // with a `local_path` set can only happen if a downstream
-            // caller cleared the buffer (or if the channel elided it); in
-            // that case the model doesn't see the pixels and must go
-            // through the project file path instead.
-            let body = if !att.data.is_empty() {
+            // Pick the right prompt for the agent based on whether the image
+            // bytes reached the model. If data is empty, over the inline cap,
+            // or has an unsupported MIME type, the model does not see the pixels.
+            let body = if inline_image_mime(att).is_some() {
                 "[Image attached — you can already see this image directly in the conversation. Do NOT use image_analyze or try to find this file on disk — it exists only in memory. Analyze it using your vision capabilities.]"
             } else if att.local_path.is_some() {
                 "[Image attached — the raw bytes are not in this turn's multimodal context, but the file has been persisted at the project file path above. Reference that path when you need the image.]"
@@ -283,6 +305,51 @@ mod tests {
         match &result.image_parts[0] {
             ContentPart::ImageUrl { image_url } => {
                 assert!(image_url.url.starts_with("data:image/jpeg;base64,"));
+            }
+            other => panic!("Expected ImageUrl, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn image_over_inline_limit_does_not_produce_content_part() {
+        let mut att = make_attachment(AttachmentKind::Image);
+        att.filename = Some("huge.png".to_string());
+        att.mime_type = "image/png".to_string();
+        att.data = vec![0; MAX_INLINE_IMAGE_BYTES + 1];
+        att.size_bytes = Some(att.data.len() as u64);
+
+        let result = augment_with_attachments("look", &[att]).unwrap();
+
+        assert!(result.image_parts.is_empty());
+        assert!(result.text.contains("visual content not available"));
+    }
+
+    #[test]
+    fn image_with_disallowed_mime_does_not_produce_content_part() {
+        let mut att = make_attachment(AttachmentKind::Image);
+        att.filename = Some("payload.png".to_string());
+        att.mime_type = "text/html".to_string();
+        att.data = b"<svg onload=alert(1)>".to_vec();
+
+        let result = augment_with_attachments("look", &[att]).unwrap();
+
+        assert!(result.image_parts.is_empty());
+        assert!(result.text.contains("visual content not available"));
+    }
+
+    #[test]
+    fn image_content_part_uses_allowed_mime_not_raw_mime() {
+        let mut att = make_attachment(AttachmentKind::Image);
+        att.mime_type = "IMAGE/JPG; charset=utf-8".to_string();
+        att.data = vec![0xFF, 0xD8, 0xFF];
+
+        let result = augment_with_attachments("look", &[att]).unwrap();
+
+        assert_eq!(result.image_parts.len(), 1);
+        match &result.image_parts[0] {
+            ContentPart::ImageUrl { image_url } => {
+                assert!(image_url.url.starts_with("data:image/jpeg;base64,"));
+                assert!(!image_url.url.contains("charset"));
             }
             other => panic!("Expected ImageUrl, got: {:?}", other),
         }

@@ -1958,7 +1958,7 @@ impl WasmChannel {
         fuel_limit: u64,
     ) -> WasmChannelError {
         let error_str = e.into().to_string();
-        if error_str.contains("out of fuel") {
+        if error_str.contains("all fuel consumed") || error_str.contains("out of fuel") {
             WasmChannelError::FuelExhausted {
                 name: name.to_string(),
                 limit: fuel_limit,

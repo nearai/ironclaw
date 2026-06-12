@@ -5,15 +5,15 @@ use std::sync::Arc;
 #[cfg(test)]
 use ironclaw_engine::ModelToolSurface;
 use ironclaw_engine::{
-    ActionDef, EngineError, LlmBackend, LlmCallConfig, LlmOutput, LlmResponse, ThreadMessage,
-    TokenUsage,
+    ActionDef, EngineError, LlmBackend, LlmCallConfig, LlmOutput, LlmResponse, MessageContentPart,
+    ThreadMessage, TokenUsage,
 };
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 
 use ironclaw_llm::{
-    ChatMessage, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolDefinition,
-    clean_response, recover_tool_calls_from_content, sanitize_tool_messages,
+    ChatMessage, ContentPart, ImageUrl, LlmProvider, Role, ToolCall, ToolCompletionRequest,
+    ToolDefinition, clean_response, recover_tool_calls_from_content, sanitize_tool_messages,
 };
 
 const EMPTY_CLEANED_RESPONSE_FALLBACK: &str = "I'm not sure how to respond to that.";
@@ -398,6 +398,18 @@ fn json_has_template_refs(value: &serde_json::Value) -> bool {
 
 // ── Conversion helpers ──────────────────────────────────────
 
+fn engine_content_part_to_llm(part: &MessageContentPart) -> ContentPart {
+    match part {
+        MessageContentPart::Text { text } => ContentPart::Text { text: text.clone() },
+        MessageContentPart::ImageUrl { image_url } => ContentPart::ImageUrl {
+            image_url: ImageUrl {
+                url: image_url.url.clone(),
+                detail: image_url.detail.clone(),
+            },
+        },
+    }
+}
+
 fn thread_msg_to_chat(msg: &ThreadMessage) -> ChatMessage {
     use ironclaw_engine::MessageRole;
 
@@ -411,7 +423,11 @@ fn thread_msg_to_chat(msg: &ThreadMessage) -> ChatMessage {
     let mut chat = ChatMessage {
         role,
         content: msg.content.clone(),
-        content_parts: Vec::new(),
+        content_parts: msg
+            .content_parts
+            .iter()
+            .map(engine_content_part_to_llm)
+            .collect(),
         tool_call_id: msg.action_call_id.clone(),
         name: msg.action_name.clone(),
         tool_calls: None,
@@ -638,7 +654,10 @@ mod tests {
     use async_trait::async_trait;
     use rust_decimal::Decimal;
 
-    use ironclaw_engine::{ActionCall, ActionDef, EffectType, LlmResponse, ThreadMessage};
+    use ironclaw_engine::{
+        ActionCall, ActionDef, EffectType, LlmResponse, MessageContentPart, MessageImageUrl,
+        ThreadMessage,
+    };
 
     use crate::error::LlmError;
     use ironclaw_llm::ToolCompletionResponse;
@@ -1439,6 +1458,34 @@ And also check the token price:\n\
     fn unclosed_block_returns_none() {
         let text = "```python\nprint('no closing fence')";
         assert!(extract_code_block(text).is_none());
+    }
+
+    /// Regression test: engine-v2 image parts must survive the
+    /// ThreadMessage -> ChatMessage bridge before provider dispatch.
+    #[test]
+    fn thread_msg_to_chat_preserves_image_content_parts() {
+        let message = ThreadMessage::user_with_content_parts(
+            "What is in this image?",
+            vec![MessageContentPart::ImageUrl {
+                image_url: MessageImageUrl {
+                    url: "data:image/png;base64,iVBORw0KGgo=".to_string(),
+                    detail: Some("auto".to_string()),
+                },
+            }],
+        );
+
+        let chat = thread_msg_to_chat(&message);
+
+        assert_eq!(chat.role, Role::User);
+        assert_eq!(chat.content, "What is in this image?");
+        assert_eq!(chat.content_parts.len(), 1);
+        match &chat.content_parts[0] {
+            ContentPart::ImageUrl { image_url } => {
+                assert_eq!(image_url.url, "data:image/png;base64,iVBORw0KGgo=");
+                assert_eq!(image_url.detail.as_deref(), Some("auto"));
+            }
+            other => panic!("expected image content part, got: {other:?}"),
+        }
     }
 
     /// Regression test: the full ThreadMessage -> ChatMessage -> sanitize

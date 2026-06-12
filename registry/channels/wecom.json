@@ -2,7 +2,7 @@
   "name": "wecom",
   "display_name": "WeCom Channel",
   "kind": "channel",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "wit_version": "0.3.1",
   "description": "Talk to your agent through a WeCom intelligent bot with WebSocket inbound and direct Bot media sends",
   "keywords": [

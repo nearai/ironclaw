@@ -16,7 +16,7 @@ use crate::runtime::messaging::ThreadOutcome;
 use crate::traits::store::Store;
 use crate::types::conversation::{ConversationEntry, ConversationId, ConversationSurface};
 use crate::types::error::EngineError;
-use crate::types::message::ThreadMessage;
+use crate::types::message::{MessageContentPart, ThreadMessage};
 use crate::types::project::ProjectId;
 use crate::types::thread::{ThreadConfig, ThreadId, ThreadState, ThreadType};
 
@@ -24,6 +24,17 @@ use crate::types::thread::{ThreadConfig, ThreadId, ThreadState, ThreadType};
 enum ActiveForeground {
     Running(ThreadId),
     Resumable(ThreadId),
+}
+
+fn user_message_with_content_parts(
+    content: &str,
+    content_parts: Vec<MessageContentPart>,
+) -> ThreadMessage {
+    if content_parts.is_empty() {
+        ThreadMessage::user(content)
+    } else {
+        ThreadMessage::user_with_content_parts(content, content_parts)
+    }
 }
 
 /// Manages conversation surfaces and routes messages to threads.
@@ -220,6 +231,33 @@ impl ConversationManager {
         user_timezone: Option<&str>,
         extra_initial_metadata: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> Result<ThreadId, EngineError> {
+        self.handle_user_message_with_content_parts(
+            conversation_id,
+            content,
+            Vec::new(),
+            project_id,
+            user_id,
+            thread_config,
+            user_timezone,
+            extra_initial_metadata,
+        )
+        .await
+    }
+
+    /// Like [`Self::handle_user_message`], but carries transient multimodal
+    /// parts for the current user turn into the engine's LLM request.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn handle_user_message_with_content_parts(
+        &self,
+        conversation_id: ConversationId,
+        content: &str,
+        content_parts: Vec<MessageContentPart>,
+        project_id: ProjectId,
+        user_id: &str,
+        thread_config: ThreadConfig,
+        user_timezone: Option<&str>,
+        extra_initial_metadata: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<ThreadId, EngineError> {
         let conv_arc = self.get_conversation_lock(conversation_id).await?;
         let mut conv = conv_arc.lock().await;
 
@@ -255,7 +293,11 @@ impl ConversationManager {
                 // Updating the persisted record here would not affect the live
                 // step. Rare in practice; defer to a follow-up if needed.
                 self.thread_manager
-                    .inject_message(thread_id, user_id, ThreadMessage::user(content))
+                    .inject_message(
+                        thread_id,
+                        user_id,
+                        user_message_with_content_parts(content, content_parts),
+                    )
                     .await?;
                 thread_id
             }
@@ -287,7 +329,7 @@ impl ConversationManager {
                     .resume_thread(
                         thread_id,
                         user_id,
-                        Some(ThreadMessage::user(content)),
+                        Some(user_message_with_content_parts(content, content_parts)),
                         None,
                         None,
                     )
@@ -353,7 +395,7 @@ impl ConversationManager {
                 // the initial user turn); `title` is the short sidebar label.
                 let title = crate::types::thread::Thread::derive_title_from_message(content);
                 self.thread_manager
-                    .spawn_thread_with_history(
+                    .spawn_thread_with_history_and_content_parts(
                         content, // use message as goal
                         title,
                         ThreadType::Foreground,
@@ -363,6 +405,7 @@ impl ConversationManager {
                         user_id,
                         history,
                         initial_metadata,
+                        content_parts,
                     )
                     .await?
             }
@@ -620,13 +663,15 @@ mod tests {
     use crate::traits::effect::EffectExecutor;
     use crate::traits::llm::{LlmBackend, LlmCallConfig, LlmOutput};
     use crate::traits::store::Store;
-    use crate::types::capability::{ActionDef, CapabilityLease};
+    use crate::types::capability::{
+        ActionDef, Capability, CapabilityLease, EffectType, ModelToolSurface,
+    };
     use crate::types::conversation::{ConversationId, ConversationSurface, EntrySender};
     use crate::types::event::ThreadEvent;
     use crate::types::memory::{DocId, MemoryDoc};
-    use crate::types::message::MessageRole;
+    use crate::types::message::{MessageImageUrl, MessageRole};
     use crate::types::project::Project;
-    use crate::types::step::{ActionResult, LlmResponse, Step, TokenUsage};
+    use crate::types::step::{ActionCall, ActionResult, LlmResponse, Step, TokenUsage};
     use crate::types::thread::ThreadState;
     use std::sync::Mutex;
     use std::time::Duration;
@@ -683,6 +728,57 @@ mod tests {
             _: &crate::traits::effect::ThreadExecutionContext,
         ) -> Result<Vec<ActionDef>, EngineError> {
             Ok(vec![])
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[CapabilityLease],
+            _: &crate::traits::effect::ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
+            Ok(vec![])
+        }
+    }
+
+    struct BlockingEffects {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl BlockingEffects {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                entered: Arc::new(tokio::sync::Notify::new()),
+                release: Arc::new(tokio::sync::Notify::new()),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EffectExecutor for BlockingEffects {
+        async fn execute_action(
+            &self,
+            _: &str,
+            _: serde_json::Value,
+            _: &CapabilityLease,
+            _: &crate::traits::effect::ThreadExecutionContext,
+        ) -> Result<ActionResult, EngineError> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(ActionResult {
+                call_id: "call_1".to_string(),
+                action_name: "test_tool".to_string(),
+                output: serde_json::json!({"ok": true}),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })
+        }
+
+        async fn available_actions(
+            &self,
+            _: &[CapabilityLease],
+            _: &crate::traits::effect::ThreadExecutionContext,
+        ) -> Result<Vec<ActionDef>, EngineError> {
+            Ok(vec![test_action()])
         }
 
         async fn available_capabilities(
@@ -868,6 +964,99 @@ mod tests {
         (tm, cm)
     }
 
+    fn make_conv_manager_with(
+        llm: Arc<dyn LlmBackend>,
+        effects: Arc<dyn EffectExecutor>,
+        store: Arc<MockStore>,
+        capabilities: Arc<CapabilityRegistry>,
+    ) -> (Arc<ThreadManager>, ConversationManager) {
+        let tm = Arc::new(ThreadManager::new(
+            llm,
+            effects,
+            store.clone(),
+            capabilities,
+            Arc::new(LeaseManager::new()),
+            Arc::new(PolicyEngine::new()),
+        ));
+        let cm = ConversationManager::new(Arc::clone(&tm), store);
+        (tm, cm)
+    }
+
+    fn image_content_part(url: &str) -> MessageContentPart {
+        MessageContentPart::ImageUrl {
+            image_url: MessageImageUrl {
+                url: url.to_string(),
+                detail: Some("auto".to_string()),
+            },
+        }
+    }
+
+    fn assert_user_message_image_url(
+        thread: &crate::types::thread::Thread,
+        content: &str,
+        expected_url: &str,
+    ) {
+        let message = thread
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == MessageRole::User && message.content == content)
+            .unwrap_or_else(|| panic!("missing user message with content {content:?}"));
+        assert_eq!(message.content_parts.len(), 1);
+        match &message.content_parts[0] {
+            MessageContentPart::ImageUrl { image_url } => {
+                assert_eq!(image_url.url, expected_url);
+                assert_eq!(image_url.detail.as_deref(), Some("auto"));
+            }
+            other => panic!("expected image content part, got: {other:?}"),
+        }
+    }
+
+    fn text_output(text: &str) -> LlmOutput {
+        LlmOutput {
+            response: LlmResponse::Text(text.into()),
+            usage: TokenUsage::default(),
+        }
+    }
+
+    fn action_output(action_name: &str, call_id: &str) -> LlmOutput {
+        LlmOutput {
+            response: LlmResponse::ActionCalls {
+                calls: vec![ActionCall {
+                    id: call_id.to_string(),
+                    action_name: action_name.to_string(),
+                    parameters: serde_json::json!({}),
+                }],
+                content: None,
+            },
+            usage: TokenUsage::default(),
+        }
+    }
+
+    fn test_action() -> ActionDef {
+        ActionDef {
+            name: "test_tool".to_string(),
+            description: "Test tool".to_string(),
+            parameters_schema: serde_json::json!({"type": "object"}),
+            effects: vec![EffectType::ReadLocal],
+            requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
+            discovery: None,
+        }
+    }
+
+    fn test_capabilities() -> CapabilityRegistry {
+        let mut capabilities = CapabilityRegistry::new();
+        capabilities.register(Capability {
+            name: "test".to_string(),
+            description: "Test capability".to_string(),
+            actions: vec![test_action()],
+            knowledge: vec![],
+            policies: vec![],
+        });
+        capabilities
+    }
+
     // ── Tests ───────────────────────────────────────────────
 
     #[tokio::test]
@@ -981,6 +1170,135 @@ mod tests {
         assert_eq!(resumed, thread.id);
         let outcome = tm.join_thread(thread.id).await.unwrap();
         assert!(matches!(outcome, ThreadOutcome::Completed { .. }));
+    }
+
+    #[tokio::test]
+    async fn handle_user_message_with_content_parts_carries_parts_on_resume() {
+        let store = Arc::new(MockStore::new());
+        let tm = Arc::new(ThreadManager::new(
+            Arc::new(MockLlm(Mutex::new(vec![text_output("Recovered")]))),
+            Arc::new(MockEffects),
+            store.clone(),
+            Arc::new(CapabilityRegistry::new()),
+            Arc::new(LeaseManager::new()),
+            Arc::new(PolicyEngine::new()),
+        ));
+        let cm = ConversationManager::new(Arc::clone(&tm), store.clone());
+
+        let conv_id = cm.get_or_create_conversation("web", "user1").await.unwrap();
+        let project = ProjectId::new();
+        let mut thread = crate::types::thread::Thread::new(
+            "resume",
+            ThreadType::Foreground,
+            project,
+            "user1",
+            ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+        thread.add_message(ThreadMessage::user("earlier"));
+        thread.step_count = 1;
+        thread.metadata = serde_json::json!({
+            "runtime_checkpoint": {
+                "persisted_state": {"last_return": 7},
+                "nudge_count": 0,
+                "consecutive_errors": 0,
+                "compaction_count": 0
+            }
+        });
+        thread
+            .transition_to(
+                ThreadState::Suspended,
+                Some("engine restart; resumable from checkpoint".into()),
+            )
+            .unwrap();
+        store.save_thread(&thread).await.unwrap();
+        cm.track_thread_in_conversation(conv_id, thread.id).await;
+
+        let resumed = cm
+            .handle_user_message_with_content_parts(
+                conv_id,
+                "continue from there",
+                vec![image_content_part("data:image/png;base64,resume")],
+                project,
+                "user1",
+                ThreadConfig::default(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resumed, thread.id);
+        let outcome = tm.join_thread(thread.id).await.unwrap();
+        assert!(matches!(outcome, ThreadOutcome::Completed { .. }));
+
+        let saved = store.load_thread(thread.id).await.unwrap().unwrap();
+        assert_user_message_image_url(
+            &saved,
+            "continue from there",
+            "data:image/png;base64,resume",
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_user_message_with_content_parts_carries_parts_on_inject() {
+        let store = Arc::new(MockStore::new());
+        let llm: Arc<dyn LlmBackend> = Arc::new(MockLlm(Mutex::new(vec![
+            action_output("test_tool", "call_1"),
+            text_output("Done"),
+        ])));
+        let effects = BlockingEffects::new();
+        let (tm, cm) = make_conv_manager_with(
+            llm,
+            effects.clone(),
+            store.clone(),
+            Arc::new(test_capabilities()),
+        );
+        let conv_id = cm.get_or_create_conversation("web", "user1").await.unwrap();
+        let project = ProjectId::new();
+
+        let thread_id = cm
+            .handle_user_message(
+                conv_id,
+                "start",
+                project,
+                "user1",
+                ThreadConfig::default(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), effects.entered.notified())
+            .await
+            .expect("thread should enter blocking test action");
+
+        let injected = cm
+            .handle_user_message_with_content_parts(
+                conv_id,
+                "look at this",
+                vec![image_content_part("data:image/png;base64,inject")],
+                project,
+                "user1",
+                ThreadConfig::default(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(injected, thread_id);
+        effects.release.notify_one();
+
+        let outcome = tokio::time::timeout(Duration::from_secs(5), tm.join_thread(thread_id))
+            .await
+            .expect("thread should finish after releasing test action")
+            .unwrap();
+        assert!(matches!(outcome, ThreadOutcome::Completed { .. }));
+
+        let saved = store.load_thread(thread_id).await.unwrap().unwrap();
+        assert_user_message_image_url(&saved, "look at this", "data:image/png;base64,inject");
     }
 
     #[tokio::test]

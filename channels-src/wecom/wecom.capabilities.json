@@ -58,6 +58,7 @@
       "allow_polling": true,
       "workspace_prefix": "channels/wecom/",
       "callback_timeout_secs": 45,
+      "callback_fuel": 2000000000,
       "emit_rate_limit": {
         "messages_per_minute": 100,
         "messages_per_hour": 5000

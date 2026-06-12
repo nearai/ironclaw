@@ -61,7 +61,10 @@ impl GeneratedImageSentinel {
         format!("Generated image ({media_type})")
     }
 
-    pub(crate) fn compact_value_without_data_url(&self) -> serde_json::Value {
+    pub(crate) fn compact_value_without_data_url_with_reason(
+        &self,
+        omitted_reason: impl Into<String>,
+    ) -> serde_json::Value {
         let mut summary = serde_json::Map::new();
         summary.insert(
             "type".to_string(),
@@ -84,12 +87,16 @@ impl GeneratedImageSentinel {
         summary.insert("data_omitted".to_string(), serde_json::Value::Bool(true));
         summary.insert(
             "omitted_reason".to_string(),
-            serde_json::Value::String(format!(
-                "exceeded the {} cap",
-                recorded_image_sentinel_cap_label()
-            )),
+            serde_json::Value::String(omitted_reason.into()),
         );
         serde_json::Value::Object(summary)
+    }
+
+    pub(crate) fn compact_value_without_data_url(&self) -> serde_json::Value {
+        self.compact_value_without_data_url_with_reason(format!(
+            "exceeded the {} cap",
+            recorded_image_sentinel_cap_label()
+        ))
     }
 
     fn content_with_omitted_data_url_when_oversized(&self) -> String {

@@ -78,7 +78,7 @@ impl WasmChannelLoader {
         let wasm_bytes = fs::read(wasm_path).await?;
 
         // Read capabilities file
-        let (capabilities, config_json, description, cap_file) =
+        let (capabilities, config_json, description, resource_limits, cap_file) =
             if let Some(cap_path) = capabilities_path {
                 if cap_path.exists() {
                     let cap_bytes = fs::read(cap_path).await?;
@@ -118,8 +118,10 @@ impl WasmChannelLoader {
 
                     let config = cap_file.config_json();
                     let desc = cap_file.description.clone();
+                    let resource_limits =
+                        cap_file.resource_limits(&self.runtime.config().default_limits);
 
-                    (caps, config, desc, Some(cap_file))
+                    (caps, config, desc, resource_limits, Some(cap_file))
                 } else {
                     tracing::warn!(
                         path = %cap_path.display(),
@@ -130,6 +132,7 @@ impl WasmChannelLoader {
                         "{}".to_string(),
                         None,
                         None,
+                        None,
                     )
                 }
             } else {
@@ -138,13 +141,14 @@ impl WasmChannelLoader {
                     "{}".to_string(),
                     None,
                     None,
+                    None,
                 )
             };
 
         // Prepare the module
         let prepared = self
             .runtime
-            .prepare(name, &wasm_bytes, None, description)
+            .prepare(name, &wasm_bytes, resource_limits, description)
             .await?;
 
         // Create the channel

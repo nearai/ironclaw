@@ -9,6 +9,7 @@
 //! - Rate limiting (per-user, per-tool)
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
@@ -33,6 +34,7 @@ use crate::bridge::sandbox::{InterceptOutcome, maybe_intercept};
 use crate::bridge::tool_permissions::{ToolPermissionResolution, ToolPermissionSnapshot};
 use crate::context::JobContext;
 use crate::extensions::InstalledExtension;
+use crate::generated_images::{GeneratedImageSentinel, stage_generated_image_data_url};
 use crate::hooks::{HookEvent, HookOutcome, HookRegistry};
 use crate::tools::ToolRegistry;
 use crate::tools::permissions::PermissionState;
@@ -89,6 +91,10 @@ pub struct EffectBridgeAdapter {
     /// for any action name in the catalog, and `available_actions`
     /// merges the catalog into the LLM-visible action surface.
     external_tool_catalog: RwLock<Option<Arc<crate::bridge::ExternalToolCatalog>>>,
+    /// Generated image file paths staged by image tools for final channel
+    /// delivery. Kept out of ActionResult output so the LLM never sees or
+    /// repeats internal attachment sentinels.
+    generated_image_attachments: RwLock<HashMap<ironclaw_engine::ThreadId, Vec<String>>>,
 }
 
 struct ToolApprovalContext<'a> {
@@ -133,6 +139,7 @@ impl EffectBridgeAdapter {
             workspace_mounts: RwLock::new(None),
             capability_registry: RwLock::new(None),
             external_tool_catalog: RwLock::new(None),
+            generated_image_attachments: RwLock::new(HashMap::new()),
         }
     }
 
@@ -149,6 +156,66 @@ impl EffectBridgeAdapter {
     /// Look up the catalog (if installed) for read-only use.
     async fn external_tool_catalog(&self) -> Option<Arc<crate::bridge::ExternalToolCatalog>> {
         self.external_tool_catalog.read().await.clone()
+    }
+
+    pub async fn take_generated_image_attachments(
+        &self,
+        thread_id: ironclaw_engine::ThreadId,
+    ) -> Vec<String> {
+        self.generated_image_attachments
+            .write()
+            .await
+            .remove(&thread_id)
+            .unwrap_or_default()
+    }
+
+    async fn action_output_for_engine_context(
+        &self,
+        action_name: &str,
+        output_value: serde_json::Value,
+        thread_id: ironclaw_engine::ThreadId,
+    ) -> serde_json::Value {
+        if !matches!(action_name, "image_generate" | "image_edit") {
+            return output_value;
+        }
+
+        let Some(sentinel) = GeneratedImageSentinel::from_value(&output_value) else {
+            return output_value;
+        };
+
+        let staged_path = sentinel
+            .path()
+            .map(str::trim)
+            .filter(|path| !path.is_empty() && Path::new(path).exists())
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                let data_url = sentinel
+                    .data_url()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())?;
+                match stage_generated_image_data_url(data_url) {
+                    Ok(path) => Some(path),
+                    Err(error) => {
+                        tracing::warn!(
+                            action = %action_name,
+                            error = %error,
+                            "failed to stage generated image for engine v2 response attachment"
+                        );
+                        None
+                    }
+                }
+            });
+
+        if let Some(path) = staged_path {
+            self.generated_image_attachments
+                .write()
+                .await
+                .entry(thread_id)
+                .or_default()
+                .push(path);
+        }
+
+        serde_json::Value::String(sentinel.summary_for_context())
     }
 
     /// Resolve all catalog keys this `ThreadExecutionContext` may have
@@ -1627,6 +1694,9 @@ impl EffectBridgeAdapter {
                 let wrapped = self.safety.wrap_for_llm(&lookup_name, &sanitized.content);
                 let output_value = serde_json::from_str::<serde_json::Value>(&output)
                     .unwrap_or(serde_json::Value::String(wrapped));
+                let output_value = self
+                    .action_output_for_engine_context(&lookup_name, output_value, context.thread_id)
+                    .await;
 
                 if (lookup_name == "tool_auth"
                     || lookup_name == "tool_install"

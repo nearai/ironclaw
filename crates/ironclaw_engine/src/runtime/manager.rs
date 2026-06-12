@@ -18,7 +18,7 @@ use crate::traits::effect::EffectExecutor;
 use crate::traits::llm::LlmBackend;
 use crate::traits::store::Store;
 use crate::types::error::EngineError;
-use crate::types::message::{MessageRole, ThreadMessage};
+use crate::types::message::{MessageContentPart, MessageRole, ThreadMessage};
 use crate::types::project::ProjectId;
 use crate::types::thread::{Thread, ThreadConfig, ThreadId, ThreadState, ThreadType};
 
@@ -186,6 +186,37 @@ impl ThreadManager {
         initial_messages: Vec<crate::types::message::ThreadMessage>,
         initial_metadata: serde_json::Map<String, serde_json::Value>,
     ) -> Result<ThreadId, EngineError> {
+        self.spawn_thread_with_history_and_content_parts(
+            goal,
+            title,
+            thread_type,
+            project_id,
+            config,
+            parent_id,
+            user_id,
+            initial_messages,
+            initial_metadata,
+            Vec::new(),
+        )
+        .await
+    }
+
+    /// Spawn a thread with initial conversation history and transient
+    /// multimodal parts for the current user goal.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn spawn_thread_with_history_and_content_parts(
+        &self,
+        goal: impl Into<String>,
+        title: Option<String>,
+        thread_type: ThreadType,
+        project_id: ProjectId,
+        config: ThreadConfig,
+        parent_id: Option<ThreadId>,
+        user_id: impl Into<String>,
+        initial_messages: Vec<crate::types::message::ThreadMessage>,
+        initial_metadata: serde_json::Map<String, serde_json::Value>,
+        goal_content_parts: Vec<MessageContentPart>,
+    ) -> Result<ThreadId, EngineError> {
         let user_id = user_id.into();
         let mut thread = Thread::new(goal, thread_type, project_id, &user_id, config);
         if let Some(pid) = parent_id {
@@ -236,7 +267,12 @@ impl ThreadManager {
         }
 
         // Add the goal as the current user message so the LLM has context
-        thread.add_message(crate::types::message::ThreadMessage::user(&thread.goal));
+        thread.add_message(
+            crate::types::message::ThreadMessage::user_with_content_parts(
+                &thread.goal,
+                goal_content_parts,
+            ),
+        );
 
         // Persist
         self.store.save_thread(&thread).await?;

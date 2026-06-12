@@ -482,6 +482,14 @@ impl ChannelHostState {
     ) -> Result<Option<String>, crate::tools::wasm::WasmError> {
         // Prefix the path with channel namespace before reading
         let full_path = self.capabilities.prefix_workspace_path(path);
+        if let Some(write) = self
+            .pending_writes
+            .iter()
+            .rev()
+            .find(|write| write.path == full_path)
+        {
+            return Ok(Some(write.content.clone()));
+        }
         self.base.workspace_read(&full_path)
     }
 
@@ -1115,6 +1123,22 @@ mod tests {
         // Non-existent key returns None.
         let missing = state2.workspace_read("no_such_key").unwrap();
         assert!(missing.is_none());
+    }
+
+    #[test]
+    fn test_workspace_read_sees_pending_write_in_same_callback() {
+        let caps = ChannelCapabilities::for_channel("wecom");
+        let mut state = ChannelHostState::new("wecom", caps);
+
+        state
+            .workspace_write("state/blob.b64", "first".to_string())
+            .unwrap();
+        state
+            .workspace_write("state/blob.b64", "second".to_string())
+            .unwrap();
+
+        let value = state.workspace_read("state/blob.b64").unwrap();
+        assert_eq!(value, Some("second".to_string()));
     }
 
     #[test]

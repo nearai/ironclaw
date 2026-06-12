@@ -742,6 +742,7 @@ async fn handle_llm_complete(
         .as_ref()
         .and_then(json_to_thread_messages)
         .unwrap_or_else(|| thread.messages.clone());
+    reattach_transient_content_parts(&mut messages, thread);
 
     if let Err(e) = reconcile_dynamic_tool_lease(
         thread,
@@ -3073,6 +3074,34 @@ fn json_to_thread_messages(value: &serde_json::Value) -> Option<Vec<ThreadMessag
     Some(messages)
 }
 
+fn reattach_transient_content_parts(messages: &mut [ThreadMessage], thread: &Thread) {
+    let sources: Vec<&ThreadMessage> = thread
+        .internal_messages
+        .iter()
+        .rev()
+        .chain(thread.messages.iter().rev())
+        .filter(|message| !message.content_parts.is_empty())
+        .collect();
+    let mut used_sources = vec![false; sources.len()];
+
+    for message in messages.iter_mut().rev() {
+        if !message.content_parts.is_empty() {
+            continue;
+        }
+
+        if let Some((idx, source)) = sources.iter().enumerate().find(|(idx, candidate)| {
+            !used_sources[*idx]
+                && candidate.role == message.role
+                && candidate.content == message.content
+                && candidate.action_call_id == message.action_call_id
+                && candidate.action_name == message.action_name
+        }) {
+            message.content_parts = source.content_parts.clone();
+            used_sources[idx] = true;
+        }
+    }
+}
+
 fn sync_runtime_state(thread: &mut Thread, state: Option<&serde_json::Value>) {
     let Some(state) = state else {
         return;
@@ -4527,6 +4556,123 @@ mod tests {
         let captured = concrete.captured.lock().await;
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0], None);
+    }
+
+    #[test]
+    fn reattach_transient_content_parts_disambiguates_identical_content() {
+        fn image_part(url: &str) -> crate::types::message::MessageContentPart {
+            crate::types::message::MessageContentPart::ImageUrl {
+                image_url: crate::types::message::MessageImageUrl {
+                    url: url.to_string(),
+                    detail: Some("auto".to_string()),
+                },
+            }
+        }
+
+        fn only_image_url(message: &ThreadMessage) -> &str {
+            assert_eq!(message.content_parts.len(), 1);
+            match &message.content_parts[0] {
+                crate::types::message::MessageContentPart::ImageUrl { image_url } => {
+                    image_url.url.as_str()
+                }
+                other => panic!("expected image content part, got: {other:?}"),
+            }
+        }
+
+        let mut thread = Thread::new(
+            "goal",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.messages = vec![
+            ThreadMessage::user_with_content_parts(
+                "look at this",
+                vec![image_part("data:image/png;base64,A")],
+            ),
+            ThreadMessage::user_with_content_parts(
+                "look at this",
+                vec![image_part("data:image/png;base64,B")],
+            ),
+        ];
+
+        let mut rebuilt = vec![
+            ThreadMessage::user("look at this"),
+            ThreadMessage::user("look at this"),
+        ];
+
+        reattach_transient_content_parts(&mut rebuilt, &thread);
+
+        assert_eq!(only_image_url(&rebuilt[0]), "data:image/png;base64,A");
+        assert_eq!(only_image_url(&rebuilt[1]), "data:image/png;base64,B");
+    }
+
+    #[tokio::test]
+    async fn llm_complete_reattaches_transient_content_parts_from_thread_messages() {
+        let concrete = Arc::new(PromptCapturingLlm {
+            captured_messages: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let llm: Arc<dyn LlmBackend> = Arc::clone(&concrete) as Arc<dyn LlmBackend>;
+        let effects: Arc<dyn EffectExecutor> = Arc::new(NoopEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let store: Arc<dyn Store> = Arc::new(crate::tests::InMemoryStore::with_docs(vec![]));
+
+        let mut thread = Thread::new(
+            "goal",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+        thread.messages = vec![ThreadMessage::user_with_content_parts(
+            "look at this",
+            vec![crate::types::message::MessageContentPart::ImageUrl {
+                image_url: crate::types::message::MessageImageUrl {
+                    url: "data:image/png;base64,iVBORw0KGgo=".to_string(),
+                    detail: Some("auto".to_string()),
+                },
+            }],
+        )];
+
+        let mut total_tokens = TokenUsage::default();
+        let result = handle_llm_complete(
+            &[
+                json_to_monty(&serde_json::json!([{
+                    "role": "user",
+                    "content": "look at this"
+                }])),
+                json_to_monty(&serde_json::json!([])),
+                json_to_monty(&serde_json::json!({})),
+            ],
+            &[],
+            &mut thread,
+            LlmCompleteDeps {
+                llm: &llm,
+                effects: &effects,
+                leases: &leases,
+                store: Some(&store),
+                platform_info: None,
+            },
+            &mut total_tokens,
+        )
+        .await;
+
+        assert!(matches!(result, ExtFunctionResult::Return(_)));
+        let captured = concrete.captured_messages.lock().await;
+        let user_message = captured[0]
+            .iter()
+            .find(|message| message.role == crate::types::message::MessageRole::User)
+            .expect("user message sent to LLM");
+        assert_eq!(user_message.content_parts.len(), 1);
+        match &user_message.content_parts[0] {
+            crate::types::message::MessageContentPart::ImageUrl { image_url } => {
+                assert_eq!(image_url.url, "data:image/png;base64,iVBORw0KGgo=");
+                assert_eq!(image_url.detail.as_deref(), Some("auto"));
+            }
+            other => panic!("expected image content part, got: {other:?}"),
+        }
     }
 
     #[tokio::test]

@@ -222,6 +222,79 @@ mod attachment_tests {
     }
 
     #[tokio::test]
+    async fn engine_v2_image_attachment_reaches_llm_content_parts() {
+        let _guard = engine_v2_attachment_root_lock().lock().await;
+
+        let project_root_tmp = tempfile::tempdir().expect("create attachment project_root tempdir");
+        let project_root = project_root_tmp.path().to_path_buf();
+        let rig = TestRigBuilder::new().with_engine_v2().build().await;
+        assert!(
+            ironclaw::bridge::override_engine_project_root_for_test(project_root.clone()).await,
+            "engine state should be installed after build()"
+        );
+
+        let mut msg = IncomingMessage::new("telegram", "vision-user", "What is in this image?");
+        msg.attachments.push(IncomingAttachment {
+            id: "img-1".to_string(),
+            kind: AttachmentKind::Image,
+            mime_type: "image/png".to_string(),
+            filename: Some("screenshot.png".to_string()),
+            size_bytes: Some(4),
+            source_url: None,
+            storage_key: None,
+            local_path: None,
+            extracted_text: None,
+            data: vec![0x89, 0x50, 0x4E, 0x47],
+            duration_secs: None,
+        });
+
+        rig.send_incoming(msg).await;
+        let deadline = tokio::time::Instant::now() + TIMEOUT;
+        let requests = loop {
+            let requests = rig.captured_llm_requests();
+            if !requests.is_empty() {
+                break requests;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "should capture an engine-v2 LLM request for image attachment"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        let last_request = requests.last().expect("captured LLM request");
+        let last_user_msg = last_request
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, ironclaw_llm::Role::User))
+            .expect("user message");
+
+        assert!(
+            last_user_msg
+                .content
+                .contains("you can already see this image"),
+            "augmented text should note image sent as visual content"
+        );
+        assert_eq!(
+            last_user_msg.content_parts.len(),
+            1,
+            "engine v2 should pass image bytes as multimodal content"
+        );
+        match &last_user_msg.content_parts[0] {
+            ContentPart::ImageUrl { image_url } => {
+                assert!(
+                    image_url.url.starts_with("data:image/png;base64,"),
+                    "image URL should be a base64 data URI, got: {}",
+                    &image_url.url[..image_url.url.len().min(40)]
+                );
+                assert_eq!(image_url.detail.as_deref(), Some("auto"));
+            }
+            other => panic!("expected ImageUrl content part, got: {:?}", other),
+        }
+
+        rig.shutdown();
+    }
+
+    #[tokio::test]
     async fn engine_v2_channel_attachments_persist_for_telegram_and_whatsapp() {
         let _guard = engine_v2_attachment_root_lock().lock().await;
 

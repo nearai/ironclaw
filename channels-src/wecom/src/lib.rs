@@ -329,6 +329,7 @@ struct RecentMessageIdEntry {
 struct PendingWebsocketMediaOutbound {
     send_id: String,
     payload: String,
+    complete_after_send: bool,
 }
 
 enum PendingWebsocketMediaAdvance {
@@ -1664,6 +1665,7 @@ fn start_websocket_media_batch(
                 outbound_payloads.push(PendingWebsocketMediaOutbound {
                     send_id: send.id.clone(),
                     payload,
+                    complete_after_send: false,
                 });
                 sends.push(send);
             }
@@ -1775,6 +1777,29 @@ fn fail_persisted_websocket_media_send(send_id: &str, error: String) {
     }
 }
 
+fn complete_persisted_websocket_media_send(send_id: &str) {
+    let mut state = load_pending_websocket_media_state();
+    let Some(pos) = state.sends.iter().position(|send| send.id == send_id) else {
+        log_wecom(
+            channel_host::LogLevel::Warn,
+            &format!(
+                "WeCom websocket media send completed after state was already cleared: {send_id}"
+            ),
+        );
+        return;
+    };
+
+    let send = state.sends.remove(pos);
+    cleanup_websocket_media_chunks(&send);
+    complete_websocket_media_batch(&mut state, &send.batch_id, Ok(()));
+    if let Err(error) = persist_pending_websocket_media_state(&state) {
+        log_wecom(
+            channel_host::LogLevel::Warn,
+            &format!("Failed to persist completed WeCom websocket media state: {error}"),
+        );
+    }
+}
+
 fn capped_websocket_media_errors(errors: Vec<String>) -> Vec<String> {
     if errors.len() <= MAX_WEBSOCKET_MEDIA_BATCH_ERRORS {
         return errors;
@@ -1869,6 +1894,7 @@ fn advance_pending_websocket_media(
         let outbound = PendingWebsocketMediaOutbound {
             send_id: send.id.clone(),
             payload,
+            complete_after_send: false,
         };
         return Ok(PendingWebsocketMediaAdvance::Send(outbound, send));
     }
@@ -1883,6 +1909,7 @@ fn advance_pending_websocket_media(
         let outbound = PendingWebsocketMediaOutbound {
             send_id: send.id.clone(),
             payload,
+            complete_after_send: false,
         };
         return Ok(PendingWebsocketMediaAdvance::Send(outbound, send));
     }
@@ -1895,6 +1922,7 @@ fn advance_pending_websocket_media(
         let outbound = PendingWebsocketMediaOutbound {
             send_id: send.id.clone(),
             payload,
+            complete_after_send: true,
         };
         return Ok(PendingWebsocketMediaAdvance::Send(outbound, send));
     }
@@ -1986,6 +2014,11 @@ fn handle_websocket_ack_frame(ack: WecomWsAckFrame) {
                 &outbound.send_id,
                 format!("Failed to send WeCom websocket media command: {error}"),
             );
+        } else if outbound.complete_after_send {
+            // WeCom does not reliably deliver an ACK for the final
+            // aibot_send_msg media command. Once the command has been queued
+            // successfully, complete the batch so final_text is sent.
+            complete_persisted_websocket_media_send(&outbound.send_id);
         }
     }
 }

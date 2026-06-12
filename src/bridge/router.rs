@@ -1,5 +1,6 @@
 //! Engine v2 router — handles user messages via the engine when enabled.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -27,6 +28,7 @@ use crate::db::Database;
 use crate::error::Error;
 use crate::extensions::naming::legacy_extension_alias;
 use crate::gate::pending::{PendingGate, PendingGateKey};
+use crate::generated_images::{GeneratedImageSentinel, remove_staged_generated_image_attachments};
 
 /// Typed outcome from a v2 bridge handler.
 ///
@@ -38,6 +40,11 @@ use crate::gate::pending::{PendingGate, PendingGateKey};
 pub enum BridgeOutcome {
     /// Send this text response to the user and end the turn.
     Respond(String),
+    /// Send this text response with file attachments and end the turn.
+    RespondWithAttachments {
+        text: String,
+        attachments: Vec<String>,
+    },
     /// No text response, but the turn completes normally.
     NoResponse,
     /// Turn is paused — a gate (approval/auth/external) was created and the
@@ -46,7 +53,43 @@ pub enum BridgeOutcome {
     Pending,
 }
 
-use std::collections::HashSet;
+impl BridgeOutcome {
+    fn response_text(&self) -> Option<&str> {
+        match self {
+            Self::Respond(text) | Self::RespondWithAttachments { text, .. } => {
+                (!text.trim().is_empty()).then_some(text.as_str())
+            }
+            Self::NoResponse | Self::Pending => None,
+        }
+    }
+}
+
+fn dedupe_existing_attachment_paths(paths: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::new();
+    for path in paths {
+        if path.trim().is_empty() || !Path::new(&path).exists() {
+            continue;
+        }
+        if seen.insert(path.clone()) {
+            deduped.push(path);
+        }
+    }
+    deduped
+}
+
+fn suppress_generated_image_sentinel_text(text: String, has_attachments: bool) -> String {
+    if !has_attachments {
+        return text;
+    }
+    let trimmed = text.trim();
+    if GeneratedImageSentinel::from_output(trimmed).is_some()
+        || (trimmed.starts_with("Generated image (") && trimmed.ends_with(')'))
+    {
+        return String::new();
+    }
+    text
+}
 
 /// Cadence of the external-tool catalog sweep. Backstop only — the
 /// per-thread terminal-state cleanup in `await_thread_outcome` is
@@ -73,6 +116,27 @@ fn engine_err(context: &str, e: impl std::fmt::Display) -> Error {
         id: uuid::Uuid::nil(),
         reason: format!("engine v2 {context}: {e}"),
     })
+}
+
+fn engine_content_parts_from_llm(
+    parts: &[ironclaw_llm::ContentPart],
+) -> Vec<ironclaw_engine::MessageContentPart> {
+    parts
+        .iter()
+        .map(|part| match part {
+            ironclaw_llm::ContentPart::Text { text } => {
+                ironclaw_engine::MessageContentPart::Text { text: text.clone() }
+            }
+            ironclaw_llm::ContentPart::ImageUrl { image_url } => {
+                ironclaw_engine::MessageContentPart::ImageUrl {
+                    image_url: ironclaw_engine::MessageImageUrl {
+                        url: image_url.url.clone(),
+                        detail: image_url.detail.clone(),
+                    },
+                }
+            }
+        })
+        .collect()
 }
 
 /// Build the `BridgeOutcome` for a `ThreadOutcome::Failed`.
@@ -4616,6 +4680,10 @@ async fn handle_with_engine_inner(
         .as_ref()
         .map(|result| result.text.as_str())
         .unwrap_or(content);
+    let content_parts = augmented
+        .as_ref()
+        .map(|result| engine_content_parts_from_llm(&result.image_parts))
+        .unwrap_or_default();
 
     // Fire any active OnEvent missions whose pattern (and optional channel
     // filter) match this inbound message. Mission firings here are side
@@ -4729,9 +4797,10 @@ async fn handle_with_engine_inner(
     // the same user.
     let thread_id = match state
         .conversation_manager
-        .handle_user_message(
+        .handle_user_message_with_content_parts(
             conv_id,
             effective_content,
+            content_parts,
             project_id,
             &message.user_id,
             thread_config,
@@ -4978,6 +5047,11 @@ fn spawn_post_park_continuation(
                             thread_id = %thread_id,
                             "post-park continuation hit one-hour cap; abandoning"
                         );
+                        discard_pending_v2_generated_image_attachments(
+                            effect_adapter.as_ref(),
+                            thread_id,
+                        )
+                        .await;
                         gate_controller.clear_execution_context(&user_id, thread_id, conv_id).await;
                         return;
                     }
@@ -4998,6 +5072,8 @@ fn spawn_post_park_continuation(
                     error = %e,
                     "post-park continuation: join_thread failed"
                 );
+                discard_pending_v2_generated_image_attachments(effect_adapter.as_ref(), thread_id)
+                    .await;
                 gate_controller
                     .clear_execution_context(&user_id, thread_id, conv_id)
                     .await;
@@ -5016,21 +5092,38 @@ fn spawn_post_park_continuation(
             );
         }
 
+        let mut response_attachments: Vec<String> = Vec::new();
         let response_text: Option<String> = match &outcome {
             ThreadOutcome::Completed { response } => {
                 if let Some(ref db) = db {
                     persist_v2_tool_calls(&store, db, thread_id, &message).await;
                 }
-                response.clone()
+                response_attachments = effect_adapter
+                    .take_generated_image_attachments(thread_id)
+                    .await;
+                response_attachments
+                    .extend(collect_v2_generated_image_attachments(&store, thread_id).await);
+                response_attachments = dedupe_existing_attachment_paths(response_attachments);
+                response
+                    .clone()
+                    .or_else(|| (!response_attachments.is_empty()).then(String::new))
             }
-            ThreadOutcome::Stopped => Some("Thread was stopped.".into()),
+            ThreadOutcome::Stopped => {
+                discard_pending_v2_generated_image_attachments(effect_adapter.as_ref(), thread_id)
+                    .await;
+                Some("Thread was stopped.".into())
+            }
             ThreadOutcome::MaxIterations => {
+                discard_pending_v2_generated_image_attachments(effect_adapter.as_ref(), thread_id)
+                    .await;
                 Some("Reached maximum iterations without completing.".into())
             }
             ThreadOutcome::Failed {
                 error,
                 debug_detail,
             } => {
+                discard_pending_v2_generated_image_attachments(effect_adapter.as_ref(), thread_id)
+                    .await;
                 let sanitized =
                     crate::bridge::user_facing_errors::user_facing_thread_failure(error);
                 let sse_will_deliver_to_user =
@@ -5173,8 +5266,13 @@ fn spawn_post_park_continuation(
         };
 
         if let Some(ref text) = response_text {
+            let text = suppress_generated_image_sentinel_text(
+                text.clone(),
+                !response_attachments.is_empty(),
+            );
             // SSE Response broadcast (web).
-            if let Some(ref sse) = sse {
+            let has_text = !text.trim().is_empty();
+            if has_text && let Some(ref sse) = sse {
                 sse.broadcast_for_user(
                     // projection-exempt: bridge dispatcher, post-park final response
                     &user_id,
@@ -5185,10 +5283,13 @@ fn spawn_post_park_continuation(
                 );
             }
             // Channel respond + Done status (Telegram, CLI, gateway).
-            if let Err(e) = channels
-                .respond(&message, OutgoingResponse::text(text.clone()))
-                .await
-            {
+            let mut response = OutgoingResponse::text(text.clone());
+            if !response_attachments.is_empty() {
+                response = response.with_attachments(response_attachments.clone());
+            }
+            let respond_result = channels.respond(&message, response).await;
+            remove_staged_generated_image_attachments(&response_attachments);
+            if let Err(e) = respond_result {
                 tracing::debug!(
                     channel = %channel_name,
                     error = %e,
@@ -5211,10 +5312,10 @@ fn spawn_post_park_continuation(
             }
             // Persist to v1 DB so the history API renders the final
             // assistant message.
-            if let Some(ref db) = db {
+            if has_text && let Some(ref db) = db {
                 match resolve_v1_conversation_for_message(db, &message).await {
                     Ok(cid) => {
-                        let _ = db.add_conversation_message(cid, "assistant", text).await;
+                        let _ = db.add_conversation_message(cid, "assistant", &text).await;
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -5536,7 +5637,12 @@ async fn await_thread_outcome(
                         "text-based auth fallback rejected unknown or missing credential name from tool output"
                     );
                     // Hand the original response back without inserting a gate.
-                    return Ok(BridgeOutcome::Respond(text.clone()));
+                    return Ok(bridge_outcome_for_completed_response(
+                        state,
+                        thread_id,
+                        Some(text.clone()),
+                    )
+                    .await);
                 };
 
                 // Look up setup instructions via AuthManager (or fall back to inline lookup)
@@ -5617,19 +5723,35 @@ async fn await_thread_outcome(
                 persist_v2_tool_calls(&state.store, db, thread_id, message).await;
             }
 
-            match response {
-                Some(text) => Ok(BridgeOutcome::Respond(text)),
-                None => Ok(BridgeOutcome::NoResponse),
-            }
+            Ok(bridge_outcome_for_completed_response(state, thread_id, response).await)
         }
-        ThreadOutcome::Stopped => Ok(BridgeOutcome::Respond("Thread was stopped.".into())),
-        ThreadOutcome::MaxIterations => Ok(BridgeOutcome::Respond(
-            "Reached maximum iterations without completing.".into(),
-        )),
+        ThreadOutcome::Stopped => {
+            discard_pending_v2_generated_image_attachments(
+                state.effect_adapter.as_ref(),
+                thread_id,
+            )
+            .await;
+            Ok(BridgeOutcome::Respond("Thread was stopped.".into()))
+        }
+        ThreadOutcome::MaxIterations => {
+            discard_pending_v2_generated_image_attachments(
+                state.effect_adapter.as_ref(),
+                thread_id,
+            )
+            .await;
+            Ok(BridgeOutcome::Respond(
+                "Reached maximum iterations without completing.".into(),
+            ))
+        }
         ThreadOutcome::Failed {
             error,
             debug_detail,
         } => {
+            discard_pending_v2_generated_image_attachments(
+                state.effect_adapter.as_ref(),
+                thread_id,
+            )
+            .await;
             // Emit the sanitized failure on SSE so the web gateway's
             // chat surface (and the Debug Inspector) renders a structured
             // error card with activity cleanup + input re-enable. The
@@ -5796,7 +5918,8 @@ async fn await_thread_outcome(
 
     // Write the response to the v1 DB for all outcomes so the history
     // endpoint shows the correct state (not just for Completed).
-    if let Ok(BridgeOutcome::Respond(ref text)) = result
+    if let Ok(ref outcome) = result
+        && let Some(text) = outcome.response_text()
         && let Some(ref db) = state.db
     {
         write_v1_response(db, text).await;
@@ -6042,6 +6165,114 @@ pub(crate) async fn handle_mission_notification(
             }
         }
     }
+}
+
+async fn bridge_outcome_for_completed_response(
+    state: &EngineState,
+    thread_id: ironclaw_engine::ThreadId,
+    response: Option<String>,
+) -> BridgeOutcome {
+    let attachments = take_v2_generated_image_attachments(state, thread_id).await;
+    match response {
+        Some(text) if attachments.is_empty() => BridgeOutcome::Respond(text),
+        Some(text) => BridgeOutcome::RespondWithAttachments {
+            text: suppress_generated_image_sentinel_text(text, true),
+            attachments,
+        },
+        None if attachments.is_empty() => BridgeOutcome::NoResponse,
+        None => BridgeOutcome::RespondWithAttachments {
+            text: String::new(),
+            attachments,
+        },
+    }
+}
+
+async fn discard_pending_v2_generated_image_attachments(
+    effect_adapter: &EffectBridgeAdapter,
+    thread_id: ironclaw_engine::ThreadId,
+) {
+    let attachments = effect_adapter
+        .take_generated_image_attachments(thread_id)
+        .await;
+    remove_staged_generated_image_attachments(&attachments);
+}
+
+/// Collect generated-image attachments from persisted v2 action results.
+///
+/// The effect adapter's in-memory path map is the primary delivery path. This
+/// helper is a compatibility fallback for persisted action results that still
+/// contain an image sentinel with an existing staged path. It deliberately does
+/// not re-stage persisted data URLs: v2 threads can contain old action results,
+/// and turning historical base64 back into files would risk re-sending stale
+/// images on later text-only turns.
+async fn collect_v2_generated_image_attachments(
+    store: &std::sync::Arc<dyn Store>,
+    thread_id: ironclaw_engine::ThreadId,
+) -> Vec<String> {
+    let thread = match store.load_thread(thread_id).await {
+        Ok(Some(thread)) => thread,
+        Ok(None) => {
+            tracing::debug!(
+                thread_id = %thread_id,
+                "thread not found in store for generated-image attachment collection"
+            );
+            return Vec::new();
+        }
+        Err(error) => {
+            tracing::debug!(
+                thread_id = %thread_id,
+                error = %error,
+                "failed to load thread for generated-image attachment collection"
+            );
+            return Vec::new();
+        }
+    };
+
+    let mut seen = HashSet::new();
+    let mut attachments = Vec::new();
+    for msg in &thread.internal_messages {
+        if msg.role != ironclaw_engine::MessageRole::ActionResult {
+            continue;
+        }
+        let action_name = msg.action_name.as_deref().unwrap_or_default();
+        if !matches!(action_name, "image_generate" | "image_edit") {
+            continue;
+        }
+        let Some(sentinel) = GeneratedImageSentinel::from_output(&msg.content) else {
+            continue;
+        };
+
+        let Some(path) = sentinel
+            .path()
+            .map(str::trim)
+            .filter(|path| !path.is_empty() && Path::new(path).exists())
+            .map(ToOwned::to_owned)
+        else {
+            tracing::debug!(
+                thread_id = %thread_id,
+                action = %action_name,
+                "persisted generated-image sentinel has no existing staged path"
+            );
+            continue;
+        };
+        if seen.insert(path.clone()) {
+            attachments.push(path);
+        }
+    }
+
+    attachments
+}
+
+async fn take_v2_generated_image_attachments(
+    state: &EngineState,
+    thread_id: ironclaw_engine::ThreadId,
+) -> Vec<String> {
+    let mut attachments = state
+        .effect_adapter
+        .take_generated_image_attachments(thread_id)
+        .await;
+    attachments.extend(collect_v2_generated_image_attachments(&state.store, thread_id).await);
+    dedupe_existing_attachment_paths(attachments)
 }
 
 /// Persist v2 engine tool call metadata to the v1 conversation DB.
@@ -10779,6 +11010,100 @@ mod tests {
         .await;
 
         outcome.expect("scoped WeCom history should stay separated");
+    }
+
+    #[tokio::test]
+    async fn handle_with_engine_passes_image_attachments_as_content_parts() {
+        let _engine_guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let _cwd_guard = CWD_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            let store = Arc::new(TestStore::new());
+            let temp_dir = tempfile::tempdir().expect("temp dir");
+            let _cwd = CurrentDirGuard::enter(temp_dir.path());
+            let mut state = make_expected_test_state(store.clone());
+            state.project_root = temp_dir.path().join("projects");
+            *lock.write().await = Some(state);
+
+            let (agent, _statuses) = make_router_test_agent(None).await;
+            let message = IncomingMessage::new("gateway", "alice", "What is in this image?")
+                .with_attachments(vec![crate::channels::IncomingAttachment {
+                    id: "img-1".to_string(),
+                    kind: crate::channels::AttachmentKind::Image,
+                    mime_type: "image/png".to_string(),
+                    filename: Some("screenshot.png".to_string()),
+                    size_bytes: Some(4),
+                    source_url: None,
+                    storage_key: None,
+                    local_path: None,
+                    extracted_text: None,
+                    data: vec![0x89, 0x50, 0x4E, 0x47],
+                    duration_secs: None,
+                }]);
+
+            let _ = handle_with_engine_inner(&agent, &message, &message.content, 0)
+                .await
+                .expect("router handled image message");
+
+            let thread = store
+                .threads
+                .read()
+                .await
+                .values()
+                .next()
+                .cloned()
+                .expect("thread saved");
+            let user_msg = thread
+                .messages
+                .iter()
+                .find(|msg| msg.role == ironclaw_engine::MessageRole::User)
+                .expect("user message recorded");
+
+            assert!(
+                user_msg.content.contains("you can already see this image"),
+                "expected visual-context hint, got: {}",
+                user_msg.content
+            );
+            assert!(
+                user_msg
+                    .content
+                    .contains("project_path=\".ironclaw/attachments/alice/"),
+                "expected saved project path in user content, got: {}",
+                user_msg.content
+            );
+            assert_eq!(
+                user_msg.content_parts.len(),
+                1,
+                "expected image content part to reach engine message"
+            );
+            match &user_msg.content_parts[0] {
+                ironclaw_engine::MessageContentPart::ImageUrl { image_url } => {
+                    assert!(
+                        image_url.url.starts_with("data:image/png;base64,"),
+                        "expected data URL image part, got: {}",
+                        image_url.url
+                    );
+                    assert_eq!(image_url.detail.as_deref(), Some("auto"));
+                }
+                other => panic!("expected image content part, got: {other:?}"),
+            }
+
+            assert!(
+                message
+                    .attachments
+                    .first()
+                    .is_some_and(|attachment| !attachment.data.is_empty()),
+                "source message should remain unchanged"
+            );
+
+            Ok::<(), crate::error::Error>(())
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome.expect("router image content part test");
     }
 
     #[tokio::test]
