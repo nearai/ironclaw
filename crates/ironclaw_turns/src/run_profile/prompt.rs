@@ -279,6 +279,7 @@ where
             visible_surface,
             safety_context: self.safety_context.clone(),
             inline_messages: request.inline_messages.clone(),
+            runtime_context: None,
         })?;
         if let Some(store) = self.instruction_materialization_store.as_ref() {
             store.put_materialized_messages(
