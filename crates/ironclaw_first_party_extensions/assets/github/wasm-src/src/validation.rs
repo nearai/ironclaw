@@ -122,7 +122,7 @@ pub(crate) fn normalize_ref_lookup(ref_name: &str) -> Result<String, String> {
     Ok(format!("heads/{ref_name}"))
 }
 
-fn is_full_commit_sha(ref_name: &str) -> bool {
+pub(crate) fn is_full_commit_sha(ref_name: &str) -> bool {
     ref_name.len() == 40 && ref_name.bytes().all(|b| b.is_ascii_hexdigit())
 }
 

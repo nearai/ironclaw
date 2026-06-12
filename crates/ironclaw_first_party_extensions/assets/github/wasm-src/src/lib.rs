@@ -100,7 +100,7 @@ mod tests {
     use crate::exports::near::agent::tool::Guest;
     use crate::request::sanitize_host_error;
     use crate::types::{GitHubAction, GitHubWebhookRequest};
-    use crate::validation::{normalize_ref_lookup, validate_repo_path};
+    use crate::validation::{is_full_commit_sha, normalize_ref_lookup, validate_repo_path};
     use crate::webhook::handle_webhook;
     use serde_json::json;
     use std::collections::HashMap;
@@ -237,6 +237,25 @@ mod tests {
             normalize_ref_lookup("0123456789abcdef0123456789abcdef01234567").unwrap_err(),
             "Unsupported from_ref: use a branch or tag ref, not a raw commit SHA"
         );
+    }
+
+    #[test]
+    fn full_commit_sha_detection_covers_boundaries() {
+        assert!(is_full_commit_sha(
+            "0123456789abcdef0123456789abcdef01234567"
+        ));
+        assert!(is_full_commit_sha(
+            "0123456789ABCDEF0123456789ABCDEF01234567"
+        ));
+        assert!(!is_full_commit_sha(
+            "0123456789abcdef0123456789abcdef0123456"
+        ));
+        assert!(!is_full_commit_sha(
+            "0123456789abcdef0123456789abcdef012345678"
+        ));
+        assert!(!is_full_commit_sha(
+            "0123456789abcdef0123456789abcdef0123456g"
+        ));
     }
 
     #[test]
