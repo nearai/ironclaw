@@ -859,6 +859,13 @@ async fn text_only_model_reply_driver_runs_prompt_model_transcript_path() {
     assert!(requests[0].messages.iter().any(|message| {
         message.content == "RAW_PROMPT_TEXT_SENTINEL sk-prompt-secret /host/path tool_input"
     }));
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|message| message.content.contains("Current date/time at loop start:")),
+        "model request must contain the runtime context message stamped by the production host"
+    );
     assert_eq!(
         fixture.milestone_names(),
         vec![
