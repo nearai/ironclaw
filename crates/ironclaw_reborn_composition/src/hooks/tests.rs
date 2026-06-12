@@ -12,6 +12,9 @@ use super::projection::*;
 
 use std::sync::Arc;
 
+use ironclaw_events::{
+    InMemorySecurityAuditSink, SecurityAuditSink, SecurityBoundary, SecurityDecision,
+};
 use ironclaw_hooks::dispatch::HookDispatcherBuilder;
 
 use crate::error::RebornBuildError;
@@ -222,6 +225,7 @@ fn activation_installs_a_test_first_party_hook_through_the_real_path() {
         HooksActivationConfig::enabled(),
         &registry,
         None,
+        None,
         install_test_first_party_hook,
     )
     .expect("enabled build with a test first-party hook succeeds")
@@ -316,6 +320,7 @@ fn valid_extension_hook_manifest_installs_at_installed_tier() {
     let factory = build_hook_dispatcher_builder_factory_with(
         HooksActivationConfig::enabled(),
         &registry,
+        None,
         None,
         install_test_first_party_hook,
     )
@@ -906,5 +911,44 @@ body = { mode = "nonsense" }
         !tenants.contains(&"reborn-hook-projection"),
         "the tenant-attributed entry point must NOT fall back to the synthetic \
          audit tenant; captured {captured:?}"
+    );
+}
+
+#[test]
+fn for_tenant_entry_point_records_quarantine_to_security_audit_sink() {
+    let hooks_block = r#"
+[[hooks]]
+id = "broken-hook"
+kind = "before_capability"
+body = { mode = "nonsense" }
+"#;
+    let registry = projection(registry_with_manifest(
+        "broken-ext",
+        &manifest_toml("broken-ext", hooks_block),
+    ));
+
+    let real_tenant = ironclaw_host_api::TenantId::new("acme-real-tenant").expect("tenant");
+    let sink = Arc::new(InMemorySecurityAuditSink::new());
+    let sink_dyn: Arc<dyn SecurityAuditSink> = sink.clone();
+
+    let factory = build_hook_dispatcher_builder_factory_for_tenant_with_audit_sink(
+        HooksActivationConfig::enabled(),
+        &registry,
+        &real_tenant,
+        sink_dyn,
+    )
+    .expect("malformed untrusted hook is quarantined, build succeeds")
+    .expect("flag ON yields a factory");
+    let _dispatcher = factory().expect("mint hook builder").build_arc();
+
+    let events = sink.snapshot();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].boundary, SecurityBoundary::HookQuarantine);
+    assert_eq!(events[0].decision, SecurityDecision::Blocked);
+    assert_eq!(events[0].code, super::audit::HOOK_QUARANTINED_CODE);
+    assert_eq!(
+        events[0].scope.as_ref().map(|scope| &scope.tenant_id),
+        Some(&real_tenant),
+        "quarantine security-audit event must be tenant visible"
     );
 }

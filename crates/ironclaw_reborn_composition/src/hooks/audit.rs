@@ -1,35 +1,45 @@
 //! Quarantine audit emission for the third-party hook projection path.
-//!
-//! Composition is a pre-run phase (no run-scoped `LoopHostMilestoneSink` exists
-//! yet), so quarantine decisions are surfaced via `tracing` at a stable,
-//! filterable target rather than a durable sink. Durable surfacing is a
-//! documented follow-up — and a hard prerequisite for production enablement of
-//! `HOOKS_THIRD_PARTY_ENABLED`, alongside `openat2` FS hardening. See the
-//! production-enablement gate on
-//! [`crate::hooks::HooksActivationConfig`] for the full prerequisite list.
+
+use std::sync::Arc;
+
+use ironclaw_events::{SecurityAuditEvent, SecurityAuditSink, SecurityBoundary, SecurityDecision};
+use ironclaw_host_api::{InvocationId, ResourceScope, SYSTEM_RESERVED_ID, TenantId, UserId};
+
+/// Stable security-audit code for hook projection/install quarantine.
+pub(super) const HOOK_QUARANTINED_CODE: &str = "hook_quarantined";
 
 /// Structured target for the security-audit `tracing` channel. Composition is a
 /// pre-run phase (no run-scoped `LoopHostMilestoneSink` exists yet), so
-/// quarantine decisions are surfaced via `tracing` at this stable target rather
-/// than a durable sink. Durable surfacing is a documented follow-up.
+/// quarantine decisions are also surfaced via `tracing` at this stable target.
 pub(super) const SECURITY_AUDIT_TARGET: &str = "security_audit";
 
 /// Emit a `hook.quarantined` security-audit event for an extension whose hooks
 /// were dropped during projection.
 ///
-/// Pre-run composition has no durable milestone sink, so this surfaces via
-/// `tracing` at the stable [`SECURITY_AUDIT_TARGET`]. This is a background /
-/// composition path, so per the REPL/TUI logging rule it uses `debug!` (never
-/// `info!`/`warn!`, which corrupt the interactive display); the dedicated
-/// `security_audit` target keeps the event filterable for operators.
+/// This is a background / composition path, so per the REPL/TUI logging rule it
+/// uses `debug!` (never `info!`/`warn!`, which corrupt the interactive
+/// display). When a [`SecurityAuditSink`] is wired, it also records a
+/// payload-free durable event carrying the tenant-scoped synthetic system scope.
 pub(super) fn emit_hook_quarantined(
     tenant_id: &ironclaw_host_api::TenantId,
     extension_id: &str,
     reason: &str,
     hooks_dropped: usize,
+    audit_sink: Option<&Arc<dyn SecurityAuditSink>>,
 ) {
     #[cfg(test)]
     test_capture::record(tenant_id, extension_id);
+
+    if let Some(sink) = audit_sink {
+        sink.record(
+            SecurityAuditEvent::new(
+                SecurityBoundary::HookQuarantine,
+                SecurityDecision::Blocked,
+                HOOK_QUARANTINED_CODE,
+            )
+            .with_scope(quarantine_scope(tenant_id)),
+        );
+    }
 
     tracing::debug!(
         target: SECURITY_AUDIT_TARGET,
@@ -40,6 +50,18 @@ pub(super) fn emit_hook_quarantined(
         hooks_dropped = hooks_dropped,
         "third-party extension hooks quarantined during projection"
     );
+}
+
+fn quarantine_scope(tenant_id: &TenantId) -> ResourceScope {
+    ResourceScope {
+        tenant_id: tenant_id.clone(),
+        user_id: UserId::from_trusted(SYSTEM_RESERVED_ID.to_string()),
+        agent_id: None,
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    }
 }
 
 /// Deterministic, thread-local capture of quarantine-audit attribution for

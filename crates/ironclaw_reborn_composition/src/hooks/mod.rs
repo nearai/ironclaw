@@ -84,9 +84,11 @@ mod tests;
 pub use ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory;
 
 // Public surface of the activation path (consumed by `crate::runtime`).
+pub(crate) use factory::build_hook_dispatcher_builder_factory_for_tenant_with_audit_sink;
 pub use factory::{
     build_hook_dispatcher_builder_factory, build_hook_dispatcher_builder_factory_for_tenant,
 };
+pub(crate) use projection::build_hook_projection_registry_with_audit_sink;
 pub use projection::{
     HookProjectionRegistry, MAX_INSTALLED_EXTENSIONS_CONSIDERED, MAX_TOTAL_HOOKS_PER_TENANT,
     ThirdPartyDiscoveryInput, build_hook_projection_registry, tenant_extension_root,
@@ -121,13 +123,9 @@ pub struct HooksActivationConfig {
     ///    backend as the interim mitigation; the hardened backend is the
     ///    documented gating follow-up.
     /// 2. **Durable quarantine surfacing:** `hook.quarantined` security-audit
-    ///    events are emitted only via `tracing` at the `security_audit` target
-    ///    and at `debug!` level (see [`crate::hooks::audit`]). Production
-    ///    typically disables debug logging, so operators would have no
-    ///    visibility into active quarantine activity (e.g. an extension
-    ///    attempting a scope escalation) unless `RUST_LOG=security_audit=debug`
-    ///    is explicitly set. A durable sink for these events must land before
-    ///    production enablement.
+    ///    events must be wired to a durable sink, not only tracing. The Reborn
+    ///    runtime composition wires this sink; future host profiles must
+    ///    preserve that wiring before enabling third-party hooks.
     third_party_enabled: bool,
 }
 

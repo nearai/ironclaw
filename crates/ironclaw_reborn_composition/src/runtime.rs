@@ -32,7 +32,10 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use ironclaw_events::{DurableAuditLog, DurableEventLog, InMemoryAuditSink, RuntimeEvent};
+use ironclaw_events::{
+    DurableAuditLog, DurableEventLog, DurableSecurityAuditSink, FanoutSecurityAuditSink,
+    InMemoryAuditSink, RuntimeEvent, SecurityAuditSink, TracingSecurityAuditSink,
+};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_first_party_extension_ports::{
@@ -2115,24 +2118,31 @@ pub async fn build_reborn_runtime(
     // and projected into a `HookProjectionRegistry` that carries ONLY hook
     // metadata (no `ExtensionRegistry`, no `ExtensionPackage`) and reaches ONLY
     // this hook factory, not the capability catalog or surface resolver.
+    let hook_security_audit_sink: Arc<dyn SecurityAuditSink> =
+        Arc::new(FanoutSecurityAuditSink::new(vec![
+            Arc::new(TracingSecurityAuditSink),
+            Arc::new(DurableSecurityAuditSink::new(Arc::clone(&audit_log))),
+        ]));
     let hook_dispatcher_builder_factory = if let Some(local_runtime) = local_runtime {
         let third_party_input = crate::hooks::ThirdPartyDiscoveryInput {
             filesystem: local_runtime.extension_filesystem.as_ref(),
             tenant_id: &validated_identity.tenant_id,
         };
-        let projection_registry = crate::hooks::build_hook_projection_registry(
+        let projection_registry = crate::hooks::build_hook_projection_registry_with_audit_sink(
             builtin_extension_registry()?,
             Some(third_party_input),
             hooks_config,
+            Some(Arc::clone(&hook_security_audit_sink)),
         )
         .await
         .map_err(|error| RebornRuntimeError::InvalidArgument {
             reason: format!("hook projection registry assembly failed: {error}"),
         })?;
-        crate::hooks::build_hook_dispatcher_builder_factory_for_tenant(
+        crate::hooks::build_hook_dispatcher_builder_factory_for_tenant_with_audit_sink(
             hooks_config,
             &projection_registry,
             &validated_identity.tenant_id,
+            Arc::clone(&hook_security_audit_sink),
         )
         .map_err(|error| RebornRuntimeError::InvalidArgument {
             reason: format!("hook framework activation failed: {error}"),
@@ -2196,7 +2206,7 @@ pub async fn build_reborn_runtime(
         model_policy_guard: None,
         model_budget_accountant,
         safety_context: None,
-        hook_security_audit_sink: Some(Arc::new(ironclaw_events::TracingSecurityAuditSink)),
+        hook_security_audit_sink: Some(hook_security_audit_sink),
         turn_event_sink: None,
         hook_dispatcher_builder_factory,
     };

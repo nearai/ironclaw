@@ -54,7 +54,13 @@
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use ironclaw_host_api::{CapabilityId, ResourceScope};
+use chrono::Utc;
+use ironclaw_host_api::{
+    ActionSummary, AuditEnvelope, AuditEventId, AuditStage, CapabilityId, CorrelationId,
+    DecisionSummary, EffectKind, ResourceScope,
+};
+
+use crate::sink::DurableAuditLog;
 
 /// Identifies *which* security boundary produced an audit event.
 ///
@@ -78,6 +84,10 @@ pub enum SecurityBoundary {
     /// Hook predicate / envelope rejection. (PR #3573 follow-up adoption
     /// target.)
     HookDeny,
+    /// Hook activation/projection quarantine boundary. Used when an installed
+    /// extension's hook set is dropped during projection or install-time
+    /// validation.
+    HookQuarantine,
     /// MCP direct-lease boundary that gates raw protocol access.
     McpDirectLease,
 }
@@ -92,6 +102,7 @@ impl SecurityBoundary {
             Self::CredentialChannel => "credential_channel",
             Self::AuthContinuation => "auth_continuation",
             Self::HookDeny => "hook_deny",
+            Self::HookQuarantine => "hook_quarantine",
             Self::McpDirectLease => "mcp_direct_lease",
         }
     }
@@ -204,6 +215,130 @@ impl SecurityAuditSink for NoopSecurityAuditSink {
     fn record(&self, _event: SecurityAuditEvent) {}
 }
 
+/// Records each event to every configured sink.
+///
+/// Best-effort: child sinks must not panic by contract, and this fanout does
+/// not retry. It exists so production composition can keep the tracing surface
+/// while also wiring a durable sink.
+#[derive(Clone, Debug, Default)]
+pub struct FanoutSecurityAuditSink {
+    sinks: Vec<Arc<dyn SecurityAuditSink>>,
+}
+
+impl FanoutSecurityAuditSink {
+    pub fn new(sinks: Vec<Arc<dyn SecurityAuditSink>>) -> Self {
+        Self { sinks }
+    }
+}
+
+impl SecurityAuditSink for FanoutSecurityAuditSink {
+    fn record(&self, event: SecurityAuditEvent) {
+        for sink in &self.sinks {
+            sink.record(event.clone());
+        }
+    }
+}
+
+/// Best-effort adapter that persists payload-free security-audit events into
+/// the durable control-plane audit log.
+///
+/// [`SecurityAuditSink::record`] is synchronous because several security
+/// boundaries fire from sync paths. This adapter schedules the durable append
+/// on the current Tokio runtime. If no runtime is present, it emits a debug
+/// diagnostic and preserves the surrounding security decision.
+#[derive(Clone)]
+pub struct DurableSecurityAuditSink {
+    log: Arc<dyn DurableAuditLog>,
+}
+
+impl DurableSecurityAuditSink {
+    pub fn new(log: Arc<dyn DurableAuditLog>) -> Self {
+        Self { log }
+    }
+}
+
+impl std::fmt::Debug for DurableSecurityAuditSink {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DurableSecurityAuditSink")
+            .field("log", &"<durable_audit_log>")
+            .finish()
+    }
+}
+
+impl SecurityAuditSink for DurableSecurityAuditSink {
+    fn record(&self, event: SecurityAuditEvent) {
+        let Some(record) = audit_envelope_from_security_event(event) else {
+            tracing::debug!(
+                target: "ironclaw::security_audit",
+                "security audit event omitted from durable log because it had no scope"
+            );
+            return;
+        };
+        let log = Arc::clone(&self.log);
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    if let Err(error) = log.append(record).await {
+                        tracing::debug!(
+                            target: "ironclaw::security_audit",
+                            error = %error,
+                            "failed to persist security audit event"
+                        );
+                    }
+                });
+            }
+            Err(error) => {
+                tracing::debug!(
+                    target: "ironclaw::security_audit",
+                    error = %error,
+                    "security audit event omitted from durable log because no Tokio runtime is active"
+                );
+            }
+        }
+    }
+}
+
+fn audit_envelope_from_security_event(event: SecurityAuditEvent) -> Option<AuditEnvelope> {
+    let scope = event.scope?;
+    Some(AuditEnvelope {
+        event_id: AuditEventId::new(),
+        correlation_id: CorrelationId::new(),
+        stage: audit_stage_for_decision(event.decision),
+        timestamp: Utc::now(),
+        tenant_id: scope.tenant_id,
+        user_id: scope.user_id,
+        agent_id: scope.agent_id,
+        project_id: scope.project_id,
+        mission_id: scope.mission_id,
+        thread_id: scope.thread_id,
+        invocation_id: scope.invocation_id,
+        process_id: None,
+        approval_request_id: None,
+        extension_id: None,
+        action: ActionSummary {
+            kind: "security_boundary_decision".to_string(),
+            target: Some(format!("{}:{}", event.boundary.as_str(), event.code)),
+            effects: Vec::<EffectKind>::new(),
+        },
+        decision: DecisionSummary {
+            kind: event.decision.as_str().to_string(),
+            reason: None,
+            actor: None,
+        },
+        result: None,
+    })
+}
+
+fn audit_stage_for_decision(decision: SecurityDecision) -> AuditStage {
+    match decision {
+        SecurityDecision::Allowed => AuditStage::After,
+        SecurityDecision::Blocked
+        | SecurityDecision::ScopeMismatch
+        | SecurityDecision::ReplayRejected => AuditStage::Denied,
+    }
+}
+
 /// Emits each event at `tracing::debug!`.
 ///
 /// `debug!` is chosen deliberately: per the repo `CLAUDE.md` REPL/TUI rule,
@@ -309,6 +444,7 @@ mod tests {
             "auth_continuation"
         );
         assert_eq!(SecurityBoundary::HookDeny.as_str(), "hook_deny");
+        assert_eq!(SecurityBoundary::HookQuarantine.as_str(), "hook_quarantine");
         assert_eq!(
             SecurityBoundary::McpDirectLease.as_str(),
             "mcp_direct_lease"
@@ -414,5 +550,53 @@ mod tests {
             "passthrough",
         ));
         assert_eq!(sink.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn durable_sink_appends_scope_bearing_event() {
+        use crate::{DurableAuditLog, EventCursor, EventStreamKey, InMemoryDurableAuditLog};
+        use ironclaw_host_api::{InvocationId, TenantId, UserId};
+
+        let log = Arc::new(InMemoryDurableAuditLog::new());
+        let sink = DurableSecurityAuditSink::new(log.clone());
+        let scope = ResourceScope {
+            tenant_id: TenantId::new("tenant-a").expect("tenant"),
+            user_id: UserId::new("system").expect("user"),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+
+        sink.record(
+            SecurityAuditEvent::new(
+                SecurityBoundary::HookQuarantine,
+                SecurityDecision::Blocked,
+                "hook_quarantined",
+            )
+            .with_scope(scope.clone()),
+        );
+        tokio::task::yield_now().await;
+
+        let stream = EventStreamKey::new(scope.tenant_id, scope.user_id, None);
+        let replay = log
+            .read_after_cursor(
+                &stream,
+                &crate::ReadScope::any(),
+                Some(EventCursor::origin()),
+                10,
+            )
+            .await
+            .expect("read audit log");
+        assert_eq!(replay.entries.len(), 1);
+        let record = &replay.entries[0].record;
+        assert_eq!(record.stage, AuditStage::Denied);
+        assert_eq!(record.action.kind, "security_boundary_decision");
+        assert_eq!(
+            record.action.target.as_deref(),
+            Some("hook_quarantine:hook_quarantined")
+        );
+        assert_eq!(record.decision.kind, "blocked");
     }
 }

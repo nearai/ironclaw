@@ -10,11 +10,13 @@
 //! NOTHING from the capability / runtime / package surface.
 
 use ironclaw_extensions::ExtensionRegistry;
+use std::sync::Arc;
 
 use crate::error::RebornBuildError;
 
 use super::HooksActivationConfig;
 use super::audit::emit_hook_quarantined;
+use ironclaw_events::SecurityAuditSink;
 
 /// Maximum number of *installed* extension packages whose `[[hooks]]` will be
 /// considered for projection in a single tenant build. Surplus extensions
@@ -233,6 +235,18 @@ pub async fn build_hook_projection_registry<F>(
 where
     F: ironclaw_filesystem::RootFilesystem,
 {
+    build_hook_projection_registry_with_audit_sink(builtin, third_party_input, config, None).await
+}
+
+pub(crate) async fn build_hook_projection_registry_with_audit_sink<F>(
+    builtin: ExtensionRegistry,
+    third_party_input: Option<ThirdPartyDiscoveryInput<'_, F>>,
+    config: HooksActivationConfig,
+    audit_sink: Option<Arc<dyn SecurityAuditSink>>,
+) -> Result<HookProjectionRegistry, RebornBuildError>
+where
+    F: ironclaw_filesystem::RootFilesystem,
+{
     // Seed the projection with the BUILTIN packages' hook metadata only. The
     // builtin `ExtensionRegistry` is consumed here and dropped; only hook
     // projections survive into the hook-only registry (structural containment).
@@ -291,7 +305,13 @@ where
         // id-mismatch, surplus beyond the discovery bound). Each drops only its
         // own package; valid siblings are unaffected.
         for quarantine in &discovered.quarantined {
-            emit_hook_quarantined(tenant_id, &quarantine.extension_id, &quarantine.reason, 0);
+            emit_hook_quarantined(
+                tenant_id,
+                &quarantine.extension_id,
+                &quarantine.reason,
+                0,
+                audit_sink.as_ref(),
+            );
         }
 
         let mut hook_total = 0usize;
@@ -313,11 +333,18 @@ where
                     &extension_id_str,
                     "exceeded MAX_TOTAL_HOOKS_PER_TENANT",
                     hook_count,
+                    audit_sink.as_ref(),
                 );
                 continue;
             }
             if let Err(reason) = enforce_root_containment(&root, &projection.root) {
-                emit_hook_quarantined(tenant_id, &extension_id_str, &reason, hook_count);
+                emit_hook_quarantined(
+                    tenant_id,
+                    &extension_id_str,
+                    &reason,
+                    hook_count,
+                    audit_sink.as_ref(),
+                );
                 continue;
             }
             // Dedup by extension id: a duplicate of a builtin/already-merged id
@@ -330,6 +357,7 @@ where
                     &extension_id_str,
                     "duplicate extension id collides with an already-projected package",
                     hook_count,
+                    audit_sink.as_ref(),
                 );
                 continue;
             }

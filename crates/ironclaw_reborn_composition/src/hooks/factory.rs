@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use ironclaw_events::SecurityAuditSink;
 use ironclaw_hooks::dispatch::HookDispatcherBuilder;
 use ironclaw_hooks::evaluator::PredicateEvaluator;
 use ironclaw_hooks::manifest::HookManifestEntry;
@@ -108,6 +109,7 @@ pub(super) fn project_extension_hook_sets(
     registrar: &HookRegistrar,
     tenant_id: &ironclaw_host_api::TenantId,
     tenant_root: Option<&ironclaw_host_api::VirtualPath>,
+    audit_sink: Option<&Arc<dyn SecurityAuditSink>>,
 ) -> Result<Vec<ProjectedExtensionHooks>, RebornBuildError> {
     let mut survivors: Vec<ProjectedExtensionHooks> = Vec::new();
     let mut considered = 0usize;
@@ -134,6 +136,7 @@ pub(super) fn project_extension_hook_sets(
                     &extension_id_str,
                     "exceeded MAX_INSTALLED_EXTENSIONS_CONSIDERED",
                     hook_count,
+                    audit_sink,
                 );
                 continue;
             }
@@ -143,6 +146,7 @@ pub(super) fn project_extension_hook_sets(
                     &extension_id_str,
                     "exceeded MAX_TOTAL_HOOKS_PER_TENANT",
                     hook_count,
+                    audit_sink,
                 );
                 continue;
             }
@@ -151,7 +155,13 @@ pub(super) fn project_extension_hook_sets(
             if let Some(root) = tenant_root
                 && let Err(reason) = enforce_root_containment(root, &projection.root)
             {
-                emit_hook_quarantined(tenant_id, &extension_id_str, &reason, hook_count);
+                emit_hook_quarantined(
+                    tenant_id,
+                    &extension_id_str,
+                    &reason,
+                    hook_count,
+                    audit_sink,
+                );
                 continue;
             }
         }
@@ -163,7 +173,13 @@ pub(super) fn project_extension_hook_sets(
                 if trusted {
                     return Err(RebornBuildError::InvalidConfig { reason });
                 }
-                emit_hook_quarantined(tenant_id, &extension_id_str, &reason, hook_count);
+                emit_hook_quarantined(
+                    tenant_id,
+                    &extension_id_str,
+                    &reason,
+                    hook_count,
+                    audit_sink,
+                );
                 continue;
             }
         };
@@ -192,7 +208,13 @@ pub(super) fn project_extension_hook_sets(
                 if trusted {
                     return Err(RebornBuildError::InvalidConfig { reason });
                 }
-                emit_hook_quarantined(tenant_id, &extension_id_str, &reason, hook_count);
+                emit_hook_quarantined(
+                    tenant_id,
+                    &extension_id_str,
+                    &reason,
+                    hook_count,
+                    audit_sink,
+                );
             }
         }
     }
@@ -259,6 +281,7 @@ pub fn build_hook_dispatcher_builder_factory(
         // in `build_hook_projection_registry`. A synthetic tenant label is used
         // only for any quarantine audit emitted during install-time validation.
         None,
+        None,
         install_first_party_hooks,
     )
 }
@@ -287,6 +310,23 @@ pub fn build_hook_dispatcher_builder_factory_for_tenant(
         config,
         registry,
         Some((tenant_id, &root)),
+        None,
+        install_first_party_hooks,
+    )
+}
+
+pub(crate) fn build_hook_dispatcher_builder_factory_for_tenant_with_audit_sink(
+    config: HooksActivationConfig,
+    registry: &HookProjectionRegistry,
+    tenant_id: &ironclaw_host_api::TenantId,
+    audit_sink: Arc<dyn SecurityAuditSink>,
+) -> Result<Option<HookDispatcherBuilderFactory>, RebornBuildError> {
+    let root = tenant_extension_root(tenant_id)?;
+    build_hook_dispatcher_builder_factory_with(
+        config,
+        registry,
+        Some((tenant_id, &root)),
+        Some(audit_sink),
         install_first_party_hooks,
     )
 }
@@ -308,6 +348,7 @@ pub(super) fn build_hook_dispatcher_builder_factory_with<F>(
         &ironclaw_host_api::TenantId,
         &ironclaw_host_api::VirtualPath,
     )>,
+    audit_sink: Option<Arc<dyn SecurityAuditSink>>,
     install_first_party: F,
 ) -> Result<Option<HookDispatcherBuilderFactory>, RebornBuildError>
 where
@@ -355,8 +396,13 @@ where
         Some((tenant, root)) => (tenant, Some(root)),
         None => (&fallback_tenant, None),
     };
-    let extension_install_sets =
-        project_extension_hook_sets(registry.projections(), &registrar, audit_tenant, audit_root)?;
+    let extension_install_sets = project_extension_hook_sets(
+        registry.projections(),
+        &registrar,
+        audit_tenant,
+        audit_root,
+        audit_sink.as_ref(),
+    )?;
 
     let evaluator_for_factory = Arc::clone(&evaluator);
     let factory: HookDispatcherBuilderFactory = Arc::new(move || {
