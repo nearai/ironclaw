@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use ironclaw_turns::{
     CheckpointStateStore, GetCheckpointStateRequest, GetLoopCheckpointRequest,
     LoopCheckpointStateRef, LoopCheckpointStore, PutCheckpointStateRequest,
-    PutLoopCheckpointRequest, TurnCheckpointId,
+    PutLoopCheckpointRequest, TurnCheckpointId, TurnRunId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, LoadCheckpointPayloadRequest,
         LoadedCheckpointPayload, LoopCheckpointPort, LoopCheckpointRequest,
@@ -233,13 +233,14 @@ impl LoopCheckpointPort for HostManagedLoopCheckpointPort {
             ));
         }
 
-        let state_ref = checkpoint_state_store_ref(&self.run_context, &metadata.state_ref)?;
+        let (state_ref, state_run_id) =
+            checkpoint_state_store_ref_and_run_id(&self.run_context, &metadata.state_ref)?;
         let state_record = self
             .checkpoint_state_store
             .get_checkpoint_state(GetCheckpointStateRequest {
                 scope: self.run_context.scope.clone(),
                 turn_id: self.run_context.turn_id,
-                run_id: self.run_context.run_id,
+                run_id: state_run_id,
                 state_ref,
                 schema_id: metadata.schema_id.clone(),
                 schema_version: metadata.schema_version,
@@ -267,16 +268,39 @@ fn checkpoint_state_store_ref(
     run_context: &LoopRunContext,
     state_ref: &LoopCheckpointStateRef,
 ) -> Result<LoopCheckpointStateRef, AgentLoopHostError> {
+    checkpoint_state_store_ref_and_run_id(run_context, state_ref).map(|(state_ref, _)| state_ref)
+}
+
+fn checkpoint_state_store_ref_and_run_id(
+    run_context: &LoopRunContext,
+    state_ref: &LoopCheckpointStateRef,
+) -> Result<(LoopCheckpointStateRef, TurnRunId), AgentLoopHostError> {
     let run_scoped_prefix = format!("checkpoint:{}:", run_context.run_id);
     if let Some(token) = state_ref.as_str().strip_prefix(&run_scoped_prefix) {
-        return LoopCheckpointStateRef::new(format!("checkpoint:{token}")).map_err(|reason| {
-            AgentLoopHostError::new(
-                AgentLoopHostErrorKind::Internal,
-                format!("could not rebuild store key from run-scoped checkpoint ref: {reason}"),
-            )
-        });
+        return Ok((store_checkpoint_state_ref(token)?, run_context.run_id));
     }
-    Ok(state_ref.clone())
+    let Some(rest) = state_ref.as_str().strip_prefix("checkpoint:") else {
+        return Ok((state_ref.clone(), run_context.run_id));
+    };
+    let Some((run_id, token)) = rest.split_once(':') else {
+        return Ok((state_ref.clone(), run_context.run_id));
+    };
+    let source_run_id = TurnRunId::parse(run_id).map_err(|error| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Invalid,
+            format!("checkpoint state ref contains invalid source run id: {error}"),
+        )
+    })?;
+    Ok((store_checkpoint_state_ref(token)?, source_run_id))
+}
+
+fn store_checkpoint_state_ref(token: &str) -> Result<LoopCheckpointStateRef, AgentLoopHostError> {
+    LoopCheckpointStateRef::new(format!("checkpoint:{token}")).map_err(|reason| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Internal,
+            format!("could not rebuild store key from run-scoped checkpoint ref: {reason}"),
+        )
+    })
 }
 
 #[derive(Clone)]

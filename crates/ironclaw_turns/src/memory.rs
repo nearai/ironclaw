@@ -83,10 +83,12 @@ struct Inner {
     submit_idempotency: HashMap<SubmitIdempotencyKey, Result<SubmitTurnResponse, TurnError>>,
     submit_idempotency_in_flight: HashSet<SubmitIdempotencyKey>,
     resume_idempotency: HashMap<RunIdempotencyKey, Result<ResumeTurnResponse, TurnError>>,
+    retry_idempotency: HashMap<RunIdempotencyKey, Result<RetryTurnResponse, TurnError>>,
     cancel_idempotency: HashMap<RunIdempotencyKey, Result<CancelRunResponse, TurnError>>,
     idempotency_records: HashMap<PersistedIdempotencyKey, TurnIdempotencyRecord>,
     submit_idempotency_order: VecDeque<SubmitIdempotencyKey>,
     resume_idempotency_order: VecDeque<RunIdempotencyKey>,
+    retry_idempotency_order: VecDeque<RunIdempotencyKey>,
     cancel_idempotency_order: VecDeque<RunIdempotencyKey>,
     idempotency_record_order: VecDeque<PersistedIdempotencyKey>,
     events: Vec<TurnLifecycleEvent>,
@@ -677,10 +679,18 @@ impl TurnStateStore for InMemoryTurnStateStore {
     }
 
     async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
-        // WS-3 implements failed-run retry semantics and idempotency.
-        Err(TurnError::RunNotRetryable {
+        let mut inner = self.lock_inner()?;
+        let idempotency_key = RunIdempotencyKey {
+            scope: request.scope.clone(),
             run_id: request.run_id,
-        })
+            key: request.idempotency_key.clone(),
+        };
+        if let Some(result) = inner.retry_idempotency.get(&idempotency_key) {
+            return result.clone();
+        }
+        let result = inner.retry_turn_once(&request, self.admission_limit_provider.as_ref());
+        inner.remember_retry_idempotency(idempotency_key, result.clone(), Utc::now());
+        result
     }
 
     async fn request_cancel(
@@ -1280,6 +1290,16 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
         Ok(inner.recover_expired_leases(request))
     }
 
+    async fn latest_resumable_checkpoint(
+        &self,
+        scope: &TurnScope,
+        turn_id: crate::TurnId,
+        run_id: TurnRunId,
+    ) -> Result<Option<TurnCheckpointId>, TurnError> {
+        let inner = self.lock_inner()?;
+        Ok(inner.latest_resumable_loop_checkpoint(scope, turn_id, run_id))
+    }
+
     async fn record_model_route_snapshot(
         &self,
         request: RecordModelRouteSnapshotRequest,
@@ -1484,10 +1504,12 @@ impl Inner {
 
         let mut submit_idempotency = HashMap::new();
         let mut resume_idempotency = HashMap::new();
+        let mut retry_idempotency = HashMap::new();
         let mut cancel_idempotency = HashMap::new();
         let mut idempotency_records = HashMap::new();
         let mut submit_idempotency_order = VecDeque::new();
         let mut resume_idempotency_order = VecDeque::new();
+        let mut retry_idempotency_order = VecDeque::new();
         let mut cancel_idempotency_order = VecDeque::new();
         let mut idempotency_record_order = VecDeque::new();
         let mut ordered_idempotency_records = snapshot.idempotency_records;
@@ -1516,6 +1538,17 @@ impl Inner {
                         };
                         resume_idempotency_order.push_back(key.clone());
                         resume_idempotency.insert(key, replay);
+                    }
+                }
+                TurnIdempotencyOperationKind::Retry => {
+                    if let (Some(run_id), Some(replay)) = (record.run_id, record.replay_retry()) {
+                        let key = RunIdempotencyKey {
+                            scope: record.scope.clone(),
+                            run_id,
+                            key: record.key.clone(),
+                        };
+                        retry_idempotency_order.push_back(key.clone());
+                        retry_idempotency.insert(key, replay);
                     }
                 }
                 TurnIdempotencyOperationKind::Cancel => {
@@ -1596,10 +1629,12 @@ impl Inner {
             submit_idempotency,
             submit_idempotency_in_flight: HashSet::new(),
             resume_idempotency,
+            retry_idempotency,
             cancel_idempotency,
             idempotency_records,
             submit_idempotency_order,
             resume_idempotency_order,
+            retry_idempotency_order,
             cancel_idempotency_order,
             idempotency_record_order,
             events,
@@ -1825,6 +1860,29 @@ impl Inner {
         self.prune_idempotency_records();
     }
 
+    fn remember_retry_idempotency(
+        &mut self,
+        key: RunIdempotencyKey,
+        result: Result<RetryTurnResponse, TurnError>,
+        created_at: crate::TurnTimestamp,
+    ) {
+        if !self.retry_idempotency.contains_key(&key) {
+            self.retry_idempotency_order.push_back(key.clone());
+        }
+        let record = retry_idempotency_record(&key, &result, created_at);
+        self.remember_persisted_idempotency(record);
+        self.retry_idempotency.insert(key, result);
+        let removed = prune_ordered_map(
+            &mut self.retry_idempotency,
+            &mut self.retry_idempotency_order,
+            self.limits.max_idempotency_records,
+        );
+        for key in removed {
+            self.remove_persisted_run_idempotency(TurnIdempotencyOperationKind::Retry, &key);
+        }
+        self.prune_idempotency_records();
+    }
+
     fn remember_cancel_idempotency(
         &mut self,
         key: RunIdempotencyKey,
@@ -1873,7 +1931,7 @@ impl Inner {
         let _removed = prune_ordered_map(
             &mut self.idempotency_records,
             &mut self.idempotency_record_order,
-            self.limits.max_idempotency_records.saturating_mul(3),
+            self.limits.max_idempotency_records.saturating_mul(4),
         );
     }
 
@@ -1955,6 +2013,131 @@ impl Inner {
         })();
         self.records.insert(record.run_id, record);
         result
+    }
+
+    fn retry_turn_once(
+        &mut self,
+        request: &RetryTurnRequest,
+        admission_limit_provider: &dyn TurnAdmissionLimitProvider,
+    ) -> Result<RetryTurnResponse, TurnError> {
+        let (
+            lock_key,
+            source_checkpoint,
+            scope,
+            actor,
+            turn_id,
+            profile,
+            accepted_message_ref,
+            parent_run_id,
+            subagent_depth,
+            spawn_tree_root_run_id,
+        ) = {
+            let Some(failed) = self.records.get(&request.run_id) else {
+                return Err(TurnError::ScopeNotFound);
+            };
+            if failed.scope != request.scope {
+                return Err(TurnError::ScopeNotFound);
+            }
+            if failed.actor != request.actor {
+                return Err(TurnError::Unauthorized);
+            }
+            if failed.status != TurnStatus::Failed || !self.is_latest_run_for_turn(failed) {
+                return Err(TurnError::RunNotRetryable {
+                    run_id: request.run_id,
+                });
+            }
+            let Some(source_checkpoint_id) = failed.checkpoint_id else {
+                return Err(TurnError::RunNotRetryable {
+                    run_id: request.run_id,
+                });
+            };
+            let Some(source_checkpoint) =
+                self.retryable_loop_checkpoint(failed, source_checkpoint_id)
+            else {
+                return Err(TurnError::RunNotRetryable {
+                    run_id: request.run_id,
+                });
+            };
+            (
+                TurnActiveLockKey::from(&failed.scope),
+                source_checkpoint,
+                failed.scope.clone(),
+                failed.actor.clone(),
+                failed.turn_id,
+                failed.profile.clone(),
+                failed.accepted_message_ref.clone(),
+                failed.parent_run_id,
+                failed.subagent_depth,
+                failed.spawn_tree_root_run_id,
+            )
+        };
+        if let Some(response) = self.thread_busy(&lock_key) {
+            return Err(TurnError::ThreadBusy(response));
+        }
+
+        let now = Utc::now();
+        let mut new_run_id = fresh_turn_run_id();
+        while self.records.contains_key(&new_run_id) {
+            new_run_id = fresh_turn_run_id();
+        }
+        let admission_class = profile.admission_class.clone();
+        if let Err(rejection) = self.reserve_admission(
+            new_run_id,
+            admission_class,
+            &scope,
+            &actor,
+            admission_limit_provider,
+        ) {
+            return Err(TurnError::AdmissionRejected(rejection));
+        }
+        let retry_checkpoint_id =
+            self.link_loop_checkpoint_for_retry(&source_checkpoint, new_run_id, now);
+        let event_cursor = self.next_cursor();
+        let record = RunRecord {
+            scope,
+            actor,
+            turn_id,
+            run_id: new_run_id,
+            status: TurnStatus::Queued,
+            profile,
+            resolved_model_route: None,
+            accepted_message_ref,
+            source_binding_ref: request.source_binding_ref.clone(),
+            reply_target_binding_ref: request.reply_target_binding_ref.clone(),
+            checkpoint_id: Some(retry_checkpoint_id),
+            gate_ref: None,
+            credential_requirements: Vec::new(),
+            failure: None,
+            event_cursor,
+            runner_id: None,
+            lease_token: None,
+            lease_expires_at: None,
+            last_heartbeat_at: None,
+            claim_count: 0,
+            received_at: now,
+            parent_run_id,
+            subagent_depth,
+            spawn_tree_root_run_id,
+        };
+        self.active_locks.insert(
+            lock_key.clone(),
+            TurnActiveLockRecord {
+                key: lock_key,
+                run_id: new_run_id,
+                status: TurnStatus::Queued,
+                lock_version: TurnLockVersion::new(1),
+                acquired_at: now,
+                updated_at: now,
+            },
+        );
+        self.queued_runs.push_back(new_run_id);
+        self.records.insert(new_run_id, record.clone());
+        self.push_event(&record, TurnEventKind::Resumed, None);
+        Ok(RetryTurnResponse {
+            run_id: new_run_id,
+            status: TurnStatus::Queued,
+            event_cursor,
+        })
     }
 
     fn request_cancel_once(
@@ -2083,6 +2266,9 @@ impl Inner {
                 });
             }
             record.status = status;
+            if status == TurnStatus::Failed {
+                record.checkpoint_id = None;
+            }
             record.failure = failure.clone();
             record.runner_id = None;
             record.lease_token = None;
@@ -2129,9 +2315,11 @@ impl Inner {
                     state_ref,
                     reason,
                 }) => self.block_claimed_record(record, checkpoint_id, state_ref, reason),
-                LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Failed { failure, .. }) => {
-                    self.fail_claimed_record(record, failure)
-                }
+                LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Failed {
+                    failure,
+                    resume_checkpoint_id,
+                    ..
+                }) => self.fail_claimed_record(record, failure, resume_checkpoint_id),
                 LoopExitMapping::RecoveryRequired { failure } => {
                     self.cancel_or_fail_claimed_record(record, failure)
                 }
@@ -2268,6 +2456,7 @@ impl Inner {
         &mut self,
         mut record: RunRecord,
         failure: SanitizedFailure,
+        resume_checkpoint_id: Option<TurnCheckpointId>,
     ) -> AppliedLoopTransition {
         if record.status != TurnStatus::Running {
             let from = record.status;
@@ -2280,6 +2469,7 @@ impl Inner {
             };
         }
         record.status = TurnStatus::Failed;
+        record.checkpoint_id = resume_checkpoint_id;
         record.failure = Some(failure.clone());
         record.runner_id = None;
         record.lease_token = None;
@@ -2308,7 +2498,7 @@ impl Inner {
     ) -> AppliedLoopTransition {
         let from = record.status;
         match from {
-            TurnStatus::Running => self.fail_claimed_record(record, failure),
+            TurnStatus::Running => self.fail_claimed_record(record, failure, None),
             TurnStatus::CancelRequested => self.cancel_claimed_record(record),
             _ => AppliedLoopTransition::Rejected {
                 record: Box::new(record),
@@ -2430,6 +2620,83 @@ impl Inner {
             status: record.status,
             event_cursor: record.event_cursor,
         })
+    }
+
+    fn is_latest_run_for_turn(&self, record: &RunRecord) -> bool {
+        !self.records.values().any(|candidate| {
+            candidate.turn_id == record.turn_id && candidate.event_cursor > record.event_cursor
+        })
+    }
+
+    fn retryable_loop_checkpoint(
+        &self,
+        record: &RunRecord,
+        checkpoint_id: TurnCheckpointId,
+    ) -> Option<LoopCheckpointRecord> {
+        self.loop_checkpoints
+            .get(&checkpoint_id)
+            .filter(|checkpoint| {
+                checkpoint.scope == record.scope
+                    && checkpoint.turn_id == record.turn_id
+                    && checkpoint.run_id == record.run_id
+                    && matches!(
+                        checkpoint.kind,
+                        crate::run_profile::LoopCheckpointKind::BeforeModel
+                            | crate::run_profile::LoopCheckpointKind::BeforeBlock
+                    )
+            })
+            .cloned()
+    }
+
+    fn link_loop_checkpoint_for_retry(
+        &mut self,
+        source: &LoopCheckpointRecord,
+        retry_run_id: TurnRunId,
+        created_at: crate::TurnTimestamp,
+    ) -> TurnCheckpointId {
+        let checkpoint_id = TurnCheckpointId::new();
+        self.loop_checkpoints.insert(
+            checkpoint_id,
+            LoopCheckpointRecord {
+                checkpoint_id,
+                scope: source.scope.clone(),
+                turn_id: source.turn_id,
+                run_id: retry_run_id,
+                state_ref: source.state_ref.clone(),
+                schema_id: source.schema_id.clone(),
+                schema_version: source.schema_version,
+                kind: source.kind,
+                gate_ref: source.gate_ref.clone(),
+                created_at,
+            },
+        );
+        checkpoint_id
+    }
+
+    fn latest_resumable_loop_checkpoint(
+        &self,
+        scope: &TurnScope,
+        turn_id: crate::TurnId,
+        run_id: TurnRunId,
+    ) -> Option<TurnCheckpointId> {
+        self.loop_checkpoints
+            .values()
+            .filter(|checkpoint| {
+                checkpoint.scope == *scope
+                    && checkpoint.turn_id == turn_id
+                    && checkpoint.run_id == run_id
+                    && matches!(
+                        checkpoint.kind,
+                        crate::run_profile::LoopCheckpointKind::BeforeModel
+                            | crate::run_profile::LoopCheckpointKind::BeforeBlock
+                    )
+            })
+            .max_by(|a, b| {
+                a.created_at
+                    .cmp(&b.created_at)
+                    .then_with(|| a.checkpoint_id.as_uuid().cmp(&b.checkpoint_id.as_uuid()))
+            })
+            .map(|checkpoint| checkpoint.checkpoint_id)
     }
 
     fn reserve_admission(
@@ -2623,9 +2890,9 @@ fn persisted_key_for_record(record: &TurnIdempotencyRecord) -> PersistedIdempote
         operation: record.operation,
         run_id: match record.operation {
             TurnIdempotencyOperationKind::Submit => None,
-            TurnIdempotencyOperationKind::Resume | TurnIdempotencyOperationKind::Cancel => {
-                record.run_id
-            }
+            TurnIdempotencyOperationKind::Resume
+            | TurnIdempotencyOperationKind::Retry
+            | TurnIdempotencyOperationKind::Cancel => record.run_id,
         },
         key: record.key.clone(),
     }
@@ -2718,6 +2985,34 @@ fn resume_idempotency_record(
     TurnIdempotencyRecord {
         scope: key.scope.clone(),
         operation: TurnIdempotencyOperationKind::Resume,
+        key: key.key.clone(),
+        turn_id: None,
+        run_id: Some(key.run_id),
+        outcome,
+        replay,
+        created_at,
+        expires_at: None,
+    }
+}
+
+fn retry_idempotency_record(
+    key: &RunIdempotencyKey,
+    result: &Result<RetryTurnResponse, TurnError>,
+    created_at: crate::TurnTimestamp,
+) -> TurnIdempotencyRecord {
+    let (outcome, replay) = match result {
+        Ok(response) => (
+            TurnIdempotencyOutcomeKind::Retried,
+            TurnIdempotencyReplay::RetrySucceeded(response.clone()),
+        ),
+        Err(error) => (
+            TurnIdempotencyOutcomeKind::from_error(error),
+            TurnIdempotencyReplay::Error(TurnIdempotencyErrorReplay::from_error(error)),
+        ),
+    };
+    TurnIdempotencyRecord {
+        scope: key.scope.clone(),
+        operation: TurnIdempotencyOperationKind::Retry,
         key: key.key.clone(),
         turn_id: None,
         run_id: Some(key.run_id),

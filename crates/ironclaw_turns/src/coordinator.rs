@@ -92,7 +92,11 @@ pub trait TurnCoordinator: Send + Sync {
         request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError>;
 
-    async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError>;
+    async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
+        Err(TurnError::RunNotRetryable {
+            run_id: request.run_id,
+        })
+    }
 
     async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError>;
 

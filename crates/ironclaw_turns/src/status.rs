@@ -217,10 +217,10 @@ fn validate_sanitized_category(kind: &'static str, value: &str) -> Result<(), St
     }
     if !value
         .chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == ':')
     {
         return Err(format!(
-            "{kind} must contain only lowercase ASCII letters, digits, or underscores"
+            "{kind} must contain only lowercase ASCII letters, digits, underscores, or colons"
         ));
     }
     Ok(())

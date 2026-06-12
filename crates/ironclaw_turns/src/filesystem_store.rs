@@ -463,6 +463,18 @@ where
         .await
     }
 
+    async fn latest_resumable_checkpoint(
+        &self,
+        scope: &TurnScope,
+        turn_id: crate::TurnId,
+        run_id: TurnRunId,
+    ) -> Result<Option<crate::TurnCheckpointId>, TurnError> {
+        let (snapshot, _) = self.read_snapshot().await?;
+        self.build_in_memory_store(snapshot)?
+            .latest_resumable_checkpoint(scope, turn_id, run_id)
+            .await
+    }
+
     async fn record_model_route_snapshot(
         &self,
         request: RecordModelRouteSnapshotRequest,

@@ -270,6 +270,7 @@ pub struct TurnCheckpointRecord {
 pub enum TurnIdempotencyOperationKind {
     Submit,
     Resume,
+    Retry,
     Cancel,
 }
 
@@ -280,6 +281,7 @@ pub enum TurnIdempotencyOutcomeKind {
     ThreadBusy,
     AdmissionRejected,
     Resumed,
+    Retried,
     CancelRecorded,
     ScopeNotFound,
     Unauthorized,
@@ -313,6 +315,7 @@ pub enum TurnIdempotencyReplay {
     SubmitThreadBusy(ThreadBusy),
     SubmitAdmissionRejected(AdmissionRejection),
     ResumeSucceeded(ResumeTurnResponse),
+    RetrySucceeded(RetryTurnResponse),
     CancelRecorded(CancelRunResponse),
     Error(TurnIdempotencyErrorReplay),
 }
@@ -428,6 +431,21 @@ impl TurnIdempotencyRecord {
             TurnIdempotencyReplay::CancelRecorded(response) => Some(Ok(response.clone())),
             TurnIdempotencyReplay::Error(error)
                 if self.operation == TurnIdempotencyOperationKind::Cancel =>
+            {
+                Some(Err(error.to_error()))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn replay_retry(&self) -> Option<Result<RetryTurnResponse, TurnError>> {
+        if self.operation != TurnIdempotencyOperationKind::Retry {
+            return None;
+        }
+        match &self.replay {
+            TurnIdempotencyReplay::RetrySucceeded(response) => Some(Ok(response.clone())),
+            TurnIdempotencyReplay::Error(error)
+                if self.operation == TurnIdempotencyOperationKind::Retry =>
             {
                 Some(Err(error.to_error()))
             }

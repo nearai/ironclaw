@@ -10,9 +10,10 @@ use tracing::debug;
 use crate::{
     CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse,
     RetryTurnRequest, RetryTurnResponse, RunProfileResolver, SubmitChildRunRequest,
-    SubmitTurnRequest, SubmitTurnResponse, TurnAdmissionPolicy, TurnCommittedEventObserver,
-    TurnError, TurnEventKind, TurnEventSink, TurnLifecycleEvent, TurnRunId, TurnRunRecord,
-    TurnRunState, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
+    SubmitTurnRequest, SubmitTurnResponse, TurnAdmissionPolicy, TurnCheckpointId,
+    TurnCommittedEventObserver, TurnError, TurnEventKind, TurnEventSink, TurnId,
+    TurnLifecycleEvent, TurnRunId, TurnRunRecord, TurnRunState, TurnScope, TurnSpawnTreeStateStore,
+    TurnStateStore, TurnStatus,
     events::{EventCursor, lifecycle_owner_user_id},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
@@ -404,6 +405,20 @@ fn resume_event(request: &ResumeTurnRequest, response: &ResumeTurnResponse) -> T
     }
 }
 
+fn retry_event(request: &RetryTurnRequest, response: &RetryTurnResponse) -> TurnLifecycleEvent {
+    TurnLifecycleEvent {
+        cursor: response.event_cursor,
+        scope: request.scope.clone(),
+        occurred_at: Some(Utc::now()),
+        owner_user_id: lifecycle_owner_user_id(&request.scope, Some(&request.actor.user_id)),
+        run_id: response.run_id,
+        status: response.status,
+        kind: TurnEventKind::Resumed,
+        blocked_gate: None,
+        sanitized_reason: None,
+    }
+}
+
 fn cancel_event(
     request: &CancelRunRequest,
     response: &CancelRunResponse,
@@ -490,8 +505,11 @@ where
     }
 
     async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
-        // WS-3 implements retry lifecycle publication once retry persistence exists.
-        self.inner.retry_turn(request).await
+        let event_request = request.clone();
+        let response = self.inner.retry_turn(request).await?;
+        self.publish_event_once_deferred(retry_event(&event_request, &response))
+            .await?;
+        Ok(response)
     }
 
     async fn request_cancel(
@@ -613,6 +631,17 @@ where
                 .await;
         }
         Ok(response)
+    }
+
+    async fn latest_resumable_checkpoint(
+        &self,
+        scope: &TurnScope,
+        turn_id: TurnId,
+        run_id: TurnRunId,
+    ) -> Result<Option<TurnCheckpointId>, TurnError> {
+        self.inner
+            .latest_resumable_checkpoint(scope, turn_id, run_id)
+            .await
     }
 
     async fn record_model_route_snapshot(
