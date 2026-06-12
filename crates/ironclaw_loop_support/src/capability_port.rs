@@ -54,16 +54,22 @@ use self::surface_snapshot::{
 const PROVIDER_TOOL_NAME_DIGEST_BYTES: usize = 32;
 const PROVIDER_TOOL_CALL_INPUT_REF_PREFIX: &str = "input:provider-tool-";
 
-/// Observes a capability invocation's resolved input (arguments) and result
-/// (output) as the host loop executes it, for trajectory capture by downstream
-/// consumers (benchmark harnesses, debuggers, UI). `call_id` is the capability
-/// input ref and correlates the two callbacks.
+/// Observes a capability invocation's resolved input (arguments) as the host
+/// loop executes it, for trajectory capture by downstream consumers (benchmark
+/// harnesses, debuggers, UI). `call_id` is the capability input ref.
 ///
-/// Best-effort and side-effect-free. Callbacks fire inline on the per-capability
-/// hot path, so an implementation **must never block** (do I/O, contend on a
-/// lock): hand the event to a non-blocking queue and return. A callback that
-/// panics is caught at the call site and the event is dropped — it cannot
-/// unwind or fail the run — but it must not rely on that.
+/// **Input-only.** This layer stages completed outcomes through
+/// [`LoopCapabilityResultWriter`], not through the port, so it does not observe
+/// results: result events belong to whichever result-writer the composition
+/// installs (e.g. reborn's `LocalDevCapabilityIo`), keyed back to `call_id`.
+/// Keeping the substrate observer input-only avoids advertising a result
+/// callback this layer would never fire.
+///
+/// Best-effort and side-effect-free. The callback fires inline on the
+/// per-capability hot path, so an implementation **must never block** (do I/O,
+/// contend on a lock): hand the event to a non-blocking queue and return. A
+/// callback that panics is caught at the call site and the event is dropped —
+/// it cannot unwind or fail the run — but it must not rely on that.
 pub trait CapabilityTrajectoryObserver: std::fmt::Debug + Send + Sync {
     /// A model tool call resolved to a capability invocation: `capability_id` is
     /// the resolved capability (e.g. `builtin.shell`), `arguments` the tool-call
@@ -77,8 +83,6 @@ pub trait CapabilityTrajectoryObserver: std::fmt::Debug + Send + Sync {
         capability_id: &str,
         arguments: &serde_json::Value,
     );
-    /// The capability completed; `output` is the result JSON staged for the model.
-    fn on_capability_result(&self, call_id: &str, capability_id: &str, output: &serde_json::Value);
 }
 const MAX_IN_MEMORY_PROVIDER_TOOL_CALL_EFFECTIVE_CAPABILITY_IDS: usize = 128;
 
@@ -3431,12 +3435,11 @@ mod tests {
         assert_eq!(resolved, serde_json::json!({"message":"hello"}));
     }
 
-    /// Captures every trajectory callback the port forwards, so tests can drive
-    /// the real `invoke_capability` call site and assert the observer fired.
+    /// Captures every input callback the port forwards, so tests can drive the
+    /// real `invoke_capability` call site and assert the observer fired.
     #[derive(Debug, Default)]
     struct RecordingTrajectoryObserver {
         inputs: Mutex<Vec<(String, String, serde_json::Value)>>,
-        results: Mutex<Vec<(String, String, serde_json::Value)>>,
     }
 
     impl CapabilityTrajectoryObserver for RecordingTrajectoryObserver {
@@ -3450,19 +3453,6 @@ mod tests {
                 call_id.to_string(),
                 capability_id.to_string(),
                 arguments.clone(),
-            ));
-        }
-
-        fn on_capability_result(
-            &self,
-            call_id: &str,
-            capability_id: &str,
-            output: &serde_json::Value,
-        ) {
-            self.results.lock().expect("results lock").push((
-                call_id.to_string(),
-                capability_id.to_string(),
-                output.clone(),
             ));
         }
     }

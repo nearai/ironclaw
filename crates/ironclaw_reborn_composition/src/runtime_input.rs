@@ -128,19 +128,21 @@ pub struct ResolvedRebornLlm {
     provider_id: String,
     model: String,
     pub(crate) config: ironclaw_llm::LlmConfig,
-    /// Optional pre-built provider to use *instead of* building one from
-    /// `config`. Lets a caller wrap the real provider (e.g. for token /
-    /// reasoning instrumentation) and have the runtime drive it. When `None`
-    /// the gateway builds the static provider chain from `config` as usual.
-    ///
-    /// Invariant (enforced by construction, not the type): an override must
-    /// already speak the model `config` names — `config` stays the source of
-    /// truth for `provider_id`/`model` and budget cost-table derivation, and
-    /// only the *construction* of the backend is bypassed. The two are set
-    /// together via [`ResolvedRebornLlm::with_provider`]; there is no path that
-    /// swaps the provider without carrying the matching `config`.
-    pub(crate) provider_override: Option<Arc<dyn ironclaw_llm::LlmProvider>>,
+    /// Optional decorator applied to the provider the gateway builds from
+    /// `config`. `config` is always the construction source (so it stays the
+    /// single source of truth for `provider_id`/`model` and budget cost-table
+    /// derivation); the factory only *wraps* the built provider — e.g. a
+    /// benchmark harness layering token/reasoning instrumentation over it.
+    /// When `None` the gateway uses the config-built provider as-is.
+    pub(crate) provider_factory: Option<RebornProviderFactory>,
 }
+
+/// Decorator over the config-built LLM provider. See
+/// [`ResolvedRebornLlm::with_provider_factory`].
+#[cfg(feature = "root-llm-provider")]
+pub type RebornProviderFactory = Arc<
+    dyn Fn(Arc<dyn ironclaw_llm::LlmProvider>) -> Arc<dyn ironclaw_llm::LlmProvider> + Send + Sync,
+>;
 
 // `LlmProvider` is not `Debug`, so derive can't see through `provider_override`.
 #[cfg(feature = "root-llm-provider")]
@@ -149,7 +151,7 @@ impl std::fmt::Debug for ResolvedRebornLlm {
         f.debug_struct("ResolvedRebornLlm")
             .field("provider_id", &self.provider_id)
             .field("model", &self.model)
-            .field("provider_override", &self.provider_override.is_some())
+            .field("provider_factory", &self.provider_factory.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -169,24 +171,23 @@ impl ResolvedRebornLlm {
             provider_id: config.active_provider_id(),
             model: config.active_model_name(),
             config,
-            provider_override: None,
+            provider_factory: None,
         }
     }
 
-    /// Drive the runtime with `provider` instead of building one from the
-    /// config. The provider must already speak the same model the config
-    /// names; only the construction is bypassed.
+    /// Wrap the config-built provider with `factory` before the gateway drives
+    /// it — e.g. to layer token/reasoning/cost instrumentation over the real
+    /// provider.
     ///
-    /// This is a deliberate, feature-gated (`root-llm-provider`)
-    /// instrumentation seam: it accepts the lower `ironclaw_llm::LlmProvider`
-    /// substrate trait because the whole point is to let the composition root
-    /// wrap the *real* provider (token/reasoning/cost capture) and have the
-    /// gateway drive that wrapper. There is no facade-shaped equivalent — a
-    /// composition-owned newtype would still have to expose the provider trait
-    /// to be useful — so the adaptation is kept as narrow as possible:
-    /// `build_llm_gateway` consumes the override and never re-exposes it.
-    pub fn with_provider(mut self, provider: Arc<dyn ironclaw_llm::LlmProvider>) -> Self {
-        self.provider_override = Some(provider);
+    /// This is the instrumentation seam (feature-gated on `root-llm-provider`).
+    /// The composition still constructs the provider from `config` and hands it
+    /// to the factory, so `config` remains the single source of truth and the
+    /// raw `ironclaw_llm::LlmProvider` substrate handle is never accepted
+    /// wholesale through the facade — the caller only supplies a decorator over
+    /// a provider the composition built. `build_llm_gateway` applies the factory
+    /// and never re-exposes the provider.
+    pub fn with_provider_factory(mut self, factory: RebornProviderFactory) -> Self {
+        self.provider_factory = Some(factory);
         self
     }
 }

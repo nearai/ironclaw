@@ -160,8 +160,9 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             result_writer: Arc::clone(&self.result_writer),
             milestone_sink: Arc::clone(&self.milestone_sink),
             skill_activation_source: self.skill_activation_source.clone(),
-            // #4588: thread the trajectory observer through main's refactored
-            // refreshing-port helper so reborn tool-call capture still works.
+            // Same observer drives both the input hook (on the capability port the
+            // refreshing helper builds) and the result hook (on `LocalDevCapabilityIo`),
+            // so the two callbacks correlate by `call_id` for one tool call.
             trajectory_observer: self.trajectory_observer.clone(),
         })
         .await

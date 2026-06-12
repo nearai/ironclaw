@@ -138,6 +138,9 @@ impl RefreshingLocalDevCapabilityPort {
             self.run_context.clone(),
             Arc::clone(&self.input_resolver),
             Arc::clone(&self.result_writer),
+            // Synthetic capabilities bypass the inner port's input hook, so the
+            // wrapper needs the observer to emit `on_capability_input` itself.
+            self.trajectory_observer.clone(),
         )?;
         Ok(wrap_local_dev_surface_disclosure(
             port,

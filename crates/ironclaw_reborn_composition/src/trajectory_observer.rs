@@ -71,36 +71,82 @@ pub trait RebornTrajectoryObserver: std::fmt::Debug + Send + Sync {
 const SAFE_PREVIEW_MAX_STRING_BYTES: usize = 512;
 /// Per-array element cap for the safe-preview projection.
 const SAFE_PREVIEW_MAX_ARRAY_ITEMS: usize = 32;
+/// Per-object entry cap — objects are bounded the same way arrays are, so a
+/// map with thousands of keys can't force unbounded clone/traversal.
+const SAFE_PREVIEW_MAX_OBJECT_ENTRIES: usize = 32;
+/// Maximum container nesting the preview descends before collapsing a subtree
+/// to a marker. Bounds recursion depth on the capability hot path.
+const SAFE_PREVIEW_MAX_DEPTH: usize = 8;
+/// Hard ceiling on total nodes visited across the whole projection. Once spent,
+/// the remaining subtree collapses to a marker — bounds total work for a value
+/// that is wide *and* deep regardless of any single per-level cap.
+const SAFE_PREVIEW_MAX_NODES: usize = 4096;
 
 /// Bound a trajectory payload to a safe preview: long string leaves are
-/// truncated (with a byte-count marker) and large arrays are capped. Object
-/// keys and structure are preserved so a downstream view stays meaningful.
+/// truncated (with a byte-count marker), and large/deep containers are capped
+/// (per-level entry caps, a max depth, and a total-node budget) so neither a
+/// wide nor a deeply nested value can force unbounded traversal/allocation on
+/// the capability hot path. Object keys and structure are otherwise preserved
+/// so a downstream view stays meaningful.
+///
 /// This is a size boundary, not a secret scrubber — a short credential still
 /// passes — but it matches the existing display-preview truncation boundary so
 /// the observer no longer bypasses it by forwarding the unbounded raw payload.
 pub(crate) fn safe_preview_value(value: &serde_json::Value) -> serde_json::Value {
+    let mut budget = SAFE_PREVIEW_MAX_NODES;
+    safe_preview_inner(value, 0, &mut budget)
+}
+
+fn safe_preview_inner(
+    value: &serde_json::Value,
+    depth: usize,
+    budget: &mut usize,
+) -> serde_json::Value {
     use serde_json::Value;
+    if *budget == 0 {
+        return Value::String("[… preview node budget exhausted]".to_string());
+    }
+    *budget -= 1;
     match value {
         Value::String(s) => Value::String(truncate_string(s)),
         Value::Array(items) => {
-            let mut bounded: Vec<Value> = items
-                .iter()
-                .take(SAFE_PREVIEW_MAX_ARRAY_ITEMS)
-                .map(safe_preview_value)
-                .collect();
-            if items.len() > SAFE_PREVIEW_MAX_ARRAY_ITEMS {
+            if depth >= SAFE_PREVIEW_MAX_DEPTH {
+                return Value::String(format!("[… {} array items at max depth]", items.len()));
+            }
+            let mut bounded: Vec<Value> = Vec::new();
+            for item in items.iter().take(SAFE_PREVIEW_MAX_ARRAY_ITEMS) {
+                if *budget == 0 {
+                    break;
+                }
+                bounded.push(safe_preview_inner(item, depth + 1, budget));
+            }
+            if items.len() > bounded.len() {
                 bounded.push(Value::String(format!(
                     "[… {} more items omitted]",
-                    items.len() - SAFE_PREVIEW_MAX_ARRAY_ITEMS
+                    items.len() - bounded.len()
                 )));
             }
             Value::Array(bounded)
         }
-        Value::Object(map) => Value::Object(
-            map.iter()
-                .map(|(k, v)| (k.clone(), safe_preview_value(v)))
-                .collect(),
-        ),
+        Value::Object(map) => {
+            if depth >= SAFE_PREVIEW_MAX_DEPTH {
+                return Value::String(format!("[… {} object entries at max depth]", map.len()));
+            }
+            let mut bounded = serde_json::Map::new();
+            for (k, v) in map.iter().take(SAFE_PREVIEW_MAX_OBJECT_ENTRIES) {
+                if *budget == 0 {
+                    break;
+                }
+                bounded.insert(k.clone(), safe_preview_inner(v, depth + 1, budget));
+            }
+            if map.len() > bounded.len() {
+                bounded.insert(
+                    "…".to_string(),
+                    Value::String(format!("{} more entries omitted", map.len() - bounded.len())),
+                );
+            }
+            Value::Object(bounded)
+        }
         // Numbers, booleans, null are already bounded.
         other => other.clone(),
     }
@@ -153,7 +199,9 @@ impl RebornTrajectoryObserver for SafePreviewTrajectoryObserver {
 
 /// Adapts a composition-owned [`RebornTrajectoryObserver`] to the substrate
 /// [`CapabilityTrajectoryObserver`] the loop-support capability port consumes,
-/// so the facade trait never appears in this crate's loop-support boundary.
+/// so the facade trait never appears in this crate's loop-support boundary. The
+/// substrate trait is input-only; the composition observer's result half is
+/// driven separately by `LocalDevCapabilityIo`.
 #[derive(Debug)]
 struct CapabilityTrajectoryObserverAdapter {
     inner: Arc<dyn RebornTrajectoryObserver>,
@@ -169,11 +217,6 @@ impl CapabilityTrajectoryObserver for CapabilityTrajectoryObserverAdapter {
         self.inner
             .on_capability_input(call_id, capability_id, arguments);
     }
-
-    fn on_capability_result(&self, call_id: &str, capability_id: &str, output: &serde_json::Value) {
-        self.inner
-            .on_capability_result(call_id, capability_id, output);
-    }
 }
 
 /// Adapt a composition observer to the substrate observer the loop-support
@@ -188,7 +231,7 @@ pub(crate) fn as_capability_observer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     #[test]
     fn safe_preview_truncates_long_strings() {
@@ -227,6 +270,45 @@ mod tests {
     fn safe_preview_preserves_small_payloads() {
         let payload = json!({"message": "hello", "count": 3, "ok": true});
         assert_eq!(safe_preview_value(&payload), payload);
+    }
+
+    #[test]
+    fn safe_preview_caps_large_objects() {
+        let mut map = serde_json::Map::new();
+        for i in 0..SAFE_PREVIEW_MAX_OBJECT_ENTRIES + 10 {
+            map.insert(format!("k{i}"), json!(i));
+        }
+        let preview = safe_preview_value(&Value::Object(map));
+        let obj = preview.as_object().expect("object");
+        // capped entries + one "…" marker entry
+        assert_eq!(obj.len(), SAFE_PREVIEW_MAX_OBJECT_ENTRIES + 1);
+        assert!(
+            obj.get("…").and_then(|v| v.as_str()).unwrap().contains("10 more entries"),
+            "object cap should report the dropped count"
+        );
+    }
+
+    #[test]
+    fn safe_preview_bounds_depth() {
+        // Build a nesting deeper than the max-depth cap.
+        let mut v = json!("leaf");
+        for _ in 0..SAFE_PREVIEW_MAX_DEPTH + 5 {
+            v = json!({ "next": v });
+        }
+        let preview = safe_preview_value(&v);
+        // Descend to the cap; the subtree there must be collapsed to a marker
+        // string rather than recursed further.
+        let mut cur = &preview;
+        let mut levels = 0;
+        while let Some(next) = cur.get("next") {
+            cur = next;
+            levels += 1;
+            assert!(levels <= SAFE_PREVIEW_MAX_DEPTH, "must not exceed max depth");
+        }
+        assert!(
+            cur.as_str().is_some_and(|s| s.contains("at max depth") || s == "leaf"),
+            "deepest visited node should be a collapse marker or the leaf, got {cur}"
+        );
     }
 
     #[test]
