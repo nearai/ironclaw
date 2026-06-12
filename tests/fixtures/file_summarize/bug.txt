@@ -1,0 +1,23 @@
+Bug Report — Rate Limiter: Burst Allowance Not Enforced
+
+Severity: High
+Component: tools/rate_limiter.rs
+Reported: 2026-04-15
+
+Description:
+The burst allowance of 10 calls above the base limit is not being enforced.
+When a session exceeds the base limit of 100 calls, the limiter should allow
+up to 10 additional burst calls before returning RateLimitExceeded. Instead,
+it returns the error immediately at call 101, ignoring the burst setting.
+
+Steps to reproduce:
+1. Set RATE_LIMIT_MAX_CALLS=5 and RATE_LIMIT_BURST=2
+2. Send 7 rapid tool calls in one session
+3. Observe: call 6 returns RateLimitExceeded (expected: call 8)
+
+Root cause:
+The burst_allowance field is read from config at startup but never applied
+in the check_and_record() hot path. The comparison uses max_calls directly
+instead of max_calls + burst_allowance.
+
+Fix: Update check_and_record() to compare against max_calls + burst_allowance.
