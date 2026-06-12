@@ -241,6 +241,12 @@ where
         request: LoopPromptBundleRequest,
     ) -> Result<LoopPromptBundle, AgentLoopHostError> {
         self.validate_request(&request)?;
+        if self.runtime_context.is_some() && self.instruction_materialization_store.is_none() {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "instruction materialization store is required for this prompt bundle",
+            ));
+        }
         let context = self
             .context_port
             .load_loop_context(LoopContextRequest {

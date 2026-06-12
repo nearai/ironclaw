@@ -575,6 +575,86 @@ async fn instruction_bundle_renders_runtime_context_section() {
 }
 
 #[tokio::test]
+async fn instruction_bundle_runtime_fingerprint_stable_within_minute() {
+    // Two requests that differ only in the seconds component within the same
+    // minute must produce identical rendered model_content, identical runtime
+    // message content_ref, and an identical whole-bundle fingerprint.
+    let context = claimed_run_context().await;
+    let builder = InstructionBundleBuilder::new(context);
+
+    let base_bundle = LoopContextBundle {
+        identity_messages: vec![LoopContextMessage {
+            message_ref: Some(LoopMessageRef::new("msg:identity").unwrap()),
+            role: "system".to_string(),
+            safe_summary: "identity safe".to_string(),
+            compaction: None,
+        }],
+        messages: Vec::new(),
+        compaction_message_index: Vec::new(),
+        instruction_snippets: vec![LoopContextSnippet {
+            snippet_ref: "instruction:system".to_string(),
+            model_content: "system rule".to_string(),
+            safe_summary: "system rule".to_string(),
+            metadata: None,
+        }],
+        memory_snippets: Vec::new(),
+    };
+
+    let request_early = InstructionBundleRequest {
+        context_bundle: base_bundle.clone(),
+        visible_surface: None,
+        safety_context: None,
+        inline_messages: Vec::new(),
+        runtime_context: Some(LoopRuntimeContext {
+            loop_started_at_utc: chrono::Utc
+                .with_ymd_and_hms(2026, 6, 11, 21, 32, 7)
+                .unwrap(),
+            user_timezone: None,
+        }),
+    };
+
+    let request_late = InstructionBundleRequest {
+        context_bundle: base_bundle,
+        visible_surface: None,
+        safety_context: None,
+        inline_messages: Vec::new(),
+        runtime_context: Some(LoopRuntimeContext {
+            loop_started_at_utc: chrono::Utc
+                .with_ymd_and_hms(2026, 6, 11, 21, 32, 46)
+                .unwrap(),
+            user_timezone: None,
+        }),
+    };
+
+    let bundle_early = builder.build(request_early).unwrap();
+    let bundle_late = builder.build(request_late).unwrap();
+
+    let runtime_early = bundle_early
+        .materialized_messages
+        .iter()
+        .find(|m| m.content_ref.as_str().starts_with("msg:runtime."))
+        .expect("runtime materialized message must exist (early)");
+    let runtime_late = bundle_late
+        .materialized_messages
+        .iter()
+        .find(|m| m.content_ref.as_str().starts_with("msg:runtime."))
+        .expect("runtime materialized message must exist (late)");
+
+    assert_eq!(
+        runtime_early.model_content, runtime_late.model_content,
+        "rendered runtime model_content must be identical within the same minute"
+    );
+    assert_eq!(
+        runtime_early.content_ref, runtime_late.content_ref,
+        "runtime message content_ref must be identical within the same minute"
+    );
+    assert_eq!(
+        bundle_early.fingerprint, bundle_late.fingerprint,
+        "whole-bundle fingerprint must be identical when loop_started_at_utc differs only in seconds within the same minute"
+    );
+}
+
+#[tokio::test]
 async fn instruction_bundle_renders_runtime_context_exactly_once_per_build() {
     // Regression guard: each InstructionBundleBuilder::build call must embed
     // exactly one msg:runtime.* ref and exactly one materialized message whose
@@ -684,6 +764,14 @@ async fn instruction_bundle_without_runtime_context_renders_no_runtime_section()
             .iter()
             .any(|m| m.content_ref.as_str().starts_with("msg:runtime.")),
         "no runtime section message should appear when runtime_context is None"
+    );
+
+    assert!(
+        !first
+            .messages
+            .iter()
+            .any(|m| m.content_ref.as_str().starts_with("msg:runtime.")),
+        "no runtime section ref should appear in messages vec when runtime_context is None"
     );
 
     let with_runtime_request = InstructionBundleRequest {
