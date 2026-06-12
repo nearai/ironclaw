@@ -180,6 +180,7 @@ reviews:
       - "staging"
       - "reborn-integration"
 
+  suggested_labels: false # label suggestions are owned by .github/scripts/pr-labeler.sh + actions/labeler
   auto_apply_labels: false # labels are owned by .github/scripts/pr-labeler.sh + actions/labeler
 
   tools:
