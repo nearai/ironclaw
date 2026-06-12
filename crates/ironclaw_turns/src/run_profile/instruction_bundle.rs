@@ -564,6 +564,24 @@ fn push_runtime_context(
         synthetic_message_ref("runtime", "loop-start", &model_content, 0, synthetic_refs)?;
     feed_field(fingerprint, b"section", b"runtime");
     feed_field(fingerprint, b"ref", content_ref.as_str().as_bytes());
+    feed_field(
+        fingerprint,
+        b"started_at",
+        runtime_context
+            .loop_started_at_utc
+            .timestamp()
+            .to_string()
+            .as_bytes(),
+    );
+    feed_field(
+        fingerprint,
+        b"tz",
+        runtime_context
+            .user_timezone
+            .as_deref()
+            .unwrap_or("")
+            .as_bytes(),
+    );
     feed_field(fingerprint, b"content", model_content.as_bytes());
     materialized_messages.push(InstructionBundleMaterializedMessage {
         role: "system".to_string(),
