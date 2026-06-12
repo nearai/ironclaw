@@ -293,18 +293,32 @@ fn header_pair(name: &str, value: &str) -> Result<(String, String), FirstPartyCa
 }
 
 fn body(input: &Value) -> Result<Vec<u8>, FirstPartyCapabilityError> {
-    if input.get("body").is_some() && input.get("body_base64").is_some() {
+    // Treat a null / empty-string field as absent. Models routinely emit *both*
+    // `body` and `body_base64` as `""` defaults for a bodyless request (the
+    // schema lists both), which must not trip the mutual-exclusion check or be
+    // decoded as a real (empty) body. Only a non-empty value counts as "set".
+    let is_set = |key: &str| {
+        input
+            .get(key)
+            .is_some_and(|v| !v.is_null() && v.as_str() != Some(""))
+    };
+    if is_set("body") && is_set("body_base64") {
         return Err(input_error());
     }
-    let body = if let Some(encoded) = input.get("body_base64") {
-        let encoded = encoded.as_str().ok_or_else(input_error)?;
+    let body = if is_set("body_base64") {
+        let encoded = input
+            .get("body_base64")
+            .and_then(Value::as_str)
+            .ok_or_else(input_error)?;
         BASE64_STANDARD.decode(encoded).map_err(|_| input_error())?
-    } else {
+    } else if is_set("body") {
         match input.get("body") {
-            None | Some(Value::Null) => Vec::new(),
             Some(Value::String(value)) => value.as_bytes().to_vec(),
             Some(value) => serde_json::to_vec(value).map_err(|_| input_error())?,
+            None => Vec::new(),
         }
+    } else {
+        Vec::new()
     };
     if body.len() as u64 > MAX_NETWORK_EGRESS_BYTES {
         return Err(input_error());

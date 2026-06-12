@@ -85,8 +85,11 @@ impl ResolvedRunProfile {
             context_profile_id: ContextProfileId::from_trusted_static("interactive_context"),
             steering_policy: SteeringPolicy {
                 allow_steering,
+                // ZDBG(benchmark A/B): enable the reborn final-answer nudge so the
+                // loop synthesizes a closing answer instead of ending empty. Gate
+                // behind a build-input setter (not a hardcoded default) before merge.
+                allow_driver_specific_nudges: true,
                 allow_interrupt: true,
-                allow_driver_specific_nudges: false,
             },
             cancellation_policy: CancellationPolicy {
                 allow_cancel: true,
@@ -102,8 +105,11 @@ impl ResolvedRunProfile {
             },
             resource_budget_policy: ResourceBudgetPolicy {
                 tier: ResourceBudgetTier::from_trusted_static("interactive_standard"),
-                max_model_calls: 32,
-                max_capability_invocations: 64,
+                // ZDBG: raised 32->128 / 64->512 for benchmarking — long multi-step
+                // pinchbench tasks hit the 32 model-call cap and fail-close empty
+                // (budget.rs IterationLimit, no final synthesis). Verifying the fix.
+                max_model_calls: 128,
+                max_capability_invocations: 512,
             },
             personal_context_policy: PersonalContextPolicy::Excluded,
             runtime_constraints: RuntimeProfileConstraints {
