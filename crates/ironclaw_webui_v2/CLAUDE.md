@@ -115,6 +115,10 @@ unsupported-config reason codes currently include
 `POST /api/webchat/v2/operator/setup` uses the typed LLM config service
 for provider/model setup; profile and WebUI access setup return redacted
 not-yet-wired diagnostics until those owning services are exposed.
+`GET /api/webchat/v2/operator/diagnostics` is the Reborn doctor surface:
+the product facade aggregates status/readiness, setup, and config diagnostics
+into one redacted payload instead of making route handlers inspect runtime
+internals or adding a second CLI-only diagnostic path.
 
 ### List-threads
 

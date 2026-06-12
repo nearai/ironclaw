@@ -879,6 +879,76 @@ fn operator_config_diagnostic_command_plane_response(
     }
 }
 
+fn operator_doctor_status_diagnostic(
+    check: &RebornOperatorStatusCheck,
+) -> Option<RebornOperatorConfigDiagnostic> {
+    if check.status == RebornOperatorStatusState::Ready {
+        return None;
+    }
+
+    let severity = match check.severity {
+        RebornOperatorStatusSeverity::Info => RebornOperatorConfigDiagnosticSeverity::Info,
+        RebornOperatorStatusSeverity::Warning => RebornOperatorConfigDiagnosticSeverity::Warning,
+        RebornOperatorStatusSeverity::Critical => RebornOperatorConfigDiagnosticSeverity::Error,
+    };
+    let state = match check.status {
+        RebornOperatorStatusState::Ready => "ready",
+        RebornOperatorStatusState::Degraded => "degraded",
+        RebornOperatorStatusState::Blocked => "blocked",
+        RebornOperatorStatusState::Unsupported => "unsupported",
+        RebornOperatorStatusState::NotConfigured => "not_configured",
+    };
+    Some(RebornOperatorConfigDiagnostic {
+        key: check.id.clone(),
+        severity,
+        reason_code: format!("operator_doctor_{}_{}", check.id, state),
+        message: check.summary.clone(),
+        owning_area: RebornOperatorArea::Status,
+        remediation: check
+            .remediation
+            .clone()
+            .unwrap_or_else(|| "inspect the corresponding operator status check".to_string()),
+    })
+}
+
+fn operator_doctor_setup_unavailable_diagnostic(
+    reason_code: &str,
+    message: &str,
+) -> RebornOperatorConfigDiagnostic {
+    operator_setup_diagnostic(
+        "setup",
+        RebornOperatorConfigDiagnosticSeverity::Error,
+        reason_code,
+        message,
+        "Complete provider/model setup through the operator setup API or bootstrap configuration.",
+    )
+}
+
+fn operator_doctor_status_unavailable_diagnostic() -> RebornOperatorConfigDiagnostic {
+    RebornOperatorConfigDiagnostic {
+        key: "status".to_string(),
+        severity: RebornOperatorConfigDiagnosticSeverity::Error,
+        reason_code: "operator_doctor_status_unavailable".to_string(),
+        message: "Operator status checks are unavailable.".to_string(),
+        owning_area: RebornOperatorArea::Status,
+        remediation: "wire the operator status service before relying on doctor diagnostics"
+            .to_string(),
+    }
+}
+
+fn operator_diagnostics_surface_status(
+    diagnostics: &[RebornOperatorConfigDiagnostic],
+) -> RebornOperatorSurfaceStatus {
+    if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == RebornOperatorConfigDiagnosticSeverity::Error)
+    {
+        RebornOperatorSurfaceStatus::Unavailable
+    } else {
+        RebornOperatorSurfaceStatus::Available
+    }
+}
+
 #[async_trait]
 pub trait RebornServicesApi: Send + Sync {
     async fn create_thread(
@@ -2232,6 +2302,57 @@ impl RebornServicesApi for RebornServices {
             request,
         )
         .await
+    }
+
+    async fn get_operator_diagnostics(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let mut diagnostics = Vec::new();
+        let mut operator_status = None;
+
+        match self.operator_status.status(caller.clone()).await {
+            Ok(status) => {
+                diagnostics.extend(
+                    status
+                        .checks
+                        .iter()
+                        .filter_map(operator_doctor_status_diagnostic),
+                );
+                operator_status = Some(status);
+            }
+            Err(_) => diagnostics.push(operator_doctor_status_unavailable_diagnostic()),
+        }
+
+        if let Some(llm_config) = &self.llm_config {
+            match llm_config.snapshot(caller).await {
+                Ok(snapshot) => {
+                    diagnostics
+                        .extend(setup_response_from_llm_snapshot(snapshot, Vec::new()).diagnostics);
+                }
+                Err(_) => diagnostics.push(operator_doctor_setup_unavailable_diagnostic(
+                    "operator_setup_snapshot_unavailable",
+                    "Operator setup state could not be inspected.",
+                )),
+            }
+        } else {
+            diagnostics.push(operator_doctor_setup_unavailable_diagnostic(
+                "operator_setup_service_not_wired",
+                "Operator setup diagnostics are unavailable because the LLM config service is not wired.",
+            ));
+        }
+
+        diagnostics.push(operator_config_surface_not_wired_diagnostic());
+
+        Ok(RebornOperatorCommandPlaneResponse {
+            area: RebornOperatorArea::Diagnostics,
+            status: operator_diagnostics_surface_status(&diagnostics),
+            message: "operator diagnostics completed".to_string(),
+            operator_status,
+            logs: None,
+            service_lifecycle: None,
+            diagnostics,
+        })
     }
 
     async fn get_operator_status(
