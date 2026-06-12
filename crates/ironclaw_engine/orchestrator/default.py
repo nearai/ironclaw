@@ -65,6 +65,94 @@ def extract_final(text):
     return None
 
 
+# ── Evidence drift gate (issue #2544) ───────────────────────
+#
+# A FINAL() that follows a string of failed tool attempts and zero
+# successes is almost always claim/evidence drift — the model failed,
+# couldn't recover, and narrated success anyway. Tracked by
+# #2544 / #2580 / #2582 and documented in
+# `.claude/rules/tool-evidence.md` and `prompts/codeact_postamble.md`
+# ("Claims in FINAL() need tool evidence").
+#
+# v1 is deliberately structural — no NLP classification of FINAL text
+# or user messages. The rule:
+#
+#     gate fires iff failure_count > 0 AND success_count == 0
+#
+# That is: the thread attempted at least one tool, every attempt
+# failed, and the model is now trying to FINAL. Allow:
+#
+#   • 0 attempts, 0 successes — informational answer, no commitment.
+#   • N attempts, ≥1 success — at least one tool did its job; the
+#     model can describe the outcome.
+#
+# Reject:
+#
+#   • N attempts, 0 successes — there is no successful tool result to
+#     anchor any "I did X" claim to.
+#
+# Trade-offs called out explicitly:
+#
+#   • The "no-await" failure mode (the model writes the tool name but
+#     forgets `await`, so nothing is dispatched) registers as 0
+#     attempts and slips past this rule. Catching that requires
+#     either intent detection on the user message or AST inspection
+#     of the emitted code — both out of scope for the structural v1.
+#   • Partial-success patterns ("called 5 tools, 1 succeeded, claim
+#     references the 4 failures") are allowed by this rule. A
+#     per-claim-to-action-result binding would catch those; see
+#     the prompt-side guidance in codeact_postamble.md.
+#   • On drift: emit `evidence_drift_rejected`, transition the thread
+#     to Failed, and surface "Action not performed" with the
+#     offending FINAL attached for trace/audit.
+
+
+def _record_step_action_results(state, action_results):
+    """Update cumulative success/failure counters used by the evidence
+    drift gate. Called after every step that produces ActionResults
+    (code branch and tier-0 batched tool calls)."""
+    success = state.get("_evidence_success_count", 0)
+    failure = state.get("_evidence_failure_count", 0)
+    for r in action_results or []:
+        if r is None:
+            continue
+        if r.get("is_error", False):
+            failure += 1
+        else:
+            success += 1
+    state["_evidence_success_count"] = success
+    state["_evidence_failure_count"] = failure
+
+
+def _maybe_evidence_drift_error(state, final_text):
+    """Return the user-safe error message to surface as a Failed
+    outcome when the thread has only ever failed at the tool layer
+    but a FINAL is being emitted anyway. Returns None to allow normal
+    completion."""
+    success_count = state.get("_evidence_success_count", 0)
+    failure_count = state.get("_evidence_failure_count", 0)
+    if success_count > 0 or failure_count == 0:
+        return None
+    __emit_event__(
+        "evidence_drift_rejected",
+        success_count=success_count,
+        failure_count=failure_count,
+    )
+    # `final_text` is unused for the rejection message itself, but the
+    # parameter is kept so call sites still pass it for traces — the
+    # offending FINAL is preserved in the `response` slot of the
+    # outcome dict regardless.
+    _ = final_text
+    return (
+        "Action not performed: "
+        + str(failure_count)
+        + " tool call(s) failed, 0 succeeded. The agent cannot "
+        + "report a successful outcome with no successful tool "
+        + "result behind it. See .claude/rules/tool-evidence.md "
+        + "(issue #2544)."
+    )
+
+
 def strip_quoted_strings(line):
     """Remove double-quoted string literals from a line."""
     result = []
@@ -871,6 +959,12 @@ def run_loop(context, goal, actions, state, config):
             # Check for FINAL()
             final_answer = extract_final(text)
             if final_answer is not None:
+                drift_error = _maybe_evidence_drift_error(state, final_answer)
+                if drift_error is not None:
+                    __transition_to__("failed", "evidence drift in FINAL (text)")
+                    return complete_result(
+                        state, "failed", final_answer, error=drift_error
+                    )
                 __transition_to__("completed", "FINAL() in text")
                 return complete_result(state, "completed", final_answer)
 
@@ -930,6 +1024,11 @@ def run_loop(context, goal, actions, state, config):
                 state["last_return"] = result["return_value"]
             for r in result.get("action_results", []):
                 state[r.get("action_name", "unknown")] = r.get("output")
+            # Track cumulative success/failure counts for the evidence
+            # drift gate (#2544). Must happen *before* the FINAL check
+            # so this step's tool calls count as evidence for this
+            # step's claim.
+            _record_step_action_results(state, result.get("action_results", []))
 
             # Format output for next LLM context
             output = format_output(result)
@@ -937,8 +1036,15 @@ def run_loop(context, goal, actions, state, config):
 
             # Check for FINAL() in code output
             if result.get("final_answer") is not None:
+                final_answer = result["final_answer"]
+                drift_error = _maybe_evidence_drift_error(state, final_answer)
+                if drift_error is not None:
+                    __transition_to__("failed", "evidence drift in FINAL (code)")
+                    return complete_result(
+                        state, "failed", final_answer, error=drift_error
+                    )
                 __transition_to__("completed", "FINAL() in code")
-                return complete_result(state, "completed", result["final_answer"])
+                return complete_result(state, "completed", final_answer)
 
             # Check for unified gate pause (new path)
             gate = result.get("pending_gate")
@@ -1096,6 +1202,11 @@ def run_loop(context, goal, actions, state, config):
                     action_call_id=call_id,
                 )
 
+            # Track cumulative success/failure counts for the evidence
+            # drift gate (#2544). Mirrors the per-step accounting on the
+            # code branch — single source of truth for both paths.
+            _record_step_action_results(state, results)
+
             # TODO(#2325): track consecutive action errors here, mirroring the
             # code error tracking above (lines 623-634). Needs a unified
             # progress-tracking design across both execution paths.
@@ -1202,8 +1313,17 @@ def run_loop(context, goal, actions, state, config):
                             truncated=truncated,
                             original_length=len(response.get("content", "") or ""),
                         )
+                final_answer = str(answer)
+                drift_error = _maybe_evidence_drift_error(state, final_answer)
+                if drift_error is not None:
+                    __transition_to__(
+                        "failed", "evidence drift in FINAL (tool_calls)"
+                    )
+                    return complete_result(
+                        state, "failed", final_answer, error=drift_error
+                    )
                 __transition_to__("completed", "FINAL via tool_calls")
-                return complete_result(state, "completed", str(answer))
+                return complete_result(state, "completed", final_answer)
 
             # Track consecutive action errors (separate from code errors).
             # Partial batch failures: increment only if ALL actions failed,
