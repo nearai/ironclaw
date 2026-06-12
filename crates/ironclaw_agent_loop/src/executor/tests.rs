@@ -3864,6 +3864,8 @@ async fn non_auth_gate_block_preserves_pending_auth_resume() {
         input_ref: CapabilityInputRef::new("input:original").expect("valid"),
         effective_capability_ids: Vec::new(),
         provider_replay: None,
+        resume_token: None,
+        approval_request_id: None,
     };
     let mut initial_state = LoopExecutionState::initial_for_run(host.run_context());
     initial_state.pending_auth_resume = Some(seeded_auth_resume.clone());
@@ -4271,6 +4273,8 @@ async fn gate_stage_skip_and_continue_clears_stale_pending_auth_resume() {
         input_ref: CapabilityInputRef::new("input:original").expect("valid"),
         effective_capability_ids: Vec::new(),
         provider_replay: None,
+        resume_token: None,
+        approval_request_id: None,
     });
     let call = match provider_calls_response().output {
         ParentLoopOutput::CapabilityCalls(mut calls) => calls.remove(0),
@@ -4329,6 +4333,8 @@ async fn gate_stage_abort_clears_stale_pending_auth_resume() {
         input_ref: CapabilityInputRef::new("input:original-abort").expect("valid"),
         effective_capability_ids: Vec::new(),
         provider_replay: None,
+        resume_token: None,
+        approval_request_id: None,
     });
     let call = match provider_calls_response().output {
         ParentLoopOutput::CapabilityCalls(mut calls) => calls.remove(0),
@@ -4390,6 +4396,8 @@ async fn gate_stage_skip_does_not_clear_auth_resume_for_different_capability() {
         input_ref: CapabilityInputRef::new("input:other-cap").expect("valid"),
         effective_capability_ids: Vec::new(),
         provider_replay: None,
+        resume_token: None,
+        approval_request_id: None,
     });
     // The call being dispatched through GateStage is capability_id() ("demo.echo"),
     // not the seeded "other.cap".

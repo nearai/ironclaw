@@ -534,6 +534,8 @@ mod tests {
             input_ref: CapabilityInputRef::new("input:test").unwrap(),
             effective_capability_ids: vec![cap_a.clone(), cap_b.clone()],
             provider_replay: None,
+            resume_token: None,
+            approval_request_id: None,
         };
         let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
 
