@@ -3137,6 +3137,77 @@ async fn cursor_filtered_empty_scan_does_not_tombstone_marker() {
 }
 
 #[tokio::test]
+async fn zero_limit_does_not_tombstone_marker_when_deferred_rows_exist() {
+    // Defer one message, then call list_deferred_busy_messages with
+    // limit: Some(0) and after_sequence: None — the returned slice is empty
+    // but the pre-limit match set is non-empty.  The marker must survive so
+    // that a subsequent unbounded call still returns the deferred record.
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("zero-limit-no-tombstone"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let msg = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("zero-limit-no-tombstone"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("zero-limit-msg"),
+        })
+        .await
+        .unwrap();
+    let rec = service
+        .mark_message_deferred_busy(
+            &scope("zero-limit-no-tombstone"),
+            &thread.thread_id,
+            msg.message_id,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    // limit: Some(0) with no cursor — returns empty but must not tombstone.
+    let empty = service
+        .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
+            scope: scope("zero-limit-no-tombstone"),
+            thread_id: thread.thread_id.clone(),
+            limit: Some(0),
+            after_sequence: None,
+        })
+        .await
+        .unwrap();
+    assert!(empty.is_empty(), "limit: Some(0) must return empty slice");
+
+    // Unbounded no-cursor call must still return the deferred record (marker survived).
+    let full = service
+        .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
+            scope: scope("zero-limit-no-tombstone"),
+            thread_id: thread.thread_id,
+            limit: None,
+            after_sequence: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        full.len(),
+        1,
+        "marker must survive limit:Some(0) call; full scan must still return the deferred message"
+    );
+    assert_eq!(full[0].message_id, rec.message_id);
+}
+
+#[tokio::test]
 async fn mark_message_deferred_busy_marker_present_immediately_after() {
     // After mark_message_deferred_busy returns successfully, an immediate
     // no-cursor list must return the deferred record — marker is present.

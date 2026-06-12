@@ -946,14 +946,21 @@ where
             })
             .collect();
         messages.sort_by_key(|m| m.sequence);
+        // Record whether the pre-limit, pre-truncation match set is empty
+        // before capping the slice.  The tombstone decision must use the
+        // untruncated count: `limit: Some(0)` would otherwise empty a
+        // non-empty match set and incorrectly delete the presence marker.
+        let pre_limit_empty = messages.is_empty();
         if let Some(limit) = request.limit {
             messages.truncate(limit);
         }
         // Tombstone: delete the marker only on a full scan (no cursor) that
-        // finds zero DeferredBusy rows.  A cursor-filtered empty result means
-        // deferred messages may still exist below the cursor — evicting the
-        // marker there would hide them from all future drains.
-        if messages.is_empty() && request.after_sequence.is_none() {
+        // finds zero DeferredBusy rows in the untruncated match set.  A
+        // cursor-filtered empty result means deferred messages may still exist
+        // below the cursor — evicting the marker there would hide them from
+        // all future drains.  Likewise, a limit-truncated non-empty match set
+        // must not delete the marker even if the returned slice is empty.
+        if pre_limit_empty && request.after_sequence.is_none() {
             // Best-effort: ignore delete errors (marker may already be gone
             // or the thread deleted); the worst case is one extra scan.
             let _ = self

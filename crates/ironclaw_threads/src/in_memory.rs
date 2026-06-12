@@ -301,15 +301,22 @@ impl SessionThreadService for InMemorySessionThreadService {
             .cloned()
             .collect();
         messages.sort_by_key(|m| m.sequence);
+        // Record whether the pre-limit, pre-truncation match set is empty
+        // before capping the slice.  The tombstone decision must use the
+        // untruncated count: `limit: Some(0)` would otherwise empty a
+        // non-empty match set and incorrectly delete the presence marker.
+        let pre_limit_empty = messages.is_empty();
         if let Some(limit) = request.limit {
             messages.truncate(limit);
         }
         // Tombstone: evict marker only on a full scan (no cursor) that finds
-        // zero DeferredBusy rows.  A cursor-filtered empty result must not
-        // delete the marker — messages below the cursor may still be
-        // DeferredBusy, and evicting here would hide them from all future
-        // drains.
-        if messages.is_empty() && request.after_sequence.is_none() {
+        // zero DeferredBusy rows in the untruncated match set.  A
+        // cursor-filtered empty result must not delete the marker — messages
+        // below the cursor may still be DeferredBusy, and evicting here would
+        // hide them from all future drains.  Likewise, a limit-truncated
+        // non-empty match set must not delete the marker even if the returned
+        // slice happens to be empty.
+        if pre_limit_empty && request.after_sequence.is_none() {
             state
                 .deferred_threads
                 .remove(&(request.scope.clone(), request.thread_id.clone()));

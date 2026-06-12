@@ -436,8 +436,9 @@ pub struct UpdateThreadGoalRequest {
 /// specific thread scope, ordered ascending by sequence (oldest first).
 ///
 /// Used by the deferred-busy drain: after the blocking run reaches a terminal
-/// state the drain picks up the oldest waiting message and resubmits it
-/// through the normal inbound path.
+/// state the drain picks up the oldest waiting message; callers resubmit it
+/// through the turn coordinator, replaying the persisted canonical binding
+/// refs stored on the record.
 ///
 /// `limit` caps the number of records returned after sequence-order sort.
 /// When `None` all matching records are returned (unbounded).  Callers that
