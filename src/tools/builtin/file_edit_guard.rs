@@ -86,6 +86,12 @@ impl ReadFileState {
         Ok(())
     }
 
+    /// Remove all entries for a given job, freeing associated memory.
+    /// Call this when a job completes to prevent per-job state from leaking.
+    pub fn cleanup_job(&mut self, job_id: &Uuid) {
+        self.entries.retain(|(jid, _), _| jid != job_id);
+    }
+
     /// Update the mtime after a successful write (so subsequent edits don't
     /// falsely report staleness).
     pub fn update_mtime(&mut self, job_id: Uuid, path: &Path, mtime: SystemTime) {
@@ -536,6 +542,48 @@ mod tests {
         let err = state.check_before_edit(job_b, path, now).unwrap_err();
         assert!(err.to_string().contains("has not been read yet"));
         // Job A can still edit
+        assert!(state.check_before_edit(job_a, path, now).is_ok());
+    }
+
+    #[test]
+    fn test_cleanup_job_removes_correct_entries() {
+        let mut state = ReadFileState::new();
+        let job_a = test_job_id();
+        let job_b = test_job_id();
+        let path1 = Path::new("/tmp/file1.rs");
+        let path2 = Path::new("/tmp/file2.rs");
+        let now = SystemTime::now();
+
+        state.record_read(job_a, path1, now, false);
+        state.record_read(job_a, path2, now, false);
+        state.record_read(job_b, path1, now, false);
+
+        // All should be accessible before cleanup
+        assert!(state.check_before_edit(job_a, path1, now).is_ok());
+        assert!(state.check_before_edit(job_a, path2, now).is_ok());
+        assert!(state.check_before_edit(job_b, path1, now).is_ok());
+
+        // Cleanup job_a
+        state.cleanup_job(&job_a);
+
+        // job_a entries should be gone
+        assert!(state.check_before_edit(job_a, path1, now).is_err());
+        assert!(state.check_before_edit(job_a, path2, now).is_err());
+
+        // job_b entry should remain
+        assert!(state.check_before_edit(job_b, path1, now).is_ok());
+    }
+
+    #[test]
+    fn test_cleanup_nonexistent_job_is_noop() {
+        let mut state = ReadFileState::new();
+        let job_a = test_job_id();
+        let job_b = test_job_id();
+        let path = Path::new("/tmp/file.rs");
+        let now = SystemTime::now();
+
+        state.record_read(job_a, path, now, false);
+        state.cleanup_job(&job_b); // different job
         assert!(state.check_before_edit(job_a, path, now).is_ok());
     }
 

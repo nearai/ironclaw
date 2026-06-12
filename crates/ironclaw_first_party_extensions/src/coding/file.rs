@@ -25,7 +25,7 @@ use super::{
         virtual_to_relative,
     },
     state::{SharedCodingEditLocks, read_scope_key},
-    text::{count_matches, decode_text, encode_text, reject_binary_probe, replace_content},
+    text::{collect_matches, decode_text, encode_text, reject_binary_probe, replace_ranges},
     types::{ListEntry, MatchMethod, ResolvedPath},
 };
 
@@ -274,7 +274,9 @@ pub(super) async fn apply_patch(
     }
     let old_string = required_str(request.input, "old_string")?;
     let new_string = required_str(request.input, "new_string")?;
-    if old_string == new_string {
+    // An empty old_string can never identify an edit site; reject it before
+    // matching so it cannot surface as a misleading "matched 0 times".
+    if old_string.is_empty() || old_string == new_string {
         return Err(input_error());
     }
     let replace_all = request
@@ -316,7 +318,13 @@ pub(super) async fn apply_patch(
         })?;
     reject_binary_probe(&bytes)?;
     let (content, encoding, line_ending) = decode_text(&bytes)?;
-    let (match_count, match_method) = count_matches(&content, old_string);
+    // Single-pass match collection: the same ranges drive the uniqueness
+    // validation and the replacement, so counting and replacing cannot
+    // disagree. When replace_all is false the scan stops after a second
+    // match — uniqueness only needs "one" vs "more than one".
+    let matches = collect_matches(&content, old_string, (!replace_all).then_some(2))?;
+    let match_count = matches.ranges.len();
+    let match_method = matches.method;
     if match_count == 0 {
         return Err(operation_error_with_summary(format!(
             "apply_patch failed for {}: old_string matched 0 times",
@@ -324,14 +332,19 @@ pub(super) async fn apply_patch(
         )));
     }
     if !replace_all && match_count > 1 {
+        let count_phrase = if matches.truncated {
+            format!("{match_count} or more times")
+        } else {
+            format!("{match_count} times")
+        };
         return Err(operation_error_with_summary(format!(
-            "apply_patch failed for {}: old_string matched {match_count} times; set replace_all=true or provide a unique old_string",
+            "apply_patch failed for {}: old_string matched {count_phrase}; set replace_all=true or provide a unique old_string",
             safe_summary_path(resolved.scoped_path.as_str())
         )));
     }
 
-    let (new_content, replacements) =
-        replace_content(&content, old_string, new_string, replace_all, match_count)?;
+    let new_content = replace_ranges(&content, &matches.ranges, new_string);
+    let replacements = match_count;
     let output = encode_text(&new_content, encoding, line_ending);
     request
         .filesystem

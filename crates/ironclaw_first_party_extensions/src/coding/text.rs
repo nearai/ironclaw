@@ -86,53 +86,78 @@ fn detect_line_ending(content: &str) -> LineEnding {
     }
 }
 
-pub(super) fn replace_content(
-    content: &str,
-    old_string: &str,
-    new_string: &str,
-    replace_all: bool,
-    match_count: usize,
-) -> Result<(String, usize), CodingCapabilityError> {
-    if replace_all {
-        let mut matches = Vec::new();
-        let mut search_offset = 0usize;
-        while let Some(item) = find_match_from(content, old_string, search_offset) {
-            if item.end <= item.start {
-                return Err(operation_error());
-            }
-            search_offset = item.end;
-            matches.push((item.start, item.end));
-        }
-        if matches.len() != match_count {
-            return Err(operation_error());
-        }
-        let mut rebuilt = String::with_capacity(content.len());
-        let mut last = 0usize;
-        for (start, end) in matches {
-            rebuilt.push_str(&content[last..start]);
-            rebuilt.push_str(new_string);
-            last = end;
-        }
-        rebuilt.push_str(&content[last..]);
-        Ok((rebuilt, match_count))
-    } else {
-        let item = find_match(content, old_string).ok_or_else(operation_error)?;
-        let mut rebuilt =
-            String::with_capacity(content.len() - (item.end - item.start) + new_string.len());
-        rebuilt.push_str(&content[..item.start]);
-        rebuilt.push_str(new_string);
-        rebuilt.push_str(&content[item.end..]);
-        Ok((rebuilt, 1))
-    }
+/// Match ranges collected by a single scan of [`find_match_from`].
+pub(super) struct MatchSet {
+    /// Byte ranges of every located match, in order.
+    pub(super) ranges: Vec<(usize, usize)>,
+    /// Match method of the first hit (representative for reporting).
+    pub(super) method: MatchMethod,
+    /// True when scanning stopped at `limit` — `ranges.len()` is then a
+    /// floor ("N or more"), not an exact count.
+    pub(super) truncated: bool,
 }
 
-fn find_match(haystack: &str, needle: &str) -> Option<FuzzyMatch> {
-    find_match_from(haystack, needle, 0)
+/// Collect match ranges in a single `find_match_from` pass.
+///
+/// This is the single source of truth for both the uniqueness validation and
+/// the replacement ranges in `apply_patch`: counting and replacing share one
+/// scan, so they cannot disagree (mirrors the v1 apply_patch fix in
+/// `src/tools/builtin/file.rs`). `limit` bounds the scan — pass `Some(2)`
+/// when the caller only needs to distinguish "exactly one" from "more than
+/// one", so a large file with many occurrences is not scanned end-to-end.
+/// A degenerate empty match (a needle that normalizes to nothing) is an
+/// operation error rather than a silent stop.
+pub(super) fn collect_matches(
+    haystack: &str,
+    needle: &str,
+    limit: Option<usize>,
+) -> Result<MatchSet, CodingCapabilityError> {
+    let mut ranges = Vec::new();
+    let mut method = MatchMethod::Exact;
+    let mut truncated = false;
+    let mut search_offset = 0usize;
+    while let Some(item) = find_match_from(haystack, needle, search_offset) {
+        // Unreachable by construction (find_match_from filters degenerate
+        // spans); kept as a fail-closed guard against infinite scanning.
+        if item.end <= item.start {
+            return Err(operation_error());
+        }
+        if ranges.is_empty() {
+            method = item.method;
+        }
+        ranges.push((item.start, item.end));
+        search_offset = item.end;
+        if limit.is_some_and(|limit| ranges.len() >= limit) {
+            truncated = true;
+            break;
+        }
+    }
+    Ok(MatchSet {
+        ranges,
+        method,
+        truncated,
+    })
+}
+
+/// Rebuild `content` with `new_string` substituted at each of `ranges`
+/// (non-overlapping, in order — as produced by [`collect_matches`]).
+pub(super) fn replace_ranges(content: &str, ranges: &[(usize, usize)], new_string: &str) -> String {
+    let mut rebuilt = String::with_capacity(content.len());
+    let mut last = 0usize;
+    for &(start, end) in ranges {
+        rebuilt.push_str(&content[last..start]);
+        rebuilt.push_str(new_string);
+        last = end;
+    }
+    rebuilt.push_str(&content[last..]);
+    rebuilt
 }
 
 fn find_match_from(haystack: &str, needle: &str, start_offset: usize) -> Option<FuzzyMatch> {
     let search = haystack.get(start_offset..)?;
-    if let Some(index) = search.find(needle) {
+    if !needle.is_empty()
+        && let Some(index) = search.find(needle)
+    {
         let start = start_offset + index;
         return Some(FuzzyMatch {
             start,
@@ -140,9 +165,15 @@ fn find_match_from(haystack: &str, needle: &str, start_offset: usize) -> Option<
             method: MatchMethod::Exact,
         });
     }
+    // A normalization strategy can locate a span whose original-byte range is
+    // empty (the needle normalized to nothing at that position). Such a span
+    // is unlocatable, not a match — skip to the next strategy instead of
+    // returning a degenerate range the caller would have to special-case.
     let needle_stripped = strip_trailing_whitespace(needle);
     let haystack_stripped = strip_trailing_whitespace(search);
-    if let Some((start, end)) = find_normalized_span(search, &haystack_stripped, &needle_stripped) {
+    if let Some((start, end)) = find_normalized_span(search, &haystack_stripped, &needle_stripped)
+        && end > start
+    {
         return Some(FuzzyMatch {
             start: start_offset + start,
             end: start_offset + end,
@@ -151,41 +182,30 @@ fn find_match_from(haystack: &str, needle: &str, start_offset: usize) -> Option<
     }
     let needle_normalized = normalize_quotes(needle);
     let haystack_normalized = normalize_quotes(search);
-    if let Some(index) = haystack_normalized.find(&needle_normalized) {
+    if !needle_normalized.is_empty()
+        && let Some(index) = haystack_normalized.find(&needle_normalized)
+    {
         let char_start = haystack_normalized[..index].chars().count();
         let char_len = needle_normalized.chars().count();
         let start = char_to_byte_idx(search, char_start)?;
         let end = char_to_byte_idx(search, char_start + char_len)?;
-        return Some(FuzzyMatch {
-            start: start_offset + start,
-            end: start_offset + end,
-            method: MatchMethod::QuoteNormalization,
-        });
+        if end > start {
+            return Some(FuzzyMatch {
+                start: start_offset + start,
+                end: start_offset + end,
+                method: MatchMethod::QuoteNormalization,
+            });
+        }
     }
     let needle_both = normalize_quotes(&needle_stripped);
     let haystack_both = normalize_quotes(&haystack_stripped);
-    find_normalized_span(search, &haystack_both, &needle_both).map(|(start, end)| FuzzyMatch {
-        start: start_offset + start,
-        end: start_offset + end,
-        method: MatchMethod::Both,
-    })
-}
-
-pub(super) fn count_matches(haystack: &str, needle: &str) -> (usize, MatchMethod) {
-    let mut count = 0usize;
-    let mut method = MatchMethod::Exact;
-    let mut search_offset = 0usize;
-    while let Some(item) = find_match_from(haystack, needle, search_offset) {
-        if item.end <= item.start {
-            break;
-        }
-        if count == 0 {
-            method = item.method;
-        }
-        count += 1;
-        search_offset = item.end;
-    }
-    (count, method)
+    find_normalized_span(search, &haystack_both, &needle_both)
+        .filter(|(start, end)| end > start)
+        .map(|(start, end)| FuzzyMatch {
+            start: start_offset + start,
+            end: start_offset + end,
+            method: MatchMethod::Both,
+        })
 }
 
 fn strip_trailing_whitespace(value: &str) -> String {
@@ -269,10 +289,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn count_matches_ignores_unlocatable_trailing_whitespace_normalization() {
-        let (count, method) = count_matches("\na", "\n ");
+    fn collect_matches_ignores_unlocatable_trailing_whitespace_normalization() {
+        let matches = collect_matches("\na", "\n ", None).expect("no degenerate match");
 
-        assert_eq!(count, 0);
-        assert_eq!(method, MatchMethod::Exact);
+        assert!(matches.ranges.is_empty());
+        assert_eq!(matches.method, MatchMethod::Exact);
+        assert!(!matches.truncated);
+    }
+
+    #[test]
+    fn collect_matches_limit_short_circuits_and_marks_truncated() {
+        let matches = collect_matches("x x x x", "x", Some(2)).expect("matches collect");
+
+        assert_eq!(matches.ranges, vec![(0, 1), (2, 3)]);
+        assert!(matches.truncated);
+
+        let all = collect_matches("x x x x", "x", None).expect("matches collect");
+        assert_eq!(all.ranges.len(), 4);
+        assert!(!all.truncated);
+    }
+
+    #[test]
+    fn replace_ranges_substitutes_every_range() {
+        let matches = collect_matches("a b a", "a", None).expect("matches collect");
+        assert_eq!(replace_ranges("a b a", &matches.ranges, "z"), "z b z");
     }
 }
