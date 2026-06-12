@@ -562,26 +562,13 @@ fn push_runtime_context(
         validate_model_safe_text(runtime_context.render_model_content(), "runtime context")?;
     let content_ref =
         synthetic_message_ref("runtime", "loop-start", &model_content, 0, synthetic_refs)?;
+    // Fingerprint commits the model-visible rendering only, matching the
+    // sibling sections: bundles whose rendered prompt is byte-identical must
+    // hash identically, so sub-minute timestamp differences (truncated away
+    // by render_model_content) and invalid timezones (not rendered) do not
+    // produce distinct fingerprints.
     feed_field(fingerprint, b"section", b"runtime");
     feed_field(fingerprint, b"ref", content_ref.as_str().as_bytes());
-    feed_field(
-        fingerprint,
-        b"started_at",
-        runtime_context
-            .loop_started_at_utc
-            .timestamp()
-            .to_string()
-            .as_bytes(),
-    );
-    feed_field(
-        fingerprint,
-        b"tz",
-        runtime_context
-            .user_timezone
-            .as_deref()
-            .unwrap_or("")
-            .as_bytes(),
-    );
     feed_field(fingerprint, b"content", model_content.as_bytes());
     materialized_messages.push(InstructionBundleMaterializedMessage {
         role: "system".to_string(),

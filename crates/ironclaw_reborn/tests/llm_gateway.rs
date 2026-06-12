@@ -1567,10 +1567,12 @@ async fn production_loop_model_gateway_resolves_thread_refs_and_emits_milestones
 }
 
 /// Proves that `HostManagedLoopPromptPort::with_runtime_context` stamps the
-/// loop-start time into the prompt bundle messages that will be sent to the
-/// model. Tests through `HostManagedLoopPromptPort` — the exact caller path
-/// wired by `loop_driver_host.rs` — and resolves materialized content from
-/// the shared instruction store to verify the provider would receive it.
+/// loop-start time into the prompt bundle messages and that the materialized
+/// content is resolvable from the shared instruction store. This is
+/// port-level coverage; the caller-path proof that `loop_driver_host.rs`
+/// actually wires `.with_runtime_context(...)` lives in
+/// `tests/loop_driver_host.rs`
+/// (`text_only_model_reply_driver_runs_prompt_model_transcript_path`).
 #[tokio::test]
 async fn production_loop_model_request_includes_runtime_context() {
     let fixture = ThreadFixture::new().await;
