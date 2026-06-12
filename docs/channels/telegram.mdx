@@ -109,6 +109,7 @@ automatically after you set up the channel for the first time.
 | `allow_from`                    | user IDs                       | `[]`      | Users allowed to DM the bot when `dm_policy` is set to `allowlist`              |
 | `owner_id`                      | Telegram user ID               | —         | If set, only this user can interact with the bot (DMs and group messages)       |
 | `respond_to_all_group_messages` | bool                           | `false`   | Respond to all group messages                                                   |
+| `allowed_chat_ids`              | group chat IDs                 | `[]`      | Limit group processing to specific Telegram group chat IDs                      |
 | `bot_username`                  | username                       | —         | For group mention detection whenever `respond_to_all_group_messages` is `false` |
 | `polling_enabled`               | bool                           | `false`   | Use polling instead of webhooks                                                 |
 | `poll_interval_ms`              | number                         | `30000`   | Polling interval in milliseconds (only used if `polling_enabled` is `true`)     |
@@ -300,6 +301,27 @@ openssl rand -hex 16
 <Note>
 The webhook secret is only relevant when `polling_enabled` is `false`. If you are using polling, this option has no effect.
 </Note>
+
+### Allowed Group Chats
+
+Use `allowed_chat_ids` to restrict group participation to specific Telegram groups while keeping direct-message policy separate. When the list is empty or omitted, all groups keep the previous behavior. When the list contains group IDs, messages from other groups are ignored. Direct messages are still controlled by `dm_policy`.
+
+Allowed groups bypass `dm_policy` for group messages, so a bot can require pairing for DMs while still allowing anyone in an approved group to mention it. If `owner_id` is set, the owner restriction still takes precedence. Mention handling still follows `respond_to_all_group_messages` and `bot_username`.
+
+```json
+{
+  "dm_policy": "pairing",
+  "bot_username": "TeamBot",
+  "respond_to_all_group_messages": false,
+  "allowed_chat_ids": [-5263819573]
+}
+```
+
+<Tip>
+
+Telegram group chat IDs are usually negative numbers. You can read them from update logs or a Telegram ID helper bot after sending a message in the group.
+
+</Tip>
 
 ---
 

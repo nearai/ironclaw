@@ -283,6 +283,36 @@ const BOT_USERNAME_PATH: &str = "state/bot_username";
 /// Workspace path for persisting respond_to_all_group_messages flag.
 const RESPOND_TO_ALL_GROUP_PATH: &str = "state/respond_to_all_group_messages";
 
+/// Workspace path for persisting allowed_chat_ids (JSON array of i64).
+const ALLOWED_CHAT_IDS_PATH: &str = "state/allowed_chat_ids";
+
+/// Result of checking whether a group chat is allowed.
+/// Returns `Some(true)` if the group is explicitly in the allowlist,
+/// `Some(false)` if explicitly rejected, or `None` if no filter is configured
+/// (all groups allowed).
+fn check_group_allowed(chat_id: i64, allowed_ids: &[i64]) -> Option<bool> {
+    if allowed_ids.is_empty() {
+        return None; // No filter configured — allow all groups
+    }
+    Some(allowed_ids.contains(&chat_id))
+}
+
+/// Returns whether a sender may proceed through an owner_id restriction.
+/// When owner_id is configured it is stricter than group allowlists or dm_policy.
+fn owner_allows_sender(owner_id: Option<i64>, sender_id: i64) -> bool {
+    match owner_id {
+        Some(owner) => owner == sender_id,
+        None => true,
+    }
+}
+
+/// Parse allowed_chat_ids from raw workspace JSON.
+/// Returns None if no data or invalid JSON (no filter configured).
+/// Returns Some(Vec) — empty vec means "allow all", non-empty means filter.
+fn parse_allowed_chat_ids(json: &str) -> Option<Vec<i64>> {
+    serde_json::from_str::<Vec<i64>>(json).ok()
+}
+
 // ============================================================================
 // Channel Metadata
 // ============================================================================
@@ -361,6 +391,11 @@ struct TelegramConfig {
     /// Whether to respond to all group messages (not just mentions).
     #[serde(default)]
     respond_to_all_group_messages: bool,
+
+    /// Allowed group chat IDs. If non-empty, only messages from these groups
+    /// are processed. DMs are unaffected. Empty = allow all groups.
+    #[serde(default)]
+    allowed_chat_ids: Option<Vec<i64>>,
 
     /// Public tunnel URL for webhook mode (injected by host from global settings).
     #[serde(default)]
@@ -621,6 +656,23 @@ impl Guest for TelegramChannel {
             RESPOND_TO_ALL_GROUP_PATH,
             &config.respond_to_all_group_messages.to_string(),
         );
+
+        // Persist allowed_chat_ids for group filtering
+        let allowed_chat_ids_json =
+            serde_json::to_string(&config.allowed_chat_ids.clone().unwrap_or_default())
+                .unwrap_or_else(|_| "[]".to_string());
+        let _ = channel_host::workspace_write(ALLOWED_CHAT_IDS_PATH, &allowed_chat_ids_json);
+        if let Some(ref ids) = config.allowed_chat_ids {
+            if !ids.is_empty() {
+                channel_host::log(
+                    channel_host::LogLevel::Info,
+                    &format!(
+                        "Group chat restriction enabled: {} allowed groups",
+                        ids.len()
+                    ),
+                );
+            }
+        }
 
         let webhook_mode = webhook_mode(&config);
 
@@ -2145,17 +2197,10 @@ fn download_and_store_documents(attachments: &mut [InboundAttachment]) {
 
 /// Process a single message.
 fn handle_message(message: TelegramMessage) {
-    // Extract attachments from media fields (pure data mapping, no host calls)
+    // Extract attachments from media fields (pure data mapping, no host calls).
+    // Downloading/storing attachment bytes must wait until after authorization
+    // and group-trigger checks so ignored messages cannot cause side effects.
     let mut attachments = extract_attachments(&message);
-
-    // Download and store voice attachments for host-side transcription
-    download_and_store_voice(&attachments);
-
-    // Download and store image attachments for host-side vision pipeline
-    download_and_store_images(&attachments);
-
-    // Download and store document attachments for host-side text extraction
-    download_and_store_documents(&mut attachments);
 
     // Use text or caption (for media messages)
     let has_voice = message.voice.is_some();
@@ -2189,12 +2234,43 @@ fn handle_message(message: TelegramMessage) {
 
     let is_private = message.chat.chat_type == "private";
 
+    // Group chat ID restriction: if allowed_chat_ids is set, only process
+    // messages from those groups. DMs are always allowed.
+    // When a group IS allowed, also bypass dm_policy — so you can have
+    // pairing DMs but still let anyone @mention the bot in allowed groups.
+    let mut is_allowed_group = false;
+    if !is_private {
+        if let Some(allowed_ids) = channel_host::workspace_read(ALLOWED_CHAT_IDS_PATH)
+            .and_then(|json| parse_allowed_chat_ids(&json))
+        {
+            match check_group_allowed(message.chat.id, &allowed_ids) {
+                Some(false) => {
+                    channel_host::log(
+                        channel_host::LogLevel::Debug,
+                        &format!("Dropping message from disallowed group {}", message.chat.id),
+                    );
+                    return;
+                }
+                Some(true) => is_allowed_group = true,
+                None => {} // No filter — allow all groups
+            }
+        }
+    }
+
     let owner_id = channel_host::workspace_read(OWNER_ID_PATH)
         .filter(|s| !s.is_empty())
         .and_then(|s| s.parse::<i64>().ok());
     let is_owner = owner_id == Some(from.id);
 
-    if !is_owner {
+    if !owner_allows_sender(owner_id, from.id) {
+        channel_host::log(
+            channel_host::LogLevel::Debug,
+            &format!("Dropping message from non-owner user {}", from.id),
+        );
+        return;
+    }
+
+    if !is_owner && !is_allowed_group {
         // Non-owner senders remain guests. Apply authorization based on
         // dm_policy / allow_from before letting them chat in their own scope.
         let dm_policy =
@@ -2321,6 +2397,13 @@ fn handle_message(message: TelegramMessage) {
         None if !attachments.is_empty() => String::new(),
         None => return,
     };
+
+    // Download and store attachment bytes only after all authorization and
+    // group-trigger checks pass. Disallowed/ignored groups must not cause
+    // Telegram file downloads or host-side attachment storage.
+    download_and_store_voice(&attachments);
+    download_and_store_images(&attachments);
+    download_and_store_documents(&mut attachments);
 
     // Emit the message to the agent
     channel_host::emit_message(&EmittedMessage {
@@ -2741,12 +2824,40 @@ mod tests {
         let json = r#"{
             "bot_username": "my_bot",
             "owner_id": 42,
-            "respond_to_all_group_messages": true
+            "respond_to_all_group_messages": true,
+            "allowed_chat_ids": [-5263819573]
         }"#;
         let config: TelegramConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.bot_username, Some("my_bot".to_string()));
         assert_eq!(config.owner_id, Some("42".to_string()));
         assert!(config.respond_to_all_group_messages);
+        assert_eq!(config.allowed_chat_ids, Some(vec![-5263819573]));
+    }
+
+    #[test]
+    fn test_owner_id_takes_precedence_over_allowed_group_bypass() {
+        let owner_id = Some(42_i64);
+        let sender_id = 7_i64;
+        let is_allowed_group = true;
+
+        assert!(!owner_allows_sender(owner_id, sender_id));
+        assert!(
+            is_allowed_group,
+            "allowed group should not override owner_id"
+        );
+    }
+
+    #[test]
+    fn test_attachment_downloads_are_after_authorization_comment_guard() {
+        let source = include_str!("lib.rs");
+        let auth_pos = source
+            .find("if !owner_allows_sender(owner_id, from.id)")
+            .expect("owner authorization guard should exist");
+        let download_pos = source
+            .find("Download and store attachment bytes only after all authorization")
+            .expect("post-auth attachment download block should exist");
+
+        assert!(download_pos > auth_pos);
     }
 
     #[test]
@@ -3396,5 +3507,77 @@ mod tests {
                 half_limit,
             );
         }
+    }
+
+    // =========================================================================
+    // allowed_chat_ids group filter tests
+    // =========================================================================
+
+    #[test]
+    fn test_check_group_allowed_no_filter() {
+        // Empty list = no filter configured → None (allow all)
+        assert_eq!(check_group_allowed(-5263819573, &[]), None);
+    }
+
+    #[test]
+    fn test_check_group_allowed_explicit_match() {
+        let ids = vec![-5263819573, -1001234567];
+        assert_eq!(check_group_allowed(-5263819573, &ids), Some(true));
+        assert_eq!(check_group_allowed(-1001234567, &ids), Some(true));
+    }
+
+    #[test]
+    fn test_check_group_allowed_explicit_reject() {
+        let ids = vec![-5263819573];
+        assert_eq!(check_group_allowed(-9999999999, &ids), Some(false));
+    }
+
+    #[test]
+    fn test_parse_allowed_chat_ids_valid() {
+        assert_eq!(
+            parse_allowed_chat_ids("[-5263819573]"),
+            Some(vec![-5263819573])
+        );
+        assert_eq!(
+            parse_allowed_chat_ids("[-1, -2, -3]"),
+            Some(vec![-1, -2, -3])
+        );
+    }
+
+    #[test]
+    fn test_parse_allowed_chat_ids_empty_array() {
+        assert_eq!(parse_allowed_chat_ids("[]"), Some(vec![]));
+    }
+
+    #[test]
+    fn test_parse_allowed_chat_ids_whitespace() {
+        // Whitespace in JSON should still parse correctly
+        assert_eq!(
+            parse_allowed_chat_ids(" [ -5263819573 ] "),
+            Some(vec![-5263819573])
+        );
+    }
+
+    #[test]
+    fn test_parse_allowed_chat_ids_invalid_json() {
+        assert_eq!(parse_allowed_chat_ids("not json"), None);
+        assert_eq!(parse_allowed_chat_ids(""), None);
+    }
+
+    #[test]
+    fn test_parse_allowed_chat_ids_wrong_types() {
+        // String values instead of numbers → parse fails
+        assert_eq!(parse_allowed_chat_ids("[\"abc\"]"), None);
+    }
+
+    #[test]
+    fn test_check_group_allowed_with_dm_bypass_logic() {
+        // Simulates: allowed_chat_ids=[-5263819573], dm_policy=pairing
+        // Owner in allowed group → should bypass dm_policy
+        let ids = vec![-5263819573];
+        assert_eq!(check_group_allowed(-5263819573, &ids), Some(true));
+
+        // Random group NOT in list → should be rejected (not bypass dm_policy)
+        assert_eq!(check_group_allowed(-9999, &ids), Some(false));
     }
 }

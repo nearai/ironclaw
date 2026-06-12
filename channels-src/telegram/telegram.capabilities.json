@@ -76,6 +76,7 @@
     "polling_enabled": false,
     "poll_interval_ms": 30000,
     "dm_policy": "pairing",
-    "allow_from": []
+    "allow_from": [],
+    "allowed_chat_ids": []
   }
 }
