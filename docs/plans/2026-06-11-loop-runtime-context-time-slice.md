@@ -93,9 +93,14 @@ Rendered system message:
   time capability if it is visible.
   ```
 
-Section order in `InstructionBundleBuilder::build`: identity → **runtime** →
-instruction snippets → memory snippets → safety → surface → inline messages
-(matching the parent plan's locked position).
+Section order in `InstructionBundleBuilder::build` as actually emitted today:
+inline messages → identity → **runtime** → instruction snippets → memory
+snippets → safety → surface. The runtime section sits in its locked position
+relative to identity and the host sections. Inline-first is a pre-existing
+deviation from the parent plan's locked order (inline should come last, after
+all system context — it carries subagent handoffs); fixing it changes prompt
+order and fingerprints for every bundle with inline messages, so it is
+tracked separately in issue #4798 rather than folded into this slice.
 
 ### Derivation and wiring
 
