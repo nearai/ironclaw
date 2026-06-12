@@ -124,6 +124,45 @@ mod tests {
     }
 
     #[test]
+    fn markdown_code_blocks_keep_horizontal_scroll_local_to_block() {
+        let renderer = asset_text("js/pages/chat/components/markdown-renderer.js");
+        assert!(renderer.contains("wrap.className = \"markdown-code-frame\";"));
+        assert!(renderer.contains("pre.style.overflowX = \"auto\";"));
+        assert!(renderer.contains("pre.style.overflowY = \"hidden\";"));
+        assert!(!renderer.contains("pre.style.overflow = \"hidden\";"));
+        assert!(!renderer.contains("codeEl.style.whiteSpace"));
+
+        let styles = asset_text("styles/app.css");
+        assert!(styles.contains(".markdown-body {\n  max-width: 100%;\n  min-width: 0;\n}"));
+        assert!(styles.contains(".markdown-code-frame {\n  position: relative;"));
+        assert!(styles.contains("width: 100%;\n  max-width: 100%;\n  min-width: 0;"));
+        assert!(styles.contains("overflow: hidden;"));
+        assert!(styles.contains("border-radius: 8px; box-sizing: border-box; width: 100%;"));
+        assert!(styles.contains("overflow-x: auto; white-space: pre; margin-bottom: 0.75em;"));
+        assert!(styles.contains("display: inline; background: transparent; padding: 0;"));
+        assert!(styles.contains("font-size: 0.8125em; white-space: inherit;"));
+        assert!(!styles.contains("width: max-content"));
+
+        let message_list = asset_text("js/pages/chat/components/message-list.js");
+        assert!(message_list.contains("relative flex min-h-0 min-w-0 flex-1"));
+        assert!(message_list.contains("flex min-w-0 flex-1 overflow-y-auto"));
+        assert!(!message_list.contains("overflow-x-hidden"));
+        assert!(message_list.contains("mx-auto flex w-full min-w-0 max-w-5xl flex-col"));
+
+        let message_bubble = asset_text("js/pages/chat/components/message-bubble.js");
+        assert!(message_bubble.contains("group flex w-full min-w-0 flex-col"));
+        assert!(message_bubble.contains(
+            "const bubbleWidthClass = isUser ? \"max-w-[85%]\" : \"w-full max-w-[85%]\";"
+        ));
+        assert!(
+            message_bubble.contains(
+                "const contentWidthClass = isUser ? \"\" : \"w-full min-w-0 max-w-full\";"
+            )
+        );
+        assert!(message_bubble.contains("contentWidthClass,"));
+    }
+
+    #[test]
     fn chat_connect_action_assets_render_slack_pairing_and_extensions_channel_picker() {
         let chat = asset_text("js/pages/chat/chat.js");
         assert!(chat.contains("ChannelConnectCard"));

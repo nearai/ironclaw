@@ -364,6 +364,10 @@ input:focus, select:focus, textarea:focus {
 
 /* ── Markdown body ───────────────────────────────────────────────── */
 
+.markdown-body {
+  max-width: 100%;
+  min-width: 0;
+}
 .markdown-body h1,.markdown-body h2,.markdown-body h3,.markdown-body h4 {
   margin-top: 1em; margin-bottom: 0.5em; font-weight: 600;
   color: var(--v2-text-strong);
@@ -376,11 +380,23 @@ input:focus, select:focus, textarea:focus {
   font-size: 0.875em; background: var(--v2-surface-muted);
   padding: 0.15em 0.4em; border-radius: 4px;
 }
+.markdown-code-frame {
+  position: relative;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
 .markdown-body pre {
   background: var(--v2-surface-soft); border: 1px solid var(--v2-panel-border);
-  border-radius: 8px; padding: 0.75em 1em; overflow-x: auto; margin-bottom: 0.75em;
+  border-radius: 8px; box-sizing: border-box; width: 100%; max-width: 100%;
+  min-width: 0; padding: 0.75em 1em;
+  overflow-x: auto; white-space: pre; margin-bottom: 0.75em;
 }
-.markdown-body pre code { background: transparent; padding: 0; border-radius: 0; font-size: 0.8125em; }
+.markdown-body pre code {
+  display: inline; background: transparent; padding: 0; border-radius: 0;
+  font-size: 0.8125em; white-space: inherit;
+}
 .markdown-body blockquote {
   border-left: 3px solid var(--v2-panel-border); padding-left: 1em;
   margin-left: 0; margin-bottom: 0.75em; color: var(--v2-text-muted);
