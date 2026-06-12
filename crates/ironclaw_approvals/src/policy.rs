@@ -40,8 +40,6 @@ pub fn persistent_approval_grant_issuer() -> Principal {
 
 #[derive(Debug, Error)]
 pub enum PersistentApprovalPolicyError {
-    #[error("persistent approval scope must include project_id or thread_id")]
-    UnsupportedScope,
     #[error("unknown persistent approval policy")]
     UnknownPolicy,
     #[error("persistent approval policy changed concurrently")]
@@ -95,28 +93,28 @@ pub struct PersistentApprovalScope {
     pub user_id: UserId,
     pub agent_id: Option<ironclaw_host_api::AgentId>,
     pub project_id: Option<ProjectId>,
+    /// Always `None`. The field is retained (rather than removed) purely to
+    /// preserve the policy digest: the digest is `serde_json::to_vec(key)`, and
+    /// pre-existing project-scoped policies serialized `"thread_id": null`.
+    /// Keeping the field means those digests are unchanged so old policies still
+    /// match. `thread_id` never participates in the persistent approval scope —
+    /// an "always allow" granted in one thread applies to all of that user's
+    /// threads with the same agent (and project, when present).
     pub thread_id: Option<ThreadId>,
 }
 
 impl PersistentApprovalScope {
-    pub fn from_resource_scope(
-        scope: &ResourceScope,
-    ) -> Result<Self, PersistentApprovalPolicyError> {
-        if scope.project_id.is_none() && scope.thread_id.is_none() {
-            return Err(PersistentApprovalPolicyError::UnsupportedScope);
-        }
-        let thread_id = if scope.project_id.is_some() {
-            None
-        } else {
-            scope.thread_id.clone()
-        };
-        Ok(Self {
+    pub fn from_resource_scope(scope: &ResourceScope) -> Self {
+        Self {
             tenant_id: scope.tenant_id.clone(),
             user_id: scope.user_id.clone(),
             agent_id: scope.agent_id.clone(),
             project_id: scope.project_id.clone(),
-            thread_id,
-        })
+            // Intentionally always `None`: see the field doc-comment. The scope
+            // is (tenant_id, user_id, agent_id?, project_id?) and is thread- and
+            // channel-agnostic.
+            thread_id: None,
+        }
     }
 }
 
@@ -134,13 +132,13 @@ impl PersistentApprovalPolicyKey {
         action: PersistentApprovalAction,
         capability_id: CapabilityId,
         grantee: Principal,
-    ) -> Result<Self, PersistentApprovalPolicyError> {
-        Ok(Self {
-            scope: PersistentApprovalScope::from_resource_scope(scope)?,
+    ) -> Self {
+        Self {
+            scope: PersistentApprovalScope::from_resource_scope(scope),
             action,
             capability_id,
             grantee,
-        })
+        }
     }
 }
 
@@ -243,7 +241,7 @@ impl PersistentApprovalPolicyStore for InMemoryPersistentApprovalPolicyStore {
             input.action,
             input.capability_id,
             input.grantee,
-        )?;
+        );
         let mut policies = self
             .policies
             .write()
@@ -363,7 +361,7 @@ where
             input.action,
             input.capability_id,
             input.grantee,
-        )?;
+        );
         let path = self.cached_policy_path(&key)?;
         let lock = self.mutation_lock(&key);
         let _guard = lock.lock().await;
@@ -595,10 +593,10 @@ fn within_tenant_scope(scope: &PersistentApprovalScope) -> String {
     if let Some(agent_id) = &scope.agent_id {
         segments.push(format!("agents/{agent_id}"));
     }
+    // `thread_id` is always `None` (see `PersistentApprovalScope`), so the scope
+    // path only ever branches on `project_id`.
     if let Some(project_id) = &scope.project_id {
         segments.push(format!("projects/{project_id}"));
-    } else if let Some(thread_id) = &scope.thread_id {
-        segments.push(format!("threads/{thread_id}"));
     }
     if segments.is_empty() {
         "scope".to_string()
@@ -923,23 +921,65 @@ mod tests {
 
     #[tokio::test]
     async fn policy_scope_prefers_project_over_thread() {
+        // Project is still part of the scope; differing thread ids under the same
+        // project produce identical keys (project carried, thread_id always None).
         let scope_a = scope(Some("project-a"), Some("thread-a"));
         let scope_b = scope(Some("project-a"), Some("thread-b"));
 
+        let derived_a = PersistentApprovalScope::from_resource_scope(&scope_a);
+        let derived_b = PersistentApprovalScope::from_resource_scope(&scope_b);
+
+        assert_eq!(derived_a, derived_b);
         assert_eq!(
-            PersistentApprovalScope::from_resource_scope(&scope_a).unwrap(),
-            PersistentApprovalScope::from_resource_scope(&scope_b).unwrap()
+            derived_a.project_id,
+            Some(ProjectId::new("project-a").unwrap())
+        );
+        assert_eq!(derived_a.thread_id, None);
+    }
+
+    #[tokio::test]
+    async fn policy_scope_without_project_is_thread_agnostic() {
+        let scope_a = scope(None, Some("thread-a"));
+        let scope_b = scope(None, Some("thread-b"));
+
+        let derived_a = PersistentApprovalScope::from_resource_scope(&scope_a);
+        let derived_b = PersistentApprovalScope::from_resource_scope(&scope_b);
+
+        assert_eq!(derived_a, derived_b);
+        assert_eq!(derived_a.thread_id, None);
+    }
+
+    #[tokio::test]
+    async fn policy_scope_without_project_isolates_users() {
+        let scope_a = ResourceScope {
+            user_id: UserId::new("alice").unwrap(),
+            ..scope(None, Some("thread-a"))
+        };
+        let scope_b = ResourceScope {
+            user_id: UserId::new("bob").unwrap(),
+            ..scope(None, Some("thread-a"))
+        };
+
+        assert_ne!(
+            PersistentApprovalScope::from_resource_scope(&scope_a),
+            PersistentApprovalScope::from_resource_scope(&scope_b)
         );
     }
 
     #[tokio::test]
-    async fn policy_scope_uses_thread_without_project() {
-        let scope_a = scope(None, Some("thread-a"));
-        let scope_b = scope(None, Some("thread-b"));
+    async fn policy_scope_without_project_isolates_agents() {
+        let scope_a = ResourceScope {
+            agent_id: Some(AgentId::new("agent-x").unwrap()),
+            ..scope(None, Some("thread-a"))
+        };
+        let scope_b = ResourceScope {
+            agent_id: Some(AgentId::new("agent-y").unwrap()),
+            ..scope(None, Some("thread-a"))
+        };
 
         assert_ne!(
-            PersistentApprovalScope::from_resource_scope(&scope_a).unwrap(),
-            PersistentApprovalScope::from_resource_scope(&scope_b).unwrap()
+            PersistentApprovalScope::from_resource_scope(&scope_a),
+            PersistentApprovalScope::from_resource_scope(&scope_b)
         );
     }
 
@@ -987,16 +1027,6 @@ mod tests {
         assert_eq!(grant.issued_by, persistent_approval_grant_issuer());
     }
 
-    #[tokio::test]
-    async fn from_resource_scope_errs_without_project_or_thread() {
-        let scope = scope(None, None);
-
-        assert!(matches!(
-            PersistentApprovalScope::from_resource_scope(&scope),
-            Err(PersistentApprovalPolicyError::UnsupportedScope)
-        ));
-    }
-
     fn input(scope: ResourceScope) -> PersistentApprovalPolicyInput {
         PersistentApprovalPolicyInput {
             scope,
@@ -1024,7 +1054,6 @@ mod tests {
             CapabilityId::new("fixture.echo").unwrap(),
             Principal::User(UserId::new("alice").unwrap()),
         )
-        .unwrap()
     }
 
     fn scope(project_id: Option<&str>, thread_id: Option<&str>) -> ResourceScope {

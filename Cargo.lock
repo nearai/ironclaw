@@ -4821,6 +4821,7 @@ dependencies = [
  "ironclaw_conversations",
  "ironclaw_event_projections",
  "ironclaw_events",
+ "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
  "ironclaw_loop_support",

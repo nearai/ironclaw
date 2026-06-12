@@ -542,6 +542,75 @@ fn resource_scope(actor: &TurnActor) -> ResourceScope {
     }
 }
 
+/// A no-project resource scope (WebChat shape) with explicit user/agent/thread.
+/// Threads carry `project_id = None`, which is the case the persistent approval
+/// scope fix targets: the scope key must be thread-agnostic.
+fn no_project_scope(user: &str, agent: Option<&str>, thread: &str) -> ResourceScope {
+    ResourceScope {
+        tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
+        user_id: UserId::new(user).expect("user"),
+        agent_id: agent.map(|id| ironclaw_host_api::AgentId::new(id).expect("agent")),
+        project_id: None,
+        mission_id: None,
+        thread_id: Some(ThreadId::new(thread).expect("thread")),
+        invocation_id: InvocationId::new(),
+    }
+}
+
+/// In-memory-backed scoped filesystem matching the approvals store mount layout.
+fn scoped_fs(
+    tenant: &str,
+    user: &str,
+) -> Arc<ironclaw_filesystem::ScopedFilesystem<ironclaw_filesystem::InMemoryBackend>> {
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    let backend = Arc::new(ironclaw_filesystem::InMemoryBackend::new());
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/approvals").expect("alias"),
+        VirtualPath::new(format!("/engine/tenants/{tenant}/users/{user}/approvals"))
+            .expect("virtual path"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    Arc::new(ironclaw_filesystem::ScopedFilesystem::with_fixed_view(
+        backend, mounts,
+    ))
+}
+
+/// Builds a service fixture whose pending gate carries the supplied resource
+/// scope and approval request, so tests can drive the real `resolve` path with
+/// a chosen persisted scope and grantee.
+fn service_fixture_with_scope(
+    request: ApprovalRequest,
+    gate_scope: ResourceScope,
+) -> (
+    DefaultApprovalInteractionService,
+    Arc<RecordingApprovalResolver>,
+    Arc<FakeTurnCoordinator>,
+    TurnRunId,
+    GateRef,
+) {
+    let actor = actor(gate_scope.user_id.as_str());
+    let gate_ref = approval_gate_ref(request.id).expect("gate ref");
+    let run_id = TurnRunId::new();
+    let gate = ApprovalGateRecord::with_status(
+        gate_scope,
+        run_id,
+        gate_ref.clone(),
+        request,
+        ApprovalStatus::Pending,
+    )
+    .expect("approval gate");
+    let resolver = Arc::new(RecordingApprovalResolver::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::blocked(actor, gate_ref.clone()));
+    let service = DefaultApprovalInteractionService::new(
+        Arc::new(FakeReadModel::with_gate(gate)),
+        Arc::new(FixedLeaseTermsProvider),
+        resolver.clone(),
+        coordinator.clone(),
+    );
+    (service, resolver, coordinator, run_id, gate_ref)
+}
+
 fn approval_request(reason: &str) -> ApprovalRequest {
     ApprovalRequest {
         id: ApprovalRequestId::new(),
@@ -555,6 +624,14 @@ fn approval_request(reason: &str) -> ApprovalRequest {
         reason: reason.to_string(),
         reusable_scope: None,
     }
+}
+
+/// Dispatch approval request for `demo.echo` with an explicit grantee
+/// (`requested_by`). Used by isolation tests that vary the policy grantee.
+fn approval_request_by(reason: &str, requested_by: Principal) -> ApprovalRequest {
+    let mut request = approval_request(reason);
+    request.requested_by = requested_by;
+    request
 }
 
 fn spawn_approval_request(reason: &str) -> ApprovalRequest {
@@ -686,8 +763,7 @@ async fn always_allow_resolves_gate_and_persists_reusable_policy() {
         PersistentApprovalAction::Dispatch,
         capability,
         Principal::User(UserId::new("user-alpha").expect("user")),
-    )
-    .expect("persistent policy key");
+    );
     let (service, resolver, coordinator, run_id, gate_ref) = service_fixture_for_request(request);
     let policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
     let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies.clone();
@@ -723,6 +799,248 @@ async fn always_allow_resolves_gate_and_persists_reusable_policy() {
         vec![EffectKind::DispatchCapability]
     );
     assert!(policy.active_grant().is_some());
+}
+
+/// Drives the real `resolve(AlwaysAllow)` path: builds a service whose pending
+/// gate carries `gate_scope` and `request`, wires `store`, and resolves with a
+/// turn scope/actor derived from `gate_scope` (so the read-model gate lookup
+/// matches). Asserts the resolution approved and resumed. The persisted policy
+/// scope is `gate_scope` and the grantee is `request.requested_by`.
+async fn drive_always_allow(
+    store: Arc<dyn PersistentApprovalPolicyStore>,
+    request: ApprovalRequest,
+    gate_scope: ResourceScope,
+    idempotency: &str,
+) {
+    let request_actor = TurnActor::new(gate_scope.user_id.clone());
+    let request_scope = TurnScope::new(
+        gate_scope.tenant_id.clone(),
+        gate_scope.agent_id.clone(),
+        gate_scope.project_id.clone(),
+        gate_scope
+            .thread_id
+            .clone()
+            .expect("gate scope must carry a thread id"),
+    );
+    let (service, resolver, coordinator, run_id, gate_ref) =
+        service_fixture_with_scope(request, gate_scope);
+    let service = service.with_persistent_policy_store(store);
+
+    let response = service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: request_scope,
+            actor: request_actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: ApprovalInteractionDecision::AlwaysAllow,
+            idempotency_key: IdempotencyKey::new(idempotency).expect("idempotency"),
+        })
+        .await
+        .expect("always allow");
+
+    assert!(matches!(
+        response,
+        ResolveApprovalInteractionResponse::Approved(_)
+    ));
+    assert_eq!(resolver.approval_count(), 1);
+    assert_eq!(coordinator.resumption_count(), 1);
+}
+
+/// Acceptance criterion 1: an "always allow" granted while resolving a gate in
+/// thread 1 (no project) is reused for the same capability in thread 2 without a
+/// gate. Covered against both InMemory and Filesystem stores because the
+/// filesystem scope path is part of the fix.
+#[tokio::test]
+async fn always_allow_grants_reuse_in_new_thread_without_project() {
+    let in_memory: Arc<dyn PersistentApprovalPolicyStore> =
+        Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+    let filesystem: Arc<dyn PersistentApprovalPolicyStore> = Arc::new(
+        ironclaw_approvals::FilesystemPersistentApprovalPolicyStore::new(scoped_fs(
+            "tenant-alpha",
+            "user-alpha",
+        )),
+    );
+
+    for (store, idempotency) in [
+        (in_memory, "reuse-in-memory"),
+        (filesystem, "reuse-filesystem"),
+    ] {
+        let request = approval_request("send the email");
+        let capability = match request.action.as_ref() {
+            Action::Dispatch { capability, .. } => capability.clone(),
+            _ => panic!("test request should be dispatch"),
+        };
+        // Grant in thread 1.
+        let thread_one = no_project_scope("user-alpha", Some("agent-a"), "thread-1");
+        drive_always_allow(Arc::clone(&store), request, thread_one, idempotency).await;
+
+        // Look up from thread 2 (same user/agent, no project): different thread,
+        // same persistent scope key, so the grant is active.
+        let thread_two = no_project_scope("user-alpha", Some("agent-a"), "thread-2");
+        let key = PersistentApprovalPolicyKey::new(
+            &thread_two,
+            PersistentApprovalAction::Dispatch,
+            capability,
+            Principal::User(UserId::new("user-alpha").expect("user")),
+        );
+        let policy = store
+            .lookup(&key)
+            .await
+            .expect("persistent policy lookup")
+            .expect("persistent policy active in new thread");
+        assert!(policy.active_grant().is_some());
+    }
+}
+
+/// Acceptance criterion 4 (isolation): an "always allow" granted by user A in
+/// thread 1 must NOT authorize user B in thread 2 under the same tenant/agent.
+#[tokio::test]
+async fn always_allow_does_not_grant_other_user_in_new_thread() {
+    let in_memory: Arc<dyn PersistentApprovalPolicyStore> =
+        Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+    let filesystem: Arc<dyn PersistentApprovalPolicyStore> = Arc::new(
+        ironclaw_approvals::FilesystemPersistentApprovalPolicyStore::new(scoped_fs(
+            "tenant-alpha",
+            "user-alpha",
+        )),
+    );
+
+    for (store, idempotency) in [
+        (in_memory, "user-iso-in-memory"),
+        (filesystem, "user-iso-filesystem"),
+    ] {
+        let request = approval_request_by(
+            "send the email",
+            Principal::User(UserId::new("user-alpha").expect("user")),
+        );
+        let capability = match request.action.as_ref() {
+            Action::Dispatch { capability, .. } => capability.clone(),
+            _ => panic!("test request should be dispatch"),
+        };
+        let user_a = no_project_scope("user-alpha", Some("agent-a"), "thread-1");
+        drive_always_allow(Arc::clone(&store), request, user_a, idempotency).await;
+
+        let user_b = no_project_scope("user-beta", Some("agent-a"), "thread-2");
+        let key = PersistentApprovalPolicyKey::new(
+            &user_b,
+            PersistentApprovalAction::Dispatch,
+            capability,
+            Principal::User(UserId::new("user-beta").expect("user")),
+        );
+        assert!(
+            store
+                .lookup(&key)
+                .await
+                .expect("persistent policy lookup")
+                .is_none(),
+            "another user must not inherit the grant"
+        );
+    }
+}
+
+/// Acceptance criterion 4 (isolation): an "always allow" granted under agent X
+/// must NOT authorize agent Y under the same tenant/user.
+#[tokio::test]
+async fn always_allow_does_not_grant_other_agent_in_new_thread() {
+    let in_memory: Arc<dyn PersistentApprovalPolicyStore> =
+        Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+    let filesystem: Arc<dyn PersistentApprovalPolicyStore> = Arc::new(
+        ironclaw_approvals::FilesystemPersistentApprovalPolicyStore::new(scoped_fs(
+            "tenant-alpha",
+            "user-alpha",
+        )),
+    );
+
+    for (store, idempotency) in [
+        (in_memory, "agent-iso-in-memory"),
+        (filesystem, "agent-iso-filesystem"),
+    ] {
+        let request = approval_request("send the email");
+        let capability = match request.action.as_ref() {
+            Action::Dispatch { capability, .. } => capability.clone(),
+            _ => panic!("test request should be dispatch"),
+        };
+        let agent_x = no_project_scope("user-alpha", Some("agent-x"), "thread-1");
+        drive_always_allow(Arc::clone(&store), request, agent_x, idempotency).await;
+
+        let agent_y = no_project_scope("user-alpha", Some("agent-y"), "thread-2");
+        let key = PersistentApprovalPolicyKey::new(
+            &agent_y,
+            PersistentApprovalAction::Dispatch,
+            capability,
+            Principal::User(UserId::new("user-alpha").expect("user")),
+        );
+        assert!(
+            store
+                .lookup(&key)
+                .await
+                .expect("persistent policy lookup")
+                .is_none(),
+            "another agent must not inherit the grant"
+        );
+    }
+}
+
+/// Acceptance criterion 4 (isolation): the policy key includes the grantee, so an
+/// approval for extension X must not match a lookup for extension Y requesting
+/// the same capability under the same scope.
+#[tokio::test]
+async fn always_allow_does_not_grant_other_extension_grantee() {
+    let in_memory: Arc<dyn PersistentApprovalPolicyStore> =
+        Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+    let filesystem: Arc<dyn PersistentApprovalPolicyStore> = Arc::new(
+        ironclaw_approvals::FilesystemPersistentApprovalPolicyStore::new(scoped_fs(
+            "tenant-alpha",
+            "user-alpha",
+        )),
+    );
+
+    for (store, idempotency) in [
+        (in_memory, "ext-iso-in-memory"),
+        (filesystem, "ext-iso-filesystem"),
+    ] {
+        let extension_x = ironclaw_host_api::ExtensionId::new("extension-x").expect("extension");
+        let request =
+            approval_request_by("send the email", Principal::Extension(extension_x.clone()));
+        let capability = match request.action.as_ref() {
+            Action::Dispatch { capability, .. } => capability.clone(),
+            _ => panic!("test request should be dispatch"),
+        };
+        let gate_scope = no_project_scope("user-alpha", Some("agent-a"), "thread-1");
+        drive_always_allow(Arc::clone(&store), request, gate_scope, idempotency).await;
+
+        // Same scope, same capability, but a different extension grantee.
+        let lookup_scope = no_project_scope("user-alpha", Some("agent-a"), "thread-2");
+        let extension_y = ironclaw_host_api::ExtensionId::new("extension-y").expect("extension");
+        let key = PersistentApprovalPolicyKey::new(
+            &lookup_scope,
+            PersistentApprovalAction::Dispatch,
+            capability.clone(),
+            Principal::Extension(extension_y),
+        );
+        assert!(
+            store
+                .lookup(&key)
+                .await
+                .expect("persistent policy lookup")
+                .is_none(),
+            "another extension grantee must not match"
+        );
+
+        // Sanity: the granting extension X DOES match (thread-agnostic reuse).
+        let key_x = PersistentApprovalPolicyKey::new(
+            &lookup_scope,
+            PersistentApprovalAction::Dispatch,
+            capability,
+            Principal::Extension(extension_x),
+        );
+        let policy = store
+            .lookup(&key_x)
+            .await
+            .expect("persistent policy lookup")
+            .expect("granting extension active in new thread");
+        assert!(policy.active_grant().is_some());
+    }
 }
 
 #[tokio::test]
@@ -793,8 +1111,7 @@ async fn always_allow_disallowed_by_policy_rejects_without_persisting_or_approvi
         PersistentApprovalAction::Dispatch,
         capability,
         Principal::User(UserId::new("user-alpha").expect("user")),
-    )
-    .expect("persistent policy key");
+    );
     let actor = actor("user-alpha");
     let gate_ref = approval_gate_ref(request.id).expect("gate ref");
     let run_id = TurnRunId::new();
@@ -865,8 +1182,7 @@ async fn always_allow_does_not_persist_policy_when_resolution_fails() {
         PersistentApprovalAction::Dispatch,
         capability,
         Principal::User(UserId::new("user-alpha").expect("user")),
-    )
-    .expect("persistent policy key");
+    );
     let gate_ref = approval_gate_ref(request.id).expect("gate ref");
     let run_id = TurnRunId::new();
     let gate = ApprovalGateRecord::with_status(
@@ -932,8 +1248,7 @@ async fn always_allow_resolution_failure_preserves_existing_policy() {
         PersistentApprovalAction::Dispatch,
         capability,
         Principal::User(UserId::new("user-alpha").expect("user")),
-    )
-    .expect("persistent policy key");
+    );
     let gate_ref = approval_gate_ref(request.id).expect("gate ref");
     let run_id = TurnRunId::new();
     let gate = ApprovalGateRecord::with_status(
@@ -1147,8 +1462,7 @@ async fn already_approved_always_allow_replay_rejects_without_persisting_policy(
         PersistentApprovalAction::Dispatch,
         capability,
         Principal::User(UserId::new("user-alpha").expect("user")),
-    )
-    .expect("persistent policy key");
+    );
     let (service, resolver, coordinator, run_id, gate_ref) =
         service_fixture_for_request_status(request, ApprovalStatus::Approved);
     coordinator.set_status(TurnStatus::Queued);

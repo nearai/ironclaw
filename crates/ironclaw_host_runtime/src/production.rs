@@ -986,17 +986,7 @@ impl DefaultHostRuntime {
             );
             return;
         }
-        let scope = match PersistentApprovalScope::from_resource_scope(&context.resource_scope) {
-            Ok(scope) => scope,
-            Err(error) => {
-                tracing::debug!(
-                    capability_id = %capability_id,
-                    error = %error,
-                    "persistent approval lookup skipped for unsupported scope"
-                );
-                return;
-            }
-        };
+        let scope = PersistentApprovalScope::from_resource_scope(&context.resource_scope);
         let lookup_results = join_all(persistent_approval_grantees(context).into_iter().map(
             |grantee| {
                 let policies = Arc::clone(policies);
@@ -1557,9 +1547,11 @@ fn persistent_approval_grantees(context: &ironclaw_host_api::ExecutionContext) -
     if let Some(mission_id) = &context.mission_id {
         grantees.push(Principal::Mission(mission_id.clone()));
     }
-    if let Some(thread_id) = &context.thread_id {
-        grantees.push(Principal::Thread(thread_id.clone()));
-    }
+    // No `Principal::Thread` grantee: persistent approval policies are never
+    // written under a thread grantee (the grantee always comes from
+    // `ApprovalRequest.requested_by`, which is `Principal::User` or
+    // `Principal::Extension`), so looking one up could never match. Persistent
+    // approvals are deliberately thread-agnostic (see #4825).
     grantees
 }
 
