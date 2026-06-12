@@ -50,9 +50,10 @@ use ironclaw_network::{
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
 use ironclaw_secrets::InMemorySecretStore;
 use ironclaw_triggers::{
-    ClaimDueFireRequest, ClearActiveFireRequest, FireAcceptedRequest, InMemoryTriggerRepository,
-    MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, TriggerError, TriggerRecord,
-    TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord,
+    ClaimDueFireRequest, ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest,
+    FireTerminalFailedRequest, InMemoryTriggerRepository, MAX_TRIGGER_NAME_BYTES,
+    MAX_TRIGGER_PROMPT_BYTES, TriggerError, TriggerRecord, TriggerRepository,
+    TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus, TriggerState,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -304,7 +305,13 @@ async fn builtin_trigger_create_stamps_caller_scope_and_persists_record() {
     assert_eq!(trigger["agent_id"], json!("default"));
     assert_eq!(trigger["project_id"], json!("bootstrap"));
     assert_eq!(trigger["last_status"], Value::Null);
-    assert_eq!(trigger["is_active"], json!(false));
+    assert_eq!(trigger["run_in_flight"], json!(false));
+    assert_eq!(trigger["enabled"], json!(true));
+    assert_eq!(trigger["last_error"], Value::Null);
+    assert!(
+        trigger.get("is_active").is_none(),
+        "is_active alias was dropped"
+    );
     assert!(trigger.get("last_fired_slot").is_none());
     assert!(trigger.get("active_fire_slot").is_none());
     assert!(trigger.get("active_run_ref").is_none());
@@ -462,6 +469,289 @@ async fn builtin_trigger_create_rejects_sub_minute_schedule_before_persistence()
             .unwrap()
             .is_empty()
     );
+}
+
+// Fix 1 — trigger_input_error surfaces the validation reason so the LLM can self-correct.
+#[tokio::test]
+async fn builtin_trigger_create_invalid_cron_surfaces_actionable_error_summary() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    // `* 10 * * * *` is a 6-field Quartz expression with a non-zero seconds field
+    // (* = every second), which triggers the "must not use second-level cadence" error.
+    let failure = invoke_failure_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Sub-second cron",
+            "prompt": "Run too fast",
+            "cron": "* 10 * * * *",
+            "timezone": "UTC"
+        }),
+        context.clone(),
+    )
+    .await;
+
+    assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+    let summary = failure
+        .safe_summary()
+        .expect("validation error must carry a safe summary");
+    assert!(
+        summary.contains("second") || summary.contains("cadence") || summary.contains("minute"),
+        "summary should describe the scheduling constraint, got: {summary}"
+    );
+    assert!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "rejected trigger must not be persisted"
+    );
+}
+
+#[tokio::test]
+async fn builtin_trigger_create_invalid_timezone_summary_does_not_echo_user_value() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Invalid timezone",
+            "prompt": "Run in the user's timezone",
+            "cron": "0 8 * * *",
+            "timezone": "secret/America"
+        }),
+        context.clone(),
+    )
+    .await;
+
+    assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+    let summary = failure
+        .safe_summary()
+        .expect("timezone validation error must carry a safe summary");
+    assert!(
+        summary.contains("invalid timezone"),
+        "summary should describe the invalid timezone, got: {summary}"
+    );
+    assert!(
+        !summary.contains("secret/America") && !summary.contains("secretAmerica"),
+        "safe summary must not echo the invalid timezone value: {summary}"
+    );
+    assert!(
+        !summary.chars().any(|character| matches!(
+            character,
+            '{' | '}' | '[' | ']' | '`' | '<' | '>' | '/' | '\\'
+        )),
+        "safe summary must not contain raw payload or path delimiters: {summary}"
+    );
+    assert!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "rejected trigger must not be persisted"
+    );
+}
+
+fn assert_trigger_output_state(
+    trigger: &Value,
+    run_in_flight: bool,
+    enabled: bool,
+    last_error_contains: Option<&str>,
+) {
+    assert_eq!(trigger["run_in_flight"], json!(run_in_flight));
+    assert_eq!(trigger["enabled"], json!(enabled));
+    match last_error_contains {
+        Some(expected) => {
+            let last_error = trigger["last_error"]
+                .as_str()
+                .expect("failed trigger must carry last_error");
+            assert!(
+                last_error.contains(expected),
+                "last_error should contain {expected:?}, got: {last_error}"
+            );
+        }
+        None => assert_eq!(trigger["last_error"], Value::Null),
+    }
+    assert!(
+        trigger.get("is_active").is_none(),
+        "is_active alias was dropped"
+    );
+}
+
+#[tokio::test]
+async fn builtin_trigger_output_run_in_flight_false_between_fires_and_enabled_true_when_scheduled()
+{
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID]);
+
+    invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Shape check trigger",
+            "prompt": "Verify output shape",
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let listed = invoke_with_context(
+        &runtime,
+        TRIGGER_LIST_CAPABILITY_ID,
+        json!({}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    let trigger = &listed["triggers"][0];
+
+    assert_trigger_output_state(trigger, false, true, None);
+}
+
+#[tokio::test]
+async fn builtin_trigger_output_enabled_false_and_last_error_present_for_terminal_completed_trigger()
+ {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID]);
+
+    invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Terminal failure trigger",
+            "prompt": "Will fail terminally",
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    // Drive the trigger into the Completed+Error terminal state that mark_fire_terminally_failed sets.
+    let records = repository
+        .list_triggers(context.resource_scope.tenant_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    let fire_slot = records[0].next_run_at;
+    repository
+        .claim_due_fire(ClaimDueFireRequest {
+            tenant_id: records[0].tenant_id.clone(),
+            trigger_id: records[0].trigger_id,
+            fire_slot,
+            now: fire_slot,
+        })
+        .await
+        .unwrap();
+    repository
+        .mark_fire_terminally_failed(FireTerminalFailedRequest {
+            tenant_id: records[0].tenant_id.clone(),
+            trigger_id: records[0].trigger_id,
+            fire_slot,
+        })
+        .await
+        .unwrap();
+
+    // Verify the state landed in Completed+Error as expected.
+    let terminal_records = repository
+        .list_triggers(context.resource_scope.tenant_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(terminal_records[0].state, TriggerState::Completed);
+    assert_eq!(
+        terminal_records[0].last_status,
+        Some(TriggerRunStatus::Error)
+    );
+
+    let listed = invoke_with_context(&runtime, TRIGGER_LIST_CAPABILITY_ID, json!({}), context)
+        .await
+        .unwrap();
+    let trigger = &listed["triggers"][0];
+
+    assert_trigger_output_state(trigger, false, false, Some("recreate"));
+}
+
+#[tokio::test]
+async fn builtin_trigger_output_enabled_true_and_last_error_present_for_rescheduled_permanent_failure()
+ {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID]);
+
+    invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Rescheduled failure trigger",
+            "prompt": "Will fail but reschedule",
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    // Drive the trigger into the Scheduled+Error state via mark_fire_permanently_failed.
+    // This path: claim the fire, then permanently-fail it with a future next_run_at.
+    // The trigger stays Scheduled (not Completed) and will fire again.
+    let records = repository
+        .list_triggers(context.resource_scope.tenant_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    let fire_slot = records[0].next_run_at;
+    // Advance next_run_at by one day so reject_non_future_next_run_at passes.
+    let next_run_at = fire_slot + chrono::Duration::days(1);
+    repository
+        .claim_due_fire(ClaimDueFireRequest {
+            tenant_id: records[0].tenant_id.clone(),
+            trigger_id: records[0].trigger_id,
+            fire_slot,
+            now: fire_slot,
+        })
+        .await
+        .unwrap();
+    repository
+        .mark_fire_permanently_failed(FirePermanentFailedRequest {
+            tenant_id: records[0].tenant_id.clone(),
+            trigger_id: records[0].trigger_id,
+            fire_slot,
+            next_run_at,
+        })
+        .await
+        .unwrap();
+
+    // Verify the repository landed in Scheduled+Error (still active, not terminal).
+    let rescheduled_records = repository
+        .list_triggers(context.resource_scope.tenant_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(rescheduled_records[0].state, TriggerState::Scheduled);
+    assert_eq!(
+        rescheduled_records[0].last_status,
+        Some(TriggerRunStatus::Error)
+    );
+
+    let listed = invoke_with_context(&runtime, TRIGGER_LIST_CAPABILITY_ID, json!({}), context)
+        .await
+        .unwrap();
+    let trigger = &listed["triggers"][0];
+
+    assert_trigger_output_state(trigger, false, true, Some("still scheduled"));
 }
 
 #[cfg(feature = "test-support")]
@@ -733,7 +1023,12 @@ async fn builtin_trigger_list_and_remove_are_caller_scoped() {
     .unwrap();
     assert_eq!(owner_list["triggers"].as_array().unwrap().len(), 1);
     assert!(owner_list["triggers"][0].get("last_status").is_some());
-    assert_eq!(owner_list["triggers"][0]["is_active"], json!(false));
+    assert_eq!(owner_list["triggers"][0]["run_in_flight"], json!(false));
+    assert_eq!(owner_list["triggers"][0]["enabled"], json!(true));
+    assert!(
+        owner_list["triggers"][0].get("is_active").is_none(),
+        "is_active alias was dropped"
+    );
     assert!(owner_list["triggers"][0].get("prompt").is_none());
     assert!(owner_list["triggers"][0].get("tenant_id").is_none());
     assert!(owner_list["triggers"][0].get("creator_user_id").is_none());
@@ -784,7 +1079,12 @@ async fn builtin_trigger_list_shows_active_state_without_run_identifiers() {
     )
     .await
     .unwrap();
-    assert_eq!(created["trigger"]["is_active"], json!(false));
+    assert_eq!(created["trigger"]["run_in_flight"], json!(false));
+    assert_eq!(created["trigger"]["enabled"], json!(true));
+    assert!(
+        created["trigger"].get("is_active").is_none(),
+        "is_active alias was dropped"
+    );
 
     let mut records = repository
         .list_triggers(context.resource_scope.tenant_id.clone())
@@ -800,7 +1100,12 @@ async fn builtin_trigger_list_shows_active_state_without_run_identifiers() {
         .await
         .unwrap();
     let trigger = &listed["triggers"][0];
-    assert_eq!(trigger["is_active"], json!(true));
+    assert_eq!(trigger["run_in_flight"], json!(true));
+    assert_eq!(trigger["enabled"], json!(true));
+    assert!(
+        trigger.get("is_active").is_none(),
+        "is_active alias was dropped"
+    );
     assert!(trigger.get("active_fire_slot").is_none());
     assert!(trigger.get("active_run_ref").is_none());
 }
@@ -852,7 +1157,12 @@ async fn builtin_trigger_create_list_and_remove_use_full_request_scope() {
     assert!(trigger.get("creator_user_id").is_none());
     assert_eq!(trigger["agent_id"], json!("scoped-agent"));
     assert_eq!(trigger["project_id"], json!("scoped-project"));
-    assert_eq!(trigger["is_active"], json!(false));
+    assert_eq!(trigger["run_in_flight"], json!(false));
+    assert_eq!(trigger["enabled"], json!(true));
+    assert!(
+        trigger.get("is_active").is_none(),
+        "is_active alias was dropped"
+    );
     assert!(trigger.get("prompt").is_none());
     assert!(trigger.get("last_fired_slot").is_none());
     assert!(trigger.get("active_fire_slot").is_none());
@@ -933,7 +1243,12 @@ async fn builtin_trigger_create_round_trips_nullable_agent_and_project_scope() {
 
     assert_eq!(created["trigger"]["agent_id"], Value::Null);
     assert_eq!(created["trigger"]["project_id"], Value::Null);
-    assert_eq!(created["trigger"]["is_active"], json!(false));
+    assert_eq!(created["trigger"]["run_in_flight"], json!(false));
+    assert_eq!(created["trigger"]["enabled"], json!(true));
+    assert!(
+        created["trigger"].get("is_active").is_none(),
+        "is_active alias was dropped"
+    );
 }
 
 #[tokio::test]
