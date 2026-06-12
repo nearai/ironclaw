@@ -49,9 +49,9 @@ In `crates/ironclaw_turns/src/run_profile/` (alongside the bundle types):
 /// fields rendered into the same prompt section.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopRuntimeContext {
-    /// Loop start instant, UTC, RFC3339 with minute precision
+    /// Loop start instant. Rendered at minute precision
     /// (e.g. "2026-06-11T21:32Z").
-    pub loop_started_at_utc: String,
+    pub loop_started_at_utc: chrono::DateTime<chrono::Utc>,
     /// IANA timezone name for the user (e.g. "America/Los_Angeles"),
     /// when known. None = unknown; never a guessed host timezone.
     pub user_timezone: Option<String>,

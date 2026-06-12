@@ -88,6 +88,7 @@ mod tests {
             user_timezone: Some("Not/A_Zone".to_string()),
         };
         let text = ctx.render_model_content();
+        assert!(text.contains("2026-06-11T21:32Z"), "{text}");
         assert!(text.contains("timezone is unknown"), "{text}");
         assert!(
             !text.contains("Not/A_Zone"),
