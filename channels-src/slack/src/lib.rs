@@ -556,8 +556,17 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
         // Direct message or thread follow-up to the bot
         "message" => {
             // Skip messages from bots (including ourselves)
-            if event.bot_id.is_some() || event.subtype.is_some() {
+            if event.bot_id.is_some() {
                 return;
+            }
+            // Filter out Slack system-noise subtypes (channel joins, edits,
+            // etc.) but allow `file_share` through — that's a real user
+            // message with an attached file, which is what enables
+            // file/image uploads to reach the agent.
+            if let Some(ref subtype) = event.subtype {
+                if subtype != "file_share" {
+                    return;
+                }
             }
 
             if let (Some(user), Some(channel), Some(text), Some(ts)) = (
