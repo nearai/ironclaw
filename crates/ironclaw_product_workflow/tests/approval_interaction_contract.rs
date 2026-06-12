@@ -634,6 +634,34 @@ fn approval_request_by(reason: &str, requested_by: Principal) -> ApprovalRequest
     request
 }
 
+/// The two persistent-approval store backends every caller-level test exercises.
+/// Filesystem scope paths are part of the fix, so both must pass. `prefix`
+/// distinguishes the per-backend idempotency keys.
+fn caller_level_store_pair(prefix: &str) -> [(Arc<dyn PersistentApprovalPolicyStore>, String); 2] {
+    [
+        (
+            Arc::new(InMemoryPersistentApprovalPolicyStore::new()),
+            format!("{prefix}-in-memory"),
+        ),
+        (
+            Arc::new(
+                ironclaw_approvals::FilesystemPersistentApprovalPolicyStore::new(scoped_fs(
+                    "tenant-alpha",
+                    "user-alpha",
+                )),
+            ),
+            format!("{prefix}-filesystem"),
+        ),
+    ]
+}
+
+fn dispatch_capability(request: &ApprovalRequest) -> CapabilityId {
+    match request.action.as_ref() {
+        Action::Dispatch { capability, .. } => capability.clone(),
+        _ => panic!("test request should be dispatch"),
+    }
+}
+
 fn spawn_approval_request(reason: &str) -> ApprovalRequest {
     let mut request = approval_request(reason);
     request.action = Box::new(Action::SpawnCapability {
@@ -852,27 +880,11 @@ async fn drive_always_allow(
 /// filesystem scope path is part of the fix.
 #[tokio::test]
 async fn always_allow_grants_reuse_in_new_thread_without_project() {
-    let in_memory: Arc<dyn PersistentApprovalPolicyStore> =
-        Arc::new(InMemoryPersistentApprovalPolicyStore::new());
-    let filesystem: Arc<dyn PersistentApprovalPolicyStore> = Arc::new(
-        ironclaw_approvals::FilesystemPersistentApprovalPolicyStore::new(scoped_fs(
-            "tenant-alpha",
-            "user-alpha",
-        )),
-    );
-
-    for (store, idempotency) in [
-        (in_memory, "reuse-in-memory"),
-        (filesystem, "reuse-filesystem"),
-    ] {
+    for (store, idempotency) in caller_level_store_pair("reuse") {
         let request = approval_request("send the email");
-        let capability = match request.action.as_ref() {
-            Action::Dispatch { capability, .. } => capability.clone(),
-            _ => panic!("test request should be dispatch"),
-        };
-        // Grant in thread 1.
+        let capability = dispatch_capability(&request);
         let thread_one = no_project_scope("user-alpha", Some("agent-a"), "thread-1");
-        drive_always_allow(Arc::clone(&store), request, thread_one, idempotency).await;
+        drive_always_allow(Arc::clone(&store), request, thread_one, &idempotency).await;
 
         // Look up from thread 2 (same user/agent, no project): different thread,
         // same persistent scope key, so the grant is active.
@@ -896,29 +908,14 @@ async fn always_allow_grants_reuse_in_new_thread_without_project() {
 /// thread 1 must NOT authorize user B in thread 2 under the same tenant/agent.
 #[tokio::test]
 async fn always_allow_does_not_grant_other_user_in_new_thread() {
-    let in_memory: Arc<dyn PersistentApprovalPolicyStore> =
-        Arc::new(InMemoryPersistentApprovalPolicyStore::new());
-    let filesystem: Arc<dyn PersistentApprovalPolicyStore> = Arc::new(
-        ironclaw_approvals::FilesystemPersistentApprovalPolicyStore::new(scoped_fs(
-            "tenant-alpha",
-            "user-alpha",
-        )),
-    );
-
-    for (store, idempotency) in [
-        (in_memory, "user-iso-in-memory"),
-        (filesystem, "user-iso-filesystem"),
-    ] {
+    for (store, idempotency) in caller_level_store_pair("user-iso") {
         let request = approval_request_by(
             "send the email",
             Principal::User(UserId::new("user-alpha").expect("user")),
         );
-        let capability = match request.action.as_ref() {
-            Action::Dispatch { capability, .. } => capability.clone(),
-            _ => panic!("test request should be dispatch"),
-        };
+        let capability = dispatch_capability(&request);
         let user_a = no_project_scope("user-alpha", Some("agent-a"), "thread-1");
-        drive_always_allow(Arc::clone(&store), request, user_a, idempotency).await;
+        drive_always_allow(Arc::clone(&store), request, user_a, &idempotency).await;
 
         let user_b = no_project_scope("user-beta", Some("agent-a"), "thread-2");
         let key = PersistentApprovalPolicyKey::new(
@@ -942,26 +939,11 @@ async fn always_allow_does_not_grant_other_user_in_new_thread() {
 /// must NOT authorize agent Y under the same tenant/user.
 #[tokio::test]
 async fn always_allow_does_not_grant_other_agent_in_new_thread() {
-    let in_memory: Arc<dyn PersistentApprovalPolicyStore> =
-        Arc::new(InMemoryPersistentApprovalPolicyStore::new());
-    let filesystem: Arc<dyn PersistentApprovalPolicyStore> = Arc::new(
-        ironclaw_approvals::FilesystemPersistentApprovalPolicyStore::new(scoped_fs(
-            "tenant-alpha",
-            "user-alpha",
-        )),
-    );
-
-    for (store, idempotency) in [
-        (in_memory, "agent-iso-in-memory"),
-        (filesystem, "agent-iso-filesystem"),
-    ] {
+    for (store, idempotency) in caller_level_store_pair("agent-iso") {
         let request = approval_request("send the email");
-        let capability = match request.action.as_ref() {
-            Action::Dispatch { capability, .. } => capability.clone(),
-            _ => panic!("test request should be dispatch"),
-        };
+        let capability = dispatch_capability(&request);
         let agent_x = no_project_scope("user-alpha", Some("agent-x"), "thread-1");
-        drive_always_allow(Arc::clone(&store), request, agent_x, idempotency).await;
+        drive_always_allow(Arc::clone(&store), request, agent_x, &idempotency).await;
 
         let agent_y = no_project_scope("user-alpha", Some("agent-y"), "thread-2");
         let key = PersistentApprovalPolicyKey::new(
@@ -986,28 +968,13 @@ async fn always_allow_does_not_grant_other_agent_in_new_thread() {
 /// the same capability under the same scope.
 #[tokio::test]
 async fn always_allow_does_not_grant_other_extension_grantee() {
-    let in_memory: Arc<dyn PersistentApprovalPolicyStore> =
-        Arc::new(InMemoryPersistentApprovalPolicyStore::new());
-    let filesystem: Arc<dyn PersistentApprovalPolicyStore> = Arc::new(
-        ironclaw_approvals::FilesystemPersistentApprovalPolicyStore::new(scoped_fs(
-            "tenant-alpha",
-            "user-alpha",
-        )),
-    );
-
-    for (store, idempotency) in [
-        (in_memory, "ext-iso-in-memory"),
-        (filesystem, "ext-iso-filesystem"),
-    ] {
+    for (store, idempotency) in caller_level_store_pair("ext-iso") {
         let extension_x = ironclaw_host_api::ExtensionId::new("extension-x").expect("extension");
         let request =
             approval_request_by("send the email", Principal::Extension(extension_x.clone()));
-        let capability = match request.action.as_ref() {
-            Action::Dispatch { capability, .. } => capability.clone(),
-            _ => panic!("test request should be dispatch"),
-        };
+        let capability = dispatch_capability(&request);
         let gate_scope = no_project_scope("user-alpha", Some("agent-a"), "thread-1");
-        drive_always_allow(Arc::clone(&store), request, gate_scope, idempotency).await;
+        drive_always_allow(Arc::clone(&store), request, gate_scope, &idempotency).await;
 
         // Same scope, same capability, but a different extension grantee.
         let lookup_scope = no_project_scope("user-alpha", Some("agent-a"), "thread-2");
