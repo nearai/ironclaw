@@ -1,0 +1,428 @@
+{
+  "model": "mock-model",
+  "schema_version": 1,
+  "entries": [
+    {
+      "request_hash": "0a94b6d8e1358b20faae0ec31a8bb8bf1f47a805a0f8af94c8cec0d44fac786b",
+      "request_summary": {
+        "model": "mock-model",
+        "n_messages": 2,
+        "last_user_content": "Use the echo tool to echo the exact string 'foxtrot-juliet-7714'. Then save that echoed string into the workspace at mem",
+        "tool_count": 15
+      },
+      "request_canonical": {
+        "model": "mock-model",
+        "tail": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Use the echo tool to echo the exact string 'foxtrot-juliet-7714'. Then save that echoed string into the workspace at memory/echo.md. Once both are done, tell me what you saved."
+              }
+            ]
+          }
+        ],
+        "tools": [
+          "echo",
+          "http",
+          "json",
+          "memory_read",
+          "memory_search",
+          "memory_tree",
+          "memory_write",
+          "skill_install",
+          "skill_list",
+          "skill_search",
+          "time",
+          "tool_info",
+          "tool_list",
+          "tool_search",
+          "tool_upgrade"
+        ]
+      },
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "tool_calls",
+            "index": 0,
+            "logprobs": null,
+            "message": {
+              "content": "\n\n",
+              "role": "assistant",
+              "tool_calls": [
+                {
+                  "function": {
+                    "arguments": "{\"message\": \"foxtrot-juliet-7714\"}",
+                    "name": "echo"
+                  },
+                  "id": "call_5a6566f29e7c418793b4817e",
+                  "type": "function"
+                }
+              ]
+            }
+          }
+        ],
+        "created": 1778717783,
+        "id": "chatcmpl-a86b0d6512d4b172",
+        "model": "Qwen/Qwen3.5-122B-A10B",
+        "object": "chat.completion",
+        "usage": {
+          "completion_tokens": 102,
+          "prompt_tokens": 10171,
+          "prompt_tokens_details": {
+            "cached_tokens": 8384
+          },
+          "total_tokens": 10273
+        }
+      }
+    },
+    {
+      "request_hash": "5aa8a7f94ff44d7eb5f9d2884b240368529f1453858dba71d768cd80da0765d9",
+      "request_summary": {
+        "model": "mock-model",
+        "n_messages": 4,
+        "last_user_content": "Use the echo tool to echo the exact string 'foxtrot-juliet-7714'. Then save that echoed string into the workspace at mem",
+        "tool_count": 15
+      },
+      "request_canonical": {
+        "model": "mock-model",
+        "tail": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Use the echo tool to echo the exact string 'foxtrot-juliet-7714'. Then save that echoed string into the workspace at memory/echo.md. Once both are done, tell me what you saved."
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "\n\n"
+              }
+            ],
+            "tool_calls": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "echo",
+                  "arguments": "{\"message\":\"foxtrot-juliet-7714\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "foxtrot-juliet-7714"
+          }
+        ],
+        "tools": [
+          "echo",
+          "http",
+          "json",
+          "memory_read",
+          "memory_search",
+          "memory_tree",
+          "memory_write",
+          "skill_install",
+          "skill_list",
+          "skill_search",
+          "time",
+          "tool_info",
+          "tool_list",
+          "tool_search",
+          "tool_upgrade"
+        ]
+      },
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "tool_calls",
+            "index": 0,
+            "logprobs": null,
+            "message": {
+              "content": "\n\n",
+              "role": "assistant",
+              "tool_calls": [
+                {
+                  "function": {
+                    "arguments": "{\"append\": \"false\", \"content\": \"foxtrot-juliet-7714\", \"force\": \"false\", \"layer\": null, \"metadata\": {}, \"new_string\": null, \"old_string\": null, \"replace_all\": \"false\", \"target\": \"memory/echo.md\"}",
+                    "name": "memory_write"
+                  },
+                  "id": "call_43db68e3b0d24ce2bb1c97db",
+                  "type": "function"
+                }
+              ]
+            }
+          }
+        ],
+        "created": 1778717787,
+        "id": "chatcmpl-b6d8b5f585a96f69",
+        "model": "Qwen/Qwen3.5-122B-A10B",
+        "object": "chat.completion",
+        "usage": {
+          "completion_tokens": 139,
+          "prompt_tokens": 10234,
+          "prompt_tokens_details": {
+            "cached_tokens": 8384
+          },
+          "total_tokens": 10373
+        }
+      }
+    },
+    {
+      "request_hash": "6d4cb7c8d96251bf1d56d10612aa2fee1b3475cec15f974a9a6e8cfab64000c7",
+      "request_summary": {
+        "model": "mock-model",
+        "n_messages": 6,
+        "last_user_content": "Use the echo tool to echo the exact string 'foxtrot-juliet-7714'. Then save that echoed string into the workspace at mem",
+        "tool_count": 15
+      },
+      "request_canonical": {
+        "model": "mock-model",
+        "tail": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Use the echo tool to echo the exact string 'foxtrot-juliet-7714'. Then save that echoed string into the workspace at memory/echo.md. Once both are done, tell me what you saved."
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "\n\n"
+              }
+            ],
+            "tool_calls": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "echo",
+                  "arguments": "{\"message\":\"foxtrot-juliet-7714\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "foxtrot-juliet-7714"
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "\n\n"
+              }
+            ],
+            "tool_calls": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "memory_write",
+                  "arguments": "{\"append\":\"false\",\"content\":\"foxtrot-juliet-7714\",\"force\":\"false\",\"layer\":null,\"metadata\":{},\"new_string\":null,\"old_string\":null,\"replace_all\":\"false\",\"target\":\"memory/echo.md\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "{'append': False, 'content_length': 19, 'path': 'memory/echo.md', 'status': 'written'}"
+          }
+        ],
+        "tools": [
+          "echo",
+          "http",
+          "json",
+          "memory_read",
+          "memory_search",
+          "memory_tree",
+          "memory_write",
+          "skill_install",
+          "skill_list",
+          "skill_search",
+          "time",
+          "tool_info",
+          "tool_list",
+          "tool_search",
+          "tool_upgrade"
+        ]
+      },
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "tool_calls",
+            "index": 0,
+            "logprobs": null,
+            "message": {
+              "content": "\n\n",
+              "role": "assistant",
+              "tool_calls": [
+                {
+                  "function": {
+                    "arguments": "{\"list_versions\": false, \"path\": \"memory/echo.md\", \"version\": null}",
+                    "name": "memory_read"
+                  },
+                  "id": "call_4a100f957bec4c8a9820c1a3",
+                  "type": "function"
+                }
+              ]
+            }
+          }
+        ],
+        "created": 1778717789,
+        "id": "chatcmpl-85f29275c47e2f76",
+        "model": "Qwen/Qwen3.5-122B-A10B",
+        "object": "chat.completion",
+        "usage": {
+          "completion_tokens": 55,
+          "prompt_tokens": 10416,
+          "prompt_tokens_details": {
+            "cached_tokens": 8384
+          },
+          "total_tokens": 10471
+        }
+      }
+    },
+    {
+      "request_hash": "b6c72e0a81a9a306ea40ac368697e758759c567cd6cf2e882534d6767c70d7e2",
+      "request_summary": {
+        "model": "mock-model",
+        "n_messages": 8,
+        "last_user_content": "Use the echo tool to echo the exact string 'foxtrot-juliet-7714'. Then save that echoed string into the workspace at mem",
+        "tool_count": 15
+      },
+      "request_canonical": {
+        "model": "mock-model",
+        "tail": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Use the echo tool to echo the exact string 'foxtrot-juliet-7714'. Then save that echoed string into the workspace at memory/echo.md. Once both are done, tell me what you saved."
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "\n\n"
+              }
+            ],
+            "tool_calls": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "echo",
+                  "arguments": "{\"message\":\"foxtrot-juliet-7714\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "foxtrot-juliet-7714"
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "\n\n"
+              }
+            ],
+            "tool_calls": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "memory_write",
+                  "arguments": "{\"append\":\"false\",\"content\":\"foxtrot-juliet-7714\",\"force\":\"false\",\"layer\":null,\"metadata\":{},\"new_string\":null,\"old_string\":null,\"replace_all\":\"false\",\"target\":\"memory/echo.md\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "{'append': False, 'content_length': 19, 'path': 'memory/echo.md', 'status': 'written'}"
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "\n\n"
+              }
+            ],
+            "tool_calls": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "memory_read",
+                  "arguments": "{\"list_versions\":false,\"path\":\"memory/echo.md\",\"version\":null}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "{'content': 'foxtrot-juliet-7714', 'path': 'memory/echo.md', 'updated_at': '<ts>', 'word_count': 1}"
+          }
+        ],
+        "tools": [
+          "echo",
+          "http",
+          "json",
+          "memory_read",
+          "memory_search",
+          "memory_tree",
+          "memory_write",
+          "skill_install",
+          "skill_list",
+          "skill_search",
+          "time",
+          "tool_info",
+          "tool_list",
+          "tool_search",
+          "tool_upgrade"
+        ]
+      },
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "logprobs": null,
+            "message": {
+              "content": "\n\nI've completed both tasks:\n\n1. Used the echo tool to echo 'foxtrot-juliet-7714'\n2. Saved that string to memory/echo.md\n\nThe content I saved is: **foxtrot-juliet-7714**",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1778717791,
+        "id": "chatcmpl-8c3b9b6d5758464b",
+        "model": "Qwen/Qwen3.5-122B-A10B",
+        "object": "chat.completion",
+        "usage": {
+          "completion_tokens": 64,
+          "prompt_tokens": 10553,
+          "prompt_tokens_details": {
+            "cached_tokens": 8384
+          },
+          "total_tokens": 10617
+        }
+      }
+    }
+  ]
+}
