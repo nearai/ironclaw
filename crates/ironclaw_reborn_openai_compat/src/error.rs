@@ -1,4 +1,6 @@
 use ironclaw_product_adapters::{ProductAdapterError, ProductWorkflowRejectionKind};
+#[cfg(feature = "openai-compat-beta")]
+use ironclaw_product_adapters::{ProductRejection, ProductRejectionKind};
 use serde::{Deserialize, Serialize};
 
 use crate::OpenAiCompatRefError;
@@ -222,6 +224,38 @@ impl From<OpenAiCompatRefError> for OpenAiCompatHttpError {
                 Self::from_kind(503, true, OpenAiCompatErrorKind::ServiceUnavailable, None)
             }
             OpenAiCompatRefError::CorruptMapping => Self::internal(),
+        }
+    }
+}
+
+#[cfg(feature = "openai-compat-beta")]
+pub(crate) fn product_rejection_to_openai_error(
+    rejection: &ProductRejection,
+) -> OpenAiCompatHttpError {
+    match rejection.kind {
+        ProductRejectionKind::BindingRequired => OpenAiCompatHttpError::not_found(None),
+        ProductRejectionKind::AccessDenied | ProductRejectionKind::PolicyDenied => {
+            OpenAiCompatHttpError::from_workflow_rejection(
+                ProductWorkflowRejectionKind::Unauthorized,
+                403,
+                false,
+                None,
+            )
+        }
+        ProductRejectionKind::UnknownInstallation => OpenAiCompatHttpError::from_kind(
+            503,
+            true,
+            OpenAiCompatErrorKind::ServiceUnavailable,
+            None,
+        ),
+        ProductRejectionKind::InvalidRequest => OpenAiCompatHttpError::invalid_request(None),
+        ProductRejectionKind::AmbiguousResolution => {
+            OpenAiCompatHttpError::from_workflow_rejection(
+                ProductWorkflowRejectionKind::Ambiguous,
+                409,
+                false,
+                None,
+            )
         }
     }
 }

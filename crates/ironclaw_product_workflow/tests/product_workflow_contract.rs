@@ -441,7 +441,23 @@ impl AuthInteractionService for MissingAuthThenRecordingAuthService {
 /// records on `load_delivered_gate_route_by_conversation_fingerprint`,
 /// regardless of the query key. Used only in tests that need the ambiguous-route
 /// path, since the in-memory store deduplicates by `(tenant, user, gate_ref)`.
-struct TwoRecordDeliveredGateRouteStore(Vec<ironclaw_outbound::DeliveredGateRouteRecord>);
+struct TwoRecordDeliveredGateRouteStore {
+    records: Vec<ironclaw_outbound::DeliveredGateRouteRecord>,
+    captured_args: std::sync::Mutex<Vec<(ironclaw_host_api::TenantId, String)>>,
+}
+
+impl TwoRecordDeliveredGateRouteStore {
+    fn new(records: Vec<ironclaw_outbound::DeliveredGateRouteRecord>) -> Self {
+        Self {
+            records,
+            captured_args: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn captured_args(&self) -> Vec<(ironclaw_host_api::TenantId, String)> {
+        self.captured_args.lock().expect("lock").clone()
+    }
+}
 
 #[async_trait::async_trait]
 impl ironclaw_outbound::DeliveredGateRouteStore for TwoRecordDeliveredGateRouteStore {
@@ -463,10 +479,59 @@ impl ironclaw_outbound::DeliveredGateRouteStore for TwoRecordDeliveredGateRouteS
 
     async fn load_delivered_gate_route_by_conversation_fingerprint(
         &self,
+        tenant_id: &ironclaw_host_api::TenantId,
+        conversation_fingerprint: &str,
+    ) -> Result<Vec<ironclaw_outbound::DeliveredGateRouteRecord>, String> {
+        self.captured_args
+            .lock()
+            .expect("lock")
+            .push((tenant_id.clone(), conversation_fingerprint.to_string()));
+        Ok(self.records.clone())
+    }
+
+    async fn remove_delivered_gate_route(
+        &self,
+        _tenant_id: &ironclaw_host_api::TenantId,
+        _user_id: &ironclaw_host_api::UserId,
+        _gate_ref: &str,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn sweep_expired_delivered_gate_routes(
+        &self,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<usize, String> {
+        Ok(0)
+    }
+}
+
+struct FailingRouteStore;
+
+#[async_trait::async_trait]
+impl ironclaw_outbound::DeliveredGateRouteStore for FailingRouteStore {
+    async fn record_delivered_gate_route(
+        &self,
+        _record: ironclaw_outbound::DeliveredGateRouteRecord,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn load_delivered_gate_route(
+        &self,
+        _tenant_id: &ironclaw_host_api::TenantId,
+        _user_id: &ironclaw_host_api::UserId,
+        _gate_ref: &str,
+    ) -> Result<Option<ironclaw_outbound::DeliveredGateRouteRecord>, String> {
+        Ok(None)
+    }
+
+    async fn load_delivered_gate_route_by_conversation_fingerprint(
+        &self,
         _tenant_id: &ironclaw_host_api::TenantId,
         _conversation_fingerprint: &str,
     ) -> Result<Vec<ironclaw_outbound::DeliveredGateRouteRecord>, String> {
-        Ok(self.0.clone())
+        Err("store backend unavailable".to_string())
     }
 
     async fn remove_delivered_gate_route(
@@ -808,6 +873,17 @@ fn auth_thread_reply_envelope(event_suffix: &str, gate_ref: &str) -> ProductInbo
     )
 }
 
+fn delivered_gate_thread_fingerprint() -> String {
+    ironclaw_conversations::ExternalConversationRef::new(
+        None,
+        "conv1",
+        Some("delivered-gate-thread"),
+        None,
+    )
+    .expect("conversation route")
+    .conversation_fingerprint()
+}
+
 async fn record_conversation_route_for_gate_ref(
     store: &dyn ironclaw_outbound::DeliveredGateRouteStore,
     gate_ref: &str,
@@ -831,16 +907,7 @@ async fn record_conversation_route_for_gate_ref(
             run_id,
             scope: scope.clone(),
             recorded_at,
-            delivered_conversation_fingerprints: vec![
-                ironclaw_conversations::ExternalConversationRef::new(
-                    None,
-                    "conv1",
-                    Some("delivered-gate-thread"),
-                    None,
-                )
-                .expect("conversation route")
-                .conversation_fingerprint(),
-            ],
+            delivered_conversation_fingerprints: vec![delivered_gate_thread_fingerprint()],
         })
         .await
         .expect("record delivered gate route");
@@ -1416,6 +1483,30 @@ async fn scoped_approval_misses_if_no_route() {
 }
 
 #[tokio::test]
+async fn scoped_approval_delivered_route_store_error_falls_back_to_missing_gate() {
+    let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
+        Arc::new(FailingRouteStore);
+    let approval_service = Arc::new(RecordingApprovalInteractionService::with_pending(Vec::new()));
+    let workflow = DefaultProductWorkflow::new(
+        Arc::new(FakeInboundTurnService::new()),
+        Arc::new(FakeIdempotencyLedger::new()),
+        Arc::new(FakeConversationBindingService::new()),
+    )
+    .with_approval_interaction_service(approval_service.clone())
+    .with_delivered_gate_routes(route_store);
+
+    let err = workflow
+        .accept_inbound(scoped_approval_thread_reply_envelope(
+            "store-error-fallback",
+        ))
+        .await
+        .expect_err("store errors should fall through to missing gate");
+
+    assert_scoped_approval_missing_gate(err);
+    assert!(approval_service.resolutions().is_empty());
+}
+
+#[tokio::test]
 async fn scoped_approval_missing_gate_fallback_reuses_dispatcher_binding() {
     // The MissingGate fallback must reuse the binding the dispatcher already
     // resolved, not re-derive a topic-stripped base binding. Program the two
@@ -1607,11 +1698,36 @@ async fn explicit_auth_delivered_route_requires_gate_ref_match() {
 /// `Ambiguous` (409) before any approval-interaction dispatch occurs.
 #[tokio::test]
 async fn scoped_approval_two_live_routes_same_conversation_rejects_ambiguous() {
-    let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
-    // Record two distinct routes that share conv1/delivered-gate-thread fingerprint.
-    record_scoped_approval_conversation_route(route_store.as_ref(), Utc::now()).await;
-    record_scoped_approval_conversation_route(route_store.as_ref(), Utc::now()).await;
+    let tenant_id = TenantId::new("tenant:install_alpha").expect("tenant");
+    let user_id = UserId::new("user:user1").expect("user");
+    let fingerprint = delivered_gate_thread_fingerprint();
+    let make_record = |gate_ref: &str| ironclaw_outbound::DeliveredGateRouteRecord {
+        tenant_id: tenant_id.clone(),
+        user_id: user_id.clone(),
+        gate_ref: gate_ref.to_string(),
+        run_id: TurnRunId::new(),
+        scope: TurnScope::new_with_owner(
+            tenant_id.clone(),
+            Some(AgentId::new("agent:delivered-route").expect("agent")),
+            Some(ProjectId::new("project:delivered-route").expect("project")),
+            ThreadId::new("thread:delivered-route-run").expect("thread"),
+            Some(user_id.clone()),
+        ),
+        recorded_at: Utc::now(),
+        delivered_conversation_fingerprints: vec![fingerprint.clone()],
+    };
+    let route_store = Arc::new(TwoRecordDeliveredGateRouteStore::new(vec![
+        make_record(
+            approval_gate_ref(ApprovalRequestId::new())
+                .expect("gate")
+                .as_str(),
+        ),
+        make_record(
+            approval_gate_ref(ApprovalRequestId::new())
+                .expect("gate")
+                .as_str(),
+        ),
+    ]));
     let approval_service = Arc::new(RecordingApprovalInteractionService::with_pending(Vec::new()));
     let workflow = DefaultProductWorkflow::new(
         Arc::new(FakeInboundTurnService::new()),
@@ -1619,7 +1735,7 @@ async fn scoped_approval_two_live_routes_same_conversation_rejects_ambiguous() {
         Arc::new(FakeConversationBindingService::new()),
     )
     .with_approval_interaction_service(approval_service.clone())
-    .with_delivered_gate_routes(route_store);
+    .with_delivered_gate_routes(route_store.clone());
 
     let err = workflow
         .accept_inbound(scoped_approval_thread_reply_envelope(
@@ -1643,6 +1759,11 @@ async fn scoped_approval_two_live_routes_same_conversation_rejects_ambiguous() {
     assert!(
         approval_service.resolutions().is_empty(),
         "approval service must not be consulted on ambiguous route"
+    );
+    assert_eq!(
+        route_store.captured_args(),
+        vec![(tenant_id, fingerprint)],
+        "conversation fallback must query by tenant and delivered conversation fingerprint"
     );
 }
 
@@ -1844,11 +1965,11 @@ async fn auth_two_live_routes_same_conversation_rejects_ambiguous() {
             .conversation_fingerprint(),
         ],
     };
-    let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::new(TwoRecordDeliveredGateRouteStore(vec![
-            make_record(TurnRunId::new()),
-            make_record(TurnRunId::new()),
-        ]));
+    let expected_fingerprint = delivered_gate_thread_fingerprint();
+    let route_store = Arc::new(TwoRecordDeliveredGateRouteStore::new(vec![
+        make_record(TurnRunId::new()),
+        make_record(TurnRunId::new()),
+    ]));
     let auth_service = Arc::new(MissingAuthThenRecordingAuthService::default());
     let workflow = DefaultProductWorkflow::new(
         Arc::new(FakeInboundTurnService::new()),
@@ -1856,7 +1977,7 @@ async fn auth_two_live_routes_same_conversation_rejects_ambiguous() {
         Arc::new(FakeConversationBindingService::new()),
     )
     .with_auth_interaction_service(auth_service.clone())
-    .with_delivered_gate_routes(route_store);
+    .with_delivered_gate_routes(route_store.clone());
 
     let err = workflow
         .accept_inbound(auth_thread_reply_envelope(
@@ -1892,6 +2013,11 @@ async fn auth_two_live_routes_same_conversation_rejects_ambiguous() {
     assert_eq!(
         resolutions[0].run_id_hint, None,
         "the pre-ambiguity call must not have a run_id_hint from a delivered route"
+    );
+    assert_eq!(
+        route_store.captured_args(),
+        vec![(tenant_id, expected_fingerprint)],
+        "auth fallback must query by tenant and delivered conversation fingerprint"
     );
 }
 

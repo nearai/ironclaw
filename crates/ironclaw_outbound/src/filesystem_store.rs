@@ -1113,6 +1113,8 @@ where
             None => return Ok(Vec::new()),
         };
         let entries = index_file.into_routes();
+        const CONV_IDX_LOOKUP_CAP: usize = 32;
+        let entries = entries.into_iter().take(CONV_IDX_LOOKUP_CAP);
         let mut records = Vec::new();
         for entry in entries {
             if entry.tenant_id != *tenant_id {
@@ -2016,6 +2018,47 @@ mod tests {
             .expect("lookup after remove");
         assert_eq!(after.len(), 1, "sibling must survive removal");
         assert_eq!(after[0].gate_ref, "gate:fs-two-b");
+    }
+
+    #[tokio::test]
+    async fn filesystem_gate_route_conv_lookup_capped_at_32_entries() {
+        let tenant_id = TenantId::new("fs-conv-cap-tenant").expect("tenant");
+        let user_id = UserId::new("fs-conv-cap-user").expect("user");
+        let thread_id = ThreadId::new("fs-conv-cap-thread").expect("thread");
+        let shared_conv = gate_route_conversation_fingerprint("thread-cap-shared");
+        let store = build_gate_route_store(&tenant_id, &user_id);
+        let scope = TurnScope::new_with_owner(
+            tenant_id.clone(),
+            None,
+            None,
+            thread_id,
+            Some(user_id.clone()),
+        );
+
+        for idx in 0..33 {
+            let mut record = gate_route_record(
+                tenant_id.clone(),
+                user_id.clone(),
+                &format!("gate:fs-cap-{idx:02}"),
+                TurnRunId::new(),
+                scope.clone(),
+            );
+            record.delivered_conversation_fingerprints = vec![shared_conv.clone()];
+            store
+                .record_delivered_gate_route(record)
+                .await
+                .expect("record route");
+        }
+
+        let results = store
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant_id, &shared_conv)
+            .await
+            .expect("lookup must not error");
+        assert!(
+            results.len() <= 32,
+            "lookup must cap returned records at 32, got {}",
+            results.len()
+        );
     }
 
     #[test]
