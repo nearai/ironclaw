@@ -52,9 +52,10 @@ pub struct LoopRuntimeContext {
     /// Loop start instant. Rendered at minute precision
     /// (e.g. "2026-06-11T21:32Z").
     pub loop_started_at_utc: chrono::DateTime<chrono::Utc>,
-    /// IANA timezone name for the user (e.g. "America/Los_Angeles"),
+    /// Validated IANA timezone for the user (e.g. `chrono_tz::America::Los_Angeles`),
     /// when known. None = unknown; never a guessed host timezone.
-    pub user_timezone: Option<String>,
+    /// Invalid IANA names are rejected at the producer boundary at parse time, by construction.
+    pub user_timezone: Option<chrono_tz::Tz>,
 }
 ```
 
@@ -117,8 +118,8 @@ instruction snippets → memory snippets → safety → surface → inline messa
 
 - Content is static format + timestamp + IANA name: passes
   `validate_model_safe_text`. No host paths, env vars, secrets.
-- IANA timezone string is validated (parseable by the tz database) before
-  rendering; invalid tz falls back to the unknown-timezone branch.
+- IANA timezone is carried as `chrono_tz::Tz` — invalid names are rejected at
+  the producer boundary at parse time, by construction; no runtime fallback needed.
 
 ## Testing
 
@@ -128,7 +129,7 @@ instruction snippets → memory snippets → safety → surface → inline messa
   - `None` produces a bundle identical to a pre-change bundle (no section, no
     fingerprint fields).
   - Timezone-unknown branch renders the fallback sentence.
-  - Invalid IANA tz falls back to unknown branch.
+  - Invalid IANA names are rejected at the producer boundary (no runtime fallback test needed; the type prevents construction).
 - `prompt.rs` (`HostManagedLoopPromptPort`) test: `with_runtime_context`
   attaches the section to built bundles.
 - Caller-path test in `ironclaw_reborn` model gateway tests: the final model

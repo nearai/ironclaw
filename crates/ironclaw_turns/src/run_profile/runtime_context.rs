@@ -10,22 +10,21 @@ use chrono_tz::Tz;
 pub struct LoopRuntimeContext {
     /// Instant this loop execution started. Rendered at minute precision.
     pub loop_started_at_utc: DateTime<Utc>,
-    /// IANA timezone name for the user (e.g. "America/Los_Angeles") when
-    /// known. Never a guessed host timezone.
-    pub user_timezone: Option<String>,
+    /// Validated IANA timezone for the user (e.g. `chrono_tz::America::Los_Angeles`)
+    /// when known. `None` means unknown; never a guessed host timezone.
+    ///
+    /// Invalid IANA names are rejected at the producer boundary — the type system
+    /// guarantees that any `Some` value is a well-formed, parseable timezone.
+    pub user_timezone: Option<Tz>,
 }
 
 impl LoopRuntimeContext {
     pub fn render_model_content(&self) -> String {
         let utc = self.loop_started_at_utc.format("%Y-%m-%dT%H:%MZ");
-        let local = self
-            .user_timezone
-            .as_deref()
-            .and_then(|name| name.parse::<Tz>().ok().map(|tz| (name, tz)))
-            .map(|(name, tz)| {
-                let local = self.loop_started_at_utc.with_timezone(&tz);
-                format!("{} ({}, {})", utc, local.format("%H:%M %a"), name)
-            });
+        let local = self.user_timezone.map(|tz| {
+            let local = self.loop_started_at_utc.with_timezone(&tz);
+            format!("{} ({}, {})", utc, local.format("%H:%M %a"), tz.name())
+        });
         match local {
             Some(stamped) => format!(
                 "Current date/time at loop start: {stamped}. This was captured when \
@@ -54,9 +53,10 @@ mod tests {
 
     #[test]
     fn renders_utc_and_local_when_timezone_known() {
+        let tz: Tz = "America/Los_Angeles".parse().unwrap();
         let ctx = LoopRuntimeContext {
             loop_started_at_utc: stamp(),
-            user_timezone: Some("America/Los_Angeles".to_string()),
+            user_timezone: Some(tz),
         };
         let text = ctx.render_model_content();
         assert!(
@@ -81,18 +81,8 @@ mod tests {
         assert!(text.contains("ask the user"), "{text}");
     }
 
-    #[test]
-    fn invalid_timezone_falls_back_to_unknown() {
-        let ctx = LoopRuntimeContext {
-            loop_started_at_utc: stamp(),
-            user_timezone: Some("Not/A_Zone".to_string()),
-        };
-        let text = ctx.render_model_content();
-        assert!(text.contains("2026-06-11T21:32Z"), "{text}");
-        assert!(text.contains("timezone is unknown"), "{text}");
-        assert!(
-            !text.contains("Not/A_Zone"),
-            "invalid tz must not render: {text}"
-        );
-    }
+    // Note: the previous `invalid_timezone_falls_back_to_unknown` test is no longer
+    // applicable. `user_timezone` is now `Option<chrono_tz::Tz>` — invalid IANA names
+    // are rejected at the producer boundary at parse time, by construction. There is no
+    // runtime fallback to exercise; misuse is a compile error.
 }
