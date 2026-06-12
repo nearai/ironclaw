@@ -242,6 +242,8 @@ async fn build_harness_with_actor_user_resolver_and_auth_challenges(
         threads.clone(),
     ));
     let auths = Arc::new(RecordingAuthInteractionService::new(coordinator.clone()));
+    let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
+        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
 
     let inbound = Arc::new(DefaultInboundTurnService::new(
         binding.clone(),
@@ -255,7 +257,8 @@ async fn build_harness_with_actor_user_resolver_and_auth_challenges(
             Arc::new(binding.clone()),
         )
         .with_approval_interaction_service(approvals.clone())
-        .with_auth_interaction_service(auths.clone()),
+        .with_auth_interaction_service(auths.clone())
+        .with_delivered_gate_routes(route_store.clone()),
     );
 
     let runner = Arc::new(NativeProductAdapterRunner::with_config(
@@ -284,6 +287,7 @@ async fn build_harness_with_actor_user_resolver_and_auth_challenges(
             thread_service: Arc::new(threads),
             turn_coordinator: Arc::new(coordinator.clone()),
             outbound_store,
+            route_store: route_store.clone(),
             communication_preferences: preferences,
             adapter,
             egress: Arc::new(egress.clone()),

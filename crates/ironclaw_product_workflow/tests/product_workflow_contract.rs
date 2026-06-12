@@ -338,6 +338,105 @@ impl AuthInteractionService for RecordingAuthInteractionService {
     }
 }
 
+#[derive(Default)]
+struct MissingGateThenRecordingApprovalService {
+    resolutions: Mutex<Vec<ResolveApprovalInteractionRequest>>,
+}
+
+impl MissingGateThenRecordingApprovalService {
+    fn resolutions(&self) -> Vec<ResolveApprovalInteractionRequest> {
+        self.resolutions.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl ApprovalInteractionService for MissingGateThenRecordingApprovalService {
+    async fn list_pending(
+        &self,
+        _request: ListPendingApprovalsRequest,
+    ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
+        Ok(ListPendingApprovalsResponse {
+            approvals: Vec::new(),
+        })
+    }
+
+    async fn resolve(
+        &self,
+        request: ResolveApprovalInteractionRequest,
+    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+        let run_id_hint = request.run_id_hint;
+        self.resolutions.lock().expect("lock").push(request);
+        let Some(run_id) = run_id_hint else {
+            return Err(ProductWorkflowError::ApprovalInteractionRejected {
+                kind: ironclaw_product_workflow::ApprovalInteractionRejectionKind::MissingGate,
+            });
+        };
+        Ok(ResolveApprovalInteractionResponse::Approved(
+            ResumeTurnResponse {
+                run_id,
+                status: TurnStatus::Queued,
+                event_cursor: EventCursor(41),
+            },
+        ))
+    }
+}
+
+#[derive(Default)]
+struct MissingAuthThenRecordingAuthService {
+    resolutions: Mutex<Vec<ResolveAuthInteractionRequest>>,
+}
+
+impl MissingAuthThenRecordingAuthService {
+    fn resolutions(&self) -> Vec<ResolveAuthInteractionRequest> {
+        self.resolutions.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl AuthInteractionService for MissingAuthThenRecordingAuthService {
+    async fn list_pending(
+        &self,
+        _request: ListPendingAuthInteractionsRequest,
+    ) -> Result<ListPendingAuthInteractionsResponse, ProductWorkflowError> {
+        Ok(ListPendingAuthInteractionsResponse {
+            auth_interactions: Vec::new(),
+        })
+    }
+
+    async fn resolve(
+        &self,
+        request: ResolveAuthInteractionRequest,
+    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
+        let run_id_hint = request.run_id_hint;
+        let decision = request.decision.clone();
+        self.resolutions.lock().expect("lock").push(request);
+        let Some(run_id) = run_id_hint else {
+            return Err(ProductWorkflowError::AuthInteractionRejected {
+                kind: ironclaw_product_workflow::AuthInteractionRejectionKind::MissingAuth,
+            });
+        };
+        Ok(match decision {
+            AuthInteractionDecision::Deny => {
+                ResolveAuthInteractionResponse::Canceled(CancelRunResponse {
+                    run_id,
+                    status: TurnStatus::Cancelled,
+                    event_cursor: EventCursor(42),
+                    already_terminal: false,
+                    actor: None,
+                })
+            }
+            AuthInteractionDecision::CredentialProvided { .. }
+            | AuthInteractionDecision::CallbackCompleted { .. } => {
+                ResolveAuthInteractionResponse::Resumed(ResumeTurnResponse {
+                    run_id,
+                    status: TurnStatus::Queued,
+                    event_cursor: EventCursor(43),
+                })
+            }
+        })
+    }
+}
+
 #[test]
 fn action_fingerprint_retains_typed_identifiers() {
     let adapter_id = ProductAdapterId::new("test_adapter").expect("valid");
@@ -595,6 +694,130 @@ fn build_workflow_with_binding() -> (
     let binding = Arc::new(FakeConversationBindingService::new());
     let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone(), binding.clone());
     (workflow, inbound, ledger, binding)
+}
+
+fn scoped_approval_thread_reply_envelope(event_suffix: &str) -> ProductInboundEnvelope {
+    sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("valid"),
+        AdapterInstallationId::new("install_alpha").expect("valid"),
+        ExternalEventId::new(format!("evt:{event_suffix}")).expect("valid"),
+        ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
+        ExternalConversationRef::new(
+            None,
+            "conv1",
+            Some("delivered-gate-thread"),
+            Some("reply-message"),
+        )
+        .expect("conversation"),
+        ProductInboundPayload::ScopedApprovalResolution(
+            ScopedApprovalResolutionPayload::new(ApprovalDecision::ApproveOnce)
+                .expect("scoped approval payload"),
+        ),
+    )
+}
+
+fn explicit_approval_thread_reply_envelope(
+    event_suffix: &str,
+    gate_ref: &str,
+) -> ProductInboundEnvelope {
+    sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("valid"),
+        AdapterInstallationId::new("install_alpha").expect("valid"),
+        ExternalEventId::new(format!("evt:{event_suffix}")).expect("valid"),
+        ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
+        ExternalConversationRef::new(
+            None,
+            "conv1",
+            Some("delivered-gate-thread"),
+            Some("reply-message"),
+        )
+        .expect("conversation"),
+        ProductInboundPayload::ApprovalResolution(
+            ApprovalResolutionPayload::new(gate_ref, ApprovalDecision::ApproveOnce)
+                .expect("approval payload"),
+        ),
+    )
+}
+
+fn auth_thread_reply_envelope(event_suffix: &str, gate_ref: &str) -> ProductInboundEnvelope {
+    sample_envelope_with_context(
+        ProductAdapterId::new("test_adapter").expect("valid"),
+        AdapterInstallationId::new("install_alpha").expect("valid"),
+        ExternalEventId::new(format!("evt:{event_suffix}")).expect("valid"),
+        ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
+        ExternalConversationRef::new(
+            None,
+            "conv1",
+            Some("delivered-gate-thread"),
+            Some("reply-message"),
+        )
+        .expect("conversation"),
+        ProductInboundPayload::AuthResolution(
+            AuthResolutionPayload::new(gate_ref, AuthResolutionResult::Denied)
+                .expect("auth payload"),
+        ),
+    )
+}
+
+async fn record_conversation_route_for_gate_ref(
+    store: &dyn ironclaw_outbound::DeliveredGateRouteStore,
+    gate_ref: &str,
+    recorded_at: chrono::DateTime<Utc>,
+) -> (TurnRunId, TurnScope) {
+    let tenant_id = TenantId::new("tenant:install_alpha").expect("tenant");
+    let user_id = UserId::new("user:user1").expect("user");
+    let run_id = TurnRunId::new();
+    let scope = TurnScope::new_with_owner(
+        tenant_id.clone(),
+        Some(AgentId::new("agent:delivered-route").expect("agent")),
+        Some(ProjectId::new("project:delivered-route").expect("project")),
+        ThreadId::new("thread:delivered-route-run").expect("thread"),
+        Some(user_id.clone()),
+    );
+    store
+        .record_delivered_gate_route(ironclaw_outbound::DeliveredGateRouteRecord {
+            tenant_id,
+            user_id,
+            gate_ref: gate_ref.to_string(),
+            run_id,
+            scope: scope.clone(),
+            recorded_at,
+            delivered_conversation_fingerprints: vec![
+                ironclaw_conversations::ExternalConversationRef::new(
+                    None,
+                    "conv1",
+                    Some("delivered-gate-thread"),
+                    None,
+                )
+                .expect("conversation route")
+                .conversation_fingerprint(),
+            ],
+        })
+        .await
+        .expect("record delivered gate route");
+    (run_id, scope)
+}
+
+async fn record_scoped_approval_conversation_route(
+    store: &dyn ironclaw_outbound::DeliveredGateRouteStore,
+    recorded_at: chrono::DateTime<Utc>,
+) -> (GateRef, TurnRunId, TurnScope) {
+    let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
+    let (run_id, scope) =
+        record_conversation_route_for_gate_ref(store, gate_ref.as_str(), recorded_at).await;
+    (gate_ref, run_id, scope)
+}
+
+fn assert_scoped_approval_missing_gate(error: ProductAdapterError) {
+    assert!(matches!(
+        error,
+        ProductAdapterError::WorkflowRejected {
+            kind: ProductWorkflowRejectionKind::ScopeNotFound,
+            status_code: 404,
+            retryable: false,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
@@ -1048,6 +1271,286 @@ async fn scoped_approval_resolution_rejects_ambiguous_gate() {
         }
     ));
     assert!(approval_service.resolutions().is_empty());
+}
+
+#[tokio::test]
+async fn scoped_approval_resolves_via_conversation_route() {
+    let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
+        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+    let (gate_ref, run_id, route_scope) =
+        record_scoped_approval_conversation_route(route_store.as_ref(), Utc::now()).await;
+    let approval_service = Arc::new(RecordingApprovalInteractionService::with_pending(Vec::new()));
+    let workflow = DefaultProductWorkflow::new(
+        Arc::new(FakeInboundTurnService::new()),
+        Arc::new(FakeIdempotencyLedger::new()),
+        Arc::new(FakeConversationBindingService::new()),
+    )
+    .with_approval_interaction_service(approval_service.clone())
+    .with_delivered_gate_routes(route_store);
+
+    let ack = workflow
+        .accept_inbound(scoped_approval_thread_reply_envelope(
+            "scoped-approval-conversation-route",
+        ))
+        .await
+        .expect("scoped approval should resolve through delivered conversation route");
+
+    assert!(matches!(
+        ack,
+        ProductInboundAck::Accepted {
+            submitted_run_id,
+            ..
+        } if submitted_run_id == run_id
+    ));
+    let resolutions = approval_service.resolutions();
+    assert_eq!(resolutions.len(), 1);
+    assert_eq!(resolutions[0].gate_ref, gate_ref);
+    assert_eq!(resolutions[0].run_id_hint, Some(run_id));
+    assert_eq!(resolutions[0].scope.thread_id, route_scope.thread_id);
+    assert_eq!(
+        resolutions[0].decision,
+        ApprovalInteractionDecision::ApproveOnce
+    );
+}
+
+#[tokio::test]
+async fn scoped_approval_misses_if_route_expired() {
+    let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
+        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+    record_scoped_approval_conversation_route(
+        route_store.as_ref(),
+        Utc::now() - ironclaw_outbound::DELIVERED_GATE_ROUTE_TTL - Duration::seconds(1),
+    )
+    .await;
+    let approval_service = Arc::new(RecordingApprovalInteractionService::with_pending(Vec::new()));
+    let workflow = DefaultProductWorkflow::new(
+        Arc::new(FakeInboundTurnService::new()),
+        Arc::new(FakeIdempotencyLedger::new()),
+        Arc::new(FakeConversationBindingService::new()),
+    )
+    .with_approval_interaction_service(approval_service.clone())
+    .with_delivered_gate_routes(route_store);
+
+    let error = workflow
+        .accept_inbound(scoped_approval_thread_reply_envelope(
+            "scoped-approval-expired-route",
+        ))
+        .await
+        .expect_err("expired delivered route should fall through to missing gate");
+
+    assert_scoped_approval_missing_gate(error);
+    assert!(approval_service.resolutions().is_empty());
+}
+
+#[tokio::test]
+async fn scoped_approval_misses_if_no_route() {
+    let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
+        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+    let approval_service = Arc::new(RecordingApprovalInteractionService::with_pending(Vec::new()));
+    let workflow = DefaultProductWorkflow::new(
+        Arc::new(FakeInboundTurnService::new()),
+        Arc::new(FakeIdempotencyLedger::new()),
+        Arc::new(FakeConversationBindingService::new()),
+    )
+    .with_approval_interaction_service(approval_service.clone())
+    .with_delivered_gate_routes(route_store);
+
+    let error = workflow
+        .accept_inbound(scoped_approval_thread_reply_envelope(
+            "scoped-approval-no-route",
+        ))
+        .await
+        .expect_err("missing delivered route should fall through to missing gate");
+
+    assert_scoped_approval_missing_gate(error);
+    assert!(approval_service.resolutions().is_empty());
+}
+
+#[tokio::test]
+async fn scoped_approval_missing_gate_fallback_reuses_dispatcher_binding() {
+    // The MissingGate fallback must reuse the binding the dispatcher already
+    // resolved, not re-derive a topic-stripped base binding. Program the two
+    // lookups to diverge: the thread-scoped binding matches the route owner,
+    // the base (topic-stripped) binding belongs to a different actor. Only a
+    // fallback that reuses the dispatcher binding can resolve the gate.
+    let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
+        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+    let (gate_ref, run_id, _route_scope) =
+        record_scoped_approval_conversation_route(route_store.as_ref(), Utc::now()).await;
+    let binding_service = Arc::new(FakeConversationBindingService::new());
+    let owner_binding = ResolvedBinding {
+        tenant_id: TenantId::new("tenant:install_alpha").expect("tenant"),
+        actor_user_id: UserId::new("user:user1").expect("actor"),
+        subject_user_id: Some(UserId::new("user:user1").expect("subject")),
+        thread_id: ThreadId::new("thread:dm-topic").expect("thread"),
+        agent_id: Some(AgentId::new("agent:fake").expect("agent")),
+        project_id: None,
+    };
+    let divergent_base_binding = ResolvedBinding {
+        actor_user_id: UserId::new("user:someone-else").expect("actor"),
+        subject_user_id: Some(UserId::new("user:someone-else").expect("subject")),
+        ..owner_binding.clone()
+    };
+    let thread_ref = ExternalConversationRef::new(
+        None::<&str>,
+        "conv1",
+        Some("delivered-gate-thread"),
+        None::<&str>,
+    )
+    .expect("thread ref");
+    let base_ref = ExternalConversationRef::new(None::<&str>, "conv1", None::<&str>, None::<&str>)
+        .expect("base ref");
+    binding_service.program_binding(thread_ref.conversation_fingerprint(), owner_binding);
+    binding_service.program_binding(base_ref.conversation_fingerprint(), divergent_base_binding);
+    let approval_service = Arc::new(RecordingApprovalInteractionService::with_pending(Vec::new()));
+    let workflow = DefaultProductWorkflow::new(
+        Arc::new(FakeInboundTurnService::new()),
+        Arc::new(FakeIdempotencyLedger::new()),
+        binding_service.clone(),
+    )
+    .with_approval_interaction_service(approval_service.clone())
+    .with_delivered_gate_routes(route_store);
+
+    let ack = workflow
+        .accept_inbound(scoped_approval_thread_reply_envelope(
+            "scoped-approval-binding-reuse",
+        ))
+        .await
+        .expect("fallback must resolve using the dispatcher's binding");
+
+    assert!(matches!(
+        ack,
+        ProductInboundAck::Accepted {
+            submitted_run_id,
+            ..
+        } if submitted_run_id == run_id
+    ));
+    let resolutions = approval_service.resolutions();
+    assert_eq!(resolutions.len(), 1);
+    assert_eq!(resolutions[0].gate_ref, gate_ref);
+    assert_eq!(
+        resolutions[0].actor,
+        TurnActor::new(UserId::new("user:user1").expect("actor")),
+        "resolution must act as the dispatcher-bound actor, not the re-derived base binding"
+    );
+    assert_eq!(
+        binding_service.resolve_count(),
+        1,
+        "fallback must not perform a second binding lookup"
+    );
+}
+
+#[tokio::test]
+async fn auth_resolution_resolves_via_conversation_route_after_missing_auth() {
+    let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
+        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+    let gate_ref = GateRef::new("gate:auth-conversation-route").expect("auth gate ref");
+    let (run_id, route_scope) =
+        record_conversation_route_for_gate_ref(route_store.as_ref(), gate_ref.as_str(), Utc::now())
+            .await;
+    let auth_service = Arc::new(MissingAuthThenRecordingAuthService::default());
+    let workflow = DefaultProductWorkflow::new(
+        Arc::new(FakeInboundTurnService::new()),
+        Arc::new(FakeIdempotencyLedger::new()),
+        Arc::new(FakeConversationBindingService::new()),
+    )
+    .with_auth_interaction_service(auth_service.clone())
+    .with_delivered_gate_routes(route_store);
+
+    let ack = workflow
+        .accept_inbound(auth_thread_reply_envelope(
+            "auth-conversation-route",
+            gate_ref.as_str(),
+        ))
+        .await
+        .expect("auth should resolve through delivered conversation route");
+
+    assert!(matches!(
+        ack,
+        ProductInboundAck::Accepted {
+            submitted_run_id,
+            ..
+        } if submitted_run_id == run_id
+    ));
+    let resolutions = auth_service.resolutions();
+    assert_eq!(resolutions.len(), 2);
+    assert_eq!(resolutions[0].run_id_hint, None);
+    assert_eq!(resolutions[1].gate_ref, gate_ref);
+    assert_eq!(resolutions[1].run_id_hint, Some(run_id));
+    assert_eq!(resolutions[1].scope.thread_id, route_scope.thread_id);
+    assert_eq!(resolutions[1].decision, AuthInteractionDecision::Deny);
+}
+
+#[tokio::test]
+async fn explicit_approval_delivered_route_requires_gate_ref_match() {
+    let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
+        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+    let route_gate_ref = GateRef::new("gate:approval-route-match").expect("gate ref");
+    let payload_gate_ref = GateRef::new("gate:approval-route-mismatch").expect("gate ref");
+    record_conversation_route_for_gate_ref(
+        route_store.as_ref(),
+        route_gate_ref.as_str(),
+        Utc::now(),
+    )
+    .await;
+    let approval_service = Arc::new(MissingGateThenRecordingApprovalService::default());
+    let workflow = DefaultProductWorkflow::new(
+        Arc::new(FakeInboundTurnService::new()),
+        Arc::new(FakeIdempotencyLedger::new()),
+        Arc::new(FakeConversationBindingService::new()),
+    )
+    .with_approval_interaction_service(approval_service.clone())
+    .with_delivered_gate_routes(route_store);
+
+    let error = workflow
+        .accept_inbound(explicit_approval_thread_reply_envelope(
+            "approval-explicit-route-mismatch",
+            payload_gate_ref.as_str(),
+        ))
+        .await
+        .expect_err("mismatched explicit approval ref must not use delivered route");
+
+    assert_scoped_approval_missing_gate(error);
+    let resolutions = approval_service.resolutions();
+    assert_eq!(resolutions.len(), 1);
+    assert_eq!(resolutions[0].gate_ref, payload_gate_ref);
+    assert_eq!(resolutions[0].run_id_hint, None);
+}
+
+#[tokio::test]
+async fn explicit_auth_delivered_route_requires_gate_ref_match() {
+    let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
+        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+    let route_gate_ref = GateRef::new("gate:auth-route-match").expect("gate ref");
+    let payload_gate_ref = GateRef::new("gate:auth-route-mismatch").expect("gate ref");
+    record_conversation_route_for_gate_ref(
+        route_store.as_ref(),
+        route_gate_ref.as_str(),
+        Utc::now(),
+    )
+    .await;
+    let auth_service = Arc::new(MissingAuthThenRecordingAuthService::default());
+    let workflow = DefaultProductWorkflow::new(
+        Arc::new(FakeInboundTurnService::new()),
+        Arc::new(FakeIdempotencyLedger::new()),
+        Arc::new(FakeConversationBindingService::new()),
+    )
+    .with_auth_interaction_service(auth_service.clone())
+    .with_delivered_gate_routes(route_store);
+
+    let error = workflow
+        .accept_inbound(auth_thread_reply_envelope(
+            "auth-explicit-route-mismatch",
+            payload_gate_ref.as_str(),
+        ))
+        .await
+        .expect_err("mismatched explicit auth ref must not use delivered route");
+
+    assert_scoped_approval_missing_gate(error);
+    let resolutions = auth_service.resolutions();
+    assert_eq!(resolutions.len(), 1);
+    assert_eq!(resolutions[0].gate_ref, payload_gate_ref);
+    assert_eq!(resolutions[0].run_id_hint, None);
 }
 
 #[tokio::test]
