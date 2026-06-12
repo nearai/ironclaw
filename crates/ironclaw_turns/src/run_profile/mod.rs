@@ -23,6 +23,7 @@ mod prompt;
 mod prompt_text;
 mod refs;
 mod resolver;
+mod runtime_context;
 mod skill_context;
 mod snapshot;
 mod snippet_ref;
@@ -109,6 +110,7 @@ pub use resolver::{
     InMemoryRunProfileRegistry, InMemoryRunProfileResolver, RunProfileDefinition,
     RunProfileRegistryError, RunProfileResolutionRequest, RunProfileResolver,
 };
+pub use runtime_context::LoopRuntimeContext;
 pub use skill_context::{
     InstalledSkillSnapshot, NoopSkillContextSource, SkillActivationState, SkillContextBudget,
     SkillContextError, SkillContextService, SkillContextSnippet, SkillContextSource,
