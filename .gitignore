@@ -72,6 +72,3 @@ tests/fixtures/llm_traces/live/*.log
 
 # Local test artifacts
 .anvil/
-
-# Added by code-review skill (v3)
-.review/

@@ -531,9 +531,10 @@ async fn load_delivered_routes_for_envelope(
             debug!("delivered gate route fallback found no live route for conversation");
             DeliveredRouteOutcome::Miss
         }
-        [_] => DeliveredRouteOutcome::Single(Box::new(
-            live.into_iter().next().expect("checked len == 1"),
-        )),
+        [_] => match live.into_iter().next() {
+            Some(route) => DeliveredRouteOutcome::Single(Box::new(route)),
+            None => DeliveredRouteOutcome::Miss,
+        },
         _ => {
             debug!(
                 count = live.len(),

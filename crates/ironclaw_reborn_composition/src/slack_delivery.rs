@@ -74,7 +74,7 @@ struct SlackActionableNotification {
     /// Gate ref for approval prompts on triggered runs; consumed by the
     /// delivered-gate route record so a DM reply can resolve the gate on the
     /// triggered run's thread. `None` for live-run notifications (same-thread
-    /// replies need no routing) and non-approval kinds.
+    /// replies need no routing) and non-approval and non-auth kinds.
     gate_ref_for_routing: Option<String>,
 }
 
@@ -567,11 +567,11 @@ async fn record_gate_route_if_needed(
     // Slack team id to attach to each posted-message conversation ref so that
     // inbound replies (which carry team_id as space_id) match the fingerprint.
     // A no-space fallback variant is always recorded too, for events that omit
-    // team_id; `push_unique_conversation_ref` deduplicates when the two are
-    // identical (i.e. when `posted_space_id` is None).
+    // team_id; the fingerprint set deduplicates when the two are identical
+    // (i.e. when `posted_space_id` is None).
     posted_space_id: Option<&str>,
 ) {
-    let mut conversation_fingerprints = Vec::new();
+    let mut conversation_fingerprints = std::collections::BTreeSet::new();
 
     for msg in posted_messages {
         // Record a space-qualified ref (matches inbound Slack events that carry team_id).
@@ -583,7 +583,7 @@ async fn record_gate_route_if_needed(
                 None,
             )
         {
-            push_unique_conversation_fingerprint(&mut conversation_fingerprints, conv_ref);
+            conversation_fingerprints.insert(conv_ref.conversation_fingerprint());
         }
         // Always record a no-space fallback ref for events that omit team_id.
         if let Ok(conv_ref) = ironclaw_conversations::ExternalConversationRef::new(
@@ -592,7 +592,7 @@ async fn record_gate_route_if_needed(
             Some(&msg.ts),
             None,
         ) {
-            push_unique_conversation_fingerprint(&mut conversation_fingerprints, conv_ref);
+            conversation_fingerprints.insert(conv_ref.conversation_fingerprint());
         }
     }
 
@@ -600,7 +600,7 @@ async fn record_gate_route_if_needed(
         && let Ok(env_conv_ref) = conversations_ref_from_product_ref(env_ref)
     {
         let env_no_msg = env_conv_ref.without_message_id();
-        push_unique_conversation_fingerprint(&mut conversation_fingerprints, env_no_msg);
+        conversation_fingerprints.insert(env_no_msg.conversation_fingerprint());
     }
 
     if conversation_fingerprints.is_empty() {
@@ -614,7 +614,7 @@ async fn record_gate_route_if_needed(
         run_id,
         scope: scope.clone(),
         recorded_at: Utc::now(),
-        delivered_conversation_fingerprints: conversation_fingerprints,
+        delivered_conversation_fingerprints: conversation_fingerprints.into_iter().collect(),
     };
 
     if let Err(error) = route_store.record_delivered_gate_route(record).await {
@@ -638,16 +638,6 @@ async fn record_gate_route_if_needed(
             error = %sweep_err,
             "delivered gate route sweep failed"
         );
-    }
-}
-
-fn push_unique_conversation_fingerprint(
-    fingerprints: &mut Vec<String>,
-    conv_ref: ironclaw_conversations::ExternalConversationRef,
-) {
-    let fingerprint = conv_ref.conversation_fingerprint();
-    if !fingerprints.iter().any(|existing| existing == &fingerprint) {
-        fingerprints.push(fingerprint);
     }
 }
 

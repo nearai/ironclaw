@@ -1604,7 +1604,7 @@ async fn explicit_auth_delivered_route_requires_gate_ref_match() {
 
 /// Two live routes share the same conversation fingerprint. A bare scoped-approval
 /// reply (no gate_ref) must not pick one arbitrarily — it must reject with
-/// `Conflict` (409) before any approval-interaction dispatch occurs.
+/// `Ambiguous` (409) before any approval-interaction dispatch occurs.
 #[tokio::test]
 async fn scoped_approval_two_live_routes_same_conversation_rejects_ambiguous() {
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
@@ -1811,8 +1811,8 @@ async fn explicit_approval_gate_ref_mismatch_leaves_original_rejection() {
 /// in-memory store, we instead use a store that always returns two synthetic
 /// records to exercise the `AmbiguousAuth` path in the workflow.
 ///
-/// The workflow must reject with `InvalidRequest` (400) and must not call the
-/// auth interaction service.
+/// The workflow must reject with `Ambiguous` (409) after the one pre-fallback
+/// auth-service call and must not make a second auth interaction service call.
 #[tokio::test]
 async fn auth_two_live_routes_same_conversation_rejects_ambiguous() {
     // Build two synthetic records that both pass all filters (same tenant, same
