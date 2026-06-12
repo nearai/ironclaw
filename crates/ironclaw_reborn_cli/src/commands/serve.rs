@@ -2,6 +2,7 @@ use std::env;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use clap::Args;
@@ -503,20 +504,32 @@ impl ServeCommand {
 
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
             tokio::spawn(async move {
-                if tokio::signal::ctrl_c().await.is_ok() {
+                #[cfg(unix)]
+                if let Ok(mut sigint) = tokio::signal::unix::signal(
+                    tokio::signal::unix::SignalKind::interrupt(),
+                ) {
+                    sigint.recv().await;
                     tracing::info!(
                         target = "ironclaw::reborn::cli::serve",
                         "ctrl-c received; signalling graceful shutdown. Press Ctrl+C again to force exit.",
                     );
                     let _ = shutdown_tx.send(());
-                }
 
-                if tokio::signal::ctrl_c().await.is_ok() {
+                    sigint.recv().await;
                     tracing::warn!(
                         target = "ironclaw::reborn::cli::serve",
                         "second ctrl-c received; force exiting",
                     );
                     std::process::exit(1);
+                }
+
+                #[cfg(not(unix))]
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    tracing::info!(
+                        target = "ironclaw::reborn::cli::serve",
+                        "ctrl-c received; signalling graceful shutdown.",
+                    );
+                    let _ = shutdown_tx.send(());
                 }
             });
 
@@ -537,7 +550,21 @@ impl ServeCommand {
 
             // Always drain the Reborn runtime, even on serve error, so
             // background tasks and turn-runner state shut down cleanly.
-            let shutdown_result = runtime.shutdown().await;
+            let shutdown_result = match tokio::time::timeout(
+                Duration::from_secs(15),
+                runtime.shutdown(),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => {
+                    tracing::warn!(
+                        target = "ironclaw::reborn::cli::serve",
+                        "graceful shutdown timed out after 15s; force exiting",
+                    );
+                    std::process::exit(1);
+                }
+            };
             serve_result.context("WebChat v2 serve loop failed")?;
             shutdown_result.context("Reborn runtime shutdown failed")?;
             Ok::<(), anyhow::Error>(())
