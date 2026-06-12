@@ -2272,6 +2272,15 @@ fn handle_emit_event(
         "step_completed" => {
             let input = extract_u64_kwarg(kwargs, "input_tokens").unwrap_or(0);
             let output = extract_u64_kwarg(kwargs, "output_tokens").unwrap_or(0);
+            // `cost_usd` is the per-step USD cost reported by the LLM
+            // adapter. Threading it through the event lets
+            // `bridge::router::thread_event_to_app_events` populate
+            // `AppEvent::TurnCost.cost_usd`, which drives the debug
+            // panel's session-cost card. Without this, the kwarg goes
+            // unread and the card stays at $0.00 even though the same
+            // value already updates `Thread::total_cost_usd` and the
+            // host CostGuard's daily aggregate.
+            let cost = extract_f64_kwarg(kwargs, "cost_usd").unwrap_or(0.0);
             // Increment step count (mirrors the old Rust loop's step_count += 1)
             thread.step_count += 1;
             // Track token usage
@@ -2281,6 +2290,7 @@ fn handle_emit_event(
                 tokens: TokenUsage {
                     input_tokens: input,
                     output_tokens: output,
+                    cost_usd: cost,
                     ..Default::default()
                 },
             }
@@ -3205,6 +3215,26 @@ fn extract_u64_kwarg(kwargs: &[(MontyObject, MontyObject)], name: &str) -> Optio
             && let MontyObject::Int(i) = v
         {
             return Some(*i as u64);
+        }
+    }
+    None
+}
+
+/// Extract an `f64` kwarg, accepting both `Float` and `Int` values
+/// because Python literals like `0` arrive as `Int` even when the
+/// caller intends a float (e.g. `cost_usd=0.0` collapses to `Int(0)`
+/// when the LLM adapter reports a zero cost on a subscription-billed
+/// provider).
+fn extract_f64_kwarg(kwargs: &[(MontyObject, MontyObject)], name: &str) -> Option<f64> {
+    for (k, v) in kwargs {
+        if let MontyObject::String(key) = k
+            && key == name
+        {
+            return match v {
+                MontyObject::Float(f) => Some(*f),
+                MontyObject::Int(i) => Some(*i as f64),
+                _ => None,
+            };
         }
     }
     None
@@ -5502,5 +5532,77 @@ FINAL(batch_error_count)
             action_failed,
             "expected ActionFailed event alongside CodeExecutionFailed"
         );
+    }
+
+    #[test]
+    fn handle_emit_event_step_completed_threads_cost_usd_into_token_usage() {
+        // Regression: the Python `__emit_event__("step_completed", ...)`
+        // call already had access to `response["usage"]["cost_usd"]` but
+        // never passed it through, and the Rust handler built
+        // `TokenUsage` with `..Default::default()`, which forced
+        // `cost_usd` to 0.0. The bridge then projected an
+        // `AppEvent::TurnCost` whose `cost_usd` field was always
+        // "$0.0000", leaving the debug-panel Session Cost card stuck at
+        // $0 even though daily_cost / per-model usage worked. This test
+        // drives `handle_emit_event` end-to-end and asserts the
+        // recorded `EventKind::StepCompleted` carries the kwarg cost.
+        let mut thread = Thread::new(
+            "step-completed cost regression",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        let args = vec![MontyObject::String("step_completed".into())];
+        let kwargs = vec![
+            (
+                MontyObject::String("input_tokens".into()),
+                MontyObject::Int(1000),
+            ),
+            (
+                MontyObject::String("output_tokens".into()),
+                MontyObject::Int(500),
+            ),
+            (
+                MontyObject::String("cost_usd".into()),
+                MontyObject::Float(0.0105),
+            ),
+        ];
+
+        handle_emit_event(&args, &kwargs, &mut thread, None);
+
+        let step_completed = thread
+            .events
+            .iter()
+            .find_map(|e| match &e.kind {
+                EventKind::StepCompleted { tokens, .. } => Some(tokens),
+                _ => None,
+            })
+            .expect("step_completed event must be recorded on the thread");
+
+        assert_eq!(step_completed.input_tokens, 1000);
+        assert_eq!(step_completed.output_tokens, 500);
+        assert!(
+            (step_completed.cost_usd - 0.0105).abs() < 1e-9,
+            "cost_usd kwarg must thread through to TokenUsage.cost_usd; got {}",
+            step_completed.cost_usd
+        );
+    }
+
+    #[test]
+    fn extract_f64_kwarg_accepts_float_and_int() {
+        let kwargs = vec![
+            (MontyObject::String("a".into()), MontyObject::Float(0.0105)),
+            (MontyObject::String("b".into()), MontyObject::Int(7)),
+            (MontyObject::String("c".into()), MontyObject::None),
+        ];
+        assert_eq!(extract_f64_kwarg(&kwargs, "a"), Some(0.0105));
+        // `Int` is accepted so `cost_usd=0` (literal int from Python)
+        // doesn't silently fall back to 0.0 via the None branch.
+        assert_eq!(extract_f64_kwarg(&kwargs, "b"), Some(7.0));
+        assert_eq!(extract_f64_kwarg(&kwargs, "c"), None);
+        assert_eq!(extract_f64_kwarg(&kwargs, "missing"), None);
     }
 }

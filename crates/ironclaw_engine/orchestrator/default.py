@@ -859,7 +859,8 @@ def run_loop(context, goal, actions, state, config):
         response = __llm_complete__(working_messages, actions, None)
         __emit_event__("step_completed", step=step,
                        input_tokens=response.get("usage", {}).get("input_tokens", 0),
-                       output_tokens=response.get("usage", {}).get("output_tokens", 0))
+                       output_tokens=response.get("usage", {}).get("output_tokens", 0),
+                       cost_usd=response.get("usage", {}).get("cost_usd", 0.0))
 
         # 5. Handle response based on type
         resp_type = response.get("type", "text")
