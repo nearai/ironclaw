@@ -16,6 +16,7 @@ use std::{
 
 use async_trait::async_trait;
 use futures_util::FutureExt as _;
+use ironclaw_events::{SecurityAuditEvent, SecurityAuditSink, SecurityBoundary, SecurityDecision};
 use ironclaw_extensions::{ExtensionPackage, ExtensionRuntime};
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, NetworkMethod, NetworkPolicy, ResourceEstimate, ResourceReservation,
@@ -30,6 +31,7 @@ use thiserror::Error;
 
 const STREAMABLE_HTTP_MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MCP_PROTOCOL_VERSION_HEADER: &str = "MCP-Protocol-Version";
+pub const MCP_DIRECT_LEASE_DENY_CODE: &str = "mcp_direct_lease_deny";
 
 /// Host-owned MCP adapter limits.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -381,6 +383,7 @@ pub struct McpHostHttpClient<H, P> {
     http: H,
     planner: P,
     state: Arc<McpHostHttpClientState>,
+    security_audit_sink: Option<Arc<dyn SecurityAuditSink>>,
 }
 
 #[derive(Debug)]
@@ -400,7 +403,6 @@ struct McpHostHttpSessionCleanup {
 
 struct PlannedMcpJsonRpc {
     id: Option<u64>,
-    method: McpJsonRpcMethod,
     url: String,
     policy_headers: Vec<(String, String)>,
     body: Vec<u8>,
@@ -469,11 +471,45 @@ where
                 next_id: AtomicU64::new(1),
                 sessions: Mutex::new(HashMap::new()),
             }),
+            security_audit_sink: None,
         }
+    }
+
+    /// Attach a payload-free security audit sink for MCP boundary decisions.
+    #[must_use]
+    pub fn with_security_audit_sink(mut self, sink: Arc<dyn SecurityAuditSink>) -> Self {
+        self.security_audit_sink = Some(sink);
+        self
     }
 
     fn next_request_id(&self) -> u64 {
         self.state.next_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    fn record_direct_lease_rejection(&self, request: &McpClientRequest) {
+        if let Some(sink) = self.security_audit_sink.as_ref() {
+            sink.record(
+                SecurityAuditEvent::new(
+                    SecurityBoundary::McpDirectLease,
+                    SecurityDecision::Blocked,
+                    MCP_DIRECT_LEASE_DENY_CODE,
+                )
+                .with_capability_id(request.capability_id.clone())
+                .with_scope(request.scope.clone()),
+            );
+        }
+    }
+
+    fn reject_direct_lease_credential_injections(
+        &self,
+        request: &McpClientRequest,
+        credential_injections: &[RuntimeCredentialInjection],
+    ) -> Result<(), McpClientError> {
+        if credential_injections_contain_secret_store_lease(credential_injections) {
+            self.record_direct_lease_rejection(request);
+            return Err(McpClientError::client(request_denied()));
+        }
+        Ok(())
     }
 
     async fn send_json_rpc(
@@ -522,7 +558,6 @@ where
         });
         Ok(PlannedMcpJsonRpc {
             id,
-            method,
             url: url.to_string(),
             policy_headers,
             body,
@@ -551,9 +586,11 @@ where
             planned.plan.response_body_limit,
             request.max_output_bytes,
         );
-        let credential_injections = planned
-            .method
-            .credential_injections(planned.plan.credential_injections)?;
+        self.reject_direct_lease_credential_injections(
+            request,
+            &planned.plan.credential_injections,
+        )?;
+        let credential_injections = planned.plan.credential_injections;
         let response = self
             .http
             .request(McpHostHttpRequest {
@@ -731,8 +768,10 @@ where
             McpJsonRpcMethod::ToolsCall,
             Some(tool_call_params),
         )?;
-        validate_tools_call_credential_injections(&tool_call_plan.plan.credential_injections)
-            .map_err(McpClientError::client)?;
+        self.reject_direct_lease_credential_injections(
+            &request,
+            &tool_call_plan.plan.credential_injections,
+        )?;
 
         let mut usage = self.initialize_session(&request, &session_key).await?;
 
@@ -783,8 +822,10 @@ where
             McpJsonRpcMethod::ToolsList,
             None,
         )?;
-        validate_staged_credential_injections(&tools_list_plan.plan.credential_injections)
-            .map_err(McpClientError::client)?;
+        self.reject_direct_lease_credential_injections(
+            &request,
+            &tools_list_plan.plan.credential_injections,
+        )?;
 
         let mut usage = self.initialize_session(&request, &session_key).await?;
         let tools = self
@@ -843,42 +884,14 @@ impl McpJsonRpcMethod {
             Self::ToolsCall => "tools/call",
         }
     }
-
-    fn credential_injections(
-        self,
-        credential_injections: Vec<RuntimeCredentialInjection>,
-    ) -> Result<Vec<RuntimeCredentialInjection>, String> {
-        if credential_injections
-            .iter()
-            .any(|injection| matches!(injection.source, RuntimeCredentialSource::SecretStoreLease))
-        {
-            return Err(request_denied());
-        }
-        Ok(credential_injections)
-    }
 }
 
-/// Validate credential injections planned for a `tools/call` request without
-/// consuming the list, so the caller can reuse it in the actual send.
-///
-/// Returns `Err(denied)` if any injection uses a [`RuntimeCredentialSource::SecretStoreLease`],
-/// which is not permitted over the MCP `tools/call` boundary.
-fn validate_tools_call_credential_injections(
+fn credential_injections_contain_secret_store_lease(
     credential_injections: &[RuntimeCredentialInjection],
-) -> Result<(), String> {
-    validate_staged_credential_injections(credential_injections)
-}
-
-fn validate_staged_credential_injections(
-    credential_injections: &[RuntimeCredentialInjection],
-) -> Result<(), String> {
-    if credential_injections
+) -> bool {
+    credential_injections
         .iter()
         .any(|injection| matches!(injection.source, RuntimeCredentialSource::SecretStoreLease))
-    {
-        return Err(request_denied());
-    }
-    Ok(())
 }
 
 fn mcp_client_http_error(error: McpHostHttpError) -> McpClientError {

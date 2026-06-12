@@ -304,10 +304,12 @@ where
     };
     let runtime_http_egress = runtime_ports.runtime_http_egress();
     let registry = services.shared_extension_registry();
+    let security_audit_sink = services.security_audit_sink();
 
     Ok(services.with_mcp_runtime(Arc::new(hosted_http_mcp_runtime(
         registry,
         runtime_http_egress,
+        security_audit_sink,
     ))))
 }
 

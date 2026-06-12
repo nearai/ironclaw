@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use ironclaw_events::SecurityAuditSink;
 use ironclaw_extensions::{
     ExtensionPackage, ExtensionRuntime, ManifestSource, SharedExtensionRegistry,
 };
@@ -19,13 +20,17 @@ const MCP_TIMEOUT_MS: u32 = 60_000;
 pub(crate) fn hosted_http_mcp_runtime(
     registry: Arc<SharedExtensionRegistry>,
     runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
+    security_audit_sink: Option<Arc<dyn SecurityAuditSink>>,
 ) -> McpRuntime<
     McpHostHttpClient<McpRuntimeHttpAdapter<Arc<dyn RuntimeHttpEgress>>, RegistryMcpEgressPlanner>,
 > {
-    let client = McpHostHttpClient::new(
+    let mut client = McpHostHttpClient::new(
         McpRuntimeHttpAdapter::new(runtime_http_egress),
         RegistryMcpEgressPlanner::new(registry),
     );
+    if let Some(sink) = security_audit_sink {
+        client = client.with_security_audit_sink(sink);
+    }
     McpRuntime::new(McpRuntimeConfig::default(), client)
 }
 

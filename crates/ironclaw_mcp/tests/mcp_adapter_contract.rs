@@ -1,6 +1,9 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use ironclaw_events::{
+    InMemorySecurityAuditSink, SecurityAuditSink, SecurityBoundary, SecurityDecision,
+};
 use ironclaw_extensions::*;
 use ironclaw_host_api::*;
 use ironclaw_mcp::*;
@@ -435,10 +438,13 @@ async fn concrete_mcp_http_client_sends_credentials_only_for_tool_call_exchange(
     plan.credential_injections = vec![secret_store_lease];
     let egress = RecordingRuntimeEgress::json_rpc();
     let planner = RecordingEgressPlanner::new(plan.clone());
+    let security_sink = Arc::new(InMemorySecurityAuditSink::new());
+    let security_sink_dyn: Arc<dyn SecurityAuditSink> = security_sink.clone();
     let client = McpHostHttpClient::new(
         McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
         planner.clone(),
-    );
+    )
+    .with_security_audit_sink(security_sink_dyn);
 
     let error = client
         .call_tool(McpClientRequest {
@@ -456,6 +462,16 @@ async fn concrete_mcp_http_client_sends_credentials_only_for_tool_call_exchange(
         .expect_err("direct secret-store leases must fail before MCP transport");
 
     assert_eq!(error.stable_reason(), "request_denied");
+    let events = security_sink.snapshot();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].boundary, SecurityBoundary::McpDirectLease);
+    assert_eq!(events[0].decision, SecurityDecision::Blocked);
+    assert_eq!(events[0].code, MCP_DIRECT_LEASE_DENY_CODE);
+    assert_eq!(
+        events[0].capability_id,
+        Some(CapabilityId::new("github-mcp.search").unwrap())
+    );
+    assert_eq!(events[0].scope, Some(scope.clone()));
     assert!(
         egress.requests().is_empty(),
         "direct leases must be rejected before initialize or tools/call transport"
@@ -493,6 +509,11 @@ async fn concrete_mcp_http_client_sends_credentials_only_for_tool_call_exchange(
         "failed preflight must not leave a stale session id for the next initialize"
     );
     assert_eq!(planner.calls().len(), 4);
+    assert_eq!(
+        security_sink.snapshot().len(),
+        1,
+        "successful retry must not emit another direct-lease denial"
+    );
 }
 
 #[tokio::test]
