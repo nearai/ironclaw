@@ -132,6 +132,13 @@ pub struct ResolvedRebornLlm {
     /// `config`. Lets a caller wrap the real provider (e.g. for token /
     /// reasoning instrumentation) and have the runtime drive it. When `None`
     /// the gateway builds the static provider chain from `config` as usual.
+    ///
+    /// Invariant (enforced by construction, not the type): an override must
+    /// already speak the model `config` names — `config` stays the source of
+    /// truth for `provider_id`/`model` and budget cost-table derivation, and
+    /// only the *construction* of the backend is bypassed. The two are set
+    /// together via [`ResolvedRebornLlm::with_provider`]; there is no path that
+    /// swaps the provider without carrying the matching `config`.
     pub(crate) provider_override: Option<Arc<dyn ironclaw_llm::LlmProvider>>,
 }
 
@@ -169,6 +176,15 @@ impl ResolvedRebornLlm {
     /// Drive the runtime with `provider` instead of building one from the
     /// config. The provider must already speak the same model the config
     /// names; only the construction is bypassed.
+    ///
+    /// This is a deliberate, feature-gated (`root-llm-provider`)
+    /// instrumentation seam: it accepts the lower `ironclaw_llm::LlmProvider`
+    /// substrate trait because the whole point is to let the composition root
+    /// wrap the *real* provider (token/reasoning/cost capture) and have the
+    /// gateway drive that wrapper. There is no facade-shaped equivalent — a
+    /// composition-owned newtype would still have to expose the provider trait
+    /// to be useful — so the adaptation is kept as narrow as possible:
+    /// `build_llm_gateway` consumes the override and never re-exposes it.
     pub fn with_provider(mut self, provider: Arc<dyn ironclaw_llm::LlmProvider>) -> Self {
         self.provider_override = Some(provider);
         self
@@ -380,7 +396,33 @@ impl RebornRuntimeInput {
 
     /// Install a trajectory observer that receives each capability/tool call +
     /// result during a run (for downstream step-by-step trajectory capture).
+    ///
+    /// The observer receives a **bounded safe preview** of arguments/results
+    /// (long strings truncated, large arrays capped — see
+    /// [`crate::trajectory_observer`]), keeping a downstream logs/UI/telemetry
+    /// sink within the same boundary the model-visible display path enforces.
+    /// A consumer that needs the unbounded raw payloads (and owns its own
+    /// redaction/access control) must opt in via
+    /// [`Self::with_raw_trajectory_observer`].
     pub fn with_trajectory_observer(
+        mut self,
+        observer: Arc<dyn crate::RebornTrajectoryObserver>,
+    ) -> Self {
+        self.trajectory_observer =
+            Some(crate::trajectory_observer::SafePreviewTrajectoryObserver::wrap(observer));
+        self
+    }
+
+    /// Install a trajectory observer that receives the **raw, unbounded**
+    /// capability arguments and results — no safe-preview truncation.
+    ///
+    /// Capability results can contain file contents, command output, or
+    /// credentials, so this bypasses the truncation boundary that
+    /// [`Self::with_trajectory_observer`] applies by default. Use it only for a
+    /// trusted, in-process consumer that needs the verbatim trajectory (e.g. a
+    /// benchmark harness rendering exact tool I/O) and owns its own redaction
+    /// and access control for whatever sink it projects to.
+    pub fn with_raw_trajectory_observer(
         mut self,
         observer: Arc<dyn crate::RebornTrajectoryObserver>,
     ) -> Self {

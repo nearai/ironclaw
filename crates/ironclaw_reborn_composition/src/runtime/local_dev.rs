@@ -180,7 +180,10 @@ struct LocalDevCapabilityIo {
     results: StdMutex<StagedValueStore>,
     display_previews: Arc<CapabilityDisplayPreviewStore>,
     durable_previews: Option<DurableCapabilityDisplayPreviewSink>,
-    /// Optional consumer hook: receives each tool call's name/args + result.
+    /// Optional consumer hook. This struct drives only the *result* half of the
+    /// trajectory observer (via `write_capability_result`); the resolved
+    /// tool-call inputs are emitted upstream by `HostRuntimeLoopCapabilityPort`
+    /// (the input resolver bypasses this IO for provider tool-call inputs).
     observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
 }
 
@@ -502,7 +505,18 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             display_preview.as_ref(),
         );
         if let Some(observer) = &self.observer {
-            observer.on_capability_result(input_ref.as_str(), capability_id.as_str(), &output);
+            // Best-effort, inline on the capability hot path: a panicking
+            // observer must never unwind capability result staging. (Blocking
+            // is the observer's own contract — see `RebornTrajectoryObserver`.)
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                observer.on_capability_result(input_ref.as_str(), capability_id.as_str(), &output);
+            }));
+            if caught.is_err() {
+                tracing::warn!(
+                    capability_id = capability_id.as_str(),
+                    "trajectory observer on_capability_result panicked; dropping event"
+                );
+            }
         }
         if let Some(message_id) = self
             .try_append_durable_display_preview(run_context, invocation_id, capability_id)

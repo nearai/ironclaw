@@ -4782,6 +4782,119 @@ mod tests {
         runtime.shutdown().await.expect("runtime shutdown");
     }
 
+    /// Records both trajectory callbacks so the e2e test can assert the
+    /// observer fires through a real `build_reborn_runtime` turn — driving the
+    /// input hook (`HostRuntimeLoopCapabilityPort`) and the result hook
+    /// (`LocalDevCapabilityIo::write_capability_result`) on the actual dispatch
+    /// path, not a direct helper call.
+    #[derive(Debug, Default)]
+    struct RecordingTrajectoryObserver {
+        inputs: StdMutex<Vec<(String, String, serde_json::Value)>>,
+        results: StdMutex<Vec<(String, String, serde_json::Value)>>,
+    }
+
+    impl crate::RebornTrajectoryObserver for RecordingTrajectoryObserver {
+        fn on_capability_input(
+            &self,
+            call_id: &str,
+            capability_id: &str,
+            arguments: &serde_json::Value,
+        ) {
+            self.inputs.lock().expect("inputs lock").push((
+                call_id.to_string(),
+                capability_id.to_string(),
+                arguments.clone(),
+            ));
+        }
+
+        fn on_capability_result(
+            &self,
+            call_id: &str,
+            capability_id: &str,
+            output: &serde_json::Value,
+        ) {
+            self.results.lock().expect("results lock").push((
+                call_id.to_string(),
+                capability_id.to_string(),
+                output.clone(),
+            ));
+        }
+    }
+
+    /// End-to-end guard for the #4588 trajectory observer seam: a real runtime
+    /// turn that dispatches the `builtin.echo` capability must fire BOTH the
+    /// input and result callbacks installed via
+    /// `RebornRuntimeInput::with_raw_trajectory_observer`. This drives the
+    /// result hook on the genuine dispatch path (the prior direct-call unit
+    /// test was dropped as false confidence — it stayed green even when
+    /// end-to-end dispatch was broken).
+    #[tokio::test]
+    async fn local_dev_runtime_forwards_tool_call_trajectory_to_raw_observer() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(ToolCallingGateway::default());
+        let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
+        let observer = Arc::new(RecordingTrajectoryObserver::default());
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-trajectory-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-trajectory-tenant".to_string(),
+            agent_id: "runtime-trajectory-agent".to_string(),
+            source_binding_id: "runtime-trajectory-source".to_string(),
+            reply_target_binding_id: "runtime-trajectory-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        // Raw (not safe-preview) so we can assert verbatim arguments + output.
+        .with_raw_trajectory_observer(observer.clone())
+        .with_model_gateway_override(gateway_for_runtime);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            RUNTIME_SEND_TIMEOUT,
+            runtime.send_user_message(&conversation, "use echo tool"),
+        )
+        .await
+        .expect("runtime send should finish")
+        .expect("runtime send should succeed");
+        assert_eq!(reply.status, TurnStatus::Completed);
+
+        let echo_id = CapabilityId::new("builtin.echo").unwrap();
+
+        let inputs = observer.inputs.lock().expect("inputs lock");
+        assert_eq!(inputs.len(), 1, "exactly one capability input observed");
+        let (input_call_id, input_capability, arguments) = &inputs[0];
+        assert!(!input_call_id.is_empty(), "input call_id should be present");
+        assert_eq!(input_capability, echo_id.as_str());
+        assert_eq!(
+            arguments,
+            &serde_json::json!({"message": "hello from tool"}),
+            "observer should receive the raw model-emitted tool arguments"
+        );
+
+        let results = observer.results.lock().expect("results lock");
+        assert_eq!(results.len(), 1, "exactly one capability result observed");
+        let (result_call_id, result_capability, output) = &results[0];
+        assert_eq!(result_capability, echo_id.as_str());
+        assert_eq!(
+            result_call_id, input_call_id,
+            "result and input callbacks correlate by call_id"
+        );
+        assert!(
+            output.to_string().contains("hello from tool"),
+            "observer should receive the staged capability output, got {output}"
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
     #[tokio::test]
     async fn local_dev_runtime_wires_input_skill_context_source_to_model_calls() {
         let root = tempfile::tempdir().expect("tempdir");

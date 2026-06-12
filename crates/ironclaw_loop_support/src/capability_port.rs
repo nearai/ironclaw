@@ -57,8 +57,13 @@ const PROVIDER_TOOL_CALL_INPUT_REF_PREFIX: &str = "input:provider-tool-";
 /// Observes a capability invocation's resolved input (arguments) and result
 /// (output) as the host loop executes it, for trajectory capture by downstream
 /// consumers (benchmark harnesses, debuggers, UI). `call_id` is the capability
-/// input ref and correlates the two callbacks. Best-effort and side-effect-free:
-/// implementations must never block or fail the run.
+/// input ref and correlates the two callbacks.
+///
+/// Best-effort and side-effect-free. Callbacks fire inline on the per-capability
+/// hot path, so an implementation **must never block** (do I/O, contend on a
+/// lock): hand the event to a non-blocking queue and return. A callback that
+/// panics is caught at the call site and the event is dropped — it cannot
+/// unwind or fail the run — but it must not rely on that.
 pub trait CapabilityTrajectoryObserver: std::fmt::Debug + Send + Sync {
     /// A model tool call resolved to a capability invocation: `capability_id` is
     /// the resolved capability (e.g. `builtin.shell`), `arguments` the tool-call
@@ -1325,11 +1330,22 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             // tool-call decorator stages them upstream and bypasses the input
             // resolver hook).
             if let Some(observer) = &self.trajectory_observer {
-                observer.on_capability_input(
-                    effective_input_ref.as_str(),
-                    request.capability_id.as_str(),
-                    &input,
-                );
+                // Best-effort, inline on the capability hot path: a panicking
+                // observer must never unwind the invocation before dispatch.
+                // (Blocking is the observer's own contract.)
+                let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    observer.on_capability_input(
+                        effective_input_ref.as_str(),
+                        request.capability_id.as_str(),
+                        &input,
+                    );
+                }));
+                if caught.is_err() {
+                    tracing::warn!(
+                        capability_id = request.capability_id.as_str(),
+                        "trajectory observer on_capability_input panicked; dropping event"
+                    );
+                }
             }
             let input = match prepare_provider_arguments_with_detail(
                 &input,

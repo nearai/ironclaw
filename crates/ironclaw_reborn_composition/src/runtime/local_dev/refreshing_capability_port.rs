@@ -107,7 +107,14 @@ impl RefreshingLocalDevCapabilityPort {
             Arc::clone(&self.milestone_sink),
         )
         .with_execution_mounts(self.workspace_mounts.clone())
-        .with_trajectory_observer(self.trajectory_observer.clone());
+        // Adapt the composition-owned observer to the loop-support substrate
+        // trait the capability port consumes (the input hook). The result hook
+        // calls the composition trait directly from `LocalDevCapabilityIo`.
+        .with_trajectory_observer(
+            self.trajectory_observer
+                .clone()
+                .map(crate::trajectory_observer::as_capability_observer),
+        );
         for capability_id in self.policy.skill_management_capability_ids() {
             factory = factory
                 .with_capability_execution_mount(capability_id.clone(), self.skill_mounts.clone());
