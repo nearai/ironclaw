@@ -79,15 +79,15 @@ Rendered system message:
 
 - Timezone known (local time computed from the UTC stamp + IANA tz):
 
-  ```
-  Current date/time at loop start: 2026-06-11T21:32Z (14:32 Wed, America/Los_Angeles).
+  ```text
+  Current date/time at loop start: 2026-06-11T21:32Z (14:32 Thu, America/Los_Angeles).
   This was captured when this loop started; for the precise current time use the
   time capability if it is visible.
   ```
 
 - Timezone unknown:
 
-  ```
+  ```text
   Current date/time at loop start: 2026-06-11T21:32Z.
   The user's timezone is unknown — if local time matters, ask the user or use the
   time capability if it is visible.

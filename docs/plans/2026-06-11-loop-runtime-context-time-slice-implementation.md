@@ -17,7 +17,7 @@
 
 ---
 
-### Task 1: `LoopRuntimeContext` type + renderer
+## Task 1: `LoopRuntimeContext` type + renderer
 
 **Files:**
 - Create: `crates/ironclaw_turns/src/run_profile/runtime_context.rs`
@@ -40,7 +40,7 @@ mod tests {
     fn renders_utc_and_local_when_timezone_known() {
         let ctx = LoopRuntimeContext {
             loop_started_at_utc: stamp(),
-            user_timezone: Some("America/Los_Angeles".to_string()),
+            user_timezone: Some(chrono_tz::America::Los_Angeles),
         };
         let text = ctx.render_model_content();
         assert!(text.contains("2026-06-11T21:32Z"), "minute-truncated UTC: {text}");
@@ -62,16 +62,9 @@ mod tests {
         assert!(text.contains("ask the user"), "{text}");
     }
 
-    #[test]
-    fn invalid_timezone_falls_back_to_unknown() {
-        let ctx = LoopRuntimeContext {
-            loop_started_at_utc: stamp(),
-            user_timezone: Some("Not/A_Zone".to_string()),
-        };
-        let text = ctx.render_model_content();
-        assert!(text.contains("timezone is unknown"), "{text}");
-        assert!(!text.contains("Not/A_Zone"), "invalid tz must not render: {text}");
-    }
+    // [Amendment: `invalid_timezone_falls_back_to_unknown` was removed when
+    // `user_timezone` became `Option<chrono_tz::Tz>`; invalid IANA names are
+    // unrepresentable by construction and are rejected at the producer boundary.]
 }
 ```
 
@@ -97,9 +90,9 @@ use chrono_tz::Tz;
 pub struct LoopRuntimeContext {
     /// Instant this loop execution started. Rendered at minute precision.
     pub loop_started_at_utc: DateTime<Utc>,
-    /// IANA timezone name for the user (e.g. "America/Los_Angeles") when
-    /// known. Never a guessed host timezone.
-    pub user_timezone: Option<String>,
+    /// Validated IANA timezone for the user (e.g. `chrono_tz::America::Los_Angeles`),
+    /// when known. Never a guessed host timezone.
+    pub user_timezone: Option<chrono_tz::Tz>,
 }
 
 impl LoopRuntimeContext {
@@ -107,11 +100,9 @@ impl LoopRuntimeContext {
         let utc = self.loop_started_at_utc.format("%Y-%m-%dT%H:%MZ");
         let local = self
             .user_timezone
-            .as_deref()
-            .and_then(|name| name.parse::<Tz>().ok().map(|tz| (name, tz)))
-            .map(|(name, tz)| {
+            .map(|tz| {
                 let local = self.loop_started_at_utc.with_timezone(&tz);
-                format!("{} ({}, {})", utc, local.format("%H:%M %a"), name)
+                format!("{} ({}, {})", utc, local.format("%H:%M %a"), tz.name())
             });
         match local {
             Some(stamped) => format!(
@@ -134,7 +125,7 @@ Adjust `mod.rs` declaration/re-export to match sibling style (look at how `instr
 - [ ] **Step 4: Run, verify pass**
 
 Run: `cargo test -p ironclaw_turns runtime_context`
-Expected: 3 passed.
+Expected: 2 passed.
 
 - [ ] **Step 5: Commit**
 
