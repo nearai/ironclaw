@@ -965,8 +965,8 @@ impl RebornRuntime {
     /// already owns rather than opening a second handle to that file (the
     /// host filesystem abstraction owns the substrate, not the caller).
     /// Returns `None` when the runtime was built without a local-runtime
-    /// substrate (production-shape profiles not yet wired), so callers fail
-    /// closed.
+    /// substrate, so callers fail closed instead of synthesizing a second
+    /// identity store outside the host-owned substrate.
     #[cfg(feature = "webui-v2-beta")]
     pub async fn open_reborn_identity_resolver(
         &self,
@@ -1747,18 +1747,22 @@ pub async fn build_reborn_runtime(
     })?;
 
     let profile = services_input.profile();
-    if !matches!(
-        profile,
+    match profile {
         RebornCompositionProfile::LocalDev
-            | RebornCompositionProfile::LocalDevYolo
-            | RebornCompositionProfile::Production
-    ) {
-        return Err(RebornRuntimeError::InvalidArgument {
-            reason: format!(
-                "profile={profile} is not yet wired end-to-end by build_reborn_runtime; \
-                 local-dev, local-dev-yolo, and production are supported in this slice"
-            ),
-        });
+        | RebornCompositionProfile::LocalDevYolo
+        | RebornCompositionProfile::Production => {}
+        RebornCompositionProfile::MigrationDryRun => {
+            return Err(RebornRuntimeError::InvalidArgument {
+                reason:
+                    "profile=migration-dry-run validates production-shaped wiring but must not start live Reborn runtime traffic"
+                        .to_string(),
+            });
+        }
+        RebornCompositionProfile::Disabled => {
+            return Err(RebornRuntimeError::InvalidArgument {
+                reason: "profile=disabled must not start live Reborn runtime traffic".to_string(),
+            });
+        }
     }
     if services_input.runtime_policy().is_none() {
         return Err(RebornRuntimeError::InvalidArgument {
