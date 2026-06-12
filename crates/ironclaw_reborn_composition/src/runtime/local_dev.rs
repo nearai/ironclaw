@@ -835,7 +835,9 @@ fn ensure_local_dev_ref_scope(
     if reference.starts_with(&expected_prefix) {
         Ok(())
     } else {
-        eprintln!("ZDBG scope-mismatch: prefix={prefix:?} reference={reference:?} expected={expected_prefix:?}");
+        eprintln!(
+            "ZDBG scope-mismatch: prefix={prefix:?} reference={reference:?} expected={expected_prefix:?}"
+        );
         Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::ScopeMismatch,
             "capability input ref is not scoped to this loop run",
