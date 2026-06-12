@@ -624,6 +624,9 @@ impl AcceptedProductInboundTurn {
             subagent_depth: 0,
             spawn_tree_root_run_id: None,
         };
+        // Clone the request so the defer path can retry with the same
+        // idempotency key after the DeferredBusy marker is durable.
+        let retry_request = request.clone();
 
         match turn_coordinator.submit_turn(request).await {
             Ok(SubmitTurnResponse::Accepted {
@@ -660,11 +663,56 @@ impl AcceptedProductInboundTurn {
                     .map_err(|e| ProductWorkflowError::Transient {
                         reason: format!("failed to mark message deferred: {e}"),
                     })?;
-                Ok(InboundTurnOutcome::DeferredBusy {
-                    accepted_message_ref,
-                    active_run_id: busy.active_run_id,
-                    binding,
-                })
+                // Post-defer retry: the marker is now durable.  If the blocking
+                // run terminated between the original ThreadBusy result and the
+                // marker write, the thread is now free and this retry will be
+                // accepted.  If the run is still active we get ThreadBusy again
+                // and the drain will pick up the message on the next terminal
+                // event (marker is already in place).  Any other error is
+                // non-fatal: the message stays DeferredBusy and the drain or
+                // the next inbound activity recovers it.
+                match turn_coordinator.submit_turn(retry_request).await {
+                    Ok(SubmitTurnResponse::Accepted {
+                        turn_id, run_id, ..
+                    }) => {
+                        thread_service
+                            .mark_message_submitted(
+                                &thread_scope,
+                                &binding.thread_id,
+                                message_id,
+                                turn_id.to_string(),
+                                run_id.to_string(),
+                            )
+                            .await
+                            .map_err(|e| ProductWorkflowError::Transient {
+                                reason: format!(
+                                    "failed to mark message submitted after defer retry: {e}"
+                                ),
+                            })?;
+                        Ok(InboundTurnOutcome::Submitted {
+                            accepted_message_ref,
+                            submitted_run_id: run_id,
+                            binding,
+                        })
+                    }
+                    Err(TurnError::ThreadBusy(_)) => Ok(InboundTurnOutcome::DeferredBusy {
+                        accepted_message_ref,
+                        active_run_id: busy.active_run_id,
+                        binding,
+                    }),
+                    Err(retry_error) => {
+                        tracing::warn!(
+                            message_id = %message_id,
+                            error = %retry_error,
+                            "post-defer submit retry failed; message stays DeferredBusy for drain"
+                        );
+                        Ok(InboundTurnOutcome::DeferredBusy {
+                            accepted_message_ref,
+                            active_run_id: busy.active_run_id,
+                            binding,
+                        })
+                    }
+                }
             }
             Err(error) => Err(ProductWorkflowError::TurnSubmissionFailed { error }),
         }

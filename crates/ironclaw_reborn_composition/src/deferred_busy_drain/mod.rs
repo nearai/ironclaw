@@ -9,6 +9,19 @@
 //! that resubmitted run terminates, this observer fires again and picks up the
 //! next deferred message.
 //!
+//! # Timing gap — closed by post-defer retry
+//!
+//! Both defer call sites (`inbound_turn.rs` and `reborn_services.rs`) perform
+//! a one-shot retry of `submit_turn` immediately after the `DeferredBusy`
+//! marker becomes durable.  This closes the residual window where the blocking
+//! run's terminal event fires between the original `ThreadBusy` result and the
+//! marker write: the thread is free by the time the retry runs, so the retry
+//! is accepted and `mark_message_submitted` flips the status before any drain
+//! fires.  If the run is still active the retry gets `ThreadBusy` again, and
+//! the drain picks up the message on the next terminal event as normal.
+//! The drain's separate `drain:<message_id>` idempotency key prevents
+//! double-submission even if both paths race.
+//!
 //! # Failure contract
 //!
 //! Drain failures must **never** poison the terminal-event path.  The observer

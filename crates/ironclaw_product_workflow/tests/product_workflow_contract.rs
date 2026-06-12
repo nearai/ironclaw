@@ -1,6 +1,6 @@
 //! Contract tests for the product workflow facade.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
@@ -115,7 +115,7 @@ fn sample_envelope_with_context(
 #[derive(Default)]
 struct RecordingTurnCoordinator {
     submissions: Mutex<Vec<SubmitTurnRequest>>,
-    busy_once: Mutex<Option<TurnRunId>>,
+    busy_queue: Mutex<VecDeque<TurnRunId>>,
 }
 
 impl RecordingTurnCoordinator {
@@ -123,8 +123,13 @@ impl RecordingTurnCoordinator {
         self.submissions.lock().expect("lock").clone()
     }
 
-    fn force_thread_busy_once(&self, active_run_id: TurnRunId) {
-        *self.busy_once.lock().expect("lock") = Some(active_run_id);
+    /// Force the coordinator to return `ThreadBusy` for the next `count`
+    /// `submit_turn` calls with the given `active_run_id`.
+    fn force_thread_busy_n_times(&self, active_run_id: TurnRunId, count: usize) {
+        let mut queue = self.busy_queue.lock().expect("lock");
+        for _ in 0..count {
+            queue.push_back(active_run_id);
+        }
     }
 }
 
@@ -138,7 +143,7 @@ impl TurnCoordinator for RecordingTurnCoordinator {
         &self,
         request: SubmitTurnRequest,
     ) -> Result<SubmitTurnResponse, TurnError> {
-        if let Some(active_run_id) = self.busy_once.lock().expect("lock").take() {
+        if let Some(active_run_id) = self.busy_queue.lock().expect("lock").pop_front() {
             return Err(TurnError::ThreadBusy(ThreadBusy {
                 active_run_id,
                 status: TurnStatus::Running,
@@ -4927,7 +4932,10 @@ async fn accepted_message_replay_validates_current_actor_before_submit() {
         )],
     );
     let coordinator = Arc::new(RecordingTurnCoordinator::default());
-    coordinator.force_thread_busy_once(TurnRunId::new());
+    // Push two ThreadBusy results: one for the initial submit and one for the
+    // post-defer retry.  Both must be busy so the message stays DeferredBusy.
+    let active_run_id = TurnRunId::new();
+    coordinator.force_thread_busy_n_times(active_run_id, 2);
     let inbound = Arc::new(DefaultInboundTurnService::new(
         binding.clone(),
         InMemorySessionThreadService::default(),

@@ -1241,11 +1241,18 @@ async fn deferred_busy_retry_resubmits_existing_message() {
     let thread_service = InMemorySessionThreadService::default();
     let coordinator = ScriptedTurnCoordinator::default();
     let active_run_id = TurnRunId::new();
-    coordinator.push_result(Err(TurnError::ThreadBusy(ThreadBusy {
-        active_run_id,
-        status: TurnStatus::Running,
-        event_cursor: EventCursor::default(),
-    })));
+    let busy_result = || {
+        Err(TurnError::ThreadBusy(ThreadBusy {
+            active_run_id,
+            status: TurnStatus::Running,
+            event_cursor: EventCursor::default(),
+        }))
+    };
+    // Push two ThreadBusy results: one for the initial submit and one for the
+    // post-defer retry.  Both must be busy so the message stays DeferredBusy
+    // and the second accept_user_message call goes through the replay path.
+    coordinator.push_result(busy_result());
+    coordinator.push_result(busy_result());
     let service =
         DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
 
@@ -1373,4 +1380,181 @@ async fn binding_failure_surfaces_workflow_error() {
         err,
         ProductWorkflowError::BindingResolutionFailed { .. }
     ));
+}
+
+#[tokio::test]
+async fn defer_retry_still_busy_message_stays_deferred() {
+    // Both the initial submit and the post-defer retry return ThreadBusy.
+    // The message must remain DeferredBusy with the canonical binding refs
+    // persisted so the drain can pick it up later.
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let coordinator = ScriptedTurnCoordinator::default();
+    let active_run_id = TurnRunId::new();
+    let busy_result = || {
+        Err(TurnError::ThreadBusy(ThreadBusy {
+            active_run_id,
+            status: TurnStatus::Running,
+            event_cursor: EventCursor::default(),
+        }))
+    };
+    coordinator.push_result(busy_result());
+    coordinator.push_result(busy_result());
+    let coordinator_handle = coordinator.clone();
+    let service =
+        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
+
+    let envelope = sample_user_message_envelope("defer-retry-busy");
+    let outcome = service
+        .accept_user_message(&envelope)
+        .await
+        .expect("busy submit");
+
+    assert!(
+        matches!(outcome, InboundTurnOutcome::DeferredBusy { .. }),
+        "both submits busy → DeferredBusy"
+    );
+    let binding = match outcome {
+        InboundTurnOutcome::DeferredBusy { binding, .. } => binding,
+        _ => unreachable!(),
+    };
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: ThreadScope {
+                tenant_id: binding.tenant_id.clone(),
+                agent_id: binding.agent_id.clone().expect("agent id"),
+                project_id: binding.project_id.clone(),
+                owner_user_id: binding.subject_user_id.clone(),
+                mission_id: None,
+            },
+            thread_id: binding.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(history.messages[0].status, MessageStatus::DeferredBusy);
+    assert!(
+        history.messages[0]
+            .turn_source_binding_ref
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("src:"),
+        "deferred message must persist canonical src: source binding ref"
+    );
+    assert!(
+        history.messages[0]
+            .turn_reply_target_binding_ref
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("reply:"),
+        "deferred message must persist canonical reply: target binding ref"
+    );
+    // Two submit_turn calls recorded: initial (ThreadBusy) + post-defer retry (ThreadBusy).
+    // Both returned errors so no Accepted outcome was produced.
+    assert_eq!(
+        coordinator_handle.submissions().len(),
+        2,
+        "both submit_turn calls recorded (initial + retry)"
+    );
+}
+
+#[tokio::test]
+async fn defer_retry_gap_hit_message_becomes_submitted() {
+    // The initial submit returns ThreadBusy (blocking run active) but the
+    // post-defer retry returns Accepted (run terminated during the gap).
+    // The message must end Submitted, not DeferredBusy.
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let coordinator = ScriptedTurnCoordinator::default();
+    let active_run_id = TurnRunId::new();
+    coordinator.push_result(Err(TurnError::ThreadBusy(ThreadBusy {
+        active_run_id,
+        status: TurnStatus::Running,
+        event_cursor: EventCursor::default(),
+    })));
+    // Retry returns Accepted (queue falls through to default Accepted behavior).
+    let coordinator_handle = coordinator.clone();
+    let service =
+        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
+
+    let envelope = sample_user_message_envelope("defer-retry-gap-hit");
+    let outcome = service
+        .accept_user_message(&envelope)
+        .await
+        .expect("gap-hit accept");
+
+    let InboundTurnOutcome::Submitted { binding, .. } = outcome else {
+        panic!("gap-hit retry must yield Submitted, not DeferredBusy")
+    };
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: ThreadScope {
+                tenant_id: binding.tenant_id.clone(),
+                agent_id: binding.agent_id.clone().expect("agent id"),
+                project_id: binding.project_id.clone(),
+                owner_user_id: binding.subject_user_id.clone(),
+                mission_id: None,
+            },
+            thread_id: binding.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(history.messages[0].status, MessageStatus::Submitted);
+    // Two submit_turn calls: initial (ThreadBusy) + retry (Accepted).
+    let submissions = coordinator_handle.submissions();
+    assert_eq!(submissions.len(), 2, "initial + retry submit_turn calls");
+    // Both calls must use the same idempotency key.
+    assert_eq!(
+        submissions[0].idempotency_key.as_str(),
+        submissions[1].idempotency_key.as_str(),
+        "retry must reuse the same stable idempotency key as the initial attempt"
+    );
+    assert!(
+        submissions[0].idempotency_key.as_str().starts_with("turn:"),
+        "idempotency key must carry the stable turn: prefix"
+    );
+}
+
+#[tokio::test]
+async fn defer_retry_non_busy_error_message_stays_deferred_call_succeeds() {
+    // The initial submit returns ThreadBusy but the post-defer retry returns
+    // an unexpected non-ThreadBusy error.  The call must still succeed with
+    // DeferredBusy (the drain or the next inbound activity recovers it).
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let coordinator = ScriptedTurnCoordinator::default();
+    let active_run_id = TurnRunId::new();
+    coordinator.push_result(Err(TurnError::ThreadBusy(ThreadBusy {
+        active_run_id,
+        status: TurnStatus::Running,
+        event_cursor: EventCursor::default(),
+    })));
+    coordinator.push_result(Err(TurnError::Unavailable {
+        reason: "transient coordinator error".into(),
+    }));
+    let service =
+        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
+
+    let envelope = sample_user_message_envelope("defer-retry-error");
+    let outcome = service
+        .accept_user_message(&envelope)
+        .await
+        .expect("non-busy retry error must not fail the inbound call");
+
+    let InboundTurnOutcome::DeferredBusy { binding, .. } = outcome else {
+        panic!("retry error must leave message DeferredBusy")
+    };
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: ThreadScope {
+                tenant_id: binding.tenant_id.clone(),
+                agent_id: binding.agent_id.clone().expect("agent id"),
+                project_id: binding.project_id.clone(),
+                owner_user_id: binding.subject_user_id.clone(),
+                mission_id: None,
+            },
+            thread_id: binding.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(history.messages[0].status, MessageStatus::DeferredBusy);
 }

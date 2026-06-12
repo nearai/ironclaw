@@ -890,10 +890,13 @@ where
         // Invariants: (i) marker is written after the DeferredBusy status
         // commit; (ii) every defer refreshes the marker (idempotent put);
         // (iii) marker is deleted only by a full (no-cursor) empty scan.
-        // Residual benign window: a terminal event that fires between the
-        // status commit and the marker write misses that single drain; the
-        // marker lands immediately after, so the next terminal event or defer
-        // recovers it.
+        // Residual window — closed by post-defer retry: both defer call sites
+        // retry `submit_turn` once after this marker write.  If the blocking
+        // run terminated in the window between the original `ThreadBusy` and
+        // this marker, the retry finds the thread free and calls
+        // `mark_message_submitted`, which flips the status before any drain
+        // fires.  If the run is still active the retry gets `ThreadBusy` again
+        // and the marker is already durable for the next terminal event.
         let record = self
             .apply_message_update(scope, thread_id, message_id, |message| {
                 ensure_user_accepted(message, "mark_message_deferred_busy")?;

@@ -1730,6 +1730,9 @@ impl RebornServicesApi for RebornServices {
             subagent_depth: 0,
             spawn_tree_root_run_id: None,
         };
+        // Clone the request so the defer path can retry with the same
+        // idempotency key after the DeferredBusy marker is durable.
+        let retry_submit = submit.clone();
 
         self.record_skill_activation_message(&scope, &accepted_message_ref, &content)?;
         match self.turn_coordinator.submit_turn(submit).await {
@@ -1775,13 +1778,74 @@ impl RebornServicesApi for RebornServices {
                 )
                 .await?;
 
-                Ok(RebornSubmitTurnResponse::DeferredBusy {
-                    thread_id: handoff.thread_id,
-                    accepted_message_ref,
-                    active_run_id: busy.active_run_id,
-                    status: busy.status,
-                    event_cursor: busy.event_cursor,
-                })
+                // Post-defer retry: the marker is now durable.  If the blocking
+                // run terminated between the original ThreadBusy result and the
+                // marker write, the thread is now free and this retry will be
+                // accepted.  If the run is still active we get ThreadBusy again
+                // and the drain will pick up the message on the next terminal
+                // event (marker is already in place).  Any other error is
+                // non-fatal: the message stays DeferredBusy and the drain or
+                // the next inbound activity recovers it.
+                match self.turn_coordinator.submit_turn(retry_submit).await {
+                    Ok(SubmitTurnResponse::Accepted {
+                        turn_id,
+                        run_id,
+                        status,
+                        resolved_run_profile_id,
+                        resolved_run_profile_version,
+                        event_cursor,
+                        ..
+                    }) => {
+                        mark_message_submitted_or_replay(
+                            &*self.thread_service,
+                            &thread_scope,
+                            &handoff,
+                            &client_action_id,
+                            turn_id.to_string(),
+                            run_id.to_string(),
+                        )
+                        .await?;
+                        // Skill activation was cleared on the initial ThreadBusy;
+                        // re-apply it now that the retry was accepted so callers
+                        // observe the same activation semantics as a first-try accept.
+                        self.record_skill_activation_message(
+                            &scope,
+                            &accepted_message_ref,
+                            &content,
+                        )?;
+                        Ok(RebornSubmitTurnResponse::Submitted {
+                            thread_id: handoff.thread_id,
+                            accepted_message_ref,
+                            turn_id: turn_id.to_string(),
+                            run_id,
+                            status,
+                            resolved_run_profile_id: resolved_run_profile_id.as_str().to_string(),
+                            resolved_run_profile_version: resolved_run_profile_version.as_u64(),
+                            event_cursor,
+                        })
+                    }
+                    Err(TurnError::ThreadBusy(_)) => Ok(RebornSubmitTurnResponse::DeferredBusy {
+                        thread_id: handoff.thread_id,
+                        accepted_message_ref,
+                        active_run_id: busy.active_run_id,
+                        status: busy.status,
+                        event_cursor: busy.event_cursor,
+                    }),
+                    Err(retry_error) => {
+                        tracing::warn!(
+                            message_id = %handoff.message_id,
+                            error = %retry_error,
+                            "post-defer submit retry failed; message stays DeferredBusy for drain"
+                        );
+                        Ok(RebornSubmitTurnResponse::DeferredBusy {
+                            thread_id: handoff.thread_id,
+                            accepted_message_ref,
+                            active_run_id: busy.active_run_id,
+                            status: busy.status,
+                            event_cursor: busy.event_cursor,
+                        })
+                    }
+                }
             }
             Err(error) => {
                 self.clear_skill_activation_message(&scope, &accepted_message_ref)?;
