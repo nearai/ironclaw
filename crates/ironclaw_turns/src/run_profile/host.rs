@@ -1383,6 +1383,13 @@ pub struct CapabilityInvocation {
     pub input_ref: CapabilityInputRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_resume: Option<CapabilityApprovalResume>,
+    /// Set when the invocation was previously auth-blocked and the auth
+    /// gate has now been resolved. Carries the original `invocation_id`
+    /// (as a resume token) so re-dispatch reuses it rather than minting a
+    /// new one, preserving any prior approval lease whose scope embeds
+    /// that id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_resume: Option<CapabilityAuthResume>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -1430,6 +1437,24 @@ pub struct CapabilityApprovalResume {
     pub input_ref: CapabilityInputRef,
     pub input: serde_json::Value,
     pub estimate: ResourceEstimate,
+}
+
+/// Auth-gate resume identity.
+///
+/// Carries the original `invocation_id` (encoded as a resume token) so
+/// that re-dispatch after credential completion reuses the same invocation
+/// rather than minting a fresh one. When the prior invocation also passed
+/// an approval gate, `approval_request_id` is set so the host can claim
+/// the matching fingerprinted lease.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityAuthResume {
+    /// Encodes the original `InvocationId`; decoded by the host via
+    /// `invocation_id_from_resume_token` to set `context.invocation_id`.
+    pub resume_token: CapabilityResumeToken,
+    /// Present when the invocation previously passed an approval gate.
+    /// The host uses it to locate and claim the matching lease.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_request_id: Option<ApprovalRequestId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
