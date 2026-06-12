@@ -323,11 +323,9 @@ fn interactive_profile() -> RunProfileDefinition {
         steering_policy: SteeringPolicy {
             allow_steering: true,
             allow_interrupt: true,
-            // ZDBG(benchmark A/B): enable the reborn final-answer nudge on the
-            // interactive profile (the bench's active run profile) so the loop
-            // synthesizes a closing answer instead of ending empty / canned. Gate
-            // behind a build-input setter (not a hardcoded default) before merge.
-            allow_driver_specific_nudges: true,
+            // ZDBG(nudge isolation A/B): nudge DISABLED to measure its marginal
+            // contribution vs the http + multi-call fixes.
+            allow_driver_specific_nudges: false,
         },
         cancellation_policy: CancellationPolicy {
             allow_cancel: true,
