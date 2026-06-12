@@ -1,7 +1,9 @@
 import { React, html } from "../../../lib/html.js";
 import { MarkdownRenderer } from "./markdown-renderer.js";
 import { ToolActivity } from "./tool-activity.js";
+import { Avatar } from "./avatar.js";
 import { Icon } from "../../../design-system/icons.js";
+import { useT } from "../../../lib/i18n.js";
 import { toast } from "../../../lib/toast.js";
 
 /* User keeps a tinted bubble; assistant is borderless (document-like);
@@ -55,6 +57,7 @@ function ThinkingDisclosure({ content }) {
 function MessageBubbleImpl({ message, onRetry }) {
   const { role, content, images, attachments, generatedImages, isOptimistic, status, error, toolCalls, timestamp } = message;
   const isUser = role === "user";
+  const t = useT();
   const [copied, setCopied] = React.useState(false);
   // All hooks must run before the role-based early returns below.
   // A message can change role in place across renders (e.g. an
@@ -109,13 +112,33 @@ function MessageBubbleImpl({ message, onRetry }) {
 
   const timeLabel = formatTimestamp(timestamp);
   const showActions = (role === "assistant" || role === "user") && !isOptimistic;
+  // Persistent identity for the two conversational roles; system / error
+  // stay as centered notices without an avatar.
+  const showIdentity = role === "user" || role === "assistant";
+  const identityName = isUser
+    ? t("chat.identityUser")
+    : t("chat.identityAssistant");
 
   return html`
     <div
       data-testid=${`msg-${role}`}
       className=${["group flex flex-col", isUser ? "items-end" : "items-start"].join(" ")}
     >
-      <div className="flex min-w-0 max-w-[85%] flex-col gap-1">
+      <div className="flex min-w-0 max-w-[85%] flex-col gap-2">
+        ${showIdentity &&
+        html`
+          <div
+            className=${[
+              "flex items-center gap-2 px-1",
+              isUser ? "flex-row-reverse" : "",
+            ].join(" ")}
+          >
+            <${Avatar} role=${role} />
+            <span className="text-xs font-medium text-[var(--v2-text-muted)]">
+              ${identityName}
+            </span>
+          </div>
+        `}
         <div
           className=${[
             "text-sm leading-6",

@@ -161,6 +161,7 @@ tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", 
 tokio-util = { version = "0.7", features = ["rt"] }
 toml = "0.8"
 tracing = "0.1"
+tracing-subscriber = "0.3"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 

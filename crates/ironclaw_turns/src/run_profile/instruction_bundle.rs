@@ -17,6 +17,7 @@ use super::{
     LoopModelMessage, LoopRunContext, PromptSkillContextMetadata, SkillTrustLevel,
     VisibleCapabilitySurface,
     prompt_text::{PromptTextSurface, validate_model_safe_text, validate_prompt_text},
+    runtime_context::LoopRuntimeContext,
     skill_snippet_model_message_ref,
 };
 /// Stable fingerprint for an instruction bundle rebuild.
@@ -103,6 +104,7 @@ pub struct InstructionBundleRequest {
     pub visible_surface: Option<VisibleCapabilitySurface>,
     pub safety_context: Option<InstructionSafetyContext>,
     pub inline_messages: Vec<LoopInlineMessage>,
+    pub runtime_context: Option<LoopRuntimeContext>,
 }
 
 /// Host-built instruction bundle materialized in memory for model-port resolution.
@@ -259,6 +261,17 @@ impl InstructionBundleBuilder {
                 },
                 &mut synthetic_refs,
                 message,
+            )?;
+        }
+
+        if let Some(runtime_context) = request.runtime_context {
+            requires_materialization_store = true;
+            push_runtime_context(
+                &mut messages,
+                &mut materialized_messages,
+                &mut fingerprint,
+                runtime_context,
+                &mut synthetic_refs,
             )?;
         }
 
@@ -530,6 +543,37 @@ fn push_safety_context(
         role: "system".to_string(),
         content_ref: content_ref.clone(),
         model_content: safety_context.safe_summary,
+    });
+    messages.push(LoopModelMessage {
+        role: "system".to_string(),
+        content_ref,
+    });
+    Ok(())
+}
+
+fn push_runtime_context(
+    messages: &mut Vec<LoopModelMessage>,
+    materialized_messages: &mut Vec<InstructionBundleMaterializedMessage>,
+    fingerprint: &mut Sha256,
+    runtime_context: LoopRuntimeContext,
+    synthetic_refs: &mut SyntheticMessageRefRegistry,
+) -> Result<(), AgentLoopHostError> {
+    let model_content =
+        validate_model_safe_text(runtime_context.render_model_content(), "runtime context")?;
+    let content_ref =
+        synthetic_message_ref("runtime", "loop-start", &model_content, 0, synthetic_refs)?;
+    // Fingerprint commits the model-visible rendering only, matching the
+    // sibling sections: bundles whose rendered prompt is byte-identical must
+    // hash identically, so sub-minute timestamp differences (truncated away
+    // by render_model_content) and invalid timezones (not rendered) do not
+    // produce distinct fingerprints.
+    feed_field(fingerprint, b"section", b"runtime");
+    feed_field(fingerprint, b"ref", content_ref.as_str().as_bytes());
+    feed_field(fingerprint, b"content", model_content.as_bytes());
+    materialized_messages.push(InstructionBundleMaterializedMessage {
+        role: "system".to_string(),
+        content_ref: content_ref.clone(),
+        model_content,
     });
     messages.push(LoopModelMessage {
         role: "system".to_string(),

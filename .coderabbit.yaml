@@ -1,0 +1,264 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit configuration for nearai/ironclaw.
+#
+# Context: CodeRabbit is being trialed as the primary AI reviewer, a candidate
+# replacement for Gemini Code Assist, the ruleset-enforced Copilot review, Codex,
+# and the on-demand `@claude review` workflow. During the trial all reviewers run
+# side by side for comparison.
+#
+# Deterministic CI remains authoritative for everything it gates (cargo fmt,
+# clippy -D warnings, cargo-deny, scripts/check_no_panics.py,
+# scripts/check_gateway_boundaries.py, regression-test-check) — CodeRabbit is
+# configured NOT to repeat those findings.
+#
+# On-demand deep review: comment `@coderabbitai full review` (replaces
+# `@claude review`). Other commands: `@coderabbitai review` (incremental),
+# `pause` / `resume`, and `@coderabbitai ignore` in the PR description to opt out.
+#
+# NOTE: this file is inert until the CodeRabbit GitHub App is installed on the
+# nearai org and authorized for this repository (dashboard action, not code).
+language: en-US
+tone_instructions: "Terse, evidence-first senior Rust review. Cite the repo invariant violated (CLAUDE.md/AGENTS.md/.claude/rules). Skip what clippy, rustfmt, cargo-deny and check_no_panics already gate. Sandbox, trust, secrets, egress and migration issues first."
+
+reviews:
+  profile: assertive # full strength for the head-to-head trial against the other AI reviewers
+  request_changes_workflow: false # advisory only; merge gating stays with the ruleset's required checks
+
+  # Review everything except generated / vendored / fixture / binary content.
+  path_filters:
+    - "!**/Cargo.lock"
+    - "!CHANGELOG.md" # maintained by release-plz
+    - "!ironclaw.bash" # clap_complete-generated completions
+    - "!ironclaw.fish"
+    - "!ironclaw.zsh"
+    - "!README.ja.md" # translations; review the English source
+    - "!README.ko.md"
+    - "!README.ru.md"
+    - "!README.zh-CN.md"
+    - "!docs/zh/**"
+    - "!docs/images/**"
+    - "!docs/architecture-video/package-lock.json"
+    - "!tests/test-pages/**" # saved web pages (linguist-generated)
+    - "!tests/fixtures/**" # recorded LLM/gateway traces
+    - "!tests/snapshots/**" # insta snapshots — the replay gate owns these
+    - "!src/cli/snapshots/**"
+    - "!tests/e2e/ironclaw_e2e.egg-info/**"
+    - "!tests/e2e/**/*.png"
+    - "!fuzz/corpus/**"
+    - "!crates/ironclaw_safety/fuzz/corpus/**"
+    - "!**/*.wasm" # compiled artifacts; new binaries surface via registry/ and manifest review
+    - "!crates/ironclaw_webui_v2_static/static/assets/**" # binary icons; static/js IS hand-written and reviewed
+    - "!wix/**" # cargo-dist/WiX installer boilerplate
+    - "!ironclaw.png"
+
+  path_instructions:
+    - path: "**/*.rs"
+      instructions: |
+        Review against the repo's named invariants and cite them:
+        - "Everything Goes Through Tools": gateway handlers, CLI commands, routine engine,
+          WASM channels and other non-agent callers route actions through
+          ToolDispatcher::dispatch(), never directly via state.store / workspace /
+          extension_manager / skill_registry / session_manager (exceptions need
+          "// dispatch-exempt: <reason>").
+        - Trusted-ingress seal: product adapters, product workflow, first-party capabilities
+          and host-runtime handlers consume untrusted inbound requests; they must not mint
+          TrustedInboundTurnRequest or call trusted trigger-submitter factories; never add a
+          second agent loop.
+        - Fail loud: flag silent-failure patterns — .unwrap_or_default() on a Result, .ok()?
+          dropping errors, let-else returning None to swallow failures, warn-and-continue that
+          poisons state. Errors propagate with ? into thiserror types with context.
+        - "LLM data is never deleted": no stripping/truncating/deleting LLM output, context,
+          reasoning or tool calls from the database; cleanup means cache eviction, never row
+          deletion.
+        - Prompt templates live in files (crates/ironclaw_engine/prompts/*.md via
+          include_str!), never inline Rust string constants.
+        - REPL/TUI logging: info!/warn! corrupt the terminal UI — internal diagnostics use
+          debug!; background tasks never use info!.
+        - Test through the caller: when a helper gates a side effect, require a test driving
+          the real call site (handler/factory/manager), not only the helper.
+        - Imports: crate:: for cross-module paths (super:: only in tests); no pub use
+          re-exports unless for downstream consumers; import extracted-crate types from
+          ironclaw_safety / ironclaw_skills / ironclaw_llm directly, not via crate:: shims.
+        - Module specs win ties (root CLAUDE.md "Module Specs" table) — flag diffs that
+          contradict their module spec without updating it.
+        - New `unsafe` outside #[cfg(test)] env-var manipulation is exceptional and needs a
+          SAFETY comment; many reborn/product crates declare #![forbid(unsafe_code)].
+        Do NOT flag: .unwrap()/.expect()/assert! in production (scripts/check_no_panics.py is
+        a blocking CI gate), rustfmt/clippy-level style, dependency licenses/advisories
+        (cargo-deny), or pre-existing issues the PR does not touch.
+    - path: "migrations/**"
+      instructions: |
+        Refinery PostgreSQL migrations. Released migrations are IMMUTABLE: any edit to an
+        existing V*.sql or to a pinned hash in migrations/checksums.lock is a hard error (the
+        released_migrations_are_immutable test enforces SipHasher13 checksums). New
+        migrations: next sequential V{n}__snake_case.sql, up-only, PostgreSQL dialect.
+        Dual-backend mandate: schema changes generally need a matching hand-translated update
+        in src/db/libsql_migrations.rs (UUID→TEXT, TIMESTAMPTZ→ISO-8601 TEXT, JSONB→TEXT,
+        BYTEA→BLOB, VECTOR→F32_BLOB) — flag a new V*.sql without a libSQL twin change unless
+        justified. Ported schema must include indexes and seed data, with semantic
+        differences documented. Destructive DDL is review track C: 2 approvals + documented
+        rollback plan (CONTRIBUTING.md).
+    - path: "src/db/**"
+      instructions: |
+        Dual-backend persistence: every new persistence feature supports BOTH PostgreSQL and
+        libSQL — extend the shared Database trait first, then both backends (Reborn stores
+        keep ironclaw_hooks_postgres / ironclaw_hooks_libsql in parity via hooks_parity).
+        Multi-step DB operations must be wrapped in a transaction. Driver types
+        (tokio_postgres::, libsql::) must not leak outside the allowed modules
+        (scripts/check-boundaries.sh).
+    - path: "**/*.wit"
+      instructions: |
+        Hand-written WIT contracts define the trusted/untrusted WASM ABI. Interface changes
+        must stay in sync with the host bindgen sites (src/tools/wasm/wrapper.rs,
+        src/channels/wasm/wrapper.rs, crates/ironclaw_wasm/src/bindings.rs,
+        crates/ironclaw_wasm_product_adapters/src/bindings.rs) and the ~20 guest crates under
+        tools-src/ and channels-src/. WIT or extension-source changes require version bumps
+        (scripts/check-version-bumps.sh; escape token [skip-version-check]). Host capability
+        functions are security-gated: secrets must never cross into WASM guests; guest
+        outputs are scanned for leaks — flag anything that widens host capabilities or
+        bypasses capability checks.
+    - path: "**/*.capabilities.json"
+      instructions: |
+        Capability manifests grant authority to sandboxed WASM guests. Every new or broadened
+        grant (network hosts, workspace paths, secrets, tool-invoke) is a security decision:
+        require justification, prefer the narrowest scope, flag wildcard or broad-domain
+        grants.
+    - path: "registry/**"
+      instructions: |
+        Registry manifests are embedded into the binary and drive extension installation.
+        Verify URLs point at expected upstreams, artifact references carry checksums, and no
+        un-audited prebuilt WASM is introduced (root build.rs documents committed WASM as a
+        supply-chain risk).
+    - path: "{src/sandbox/**,src/secrets/**,src/safety/**,src/gate/**,src/pairing/**,src/auth/**,crates/ironclaw_safety/**,crates/ironclaw_secrets/**,crates/ironclaw_network/**,crates/ironclaw_trust/**,crates/ironclaw_authorization/**,crates/ironclaw_capabilities/**,crates/ironclaw_process_sandbox/**,crates/ironclaw_prompt_envelope/**,crates/ironclaw_reborn_webui_ingress/**}"
+      instructions: |
+        Kernel/safety boundary — review track C (2 approvals + rollback plan). Hold the line
+        on: no weakening of bearer/webhook auth, CORS/origin checks, body/rate limits or
+        egress allowlists; egress goes through host-mediated policy with private-IP /
+        DNS-rebinding rejection (ironclaw_network policy/resolver); never expose raw secret
+        material via metadata, errors, debug output, audit records, events or dispatch
+        results (ironclaw_secrets); privileged EffectiveTrustClass variants (FirstParty,
+        System) are constructible only inside ironclaw_trust; sandbox lanes accept typed
+        plans only (SandboxProcessPlan) — no raw Docker flags, raw host paths or blanket env
+        inheritance; events/audit records are redacted by contract. Treat containers and
+        external services as untrusted.
+    - path: ".github/workflows/**"
+      instructions: |
+        GitHub Actions hygiene. Privileged triggers exist (pull_request_target in
+        pr-label-*.yml; issue_comment dispatchers in claude-review.yml and nearai-bench.yml):
+        flag privileged workflows that check out or execute PR-controlled code,
+        `permissions:` expansions, unpinned third-party actions (pin full SHAs), and
+        interpolation of untrusted ${{ github.event.* }} strings into run: scripts. The
+        roll-up job names "Run Tests" and "Code Style (fmt + clippy)" are required checks in
+        the main ruleset — renaming them silently un-gates merges.
+    - path: "{scripts/**,.github/scripts/**}"
+      instructions: |
+        CI and dev tooling. Expect set -euo pipefail and quoted expansions; these scripts
+        gate merges (check_no_panics.py, check_gateway_boundaries.py, pr-labeler.sh), so
+        behavior changes need matching workflow updates.
+    - path: "tests/e2e/**"
+      instructions: |
+        Python/Playwright e2e harness (see tests/e2e/CLAUDE.md). Scenarios use the mock LLM /
+        fake APIs, never live providers; credentials come from env, never hardcoded.
+    - path: "{Dockerfile*,docker/**,deploy/**,infra/**,crates/Dockerfile.sandbox}"
+      instructions: |
+        Sandbox and deployment images are security boundaries running untrusted workloads.
+        Flag privilege escalation (root user, added capabilities, docker.sock mounts),
+        weakened entrypoint isolation, secrets baked into layers, and unpinned base images.
+    - path: "{crates/ironclaw_gateway/static/**,crates/ironclaw_webui_v2_static/static/js/**,src/channels/web/static/**}"
+      instructions: |
+        Hand-written no-build frontends embedded into the binary. Watch XSS sinks
+        (innerHTML / htm interpolation), CSP-nonce handling
+        (ironclaw_webui_v2_static/src/router.rs), origin/CSRF checks, and token handling in
+        client JS.
+
+  auto_review:
+    enabled: true
+    drafts: false # matches the Copilot ruleset behavior; review starts at ready-for-review
+    auto_pause_after_reviewed_commits: 0 # never silently pause mid-PR during the trial
+    base_branches: # main is always reviewed; these are the long-lived extras
+      - "staging"
+      - "reborn-integration"
+
+  suggested_labels: false # label suggestions are owned by .github/scripts/pr-labeler.sh + actions/labeler
+  auto_apply_labels: false # labels are owned by .github/scripts/pr-labeler.sh + actions/labeler
+
+  tools:
+    clippy:
+      enabled: false # CI gates `cargo clippy --all-features -- -D warnings`; re-reporting is noise
+    github-checks:
+      enabled: true
+      timeout_ms: 300000 # required roll-ups aggregate ~15 conditional jobs; default 90s is too short
+    gitleaks:
+      enabled: true # no secret scanning in CI — unique fill
+    trufflehog:
+      enabled: true
+    actionlint:
+      enabled: true # 21 workflows incl. privileged triggers, unlinted today
+    zizmor:
+      enabled: true
+    shellcheck:
+      enabled: true # scripts/** has no shell linting in CI
+    hadolint:
+      enabled: true # 6 hand-written Dockerfiles, unlinted
+    sqlfluff:
+      enabled: true # 31 refinery migrations, unlinted
+    osvScanner:
+      enabled: false # cargo-deny (PR-time) + Dependabot own dependency advisories
+    trivy:
+      enabled: false
+    markdownlint:
+      enabled: false # docs are Mintlify-managed; no repo markdownlint config — style nags only
+    yamllint:
+      enabled: false # no repo yamllint config; actionlint covers workflow correctness
+    languagetool:
+      enabled: false # prose grammar comments are noise here
+
+  pre_merge_checks: # advisory (warning) — request_changes_workflow stays false
+    docstrings:
+      mode: "off" # quoted deliberately: bare `off` is YAML boolean false
+    title:
+      mode: warning
+      requirements: "Prefer Conventional Commits style (type(scope): summary) — squash-merge makes the PR title the permanent main-branch subject."
+    description:
+      mode: warning
+    issue_assessment:
+      mode: warning # CONTRIBUTING.md requires an approved issue for new features
+    # custom_checks are Pro+ — uncomment after confirming the plan tier in the dashboard:
+    # custom_checks:
+    #   - name: "FEATURE_PARITY same-branch update"
+    #     mode: warning
+    #     instructions: "If the PR changes the implementation status of any capability tracked in FEATURE_PARITY.md (❌/🚧/✅, notes, priorities), FEATURE_PARITY.md must be updated in this same PR (AGENTS.md / CONTRIBUTING.md 'Feature Parity Requirement')."
+    #   - name: "Released migrations are immutable"
+    #     mode: warning
+    #     instructions: "Fail if the PR edits an existing migrations/V*.sql or rewrites a pinned hash in migrations/checksums.lock; released refinery migrations must never be modified."
+
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false # Pro+; regression-test-check.yml + the codecov patch target own test pressure
+    simplify:
+      enabled: false
+
+knowledge_base:
+  web_search:
+    enabled: true
+  learnings:
+    scope: local # public repo — keep learnings repo-scoped
+  code_guidelines:
+    enabled: true
+    # Defaults already ingest **/AGENTS.md and **/CLAUDE.md (root + the nested crate files).
+    # Add the review-shaped docs the defaults miss:
+    filePatterns:
+      - ".claude/rules/*.md" # error-handling, review-discipline, testing, safety-and-sandbox — the most review-shaped rules in the repo
+      - "CONTRIBUTING.md" # review tracks A/B/C, issue-first policy, FEATURE_PARITY requirement
+      - files: "src/tools/README.md" # declared module specs (root CLAUDE.md table) hidden from the defaults by README naming
+        applyTo: "src/tools/**"
+      - files: "src/setup/README.md"
+        applyTo: "src/setup/**"
+      - files: "src/workspace/README.md"
+        applyTo: "src/workspace/**"
+
+chat:
+  auto_reply: true
