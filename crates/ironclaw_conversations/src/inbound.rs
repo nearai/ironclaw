@@ -395,6 +395,7 @@ fn submit_trusted_trigger_outcome(
         return Ok(TrustedTriggerFireSubmitOutcome::Replayed {
             original_run_id: run_id,
             replayed_at: submitted_at,
+            thread_id: Some(response.resolution.turn_scope.thread_id.clone()),
         });
     }
     Ok(TrustedTriggerFireSubmitOutcome::Accepted {
@@ -767,6 +768,7 @@ mod tests {
             TrustedTriggerFireSubmitOutcome::Replayed {
                 original_run_id,
                 replayed_at,
+                ..
             } if original_run_id == run_id && replayed_at == submitted_at
         ));
 

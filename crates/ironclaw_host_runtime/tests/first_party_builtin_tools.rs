@@ -1043,6 +1043,7 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
             trigger_id: record.trigger_id,
             fire_slot: first_fire_slot,
             run_id: first_run_id,
+            thread_id: ThreadId::new("01890f0f-0001-7000-8000-000000000001").unwrap(),
             submitted_at: first_fire_slot + chrono::Duration::seconds(1),
             next_run_at: first_fire_slot + chrono::Duration::minutes(1),
         })
@@ -1076,6 +1077,7 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
             trigger_id: record.trigger_id,
             fire_slot: second_fire_slot,
             run_id: second_run_id,
+            thread_id: ThreadId::new("01890f0f-0002-7000-8000-000000000002").unwrap(),
             submitted_at: second_fire_slot + chrono::Duration::seconds(1),
             next_run_at: second_fire_slot + chrono::Duration::minutes(1),
         })
@@ -1109,6 +1111,7 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
             trigger_id: record.trigger_id,
             fire_slot: third_fire_slot,
             run_id: third_run_id,
+            thread_id: ThreadId::new("01890f0f-0003-7000-8000-000000000003").unwrap(),
             submitted_at: third_fire_slot + chrono::Duration::seconds(1),
             next_run_at: third_fire_slot + chrono::Duration::minutes(1),
         })
@@ -1135,10 +1138,9 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
     assert_eq!(runs[2]["run_id"], json!(first_run_id.to_string()));
     assert_eq!(runs[2]["status"], json!("ok"));
     assert_ne!(runs[2]["completed_at"], Value::Null);
-    assert_eq!(
-        runs[0]["thread_id"].as_str().unwrap().len(),
-        64,
-        "trigger route thread ids are deterministic hex identifiers"
+    assert!(
+        uuid::Uuid::parse_str(runs[0]["thread_id"].as_str().unwrap()).is_ok(),
+        "run thread ids are canonical conversation thread UUIDs, not route placeholders"
     );
 }
 
@@ -1251,6 +1253,7 @@ async fn seed_completed_trigger_runs(
                 trigger_id: record.trigger_id,
                 fire_slot,
                 run_id,
+                thread_id: ThreadId::new("01890f0f-0004-7000-8000-000000000004").unwrap(),
                 submitted_at: fire_slot + chrono::Duration::seconds(1),
                 next_run_at: fire_slot + chrono::Duration::minutes(1),
             })
@@ -6539,6 +6542,15 @@ fn trigger_backend_error() -> ironclaw_triggers::TriggerError {
 
 #[async_trait]
 impl TriggerRepository for RemoveFailingTriggerRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(
         &self,
         record: ironclaw_triggers::TriggerRecord,
@@ -6671,6 +6683,15 @@ impl TriggerRepository for RemoveFailingTriggerRepository {
 
 #[async_trait]
 impl TriggerRepository for BatchRunHistoryFailingTriggerRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(
         &self,
         record: ironclaw_triggers::TriggerRecord,
@@ -6811,6 +6832,15 @@ impl TriggerRepository for BatchRunHistoryFailingTriggerRepository {
 
 #[async_trait]
 impl TriggerRepository for FailingTriggerRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(
         &self,
         _record: ironclaw_triggers::TriggerRecord,

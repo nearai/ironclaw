@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use ironclaw_host_api::{TenantId, Timestamp};
+use ironclaw_host_api::{TenantId, ThreadId, Timestamp};
 use ironclaw_turns::{TurnRunId, TurnScope};
 
 use crate::{
@@ -82,6 +82,13 @@ pub enum TrustedTriggerFireSubmitOutcome {
     Replayed {
         original_run_id: TurnRunId,
         replayed_at: Timestamp,
+        /// Canonical thread id for the replayed fire.
+        ///
+        /// The submission path resolves conversation binding before determining
+        /// whether a fire is new or replayed, so the canonical `ThreadId` is
+        /// available at this point. `None` means no canonical thread was
+        /// resolved.
+        thread_id: Option<ThreadId>,
     },
 }
 

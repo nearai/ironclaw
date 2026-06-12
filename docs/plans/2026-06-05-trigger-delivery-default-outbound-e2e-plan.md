@@ -60,6 +60,14 @@ progress/projection payloads and non-text modality defaults remain deferred.
 - Slack final-reply delivery reads the shared
   `local_runtime.outbound_preferences` repository instead of a private
   in-memory preference repository.
+- **Resolved 2026-06-11 (PR #4782):** the carry-forward finding from the
+  2026-05-29 plan (Slack host-beta constructing its own outbound state store)
+  is closed. `RebornLocalRuntimeServices` now owns a single outbound store
+  exposing preferences, state, gate-routes, and triggered-delivery handles;
+  `slack_host_beta` consumes those handles rather than constructing a private
+  `FilesystemOutboundStateStore`. The `/outbound` grant was removed from
+  `slack_host_state_mount_view`, and a `clippy::disallowed-methods` lint bans
+  `FilesystemOutboundStateStore::new` outside the factory.
 - The staged Slack provider is not yet wired into the WebUI/API bundle and
   should not become user-selectable until the scoped authority model below is
   implemented.

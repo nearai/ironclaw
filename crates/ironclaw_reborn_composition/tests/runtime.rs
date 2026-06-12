@@ -27,7 +27,44 @@ async fn runtime_rejects_disabled_profile_before_local_substrate_lookup() {
     let RebornRuntimeError::InvalidArgument { reason } = error else {
         panic!("expected invalid argument, got {error:?}");
     };
-    assert!(reason.contains("profile=disabled is not yet wired end-to-end"));
+    assert!(reason.contains("profile=disabled must not start live Reborn runtime traffic"));
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn runtime_rejects_migration_dry_run_before_live_traffic() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = std::sync::Arc::new(
+        libsql::Builder::new_local(dir.path().join("reborn.db"))
+            .build()
+            .await
+            .unwrap(),
+    );
+    let input = RebornRuntimeInput::from_services(RebornBuildInput::libsql(
+        ironclaw_reborn_composition::RebornCompositionProfile::MigrationDryRun,
+        "runtime-migration-dry-run-owner",
+        db,
+        dir.path().join("events.db").to_string_lossy(),
+        None,
+        ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
+    ));
+
+    let error = match build_reborn_runtime(input).await {
+        Ok(runtime) => {
+            runtime.shutdown().await.expect("shutdown");
+            panic!("migration-dry-run must validate only and never start live runtime traffic");
+        }
+        Err(error) => error,
+    };
+
+    let RebornRuntimeError::InvalidArgument { reason } = error else {
+        panic!("expected invalid argument, got {error:?}");
+    };
+    assert!(
+        reason.contains("profile=migration-dry-run")
+            && reason.contains("must not start live Reborn runtime traffic"),
+        "reason: {reason}"
+    );
 }
 
 #[tokio::test]

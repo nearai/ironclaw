@@ -12,7 +12,7 @@ use ironclaw_reborn_composition::{
     open_local_trigger_access_store,
 };
 use ironclaw_reborn_composition::{
-    OAuthClientConfig, PollSettings, RebornBuildInput, RebornCompositionProfile,
+    OAuthClientConfig, OperatorLogLayer, PollSettings, RebornBuildInput, RebornCompositionProfile,
     RebornLocalRuntimeProfileOptions, RebornRuntimeIdentity, RebornRuntimeInput,
     TurnRunnerSettings, build_reborn_runtime, local_runtime_build_input_with_options,
     nearai_mcp_bootstrap_config_from_env,
@@ -34,12 +34,14 @@ use trigger_poller::trigger_poller_settings;
 pub(crate) fn init_tracing() {
     use tracing_subscriber::EnvFilter;
     use tracing_subscriber::fmt;
+    use tracing_subscriber::prelude::*;
     let filter = EnvFilter::try_from_env("IRONCLAW_REBORN_LOG").unwrap_or_else(|_| {
         EnvFilter::new("info,ironclaw_reborn=info,ironclaw_reborn_composition=info")
     });
-    let _ = fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt::layer().with_writer(std::io::stderr))
+        .with(OperatorLogLayer)
         .try_init();
 }
 

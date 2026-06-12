@@ -245,7 +245,16 @@ fn capability_display_preview_resolution_from_store(
             | CapabilityActivityStatus::Failed
             | CapabilityActivityStatus::Killed
     ) {
-        return Ok(CapabilityDisplayPreviewResolution::NotApplicable);
+        // A still-running invocation has no preview yet, but it WILL produce one
+        // when it reaches a terminal status. Resolving it as `Pending` (rather
+        // than `NotApplicable`) holds the runtime cursor at this activity's
+        // preview slot instead of skipping past it. Skipping was unsafe: the
+        // drain would deliver later activities' payloads past this slot, and
+        // when the invocation later completed its now-materialized preview sat
+        // behind the resume watermark and was never delivered — the dropped
+        // dropped tool card. Holding keeps the slot positionally stable so
+        // the preview is delivered in order once it lands.
+        return Ok(CapabilityDisplayPreviewResolution::Pending);
     }
     let Some(record) = store.record_for_invocation(activity.invocation_id) else {
         return if matches!(
