@@ -1,6 +1,7 @@
 import { BAD_REQUEST, UNAUTHORIZED } from "every-plugin/errors";
 import { oc } from "every-plugin/orpc";
 import { z } from "every-plugin/zod";
+import { contract as ironclawContract } from "../../plugins/ironclaw/src/contract";
 
 export const RegisterInputSchema = z.object({
   agentId: z.string().min(1).max(64),
@@ -65,6 +66,8 @@ export const contract = oc.router({
       }),
     ),
   },
+
+  ironclaw: ironclawContract,
 });
 
 export type ContractType = typeof contract;
