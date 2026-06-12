@@ -56,6 +56,7 @@ export function isAcceptedFile(file, accept) {
   return accept.some((token) => {
     const t = token.trim().toLowerCase();
     if (!t) return false;
+    if (t === "*/*" || t === "*") return true;
     if (t.endsWith("/*")) return mime.startsWith(t.slice(0, -1));
     if (t.startsWith(".")) return name.endsWith(t);
     return mime === t;
@@ -124,12 +125,16 @@ export async function stageFiles(files, { limits, existing = [], t }) {
       continue;
     }
     if (total + file.size > cfg.maxTotalBytes) {
-      errors.push(
-        t("chat.attachmentTotalTooLarge", {
-          max: formatBytes(cfg.maxTotalBytes),
-        }),
-      );
-      break;
+      // A later, smaller file may still fit the remaining budget, so skip this
+      // one rather than abandoning the rest of the selection. De-dup the notice
+      // so several oversized files don't stack identical messages.
+      const err = t("chat.attachmentTotalTooLarge", {
+        max: formatBytes(cfg.maxTotalBytes),
+      });
+      if (!errors.includes(err)) {
+        errors.push(err);
+      }
+      continue;
     }
 
     let dataUrl;

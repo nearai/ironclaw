@@ -71,6 +71,11 @@ test("isAcceptedFile honours wildcards, extensions, and exact MIME", () => {
   assert.equal(isAcceptedFile({ type: "application/x-evil", name: "x" }, []), true);
 });
 
+test("isAcceptedFile treats */* and * as accept-anything tokens", () => {
+  assert.equal(isAcceptedFile({ type: "application/x-evil", name: "x" }, ["*/*"]), true);
+  assert.equal(isAcceptedFile({ type: "", name: "x" }, ["*"]), true);
+});
+
 test("stageFiles produces the staged shape for an accepted file", async () => {
   const { staged, errors } = await stageFiles(
     [
@@ -172,5 +177,26 @@ test("stageFiles enforces the total-bytes budget across the batch", async () => 
   // First fits (900 <= 1000 file, 900 <= 1500 total); second pushes the
   // running total to 1800 > 1500.
   assert.equal(staged.length, 1);
+  assert.deepEqual(errors, ["chat.attachmentTotalTooLarge"]);
+});
+
+test("stageFiles skips an over-budget file but still stages a later fitting one", async () => {
+  const files = [
+    fakeFile({ name: "a.txt", type: "text/plain", size: 900, dataUrl: "data:text/plain;base64,YQ==" }),
+    // Pushes the total to 1800 > 1500 — skipped, not fatal.
+    fakeFile({ name: "big.txt", type: "text/plain", size: 900, dataUrl: "data:text/plain;base64,Yg==" }),
+    // Still fits in the remaining budget (900 + 100 = 1000 <= 1500).
+    fakeFile({ name: "c.txt", type: "text/plain", size: 100, dataUrl: "data:text/plain;base64,Yw==" }),
+  ];
+  const { staged, errors } = await stageFiles(files, {
+    limits: LIMITS,
+    existing: [],
+    t: tKey,
+  });
+  assert.deepEqual(
+    staged.map((att) => att.filename),
+    ["a.txt", "c.txt"],
+  );
+  // The over-budget notice is recorded once, not once per skipped file.
   assert.deepEqual(errors, ["chat.attachmentTotalTooLarge"]);
 });
