@@ -754,6 +754,7 @@ mod tests {
             redaction_ref: None,
             turn_source_binding_ref: None,
             turn_reply_target_binding_ref: None,
+            turn_idempotency_key: None,
         }
     }
 

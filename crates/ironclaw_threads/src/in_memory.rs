@@ -168,6 +168,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             redaction_ref: None,
             turn_source_binding_ref: None,
             turn_reply_target_binding_ref: None,
+            turn_idempotency_key: None,
         });
 
         if let Some(key) = key {
@@ -248,6 +249,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         message_id: ThreadMessageId,
         turn_source_binding_ref: Option<String>,
         turn_reply_target_binding_ref: Option<String>,
+        turn_idempotency_key: Option<String>,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         let mut state = self.state.lock().await;
         // Mutate the message status first; insert the presence marker only
@@ -266,6 +268,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         message.turn_run_id = None;
         message.turn_source_binding_ref = turn_source_binding_ref;
         message.turn_reply_target_binding_ref = turn_reply_target_binding_ref;
+        message.turn_idempotency_key = turn_idempotency_key;
         let record = message.clone();
         state
             .deferred_threads
@@ -354,6 +357,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             redaction_ref: None,
             turn_source_binding_ref: None,
             turn_reply_target_binding_ref: None,
+            turn_idempotency_key: None,
         };
         thread.next_sequence += 1;
         thread.messages.push(message.clone());
@@ -436,6 +440,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             redaction_ref: None,
             turn_source_binding_ref: None,
             turn_reply_target_binding_ref: None,
+            turn_idempotency_key: None,
         };
         thread.next_sequence += 1;
         thread.messages.push(message.clone());
@@ -485,6 +490,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             redaction_ref: None,
             turn_source_binding_ref: None,
             turn_reply_target_binding_ref: None,
+            turn_idempotency_key: None,
         };
         thread.next_sequence += 1;
         thread.messages.push(message.clone());
@@ -1079,6 +1085,7 @@ fn history_message(message: &ThreadMessageRecord) -> ThreadMessageRecord {
         redaction_ref: message.redaction_ref.clone(),
         turn_source_binding_ref: message.turn_source_binding_ref.clone(),
         turn_reply_target_binding_ref: message.turn_reply_target_binding_ref.clone(),
+        turn_idempotency_key: message.turn_idempotency_key.clone(),
     }
 }
 

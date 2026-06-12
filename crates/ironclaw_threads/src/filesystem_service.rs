@@ -765,6 +765,7 @@ where
             redaction_ref: None,
             turn_source_binding_ref: None,
             turn_reply_target_binding_ref: None,
+            turn_idempotency_key: None,
         };
         self.write_new_message(&request.scope, &request.thread_id, &message, "message")
             .await?;
@@ -876,6 +877,7 @@ where
         message_id: ThreadMessageId,
         turn_source_binding_ref: Option<String>,
         turn_reply_target_binding_ref: Option<String>,
+        turn_idempotency_key: Option<String>,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         self.read_thread_versioned(scope, thread_id)
             .await?
@@ -895,8 +897,9 @@ where
         // marker-visibility gap.  If the blocking run terminated between the
         // original `ThreadBusy` and this marker write, the retry finds the
         // thread free and calls `mark_message_submitted`; observer-side replays
-        // are deduplicated by the `drain:<message_id>` idempotency key rather
-        // than by one path always winning the race.
+        // are deduplicated by the persisted original idempotency key (or
+        // `drain:<message_id>` for legacy records without one) rather than by
+        // one path always winning the race.
         let record = self
             .apply_message_update(scope, thread_id, message_id, |message| {
                 ensure_user_accepted(message, "mark_message_deferred_busy")?;
@@ -905,6 +908,7 @@ where
                 message.turn_run_id = None;
                 message.turn_source_binding_ref = turn_source_binding_ref.clone();
                 message.turn_reply_target_binding_ref = turn_reply_target_binding_ref.clone();
+                message.turn_idempotency_key = turn_idempotency_key.clone();
                 Ok(())
             })
             .await?;
@@ -1012,6 +1016,7 @@ where
             redaction_ref: None,
             turn_source_binding_ref: None,
             turn_reply_target_binding_ref: None,
+            turn_idempotency_key: None,
         };
         self.write_new_message(
             &request.scope,
@@ -1123,6 +1128,7 @@ where
             redaction_ref: None,
             turn_source_binding_ref: None,
             turn_reply_target_binding_ref: None,
+            turn_idempotency_key: None,
         };
         self.write_new_message(
             &request.scope,
@@ -1181,6 +1187,7 @@ where
             redaction_ref: None,
             turn_source_binding_ref: None,
             turn_reply_target_binding_ref: None,
+            turn_idempotency_key: None,
         };
         let path = message_record_path(&request.scope, &request.thread_id, message.message_id)?;
         let entry = Self::message_entry(&message)?;
@@ -2127,6 +2134,7 @@ fn history_message(message: &ThreadMessageRecord) -> ThreadMessageRecord {
         redaction_ref: message.redaction_ref.clone(),
         turn_source_binding_ref: message.turn_source_binding_ref.clone(),
         turn_reply_target_binding_ref: message.turn_reply_target_binding_ref.clone(),
+        turn_idempotency_key: message.turn_idempotency_key.clone(),
     }
 }
 

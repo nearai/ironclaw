@@ -1449,6 +1449,7 @@ mod tests {
             _message_id: ironclaw_threads::ThreadMessageId,
             _turn_source_binding_ref: Option<String>,
             _turn_reply_target_binding_ref: Option<String>,
+            _turn_idempotency_key: Option<String>,
         ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
         {
             Err(ironclaw_threads::SessionThreadError::Backend(

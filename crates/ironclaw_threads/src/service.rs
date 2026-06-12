@@ -50,6 +50,7 @@ pub trait SessionThreadService: Send + Sync {
         message_id: ThreadMessageId,
         turn_source_binding_ref: Option<String>,
         turn_reply_target_binding_ref: Option<String>,
+        turn_idempotency_key: Option<String>,
     ) -> Result<ThreadMessageRecord, SessionThreadError>;
 
     /// List all `DeferredBusy` inbound user messages for `thread_id` within
@@ -322,6 +323,7 @@ where
         message_id: ThreadMessageId,
         turn_source_binding_ref: Option<String>,
         turn_reply_target_binding_ref: Option<String>,
+        turn_idempotency_key: Option<String>,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         self.as_ref()
             .mark_message_deferred_busy(
@@ -330,6 +332,7 @@ where
                 message_id,
                 turn_source_binding_ref,
                 turn_reply_target_binding_ref,
+                turn_idempotency_key,
             )
             .await
     }

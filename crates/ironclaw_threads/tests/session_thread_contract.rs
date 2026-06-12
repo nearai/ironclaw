@@ -853,6 +853,7 @@ async fn busy_message_is_visible_deferred_and_not_tied_to_a_run() {
             accepted.message_id,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -892,7 +893,14 @@ async fn deferred_busy_rejects_non_user_and_non_accepted_messages() {
         .unwrap();
 
     let result = service
-        .mark_message_deferred_busy(&scope("a"), &thread.thread_id, draft.message_id, None, None)
+        .mark_message_deferred_busy(
+            &scope("a"),
+            &thread.thread_id,
+            draft.message_id,
+            None,
+            None,
+            None,
+        )
         .await;
 
     assert!(result.is_err());
@@ -2570,7 +2578,14 @@ async fn list_deferred_busy_messages_returns_only_deferred_busy() {
         .await
         .unwrap();
     service
-        .mark_message_deferred_busy(&scope("a"), &thread.thread_id, msg_a.message_id, None, None)
+        .mark_message_deferred_busy(
+            &scope("a"),
+            &thread.thread_id,
+            msg_a.message_id,
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
 
@@ -2633,7 +2648,14 @@ async fn list_deferred_busy_messages_ordered_oldest_first() {
             .await
             .unwrap();
         service
-            .mark_message_deferred_busy(&scope("a"), &thread.thread_id, msg.message_id, None, None)
+            .mark_message_deferred_busy(
+                &scope("a"),
+                &thread.thread_id,
+                msg.message_id,
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
     }
@@ -2684,7 +2706,14 @@ async fn list_deferred_busy_messages_wrong_scope_returns_empty() {
         .await
         .unwrap();
     service
-        .mark_message_deferred_busy(&scope("a"), &thread.thread_id, msg.message_id, None, None)
+        .mark_message_deferred_busy(
+            &scope("a"),
+            &thread.thread_id,
+            msg.message_id,
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
 
@@ -2731,7 +2760,14 @@ async fn list_deferred_busy_messages_limit_caps_results() {
             .await
             .unwrap();
         service
-            .mark_message_deferred_busy(&scope("a"), &thread.thread_id, msg.message_id, None, None)
+            .mark_message_deferred_busy(
+                &scope("a"),
+                &thread.thread_id,
+                msg.message_id,
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
     }
@@ -2804,6 +2840,7 @@ async fn list_deferred_busy_messages_after_sequence_filters_earlier_records() {
             msg_a.message_id,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -2827,6 +2864,7 @@ async fn list_deferred_busy_messages_after_sequence_filters_earlier_records() {
             msg_b.message_id,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -2848,6 +2886,7 @@ async fn list_deferred_busy_messages_after_sequence_filters_earlier_records() {
             &scope("after-seq"),
             &thread.thread_id,
             msg_c.message_id,
+            None,
             None,
             None,
         )
@@ -3014,6 +3053,7 @@ async fn list_deferred_busy_tombstones_marker_after_last_deferred_resolved() {
             msg.message_id,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -3098,6 +3138,7 @@ async fn cursor_filtered_empty_scan_does_not_tombstone_marker() {
             msg.message_id,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -3173,6 +3214,7 @@ async fn zero_limit_does_not_tombstone_marker_when_deferred_rows_exist() {
             msg.message_id,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -3242,6 +3284,7 @@ async fn mark_message_deferred_busy_marker_present_immediately_after() {
             msg.message_id,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -3261,4 +3304,129 @@ async fn mark_message_deferred_busy_marker_present_immediately_after() {
         "marker must be present immediately after mark_message_deferred_busy returns"
     );
     assert_eq!(result[0].message_id, deferred.message_id);
+}
+
+#[tokio::test]
+async fn mark_message_deferred_busy_persists_turn_idempotency_key() {
+    // When a Some(key) is supplied, list_deferred_busy_messages must return
+    // a record with turn_idempotency_key == Some(key). This ensures the drain
+    // can replay the original idempotency key rather than deriving a new one.
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("idem-key-persist"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let msg = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("idem-key-persist"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("idem-key-test"),
+        })
+        .await
+        .unwrap();
+
+    let expected_key = "turn:original-key-abc123".to_string();
+    service
+        .mark_message_deferred_busy(
+            &scope("idem-key-persist"),
+            &thread.thread_id,
+            msg.message_id,
+            Some("src:binding-x".to_string()),
+            Some("reply:binding-x".to_string()),
+            Some(expected_key.clone()),
+        )
+        .await
+        .unwrap();
+
+    let result = service
+        .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
+            scope: scope("idem-key-persist"),
+            thread_id: thread.thread_id.clone(),
+            limit: None,
+            after_sequence: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.len(), 1);
+    assert_eq!(
+        result[0].turn_idempotency_key.as_deref(),
+        Some(expected_key.as_str()),
+        "turn_idempotency_key must be persisted verbatim so the drain can replay it"
+    );
+    assert_eq!(
+        result[0].turn_source_binding_ref.as_deref(),
+        Some("src:binding-x"),
+        "turn_source_binding_ref must also be persisted"
+    );
+}
+
+#[tokio::test]
+async fn mark_message_deferred_busy_none_idempotency_key_returns_none_in_record() {
+    // When None is supplied for turn_idempotency_key (legacy path), the
+    // persisted record must also have None — the drain will fall back to
+    // drain:<message_id> for such records.
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("idem-key-none"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let msg = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("idem-key-none"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("idem-key-none-test"),
+        })
+        .await
+        .unwrap();
+
+    service
+        .mark_message_deferred_busy(
+            &scope("idem-key-none"),
+            &thread.thread_id,
+            msg.message_id,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let result = service
+        .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
+            scope: scope("idem-key-none"),
+            thread_id: thread.thread_id,
+            limit: None,
+            after_sequence: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.len(), 1);
+    assert_eq!(
+        result[0].turn_idempotency_key, None,
+        "turn_idempotency_key must be None when not supplied at defer time"
+    );
 }

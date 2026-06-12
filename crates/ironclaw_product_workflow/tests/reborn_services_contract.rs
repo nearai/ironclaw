@@ -166,6 +166,7 @@ fn fake_thread_history(owner: &WebUiAuthenticatedCaller, thread_id: &str) -> Thr
             redaction_ref: None,
             turn_source_binding_ref: None,
             turn_reply_target_binding_ref: None,
+            turn_idempotency_key: None,
         }],
         summary_artifacts: vec![],
     }
@@ -1370,6 +1371,7 @@ impl SessionThreadService for ScopeMismatchThreadStub {
         _message_id: ThreadMessageId,
         _turn_source_binding_ref: Option<String>,
         _turn_reply_target_binding_ref: Option<String>,
+        _turn_idempotency_key: Option<String>,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         panic!("ScopeMismatchThreadStub::mark_message_deferred_busy should not be reached")
     }
@@ -1604,6 +1606,7 @@ impl SessionThreadService for ScriptedThreadService {
         _message_id: ThreadMessageId,
         _turn_source_binding_ref: Option<String>,
         _turn_reply_target_binding_ref: Option<String>,
+        _turn_idempotency_key: Option<String>,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         scripted_stub_unreachable("mark_message_deferred_busy")
     }
@@ -5771,6 +5774,7 @@ impl SessionThreadService for FirstMissBackendErrorThreadService {
         _message_id: ThreadMessageId,
         _turn_source_binding_ref: Option<String>,
         _turn_reply_target_binding_ref: Option<String>,
+        _turn_idempotency_key: Option<String>,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         panic!(
             "FirstMissBackendErrorThreadService::mark_message_deferred_busy should not be reached"
@@ -7818,6 +7822,7 @@ async fn get_timeline_scrubs_internal_binding_refs_at_facade_boundary() {
             accepted.message_id,
             Some("sbr://tenant/agent/source".to_string()),
             Some("rtr://tenant/agent/reply".to_string()),
+            None,
         )
         .await
         .expect("mark message deferred-busy");

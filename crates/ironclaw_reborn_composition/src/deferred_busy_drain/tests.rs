@@ -211,6 +211,7 @@ async fn deferred_message_submitted_after_blocking_run_is_cancelled() {
             msg_b.message_id,
             Some("src:binding-drain".to_string()),
             Some("reply:binding-drain".to_string()),
+            None,
         )
         .await
         .expect("mark deferred busy");
@@ -305,6 +306,7 @@ async fn drain_idempotency_second_terminal_event_does_not_double_submit() {
             msg_b.message_id,
             Some("src:binding-drain".to_string()),
             Some("reply:binding-drain".to_string()),
+            None,
         )
         .await
         .expect("mark deferred busy");
@@ -429,6 +431,7 @@ async fn deferred_message_submitted_after_blocking_run_completes_via_publish_sta
             msg_b.message_id,
             Some("src:binding-drain".to_string()),
             Some("reply:binding-drain".to_string()),
+            None,
         )
         .await
         .expect("mark deferred busy");
@@ -518,6 +521,7 @@ async fn drain_skips_invalid_message_and_submits_next() {
                 accepted.message_id,
                 None, // No canonical refs — simulates legacy/invalid entry that drain skips
                 None,
+                None,
             )
             .await
             .expect("mark B deferred busy");
@@ -555,6 +559,7 @@ async fn drain_skips_invalid_message_and_submits_next() {
             msg_c.message_id,
             Some("src:binding-drain".to_string()),
             Some("reply:binding-drain".to_string()),
+            None,
         )
         .await
         .expect("mark C deferred busy");
@@ -662,6 +667,7 @@ async fn drain_submits_using_canonical_refs_persisted_at_defer_time() {
             msg_b.message_id,
             Some(canonical_src.to_string()),
             Some(canonical_reply.to_string()),
+            None,
         )
         .await
         .expect("mark B deferred busy");
@@ -722,6 +728,7 @@ async fn drain_submits_one_valid_message_per_terminal_event_cascade() {
             msg_b.message_id,
             Some("src:binding-drain".to_string()),
             Some("reply:binding-drain".to_string()),
+            None,
         )
         .await
         .expect("defer B");
@@ -734,6 +741,7 @@ async fn drain_submits_one_valid_message_per_terminal_event_cascade() {
             msg_c.message_id,
             Some("src:binding-drain".to_string()),
             Some("reply:binding-drain".to_string()),
+            None,
         )
         .await
         .expect("defer C");
@@ -886,6 +894,7 @@ impl ironclaw_threads::SessionThreadService for FailingListService {
         _: &ThreadScope,
         _: &ironclaw_host_api::ThreadId,
         _: ironclaw_threads::ThreadMessageId,
+        _: Option<String>,
         _: Option<String>,
         _: Option<String>,
     ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError> {
@@ -1100,6 +1109,7 @@ impl ironclaw_threads::SessionThreadService for NoActorListService {
         _: ironclaw_threads::ThreadMessageId,
         _: Option<String>,
         _: Option<String>,
+        _: Option<String>,
     ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError> {
         unreachable!("NoActorListService: mark_message_deferred_busy")
     }
@@ -1131,6 +1141,7 @@ impl ironclaw_threads::SessionThreadService for NoActorListService {
             redaction_ref: None,
             turn_source_binding_ref: Some("src:binding-drain".to_string()),
             turn_reply_target_binding_ref: Some("reply:binding-drain".to_string()),
+            turn_idempotency_key: None,
         }])
     }
     async fn append_assistant_draft(
@@ -1299,6 +1310,7 @@ async fn drain_leaves_deferred_when_resubmit_hits_thread_busy() {
             msg_b.message_id,
             Some("src:binding-drain".to_string()),
             Some("reply:binding-drain".to_string()),
+            None,
         )
         .await
         .expect("defer B");
@@ -1364,6 +1376,7 @@ async fn drain_leaves_deferred_when_resubmit_hits_thread_busy() {
             msg_c.message_id,
             Some("src:binding-drain".to_string()),
             Some("reply:binding-drain".to_string()),
+            None,
         )
         .await
         .expect("defer C");
@@ -1511,6 +1524,7 @@ async fn drain_submit_error_returns_ok_and_leaves_deferred_busy() {
             _: ironclaw_threads::ThreadMessageId,
             _: Option<String>,
             _: Option<String>,
+            _: Option<String>,
         ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
         {
             unreachable!("ValidRecordListService: mark_message_deferred_busy")
@@ -1542,6 +1556,7 @@ async fn drain_submit_error_returns_ok_and_leaves_deferred_busy() {
                 redaction_ref: None,
                 turn_source_binding_ref: Some("src:binding-drain".to_string()),
                 turn_reply_target_binding_ref: Some("reply:binding-drain".to_string()),
+                turn_idempotency_key: None,
             }])
         }
         async fn append_assistant_draft(
@@ -1713,6 +1728,7 @@ impl ironclaw_threads::SessionThreadService for FailingMarkSubmittedService {
         _: ironclaw_threads::ThreadMessageId,
         _: Option<String>,
         _: Option<String>,
+        _: Option<String>,
     ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError> {
         unreachable!("FailingMarkSubmittedService: mark_message_deferred_busy")
     }
@@ -1744,6 +1760,7 @@ impl ironclaw_threads::SessionThreadService for FailingMarkSubmittedService {
             redaction_ref: None,
             turn_source_binding_ref: Some("src:binding-drain".to_string()),
             turn_reply_target_binding_ref: Some("reply:binding-drain".to_string()),
+            turn_idempotency_key: None,
         }])
     }
     async fn append_assistant_draft(
@@ -2003,9 +2020,11 @@ async fn drain_replays_persisted_refs_verbatim_in_submit_turn_request() {
     )
     .await;
 
-    // Step 2: Accept B with distinctive canonical refs and defer it.
+    // Step 2: Accept B with distinctive canonical refs and defer it, including
+    // a persisted idempotency key so the drain replays the original key.
     let canonical_src = "webui-src:capture-me";
     let canonical_reply = "webui-reply:capture-me";
+    let canonical_idem = "turn:original-idem-key-capture";
     let msg_b = accept_message(&thread_service, "capture-b", "ev-cap-b").await;
     let expected_accepted_ref = format!("msg:{}", msg_b.message_id);
 
@@ -2019,6 +2038,7 @@ async fn drain_replays_persisted_refs_verbatim_in_submit_turn_request() {
             msg_b.message_id,
             Some(canonical_src.to_string()),
             Some(canonical_reply.to_string()),
+            Some(canonical_idem.to_string()),
         )
         .await
         .expect("mark B deferred busy");
@@ -2035,7 +2055,8 @@ async fn drain_replays_persisted_refs_verbatim_in_submit_turn_request() {
         .await
         .expect("cancel run A");
 
-    // Step 4: Retrieve the captured request and assert all three ref fields.
+    // Step 4: Retrieve the captured request and assert all fields, including
+    // the idempotency key which must match the persisted original exactly.
     let captured = capturing_coordinator
         .take_captured()
         .await
@@ -2055,6 +2076,106 @@ async fn drain_replays_persisted_refs_verbatim_in_submit_turn_request() {
         captured.accepted_message_ref.as_str(),
         expected_accepted_ref,
         "accepted_message_ref must point at the deferred message"
+    );
+    assert_eq!(
+        captured.idempotency_key.as_str(),
+        canonical_idem,
+        "drain must replay the persisted turn_idempotency_key verbatim, not a derived drain: key"
+    );
+}
+
+/// Sibling to `drain_replays_persisted_refs_verbatim_in_submit_turn_request`:
+/// when `turn_idempotency_key` is `None` (legacy record written before the
+/// field existed), the drain must fall back to `drain:<message_id>` so there
+/// is always a well-formed key and the coordinator still deduplicates retries
+/// for the same message.
+#[tokio::test]
+async fn drain_falls_back_to_derived_key_when_no_persisted_idempotency_key() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope(),
+            thread_id: Some(thread_id()),
+            created_by_actor_id: actor().as_str().to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("ensure thread");
+
+    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let lifecycle_bus = Arc::new(DefaultTurnLifecycleEventBus::new());
+
+    let drain_observer_for_bind = Arc::new(DeferredBusyDrainObserver::new_unbound(Arc::clone(
+        &thread_service,
+    )
+        as Arc<dyn ironclaw_threads::SessionThreadService>));
+    let drain_observer: Arc<dyn TurnCommittedEventObserver> =
+        Arc::clone(&drain_observer_for_bind) as Arc<dyn TurnCommittedEventObserver>;
+    lifecycle_bus
+        .subscribe_required(drain_observer)
+        .expect("subscribe drain observer");
+
+    let publishing_store = Arc::new(LifecyclePublishingTurnStateStore::new(
+        Arc::clone(&turn_store),
+        lifecycle_bus,
+    ));
+
+    let inner_coordinator: Arc<dyn TurnCoordinator> =
+        Arc::new(DefaultTurnCoordinator::new(Arc::clone(&publishing_store)));
+    let capturing_coordinator = Arc::new(CapturingCoordinator::new(Arc::clone(&inner_coordinator)));
+    let coordinator: Arc<dyn TurnCoordinator> =
+        Arc::clone(&capturing_coordinator) as Arc<dyn TurnCoordinator>;
+
+    drain_observer_for_bind
+        .bind_coordinator(Arc::clone(&coordinator))
+        .expect("bind drain coordinator");
+
+    let msg_a = accept_message(&thread_service, "fallback-idem-a", "ev-fallback-a").await;
+    let run_a = submit_run(
+        inner_coordinator.as_ref(),
+        "fallback-idem-a",
+        AcceptedMessageRef::new(format!("msg:{}", msg_a.message_id)).unwrap(),
+    )
+    .await;
+
+    let msg_b = accept_message(&thread_service, "fallback-idem-b", "ev-fallback-b").await;
+    let _ = capturing_coordinator.take_captured().await;
+
+    // Defer B with None idempotency key — simulates a legacy record.
+    thread_service
+        .mark_message_deferred_busy(
+            &thread_scope(),
+            &thread_id(),
+            msg_b.message_id,
+            Some("src:fallback-idem".to_string()),
+            Some("reply:fallback-idem".to_string()),
+            None, // no persisted idempotency key → drain should fall back
+        )
+        .await
+        .expect("mark B deferred busy");
+
+    coordinator
+        .cancel_run(CancelRunRequest {
+            scope: turn_scope(),
+            actor: TurnActor::new(actor()),
+            run_id: run_a,
+            reason: SanitizedCancelReason::UserRequested,
+            idempotency_key: IdempotencyKey::new("cancel:fallback-idem-a").unwrap(),
+        })
+        .await
+        .expect("cancel run A");
+
+    let captured = capturing_coordinator
+        .take_captured()
+        .await
+        .expect("drain must have called submit_turn for deferred message B");
+
+    let expected_fallback = format!("drain:{}", msg_b.message_id);
+    assert_eq!(
+        captured.idempotency_key.as_str(),
+        expected_fallback,
+        "drain must fall back to drain:<message_id> for records without a persisted idempotency key"
     );
 }
 
@@ -2121,6 +2242,7 @@ impl ironclaw_threads::SessionThreadService for OverCapInvalidListService {
         _: ironclaw_threads::ThreadMessageId,
         _: Option<String>,
         _: Option<String>,
+        _: Option<String>,
     ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError> {
         unreachable!("OverCapInvalidListService: mark_message_deferred_busy")
     }
@@ -2156,6 +2278,7 @@ impl ironclaw_threads::SessionThreadService for OverCapInvalidListService {
                 // No canonical refs → drain skips all of these.
                 turn_source_binding_ref: None,
                 turn_reply_target_binding_ref: None,
+                turn_idempotency_key: None,
             })
             .collect();
         Ok(records)
@@ -2384,6 +2507,7 @@ impl ironclaw_threads::SessionThreadService for MalformedRefListService {
             redaction_ref: None,
             turn_source_binding_ref: Some("src:binding-drain".to_string()),
             turn_reply_target_binding_ref: Some("reply:binding-drain".to_string()),
+            turn_idempotency_key: None,
         })
     }
     async fn mark_message_deferred_busy(
@@ -2391,6 +2515,7 @@ impl ironclaw_threads::SessionThreadService for MalformedRefListService {
         _: &ThreadScope,
         _: &ironclaw_host_api::ThreadId,
         _: ironclaw_threads::ThreadMessageId,
+        _: Option<String>,
         _: Option<String>,
         _: Option<String>,
     ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError> {
@@ -2428,6 +2553,7 @@ impl ironclaw_threads::SessionThreadService for MalformedRefListService {
                 // >256 bytes → SourceBindingRef::new will reject this.
                 turn_source_binding_ref: Some(overlong_ref),
                 turn_reply_target_binding_ref: Some("reply:binding-drain".to_string()),
+                turn_idempotency_key: None,
             },
             ironclaw_threads::ThreadMessageRecord {
                 message_id: self.good_message_id,
@@ -2446,6 +2572,7 @@ impl ironclaw_threads::SessionThreadService for MalformedRefListService {
                 redaction_ref: None,
                 turn_source_binding_ref: Some("src:binding-drain".to_string()),
                 turn_reply_target_binding_ref: Some("reply:binding-drain".to_string()),
+                turn_idempotency_key: None,
             },
         ])
     }

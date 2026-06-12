@@ -2752,6 +2752,7 @@ async fn mark_message_deferred_busy_or_replay(
             handoff.message_id,
             Some(turn_source_binding_ref),
             Some(turn_reply_target_binding_ref),
+            Some(client_action_id.as_str().to_string()),
         )
         .await
     {
@@ -3700,6 +3701,7 @@ fn scrub_internal_timeline_refs(
 ) -> ironclaw_threads::ThreadMessageRecord {
     record.turn_source_binding_ref = None;
     record.turn_reply_target_binding_ref = None;
+    record.turn_idempotency_key = None;
     record
 }
 

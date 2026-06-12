@@ -610,6 +610,7 @@ impl AcceptedProductInboundTurn {
 
         let canonical_source_ref = source_binding_ref.as_str().to_string();
         let canonical_reply_ref = reply_target_binding_ref.as_str().to_string();
+        let canonical_idempotency_key = idempotency_key.as_str().to_string();
         let request = SubmitTurnRequest {
             scope: turn_scope,
             actor,
@@ -658,6 +659,7 @@ impl AcceptedProductInboundTurn {
                         message_id,
                         Some(canonical_source_ref),
                         Some(canonical_reply_ref),
+                        Some(canonical_idempotency_key),
                     )
                     .await
                     .map_err(|e| ProductWorkflowError::Transient {

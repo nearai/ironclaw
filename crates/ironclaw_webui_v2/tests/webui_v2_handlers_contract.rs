@@ -3986,6 +3986,7 @@ async fn get_timeline_scrubs_internal_binding_refs_from_wire_response() {
         // Facade has already scrubbed these to None before the handler sees them.
         turn_source_binding_ref: None,
         turn_reply_target_binding_ref: None,
+        turn_idempotency_key: None,
     };
     services.set_next_timeline_messages(vec![message_from_facade]);
 

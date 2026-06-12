@@ -139,6 +139,15 @@ pub struct ThreadMessageRecord {
     /// See `turn_source_binding_ref` for the None/legacy semantics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_reply_target_binding_ref: Option<String>,
+    /// Original idempotency key from the `SubmitTurnRequest` that produced the
+    /// initial `ThreadBusy` result, persisted at defer time so the drain can
+    /// replay with the exact same key and the coordinator deduplicates any
+    /// concurrent retry that was already accepted under that key.
+    ///
+    /// `None` on records written before this field was added (legacy). The drain
+    /// falls back to `drain:<message_id>` for those records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_idempotency_key: Option<String>,
 }
 
 /// Summary artifact over a stable transcript sequence range.

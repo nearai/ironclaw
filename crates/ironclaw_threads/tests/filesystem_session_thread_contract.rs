@@ -1175,6 +1175,7 @@ async fn filesystem_list_deferred_busy_messages_returns_only_deferred_busy() {
             msg_a.message_id,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1244,6 +1245,7 @@ async fn filesystem_list_deferred_busy_messages_ordered_oldest_first() {
                 msg.message_id,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -1302,6 +1304,7 @@ async fn filesystem_list_deferred_busy_messages_wrong_scope_returns_empty() {
             msg.message_id,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1354,6 +1357,7 @@ async fn filesystem_list_deferred_busy_messages_limit_caps_results() {
                 &scope("ldb-limit"),
                 &thread.thread_id,
                 msg.message_id,
+                None,
                 None,
                 None,
             )
@@ -1430,6 +1434,7 @@ async fn filesystem_list_deferred_busy_messages_after_sequence_filters_earlier_r
             msg_a.message_id,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1453,6 +1458,7 @@ async fn filesystem_list_deferred_busy_messages_after_sequence_filters_earlier_r
             msg_b.message_id,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1474,6 +1480,7 @@ async fn filesystem_list_deferred_busy_messages_after_sequence_filters_earlier_r
             &scope("ldb-aseq"),
             &thread.thread_id,
             msg_c.message_id,
+            None,
             None,
             None,
         )
@@ -1572,6 +1579,7 @@ async fn filesystem_cursor_filtered_empty_scan_does_not_tombstone_marker() {
             msg.message_id,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1647,6 +1655,7 @@ async fn filesystem_mark_message_deferred_busy_marker_present_immediately_after(
             msg.message_id,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1705,6 +1714,7 @@ async fn filesystem_tombstones_marker_after_last_deferred_resolved() {
             &scope("fs-marker-tombstone"),
             &thread.thread_id,
             msg.message_id,
+            None,
             None,
             None,
         )
@@ -1794,6 +1804,7 @@ async fn filesystem_zero_limit_does_not_tombstone_marker_when_deferred_rows_exis
             msg.message_id,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1826,6 +1837,133 @@ async fn filesystem_zero_limit_does_not_tombstone_marker_when_deferred_rows_exis
         "marker must survive limit:Some(0) call; full scan must still return the deferred message"
     );
     assert_eq!(full[0].message_id, rec.message_id);
+}
+
+#[tokio::test]
+async fn filesystem_mark_message_deferred_busy_persists_turn_idempotency_key() {
+    // When a Some(key) is supplied, the persisted record must carry it so the
+    // drain can replay the original idempotency key verbatim.
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-idem-key-persist", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("idem-key-persist-fs"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let msg = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("idem-key-persist-fs"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("idem-key-test-fs"),
+        })
+        .await
+        .unwrap();
+
+    let expected_key = "turn:original-key-fs-abc123".to_string();
+    service
+        .mark_message_deferred_busy(
+            &scope("idem-key-persist-fs"),
+            &thread.thread_id,
+            msg.message_id,
+            Some("src:binding-fs".to_string()),
+            Some("reply:binding-fs".to_string()),
+            Some(expected_key.clone()),
+        )
+        .await
+        .unwrap();
+
+    let result = service
+        .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
+            scope: scope("idem-key-persist-fs"),
+            thread_id: thread.thread_id,
+            limit: None,
+            after_sequence: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.len(), 1);
+    assert_eq!(
+        result[0].turn_idempotency_key.as_deref(),
+        Some(expected_key.as_str()),
+        "turn_idempotency_key must be persisted verbatim so the drain can replay it"
+    );
+    assert_eq!(
+        result[0].turn_source_binding_ref.as_deref(),
+        Some("src:binding-fs"),
+        "turn_source_binding_ref must also be persisted"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_mark_message_deferred_busy_none_idempotency_key_returns_none_in_record() {
+    // When None is supplied (legacy path), the persisted record must also
+    // have None so the drain knows to fall back to drain:<message_id>.
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-idem-key-none", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("idem-key-none-fs"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let msg = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("idem-key-none-fs"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("idem-key-none-test-fs"),
+        })
+        .await
+        .unwrap();
+
+    service
+        .mark_message_deferred_busy(
+            &scope("idem-key-none-fs"),
+            &thread.thread_id,
+            msg.message_id,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let result = service
+        .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
+            scope: scope("idem-key-none-fs"),
+            thread_id: thread.thread_id,
+            limit: None,
+            after_sequence: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.len(), 1);
+    assert_eq!(
+        result[0].turn_idempotency_key, None,
+        "turn_idempotency_key must be None when not supplied at defer time"
+    );
 }
 
 fn scoped_threads_fs_at<F>(backend: Arc<F>, tenant: &str, user: &str) -> Arc<ScopedFilesystem<F>>

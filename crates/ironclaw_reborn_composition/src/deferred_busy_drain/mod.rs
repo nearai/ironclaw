@@ -20,8 +20,12 @@
 //! active the retry gets `ThreadBusy` again, and the drain picks up the
 //! message on the next terminal event.  There is no hard ordering between the
 //! retry and a concurrently-firing drain; observer-side replays are
-//! deduplicated by the `drain:<message_id>` idempotency key rather than by
-//! one path always winning the race.
+//! deduplicated by the coordinator: the drain replays the original
+//! `turn_idempotency_key` persisted at defer time so a post-defer retry that
+//! was already accepted deduplicates rather than producing a second run.
+//! Records written before this field existed fall back to the legacy
+//! `drain:<message_id>` prefix which is unique per message but does not
+//! deduplicate against the original submission key.
 //!
 //! # Failure contract
 //!
@@ -266,10 +270,13 @@ where
                         }
                     };
 
-                // Use the message_id as the idempotency key so a duplicate drain
-                // fire produces the same run rather than a second submission.
-                let idempotency_key =
-                    match IdempotencyKey::new(format!("drain:{}", message.message_id)) {
+                // Use the original idempotency key persisted at defer time so
+                // the coordinator deduplicates any concurrent retry that was
+                // already accepted under that key.  Records written before this
+                // field existed (turn_idempotency_key = None) fall back to the
+                // legacy `drain:<message_id>` prefix.
+                let idempotency_key = match message.turn_idempotency_key.as_deref() {
+                    Some(raw) => match IdempotencyKey::new(raw) {
                         Ok(k) => k,
                         Err(reason) => {
                             debug!(
@@ -277,11 +284,25 @@ where
                                 run_id = %run_id,
                                 message_id = %message.message_id,
                                 reason,
-                                "cannot build idempotency key, skipping"
+                                "invalid persisted turn_idempotency_key, skipping"
                             );
                             continue;
                         }
-                    };
+                    },
+                    None => match IdempotencyKey::new(format!("drain:{}", message.message_id)) {
+                        Ok(k) => k,
+                        Err(reason) => {
+                            debug!(
+                                observer = "deferred_busy_drain",
+                                run_id = %run_id,
+                                message_id = %message.message_id,
+                                reason,
+                                "cannot build fallback idempotency key, skipping"
+                            );
+                            continue;
+                        }
+                    },
+                };
 
                 let agent_id = match scope.agent_id.clone() {
                     Some(id) => id,
@@ -482,10 +503,14 @@ where
     /// Handles runner-origin terminal transitions (complete_run, fail_run,
     /// cancel_run via runner, etc.) — the production path for approval runs.
     ///
-    /// The idempotency key (`drain:<message_id>`) ensures a double-drain
-    /// (one from state publication, one from any subsequent event publication
-    /// for the same terminal transition) produces `AlreadySubmitted` on the
-    /// second call rather than a duplicate run.
+    /// Replaying the persisted original `turn_idempotency_key` closes the
+    /// double-run window: a double-drain (one from state publication, one from
+    /// any subsequent event publication for the same terminal transition)
+    /// produces `AlreadySubmitted` on the second call rather than a duplicate
+    /// run.  Legacy records without a persisted key fall back to the
+    /// `drain:<message_id>` prefix which still deduplicates concurrent drain
+    /// fires for the same message but does not deduplicate against the original
+    /// submission key.
     async fn observe_committed_state(&self, state: TurnRunState) -> Result<(), TurnError> {
         if let Err(error) = self.drain_for_terminal_state(&state).await {
             debug!(

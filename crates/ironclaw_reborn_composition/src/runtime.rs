@@ -6752,6 +6752,7 @@ mod tests {
                 msg_b.message_id,
                 Some("drain-wiring-source:b".to_string()),
                 Some("drain-wiring-reply:b".to_string()),
+                None,
             )
             .await
             .expect("mark message B deferred busy");
