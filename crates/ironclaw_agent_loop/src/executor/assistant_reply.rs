@@ -34,18 +34,18 @@ impl ExecutorStage<AssistantReplyInput> for AssistantReplyStage {
         // nothing to grade), try one tool-free final-answer nudge. No-op unless
         // the run profile enables driver-specific nudges.
         let trimmed = input.reply.content.trim();
-        if trimmed.is_empty() || trimmed.ends_with(':') {
-            if let Some(reply_ref) = try_final_answer_nudge(ctx, &mut state).await? {
-                state.assistant_refs.push(reply_ref.clone());
-                state = match CheckpointStage.cancel_if_requested(ctx, state).await? {
-                    CancelCheck::Continue(state) => *state,
-                    CancelCheck::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
-                };
-                return Ok(TurnCompletedStep::Continue {
-                    state: Box::new(state),
-                    summary: TurnSummary::reply_only(reply_ref),
-                });
-            }
+        if (trimmed.is_empty() || trimmed.ends_with(':'))
+            && let Some(reply_ref) = try_final_answer_nudge(ctx, &mut state).await?
+        {
+            state.assistant_refs.push(reply_ref.clone());
+            state = match CheckpointStage.cancel_if_requested(ctx, state).await? {
+                CancelCheck::Continue(state) => *state,
+                CancelCheck::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
+            };
+            return Ok(TurnCompletedStep::Continue {
+                state: Box::new(state),
+                summary: TurnSummary::reply_only(reply_ref),
+            });
         }
 
         let output_tokens = input
