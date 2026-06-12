@@ -16,6 +16,19 @@ const PAGE_SIZE = 50;
  * source of truth; the /timeline endpoint remains authoritative. */
 const historyCache = new Map();
 
+// Cap the cache so a long SPA session visiting many threads can't grow it
+// without bound. Map preserves insertion order, so re-inserting on write and
+// evicting from the front gives simple LRU-ish behavior.
+const MAX_CACHED_THREADS = 30;
+function putCache(key, value) {
+  historyCache.delete(key);
+  historyCache.set(key, value);
+  while (historyCache.size > MAX_CACHED_THREADS) {
+    const oldest = historyCache.keys().next().value;
+    historyCache.delete(oldest);
+  }
+}
+
 // Namespace cache entries by the authenticated user so a session change in
 // the same tab (sign-out/in, token swap, 401 re-auth) can't surface the
 // previous user's cached conversations — a different identity reads under a
@@ -84,7 +97,7 @@ export function useHistory(threadId, options = {}) {
         // state, so refresh the cache even if the user has since switched
         // threads.
         if (!cursor) {
-          historyCache.set(cacheKey(threadId), { messages: renderable, nextCursor });
+          putCache(cacheKey(threadId), { messages: renderable, nextCursor });
         }
 
         setState((prev) => {
@@ -94,7 +107,7 @@ export function useHistory(threadId, options = {}) {
           const merged = cursor
             ? mergePage(renderable, prev.messages)
             : renderable;
-          if (cursor) historyCache.set(cacheKey(threadId), { messages: merged, nextCursor });
+          if (cursor) putCache(cacheKey(threadId), { messages: merged, nextCursor });
           return {
             messages: merged,
             nextCursor,
@@ -151,7 +164,7 @@ export function useHistory(threadId, options = {}) {
         // Keep the cache in step with optimistic sends and SSE-driven
         // updates so returning to the thread shows the latest messages.
         if (threadId) {
-          historyCache.set(cacheKey(threadId), { messages, nextCursor: s.nextCursor });
+          putCache(cacheKey(threadId), { messages, nextCursor: s.nextCursor });
         }
         return { ...s, messages };
       }),
