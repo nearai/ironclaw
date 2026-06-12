@@ -129,6 +129,18 @@ export function useProviderLogin({ onSuccess } = {}) {
   const [codexError, setCodexError] = React.useState("");
   const [codexCode, setCodexCode] = React.useState(null);
 
+  // Clear every login flow's feedback before starting a new attempt. The
+  // status surface renders the NEAR AI and Codex errors (plus the Codex device
+  // code) together, and the three NEAR AI methods share one error slot, so a
+  // failed attempt's message would otherwise linger while the user switches to
+  // a different provider/method. Resetting on every start keeps the surface
+  // scoped to the attempt in progress.
+  const resetLoginFeedback = React.useCallback(() => {
+    setNearaiError("");
+    setCodexError("");
+    setCodexCode(null);
+  }, []);
+
   const finishActive = React.useCallback(async () => {
     await queryClient.invalidateQueries({ queryKey: ["llm-providers"] });
     if (onSuccess) {
@@ -138,7 +150,7 @@ export function useProviderLogin({ onSuccess } = {}) {
 
   const startNearai = React.useCallback(
     async (provider) => {
-      setNearaiError("");
+      resetLoginFeedback();
       if (isLocalDevOrigin()) {
         setNearaiError(t("onboarding.nearaiLocalSso"));
         return;
@@ -185,7 +197,7 @@ export function useProviderLogin({ onSuccess } = {}) {
         setNearaiBusy(false);
       }
     },
-    [finishActive, t]
+    [finishActive, resetLoginFeedback, t]
   );
 
   // NEAR wallet login can't reuse the GitHub/Google redirect: NEP-413 signing
@@ -198,7 +210,7 @@ export function useProviderLogin({ onSuccess } = {}) {
     // NEP-413 signing happens in a same-origin popup and the signed message is
     // relayed through our own backend. So it works on localhost — no local-dev
     // guard here.
-    setNearaiError("");
+    resetLoginFeedback();
     setNearaiBusy(true);
     try {
       const channelName = walletLoginChannelName();
@@ -240,11 +252,10 @@ export function useProviderLogin({ onSuccess } = {}) {
     } finally {
       setNearaiBusy(false);
     }
-  }, [finishActive, t]);
+  }, [finishActive, resetLoginFeedback, t]);
 
   const startCodex = React.useCallback(async () => {
-    setCodexError("");
-    setCodexCode(null);
+    resetLoginFeedback();
     setCodexBusy(true);
     try {
       const { user_code: userCode, verification_uri: verificationUri } =
@@ -281,7 +292,7 @@ export function useProviderLogin({ onSuccess } = {}) {
     } finally {
       setCodexBusy(false);
     }
-  }, [finishActive, t]);
+  }, [finishActive, resetLoginFeedback, t]);
 
   return {
     nearaiBusy,

@@ -759,3 +759,23 @@ test("startCodex recovers when the user closes the verification tab (#4706)", as
   );
   assert.ok(run.codexBusyCleared(), "the busy flag is cleared so retry needs no refresh");
 });
+
+test("starting a new sign-in clears a prior provider's stale error (#4706)", async () => {
+  // The status surface renders the NEAR AI and Codex errors together, so a
+  // failed attempt's message must not linger once the user starts a different
+  // sign-in. localhost makes the NEAR AI hosted-SSO attempt fail fast with a
+  // visible error; popupClosed lets the subsequent Codex attempt resolve
+  // promptly without polling out its deadline.
+  const run = runProviderLogin({ hostname: "localhost", popupClosed: true });
+  await run.hook.startNearai("github");
+  assert.ok(
+    run.nearaiErrors().includes("onboarding.nearaiLocalSso"),
+    "the first attempt surfaces an error"
+  );
+  await run.hook.startCodex();
+  assert.equal(
+    run.nearaiErrors().at(-1),
+    "",
+    "starting a different sign-in clears the prior provider's error"
+  );
+});
