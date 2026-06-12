@@ -22,6 +22,7 @@ use super::{
     compaction::{CompactionInitiator, LoopCompactionPort},
     instruction_bundle::InstructionBundleFingerprint,
     model_observation::{CapabilityFailureDetail, ModelVisibleToolObservation},
+    prompt_text::{PromptTextSurface, validate_prompt_text},
     refs::{CheckpointSchemaId, LoopDriverId, ModelProfileId},
     snapshot::ResolvedRunProfile,
     system_inference::SystemInferenceTaskId,
@@ -192,6 +193,15 @@ fn validate_loop_safe_summary(value: String) -> Result<String, String> {
         return Err("loop safe summary must not contain API-key-like tokens".to_string());
     }
     Ok(value)
+}
+
+fn validate_loop_inline_message_body(value: String) -> Result<String, String> {
+    validate_prompt_text(
+        value,
+        "loop inline message body",
+        PromptTextSurface::GenericModelContent,
+    )
+    .map_err(|error| error.safe_summary)
 }
 
 macro_rules! bounded_loop_ref {
@@ -403,6 +413,42 @@ impl AsRef<str> for LoopSafeSummary {
 impl std::fmt::Display for LoopSafeSummary {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct LoopInlineMessageBody(String);
+
+impl LoopInlineMessageBody {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        validate_loop_inline_message_body(value.into()).map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for LoopInlineMessageBody {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for LoopInlineMessageBody {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for LoopInlineMessageBody {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -970,7 +1016,7 @@ pub enum LoopInlineMessageRole {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopInlineMessage {
     pub role: LoopInlineMessageRole,
-    pub safe_body: LoopSafeSummary,
+    pub safe_body: LoopInlineMessageBody,
 }
 
 /// Request for a host-managed prompt bundle.

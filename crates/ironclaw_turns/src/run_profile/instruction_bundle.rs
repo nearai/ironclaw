@@ -547,8 +547,11 @@ fn push_inline_message(
     synthetic_refs: &mut SyntheticMessageRefRegistry,
 ) -> Result<(), AgentLoopHostError> {
     let role = inline_role(message.role).to_string();
-    let safe_body =
-        validate_model_safe_text(message.safe_body.as_str().to_string(), "inline prompt body")?;
+    let safe_body = validate_prompt_text(
+        message.safe_body.as_str().to_string(),
+        "inline prompt body",
+        PromptTextSurface::GenericModelContent,
+    )?;
     let content_ref = synthetic_message_ref("inline", &role, &safe_body, ordinal, synthetic_refs)?;
     feed_field(fingerprint, b"section", b"inline");
     feed_field(fingerprint, b"ref", content_ref.as_str().as_bytes());
