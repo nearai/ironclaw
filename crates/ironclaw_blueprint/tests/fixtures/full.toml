@@ -1,0 +1,52 @@
+api_version = "ironclaw.config/v1"
+kind = "Blueprint"
+
+[scope]
+tenant = "acme"
+
+[system_prompt]
+text_ref = "files/system_prompt.md"
+applies_to = { project = "*" }
+
+[providers]
+default_llm = "anthropic"
+
+[providers.anthropic]
+model = "claude-opus-4-7"
+api_key = "${secret:anthropic_api_key}"
+
+[runtime]
+profile = "HostedDev"
+approval_policy = "ask_destructive"
+
+[agent_loop]
+run_class = "interactive_coding"
+loop_driver = "lightweight"
+
+[[extensions]]
+id = "github-mcp"
+version = "^0.4"
+trust = "user_trusted"
+config = { default_org = "acme-corp" }
+auth = { kind = "oauth", account_ref = "github.work" }
+
+[[skills]]
+id = "code-review"
+source = "registry"
+enabled = true
+
+[[missions]]
+id = "weekly-security-sweep"
+schedule = "0 9 * * MON"
+brief_ref = "files/missions/security-sweep.md"
+
+[[projects]]
+id = "acme-monorepo"
+seed = { from = "git", url = "https://github.com/acme/monorepo", ref = "main" }
+
+[capability_surface]
+allow = ["filesystem.read", "github-mcp.*", "memory.*"]
+deny = ["shell.*"]
+
+[harness]
+id = "chain-incident-response"

@@ -4169,6 +4169,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_blueprint"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "ironclaw_host_api",
+ "ironclaw_reborn_config",
+ "jsonschema",
+ "schemars 1.2.1",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "ironclaw_capabilities"
 version = "0.1.0"
 dependencies = [

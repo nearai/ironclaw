@@ -1,0 +1,46 @@
+[package]
+name = "ironclaw_blueprint"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Declarative tenant/operator blueprint format and parser for IronClaw Reborn (epic #3036)"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+# Boundary crate only: it owns the blueprint *input* format and its parser.
+# The apply path (reconcilers writing typed repos) is a later slice and must
+# not be folded back into this crate — keeping it dependency-light makes the
+# parser cheap to embed in the CLI, the admin web endpoint, and tests alike.
+[package.metadata.dist]
+dist = false
+
+[dependencies]
+# Reuse the boot-config inline-secret guard rather than reimplementing the
+# rejection rule. The guard already cites this epic and tracks the secret
+# shapes operators paste by mistake.
+ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
+# Typed-ID grammars (TenantId, ExtensionId, SecretHandle, …). Identifiers are
+# validated with the same constructors the repos use downstream, so a value
+# this parser accepts can never be rejected at apply time.
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+
+hex = "0.4.3"
+# JSON Schema artifacts are generated from the serde AST types so the schemas
+# and the parser cannot drift (epic slice 1 "JSON Schemas" deliverable).
+schemars = "1"
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+toml = "0.8"
+
+[dev-dependencies]
+jsonschema = { version = "0.45", default-features = false }
+tempfile = "3"
+
+[lints]
+workspace = true
