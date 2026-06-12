@@ -1576,8 +1576,7 @@ async fn production_loop_model_request_includes_runtime_context() {
     let fixture = ThreadFixture::new().await;
     let loop_started_at_utc = chrono::Utc::now();
     let store = Arc::new(InMemoryInstructionMaterializationStore::default());
-    let store_for_port: Arc<dyn InstructionMaterializationStore> =
-        Arc::clone(&store) as Arc<dyn InstructionMaterializationStore>;
+    let store_for_port: Arc<dyn InstructionMaterializationStore> = store.clone();
     let context_port = Arc::new(ThreadBackedLoopContextPort::new(
         Arc::clone(&fixture.thread_service),
         fixture.thread_scope.clone(),
