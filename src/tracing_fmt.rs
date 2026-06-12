@@ -12,7 +12,7 @@
 //!        v
 //!   tracing_subscriber::registry()
 //!        |
-//!        +-- fmt::layer().with_writer(TruncatingStderr)  <-- caps at 500B
+//!        +-- fmt::layer().with_writer(TruncatingStderr)  <-- caps at 500B (IRONCLAW_LOG_MAX_BYTES to override)
 //!        |       \-- stderr (truncated)
 //!        |
 //!        \-- WebLogLayer (unchanged)
@@ -65,6 +65,25 @@ impl Default for TruncatingStderr {
 }
 
 impl TruncatingStderr {
+    /// Construct from `IRONCLAW_LOG_MAX_BYTES`, falling back to the default if
+    /// the variable is unset or unparseable.
+    pub fn from_env() -> Self {
+        let max_bytes = std::env::var("IRONCLAW_LOG_MAX_BYTES")
+            .ok()
+            .and_then(|v| match v.parse::<usize>() {
+                Ok(n) => Some(n),
+                Err(_) => {
+                    eprintln!(
+                        "warning: IRONCLAW_LOG_MAX_BYTES={v:?} is not a valid number, \
+                         using default ({TERMINAL_MAX_EVENT_BYTES})"
+                    );
+                    None
+                }
+            })
+            .unwrap_or(TERMINAL_MAX_EVENT_BYTES);
+        Self { max_bytes }
+    }
+
     #[cfg(test)]
     fn with_max_bytes(max_bytes: usize) -> Self {
         Self { max_bytes }
@@ -169,6 +188,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use crate::tracing_fmt::{EventBuffer, TruncatingStderr, utf8_floor};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     use std::io::Write;
 
@@ -334,5 +355,31 @@ mod tests {
         // Should back up to byte 2 (just "AB"), since bytes 2..5 are all part of 𝄞
         assert!(s.starts_with("AB"), "expected 'AB', got: {}", s);
         assert!(s.contains("...["), "should be truncated, got: {}", s);
+    }
+
+    #[test]
+    fn test_from_env_valid_number() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::set_var("IRONCLAW_LOG_MAX_BYTES", "2000") };
+        let writer = TruncatingStderr::from_env();
+        unsafe { std::env::remove_var("IRONCLAW_LOG_MAX_BYTES") };
+        assert_eq!(writer.max_bytes, 2000);
+    }
+
+    #[test]
+    fn test_from_env_invalid_value_falls_back_to_default() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::set_var("IRONCLAW_LOG_MAX_BYTES", "not_a_number") };
+        let writer = TruncatingStderr::from_env();
+        unsafe { std::env::remove_var("IRONCLAW_LOG_MAX_BYTES") };
+        assert_eq!(writer.max_bytes, 500);
+    }
+
+    #[test]
+    fn test_from_env_unset_falls_back_to_default() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("IRONCLAW_LOG_MAX_BYTES") };
+        let writer = TruncatingStderr::from_env();
+        assert_eq!(writer.max_bytes, 500);
     }
 }
