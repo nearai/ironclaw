@@ -728,4 +728,62 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn registry_canonical_ext_matches_web_extension_map() {
+        // Mirror of `web_attachment_ext` in `src/channels/web/util.rs`, minus
+        // `application/octet-stream` (the deliberate generic-binary `bin`
+        // exclusion). `canonical_ext` is the registry field meant to replace
+        // that map; this locks the two from drifting (e.g. registry `jpg` vs a
+        // future map `jpeg`), the same guard the document-extractor and
+        // upload-allow-list lists already have.
+        const WEB_EXT: &[(&str, &str)] = &[
+            ("image/png", "png"),
+            ("image/jpeg", "jpg"),
+            ("image/jpg", "jpg"),
+            ("image/gif", "gif"),
+            ("image/webp", "webp"),
+            ("application/pdf", "pdf"),
+            ("text/plain", "txt"),
+            ("text/markdown", "md"),
+            ("text/csv", "csv"),
+            ("application/json", "json"),
+            ("application/xml", "xml"),
+            ("text/xml", "xml"),
+            ("application/rtf", "rtf"),
+            ("text/rtf", "rtf"),
+            (
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                "pptx",
+            ),
+            ("application/vnd.ms-powerpoint", "ppt"),
+            (
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "docx",
+            ),
+            (
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "xlsx",
+            ),
+            ("application/msword", "doc"),
+            ("application/vnd.ms-excel", "xls"),
+            ("audio/mpeg", "mp3"),
+            ("audio/ogg", "ogg"),
+            ("audio/wav", "wav"),
+            ("audio/wave", "wav"),
+            ("audio/x-wav", "wav"),
+            ("audio/mp4", "mp4"),
+            ("audio/x-m4a", "m4a"),
+            ("audio/aac", "aac"),
+            ("audio/flac", "flac"),
+            ("audio/webm", "webm"),
+        ];
+        for (mime, ext) in WEB_EXT {
+            assert_eq!(
+                canonical_extension(mime),
+                Some(*ext),
+                "registry canonical_ext for {mime} diverged from web_attachment_ext"
+            );
+        }
+    }
 }

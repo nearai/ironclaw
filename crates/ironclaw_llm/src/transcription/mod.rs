@@ -314,6 +314,11 @@ mod tests {
             AudioFormat::from_mime_type("audio/ogg; codecs=opus"),
             Some(AudioFormat::Ogg)
         );
+        // `audio/wave` is an alias for WAV alongside `audio/wav` / `audio/x-wav`.
+        assert_eq!(
+            AudioFormat::from_mime_type("audio/wave"),
+            Some(AudioFormat::Wav)
+        );
         assert_eq!(AudioFormat::from_mime_type("image/jpeg"), None);
     }
 }

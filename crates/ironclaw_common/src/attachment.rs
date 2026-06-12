@@ -74,3 +74,48 @@ pub struct IncomingAttachment {
     /// Duration in seconds (for audio/video).
     pub duration_secs: Option<u32>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_mime_type_strips_params_trims_and_lowercases() {
+        // No-semicolon passthrough.
+        assert_eq!(normalize_mime_type("text/plain"), "text/plain");
+        // Parameter strip + case fold.
+        assert_eq!(
+            normalize_mime_type("TEXT/PLAIN; charset=UTF-8"),
+            "text/plain"
+        );
+        // Surrounding whitespace and embedded space before the `;` (RFC-legal).
+        assert_eq!(normalize_mime_type("  Image/PNG  "), "image/png");
+        assert_eq!(
+            normalize_mime_type("text/plain ; charset=utf-8"),
+            "text/plain"
+        );
+        // Multiple parameters.
+        assert_eq!(normalize_mime_type("a/b; x=1; y=2"), "a/b");
+        // Degenerate inputs collapse predictably.
+        assert_eq!(normalize_mime_type(""), "");
+        assert_eq!(normalize_mime_type("; charset=utf-8"), "");
+    }
+
+    #[test]
+    fn from_mime_type_normalizes_case_and_params() {
+        // Mixed/upper case must still classify (regression: before
+        // normalization, `"Image/JPEG".starts_with("image/")` was false).
+        assert_eq!(
+            AttachmentKind::from_mime_type("IMAGE/PNG"),
+            AttachmentKind::Image
+        );
+        assert_eq!(
+            AttachmentKind::from_mime_type("Audio/Ogg; codecs=opus"),
+            AttachmentKind::Audio
+        );
+        assert_eq!(
+            AttachmentKind::from_mime_type("APPLICATION/PDF"),
+            AttachmentKind::Document
+        );
+    }
+}
