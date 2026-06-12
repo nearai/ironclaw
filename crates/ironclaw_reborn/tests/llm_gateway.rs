@@ -536,7 +536,7 @@ async fn gateway_repairs_oversized_provider_tool_arguments_before_registration()
                     id: "call_1".to_string(),
                     name: "demo__echo".to_string(),
                     arguments: serde_json::json!({"message":"one"}),
-                    reasoning: None,
+                    reasoning: Some("valid call reasoning".to_string()),
                     signature: None,
                     arguments_parse_error: None,
                 },
@@ -544,7 +544,7 @@ async fn gateway_repairs_oversized_provider_tool_arguments_before_registration()
                     id: "call_2".to_string(),
                     name: "demo__echo".to_string(),
                     arguments: serde_json::json!({"message": oversized_message}),
-                    reasoning: None,
+                    reasoning: Some("oversized call reasoning".to_string()),
                     signature: None,
                     arguments_parse_error: None,
                 },
@@ -580,6 +580,12 @@ async fn gateway_repairs_oversized_provider_tool_arguments_before_registration()
         .await
         .unwrap();
 
+    let usage = response
+        .usage
+        .expect("repaired response reports accumulated provider usage");
+    assert_eq!(usage.input_tokens, 3);
+    assert_eq!(usage.output_tokens, 3);
+
     let ParentLoopOutput::AssistantReply(reply) = response.output else {
         panic!("expected repaired assistant reply");
     };
@@ -599,10 +605,19 @@ async fn gateway_repairs_oversized_provider_tool_arguments_before_registration()
         .expect("tool calls replayed");
     assert_eq!(repair_tool_calls.len(), 2);
     assert_eq!(
+        repair_tool_calls[0].arguments,
+        serde_json::json!({"message":"one"})
+    );
+    assert_eq!(
         repair_tool_calls[1].arguments,
         serde_json::json!({
             "error": "arguments omitted because they exceeded the host provider-tool limit"
         })
+    );
+    assert!(
+        repair_tool_calls
+            .iter()
+            .all(|call| call.reasoning.is_none())
     );
     let repair_tool_result = repair_messages
         .iter()
