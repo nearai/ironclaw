@@ -20,6 +20,7 @@ pub mod redaction;
 pub mod runtime_filter;
 pub(crate) mod schema_metrics;
 pub mod schema_validator;
+pub mod tool_name_fitting;
 pub mod wasm;
 
 mod registry;
