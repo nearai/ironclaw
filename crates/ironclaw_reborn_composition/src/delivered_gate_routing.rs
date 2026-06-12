@@ -707,8 +707,8 @@ mod tests {
             &self,
             _tenant_id: &ironclaw_host_api::TenantId,
             _conversation_fingerprint: &str,
-        ) -> Result<Option<DeliveredGateRouteRecord>, String> {
-            Ok(None)
+        ) -> Result<Vec<DeliveredGateRouteRecord>, String> {
+            Ok(Vec::new())
         }
 
         async fn remove_delivered_gate_route(

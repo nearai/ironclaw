@@ -1161,6 +1161,7 @@ fn product_rejection_kind_for_workflow_rejection(
         ProductWorkflowRejectionKind::ScopeNotFound => ProductRejectionKind::BindingRequired,
         ProductWorkflowRejectionKind::Unauthorized => ProductRejectionKind::AccessDenied,
         ProductWorkflowRejectionKind::InvalidRequest => ProductRejectionKind::InvalidRequest,
+        ProductWorkflowRejectionKind::Ambiguous => ProductRejectionKind::AmbiguousResolution,
         ProductWorkflowRejectionKind::ThreadBusy
         | ProductWorkflowRejectionKind::AdmissionRejected
         | ProductWorkflowRejectionKind::Unavailable
