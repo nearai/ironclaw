@@ -1,5 +1,5 @@
 use ironclaw_turns::{
-    LoopBlockedKind, LoopFailureKind,
+    LoopBlockedKind, LoopFailureKind, SanitizedFailure,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, CapabilityFailureKind,
         CapabilityOutcome, LoopCheckpointKind, LoopGateKind,
@@ -166,6 +166,40 @@ pub(super) fn capability_failure_kind(kind: &CapabilityFailureKind) -> LoopFailu
         }
         _ => LoopFailureKind::CapabilityProtocolError,
     }
+}
+
+pub(super) fn capability_error_failure_category(
+    class: CapabilityErrorClass,
+) -> Result<SanitizedFailure, AgentLoopExecutorError> {
+    sanitized_failure_category(match class {
+        CapabilityErrorClass::Transient => "capability_transient",
+        CapabilityErrorClass::Permanent => "capability_permanent",
+        CapabilityErrorClass::InputInvalid => "capability_input_invalid",
+        CapabilityErrorClass::OperationFailed => "capability_operation_failed",
+        CapabilityErrorClass::PolicyDenied => "capability_policy_denied",
+        CapabilityErrorClass::Unavailable => "capability_unavailable",
+        CapabilityErrorClass::Internal => "capability_internal",
+    })
+}
+
+pub(super) fn model_error_failure_category(
+    class: ModelErrorClass,
+) -> Result<SanitizedFailure, AgentLoopExecutorError> {
+    sanitized_failure_category(match class {
+        ModelErrorClass::Transient => "model_transient",
+        ModelErrorClass::ContextOverflow => "model_context_overflow",
+        ModelErrorClass::ContentFiltered => "model_content_filtered",
+        ModelErrorClass::Unavailable => "model_unavailable",
+        ModelErrorClass::Internal => "model_internal",
+    })
+}
+
+fn sanitized_failure_category(
+    category: &'static str,
+) -> Result<SanitizedFailure, AgentLoopExecutorError> {
+    SanitizedFailure::new(category).map_err(|_| AgentLoopExecutorError::PlannerContract {
+        detail: "static failure category was invalid",
+    })
 }
 
 pub(super) fn sanitized_strategy_summary(

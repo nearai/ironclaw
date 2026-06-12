@@ -15,9 +15,10 @@ use crate::{
 
 use super::prompt::build_prompt_bundle_for_surface;
 use super::{
-    AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, HostStage,
-    MAX_MODEL_RETRIES, StageContext, failed_exit, honor_retry_alteration, model_error_class,
-    model_preference_to_host, sanitized_strategy_summary,
+    AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, FailedExitDetails,
+    HostStage, MAX_MODEL_RETRIES, StageContext, failed_exit, honor_retry_alteration,
+    model_error_class, model_error_failure_category, model_preference_to_host,
+    sanitized_strategy_summary,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -207,6 +208,13 @@ impl ExecutorStage<ModelInput> for ModelStage {
                                 checked.state,
                                 failure_kind,
                                 Some(checked.checkpoint_id),
+                                FailedExitDetails {
+                                    diagnostic_ref: summary.diagnostic_ref.clone(),
+                                    safe_summary: Some(model_error_failure_category(
+                                        summary.class,
+                                    )?),
+                                    explanation_message_ref: None,
+                                },
                             )?));
                         }
                     }
@@ -222,6 +230,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
             checked.state,
             LoopFailureKind::DriverBug,
             Some(checked.checkpoint_id),
+            FailedExitDetails::default(),
         )?))
     }
 }

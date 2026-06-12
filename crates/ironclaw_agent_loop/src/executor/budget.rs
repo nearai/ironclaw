@@ -4,8 +4,8 @@ use ironclaw_turns::{LoopExit, LoopFailureKind};
 use crate::state::{CheckpointKind, LoopExecutionState};
 
 use super::{
-    AgentLoopExecutorError, CheckpointStage, ExecutorStage, PendingInputAck, StageContext,
-    failed_exit,
+    AgentLoopExecutorError, CheckpointStage, ExecutorStage, FailedExitDetails, PendingInputAck,
+    StageContext, explain_failure, failed_exit,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -42,6 +42,13 @@ impl ExecutorStage<BudgetInput> for BudgetStage {
             });
         }
 
+        let mut state = state;
+        let explanation_message_ref =
+            explain_failure(ctx, &state, LoopFailureKind::IterationLimit).await;
+        if let Some(message_ref) = explanation_message_ref.as_ref() {
+            state.assistant_refs.push(message_ref.clone());
+        }
+
         let checked = CheckpointStage
             .write(ctx, state, CheckpointKind::Final)
             .await?;
@@ -51,6 +58,11 @@ impl ExecutorStage<BudgetInput> for BudgetStage {
             checked.state,
             LoopFailureKind::IterationLimit,
             Some(checked.checkpoint_id),
+            FailedExitDetails {
+                diagnostic_ref: None,
+                safe_summary: None,
+                explanation_message_ref,
+            },
         )?))
     }
 }

@@ -10,8 +10,8 @@ use crate::{
 };
 
 use super::{
-    AgentLoopExecutorError, CheckpointStage, ExecutorStage, StageContext, completed_exit,
-    failed_exit,
+    AgentLoopExecutorError, CheckpointStage, ExecutorStage, FailedExitDetails, StageContext,
+    completed_exit, explain_failure, failed_exit,
 };
 
 const NO_PROGRESS_FALLBACK_REPLY: &str = concat!(
@@ -65,6 +65,11 @@ impl ExitStage {
                 completed_exit(ctx.host, checked.state, Some(checked.checkpoint_id))
             }
             StopKind::Aborted(failure_kind) => {
+                let mut state = state;
+                let explanation_message_ref = explain_failure(ctx, &state, failure_kind).await;
+                if let Some(message_ref) = explanation_message_ref.as_ref() {
+                    state.assistant_refs.push(message_ref.clone());
+                }
                 let checked = CheckpointStage
                     .write(ctx, state, CheckpointKind::Final)
                     .await?;
@@ -73,6 +78,11 @@ impl ExitStage {
                     checked.state,
                     failure_kind,
                     Some(checked.checkpoint_id),
+                    FailedExitDetails {
+                        diagnostic_ref: None,
+                        safe_summary: None,
+                        explanation_message_ref,
+                    },
                 )
             }
         }

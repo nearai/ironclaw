@@ -1,6 +1,6 @@
 use ironclaw_turns::{
-    LoopCancelled, LoopCancelledReasonKind, LoopCompleted, LoopCompletionKind, LoopExit,
-    LoopExitId, LoopFailed, LoopFailureKind,
+    LoopCancelled, LoopCancelledReasonKind, LoopCompleted, LoopCompletionKind, LoopDiagnosticRef,
+    LoopExit, LoopExitId, LoopFailed, LoopFailureKind, LoopMessageRef, SanitizedFailure,
     run_profile::{AgentLoopDriverHost, LoopCancelReasonKind, LoopCancellationSignal},
 };
 
@@ -32,19 +32,45 @@ pub(super) fn completed_exit(
 
 pub(super) fn failed_exit(
     host: &(dyn AgentLoopDriverHost + Send + Sync),
-    _state: LoopExecutionState,
+    state: LoopExecutionState,
     reason_kind: LoopFailureKind,
     checkpoint_id: Option<ironclaw_turns::TurnCheckpointId>,
+    details: FailedExitDetails,
 ) -> Result<LoopExit, AgentLoopExecutorError> {
     Ok(LoopExit::Failed(LoopFailed {
         reason_kind,
         checkpoint_id,
         usage_summary_ref: None,
-        diagnostic_ref: None,
+        diagnostic_ref: details.diagnostic_ref,
         exit_id: exit_id(host, "failed")?,
-        explanation_message_refs: Vec::new(),
-        safe_summary: None,
+        explanation_message_refs: failure_message_refs(&state, details.explanation_message_ref),
+        safe_summary: details.safe_summary,
     }))
+}
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct FailedExitDetails {
+    pub(super) diagnostic_ref: Option<LoopDiagnosticRef>,
+    pub(super) safe_summary: Option<SanitizedFailure>,
+    pub(super) explanation_message_ref: Option<LoopMessageRef>,
+}
+
+fn failure_message_refs(
+    state: &LoopExecutionState,
+    explanation_message_ref: Option<LoopMessageRef>,
+) -> Vec<LoopMessageRef> {
+    let mut refs = Vec::new();
+    for message_ref in state
+        .assistant_refs
+        .iter()
+        .cloned()
+        .chain(explanation_message_ref)
+    {
+        if !refs.contains(&message_ref) {
+            refs.push(message_ref);
+        }
+    }
+    refs
 }
 
 pub(super) fn cancelled_reason_from_signal(

@@ -1,7 +1,6 @@
 use async_trait::async_trait;
-use ironclaw_turns::LoopFailureKind;
 use ironclaw_turns::{
-    LoopExit,
+    LoopExit, LoopFailureKind, SanitizedFailure,
     run_profile::{
         CapabilitySurfaceVersion, CompactionInitiator, LoopCompactionError, LoopCompactionMode,
         LoopCompactionOutcome, LoopCompactionRequest, LoopContextCompactionKind,
@@ -20,9 +19,10 @@ use crate::state::{
 use crate::strategies::CompactionDecision;
 
 use super::{
-    AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, HostStage,
-    PendingInputAck, StageContext, apply_capability_filter, cancelled_exit, debug_host_unavailable,
-    failed_exit, pending_approval_resume_candidate, pending_auth_resume_candidate,
+    AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, FailedExitDetails,
+    HostStage, PendingInputAck, StageContext, apply_capability_filter, cancelled_exit,
+    debug_host_unavailable, explain_failure, failed_exit, pending_approval_resume_candidate,
+    pending_auth_resume_candidate,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -598,6 +598,12 @@ async fn compaction_failed_exit(
             },
         )
         .await;
+    let mut state = state;
+    let explanation_message_ref =
+        explain_failure(ctx, &state, LoopFailureKind::CompactionUnavailable).await;
+    if let Some(message_ref) = explanation_message_ref.as_ref() {
+        state.assistant_refs.push(message_ref.clone());
+    }
     let checked = CheckpointStage
         .write(ctx, state, CheckpointKind::Final)
         .await?;
@@ -607,6 +613,11 @@ async fn compaction_failed_exit(
         checked.state,
         LoopFailureKind::CompactionUnavailable,
         Some(checked.checkpoint_id),
+        FailedExitDetails {
+            diagnostic_ref: None,
+            safe_summary: Some(compaction_failure_category(error)?),
+            explanation_message_ref,
+        },
     )?;
     Ok(PromptCompactionOutcome::Exited(exit))
 }
@@ -689,6 +700,23 @@ fn loop_compaction_reason(error: &LoopCompactionError) -> LoopSafeSummary {
         LoopCompactionError::PersistenceFailed { .. } => "persistence failed",
     };
     LoopSafeSummary::new(value).unwrap_or_else(|_| LoopSafeSummary::model_gateway_failed())
+}
+
+fn compaction_failure_category(
+    error: &LoopCompactionError,
+) -> Result<SanitizedFailure, AgentLoopExecutorError> {
+    let category = match error {
+        LoopCompactionError::InvalidCutPoint => "compaction_invalid_cut_point",
+        LoopCompactionError::UnsupportedMode => "compaction_unsupported_mode",
+        LoopCompactionError::InputTooLarge => "compaction_input_too_large",
+        LoopCompactionError::SecurityRejected { .. } => "compaction_security_rejected",
+        LoopCompactionError::InferenceFailed { .. } => "compaction_inference_failed",
+        LoopCompactionError::Cancelled => "compaction_cancelled",
+        LoopCompactionError::PersistenceFailed { .. } => "compaction_persistence_failed",
+    };
+    SanitizedFailure::new(category).map_err(|_| AgentLoopExecutorError::PlannerContract {
+        detail: "static compaction failure category was invalid",
+    })
 }
 
 fn safe(value: &'static str) -> LoopSafeSummary {
