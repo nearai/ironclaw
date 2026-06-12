@@ -379,7 +379,7 @@ impl ApprovalInteractionService for ForeignScopeApprovalService {
 /// fallback path. Returns the harness (with `route_store` accessible) and the
 /// underlying recording approval service for request assertions.
 ///
-/// Two separate `InMemoryDeliveredGateRouteStore` instances are used:
+/// By default, two separate `InMemoryDeliveredGateRouteStore` instances are used:
 ///
 /// - `workflow_route_store` (exposed via `harness.route_store`): the store the
 ///   workflow queries when resolving delivered-gate-route fallback paths.  Tests
@@ -389,8 +389,22 @@ impl ApprovalInteractionService for ForeignScopeApprovalService {
 ///   exposed because tests never need to read it — it intentionally stays
 ///   separate so auto-created routes cannot pollute the workflow's view and
 ///   accidentally turn a `Miss` into a `Single` or `Ambiguous`.
+///
+/// The unified-store regression harness below opts into sharing the same store
+/// across observer and workflow to verify the production wiring shape.
 async fn build_harness_for_delivered_route_tests()
 -> (Harness, Arc<RecordingApprovalInteractionService>) {
+    build_harness_for_delivered_route_tests_with_store_mode(false).await
+}
+
+async fn build_harness_for_unified_delivered_route_test()
+-> (Harness, Arc<RecordingApprovalInteractionService>) {
+    build_harness_for_delivered_route_tests_with_store_mode(true).await
+}
+
+async fn build_harness_for_delivered_route_tests_with_store_mode(
+    share_observer_and_workflow_route_store: bool,
+) -> (Harness, Arc<RecordingApprovalInteractionService>) {
     let conversations = Arc::new(InMemoryConversationServices::default());
     let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
         conversations.clone();
@@ -441,7 +455,11 @@ async fn build_harness_for_delivered_route_tests()
     // gate route after posting an approval prompt.  Kept separate so auto-created
     // routes never bleed into the workflow's index.
     let observer_route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+        if share_observer_and_workflow_route_store {
+            workflow_route_store.clone()
+        } else {
+            Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default())
+        };
 
     let inbound = Arc::new(DefaultInboundTurnService::new(
         binding.clone(),
@@ -606,6 +624,35 @@ async fn bare_approve_in_dm_resolves_gate_on_foreign_scope_via_delivered_route()
         requests[0].run_id_hint,
         Some(blocked_run_id),
         "run_id_hint carries the route record's run_id"
+    );
+    assert_eq!(
+        requests[0].decision,
+        ApprovalInteractionDecision::ApproveOnce
+    );
+}
+
+#[tokio::test]
+async fn bare_approve_in_dm_resolves_gate_recorded_by_observer() {
+    let (harness, inner_approvals) = build_harness_for_unified_delivered_route_test().await;
+
+    let block_response = harness.post_event(DM_BLOCK).await;
+    assert_eq!(block_response.status(), StatusCode::OK);
+    harness.drain().await;
+    let blocked_run_id = harness
+        .coordinator
+        .blocked_run_id()
+        .expect("run must be blocked after DM_BLOCK"); // safety: E2E test assertion.
+
+    let approve_response = harness.post_event(DM_APPROVE).await;
+    assert_eq!(approve_response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let requests = inner_approvals.requests();
+    assert_eq!(requests.len(), 1, "exactly one approval resolve request");
+    assert_eq!(
+        requests[0].run_id_hint,
+        Some(blocked_run_id),
+        "run_id_hint must come from the observer-recorded route"
     );
     assert_eq!(
         requests[0].decision,
