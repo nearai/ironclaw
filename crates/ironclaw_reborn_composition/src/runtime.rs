@@ -3042,14 +3042,16 @@ mod tests {
     use ironclaw_run_state::ApprovalRequestStore;
     use ironclaw_skills::SkillTrust;
     use ironclaw_threads::{
-        AppendToolResultReferenceRequest, EnsureThreadRequest, LoadContextMessagesRequest,
-        MessageKind, ThreadHistoryRequest, ThreadScope, ToolResultSafeSummary,
+        AcceptInboundMessageRequest, AppendToolResultReferenceRequest, EnsureThreadRequest,
+        LoadContextMessagesRequest, MessageContent, MessageKind, MessageStatus,
+        ThreadHistoryRequest, ThreadScope, ToolResultSafeSummary,
     };
     use ironclaw_turns::{
-        AcceptedMessageRef, AllowAllTurnAdmissionPolicy, BlockedReason, GetRunStateRequest,
-        IdempotencyKey, LoopResultRef, ReplyTargetBindingRef, SanitizedCancelReason,
-        SourceBindingRef, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-        TurnCheckpointId, TurnId, TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope, TurnStatus,
+        AcceptedMessageRef, AllowAllTurnAdmissionPolicy, BlockedReason, CancelRunRequest,
+        GetRunStateRequest, IdempotencyKey, LoopResultRef, ReplyTargetBindingRef,
+        SanitizedCancelReason, SourceBindingRef, SubmitChildRunRequest, SubmitTurnRequest,
+        SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnError, TurnId, TurnLeaseToken,
+        TurnRunId, TurnRunnerId, TurnScope, TurnStatus,
         run_profile::{
             InMemoryRunProfileResolver, LoopCapabilityPort, LoopCheckpointStateRef, LoopRunContext,
             ModelProfileId, ProviderToolCall, RunProfileResolutionRequest, RunProfileResolver,
@@ -6624,6 +6626,173 @@ mod tests {
         assert_eq!(selected.len(), 1);
         assert!(combined_skill_context.contains("webui helper description"));
         assert!(combined_skill_context.contains("WEBUI_HELPER_PROMPT_SENTINEL"));
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    /// Verifies the full production wiring: when a second turn is submitted
+    /// while the thread is busy (run A in progress), and the caller marks
+    /// the second message as `DeferredBusy` (as `inbound_turn.rs` does), the
+    /// `DeferredBusyDrainObserver` — wired through `build_reborn_runtime` —
+    /// resubmits the deferred message after run A reaches a terminal state.
+    #[tokio::test]
+    async fn runtime_drains_deferred_busy_after_gate_terminal() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "unused".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("drain-wiring-owner", root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "drain-wiring-tenant".to_string(),
+            agent_id: "drain-wiring-agent".to_string(),
+            source_binding_id: "drain-wiring-source".to_string(),
+            reply_target_binding_id: "drain-wiring-reply".to_string(),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+
+        // Stop the turn runner so submitted runs stay InProgress indefinitely,
+        // allowing us to drive state transitions manually below.
+        stop_turn_runner_worker_for_manual_state_test(&runtime).await;
+
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let turn_scope = runtime.turn_scope_for(&conversation.0);
+        let actor = TurnActor::new(runtime.actor_user_id.clone());
+
+        // ── Accept and submit message A ────────────────────────────────────
+        let msg_a = runtime
+            .thread_service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: runtime.thread_scope.clone(),
+                thread_id: conversation.0.clone(),
+                actor_id: runtime.actor_user_id.as_str().to_string(),
+                source_binding_id: Some("drain-wiring-source".to_string()),
+                reply_target_binding_id: Some("drain-wiring-reply".to_string()),
+                external_event_id: Some("event-a".to_string()),
+                content: MessageContent::text("message A"),
+            })
+            .await
+            .expect("accept message A");
+
+        let run_a_response = runtime
+            .turn_coordinator
+            .submit_turn(SubmitTurnRequest {
+                scope: turn_scope.clone(),
+                actor: actor.clone(),
+                accepted_message_ref: AcceptedMessageRef::new(format!("msg:{}", msg_a.message_id))
+                    .unwrap(),
+                source_binding_ref: SourceBindingRef::new("drain-wiring-source:a").unwrap(),
+                reply_target_binding_ref: ReplyTargetBindingRef::new("drain-wiring-reply:a")
+                    .unwrap(),
+                requested_run_profile: None,
+                idempotency_key: IdempotencyKey::new("drain-wiring-a").unwrap(),
+                received_at: chrono::Utc::now(),
+                requested_run_id: None,
+                parent_run_id: None,
+                subagent_depth: 0,
+                spawn_tree_root_run_id: None,
+            })
+            .await
+            .expect("submit turn A");
+        let SubmitTurnResponse::Accepted { run_id: run_a, .. } = run_a_response;
+
+        // ── Accept message B and submit — must hit ThreadBusy ─────────────
+        let msg_b = runtime
+            .thread_service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: runtime.thread_scope.clone(),
+                thread_id: conversation.0.clone(),
+                actor_id: runtime.actor_user_id.as_str().to_string(),
+                source_binding_id: Some("drain-wiring-source".to_string()),
+                reply_target_binding_id: Some("drain-wiring-reply".to_string()),
+                external_event_id: Some("event-b".to_string()),
+                content: MessageContent::text("message B"),
+            })
+            .await
+            .expect("accept message B");
+
+        let submit_b_error = runtime
+            .turn_coordinator
+            .submit_turn(SubmitTurnRequest {
+                scope: turn_scope.clone(),
+                actor: actor.clone(),
+                accepted_message_ref: AcceptedMessageRef::new(format!("msg:{}", msg_b.message_id))
+                    .unwrap(),
+                source_binding_ref: SourceBindingRef::new("drain-wiring-source:b").unwrap(),
+                reply_target_binding_ref: ReplyTargetBindingRef::new("drain-wiring-reply:b")
+                    .unwrap(),
+                requested_run_profile: None,
+                idempotency_key: IdempotencyKey::new("drain-wiring-b").unwrap(),
+                received_at: chrono::Utc::now(),
+                requested_run_id: None,
+                parent_run_id: None,
+                subagent_depth: 0,
+                spawn_tree_root_run_id: None,
+            })
+            .await
+            .expect_err("second submit must fail with ThreadBusy");
+        let TurnError::ThreadBusy(_) = submit_b_error else {
+            panic!("expected ThreadBusy, got {submit_b_error:?}");
+        };
+
+        // Mark B as DeferredBusy — mirrors what inbound_turn.rs does on
+        // ThreadBusy; the drain observer fires on A's terminal event and
+        // resubmits B.
+        runtime
+            .thread_service
+            .mark_message_deferred_busy(
+                &runtime.thread_scope,
+                &conversation.0,
+                msg_b.message_id,
+                Some("drain-wiring-source:b".to_string()),
+                Some("drain-wiring-reply:b".to_string()),
+            )
+            .await
+            .expect("mark message B deferred busy");
+
+        // ── Drive A to a terminal state (Cancel is simplest) ──────────────
+        // The drain observer is subscribed to the lifecycle bus inside
+        // build_reborn_runtime and fires synchronously when the state is
+        // committed.
+        runtime
+            .turn_coordinator
+            .cancel_run(CancelRunRequest {
+                scope: turn_scope.clone(),
+                actor: actor.clone(),
+                run_id: run_a,
+                reason: SanitizedCancelReason::UserRequested,
+                idempotency_key: IdempotencyKey::new("drain-wiring-cancel-a").unwrap(),
+            })
+            .await
+            .expect("cancel run A");
+
+        // ── Assert B was resubmitted by the drain ─────────────────────────
+        let history = runtime
+            .thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: runtime.thread_scope.clone(),
+                thread_id: conversation.0.clone(),
+            })
+            .await
+            .expect("read thread history");
+        let msg_b_record = history
+            .messages
+            .iter()
+            .find(|m| m.message_id == msg_b.message_id)
+            .expect("message B must be in thread history");
+        assert_eq!(
+            msg_b_record.status,
+            MessageStatus::Submitted,
+            "drain must have resubmitted message B after run A terminated; \
+             status was {:?}",
+            msg_b_record.status
+        );
 
         runtime.shutdown().await.expect("runtime shutdown");
     }

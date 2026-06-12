@@ -18,22 +18,27 @@ use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use ironclaw_host_api::UserId;
-use ironclaw_product_workflow::{
-    DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_reply_target_binding_ref, bounded_source_binding_ref,
-};
 use ironclaw_threads::{ListDeferredBusyMessagesRequest, SessionThreadService, ThreadScope};
 use ironclaw_turns::{
-    AcceptedMessageRef, IdempotencyKey, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCommittedEventObserver, TurnCoordinator, TurnError, TurnLifecycleEvent, TurnRunState,
-    TurnScope,
+    AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef, SourceBindingRef, SubmitTurnRequest,
+    SubmitTurnResponse, TurnActor, TurnCommittedEventObserver, TurnCoordinator, TurnError,
+    TurnLifecycleEvent, TurnRunState, TurnScope,
 };
 
-/// Maximum number of `DeferredBusy` records loaded per drain attempt.
+/// Maximum number of `DeferredBusy` records loaded per drain window.
 ///
-/// This caps the full-thread history scan to a bounded window. The value must
-/// be large enough that the skip-invalid loop (Fix 3) can make progress past
-/// a few bad entries before stopping and leaving the rest for the next drain.
+/// Each drain attempt pages through windows of this size, advancing past
+/// entirely-invalid windows until a valid message is found or the total cap
+/// is hit.  Must be ≤ `DRAIN_TOTAL_CAP` and large enough to make progress
+/// past a few bad entries in a single window.
 const DRAIN_LIST_LIMIT: usize = 8;
+
+/// Hard cap on total deferred records examined per drain invocation.
+///
+/// Prevents a pathological sequence of 64+ invalid records from causing
+/// unbounded service calls.  When this cap is hit any remaining deferred
+/// messages are left for the next drain invocation.
+const DRAIN_TOTAL_CAP: usize = 64;
 
 /// Observer that drains `DeferredBusy` thread messages when a run terminates.
 ///
@@ -74,17 +79,21 @@ where
     /// Core drain logic: lists deferred messages for `thread_id` within
     /// `thread_scope` and submits the first valid one through `coordinator`.
     ///
-    /// Iterates in sequence order (oldest first).  A message that fails
-    /// validation (bad actor, missing binding refs, etc.) is logged at
-    /// `warn!` and **skipped** — the loop continues to the next entry.
-    /// This prevents a single corrupt entry from head-of-line blocking the
-    /// entire queue.  On a successful submit the loop stops (cascade
-    /// semantics take over when that run terminates).  On `ThreadBusy` the
-    /// loop stops and all remaining messages stay deferred.
+    /// Iterates in sequence order (oldest first) in windows of `DRAIN_LIST_LIMIT`.
+    /// A message that fails validation (bad actor, missing canonical refs, etc.)
+    /// is logged at `warn!` and **skipped** — the loop continues to the next
+    /// entry.  When an entire window is exhausted without finding a valid message,
+    /// the next window is fetched starting after the last examined sequence.
+    /// The total number of records examined across all windows is capped at
+    /// `DRAIN_TOTAL_CAP`.
+    ///
+    /// On a successful submit the loop stops (cascade semantics take over when
+    /// that run terminates).  On `ThreadBusy` the loop stops and all remaining
+    /// messages stay deferred.
     ///
     /// Failed messages are NOT mutated — LLM-data retention rule applies.
-    /// They will be re-examined on each subsequent drain call and skipped
-    /// again, which is acceptable.
+    /// They will be re-examined on each subsequent drain call and skipped again,
+    /// which is acceptable.
     async fn drain_for_scope(
         &self,
         run_id: &ironclaw_turns::TurnRunId,
@@ -92,112 +101,122 @@ where
         thread_scope: &ThreadScope,
         coordinator: &Arc<dyn TurnCoordinator>,
     ) -> Result<(), TurnError> {
-        let deferred = match self
-            .thread_service
-            .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
-                scope: thread_scope.clone(),
-                thread_id: scope.thread_id.clone(),
-                limit: Some(DRAIN_LIST_LIMIT),
-            })
-            .await
-        {
-            Ok(messages) => messages,
-            Err(error) => {
-                warn!(
+        let mut after_sequence: Option<u64> = None;
+        let mut total_examined: usize = 0;
+
+        loop {
+            if total_examined >= DRAIN_TOTAL_CAP {
+                debug!(
                     run_id = %run_id,
-                    error = %error,
-                    "DeferredBusyDrainObserver: failed to list deferred messages, skipping drain"
+                    total_examined,
+                    "DeferredBusyDrainObserver: total examined cap reached, leaving rest for next drain"
                 );
                 return Ok(());
             }
-        };
 
-        for message in deferred {
-            // Build the coordinator submission from the thread record fields.
-            // On any validation failure for this message, log + skip to next.
-
-            let actor_user_id = match resolve_actor_user_id(&message, thread_scope) {
-                Ok(id) => id,
-                Err(reason) => {
-                    warn!(
-                        run_id = %run_id,
-                        message_id = %message.message_id,
-                        reason,
-                        "DeferredBusyDrainObserver: cannot resolve actor for deferred message, skipping"
-                    );
-                    continue;
-                }
-            };
-
-            let source_binding_id_raw = match message
-                .source_binding_id
-                .as_deref()
-                .filter(|s| !s.is_empty())
+            let window = match self
+                .thread_service
+                .list_deferred_busy_messages(ListDeferredBusyMessagesRequest {
+                    scope: thread_scope.clone(),
+                    thread_id: scope.thread_id.clone(),
+                    limit: Some(DRAIN_LIST_LIMIT),
+                    after_sequence,
+                })
+                .await
             {
-                Some(raw) => raw,
-                None => {
+                Ok(messages) => messages,
+                Err(error) => {
                     warn!(
                         run_id = %run_id,
-                        message_id = %message.message_id,
-                        "DeferredBusyDrainObserver: deferred message missing source_binding_id, skipping"
+                        error = %error,
+                        "DeferredBusyDrainObserver: failed to list deferred messages, skipping drain"
                     );
-                    continue;
-                }
-            };
-            // Use the same bounded conversion that the inbound turn path used
-            // when originally persisting the binding ids, so the ref matches
-            // what the original product submission produced.
-            let source_binding_ref = match bounded_source_binding_ref(
-                "src",
-                source_binding_id_raw,
-                DEFAULT_BINDING_REF_RAW_MAX_BYTES,
-            ) {
-                Ok(r) => r,
-                Err(reason) => {
-                    warn!(
-                        run_id = %run_id,
-                        message_id = %message.message_id,
-                        reason,
-                        "DeferredBusyDrainObserver: invalid source_binding_id, skipping"
-                    );
-                    continue;
+                    return Ok(());
                 }
             };
 
-            let reply_target_binding_id_raw = match message
-                .reply_target_binding_id
-                .as_deref()
-                .filter(|s| !s.is_empty())
-            {
-                Some(raw) => raw,
-                None => {
-                    warn!(
-                        run_id = %run_id,
-                        message_id = %message.message_id,
-                        "DeferredBusyDrainObserver: deferred message missing reply_target_binding_id, skipping"
-                    );
-                    continue;
-                }
-            };
-            let reply_target_binding_ref = match bounded_reply_target_binding_ref(
-                "reply",
-                reply_target_binding_id_raw,
-                DEFAULT_BINDING_REF_RAW_MAX_BYTES,
-            ) {
-                Ok(r) => r,
-                Err(reason) => {
-                    warn!(
-                        run_id = %run_id,
-                        message_id = %message.message_id,
-                        reason,
-                        "DeferredBusyDrainObserver: invalid reply_target_binding_id, skipping"
-                    );
-                    continue;
-                }
-            };
+            if window.is_empty() {
+                // No more deferred messages — nothing to drain.
+                return Ok(());
+            }
 
-            let accepted_message_ref =
-                match AcceptedMessageRef::new(format!("msg:{}", message.message_id)) {
+            let window_last_sequence = window.last().map(|m| m.sequence).unwrap_or(0);
+
+            for message in window {
+                total_examined += 1;
+
+                // Build the coordinator submission from the thread record fields.
+                // On any validation failure for this message, log + skip to next.
+
+                let actor_user_id = match resolve_actor_user_id(&message, thread_scope) {
+                    Ok(id) => id,
+                    Err(reason) => {
+                        warn!(
+                            run_id = %run_id,
+                            message_id = %message.message_id,
+                            reason,
+                            "DeferredBusyDrainObserver: cannot resolve actor for deferred message, skipping"
+                        );
+                        continue;
+                    }
+                };
+
+                // Use the canonical refs persisted at defer time.  Records written
+                // before this field was added (legacy branch — no production data,
+                // branch unmerged) have `None` here and are skipped.
+                let source_binding_ref = match message.turn_source_binding_ref.as_deref() {
+                    Some(canonical) => match SourceBindingRef::new(canonical) {
+                        Ok(r) => r,
+                        Err(reason) => {
+                            warn!(
+                                run_id = %run_id,
+                                message_id = %message.message_id,
+                                reason,
+                                "DeferredBusyDrainObserver: invalid persisted turn_source_binding_ref, skipping"
+                            );
+                            continue;
+                        }
+                    },
+                    None => {
+                        warn!(
+                            run_id = %run_id,
+                            message_id = %message.message_id,
+                            "DeferredBusyDrainObserver: deferred message missing turn_source_binding_ref (legacy record), skipping"
+                        );
+                        continue;
+                    }
+                };
+
+                let reply_target_binding_ref = match message
+                    .turn_reply_target_binding_ref
+                    .as_deref()
+                {
+                    Some(canonical) => match ReplyTargetBindingRef::new(canonical) {
+                        Ok(r) => r,
+                        Err(reason) => {
+                            warn!(
+                                run_id = %run_id,
+                                message_id = %message.message_id,
+                                reason,
+                                "DeferredBusyDrainObserver: invalid persisted turn_reply_target_binding_ref, skipping"
+                            );
+                            continue;
+                        }
+                    },
+                    None => {
+                        warn!(
+                            run_id = %run_id,
+                            message_id = %message.message_id,
+                            "DeferredBusyDrainObserver: deferred message missing turn_reply_target_binding_ref (legacy record), skipping"
+                        );
+                        continue;
+                    }
+                };
+
+                let accepted_message_ref = match AcceptedMessageRef::new(format!(
+                    "msg:{}",
+                    message.message_id
+                )) {
                     Ok(r) => r,
                     Err(reason) => {
                         warn!(
@@ -210,118 +229,129 @@ where
                     }
                 };
 
-            // Use the message_id as the idempotency key so a duplicate drain
-            // fire produces the same run rather than a second submission.
-            let idempotency_key = match IdempotencyKey::new(format!("drain:{}", message.message_id))
-            {
-                Ok(k) => k,
-                Err(reason) => {
-                    warn!(
-                        run_id = %run_id,
-                        message_id = %message.message_id,
-                        reason,
-                        "DeferredBusyDrainObserver: cannot build idempotency key, skipping"
-                    );
-                    continue;
-                }
-            };
+                // Use the message_id as the idempotency key so a duplicate drain
+                // fire produces the same run rather than a second submission.
+                let idempotency_key =
+                    match IdempotencyKey::new(format!("drain:{}", message.message_id)) {
+                        Ok(k) => k,
+                        Err(reason) => {
+                            warn!(
+                                run_id = %run_id,
+                                message_id = %message.message_id,
+                                reason,
+                                "DeferredBusyDrainObserver: cannot build idempotency key, skipping"
+                            );
+                            continue;
+                        }
+                    };
 
-            let agent_id = match scope.agent_id.clone() {
-                Some(id) => id,
-                None => {
-                    debug!(
-                        run_id = %run_id,
-                        message_id = %message.message_id,
-                        "DeferredBusyDrainObserver: agentless scope, skipping drain"
-                    );
-                    // Agentless scope is a structural issue — no point
-                    // iterating further since all messages share the same scope.
-                    return Ok(());
-                }
-            };
+                let agent_id = match scope.agent_id.clone() {
+                    Some(id) => id,
+                    None => {
+                        debug!(
+                            run_id = %run_id,
+                            message_id = %message.message_id,
+                            "DeferredBusyDrainObserver: agentless scope, skipping drain"
+                        );
+                        // Agentless scope is a structural issue — no point
+                        // iterating further since all messages share the same scope.
+                        return Ok(());
+                    }
+                };
 
-            let turn_scope = TurnScope::new_with_owner(
-                scope.tenant_id.clone(),
-                Some(agent_id),
-                scope.project_id.clone(),
-                scope.thread_id.clone(),
-                thread_scope.owner_user_id.clone(),
-            );
+                let turn_scope = TurnScope::new_with_owner(
+                    scope.tenant_id.clone(),
+                    Some(agent_id),
+                    scope.project_id.clone(),
+                    scope.thread_id.clone(),
+                    thread_scope.owner_user_id.clone(),
+                );
 
-            let request = SubmitTurnRequest {
-                scope: turn_scope,
-                actor: TurnActor::new(actor_user_id),
-                accepted_message_ref: accepted_message_ref.clone(),
-                source_binding_ref,
-                reply_target_binding_ref,
-                requested_run_profile: None,
-                idempotency_key,
-                received_at: chrono::Utc::now(),
-                requested_run_id: None,
-                parent_run_id: None,
-                subagent_depth: 0,
-                spawn_tree_root_run_id: None,
-            };
+                let request = SubmitTurnRequest {
+                    scope: turn_scope,
+                    actor: TurnActor::new(actor_user_id),
+                    accepted_message_ref: accepted_message_ref.clone(),
+                    source_binding_ref,
+                    reply_target_binding_ref,
+                    requested_run_profile: None,
+                    idempotency_key,
+                    received_at: chrono::Utc::now(),
+                    requested_run_id: None,
+                    parent_run_id: None,
+                    subagent_depth: 0,
+                    spawn_tree_root_run_id: None,
+                };
 
-            match coordinator.submit_turn(request).await {
-                Ok(SubmitTurnResponse::Accepted {
-                    turn_id,
-                    run_id: submitted_run_id,
-                    ..
-                }) => {
-                    debug!(
-                        drained_message_id = %message.message_id,
-                        submitted_turn_id = %turn_id,
-                        submitted_run_id = %submitted_run_id,
-                        triggering_run_id = %run_id,
-                        "DeferredBusyDrainObserver: deferred message drained and submitted"
-                    );
-                    if let Err(error) = self
-                        .thread_service
-                        .mark_message_submitted(
-                            thread_scope,
-                            &scope.thread_id,
-                            message.message_id,
-                            turn_id.to_string(),
-                            submitted_run_id.to_string(),
-                        )
-                        .await
-                    {
+                match coordinator.submit_turn(request).await {
+                    Ok(SubmitTurnResponse::Accepted {
+                        turn_id,
+                        run_id: submitted_run_id,
+                        ..
+                    }) => {
+                        debug!(
+                            drained_message_id = %message.message_id,
+                            submitted_turn_id = %turn_id,
+                            submitted_run_id = %submitted_run_id,
+                            triggering_run_id = %run_id,
+                            "DeferredBusyDrainObserver: deferred message drained and submitted"
+                        );
+                        if let Err(error) = self
+                            .thread_service
+                            .mark_message_submitted(
+                                thread_scope,
+                                &scope.thread_id,
+                                message.message_id,
+                                turn_id.to_string(),
+                                submitted_run_id.to_string(),
+                            )
+                            .await
+                        {
+                            warn!(
+                                error = %error,
+                                drained_message_id = %message.message_id,
+                                "DeferredBusyDrainObserver: submitted to coordinator but failed to mark message as submitted"
+                            );
+                        }
+                        // Stop after the first successful submit — the cascade
+                        // will handle subsequent messages when this run terminates.
+                        return Ok(());
+                    }
+                    Err(TurnError::ThreadBusy(busy)) => {
+                        // A new run is already holding the lock — leave all
+                        // deferred messages.  The drain will fire again when that
+                        // run terminates.
+                        debug!(
+                            active_run_id = ?busy.active_run_id,
+                            drained_message_id = %message.message_id,
+                            triggering_run_id = %run_id,
+                            "DeferredBusyDrainObserver: thread still busy after terminal event, leaving deferred"
+                        );
+                        return Ok(());
+                    }
+                    Err(error) => {
                         warn!(
                             error = %error,
                             drained_message_id = %message.message_id,
-                            "DeferredBusyDrainObserver: submitted to coordinator but failed to mark message as submitted"
+                            triggering_run_id = %run_id,
+                            "DeferredBusyDrainObserver: coordinator submit failed, leaving deferred"
                         );
+                        return Ok(());
                     }
-                    // Stop after the first successful submit — the cascade
-                    // will handle subsequent messages when this run terminates.
-                    return Ok(());
                 }
-                Err(TurnError::ThreadBusy(busy)) => {
-                    // A new run is already holding the lock — leave all
-                    // deferred messages.  The drain will fire again when that
-                    // run terminates.
-                    debug!(
-                        active_run_id = ?busy.active_run_id,
-                        drained_message_id = %message.message_id,
-                        triggering_run_id = %run_id,
-                        "DeferredBusyDrainObserver: thread still busy after terminal event, leaving deferred"
-                    );
-                    return Ok(());
-                }
-                Err(error) => {
-                    warn!(
-                        error = %error,
-                        drained_message_id = %message.message_id,
-                        triggering_run_id = %run_id,
-                        "DeferredBusyDrainObserver: coordinator submit failed, leaving deferred"
-                    );
-                    return Ok(());
-                }
+                // The submit succeeded — the `return Ok(())` above means we only
+                // reach here if we hit the loop-continue paths (validation skips).
             }
-        }
 
-        Ok(())
+            // Entire window was skipped (all validation failures).
+            // Advance past this window and fetch the next one.
+            debug!(
+                run_id = %run_id,
+                window_last_sequence,
+                total_examined,
+                "DeferredBusyDrainObserver: full window skipped, advancing past sequence {window_last_sequence}"
+            );
+            after_sequence = Some(window_last_sequence);
+        }
     }
 
     async fn drain_for_terminal_event(&self, event: &TurnLifecycleEvent) -> Result<(), TurnError> {
@@ -509,9 +539,8 @@ mod tests {
 
     use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
     use ironclaw_threads::{
-        AcceptInboundMessageRequest, AcceptedInboundMessage, EnsureThreadRequest,
-        InMemorySessionThreadService, MessageContent, MessageStatus, SessionThreadService,
-        ThreadHistoryRequest, ThreadScope,
+        AcceptInboundMessageRequest, AcceptedInboundMessage, EnsureThreadRequest, InMemorySessionThreadService,
+        MessageContent, MessageStatus, SessionThreadService, ThreadHistoryRequest, ThreadScope,
     };
     use ironclaw_turns::{
         AcceptedMessageRef, CancelRunRequest, DefaultTurnCoordinator, DefaultTurnLifecycleEventBus,
@@ -648,9 +677,10 @@ mod tests {
 
     /// Accept a user message and return the `AcceptedInboundMessage`.
     ///
-    /// `source_binding_id` / `reply_target_binding_id` are the RAW values
-    /// (without the "src:" / "reply:" prefix) as stored by the inbound turn
-    /// path before `bounded_source_binding_ref` adds the prefix.
+    /// Stores `"binding-drain"` as both `source_binding_id` and
+    /// `reply_target_binding_id`.  Callers that need to defer the message must
+    /// separately call `mark_message_deferred_busy` with the canonical refs
+    /// (e.g. `"src:binding-drain"` / `"reply:binding-drain"`).
     async fn accept_message(
         thread_service: &InMemorySessionThreadService,
         text: &str,
@@ -661,8 +691,6 @@ mod tests {
                 scope: thread_scope(),
                 thread_id: thread_id(),
                 actor_id: actor().as_str().to_string(),
-                // Raw binding ids — the drain will add the "src:"/"reply:"
-                // prefix via bounded_source/reply_target_binding_ref.
                 source_binding_id: Some("binding-drain".to_string()),
                 reply_target_binding_id: Some("binding-drain".to_string()),
                 external_event_id: Some(external_event_id.to_string()),
@@ -710,7 +738,13 @@ mod tests {
             other => panic!("expected ThreadBusy, got {other:?}"),
         }
         thread_service
-            .mark_message_deferred_busy(&thread_scope(), &thread_id(), msg_b.message_id)
+            .mark_message_deferred_busy(
+                &thread_scope(),
+                &thread_id(),
+                msg_b.message_id,
+                Some("src:binding-drain".to_string()),
+                Some("reply:binding-drain".to_string()),
+            )
             .await
             .expect("mark deferred busy");
 
@@ -799,7 +833,13 @@ mod tests {
             other => panic!("expected ThreadBusy, got {other:?}"),
         }
         thread_service
-            .mark_message_deferred_busy(&thread_scope(), &thread_id(), msg_b.message_id)
+            .mark_message_deferred_busy(
+                &thread_scope(),
+                &thread_id(),
+                msg_b.message_id,
+                Some("src:binding-drain".to_string()),
+                Some("reply:binding-drain".to_string()),
+            )
             .await
             .expect("mark deferred busy");
 
@@ -919,7 +959,13 @@ mod tests {
             other => panic!("expected ThreadBusy, got {other:?}"),
         }
         thread_service
-            .mark_message_deferred_busy(&thread_scope(), &thread_id(), msg_b.message_id)
+            .mark_message_deferred_busy(
+                &thread_scope(),
+                &thread_id(),
+                msg_b.message_id,
+                Some("src:binding-drain".to_string()),
+                Some("reply:binding-drain".to_string()),
+            )
             .await
             .expect("mark deferred busy");
 
@@ -1002,7 +1048,13 @@ mod tests {
                 .await
                 .expect("accept message B");
             thread_service
-                .mark_message_deferred_busy(&thread_scope(), &thread_id(), accepted.message_id)
+                .mark_message_deferred_busy(
+                    &thread_scope(),
+                    &thread_id(),
+                    accepted.message_id,
+                    None, // No canonical refs — simulates legacy/invalid entry that drain skips
+                    None,
+                )
                 .await
                 .expect("mark B deferred busy");
             accepted.message_id
@@ -1034,7 +1086,13 @@ mod tests {
             other => panic!("expected ThreadBusy for C, got {other:?}"),
         }
         thread_service
-            .mark_message_deferred_busy(&thread_scope(), &thread_id(), msg_c.message_id)
+            .mark_message_deferred_busy(
+                &thread_scope(),
+                &thread_id(),
+                msg_c.message_id,
+                Some("src:binding-drain".to_string()),
+                Some("reply:binding-drain".to_string()),
+            )
             .await
             .expect("mark C deferred busy");
 
@@ -1084,50 +1142,45 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Scenario E: oversized binding id round-trip through defer → drain
+    // Scenario E: canonical refs persisted at defer time are replayed verbatim
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn drain_handles_oversized_binding_id_via_uuid_fallback() {
+    async fn drain_submits_using_canonical_refs_persisted_at_defer_time() {
         let (coordinator, thread_service, _) = build_harness().await;
 
         // Step 1: Accept and submit message A — thread lock acquired.
         let msg_a = accept_message(
             &thread_service,
-            "message A-oversize",
-            "ext-event-a-oversize",
+            "message A-canonical",
+            "ext-event-a-canonical",
         )
         .await;
         let msg_a_ref = AcceptedMessageRef::new(format!("msg:{}", msg_a.message_id)).unwrap();
-        let run_a = submit_run(coordinator.as_ref(), "a-oversize", msg_a_ref).await;
+        let run_a = submit_run(coordinator.as_ref(), "a-canonical", msg_a_ref).await;
 
-        // Step 2: Accept message B with a >256-byte raw binding id.
-        // The drain should apply bounded_source_binding_ref and UUID-hash it
-        // instead of failing with an invalid-length error.
-        let oversized_binding_id = "x".repeat(300); // 300 bytes > 256 limit
-        let msg_b = thread_service
-            .accept_inbound_message(AcceptInboundMessageRequest {
-                scope: thread_scope(),
-                thread_id: thread_id(),
-                actor_id: actor().as_str().to_string(),
-                source_binding_id: Some(oversized_binding_id.clone()),
-                reply_target_binding_id: Some(oversized_binding_id.clone()),
-                external_event_id: Some("ext-event-b-oversize".to_string()),
-                content: MessageContent::text("message B-oversize"),
-            })
-            .await
-            .expect("accept message B with oversized binding");
+        // Step 2: Accept message B and defer it with explicitly provided canonical
+        // refs (the inbound path would compute these before calling the service).
+        // We use non-standard prefixes to verify the drain uses exactly what was
+        // stored rather than re-deriving with "src:"/"reply:".
+        let canonical_src = "webui-src:some-webui-binding-id";
+        let canonical_reply = "webui-reply:some-webui-binding-id";
+        let msg_b = accept_message(
+            &thread_service,
+            "message B-canonical",
+            "ext-event-b-canonical",
+        )
+        .await;
         match coordinator
             .submit_turn(SubmitTurnRequest {
                 scope: turn_scope(),
                 actor: TurnActor::new(actor()),
                 accepted_message_ref: AcceptedMessageRef::new(format!("msg:{}", msg_b.message_id))
                     .unwrap(),
-                source_binding_ref: SourceBindingRef::new("src:binding-drain").unwrap(),
-                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:binding-drain")
-                    .unwrap(),
+                source_binding_ref: SourceBindingRef::new(canonical_src).unwrap(),
+                reply_target_binding_ref: ReplyTargetBindingRef::new(canonical_reply).unwrap(),
                 requested_run_profile: None,
-                idempotency_key: IdempotencyKey::new("turn:drain-test-b-oversize").unwrap(),
+                idempotency_key: IdempotencyKey::new("turn:drain-test-b-canonical").unwrap(),
                 received_at: chrono::Utc::now(),
                 requested_run_id: None,
                 parent_run_id: None,
@@ -1140,12 +1193,17 @@ mod tests {
             other => panic!("expected ThreadBusy, got {other:?}"),
         }
         thread_service
-            .mark_message_deferred_busy(&thread_scope(), &thread_id(), msg_b.message_id)
+            .mark_message_deferred_busy(
+                &thread_scope(),
+                &thread_id(),
+                msg_b.message_id,
+                Some(canonical_src.to_string()),
+                Some(canonical_reply.to_string()),
+            )
             .await
             .expect("mark B deferred busy");
 
-        // Step 3: Cancel run A → drain fires with oversized binding id.
-        // Should NOT leave B stuck — must submit successfully via UUID hash.
+        // Step 3: Cancel run A → drain fires → replays canonical refs verbatim.
         coordinator
             .cancel_run(CancelRunRequest {
                 scope: turn_scope(),
@@ -1172,7 +1230,506 @@ mod tests {
         assert_eq!(
             b_rec.status,
             MessageStatus::Submitted,
-            "message with oversized binding id must be Submitted after drain (UUID fallback)"
+            "deferred message must be Submitted after drain replays canonical refs verbatim"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Scenario F: two valid deferred messages drained one per terminal event
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn drain_submits_one_valid_message_per_terminal_event_cascade() {
+        let (coordinator, thread_service, publishing_store) = build_harness().await;
+
+        let msg_a = accept_message(&thread_service, "cascade-a", "ev-casc-a").await;
+        let run_a = submit_run(
+            coordinator.as_ref(),
+            "casc-a",
+            AcceptedMessageRef::new(format!("msg:{}", msg_a.message_id)).unwrap(),
+        )
+        .await;
+
+        // Defer B and C in order.
+        let msg_b = accept_message(&thread_service, "cascade-b", "ev-casc-b").await;
+        thread_service
+            .mark_message_deferred_busy(
+                &thread_scope(),
+                &thread_id(),
+                msg_b.message_id,
+                Some("src:binding-drain".to_string()),
+                Some("reply:binding-drain".to_string()),
+            )
+            .await
+            .expect("defer B");
+
+        let msg_c = accept_message(&thread_service, "cascade-c", "ev-casc-c").await;
+        thread_service
+            .mark_message_deferred_busy(
+                &thread_scope(),
+                &thread_id(),
+                msg_c.message_id,
+                Some("src:binding-drain".to_string()),
+                Some("reply:binding-drain".to_string()),
+            )
+            .await
+            .expect("defer C");
+
+        // Complete run A via runner path — drain fires, submits B (oldest).
+        let claimed_a = TurnRunTransitionPort::claim_next_run(
+            publishing_store.as_ref(),
+            ClaimRunRequest {
+                runner_id: TurnRunnerId::new(),
+                lease_token: TurnLeaseToken::new(),
+                scope_filter: None,
+            },
+        )
+        .await
+        .expect("claim A")
+        .expect("A must be claimable");
+        assert_eq!(claimed_a.state.run_id, run_a);
+
+        TurnRunTransitionPort::complete_run(
+            publishing_store.as_ref(),
+            CompleteRunRequest {
+                run_id: run_a,
+                runner_id: claimed_a.runner_id,
+                lease_token: claimed_a.lease_token,
+            },
+        )
+        .await
+        .expect("complete A");
+
+        let history = thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: thread_scope(),
+                thread_id: thread_id(),
+            })
+            .await
+            .unwrap();
+        let b_status = history
+            .messages
+            .iter()
+            .find(|m| m.message_id == msg_b.message_id)
+            .map(|m| m.status)
+            .expect("msg B");
+        let c_status = history
+            .messages
+            .iter()
+            .find(|m| m.message_id == msg_c.message_id)
+            .map(|m| m.status)
+            .expect("msg C");
+        assert_eq!(
+            b_status,
+            MessageStatus::Submitted,
+            "B must be Submitted after A completes"
+        );
+        assert_eq!(
+            c_status,
+            MessageStatus::DeferredBusy,
+            "C must still be DeferredBusy — drain submits one per terminal event"
+        );
+
+        // Complete B's run — drain fires, submits C.
+        let claimed_b = TurnRunTransitionPort::claim_next_run(
+            publishing_store.as_ref(),
+            ClaimRunRequest {
+                runner_id: TurnRunnerId::new(),
+                lease_token: TurnLeaseToken::new(),
+                scope_filter: None,
+            },
+        )
+        .await
+        .expect("claim B")
+        .expect("B's run must be claimable");
+
+        TurnRunTransitionPort::complete_run(
+            publishing_store.as_ref(),
+            CompleteRunRequest {
+                run_id: claimed_b.state.run_id,
+                runner_id: claimed_b.runner_id,
+                lease_token: claimed_b.lease_token,
+            },
+        )
+        .await
+        .expect("complete B's run");
+
+        let history2 = thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: thread_scope(),
+                thread_id: thread_id(),
+            })
+            .await
+            .unwrap();
+        let c_status2 = history2
+            .messages
+            .iter()
+            .find(|m| m.message_id == msg_c.message_id)
+            .map(|m| m.status)
+            .expect("msg C after B");
+        assert_eq!(
+            c_status2,
+            MessageStatus::Submitted,
+            "C must be Submitted after B's run completes"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Scenario G: list_deferred_busy_messages error — observe methods stay Ok
+    // -----------------------------------------------------------------------
+
+    /// Minimal `SessionThreadService` that panics on any call except
+    /// `list_deferred_busy_messages`, which always returns a backend error.
+    struct FailingListService;
+
+    #[async_trait::async_trait]
+    impl ironclaw_threads::SessionThreadService for FailingListService {
+        // ── Required methods — all unreachable; drain only calls list_deferred_busy_messages ──
+
+        async fn ensure_thread(
+            &self,
+            _: ironclaw_threads::EnsureThreadRequest,
+        ) -> Result<ironclaw_threads::SessionThreadRecord, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("FailingListService: ensure_thread")
+        }
+        async fn accept_inbound_message(
+            &self,
+            _: ironclaw_threads::AcceptInboundMessageRequest,
+        ) -> Result<ironclaw_threads::AcceptedInboundMessage, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("FailingListService: accept_inbound_message")
+        }
+        async fn replay_accepted_inbound_message(
+            &self,
+            _: ironclaw_threads::ReplayAcceptedInboundMessageRequest,
+        ) -> Result<
+            Option<ironclaw_threads::AcceptedInboundMessageReplay>,
+            ironclaw_threads::SessionThreadError,
+        > {
+            unreachable!("FailingListService: replay_accepted_inbound_message")
+        }
+        async fn mark_message_submitted(
+            &self,
+            _: &ThreadScope,
+            _: &ironclaw_host_api::ThreadId,
+            _: ironclaw_threads::ThreadMessageId,
+            _: String,
+            _: String,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("FailingListService: mark_message_submitted")
+        }
+        async fn mark_message_deferred_busy(
+            &self,
+            _: &ThreadScope,
+            _: &ironclaw_host_api::ThreadId,
+            _: ironclaw_threads::ThreadMessageId,
+            _: Option<String>,
+            _: Option<String>,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("FailingListService: mark_message_deferred_busy")
+        }
+        /// Always fails — exercises the drain's list-error handling path.
+        async fn list_deferred_busy_messages(
+            &self,
+            _: ironclaw_threads::ListDeferredBusyMessagesRequest,
+        ) -> Result<Vec<ironclaw_threads::ThreadMessageRecord>, ironclaw_threads::SessionThreadError>
+        {
+            Err(ironclaw_threads::SessionThreadError::Backend(
+                "injected list failure".to_string(),
+            ))
+        }
+        async fn append_assistant_draft(
+            &self,
+            _: ironclaw_threads::AppendAssistantDraftRequest,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("FailingListService: append_assistant_draft")
+        }
+        async fn append_tool_result_reference(
+            &self,
+            _: ironclaw_threads::AppendToolResultReferenceRequest,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("FailingListService: append_tool_result_reference")
+        }
+        async fn append_capability_display_preview(
+            &self,
+            _: ironclaw_threads::AppendCapabilityDisplayPreviewRequest,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("FailingListService: append_capability_display_preview")
+        }
+        async fn update_tool_result_reference(
+            &self,
+            _: ironclaw_threads::UpdateToolResultReferenceRequest,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("FailingListService: update_tool_result_reference")
+        }
+        async fn update_assistant_draft(
+            &self,
+            _: ironclaw_threads::UpdateAssistantDraftRequest,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("FailingListService: update_assistant_draft")
+        }
+        async fn finalize_assistant_message(
+            &self,
+            _: &ThreadScope,
+            _: &ironclaw_host_api::ThreadId,
+            _: ironclaw_threads::ThreadMessageId,
+            _: ironclaw_threads::MessageContent,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("FailingListService: finalize_assistant_message")
+        }
+        async fn redact_message(
+            &self,
+            _: ironclaw_threads::RedactMessageRequest,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("FailingListService: redact_message")
+        }
+        async fn load_context_window(
+            &self,
+            _: ironclaw_threads::LoadContextWindowRequest,
+        ) -> Result<ironclaw_threads::ContextWindow, ironclaw_threads::SessionThreadError> {
+            unreachable!("FailingListService: load_context_window")
+        }
+        async fn load_context_messages(
+            &self,
+            _: ironclaw_threads::LoadContextMessagesRequest,
+        ) -> Result<ironclaw_threads::ContextMessages, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("FailingListService: load_context_messages")
+        }
+        async fn list_thread_history(
+            &self,
+            _: ironclaw_threads::ThreadHistoryRequest,
+        ) -> Result<ironclaw_threads::ThreadHistory, ironclaw_threads::SessionThreadError> {
+            unreachable!("FailingListService: list_thread_history")
+        }
+        async fn create_summary_artifact(
+            &self,
+            _: ironclaw_threads::CreateSummaryArtifactRequest,
+        ) -> Result<ironclaw_threads::SummaryArtifact, ironclaw_threads::SessionThreadError>
+        {
+            unreachable!("FailingListService: create_summary_artifact")
+        }
+        // Methods with default impls (read_thread, delete_thread, latest_thread_message,
+        // finalized_assistant_message_by_run, list_thread_messages_range, update_thread_goal,
+        // read_thread_by_id, list_threads_for_scope) are inherited as-is.
+    }
+
+    #[tokio::test]
+    async fn drain_list_error_returns_ok_and_leaves_deferred() {
+        let failing_service: Arc<dyn ironclaw_threads::SessionThreadService> =
+            Arc::new(FailingListService);
+
+        let turn_store = Arc::new(InMemoryTurnStateStore::default());
+        let lifecycle_bus = Arc::new(DefaultTurnLifecycleEventBus::new());
+
+        let drain = Arc::new(DeferredBusyDrainObserver::new_unbound(Arc::clone(
+            &failing_service,
+        )));
+        let drain_observer: Arc<dyn TurnCommittedEventObserver> =
+            Arc::clone(&drain) as Arc<dyn TurnCommittedEventObserver>;
+        lifecycle_bus
+            .subscribe_required(drain_observer)
+            .expect("subscribe drain");
+
+        let publishing_store = Arc::new(LifecyclePublishingTurnStateStore::new(
+            Arc::clone(&turn_store),
+            lifecycle_bus,
+        ));
+        let coordinator: Arc<dyn TurnCoordinator> =
+            Arc::new(DefaultTurnCoordinator::new(Arc::clone(&publishing_store)));
+        drain
+            .bind_coordinator(Arc::clone(&coordinator))
+            .expect("bind coordinator");
+
+        let run_response = coordinator
+            .submit_turn(SubmitTurnRequest {
+                scope: turn_scope(),
+                actor: TurnActor::new(actor()),
+                accepted_message_ref: AcceptedMessageRef::new("msg:fail-list-a").unwrap(),
+                source_binding_ref: SourceBindingRef::new("src:fail-list").unwrap(),
+                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:fail-list").unwrap(),
+                requested_run_profile: None,
+                idempotency_key: IdempotencyKey::new("turn:fail-list-a").unwrap(),
+                received_at: chrono::Utc::now(),
+                requested_run_id: None,
+                parent_run_id: None,
+                subagent_depth: 0,
+                spawn_tree_root_run_id: None,
+            })
+            .await
+            .expect("submit turn");
+        let SubmitTurnResponse::Accepted { run_id, .. } = run_response;
+
+        // Cancel triggers observe_committed_event via the lifecycle bus.
+        // The drain calls list_deferred_busy_messages on FailingListService → error →
+        // drain logs a warn and returns Ok.  The lifecycle bus propagates Ok.
+        let cancel_result = coordinator
+            .cancel_run(CancelRunRequest {
+                scope: turn_scope(),
+                actor: TurnActor::new(actor()),
+                run_id,
+                reason: SanitizedCancelReason::UserRequested,
+                idempotency_key: IdempotencyKey::new("cancel:fail-list-a").unwrap(),
+            })
+            .await;
+        assert!(
+            cancel_result.is_ok(),
+            "cancel_run must not fail due to a drain list error: {cancel_result:?}"
+        );
+
+        // The cancel_run path above already exercised observe_committed_event via the lifecycle
+        // bus.  observe_committed_state (the non-terminal path) doesn't call the list service
+        // at all, so no extra assertion is needed here.
+    }
+
+    // -----------------------------------------------------------------------
+    // Scenario H: ThreadBusy during drain — message stays DeferredBusy
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn drain_leaves_deferred_when_resubmit_hits_thread_busy() {
+        // Build harness normally.
+        let (coordinator, thread_service, publishing_store) = build_harness().await;
+
+        // Submit run A — thread locked.
+        let msg_a = accept_message(&thread_service, "busy-h-a", "ev-busy-h-a").await;
+        let run_a = submit_run(
+            coordinator.as_ref(),
+            "busy-h-a",
+            AcceptedMessageRef::new(format!("msg:{}", msg_a.message_id)).unwrap(),
+        )
+        .await;
+
+        // Defer B.
+        let msg_b = accept_message(&thread_service, "busy-h-b", "ev-busy-h-b").await;
+        thread_service
+            .mark_message_deferred_busy(
+                &thread_scope(),
+                &thread_id(),
+                msg_b.message_id,
+                Some("src:binding-drain".to_string()),
+                Some("reply:binding-drain".to_string()),
+            )
+            .await
+            .expect("defer B");
+
+        // Cancel A — drain fires, submits B (B becomes Submitted, thread busy again).
+        coordinator
+            .cancel_run(CancelRunRequest {
+                scope: turn_scope(),
+                actor: TurnActor::new(actor()),
+                run_id: run_a,
+                reason: SanitizedCancelReason::UserRequested,
+                idempotency_key: IdempotencyKey::new("cancel:busy-h-a").unwrap(),
+            })
+            .await
+            .expect("cancel A");
+
+        let hist1 = thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: thread_scope(),
+                thread_id: thread_id(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            hist1
+                .messages
+                .iter()
+                .find(|m| m.message_id == msg_b.message_id)
+                .unwrap()
+                .status,
+            MessageStatus::Submitted,
+            "drain must submit B after A terminates"
+        );
+
+        // Thread now has B's run InProgress.  Accept C, try to submit C → ThreadBusy.
+        // Defer C manually.  Accept D, submit D → ThreadBusy (B still active).
+        let msg_c = accept_message(&thread_service, "busy-h-c", "ev-busy-h-c").await;
+        let submit_c_err = coordinator
+            .submit_turn(SubmitTurnRequest {
+                scope: turn_scope(),
+                actor: TurnActor::new(actor()),
+                accepted_message_ref: AcceptedMessageRef::new(format!("msg:{}", msg_c.message_id))
+                    .unwrap(),
+                source_binding_ref: SourceBindingRef::new("src:binding-drain").unwrap(),
+                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:binding-drain")
+                    .unwrap(),
+                requested_run_profile: None,
+                idempotency_key: IdempotencyKey::new("turn:busy-h-c").unwrap(),
+                received_at: chrono::Utc::now(),
+                requested_run_id: None,
+                parent_run_id: None,
+                subagent_depth: 0,
+                spawn_tree_root_run_id: None,
+            })
+            .await;
+        assert!(
+            matches!(submit_c_err, Err(ironclaw_turns::TurnError::ThreadBusy(_))),
+            "C must hit ThreadBusy while B runs: {submit_c_err:?}"
+        );
+        thread_service
+            .mark_message_deferred_busy(
+                &thread_scope(),
+                &thread_id(),
+                msg_c.message_id,
+                Some("src:binding-drain".to_string()),
+                Some("reply:binding-drain".to_string()),
+            )
+            .await
+            .expect("defer C");
+
+        // Claim and complete B's run — drain fires, submits C.
+        let claimed_b = TurnRunTransitionPort::claim_next_run(
+            publishing_store.as_ref(),
+            ClaimRunRequest {
+                runner_id: TurnRunnerId::new(),
+                lease_token: TurnLeaseToken::new(),
+                scope_filter: None,
+            },
+        )
+        .await
+        .expect("claim B")
+        .expect("B must be claimable");
+
+        TurnRunTransitionPort::complete_run(
+            publishing_store.as_ref(),
+            CompleteRunRequest {
+                run_id: claimed_b.state.run_id,
+                runner_id: claimed_b.runner_id,
+                lease_token: claimed_b.lease_token,
+            },
+        )
+        .await
+        .expect("complete B's run");
+
+        // C must now be Submitted.
+        let hist2 = thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: thread_scope(),
+                thread_id: thread_id(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            hist2
+                .messages
+                .iter()
+                .find(|m| m.message_id == msg_c.message_id)
+                .unwrap()
+                .status,
+            MessageStatus::Submitted,
+            "C must be Submitted after B's run terminates"
         );
     }
 }
