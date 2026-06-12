@@ -80,6 +80,7 @@ async fn run_routine_creation(case: RoutineCreationCase) {
                     "name": case.trigger_name,
                     "prompt": case.prompt,
                     "cron": case.cron,
+                    "timezone": "UTC",
                 }),
             )],
             expected_tool_results: Vec::new(),
@@ -307,6 +308,7 @@ async fn reborn_qa_routine_created_by_tool_fires_and_runs_routine_prompt() {
             "name": "Deployment health watcher",
             "prompt": QA_ROUTINE_PROMPT,
             "cron": "*/5 * * * *",
+            "timezone": "UTC",
         }),
     )
     .await;
@@ -461,6 +463,7 @@ async fn reborn_qa_fired_routine_executes_action_and_finalizes_reply() {
             "name": "Deployment health watcher action",
             "prompt": QA_ROUTINE_PROMPT,
             "cron": "*/5 * * * *",
+            "timezone": "UTC",
         }),
     )
     .await;

@@ -142,11 +142,13 @@ fn is_sensitive_header(name: &str) -> bool {
     )
 }
 
+#[allow(dead_code)] // Shared test support; not every root test target uses live loopback HTTP.
 #[derive(Clone)]
 pub struct LiveLoopbackHttpState {
     requests: Arc<Mutex<Vec<String>>>,
 }
 
+#[allow(dead_code)]
 impl LiveLoopbackHttpState {
     pub fn record(&self, uri: &Uri) {
         self.requests
@@ -160,12 +162,14 @@ impl LiveLoopbackHttpState {
     }
 }
 
+#[allow(dead_code)] // Shared test support; instantiated by QA web/doc tests.
 pub struct LiveLoopbackHttpServer {
     port: u16,
     requests: Arc<Mutex<Vec<String>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
+#[allow(dead_code)]
 impl LiveLoopbackHttpServer {
     pub async fn start(routes: Router<LiveLoopbackHttpState>) -> Self {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -208,6 +212,7 @@ impl Drop for LiveLoopbackHttpServer {
     }
 }
 
+#[allow(dead_code)] // Shared test support; consumed outside support_unit_tests.
 pub fn loopback_http_policy(port: u16) -> NetworkPolicy {
     NetworkPolicy {
         allowed_targets: vec![NetworkTargetPattern {
