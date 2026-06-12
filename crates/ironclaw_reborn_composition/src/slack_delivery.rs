@@ -52,6 +52,13 @@ use crate::auth_prompt::auth_prompt_view_for_blocked_auth;
 use crate::slack_outbound_targets::slack_conversation_id_from_reply_target_binding_ref;
 
 const MAX_SLACK_RUN_POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// Maximum number of concurrently in-flight deferred-busy hint posts.
+///
+/// Hint posts are fire-and-forget best-effort; capping to 4 prevents a burst
+/// from creating unbounded tasks or overwhelming Slack egress. Bursts beyond
+/// this limit drop the hint with a `debug!` log — the user already received
+/// hints for earlier messages in the burst.
+const MAX_CONCURRENT_HINT_POSTS: usize = 4;
 const SLACK_RUN_POLL_JITTER_BUCKETS: u32 = 5;
 const SLACK_API_HOST: &str = "slack.com";
 const SLACK_BOT_TOKEN_HANDLE: &str = "slack_bot_token";
@@ -66,7 +73,10 @@ const SLACK_DEFERRED_BUSY_APPROVAL_MESSAGE: &str = "Ironclaw is waiting on a pen
 /// Posted when the blocking run is `BlockedAuth`.
 const SLACK_DEFERRED_BUSY_AUTH_MESSAGE: &str = "Ironclaw is waiting on an authentication step before taking new messages — complete the authentication prompt (or reply `auth deny <auth-request-ref>` to decline).";
 /// Posted for any other non-terminal blocking state, or when the state lookup fails.
-const SLACK_DEFERRED_BUSY_GENERIC_MESSAGE: &str = "Ironclaw is still working on a previous message — this one is queued and will run when the current task finishes.";
+///
+/// Honest copy: no queue yet — deferred-message drain ships in a separate PR (#4812).
+/// Revisit this wording once #4812 lands and automatic retry is available.
+const SLACK_DEFERRED_BUSY_GENERIC_MESSAGE: &str = "Ironclaw is still working on a previous message and can't take this one yet — please resend it once the current task finishes.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BlockedActionableMarker {
@@ -123,6 +133,9 @@ pub struct SlackFinalReplyDeliveryObserver {
     services: SlackFinalReplyDeliveryServices,
     settings: SlackFinalReplyDeliverySettings,
     delivery_permits: Arc<Semaphore>,
+    /// Bounds concurrent in-flight deferred-busy hint posts.
+    /// `try_acquire_owned` before spawning; drop hint (debug!) on saturation.
+    hint_post_permits: Arc<Semaphore>,
 }
 
 impl SlackFinalReplyDeliveryObserver {
@@ -138,6 +151,7 @@ impl SlackFinalReplyDeliveryObserver {
             services,
             settings,
             delivery_permits: Arc::new(Semaphore::new(settings.max_concurrent_deliveries.get())),
+            hint_post_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_HINT_POSTS)),
         }
     }
 
@@ -961,12 +975,10 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
         // same guard used by `post_rejection_hint_if_authorized`.
         //
         // Backpressure: the hint post is spawned detached so a burst of deferred
-        // messages does not pin post-ack workers on Slack I/O.
-        if is_deferred_busy_user_message(&envelope, &ack) {
-            let active_run_id = match &ack {
-                ProductInboundAck::DeferredBusy { active_run_id, .. } => *active_run_id,
-                _ => unreachable!("is_deferred_busy_user_message ensures DeferredBusy"),
-            };
+        // messages does not pin post-ack workers on Slack I/O.  A small semaphore
+        // (MAX_CONCURRENT_HINT_POSTS) caps concurrent in-flight spawns so a burst
+        // does not create unbounded tasks or bypass max_concurrent_deliveries.
+        if let Some(active_run_id) = deferred_busy_user_message_run_id(&envelope, &ack) {
             // Authorization: verify the conversation has a valid binding before
             // posting. Skip silently (debug!) when unauthorized.
             let binding = match self
@@ -985,6 +997,15 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
                     return;
                 }
             };
+            // Backpressure: try_acquire_owned is non-blocking so the ack path is
+            // never stalled waiting for a permit.
+            let Ok(permit) = Arc::clone(&self.hint_post_permits).try_acquire_owned() else {
+                tracing::debug!(
+                    target = "ironclaw::reborn::slack_delivery",
+                    "deferred-busy hint dropped: hint-post semaphore saturated (best-effort)"
+                );
+                return;
+            };
             // Derive the scope for the active run state lookup.
             // Falls back to generic copy on any failure — never skips the hint.
             let hint = deferred_busy_hint_from_run_state(
@@ -996,6 +1017,9 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
             let egress = Arc::clone(&self.services.egress);
             let conversation = envelope.external_conversation_ref().clone();
             tokio::spawn(async move {
+                // Hold the permit until the post completes so the in-flight count
+                // is accurate for the full duration of the Slack I/O.
+                let _permit = permit;
                 if let Err(post_err) =
                     post_slack_message(egress.as_ref(), &conversation, hint).await
                 {
@@ -1213,27 +1237,30 @@ fn rejection_hint_for_resolution(
     Some(hint)
 }
 
-/// Returns `true` when the ack + payload combination should trigger the deferred-busy
-/// hint flow: a plain `DeferredBusy` ack on a `UserMessage` payload.
+/// Returns `Some(active_run_id)` when the ack + payload combination should trigger
+/// the deferred-busy hint flow: a plain `DeferredBusy` ack on a `UserMessage` payload.
 ///
-/// Returns `false` for `Duplicate` acks (the idempotency ledger never settles
+/// Returns `None` for `Duplicate` acks (the idempotency ledger never settles
 /// `DeferredBusy`, so Slack transport retries re-process as a fresh plain
 /// `DeferredBusy`, never `Duplicate{DeferredBusy}`; suppressing all `Duplicate`
 /// matches the invariant in `rejection_hint_for_resolution`) and for all non-user-
 /// message payloads (resolution/control payloads must stay silent).
-fn is_deferred_busy_user_message(
+fn deferred_busy_user_message_run_id(
     envelope: &ProductInboundEnvelope,
     ack: &ProductInboundAck,
-) -> bool {
+) -> Option<TurnRunId> {
     // All Duplicate acks are suppressed — same pattern as rejection_hint_for_resolution.
     if matches!(ack, ProductInboundAck::Duplicate { .. }) {
-        return false;
-    }
-    if !matches!(ack, ProductInboundAck::DeferredBusy { .. }) {
-        return false;
+        return None;
     }
     // Only reply to user messages — resolution/control/noop payloads must stay silent.
-    matches!(envelope.payload(), ProductInboundPayload::UserMessage(_))
+    if !matches!(envelope.payload(), ProductInboundPayload::UserMessage(_)) {
+        return None;
+    }
+    match ack {
+        ProductInboundAck::DeferredBusy { active_run_id, .. } => Some(*active_run_id),
+        _ => None,
+    }
 }
 
 /// Looks up the blocking run's state and returns the appropriate deferred-busy
@@ -2225,7 +2252,8 @@ mod tests {
         WriteCommunicationPreferenceRequest,
     };
     use ironclaw_product_adapters::{
-        FakeOutboundDeliverySink, FakeProtocolHttpEgress, ProductAdapterId,
+        EgressResponse, FakeOutboundDeliverySink, FakeProtocolHttpEgress, ProductAdapterId,
+        ProtocolHttpEgressError,
     };
     use ironclaw_slack_v2_adapter::{
         SlackV2Adapter, SlackV2AdapterConfig, slack_request_signature_auth_requirement,
@@ -3572,6 +3600,7 @@ mod tests {
             thread_service,
             turn_coordinator: coordinator,
             outbound_store: outbound.clone(),
+            route_store: Arc::new(InMemoryDeliveredGateRouteStore::default()),
             communication_preferences: outbound,
             adapter: test_adapter(install),
             egress: egress.clone(),
@@ -4679,5 +4708,300 @@ mod tests {
             "recorded route must include the no-space channel-root fingerprint for bare replies; fingerprints={:?}",
             route.delivered_conversation_fingerprints,
         );
+    }
+
+    // ── Extra DeferredBusy coverage tests ─────────────────────────────────────
+
+    /// Binding service that always returns a binding with `agent_id = None`.
+    ///
+    /// Used to exercise the scope-derivation fallback in
+    /// `deferred_busy_hint_from_run_state`: when `thread_scope_from_binding` fails
+    /// because `agent_id` is missing, the hint must still be posted using the
+    /// generic copy rather than being silently dropped.
+    struct NoAgentConversationBindingService;
+
+    #[async_trait]
+    impl ConversationBindingService for NoAgentConversationBindingService {
+        async fn resolve_binding(
+            &self,
+            request: ResolveBindingRequest,
+        ) -> Result<ResolvedBinding, ProductWorkflowError> {
+            Ok(ResolvedBinding {
+                tenant_id: ironclaw_host_api::TenantId::new("tenant:test").expect("tenant"),
+                actor_user_id: ironclaw_host_api::UserId::new(format!(
+                    "user:{}",
+                    request.external_actor_ref.id()
+                ))
+                .expect("user"),
+                subject_user_id: None,
+                thread_id: ironclaw_host_api::ThreadId::new("thread:test").expect("thread"),
+                agent_id: None, // deliberately no agent — triggers scope derivation failure
+                project_id: None,
+            })
+        }
+
+        async fn lookup_binding(
+            &self,
+            request: ResolveBindingRequest,
+        ) -> Result<ResolvedBinding, ProductWorkflowError> {
+            self.resolve_binding(request).await
+        }
+    }
+
+    /// A `TurnCoordinator` double whose `get_run_state` always returns `Err`.
+    struct ErroringTurnCoordinator;
+
+    #[async_trait]
+    impl TurnCoordinator for ErroringTurnCoordinator {
+        async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: "ErroringTurnCoordinator".to_string(),
+            })
+        }
+
+        async fn submit_turn(
+            &self,
+            _request: SubmitTurnRequest,
+        ) -> Result<SubmitTurnResponse, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: "ErroringTurnCoordinator".to_string(),
+            })
+        }
+
+        async fn resume_turn(
+            &self,
+            _request: ResumeTurnRequest,
+        ) -> Result<ResumeTurnResponse, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: "ErroringTurnCoordinator".to_string(),
+            })
+        }
+
+        async fn get_run_state(
+            &self,
+            _request: GetRunStateRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: "simulated run-state lookup failure".to_string(),
+            })
+        }
+
+        async fn cancel_run(
+            &self,
+            _request: ironclaw_turns::CancelRunRequest,
+        ) -> Result<ironclaw_turns::CancelRunResponse, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: "ErroringTurnCoordinator".to_string(),
+            })
+        }
+    }
+
+    /// Binding with no `agent_id` → scope derivation fails → generic copy posted.
+    ///
+    /// `deferred_busy_hint_from_run_state` calls `thread_scope_from_binding` which
+    /// returns `Err` when `agent_id` is `None`. The code must fall back to
+    /// `SLACK_DEFERRED_BUSY_GENERIC_MESSAGE` and still post the hint.
+    #[tokio::test]
+    async fn deferred_busy_missing_agent_binding_posts_generic_hint() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "7000.1"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::BlockedApproval,
+        ));
+
+        // Wire the no-agent binding service directly.
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let services = SlackFinalReplyDeliveryServices {
+            binding_service: Arc::new(NoAgentConversationBindingService),
+            thread_service,
+            turn_coordinator: coordinator,
+            outbound_store: outbound.clone(),
+            route_store: Arc::new(InMemoryDeliveredGateRouteStore::default()),
+            communication_preferences: outbound,
+            adapter: test_adapter(install),
+            egress: egress.clone(),
+            delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
+            auth_challenges: None,
+        };
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_millis(1),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let observer = SlackFinalReplyDeliveryObserver::with_settings(services, settings);
+
+        let env = envelope(user_message_payload());
+        let ack = deferred_busy_ack();
+
+        observer.observe_workflow_ack(env, ack).await;
+        tokio::task::yield_now().await;
+
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "expected exactly one chat.postMessage even when agent_id is missing"
+        );
+        let body = std::str::from_utf8(&post_calls[0].body).expect("utf8 body");
+        assert!(
+            body.contains("still working on a previous message"),
+            "hint must fall back to generic copy when scope derivation fails, got: {body}"
+        );
+    }
+
+    /// Run-state lookup returns `Err` → generic copy posted.
+    ///
+    /// `deferred_busy_hint_from_run_state` swallows `TurnError` from
+    /// `get_run_state` and degrades to `SLACK_DEFERRED_BUSY_GENERIC_MESSAGE`.
+    #[tokio::test]
+    async fn deferred_busy_run_state_lookup_error_posts_generic_hint() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "7000.2"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+
+        use ironclaw_product_workflow::FakeConversationBindingService;
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let services = SlackFinalReplyDeliveryServices {
+            binding_service: Arc::new(FakeConversationBindingService::new()),
+            thread_service,
+            // ErroringTurnCoordinator: get_run_state always returns Err.
+            turn_coordinator: Arc::new(ErroringTurnCoordinator),
+            outbound_store: outbound.clone(),
+            route_store: Arc::new(InMemoryDeliveredGateRouteStore::default()),
+            communication_preferences: outbound,
+            adapter: test_adapter(install),
+            egress: egress.clone(),
+            delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
+            auth_challenges: None,
+        };
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_millis(1),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let observer = SlackFinalReplyDeliveryObserver::with_settings(services, settings);
+
+        let env = envelope(user_message_payload());
+        let ack = deferred_busy_ack();
+
+        observer.observe_workflow_ack(env, ack).await;
+        tokio::task::yield_now().await;
+
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "expected exactly one chat.postMessage even when run-state lookup fails"
+        );
+        let body = std::str::from_utf8(&post_calls[0].body).expect("utf8 body");
+        assert!(
+            body.contains("still working on a previous message"),
+            "hint must fall back to generic copy when run-state lookup fails, got: {body}"
+        );
+    }
+
+    /// Slack post inside the spawned hint task fails → no panic, ack path unaffected.
+    ///
+    /// The hint-post semaphore must be released and the outer call must return
+    /// normally. The `FakeProtocolHttpEgress` returns an error response when we
+    /// program `Err(...)` into the queue.
+    #[tokio::test]
+    async fn deferred_busy_post_failure_is_best_effort() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // Program a transport failure for the hint post.
+        egress.program_response("slack.com", Err(ProtocolHttpEgressError::Timeout));
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::BlockedApproval,
+        ));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+
+        let env = envelope(user_message_payload());
+        let ack = deferred_busy_ack();
+
+        // Must not panic regardless of the egress failure.
+        observer.observe_workflow_ack(env, ack).await;
+        tokio::task::yield_now().await;
+
+        // The call was recorded even though the programmed result was an error.
+        let calls = egress.calls();
+        assert!(
+            calls.iter().any(|c| c.path == "/api/chat.postMessage"),
+            "egress must have been called even when the hint post fails (best-effort)"
+        );
+    }
+
+    /// Saturated hint-post semaphore → hint dropped, no post, no panic.
+    ///
+    /// Acquire all MAX_CONCURRENT_HINT_POSTS permits from the observer's semaphore
+    /// before the ack arrives.  The observer must silently drop the hint instead of
+    /// spawning an unbounded task.
+    #[tokio::test]
+    async fn deferred_busy_semaphore_saturated_drops_hint_without_panic() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::BlockedApproval,
+        ));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+
+        // Saturate the hint-post semaphore: acquire all MAX_CONCURRENT_HINT_POSTS permits.
+        let mut permits = Vec::new();
+        for _ in 0..MAX_CONCURRENT_HINT_POSTS {
+            let p = Arc::clone(&observer.hint_post_permits)
+                .try_acquire_owned()
+                .expect("permit must be available before saturation");
+            permits.push(p);
+        }
+
+        let env = envelope(user_message_payload());
+        let ack = deferred_busy_ack();
+
+        // Must not panic, must not post.
+        observer.observe_workflow_ack(env, ack).await;
+
+        let calls = egress.calls();
+        assert!(
+            !calls.iter().any(|c| c.path == "/api/chat.postMessage"),
+            "no chat.postMessage expected when hint-post semaphore is saturated"
+        );
+
+        // Release permits explicitly so the test is self-contained.
+        drop(permits);
     }
 }
