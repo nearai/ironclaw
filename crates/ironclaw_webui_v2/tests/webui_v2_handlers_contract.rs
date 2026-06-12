@@ -1059,7 +1059,7 @@ fn automation_info(automation_id: &str, name: &str, cron: &str) -> RebornAutomat
             run_id: Some(
                 TurnRunId::parse("11111111-1111-1111-1111-111111111111").expect("valid run id"),
             ),
-            thread_id: ThreadId::new("thread-listed").expect("valid thread id"),
+            thread_id: Some(ThreadId::new("thread-listed").expect("valid thread id")),
             fire_slot: None,
             status: RebornAutomationRecentRunStatus::Running,
             submitted_at: "2026-06-03T09:00:01Z".parse().expect("submitted at"),

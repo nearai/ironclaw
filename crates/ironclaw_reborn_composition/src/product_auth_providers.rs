@@ -353,6 +353,9 @@ mod tests {
         let gate_ref = AuthGateRef::new("gate:google-auth").unwrap();
         let requirements = vec![RuntimeCredentialAuthRequirement {
             provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                scopes: vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()],
+            },
             requester_extension: ExtensionId::new("google-calendar").unwrap(),
             provider_scopes: vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()],
         }];

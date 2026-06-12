@@ -1041,6 +1041,7 @@ fn map_fs_error(error: FilesystemError) -> OutboundError {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // contract tests construct the store under test
 mod tests {
     use std::sync::Arc;
 

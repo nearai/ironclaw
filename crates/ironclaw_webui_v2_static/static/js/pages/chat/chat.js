@@ -38,6 +38,7 @@ export function Chat({
     suggestions,
     sseStatus,
     historyLoading,
+    historyLoadError,
     hasMore,
     cooldownSeconds,
     recoveryNotice,
@@ -63,7 +64,10 @@ export function Chat({
   );
   const hasMessages =
     messages.length > 0 || isProcessing || Boolean(pendingGate) || Boolean(channelConnectAction);
-  const showLanding = !historyLoading && !hasMessages;
+  // Don't show the landing composer when history failed to load — show the
+  // error banner instead so the user is not misled into thinking the thread
+  // is empty.
+  const showLanding = !historyLoading && !hasMessages && !historyLoadError;
   const composerDisabled = (isProcessing && !pendingGate) || cooldownSeconds > 0;
   const composerStatusText =
     cooldownSeconds > 0 ? `Retry in ${cooldownSeconds}s` : undefined;
@@ -119,10 +123,9 @@ export function Chat({
    * working.
    *
    * Invariant: useChat resets pendingGate (and isProcessing reaches a
-   * fresh value) on threadId change via the sibling effect at
-   * useChat.js:136-140, so within a single React commit batch we never
-   * observe stale state from a previous thread paired with a new
-   * activeThreadId.
+   * fresh value) on threadId change via the thread-reset effect in
+   * useChat, so within a single React commit batch we never observe
+   * stale state from a previous thread paired with a new activeThreadId.
    *
    * Coverage gap (writer is per-active-thread only): this seam only
    * flags whichever thread the user is currently viewing. Cross-thread
@@ -163,6 +166,16 @@ export function Chat({
     <div className="flex h-full min-h-0 overflow-hidden">
       <div className="flex min-w-0 flex-1 flex-col">
         <${ConnectionStatus} status=${sseStatus} />
+
+        ${historyLoadError &&
+        html`
+          <div
+            className="mx-4 mt-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300"
+            role="alert"
+          >
+            ${historyLoadError}
+          </div>
+        `}
 
         ${showLanding &&
         html`

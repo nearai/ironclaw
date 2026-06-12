@@ -38,6 +38,11 @@ export function useHistory(threadId, options = {}) {
     messages: cached?.messages || [],
     nextCursor: cached?.nextCursor || null,
     isLoading: false,
+    // Non-null when an initial or cursor-load failed. Reset to null on a
+    // successful load or when the threadId changes. The chat page renders
+    // this as a user-visible error banner so timeline failures are never
+    // silently swallowed.
+    loadError: null,
   });
   // Synchronous reentrancy guard — `isLoading` in state is async so
   // it can't gate overlapping calls (scroll-to-load + onRunCompleted
@@ -54,7 +59,7 @@ export function useHistory(threadId, options = {}) {
   const loadHistory = React.useCallback(
     async (cursor) => {
       if (!threadId) {
-        setState({ messages: [], nextCursor: null, isLoading: false });
+        setState({ messages: [], nextCursor: null, isLoading: false, loadError: null });
         return;
       }
       if (loadingRef.current) return;
@@ -94,15 +99,23 @@ export function useHistory(threadId, options = {}) {
             messages: merged,
             nextCursor,
             isLoading: false,
+            loadError: null,
           };
         });
       } catch (err) {
-        setState((s) =>
-          threadIdRef.current === threadId ? { ...s, isLoading: false } : s,
-        );
-        // Stay loud — surface to the SPA error boundary rather than
-        // silently masking timeline outages.
         console.error("Failed to load timeline:", err);
+        // Stay loud — surface a user-visible error rather than silently
+        // masking timeline outages. Ignore a stale resolve for a thread the
+        // user already navigated away from (its data is already cached).
+        setState((s) =>
+          threadIdRef.current === threadId
+            ? {
+                ...s,
+                isLoading: false,
+                loadError: "Failed to load conversation history.",
+              }
+            : s,
+        );
       } finally {
         loadingRef.current = false;
       }
@@ -119,6 +132,7 @@ export function useHistory(threadId, options = {}) {
       // otherwise render the cached thread immediately and refresh in
       // the background so the content area doesn't flash empty.
       isLoading: Boolean(threadId) && !entry,
+      loadError: null,
     });
     if (threadId) loadHistory();
   }, [threadId, loadHistory]);
@@ -128,6 +142,7 @@ export function useHistory(threadId, options = {}) {
     hasMore: Boolean(state.nextCursor),
     nextCursor: state.nextCursor,
     isLoading: state.isLoading,
+    loadError: state.loadError,
     loadHistory,
     setMessages: (updater) =>
       setState((s) => {

@@ -355,7 +355,7 @@ fn trigger_run_output(run: &TriggerRunRecord) -> Value {
     json!({
         "fire_slot": run.fire_slot,
         "run_id": run.run_id.as_ref().map(ToString::to_string),
-        "thread_id": run.thread_id.as_str(),
+        "thread_id": run.thread_id.as_ref().map(|t| t.as_str()),
         "status": run.status,
         "submitted_at": run.submitted_at,
         "completed_at": run.completed_at,

@@ -1,3 +1,6 @@
+// Contract tests construct the store directly under test.
+#![allow(clippy::disallowed_methods)]
+
 use std::sync::Arc;
 
 use async_trait::async_trait;

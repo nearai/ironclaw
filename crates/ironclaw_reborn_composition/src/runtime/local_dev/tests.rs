@@ -211,6 +211,18 @@ mod tests {
             .create_capability_port(run_context)
             .await
             .expect("capability port");
+        let initial_tool_definition_ids = port
+            .tool_definitions()
+            .expect("initial tool definitions")
+            .into_iter()
+            .map(|definition| definition.capability_id.as_str().to_string())
+            .collect::<Vec<_>>();
+        assert!(
+            initial_tool_definition_ids
+                .iter()
+                .any(|id| id == "github.search_issues"),
+            "fresh capability ports must initialize active extension tools for auth-resume replay"
+        );
         let surface = port
             .visible_capabilities(VisibleCapabilityRequest {})
             .await
@@ -392,7 +404,8 @@ mod tests {
         let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
             local_runtime.skill_management.clone(),
         )
-        .with_extension_management(extension_management);
+        .with_extension_management(extension_management)
+        .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
         for extension_id in ["gmail", "google-calendar"] {
             let package_ref =
                 LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id)
@@ -415,6 +428,45 @@ mod tests {
                     .await
                     .expect("activate GSuite extension");
             }
+        }
+    }
+
+    struct ConfiguredRuntimeCredentialAccounts;
+
+    #[async_trait::async_trait]
+    impl crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionService
+        for ConfiguredRuntimeCredentialAccounts
+    {
+        async fn select_unique_configured_runtime_account(
+            &self,
+            _request: crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest,
+        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            let now = chrono::Utc::now();
+            Ok(ironclaw_auth::CredentialAccount {
+                id: ironclaw_auth::CredentialAccountId::new(),
+                scope: ironclaw_auth::AuthProductScope::new(
+                    ironclaw_host_api::ResourceScope::local_default(
+                        UserId::new("configured-credential-user").expect("user id"),
+                        ironclaw_host_api::InvocationId::new(),
+                    )
+                    .expect("resource scope"),
+                    ironclaw_auth::AuthSurface::Api,
+                ),
+                provider: ironclaw_auth::AuthProviderId::new("test-provider").expect("provider id"),
+                label: ironclaw_auth::CredentialAccountLabel::new("test-provider")
+                    .expect("account label"),
+                status: ironclaw_auth::CredentialAccountStatus::Configured,
+                ownership: ironclaw_auth::CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(
+                    ironclaw_host_api::SecretHandle::new("test-secret").expect("secret handle"),
+                ),
+                refresh_secret: None,
+                scopes: Vec::new(),
+                created_at: now,
+                updated_at: now,
+            })
         }
     }
 
@@ -1553,7 +1605,8 @@ mod tests {
             let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
                 local_runtime.skill_management.clone(),
             )
-            .with_extension_management(extension_management);
+            .with_extension_management(extension_management)
+            .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
             let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
                 .expect("valid github ref");
             facade
@@ -1606,7 +1659,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_capability_port_snapshots_extensions_when_port_is_created() {
+    async fn local_dev_capability_port_refreshes_extensions_after_activation() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
         let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
@@ -1637,6 +1690,25 @@ mod tests {
             None,
         )
         .expect("local-dev capability wiring");
+        let port = wiring
+            .capability_factory
+            .create_capability_port(&run_context)
+            .await
+            .expect("capability port");
+        let inactive_surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("inactive visible surface");
+        let inactive_capability_ids = inactive_surface
+            .descriptors
+            .iter()
+            .map(|descriptor| descriptor.capability_id.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            !inactive_capability_ids.contains(&"github.search_issues"),
+            "github capability should stay hidden before activation"
+        );
+
         let local_runtime = services
             .local_runtime
             .as_ref()
@@ -1649,7 +1721,8 @@ mod tests {
         let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
             local_runtime.skill_management.clone(),
         )
-        .with_extension_management(extension_management);
+        .with_extension_management(extension_management)
+        .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
             .expect("valid github ref");
         facade
@@ -1669,7 +1742,40 @@ mod tests {
             .await
             .expect("activate github extension");
 
-        assert_github_capabilities_visible(&wiring, &run_context).await;
+        let staged_after_activation = port
+            .register_provider_tool_call(provider_tool_call_with_name(
+                "github__search_issues",
+                serde_json::json!({"query": "repo:nearai/ironclaw is:issue"}),
+            ))
+            .await
+            .expect("provider registration should refresh newly activated extension surface");
+        assert_eq!(
+            staged_after_activation.capability_id.as_str(),
+            "github.search_issues"
+        );
+
+        let active_surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("active visible surface");
+        let active_capability_ids = active_surface
+            .descriptors
+            .iter()
+            .map(|descriptor| descriptor.capability_id.as_str())
+            .collect::<Vec<_>>();
+        assert!(active_capability_ids.contains(&"github.search_issues"));
+        assert!(active_capability_ids.contains(&"github.get_issue"));
+        assert!(active_capability_ids.contains(&"github.comment_issue"));
+
+        let tool_definitions = port.tool_definitions().expect("tool definitions");
+        let tool_definition_ids = tool_definitions
+            .iter()
+            .map(|definition| definition.capability_id.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            tool_definition_ids.contains(&"github.search_issues"),
+            "refreshed provider tools should include github after activation"
+        );
     }
 
     #[tokio::test]

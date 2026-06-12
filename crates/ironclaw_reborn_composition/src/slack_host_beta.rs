@@ -11,9 +11,7 @@ use std::time::Duration;
 
 use ironclaw_conversations::InMemoryConversationServices;
 use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, TenantId, UserId};
-use ironclaw_outbound::{
-    FilesystemOutboundStateStore, OutboundStateStore, TriggeredRunDeliveryStore,
-};
+use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRunDeliveryStore};
 use ironclaw_product_adapters::{
     AdapterInstallationId, DeclaredEgressHost, DeclaredEgressTarget, DeliveryStatus,
     EgressCredentialHandle, ExternalActorRef, OutboundDeliverySink, ProductAdapter,
@@ -45,7 +43,7 @@ use crate::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteStore, SlackChannelRouteSubjectResolver,
 };
 use crate::slack_delivery::{
-    PostSubmitDeliveryHook, SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
+    SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
     SlackFinalReplyDeliverySettings, TriggeredRunDeliveryDriver,
 };
 use crate::slack_egress::{SlackProtocolHttpEgress, StaticSlackEgressCredentialProvider};
@@ -266,18 +264,25 @@ pub fn build_slack_events_route_mount(
     build_slack_host_beta_mounts(runtime, config).map(|mounts| mounts.events)
 }
 
-/// Build a [`PostSubmitDeliveryHook`] that delivers triggered-run results to
-/// the creator's personal Slack DM.
+/// Build a [`TriggeredRunDeliveryDriver`] that delivers triggered-run results
+/// to the creator's personal Slack DM.
 ///
-/// The hook shares the same egress and outbound-state infrastructure as the
-/// Slack events route: bot token, `FilesystemOutboundStateStore`, and
-/// `SlackV2Adapter`. The `delivery_store` is a separate store for recording
-/// per-run delivery outcomes (best-effort, personal scope only).
+/// Returns the concrete `Arc<TriggeredRunDeliveryDriver>` so tests can assert
+/// store-pointer identity through this production entry point (via
+/// [`TriggeredRunDeliveryDriver::communication_preferences_for_test`] and
+/// `Arc::ptr_eq`).  Call sites that wire the hook into the runtime coerce the
+/// concrete Arc to `Arc<dyn PostSubmitDeliveryHook>` implicitly when passing
+/// it to [`RebornRuntime::set_trigger_post_submit_hook`].
+///
+/// Preferences and outbound state come from the composition-owned store (the
+/// same instance the WebUI delivery-defaults facade writes through), so a
+/// preference set via the WebUI is visible to Slack delivery.
+/// See docs/plans/2026-05-29-trigger-loop-delivery-resolution-implementation.md.
 pub fn build_triggered_run_delivery_hook(
     runtime: &RebornRuntime,
     config: &SlackHostBetaConfig,
     delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
-) -> Result<Arc<dyn PostSubmitDeliveryHook>, SlackHostBetaBuildError> {
+) -> Result<Arc<TriggeredRunDeliveryDriver>, SlackHostBetaBuildError> {
     let local_runtime = runtime
         .services()
         .local_runtime
@@ -293,12 +298,11 @@ pub fn build_triggered_run_delivery_hook(
         auth_requirement: slack_request_signature_auth_requirement(),
     }));
     let egress = slack_protocol_egress(runtime, config, token_handle)?;
-    let outbound = Arc::new(FilesystemOutboundStateStore::new(Arc::clone(
-        &local_runtime.host_state_filesystem,
-    )));
-    let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
-    let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> = outbound.clone();
-    let preferences: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository> = outbound;
+    let outbound_store: Arc<dyn OutboundStateStore> = Arc::clone(&local_runtime.outbound_state);
+    let route_store: Arc<dyn DeliveredGateRouteStore> =
+        Arc::clone(&local_runtime.delivered_gate_routes);
+    let preferences: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository> =
+        Arc::clone(&local_runtime.outbound_preferences);
     let delivery_sink: Arc<dyn OutboundDeliverySink> = Arc::new(NoopSlackDeliverySink);
     let binding_service: Arc<dyn ConversationBindingService> =
         Arc::new(NoopConversationBindingService);
@@ -414,15 +418,14 @@ pub fn build_slack_host_beta_mounts(
     )
     .with_allowed_subject_user_ids(allowed_route_subjects);
 
-    // Wire the triggered-run delivery hook. The delivery store lives on the
-    // same `host_state_filesystem` mount as every other outbound store, so it
-    // inherits tenant isolation for free. `set_trigger_post_submit_hook` is
-    // idempotent: a second call (if this function is called more than once) is
-    // silently ignored.
+    // Wire the triggered-run delivery hook. The delivery store comes from the
+    // composition-owned outbound store, shared with preferences so the same
+    // backing tree is used for all outbound roles. `set_trigger_post_submit_hook`
+    // is idempotent: a second call (if this function is called more than once)
+    // is silently ignored.
     {
-        let delivery_store: Arc<dyn TriggeredRunDeliveryStore> = Arc::new(
-            FilesystemOutboundStateStore::new(Arc::clone(&local_runtime.host_state_filesystem)),
-        );
+        let delivery_store: Arc<dyn TriggeredRunDeliveryStore> =
+            Arc::clone(&local_runtime.triggered_run_delivery);
         match build_triggered_run_delivery_hook(runtime, &config, delivery_store) {
             Ok(hook) => {
                 runtime.set_trigger_post_submit_hook(hook);
@@ -561,9 +564,7 @@ fn build_slack_events_route_mount_with_resolvers(
         .with_approval_interaction_service(Arc::new(
             crate::delivered_gate_routing::DeliveredGateRoutingApprovalService::new(
                 runtime.webui_approval_interaction_service(),
-                Arc::new(FilesystemOutboundStateStore::new(Arc::clone(
-                    &local_runtime.host_state_filesystem,
-                ))),
+                Arc::clone(&local_runtime.delivered_gate_routes),
             ),
         ))
         .with_auth_interaction_service(runtime.webui_auth_interaction_service()),
@@ -586,11 +587,9 @@ fn build_slack_events_route_mount_with_resolvers(
     ));
 
     let egress = slack_protocol_egress(runtime, &config, token_handle)?;
-    let outbound = Arc::new(FilesystemOutboundStateStore::new(Arc::clone(
-        &local_runtime.host_state_filesystem,
-    )));
-    let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
-    let preferences: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository> = outbound;
+    let outbound_store: Arc<dyn OutboundStateStore> = Arc::clone(&local_runtime.outbound_state);
+    let preferences: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository> =
+        Arc::clone(&local_runtime.outbound_preferences);
     let delivery_sink: Arc<dyn OutboundDeliverySink> = Arc::new(NoopSlackDeliverySink);
     let observer = Arc::new(SlackFinalReplyDeliveryObserver::with_settings(
         SlackFinalReplyDeliveryServices {
@@ -3818,7 +3817,6 @@ mod tests {
 
         use chrono::Utc;
         use ironclaw_conversations::{AdapterInstallationId, AdapterKind, ExternalActorRef};
-        use ironclaw_outbound::{FilesystemOutboundStateStore, TriggeredRunDeliveryStore};
         use ironclaw_triggers::{
             TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
             TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerCompletionPolicy, TriggerId,
@@ -3897,17 +3895,15 @@ mod tests {
             }
         }
 
-        // Build a delivery store over the same host_state_filesystem the
-        // production hook uses.  `local_runtime` and `host_state_filesystem`
-        // are `pub(crate)` — accessible here because this test lives in the
-        // same crate.
+        // Read delivery records from the unified outbound store that the
+        // production hook writes through.  `local_runtime` is `pub(crate)`
+        // — accessible here because this test lives in the same crate.
         let local_runtime = runtime
             .services()
             .local_runtime
             .as_ref()
             .expect("local-dev runtime has local_runtime services");
-        let delivery_store =
-            FilesystemOutboundStateStore::new(Arc::clone(&local_runtime.host_state_filesystem));
+        let delivery_store = Arc::clone(&local_runtime.triggered_run_delivery);
 
         // Poll briefly for the delivery record.  The driver spawns a background
         // task; for the `NoDefaultConfigured` fast-path it should complete well
@@ -3935,5 +3931,69 @@ mod tests {
             "no TriggeredRunDeliveryRecord written after trigger fire — \
              hook → driver wiring broken; fired_run_id={fired_run_id:?}"
         );
+    }
+
+    /// Regression guard: `build_triggered_run_delivery_hook` must wire the same
+    /// `CommunicationPreferenceRepository` Arc that the WebUI
+    /// `RebornOutboundPreferencesFacade` writes through
+    /// (`local_runtime.outbound_preferences`) into
+    /// `SlackFinalReplyDeliveryServices.communication_preferences`.
+    ///
+    /// Pre-fix bug: `build_triggered_run_delivery_hook` constructed a fresh
+    /// `FilesystemOutboundStateStore::new(Arc::clone(&local_runtime.host_state_filesystem))`
+    /// as the `communication_preferences` argument, while the WebUI facade wrote
+    /// through `local_runtime.outbound_preferences` — a different store backed by the
+    /// same filesystem path but carrying independent in-memory state.  Any preference
+    /// saved through the WebUI was therefore never seen by the delivery hook.
+    ///
+    /// This test uses `Arc::ptr_eq` to verify both sides hold the *same pointer*,
+    /// which is the only invariant that guarantees a write on one side is immediately
+    /// visible on the other without filesystem round-trips.  If
+    /// `build_triggered_run_delivery_hook` is regressed to create a new store this
+    /// assertion fails deterministically and immediately, without needing an E2E run
+    /// that could be silenced by an unrelated `Skipped` outcome.
+    #[tokio::test]
+    async fn webui_saved_preference_is_visible_to_triggered_slack_delivery() {
+        use ironclaw_outbound::TriggeredRunDeliveryStore;
+
+        let (runtime, _tmp) = runtime_with_trigger_poller().await;
+
+        let local_runtime = runtime
+            .services()
+            .local_runtime
+            .as_ref()
+            .expect("local-dev runtime has local_runtime services");
+
+        // Build the delivery driver via the production entry point.
+        // `build_triggered_run_delivery_hook` now returns the concrete
+        // `Arc<TriggeredRunDeliveryDriver>` directly, so we can inspect
+        // `communication_preferences_for_test` through the same code path
+        // that the production call site uses.
+        let delivery_store: Arc<dyn TriggeredRunDeliveryStore> =
+            Arc::clone(&local_runtime.triggered_run_delivery);
+        let driver = build_triggered_run_delivery_hook(&runtime, &config(), delivery_store)
+            .expect("build_triggered_run_delivery_hook should succeed");
+
+        // The pointer stored in the driver must be the same Arc that the WebUI
+        // delivery-defaults facade uses.  Arc::ptr_eq compares allocation identity
+        // (for trait objects, data and vtable pointers); it passes only when both
+        // handles came from the same composition-owned store instance.  If
+        // `build_triggered_run_delivery_hook` is regressed to
+        // `Arc::new(FilesystemOutboundStateStore::new(...))`, the new allocation
+        // will produce a different pointer pair and this assertion fails.
+        let driver_store = driver.communication_preferences_for_test();
+        let facade_store: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository> =
+            Arc::clone(&local_runtime.outbound_preferences);
+        assert!(
+            Arc::ptr_eq(&driver_store, &facade_store),
+            "build_triggered_run_delivery_hook (production entry point) wired a DIFFERENT \
+             CommunicationPreferenceRepository than local_runtime.outbound_preferences — any \
+             preference written through the WebUI delivery-defaults facade \
+             (RebornOutboundPreferencesFacade) will NOT be visible to the Slack \
+             triggered-delivery hook; the hook must use \
+             Arc::clone(&local_runtime.outbound_preferences) as `communication_preferences`"
+        );
+
+        runtime.shutdown().await.expect("runtime shuts down");
     }
 }

@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
 use chrono_tz::Tz;
 use cron::Schedule;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
 use ironclaw_turns::TurnRunId;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -450,13 +450,28 @@ pub struct TriggerRunRecord {
     pub trigger_id: TriggerId,
     pub fire_slot: Timestamp,
     pub run_id: Option<TurnRunId>,
-    pub thread_id: TriggerRouteThreadId,
+    /// Canonical thread id for this run, or `None` if no canonical conversation
+    /// thread has been established yet.
+    ///
+    /// `None` is the initial state for claim-time rows and for runs that fail
+    /// before fire acceptance. `Some(canonical_uuid)` is set by
+    /// [`TriggerRepository::mark_fire_accepted`] (and optionally by
+    /// [`TriggerRepository::mark_fire_replayed`] when the replayed outcome
+    /// carries a canonical thread id). Only `Some` values correspond to a live
+    /// chat thread that the WebUI panel can open.
+    pub thread_id: Option<ThreadId>,
     pub status: TriggerRunHistoryStatus,
     pub submitted_at: Timestamp,
     pub completed_at: Option<Timestamp>,
 }
 
 impl TriggerRunRecord {
+    /// Create a "running" run record with no canonical thread id yet.
+    ///
+    /// The `thread_id` field will be populated with the canonical UUID at
+    /// fire-acceptance time via [`TriggerRepository::mark_fire_accepted`].
+    /// Rows that never reach acceptance (e.g. pre-submit failures) retain
+    /// `None` — the WebUI panel must not render a chat link for them.
     fn running(
         tenant_id: TenantId,
         trigger_id: TriggerId,
@@ -464,13 +479,12 @@ impl TriggerRunRecord {
         run_id: Option<TurnRunId>,
         submitted_at: Timestamp,
     ) -> Self {
-        let identity = TriggerFireIdentity::new(tenant_id.clone(), trigger_id, fire_slot);
         Self {
             tenant_id,
             trigger_id,
             fire_slot,
             run_id,
-            thread_id: identity.route_thread_id,
+            thread_id: None,
             status: TriggerRunHistoryStatus::Running,
             submitted_at,
             completed_at: None,
@@ -581,6 +595,10 @@ pub struct FireAcceptedRequest {
     pub trigger_id: TriggerId,
     pub fire_slot: Timestamp,
     pub run_id: TurnRunId,
+    /// Canonical thread id minted by the conversation binding layer for the
+    /// accepted run. Persisted into the run-history row so the WebUI Automations
+    /// panel can open the correct chat thread from `recent_runs[].thread_id`.
+    pub thread_id: ThreadId,
     pub submitted_at: Timestamp,
     pub next_run_at: Timestamp,
 }
@@ -591,6 +609,14 @@ pub struct FireReplayedRequest {
     pub trigger_id: TriggerId,
     pub fire_slot: Timestamp,
     pub original_run_id: TurnRunId,
+    /// Canonical thread id for the replayed fire, if one is known.
+    ///
+    /// The submission path resolves conversation binding before determining
+    /// whether a fire is new or replayed, so the replayed outcome can carry
+    /// the canonical `ThreadId` (UUID). `None` means the submission path
+    /// did not resolve a canonical thread — the run-history row will have
+    /// no chat link.
+    pub thread_id: Option<ThreadId>,
     pub replayed_at: Timestamp,
     pub next_run_at: Timestamp,
 }
@@ -818,6 +844,29 @@ pub trait TriggerRepository: Send + Sync {
         &self,
         request: ClearActiveFireRequest,
     ) -> Result<Option<TriggerRecord>, TriggerError>;
+
+    /// Looks up the run-history row and its parent trigger by `thread_id`.
+    ///
+    /// Returns `Some((trigger_record, run_record))` when a run with the given
+    /// `thread_id` exists for the tenant, `None` when no match is found.
+    ///
+    /// # Authorization
+    ///
+    /// This method performs a pure storage lookup with **no authorization
+    /// filtering**. The caller is responsible for applying any caller-visibility
+    /// or scope predicate before acting on the returned record (e.g., checking
+    /// that the trigger belongs to the expected `creator_user_id`, `agent_id`,
+    /// and `project_id`).
+    ///
+    /// Required (no default body): this lookup feeds the authorization path
+    /// for opening trigger-owned threads from the Automations panel. A
+    /// silently inherited `Ok(None)` would degrade every timeline/SSE/gate/
+    /// cancel access check to 404 on a backend that forgot to implement it.
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        tenant_id: TenantId,
+        thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError>;
 
     /// Returns recent run-history rows for one tenant-scoped trigger.
     ///
@@ -1186,6 +1235,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
             request.trigger_id,
             request.fire_slot,
             request.run_id,
+            Some(request.thread_id),
             record.last_run_at.unwrap_or(request.submitted_at),
         )?;
         Ok(Some(record))
@@ -1222,6 +1272,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
             request.trigger_id,
             request.fire_slot,
             request.original_run_id,
+            request.thread_id,
             record.last_run_at.unwrap_or(request.replayed_at),
         )?;
         Ok(Some(record))
@@ -1372,6 +1423,26 @@ impl TriggerRepository for InMemoryTriggerRepository {
         Ok(Some(record))
     }
 
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        tenant_id: TenantId,
+        thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        let state = self.lock_state()?;
+        let Some(run) = state.runs.values().find(|run| {
+            run.tenant_id == tenant_id
+                && run.thread_id.as_ref().map(|t| t.as_str()) == Some(thread_id.as_str())
+        }) else {
+            return Ok(None);
+        };
+        let run = run.clone();
+        let trigger = state
+            .records
+            .get(&TriggerRepositoryKey::new(&tenant_id, run.trigger_id))
+            .cloned();
+        Ok(trigger.map(|t| (t, run)))
+    }
+
     async fn list_trigger_run_history(
         &self,
         tenant_id: TenantId,
@@ -1462,27 +1533,28 @@ impl InMemoryTriggerRepository {
         trigger_id: TriggerId,
         fire_slot: Timestamp,
         run_id: TurnRunId,
+        thread_id: Option<ThreadId>,
         submitted_at: Timestamp,
     ) -> Result<(), TriggerError> {
         let mut state = self.lock_state()?;
         let key = TriggerRunRepositoryKey::new(tenant_id, trigger_id, fire_slot);
-        if state
-            .runs
-            .get(&key)
-            .is_some_and(|run| run.completed_at.is_some())
-        {
+        let existing = state.runs.get(&key);
+        if existing.is_some_and(|run| run.completed_at.is_some()) {
             return Ok(());
         }
-        state.runs.insert(
-            key,
-            TriggerRunRecord::running(
-                tenant_id.clone(),
-                trigger_id,
-                fire_slot,
-                Some(run_id),
-                submitted_at,
-            ),
+        // A replay without a resolved scope must not clobber an already
+        // persisted canonical thread id back to None.
+        let preserved_thread_id =
+            thread_id.or_else(|| existing.and_then(|run| run.thread_id.clone()));
+        let mut run = TriggerRunRecord::running(
+            tenant_id.clone(),
+            trigger_id,
+            fire_slot,
+            Some(run_id),
+            submitted_at,
         );
+        run.thread_id = preserved_thread_id;
+        state.runs.insert(key, run);
         prune_run_history_locked(&mut state, tenant_id, trigger_id);
         Ok(())
     }
@@ -2340,6 +2412,7 @@ mod tests {
             trigger_id,
             fire_slot,
             run_id,
+            Some(ThreadId::new("01890f0f-test-7000-8000-000000000001").expect("valid thread id")),
             later_submitted_at,
         )
         .expect("late running upsert is ignored");
@@ -2400,6 +2473,8 @@ mod tests {
                 fire_slot,
                 run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a")
                     .expect("valid run"),
+                thread_id: ThreadId::new("01890f0f-test-7000-8000-000000000002")
+                    .expect("valid thread id"),
                 submitted_at: fire_slot,
                 next_run_at: ts(1_704_067_260),
             })
@@ -2422,6 +2497,7 @@ mod tests {
                 fire_slot,
                 original_run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a")
                     .expect("valid run"),
+                thread_id: None,
                 replayed_at: fire_slot,
                 next_run_at: ts(1_704_067_260),
             })
