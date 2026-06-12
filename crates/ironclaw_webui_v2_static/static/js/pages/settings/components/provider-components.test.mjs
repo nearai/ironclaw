@@ -677,8 +677,15 @@ function runProviderLogin({ hostname, activeProviderId = null, popupClosed = fal
         // A usable popup handle for the synchronous-open + sever-opener +
         // navigate pattern: a settable location/opener and a no-op close.
         // `popupClosed` simulates the user closing the tab so the
-        // close-detection path can be driven.
-        const handle = { location: { href: "" }, opener: null, closed: popupClosed, close() {} };
+        // close-detection path can be driven. `opener` starts as a non-null
+        // sentinel so the sever-opener assertion is falsifiable: the hook must
+        // actively null it (the reverse-tabnabbing fix), or the test fails.
+        const handle = {
+          location: { href: "" },
+          opener: context,
+          closed: popupClosed,
+          close() {},
+        };
         popups.push(handle);
         return handle;
       },
