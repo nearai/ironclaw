@@ -77,6 +77,7 @@ pub(super) struct MockHost {
     fail_checkpoint: Arc<Mutex<Option<LoopCheckpointKind>>>,
     fail_visible_capabilities: bool,
     fail_prompt_bundle: bool,
+    fail_batch_with: Arc<Mutex<Option<AgentLoopHostErrorKind>>>,
 }
 
 impl MockHost {
@@ -115,6 +116,7 @@ impl MockHost {
             fail_checkpoint: Arc::new(Mutex::new(None)),
             fail_visible_capabilities: false,
             fail_prompt_bundle: false,
+            fail_batch_with: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -161,6 +163,11 @@ impl MockHost {
 
     pub(super) fn with_failing_prompt_bundle(mut self) -> Self {
         self.fail_prompt_bundle = true;
+        self
+    }
+
+    pub(super) fn fail_batch_with(self, kind: AgentLoopHostErrorKind) -> Self {
+        *self.fail_batch_with.lock().expect("lock") = Some(kind);
         self
     }
 
@@ -670,6 +677,9 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
         request: CapabilityBatchInvocation,
     ) -> Result<ironclaw_turns::run_profile::CapabilityBatchOutcome, AgentLoopHostError> {
         self.batch_invocations.lock().expect("lock").push(request);
+        if let Some(kind) = *self.fail_batch_with.lock().expect("lock") {
+            return Err(AgentLoopHostError::new(kind, "scripted batch failure"));
+        }
         let outcome = self
             .batch_outcomes
             .lock()

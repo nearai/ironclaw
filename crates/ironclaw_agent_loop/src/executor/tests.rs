@@ -4431,3 +4431,41 @@ async fn gate_stage_skip_does_not_clear_auth_resume_for_different_capability() {
         "surviving pending_auth_resume.gate_ref must be unchanged"
     );
 }
+
+#[tokio::test]
+async fn stale_surface_batch_failure_is_recoverable() {
+    let host = MockHost::new(vec![calls_response(), reply_response()])
+        .fail_batch_with(AgentLoopHostErrorKind::StaleSurface);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("StaleSurface batch error must not kill the run");
+
+    assert!(
+        matches!(exit, LoopExit::Completed(_)),
+        "run must complete after a StaleSurface batch error; got {exit:?}"
+    );
+}
+
+#[tokio::test]
+async fn non_stale_batch_failure_stays_terminal() {
+    let host =
+        MockHost::new(vec![calls_response()]).fail_batch_with(AgentLoopHostErrorKind::Unavailable);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let error = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect_err("non-StaleSurface batch error must propagate as terminal error");
+
+    assert_eq!(
+        error,
+        AgentLoopExecutorError::HostUnavailable {
+            stage: HostStage::Capability
+        }
+    );
+}

@@ -129,7 +129,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             .await;
 
         let mut pending_approval_resume = state.pending_approval_resume.clone();
-        let batch = ctx
+        let batch_result = ctx
             .host
             .invoke_capability_batch(CapabilityBatchInvocation {
                 invocations: visible_calls
@@ -153,8 +153,48 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     .collect(),
                 stop_on_first_suspension,
             })
-            .await
-            .map_err(capability_host_error)?;
+            .await;
+
+        let batch = match batch_result {
+            Ok(batch) => batch,
+            Err(ref error)
+                if error.kind
+                    == ironclaw_turns::run_profile::AgentLoopHostErrorKind::StaleSurface =>
+            {
+                let stale_summary = SanitizedStrategySummary::from_trusted_static(
+                    "capability surface changed before execution; re-issue the call",
+                );
+                for call in visible_calls {
+                    push_call_signature_once(&mut state, &mut signatures, &call)?;
+                    state
+                        .recent_failure_kinds
+                        .push(LoopFailureKind::PolicyDenied);
+                    let summary = CapabilityErrorSummary {
+                        class: CapabilityErrorClass::PolicyDenied,
+                        safe_summary: stale_summary.clone(),
+                        diagnostic_ref: None,
+                    };
+                    match self
+                        .handle_capability_error(
+                            ctx,
+                            state,
+                            call,
+                            summary,
+                            None,
+                            &mut capability_batch,
+                        )
+                        .await?
+                    {
+                        BatchStep::Continue(next) => state = *next,
+                        BatchStep::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
+                    }
+                }
+                return self
+                    .completed_turn(ctx, state, result_refs_start, capability_batch)
+                    .await;
+            }
+            Err(error) => return Err(capability_host_error(error)),
+        };
 
         if batch.outcomes.is_empty()
             || batch.outcomes.len() > visible_calls.len()
@@ -650,11 +690,28 @@ impl CapabilityStage {
                             })?,
                         )
                         .await;
-                    let retry = ctx
+                    let retry_result = ctx
                         .host
                         .invoke_capability(capability_invocation_from_candidate(call.clone(), None))
-                        .await
-                        .map_err(capability_host_error)?;
+                        .await;
+                    let retry = match retry_result {
+                        Ok(outcome) => outcome,
+                        Err(ref error)
+                            if error.kind
+                                == ironclaw_turns::run_profile::AgentLoopHostErrorKind::StaleSurface =>
+                        {
+                            summary = CapabilityErrorSummary {
+                                class: CapabilityErrorClass::PolicyDenied,
+                                safe_summary: SanitizedStrategySummary::from_trusted_static(
+                                    "capability surface changed before execution; re-issue the call",
+                                ),
+                                diagnostic_ref: None,
+                            };
+                            model_observation = None;
+                            continue;
+                        }
+                        Err(error) => return Err(capability_host_error(error)),
+                    };
                     match retry {
                         CapabilityOutcome::Failed(failure) => {
                             if failure.error_kind == CapabilityFailureKind::Cancelled {
