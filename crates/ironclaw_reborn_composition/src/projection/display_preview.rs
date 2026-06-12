@@ -252,7 +252,7 @@ fn capability_display_preview_resolution_from_store(
         // drain would deliver later activities' payloads past this slot, and
         // when the invocation later completed its now-materialized preview sat
         // behind the resume watermark and was never delivered — the dropped
-        // tool card behind #4770. Holding keeps the slot positionally stable so
+        // dropped tool card. Holding keeps the slot positionally stable so
         // the preview is delivered in order once it lands.
         return Ok(CapabilityDisplayPreviewResolution::Pending);
     }

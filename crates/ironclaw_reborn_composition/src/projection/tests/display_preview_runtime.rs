@@ -521,7 +521,7 @@ async fn webui_projection_with_pending_preview_on_first_activity_defers_second_a
     ));
 }
 
-/// #4770 regression: a still-running first activity must hold the runtime
+/// Regression: a still-running first activity must hold the runtime
 /// cursor at its (not-yet-existent) preview, exactly like a completed activity
 /// awaiting its preview record. Before the fix, a running activity's preview
 /// resolved to `NotApplicable`, so the drain skipped past it and delivered the

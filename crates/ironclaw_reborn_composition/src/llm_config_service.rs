@@ -1487,7 +1487,7 @@ mod tests {
         );
     }
 
-    /// #4696: testing the connection to a local Ollama that is not running must
+    /// Testing the connection to a local Ollama that is not running must
     /// report failure and name the unreachable endpoint — not the prior false
     /// "provider configured" success that left chat requests to fail later.
     #[tokio::test]
