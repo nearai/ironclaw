@@ -1000,8 +1000,8 @@ where
             let stale_fingerprints: Vec<String> = old_record
                 .delivered_conversation_fingerprints
                 .iter()
+                .filter(|&fingerprint| !new_fingerprints.contains(fingerprint))
                 .cloned()
-                .filter(|fingerprint| !new_fingerprints.contains(fingerprint))
                 .collect();
             self.delete_delivered_gate_route_conversation_indexes(&old_record, &stale_fingerprints)
                 .await?;
@@ -1097,11 +1097,7 @@ where
             .await
             .map_err(|e| format!("delivered gate route read before delete: {e}"))?
         {
-            let fingerprints: Vec<String> = old_record
-                .delivered_conversation_fingerprints
-                .iter()
-                .cloned()
-                .collect();
+            let fingerprints: Vec<String> = old_record.delivered_conversation_fingerprints.to_vec();
             self.delete_delivered_gate_route_conversation_indexes(&old_record, &fingerprints)
                 .await?;
         }
@@ -1193,11 +1189,7 @@ where
             if !record.is_expired(now) {
                 continue;
             }
-            let fingerprints: Vec<String> = record
-                .delivered_conversation_fingerprints
-                .iter()
-                .cloned()
-                .collect();
+            let fingerprints: Vec<String> = record.delivered_conversation_fingerprints.to_vec();
             if let Err(e) = self
                 .delete_delivered_gate_route_conversation_indexes(&record, &fingerprints)
                 .await
