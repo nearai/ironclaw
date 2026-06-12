@@ -344,6 +344,51 @@ async fn tick_persists_replayed_submit_with_original_run_ref() {
     assert_eq!(persisted.next_run_at, expected_next_run_at);
 }
 
+/// Regression guard: when the submitter returns `Replayed { thread_id: Some(id) }`,
+/// the worker must forward the canonical thread_id to `mark_fire_replayed`.
+/// Without this guard, a silent drop of the `thread_id` field in the worker's
+/// `Replayed` arm would leave the run row with `thread_id = None`, breaking the
+/// automation panel's ability to link to the replayed thread.
+#[tokio::test]
+async fn tick_persists_replayed_submit_with_canonical_thread_id() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+    let fire_slot = ts(1_704_067_200);
+    let record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+    repo.upsert_trigger(record).await.expect("insert");
+    let original_run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("run id");
+    let canonical_thread_id = ThreadId::new("thread-canonical-replay").expect("valid thread id");
+    let worker = worker(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+        Arc::new(RecordingSubmitter::with_outcomes(vec![Ok(
+            TrustedTriggerFireSubmitOutcome::Replayed {
+                original_run_id,
+                replayed_at: ts(1_704_067_205),
+                thread_id: Some(canonical_thread_id.clone()),
+            },
+        )])),
+        Arc::new(RecordingActiveRunLookup::default()),
+    );
+
+    worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    // The run history row for this fire slot must carry the canonical thread_id.
+    let runs = repo
+        .list_trigger_run_history(tenant("tenant-a"), trigger_id, 10)
+        .await
+        .expect("list run history");
+    let run = runs
+        .iter()
+        .find(|r| r.fire_slot == fire_slot)
+        .expect("run row for fire_slot");
+    assert_eq!(
+        run.thread_id,
+        Some(canonical_thread_id),
+        "replayed thread_id must be forwarded to mark_fire_replayed and stored on the run row"
+    );
+}
+
 #[tokio::test]
 async fn tick_skips_claim_race_already_active_without_materializing() {
     let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");

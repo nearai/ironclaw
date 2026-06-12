@@ -353,6 +353,71 @@ async fn resolve_run_thread_scope_backend_error_maps_to_unavailable() {
     assert!(error.retryable);
 }
 
+/// Pin the contract that a trigger whose `agent_id` is NULL is NOT visible
+/// to any `ProductAgentBoundCaller`.
+///
+/// `ProductAgentBoundCaller.agent_id` is a required (non-Option) field, so
+/// `list_scoped_triggers` is always called with `agent_id = Some(caller_agent)`.
+/// The NULL-safe equality in every backend therefore never returns a NULL-agent
+/// trigger for such a caller, and `trigger_is_caller_visible` must match that
+/// by requiring `trigger.agent_id == Some(caller.agent_id)`.  A NULL-agent
+/// trigger has no caller that can own it through this path.
+#[tokio::test]
+async fn resolve_run_thread_scope_returns_none_for_trigger_with_no_agent_id() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let c = caller();
+
+    // Seed a trigger whose agent_id is None — simulating a trigger that was
+    // stored without an explicit agent binding.
+    let trigger_id = TriggerId::new();
+    let mut null_agent_record = make_record(trigger_id, &c);
+    null_agent_record.agent_id = None;
+    repo.upsert_trigger(null_agent_record.clone())
+        .await
+        .expect("upsert null-agent trigger");
+
+    // Manually claim and mark the fire accepted so a run row with a thread_id
+    // exists — the resolver's thread lookup must actually find the run row
+    // before the visibility predicate gates it.
+    let fire_slot = null_agent_record.next_run_at;
+    repo.claim_due_fire(ClaimDueFireRequest {
+        tenant_id: c.tenant_id.clone(),
+        trigger_id,
+        fire_slot,
+        now: fire_slot,
+    })
+    .await
+    .expect("claim due fire");
+    let run_id = TurnRunId::new();
+    let thread_id = ThreadId::new("01890f0f-test-7000-8000-000000null01").expect("valid thread id");
+    let next_run_at = chrono::Utc::now() + chrono::Duration::hours(24);
+    repo.mark_fire_accepted(FireAcceptedRequest {
+        tenant_id: c.tenant_id.clone(),
+        trigger_id,
+        fire_slot,
+        run_id,
+        thread_id: thread_id.clone(),
+        submitted_at: fire_slot,
+        next_run_at,
+    })
+    .await
+    .expect("mark fire accepted");
+
+    // The resolver must return None: even though the run row exists and the
+    // caller's tenant/user/project match, the NULL trigger agent_id does not
+    // equal Some(caller.agent_id), so the visibility predicate rejects it.
+    let facade = RebornAutomationProductFacade::new(repo);
+    let result = facade
+        .resolve_run_thread_scope(c, &thread_id)
+        .await
+        .expect("resolver must not error");
+
+    assert!(
+        result.is_none(),
+        "NULL-agent trigger must be invisible to any ProductAgentBoundCaller"
+    );
+}
+
 #[tokio::test]
 async fn resolve_run_thread_scope_timeout_maps_to_unavailable() {
     let facade = RebornAutomationProductFacade::with_backend_timeout(

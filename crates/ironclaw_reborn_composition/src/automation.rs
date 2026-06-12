@@ -174,6 +174,17 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
 ///   AND project_id  IS <caller.project_id> -- NULL-safe equality
 /// ```
 ///
+/// **None-agent triggers are never visible** through this path.
+/// `ProductAgentBoundCaller` always carries a concrete `AgentId` (it is a
+/// required field, not `Option`), so `list_scoped_triggers` is always called
+/// with `agent_id = Some(caller.agent_id)`.  The NULL-safe comparison in the
+/// storage backends therefore never returns a trigger whose stored `agent_id`
+/// is NULL.  This predicate matches that contract: `trigger.agent_id ==
+/// Some(caller.agent_id)` correctly excludes NULL-agent triggers rather than
+/// granting phantom access.  The service-layer agent-id fallback in
+/// `check_automation_trigger_access` is only reachable via non-production
+/// facades that do not go through `ProductAgentBoundCaller`.
+///
 /// A `false` result causes `resolve_run_thread_scope` to return `Ok(None)` (404
 /// upstream) without leaking the existence of the trigger to an unauthorized
 /// caller.

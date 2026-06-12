@@ -119,10 +119,9 @@ export function Chat({
    * working.
    *
    * Invariant: useChat resets pendingGate (and isProcessing reaches a
-   * fresh value) on threadId change via the sibling effect at
-   * useChat.js:136-140, so within a single React commit batch we never
-   * observe stale state from a previous thread paired with a new
-   * activeThreadId.
+   * fresh value) on threadId change via the thread-reset effect in
+   * useChat, so within a single React commit batch we never observe
+   * stale state from a previous thread paired with a new activeThreadId.
    *
    * Coverage gap (writer is per-active-thread only): this seam only
    * flags whichever thread the user is currently viewing. Cross-thread

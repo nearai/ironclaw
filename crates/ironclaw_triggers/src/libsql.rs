@@ -290,7 +290,9 @@ impl LibSqlTriggerRepository {
                     DROP TABLE {TRIGGER_RUN_TABLE};
                     ALTER TABLE {TRIGGER_RUN_TABLE}_new RENAME TO {TRIGGER_RUN_TABLE};
                     CREATE INDEX IF NOT EXISTS trigger_run_history_trigger_fire_slot_idx
-                        ON {TRIGGER_RUN_TABLE} (tenant_id, trigger_id, fire_slot DESC);"
+                        ON {TRIGGER_RUN_TABLE} (tenant_id, trigger_id, fire_slot DESC);
+                    CREATE INDEX IF NOT EXISTS trigger_run_history_tenant_thread_id_idx
+                        ON {TRIGGER_RUN_TABLE} (tenant_id, thread_id);"
                 ))
                 .await
                 .map_err(|error| backend_error("make trigger_run_history thread_id nullable", error))?;

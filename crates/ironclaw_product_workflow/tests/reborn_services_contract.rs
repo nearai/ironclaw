@@ -5534,6 +5534,225 @@ async fn get_timeline_surfaces_trigger_scope_lookup_backend_error() {
     assert!(err.retryable, "backend outage error must be retryable");
 }
 
+/// A `SessionThreadService` that returns `UnknownThread` on its first
+/// `list_thread_history` call and `Backend(...)` on every subsequent call.
+/// Used to test the error-taxonomy contract when the caller-scoped probe misses
+/// (→ automation fallback fires) but the trigger-owned scope reload then errors.
+struct FirstMissBackendErrorThreadService {
+    call_count: Mutex<usize>,
+}
+
+impl FirstMissBackendErrorThreadService {
+    fn new() -> Self {
+        Self {
+            call_count: Mutex::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl SessionThreadService for FirstMissBackendErrorThreadService {
+    async fn list_thread_history(
+        &self,
+        request: ThreadHistoryRequest,
+    ) -> Result<ThreadHistory, SessionThreadError> {
+        let mut count = self.call_count.lock().expect("lock");
+        *count += 1;
+        if *count == 1 {
+            Err(SessionThreadError::UnknownThread {
+                thread_id: request.thread_id,
+            })
+        } else {
+            Err(SessionThreadError::Backend(
+                "backend error on trigger-owned reload".to_string(),
+            ))
+        }
+    }
+
+    async fn ensure_thread(
+        &self,
+        _request: EnsureThreadRequest,
+    ) -> Result<SessionThreadRecord, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::ensure_thread should not be reached")
+    }
+
+    async fn accept_inbound_message(
+        &self,
+        _request: AcceptInboundMessageRequest,
+    ) -> Result<AcceptedInboundMessage, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::accept_inbound_message should not be reached")
+    }
+
+    async fn replay_accepted_inbound_message(
+        &self,
+        _request: ReplayAcceptedInboundMessageRequest,
+    ) -> Result<Option<AcceptedInboundMessageReplay>, SessionThreadError> {
+        panic!(
+            "FirstMissBackendErrorThreadService::replay_accepted_inbound_message should not be reached"
+        )
+    }
+
+    async fn mark_message_submitted(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+        _turn_id: String,
+        _turn_run_id: String,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::mark_message_submitted should not be reached")
+    }
+
+    async fn mark_message_deferred_busy(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!(
+            "FirstMissBackendErrorThreadService::mark_message_deferred_busy should not be reached"
+        )
+    }
+
+    async fn append_assistant_draft(
+        &self,
+        _request: AppendAssistantDraftRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::append_assistant_draft should not be reached")
+    }
+
+    async fn append_tool_result_reference(
+        &self,
+        _request: AppendToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!(
+            "FirstMissBackendErrorThreadService::append_tool_result_reference should not be reached"
+        )
+    }
+
+    async fn append_capability_display_preview(
+        &self,
+        _request: AppendCapabilityDisplayPreviewRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!(
+            "FirstMissBackendErrorThreadService::append_capability_display_preview should not be reached"
+        )
+    }
+
+    async fn update_tool_result_reference(
+        &self,
+        _request: UpdateToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!(
+            "FirstMissBackendErrorThreadService::update_tool_result_reference should not be reached"
+        )
+    }
+
+    async fn update_assistant_draft(
+        &self,
+        _request: UpdateAssistantDraftRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::update_assistant_draft should not be reached")
+    }
+
+    async fn finalize_assistant_message(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+        _content: MessageContent,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!(
+            "FirstMissBackendErrorThreadService::finalize_assistant_message should not be reached"
+        )
+    }
+
+    async fn redact_message(
+        &self,
+        _request: RedactMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::redact_message should not be reached")
+    }
+
+    async fn load_context_window(
+        &self,
+        _request: LoadContextWindowRequest,
+    ) -> Result<ContextWindow, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::load_context_window should not be reached")
+    }
+
+    async fn load_context_messages(
+        &self,
+        _request: LoadContextMessagesRequest,
+    ) -> Result<ContextMessages, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::load_context_messages should not be reached")
+    }
+
+    async fn list_threads_for_scope(
+        &self,
+        _request: ListThreadsForScopeRequest,
+    ) -> Result<ListThreadsForScopeResponse, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::list_threads_for_scope should not be reached")
+    }
+
+    async fn create_summary_artifact(
+        &self,
+        _request: CreateSummaryArtifactRequest,
+    ) -> Result<SummaryArtifact, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::create_summary_artifact should not be reached")
+    }
+}
+
+// Contract: when the caller-scoped probe misses (UnknownThread → automation
+// fallback fires) and `resolve_run_thread_scope` authorizes access, but the
+// second `list_thread_history` call for the trigger-owned scope returns a
+// backend error, the result must be Unavailable (503) — NOT the 404 NotFound
+// that would have been returned had the automation facade also denied access.
+// A backend outage must never be surfaced as an authorization miss.
+#[tokio::test]
+async fn get_timeline_surfaces_backend_error_from_unscoped_trigger_history_reload() {
+    let caller = caller();
+    let trigger_thread_id =
+        ThreadId::new("thread-trigger-reload-error").expect("valid trigger thread id");
+
+    // Thread service: first call (caller-scoped probe) → UnknownThread,
+    // second call (trigger-owned scope reload) → Backend error.
+    let thread_service = Arc::new(FirstMissBackendErrorThreadService::new());
+
+    // Automation facade authorizes: the facade resolves a scope for the
+    // thread, so the service proceeds to the trigger-owned reload.
+    let automation_facade = Arc::new(
+        StaticAutomationFacade::new(Vec::new()).with_resolve_scope_for_thread(
+            trigger_thread_id.clone(),
+            trigger_run_thread_scope_for(&caller),
+        ),
+    );
+
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(automation_facade);
+
+    let err = services
+        .get_timeline(
+            caller,
+            RebornTimelineRequest {
+                thread_id: trigger_thread_id.as_str().to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("backend error on trigger-owned reload must surface as 503, not 404");
+
+    // Must be Unavailable, not NotFound: the backend error on the reload
+    // must not be mistaken for an authorization miss.
+    assert_eq!(
+        err.code,
+        RebornServicesErrorCode::Unavailable,
+        "trigger-owned reload backend error must map to Unavailable, not NotFound"
+    );
+    assert_eq!(err.status_code, 503);
+    assert!(err.retryable, "backend outage must be retryable");
+}
+
 // Contract: when `TriggerRunThreadScope.agent_id` is `None` the fallback must
 // substitute the bound caller's `agent_id` so the reconstructed `TurnScope`
 // can locate the thread in storage.
