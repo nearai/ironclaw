@@ -61,7 +61,12 @@ const SLACK_DELIVERY_TIMEOUT_MESSAGE: &str =
     "This is taking longer than expected — check the WebUI for the result.";
 const SLACK_DELIVERY_ERROR_MESSAGE: &str =
     "Something went wrong delivering the result here. Check the WebUI.";
-const SLACK_DEFERRED_BUSY_MESSAGE: &str = "Ironclaw is waiting on a pending approval before taking new messages — reply `approve` or `deny` (or `approve gate:<ref>`) to resume.";
+/// Posted when the blocking run is `BlockedApproval`.
+const SLACK_DEFERRED_BUSY_APPROVAL_MESSAGE: &str = "Ironclaw is waiting on a pending approval before taking new messages — reply `approve` or `deny` (or `approve gate:<ref>`) to resume.";
+/// Posted when the blocking run is `BlockedAuth`.
+const SLACK_DEFERRED_BUSY_AUTH_MESSAGE: &str = "Ironclaw is waiting on an authentication step before taking new messages — complete the authentication prompt (or reply `auth deny <auth-request-ref>` to decline).";
+/// Posted for any other non-terminal blocking state, or when the state lookup fails.
+const SLACK_DEFERRED_BUSY_GENERIC_MESSAGE: &str = "Ironclaw is still working on a previous message — this one is queued and will run when the current task finishes.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BlockedActionableMarker {
@@ -948,23 +953,59 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
             return;
         }
         // A2b: DeferredBusy feedback — the user's message was silently dropped
-        // because a run is blocked on a pending gate. Post a one-shot hint so the
-        // user knows to approve/deny rather than being left in silence. Same
-        // best-effort semantics as A2: post failure → debug! only, no recursion.
-        if let Some(hint) = deferred_busy_hint_for_user_message(&envelope, &ack) {
-            if let Err(post_err) = post_slack_message(
-                self.services.egress.as_ref(),
-                envelope.external_conversation_ref(),
-                hint,
-            )
-            .await
+        // because a run is blocked on a pending gate. Post a one-shot state-aware
+        // hint so the user knows to approve/deny/wait rather than being left in
+        // silence. Same best-effort semantics as A2: post failure → debug! only.
+        //
+        // Authorization: only post if the binding lookup succeeds, matching the
+        // same guard used by `post_rejection_hint_if_authorized`.
+        //
+        // Backpressure: the hint post is spawned detached so a burst of deferred
+        // messages does not pin post-ack workers on Slack I/O.
+        if is_deferred_busy_user_message(&envelope, &ack) {
+            let active_run_id = match &ack {
+                ProductInboundAck::DeferredBusy { active_run_id, .. } => *active_run_id,
+                _ => unreachable!("is_deferred_busy_user_message ensures DeferredBusy"),
+            };
+            // Authorization: verify the conversation has a valid binding before
+            // posting. Skip silently (debug!) when unauthorized.
+            let binding = match self
+                .services
+                .binding_service
+                .lookup_binding(ResolveBindingRequest::from_envelope(&envelope))
+                .await
             {
-                tracing::debug!(
-                    target = "ironclaw::reborn::slack_delivery",
-                    error = %post_err,
-                    "failed to post deferred-busy hint to Slack (best-effort)"
-                );
-            }
+                Ok(b) => b,
+                Err(error) => {
+                    tracing::debug!(
+                        target = "ironclaw::reborn::slack_delivery",
+                        error = %error,
+                        "skipped deferred-busy hint because the originating conversation was not authorized"
+                    );
+                    return;
+                }
+            };
+            // Derive the scope for the active run state lookup.
+            // Falls back to generic copy on any failure — never skips the hint.
+            let hint = deferred_busy_hint_from_run_state(
+                self.services.turn_coordinator.as_ref(),
+                &binding,
+                active_run_id,
+            )
+            .await;
+            let egress = Arc::clone(&self.services.egress);
+            let conversation = envelope.external_conversation_ref().clone();
+            tokio::spawn(async move {
+                if let Err(post_err) =
+                    post_slack_message(egress.as_ref(), &conversation, hint).await
+                {
+                    tracing::debug!(
+                        target = "ironclaw::reborn::slack_delivery",
+                        error = %post_err,
+                        "failed to post deferred-busy hint to Slack (best-effort)"
+                    );
+                }
+            });
             return;
         }
         let Ok(_permit) = self.delivery_permits.clone().acquire_owned().await else {
@@ -1172,34 +1213,77 @@ fn rejection_hint_for_resolution(
     Some(hint)
 }
 
-/// Returns the user-facing hint to post when an inbound user message is deferred
-/// because a run for the same conversation is blocked on a pending gate.
+/// Returns `true` when the ack + payload combination should trigger the deferred-busy
+/// hint flow: a plain `DeferredBusy` ack on a `UserMessage` payload.
 ///
-/// Returns `None` for non-UserMessage payloads (resolution/control payloads must
-/// stay silent) and for ALL `Duplicate` acks (the idempotency ledger never settles
+/// Returns `false` for `Duplicate` acks (the idempotency ledger never settles
 /// `DeferredBusy`, so Slack transport retries re-process as a fresh plain
-/// `DeferredBusy`, never `Duplicate{DeferredBusy}`; returning `None` for every
-/// `Duplicate` is the safe invariant that matches `rejection_hint_for_resolution`).
-/// Returns `Some` only for a plain `DeferredBusy` ack + `UserMessage` payload.
-fn deferred_busy_hint_for_user_message(
+/// `DeferredBusy`, never `Duplicate{DeferredBusy}`; suppressing all `Duplicate`
+/// matches the invariant in `rejection_hint_for_resolution`) and for all non-user-
+/// message payloads (resolution/control payloads must stay silent).
+fn is_deferred_busy_user_message(
     envelope: &ProductInboundEnvelope,
     ack: &ProductInboundAck,
-) -> Option<&'static str> {
+) -> bool {
     // All Duplicate acks are suppressed — same pattern as rejection_hint_for_resolution.
     if matches!(ack, ProductInboundAck::Duplicate { .. }) {
-        return None;
+        return false;
     }
     if !matches!(ack, ProductInboundAck::DeferredBusy { .. }) {
-        return None;
+        return false;
     }
     // Only reply to user messages — resolution/control/noop payloads must stay silent.
-    if !matches!(envelope.payload(), ProductInboundPayload::UserMessage(_)) {
-        return None;
+    matches!(envelope.payload(), ProductInboundPayload::UserMessage(_))
+}
+
+/// Looks up the blocking run's state and returns the appropriate deferred-busy
+/// hint copy.
+///
+/// - `BlockedApproval` → approval wording
+/// - `BlockedAuth`     → auth wording
+/// - anything else / lookup failure → generic wording
+///
+/// Never returns an error — lookup failures degrade to the generic copy.
+async fn deferred_busy_hint_from_run_state(
+    coordinator: &dyn TurnCoordinator,
+    binding: &ResolvedBinding,
+    active_run_id: TurnRunId,
+) -> &'static str {
+    let scope = match (|| -> Result<TurnScope, ProductWorkflowError> {
+        let thread_scope = thread_scope_from_binding(binding)?;
+        turn_scope_from_thread_scope(binding, &thread_scope)
+    })() {
+        Ok(s) => s,
+        Err(err) => {
+            tracing::debug!(
+                target = "ironclaw::reborn::slack_delivery",
+                error = %err,
+                "deferred-busy scope derivation failed; using generic copy"
+            );
+            return SLACK_DEFERRED_BUSY_GENERIC_MESSAGE;
+        }
+    };
+    match coordinator
+        .get_run_state(GetRunStateRequest {
+            scope,
+            run_id: active_run_id,
+        })
+        .await
+    {
+        Ok(state) => match state.status {
+            TurnStatus::BlockedApproval => SLACK_DEFERRED_BUSY_APPROVAL_MESSAGE,
+            TurnStatus::BlockedAuth => SLACK_DEFERRED_BUSY_AUTH_MESSAGE,
+            _ => SLACK_DEFERRED_BUSY_GENERIC_MESSAGE,
+        },
+        Err(err) => {
+            tracing::debug!(
+                target = "ironclaw::reborn::slack_delivery",
+                error = %err,
+                "deferred-busy run-state lookup failed; using generic copy"
+            );
+            SLACK_DEFERRED_BUSY_GENERIC_MESSAGE
+        }
     }
-    // Each delivery of a DeferredBusy ack posts the hint: a user sending multiple
-    // messages while blocked gets a hint for each one (desired feedback). Rare
-    // transport retries may double-post — accepted as benign best-effort.
-    Some(SLACK_DEFERRED_BUSY_MESSAGE)
 }
 
 fn rejection_ack_for_workflow_error(error: &ProductAdapterError) -> Option<ProductInboundAck> {
@@ -3211,8 +3295,11 @@ mod tests {
         }
     }
 
-    /// DeferredBusy ack + UserMessage payload → exactly one Slack post containing
-    /// "waiting on a pending approval".
+    /// DeferredBusy ack + UserMessage payload + BlockedApproval state → exactly one
+    /// Slack post containing approval wording.
+    ///
+    /// The hint post is spawned detached; `yield_now` lets it execute before we
+    /// inspect the egress capture.
     #[tokio::test]
     async fn deferred_busy_ack_with_user_message_posts_hint() {
         let install = "test-install";
@@ -3227,14 +3314,17 @@ mod tests {
         );
 
         let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        // BlockedApproval → state-aware lookup returns approval wording.
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
-            TurnStatus::Running,
+            TurnStatus::BlockedApproval,
         ));
         let observer = make_observer(coordinator, egress.clone(), outbound, install);
         let env = envelope(user_message_payload());
         let ack = deferred_busy_ack();
 
         observer.observe_workflow_ack(env, ack).await;
+        // Drain the spawned hint post.
+        tokio::task::yield_now().await;
 
         let calls = egress.calls();
         let post_calls: Vec<_> = calls
@@ -3317,6 +3407,8 @@ mod tests {
     /// feedback). Rare transport retries may double-post — accepted as benign
     /// best-effort. This is a deliberate design choice: feedback density beats
     /// silent suppression for the common case.
+    ///
+    /// Hint posts are spawned detached; `yield_now` drains both before asserting.
     #[tokio::test]
     async fn two_distinct_deferred_busy_user_messages_post_two_hints() {
         let install = "test-install";
@@ -3338,8 +3430,9 @@ mod tests {
         );
 
         let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        // BlockedApproval so the state-aware lookup returns the approval copy for both.
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
-            TurnStatus::Running,
+            TurnStatus::BlockedApproval,
         ));
         let observer = make_observer(coordinator, egress.clone(), outbound, install);
 
@@ -3351,6 +3444,8 @@ mod tests {
         observer
             .observe_workflow_ack(envelope(user_message_payload()), deferred_busy_ack())
             .await;
+        // Drain both spawned hint posts.
+        tokio::task::yield_now().await;
 
         let calls = egress.calls();
         let post_calls: Vec<_> = calls
@@ -3361,6 +3456,148 @@ mod tests {
             post_calls.len(),
             2,
             "two distinct DeferredBusy + UserMessage deliveries must each post a hint"
+        );
+    }
+
+    /// DeferredBusy + UserMessage + BlockedAuth state → auth copy posted.
+    #[tokio::test]
+    async fn deferred_busy_blocked_auth_state_posts_auth_hint() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "6000.1"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        // BlockedAuth → state-aware lookup returns auth wording.
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::BlockedAuth,
+        ));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+        let env = envelope(user_message_payload());
+        let ack = deferred_busy_ack();
+
+        observer.observe_workflow_ack(env, ack).await;
+        tokio::task::yield_now().await;
+
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "expected exactly one chat.postMessage for DeferredBusy + BlockedAuth"
+        );
+        let body = std::str::from_utf8(&post_calls[0].body).expect("utf8 body");
+        assert!(
+            body.contains("authentication step"),
+            "deferred-busy hint for BlockedAuth must mention 'authentication step', got: {body}"
+        );
+        // Must not contain approval command wording.
+        assert!(
+            !body.contains("approve") || body.contains("auth deny"),
+            "auth hint must not contain approval-only wording, got: {body}"
+        );
+    }
+
+    /// DeferredBusy + UserMessage + Running state (non-blocked) → generic copy posted.
+    #[tokio::test]
+    async fn deferred_busy_running_state_posts_generic_hint() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "6000.2"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        // Running → state-aware lookup returns generic wording.
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::Running,
+        ));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+        let env = envelope(user_message_payload());
+        let ack = deferred_busy_ack();
+
+        observer.observe_workflow_ack(env, ack).await;
+        tokio::task::yield_now().await;
+
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "expected exactly one chat.postMessage for DeferredBusy + Running"
+        );
+        let body = std::str::from_utf8(&post_calls[0].body).expect("utf8 body");
+        assert!(
+            body.contains("still working on a previous message"),
+            "deferred-busy hint for Running state must contain generic copy, got: {body}"
+        );
+    }
+
+    /// DeferredBusy + UserMessage + unauthorized binding → no post, no panic.
+    ///
+    /// Uses `TestNoopConversationBindingService` (always fails lookup_binding) to
+    /// simulate an unauthorized conversation: the observer must skip the hint post
+    /// silently rather than posting to an arbitrary channel.
+    #[tokio::test]
+    async fn deferred_busy_unauthorized_binding_posts_nothing() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::BlockedApproval,
+        ));
+        // Override the default `make_observer` so we can inject the no-binding service.
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let services = SlackFinalReplyDeliveryServices {
+            binding_service: Arc::new(TestNoopConversationBindingService),
+            thread_service,
+            turn_coordinator: coordinator,
+            outbound_store: outbound.clone(),
+            communication_preferences: outbound,
+            adapter: test_adapter(install),
+            egress: egress.clone(),
+            delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
+            auth_challenges: None,
+        };
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_millis(1),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let observer = SlackFinalReplyDeliveryObserver::with_settings(services, settings);
+
+        let env = envelope(user_message_payload());
+        let ack = deferred_busy_ack();
+
+        observer.observe_workflow_ack(env, ack).await;
+        // No spawn should have been issued (authorization failed synchronously).
+        // A yield is still safe to add as a hedge.
+        tokio::task::yield_now().await;
+
+        let calls = egress.calls();
+        assert!(
+            !calls.iter().any(|c| c.path == "/api/chat.postMessage"),
+            "no chat.postMessage expected when binding authorization fails"
         );
     }
 
