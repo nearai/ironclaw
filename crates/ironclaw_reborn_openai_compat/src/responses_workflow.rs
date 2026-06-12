@@ -932,7 +932,7 @@ fn accepted_cancel_ack_from_ack(mut ack: ProductInboundAck) -> Result<(), OpenAi
 }
 
 fn error_from_rejection(rejection: ProductRejection) -> OpenAiCompatHttpError {
-    product_rejection_to_openai_error(&rejection)
+    product_rejection_to_openai_error(&rejection, Some("input"))
 }
 
 fn bind_internal_refs_unavailable() -> OpenAiCompatHttpError {

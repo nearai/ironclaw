@@ -228,12 +228,20 @@ impl From<OpenAiCompatRefError> for OpenAiCompatHttpError {
     }
 }
 
+/// Translates a [`ProductRejection`] into an [`OpenAiCompatHttpError`].
+///
+/// `param` carries the surface-specific field name for `BindingRequired` and
+/// `InvalidRequest` rejections. Chat passes `Some("messages")`; Responses
+/// passes `Some("input")`.
 #[cfg(feature = "openai-compat-beta")]
 pub(crate) fn product_rejection_to_openai_error(
     rejection: &ProductRejection,
+    param: Option<&str>,
 ) -> OpenAiCompatHttpError {
     match rejection.kind {
-        ProductRejectionKind::BindingRequired => OpenAiCompatHttpError::not_found(None),
+        ProductRejectionKind::BindingRequired => {
+            OpenAiCompatHttpError::not_found(param.map(str::to_owned))
+        }
         ProductRejectionKind::AccessDenied | ProductRejectionKind::PolicyDenied => {
             OpenAiCompatHttpError::from_workflow_rejection(
                 ProductWorkflowRejectionKind::Unauthorized,
@@ -248,7 +256,9 @@ pub(crate) fn product_rejection_to_openai_error(
             OpenAiCompatErrorKind::ServiceUnavailable,
             None,
         ),
-        ProductRejectionKind::InvalidRequest => OpenAiCompatHttpError::invalid_request(None),
+        ProductRejectionKind::InvalidRequest => {
+            OpenAiCompatHttpError::invalid_request(param.map(str::to_owned))
+        }
         ProductRejectionKind::AmbiguousResolution => {
             OpenAiCompatHttpError::from_workflow_rejection(
                 ProductWorkflowRejectionKind::Ambiguous,

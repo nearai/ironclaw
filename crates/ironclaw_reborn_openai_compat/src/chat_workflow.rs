@@ -617,7 +617,7 @@ fn accepted_ack_from_ack(
 }
 
 fn error_from_rejection(rejection: ProductRejection) -> OpenAiCompatHttpError {
-    product_rejection_to_openai_error(&rejection)
+    product_rejection_to_openai_error(&rejection, Some("messages"))
 }
 
 pub(crate) fn parse_chat_request(

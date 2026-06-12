@@ -425,6 +425,11 @@ async fn chat_completion_binding_required_rejection_returns_404() {
         .expect("response");
 
     assert_eq!(response.status(), http::StatusCode::NOT_FOUND);
+    let body = json_body(response).await;
+    assert_eq!(
+        body["error"]["param"], "messages",
+        "BindingRequired on chat must carry param=messages"
+    );
     assert_eq!(workflow.seen_count(), 1);
 }
 
@@ -502,6 +507,11 @@ async fn chat_completion_invalid_request_rejection_returns_400() {
         .expect("response");
 
     assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert_eq!(
+        body["error"]["param"], "messages",
+        "InvalidRequest on chat must carry param=messages"
+    );
     assert_eq!(workflow.seen_count(), 1);
 }
 
