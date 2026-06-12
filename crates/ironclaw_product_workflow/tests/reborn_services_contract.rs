@@ -5278,6 +5278,9 @@ async fn query_operator_logs_bounds_query_before_logs_service() {
 
     let oversized_cursor = format!("  {}  ", "c".repeat(2048));
     let oversized_target = format!("{}é", "t".repeat(512));
+    let oversized_thread_id = format!("{}é", "thread-".repeat(80));
+    let oversized_run_id = format!("{}é", "run-".repeat(100));
+    let boundary_source = format!("{}é", "s".repeat(254));
     let response = services
         .query_operator_logs(
             caller(),
@@ -5286,6 +5289,12 @@ async fn query_operator_logs_bounds_query_before_logs_service() {
                 cursor: Some(oversized_cursor),
                 level: Some(RebornLogLevel::Warn),
                 target: Some(oversized_target),
+                thread_id: Some(oversized_thread_id),
+                run_id: Some(oversized_run_id),
+                turn_id: Some("turn-1".to_string()),
+                tool_call_id: Some("tool-call-1".to_string()),
+                tool_name: Some("shell".to_string()),
+                source: Some(boundary_source),
                 tail: true,
             },
         )
@@ -5298,6 +5307,19 @@ async fn query_operator_logs_bounds_query_before_logs_service() {
     assert_eq!(requests[0].limit, Some(500));
     assert_eq!(requests[0].cursor.as_ref().map(String::len), Some(512));
     assert_eq!(requests[0].target.as_ref().map(String::len), Some(256));
+    assert_eq!(requests[0].thread_id.as_ref().map(String::len), Some(256));
+    assert_eq!(requests[0].run_id.as_ref().map(String::len), Some(256));
+    assert_eq!(requests[0].turn_id.as_deref(), Some("turn-1"));
+    assert_eq!(requests[0].tool_call_id.as_deref(), Some("tool-call-1"));
+    assert_eq!(requests[0].tool_name.as_deref(), Some("shell"));
+    let source = requests[0].source.as_deref().expect("bounded source");
+    assert_eq!(source.len(), 256);
+    assert!(source.ends_with('é'));
+    assert!(source.is_char_boundary(source.len()));
+    let run_id = requests[0].run_id.as_deref().expect("bounded run id");
+    assert_eq!(run_id.len(), 256);
+    assert!(run_id.ends_with(" ... [truncated]"));
+    assert!(run_id.is_char_boundary(run_id.len()));
     assert_eq!(requests[0].level, Some(RebornLogLevel::Warn));
     assert!(
         !requests[0].tail,

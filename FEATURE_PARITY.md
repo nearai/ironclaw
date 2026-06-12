@@ -241,7 +241,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `browser` | ✅ | ❌ | P3 | Browser automation |
 | `sandbox` | ✅ | ✅ | - | WASM sandbox |
 | `doctor` | ✅ | 🚧 | P2 | 16 subsystem checks |
-| `logs` | ✅ | 🚧 | P3 | `logs` (gateway.log tail), `--follow` (SSE live stream), `--level` (get/set). No DB-persisted log history. |
+| `logs` | ✅ | 🚧 | P3 | `logs` (gateway.log tail), `--follow` (SSE live stream), `--level` (get/set). WebUI v2 operator logs expose bounded in-memory entries with level/target and run/thread/turn/tool/source scoped filters. No DB-persisted log history. |
 | `traces` | ➖ | 🚧 | - | <ul><li>IronClaw-native Trace Commons client MVP, not an OpenClaw parity feature.</li><li>Local opt-in capture, redaction, queueing, queue-status diagnostics, scoped web APIs, revocation, and periodic credit notices.</li><li>CLI opt-in writes the runtime/web user-scope policy that autonomous capture reads, and credentialed submit/status/revoke calls use bounded no-redirect HTTP.</li><li>Authenticated web paths are user-scoped and keep ingestion endpoint/credential settings out of user-managed policy updates.</li><li>Private TraceDAO server ingest/review/export/audit/retention/vector/credit infrastructure now lives in the standalone `tracedao-server` repository, with IronClaw retaining CLI/client integration wrappers.</li></ul> |
 | `update` | ✅ | ❌ | P3 | Self-update; `OPENCLAW_NO_AUTO_UPDATE=1` kill-switch |
 | `completion` | ✅ | ✅ | - | Shell completion |

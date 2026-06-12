@@ -187,6 +187,7 @@ pub use reborn_services::{
     TriggerRunThreadScope, UnsupportedAutomationProductFacade, UnsupportedOperatorLogsService,
     UnsupportedOperatorServiceLifecycleService, UnsupportedOperatorStatusService,
     UnsupportedOutboundPreferencesProductFacade, UpsertLlmProviderRequest,
+    normalize_operator_log_context_value,
 };
 
 pub use webui_inbound::{
