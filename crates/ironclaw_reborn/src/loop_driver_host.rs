@@ -61,21 +61,21 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityInvocation, CapabilityOutcome,
-        FinalizeAssistantMessage, HookMilestoneSink, HostManagedLoopModelPort,
-        HostManagedLoopPromptPort, InMemoryInstructionMaterializationStore,
-        InstructionBundleMaterializedMessage, InstructionMaterializationStore,
-        InstructionSafetyContext, LoadCheckpointPayloadRequest, LoadedCheckpointPayload,
-        LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort,
-        LoopCompactionRequest, LoopContextBundle, LoopContextPort, LoopContextRequest,
-        LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort,
-        LoopModelBudgetAccountant, LoopModelPolicyGuard, LoopModelPort, LoopModelRequest,
-        LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
-        LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopRunInfoPort, LoopRuntimeContext, LoopTranscriptPort, NoOpBudgetAccountant,
-        NoOpPolicyGuard, ProviderToolCall, ProviderToolDefinition, RunScopedHookMilestoneSink,
-        StageCheckpointPayloadRequest, SystemInferencePort, UpdateAssistantDraft,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        CommunicationContextProvider, FinalizeAssistantMessage, HookMilestoneSink,
+        HostManagedLoopModelPort, HostManagedLoopPromptPort,
+        InMemoryInstructionMaterializationStore, InstructionBundleMaterializedMessage,
+        InstructionMaterializationStore, InstructionSafetyContext, LoadCheckpointPayloadRequest,
+        LoadedCheckpointPayload, LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort,
+        LoopCheckpointPort, LoopCheckpointRequest, LoopCompactionError, LoopCompactionOutcome,
+        LoopCompactionPort, LoopCompactionRequest, LoopContextBundle, LoopContextPort,
+        LoopContextRequest, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
+        LoopInputCursor, LoopInputPort, LoopModelBudgetAccountant, LoopModelPolicyGuard,
+        LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort,
+        LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort,
+        LoopRunContext, LoopRunInfoPort, LoopRuntimeContext, LoopTranscriptPort,
+        NoOpBudgetAccountant, NoOpPolicyGuard, ProviderToolCall, ProviderToolDefinition,
+        RunScopedHookMilestoneSink, StageCheckpointPayloadRequest, SystemInferencePort,
+        UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::ClaimedTurnRun,
 };
@@ -947,6 +947,7 @@ where
     event_subscription: Option<EventTriggeredHookSubscription>,
     safety_context: InstructionSafetyContext,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
+    communication_context_provider: Option<Arc<dyn CommunicationContextProvider>>,
     input_queue: Option<Arc<dyn HostInputQueue>>,
     profiled_capabilities: Option<ProfiledCapabilityHostRuntime>,
     subagent_prompt_composer: Option<SubagentPromptComposer>,
@@ -1010,6 +1011,7 @@ where
             event_subscription: None,
             safety_context,
             identity_context_source: None,
+            communication_context_provider: None,
             input_queue: None,
             profiled_capabilities: None,
             subagent_prompt_composer: None,
@@ -1269,6 +1271,14 @@ where
         self
     }
 
+    pub fn with_communication_context_provider(
+        mut self,
+        provider: Arc<dyn CommunicationContextProvider>,
+    ) -> Self {
+        self.communication_context_provider = Some(provider);
+        self
+    }
+
     pub fn with_profiled_capability_port_factory(
         mut self,
         capability_factory: Arc<dyn LoopCapabilityPortFactory>,
@@ -1495,6 +1505,33 @@ where
             .map_err(|error| RebornLoopDriverHostError::InvalidRequest {
                 reason: error.safe_summary,
             })?;
+        let delivery_tools_visible = surface_state
+            .current()
+            .ok()
+            .flatten()
+            .map(|surface| {
+                surface
+                    .descriptors
+                    .iter()
+                    .any(|d| d.capability_id.as_str() == "builtin.outbound_delivery_target_set")
+            })
+            .unwrap_or(false);
+        let communication = match &self.communication_context_provider {
+            Some(provider) => {
+                let mut comm = provider
+                    .communication_context(
+                        &run_context.scope,
+                        run_context.actor(),
+                        delivery_tools_visible,
+                    )
+                    .await;
+                if let Some(ref mut c) = comm {
+                    c.run_origin = run_context.run_origin.clone();
+                }
+                comm
+            }
+            None => None,
+        };
         let prompt_authority = LoopPromptBundleAuthority::shared();
         let surface_state_for_prompt = Arc::clone(&surface_state);
         let prompt_port = HostManagedLoopPromptPort::new(
@@ -1511,6 +1548,7 @@ where
         .with_runtime_context(LoopRuntimeContext {
             loop_started_at_utc: chrono::Utc::now(),
             user_timezone: None,
+            communication,
         });
         let mut prompt: Arc<dyn LoopPromptPort> = Arc::new(prompt_port);
         if let Some(dispatcher) = per_build_dispatcher.as_ref() {
@@ -1993,6 +2031,9 @@ where
         }
         if let Some(snapshot) = claimed.state.resolved_model_route.clone() {
             loop_run_context = loop_run_context.with_resolved_model_route(snapshot);
+        }
+        if let Some(run_origin) = claimed.state.run_origin.clone() {
+            loop_run_context = loop_run_context.with_run_origin(run_origin);
         }
         let request = RebornLoopDriverHostRequest {
             claimed_run: claimed.clone(),

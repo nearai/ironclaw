@@ -112,20 +112,21 @@ use ironclaw_turns::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
         BatchPolicyKind, CapabilityDeniedReasonKind, CapabilityDescriptorView,
         CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-        CapabilitySurfaceVersion, CompactionInitiator, FinalizeAssistantMessage,
-        InMemoryLoopHostMilestoneSink, InstructionSafetyContext, LoopCancelReasonKind,
-        LoopCancellationPort, LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError, LoopCompactionMode,
-        LoopCompactionOutcome, LoopCompactionPort, LoopCompactionRequest, LoopContextRequest,
-        LoopDriverId, LoopDriverNoteKind, LoopGateKind, LoopHostMilestone, LoopHostMilestoneKind,
-        LoopInlineMessage, LoopInlineMessageRole, LoopInput, LoopInputAckToken, LoopInputCursor,
-        LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant, LoopModelGatewayError,
-        LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopProgressEvent,
-        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopSafeSummary, ModelWorkKind,
-        ModelWorkOutcome, ModelWorkRequest, NoOpBudgetAccountant, NoOpPolicyGuard,
-        ParentLoopOutput, PersonalContextPolicy, PromptMode, SkillVisibility,
-        StageCheckpointPayloadRequest, SystemInferenceTaskId, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        CapabilitySurfaceVersion, CommunicationContextProvider, CommunicationRuntimeContext,
+        CompactionInitiator, ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState,
+        FinalizeAssistantMessage, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
+        LoopCancelReasonKind, LoopCancellationPort, LoopCapabilityPort, LoopCheckpointKind,
+        LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError,
+        LoopCompactionMode, LoopCompactionOutcome, LoopCompactionPort, LoopCompactionRequest,
+        LoopContextRequest, LoopDriverId, LoopDriverNoteKind, LoopGateKind, LoopHostMilestone,
+        LoopHostMilestoneKind, LoopInlineMessage, LoopInlineMessageRole, LoopInput,
+        LoopInputAckToken, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
+        LoopModelBudgetAccountant, LoopModelGatewayError, LoopModelPort, LoopModelRequest,
+        LoopModelRouteSnapshot, LoopProgressEvent, LoopPromptBundleRequest, LoopPromptPort,
+        LoopRunContext, LoopSafeSummary, ModelWorkKind, ModelWorkOutcome, ModelWorkRequest,
+        NoOpBudgetAccountant, NoOpPolicyGuard, ParentLoopOutput, PersonalContextPolicy, PromptMode,
+        SkillVisibility, StageCheckpointPayloadRequest, SystemInferenceTaskId,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::{ClaimRunRequest, ClaimedTurnRun, TurnRunTransitionPort},
 };
@@ -866,6 +867,13 @@ async fn text_only_model_reply_driver_runs_prompt_model_transcript_path() {
             .any(|message| message.content.contains("Current date/time at loop start:")),
         "model request must contain the runtime context message stamped by the production host"
     );
+    assert!(
+        !requests[0]
+            .messages
+            .iter()
+            .any(|message| message.content.contains("Connected channels:")),
+        "model request must NOT contain communication section when no provider is installed"
+    );
     assert_eq!(
         fixture.milestone_names(),
         vec![
@@ -926,6 +934,13 @@ async fn text_only_model_reply_driver_embeds_runtime_context_exactly_once_per_mo
         occurrences_spawn1, 1,
         "model request for spawn 1 must embed the runtime context exactly once, found {occurrences_spawn1}"
     );
+    assert!(
+        !requests_after_spawn1[0]
+            .messages
+            .iter()
+            .any(|message| message.content.contains("Connected channels:")),
+        "model request for spawn 1 must NOT contain communication section when no provider is installed"
+    );
 
     // --- spawn 2 (same thread, transcript now has the assistant reply from
     // spawn 1; the runtime context from spawn 1 must NOT reappear) ---
@@ -949,6 +964,72 @@ async fn text_only_model_reply_driver_embeds_runtime_context_exactly_once_per_mo
     assert_eq!(
         occurrences_spawn2, 1,
         "model request for spawn 2 must embed the runtime context exactly once (not accumulated from spawn 1), found {occurrences_spawn2}"
+    );
+    assert!(
+        !requests_after_spawn2[1]
+            .messages
+            .iter()
+            .any(|message| message.content.contains("Connected channels:")),
+        "model request for spawn 2 must NOT contain communication section when no provider is installed"
+    );
+}
+
+struct StubCommunicationContextProvider;
+
+#[async_trait]
+impl CommunicationContextProvider for StubCommunicationContextProvider {
+    async fn communication_context(
+        &self,
+        _scope: &TurnScope,
+        _actor: Option<&TurnActor>,
+        _delivery_tools_visible: bool,
+    ) -> Option<CommunicationRuntimeContext> {
+        Some(CommunicationRuntimeContext {
+            connected_channels: ConnectedChannelsState::Known(vec![ConnectedChannelSummary {
+                name: "test-channel".to_string(),
+                authenticated: true,
+                active: true,
+            }]),
+            delivery_target: DeliveryTargetState::NoneSet,
+            delivery_tools_visible: false,
+            run_origin: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn text_only_host_factory_with_communication_context_provider_injects_comm_section() {
+    let mut fixture = HostFixture::new("thread-driver-runtime-comm", "hello runtime").await;
+    let driver = TextOnlyModelReplyDriver::default();
+    assign_driver_to_fixture(&mut fixture, driver.descriptor());
+    let host = fixture
+        .factory()
+        .with_communication_context_provider(Arc::new(StubCommunicationContextProvider))
+        .build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: fixture.claimed.clone(),
+            loop_run_context: fixture.context.clone(),
+        })
+        .await
+        .unwrap();
+
+    driver
+        .run(driver_request(&fixture.context), &host)
+        .await
+        .unwrap();
+
+    let requests = fixture.gateway.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].messages.iter().any(|message| message
+            .content
+            .contains("Connected channels: test-channel (authenticated, active).")),
+        "model request must contain provider-supplied connected channel"
+    );
+    assert!(
+        requests[0].messages.iter().any(|message| message
+            .content
+            .contains("Outbound delivery target: none set.")),
+        "model request must contain provider-supplied outbound delivery target state"
     );
 }
 
@@ -1364,6 +1445,7 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
                     parent_run_id: None,
                     subagent_depth: 0,
                     spawn_tree_root_run_id: None,
+                    run_origin: None,
                 },
                 &ironclaw_turns::AllowAllTurnAdmissionPolicy,
                 &resolver,
@@ -2617,6 +2699,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
         model_budget_accountant: None,
         safety_context: None,
         hook_dispatcher_builder_factory: None,
+        communication_context_provider: None,
         hook_security_audit_sink: None,
         turn_event_sink: Some(event_sink.clone()),
     })
@@ -2637,6 +2720,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
             parent_run_id: None,
             subagent_depth: 0,
             spawn_tree_root_run_id: None,
+            run_origin: None,
         })
         .await
         .unwrap();
@@ -2789,6 +2873,7 @@ async fn build_runtime_host_with_optional_hooks(
         hook_security_audit_sink: None,
         turn_event_sink: None,
         hook_dispatcher_builder_factory: hook_factory,
+        communication_context_provider: None,
     })
     .unwrap();
 
@@ -3122,6 +3207,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
         hook_dispatcher_builder_factory: None,
+        communication_context_provider: None,
         hook_security_audit_sink: None,
         turn_event_sink: None,
     })
@@ -3234,6 +3320,7 @@ async fn product_live_parts_for_gate_test(
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
         hook_dispatcher_builder_factory: None,
+        communication_context_provider: None,
         hook_security_audit_sink: None,
         turn_event_sink: None,
     }
@@ -7251,6 +7338,7 @@ async fn queue_fixture_turn(
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
+                run_origin: None,
             },
             &ironclaw_turns::AllowAllTurnAdmissionPolicy,
             resolver,
@@ -7378,6 +7466,7 @@ impl HostFixture {
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
+            run_origin: None,
         };
         let claimed = ClaimedTurnRun {
             state,

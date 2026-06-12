@@ -5,10 +5,12 @@ use ironclaw_safety::{
     InjectionScanner, PromptSafetyRejection, Sanitizer, validate_trusted_trigger_prompt,
 };
 use ironclaw_triggers::{
-    TriggerError, TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter,
-    TrustedTriggerSubmitRequest,
+    TRIGGER_TRUSTED_ADAPTER_KIND, TriggerError, TrustedTriggerFireSubmitOutcome,
+    TrustedTriggerFireSubmitter, TrustedTriggerSubmitRequest,
 };
-use ironclaw_turns::{AdmissionRejectionReason, SubmitTurnRequest, TurnCoordinator, TurnError};
+use ironclaw_turns::{
+    AdmissionRejectionReason, SubmitTurnRequest, TurnCoordinator, TurnError, TurnRunOrigin,
+};
 
 use crate::trusted_trigger::{TrustedTriggerInboundFailureKind, classify_inbound_error};
 use crate::types::TrustedInboundTurnRequest;
@@ -90,6 +92,14 @@ where
             requested_run_profile,
         } = request;
 
+        let run_origin = if adapter_kind.as_str() == TRIGGER_TRUSTED_ADAPTER_KIND {
+            Some(TurnRunOrigin::ScheduledTrigger)
+        } else {
+            Some(TurnRunOrigin::ProductInbound {
+                adapter: adapter_kind.as_str().to_string(),
+            })
+        };
+
         let replay_lookup = AcceptedInboundMessageLookup {
             tenant_id: tenant_id.clone(),
             adapter_kind: adapter_kind.clone(),
@@ -104,7 +114,7 @@ where
             .await?
         {
             return self
-                .submit_or_replay(replay.resolution, replay.accepted_message)
+                .submit_or_replay(replay.resolution, replay.accepted_message, run_origin)
                 .await;
         }
 
@@ -164,13 +174,15 @@ where
             })
             .await?;
 
-        self.submit_or_replay(resolution, accepted_message).await
+        self.submit_or_replay(resolution, accepted_message, run_origin)
+            .await
     }
 
     async fn submit_or_replay(
         &self,
         mut resolution: ConversationBindingResolution,
         accepted_message: AcceptedInboundMessage,
+        run_origin: Option<TurnRunOrigin>,
     ) -> Result<InboundTurnResponse, InboundTurnError> {
         resolution.actor = accepted_message.actor.clone();
 
@@ -207,6 +219,7 @@ where
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
+                run_origin,
             })
             .await;
         let turn_submission = match turn_submission_result {

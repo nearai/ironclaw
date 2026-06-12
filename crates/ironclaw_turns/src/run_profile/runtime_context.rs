@@ -43,6 +43,9 @@ pub struct ConnectedChannelSummary {
 pub enum DeliveryTargetState {
     Unknown,
     NoneSet,
+    /// A target is configured but its display details could not be resolved
+    /// (e.g. the resolving provider registry is not wired in this composition).
+    SetUnresolved,
     Set(DeliveryTargetSummary),
 }
 
@@ -124,6 +127,17 @@ impl LoopRuntimeContext {
                     .to_string()
             }
             DeliveryTargetState::NoneSet => "Outbound delivery target: none set.".to_string(),
+            DeliveryTargetState::SetUnresolved if comm.delivery_tools_visible => {
+                "Outbound delivery target: configured (details unavailable here; call \
+                 builtin__outbound_delivery_targets_list to inspect) \u{2014} applies to all \
+                 routine and trigger results for this user (single preference, not per-trigger)."
+                    .to_string()
+            }
+            DeliveryTargetState::SetUnresolved => {
+                "Outbound delivery target: configured \u{2014} applies to all routine and \
+                 trigger results for this user (single preference, not per-trigger)."
+                    .to_string()
+            }
             DeliveryTargetState::Set(summary) => format!(
                 "Outbound delivery target: {} ({}) \u{2014} applies to all routine and \
                  trigger results for this user (single preference, not per-trigger).",
@@ -161,6 +175,16 @@ impl LoopRuntimeContext {
 
         parts.join("\n")
     }
+}
+
+#[async_trait::async_trait]
+pub trait CommunicationContextProvider: Send + Sync {
+    async fn communication_context(
+        &self,
+        scope: &crate::scope::TurnScope,
+        actor: Option<&crate::scope::TurnActor>,
+        delivery_tools_visible: bool,
+    ) -> Option<CommunicationRuntimeContext>;
 }
 
 #[cfg(test)]
@@ -349,6 +373,60 @@ mod tests {
         let text = ctx.render_model_content();
         assert!(
             text.contains("Outbound delivery target: none set."),
+            "{text}"
+        );
+        assert!(
+            !text.contains("builtin__outbound_delivery_targets_list"),
+            "tool name must not appear when not visible: {text}"
+        );
+    }
+
+    #[test]
+    fn renders_delivery_set_unresolved_with_tools_visible() {
+        let ctx = LoopRuntimeContext {
+            loop_started_at_utc: stamp(),
+            user_timezone: None,
+            communication: Some(CommunicationRuntimeContext {
+                connected_channels: ConnectedChannelsState::Unknown,
+                delivery_target: DeliveryTargetState::SetUnresolved,
+                delivery_tools_visible: true,
+                run_origin: None,
+            }),
+        };
+        let text = ctx.render_model_content();
+        assert!(
+            text.contains("Outbound delivery target: configured (details unavailable here"),
+            "{text}"
+        );
+        assert!(
+            text.contains("builtin__outbound_delivery_targets_list"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("none set"),
+            "a stored target must never render as none set: {text}"
+        );
+        assert!(
+            text.contains("single preference, not per-trigger"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn renders_delivery_set_unresolved_without_tools_visible() {
+        let ctx = LoopRuntimeContext {
+            loop_started_at_utc: stamp(),
+            user_timezone: None,
+            communication: Some(CommunicationRuntimeContext {
+                connected_channels: ConnectedChannelsState::Unknown,
+                delivery_target: DeliveryTargetState::SetUnresolved,
+                delivery_tools_visible: false,
+                run_origin: None,
+            }),
+        };
+        let text = ctx.render_model_content();
+        assert!(
+            text.contains("Outbound delivery target: configured \u{2014} applies to all"),
             "{text}"
         );
         assert!(

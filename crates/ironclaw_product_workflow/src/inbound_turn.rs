@@ -22,7 +22,7 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator,
-    TurnError, TurnRunId, TurnScope,
+    TurnError, TurnRunId, TurnRunOrigin, TurnScope,
 };
 use uuid::Uuid;
 
@@ -119,6 +119,7 @@ struct PreparedUserMessage {
     thread_scope: ThreadScope,
     source_binding_id: String,
     submit_idempotency_key: String,
+    adapter_id: String,
 }
 
 /// Port for the inbound turn submission path.
@@ -304,6 +305,7 @@ where
             thread_scope,
             source_binding_id,
             submit_idempotency_key,
+            adapter_id: envelope.adapter_id().as_str().to_string(),
         })
     }
 
@@ -380,7 +382,7 @@ where
                 reason: format!("failed to accept inbound message: {e}"),
             })?;
 
-        ProductInboundTurnHandoff::NeedsSubmission(AcceptedProductInboundTurn {
+        ProductInboundTurnHandoff::NeedsSubmission(Box::new(AcceptedProductInboundTurn {
             binding: prepared.binding,
             thread_scope: prepared.thread_scope,
             message_id: accepted.message_id,
@@ -388,7 +390,8 @@ where
             reply_target_binding_id,
             idempotency_key_raw: prepared.submit_idempotency_key,
             received_at: envelope.received_at(),
-        })
+            adapter_id: prepared.adapter_id,
+        }))
         .submit_or_replay(&self.thread_service, &self.turn_coordinator)
         .await
     }
@@ -422,7 +425,7 @@ enum ProductInboundTurnHandoff {
         submitted_run_id: TurnRunId,
         binding: ResolvedBinding,
     },
-    NeedsSubmission(AcceptedProductInboundTurn),
+    NeedsSubmission(Box<AcceptedProductInboundTurn>),
 }
 
 impl ProductInboundTurnHandoff {
@@ -440,6 +443,7 @@ impl ProductInboundTurnHandoff {
             received_at,
             binding,
             thread_scope,
+            String::new(),
         )
     }
 
@@ -455,6 +459,7 @@ impl ProductInboundTurnHandoff {
             received_at,
             prepared.binding.clone(),
             prepared.thread_scope.clone(),
+            prepared.adapter_id.clone(),
         )
     }
 
@@ -464,6 +469,7 @@ impl ProductInboundTurnHandoff {
         received_at: DateTime<Utc>,
         binding: ResolvedBinding,
         thread_scope: ThreadScope,
+        adapter_id: String,
     ) -> Result<Self, ProductWorkflowError> {
         let accepted_message_ref = accepted_message_ref(replay.message_id)?;
 
@@ -508,15 +514,18 @@ impl ProductInboundTurnHandoff {
             }
         })?;
 
-        Ok(Self::NeedsSubmission(AcceptedProductInboundTurn {
-            binding,
-            thread_scope,
-            message_id: replay.message_id,
-            source_binding_id,
-            reply_target_binding_id,
-            idempotency_key_raw: submit_idempotency_key,
-            received_at,
-        }))
+        Ok(Self::NeedsSubmission(Box::new(
+            AcceptedProductInboundTurn {
+                binding,
+                thread_scope,
+                message_id: replay.message_id,
+                source_binding_id,
+                reply_target_binding_id,
+                idempotency_key_raw: submit_idempotency_key,
+                received_at,
+                adapter_id,
+            },
+        )))
     }
 
     async fn submit_or_replay<T, C>(
@@ -553,6 +562,7 @@ struct AcceptedProductInboundTurn {
     reply_target_binding_id: String,
     idempotency_key_raw: String,
     received_at: DateTime<Utc>,
+    adapter_id: String,
 }
 
 impl AcceptedProductInboundTurn {
@@ -573,6 +583,7 @@ impl AcceptedProductInboundTurn {
             reply_target_binding_id,
             idempotency_key_raw,
             received_at,
+            adapter_id,
         } = self;
         let turn_scope = TurnScope::new_with_owner(
             binding.tenant_id.clone(),
@@ -621,6 +632,9 @@ impl AcceptedProductInboundTurn {
             parent_run_id: None,
             subagent_depth: 0,
             spawn_tree_root_run_id: None,
+            run_origin: Some(TurnRunOrigin::ProductInbound {
+                adapter: adapter_id,
+            }),
         };
 
         match turn_coordinator.submit_turn(request).await {
@@ -925,6 +939,7 @@ mod tests {
             },
             source_binding_id: "src:alpha".to_string(),
             submit_idempotency_key: "turn-key".to_string(),
+            adapter_id: "test_adapter".to_string(),
         };
 
         let handoff = ProductInboundTurnHandoff::from_replay_with_prepared(

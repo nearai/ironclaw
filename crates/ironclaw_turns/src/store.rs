@@ -191,6 +191,8 @@ pub struct TurnRunRecord {
     pub subagent_depth: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawn_tree_root_run_id: Option<TurnRunId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_origin: Option<crate::TurnRunOrigin>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -79,6 +79,13 @@ async fn local_dev_runtime_injects_default_system_prompt_into_model_request() {
         }),
         "test should observe the real model request for the submitted user turn"
     );
+    assert!(
+        recorded_requests[0].messages.iter().any(|message| {
+            message.role == HostManagedModelMessageRole::System
+                && message.content.contains("Outbound delivery target:")
+        }),
+        "local-dev runtime should include outbound delivery target in runtime context"
+    );
 
     runtime.shutdown().await.expect("runtime shutdown");
 }

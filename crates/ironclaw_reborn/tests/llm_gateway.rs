@@ -1595,6 +1595,7 @@ async fn production_loop_model_request_includes_runtime_context() {
     .with_runtime_context(LoopRuntimeContext {
         loop_started_at_utc,
         user_timezone: None,
+        communication: None,
     });
 
     let bundle = prompt_port

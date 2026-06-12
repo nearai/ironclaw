@@ -112,8 +112,8 @@ pub use resolver::{
     RunProfileRegistryError, RunProfileResolutionRequest, RunProfileResolver,
 };
 pub use runtime_context::{
-    CommunicationRuntimeContext, ConnectedChannelSummary, ConnectedChannelsState,
-    DeliveryTargetState, DeliveryTargetSummary, LoopRuntimeContext,
+    CommunicationContextProvider, CommunicationRuntimeContext, ConnectedChannelSummary,
+    ConnectedChannelsState, DeliveryTargetState, DeliveryTargetSummary, LoopRuntimeContext,
 };
 pub use skill_context::{
     InstalledSkillSnapshot, NoopSkillContextSource, SkillActivationState, SkillContextBudget,

@@ -86,8 +86,8 @@ use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
     LoopGateRef, ReplyTargetBindingRef, RunProfileResolutionRequest, SanitizedCancelReason,
     SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
-    TurnEventProjectionSource, TurnId, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord,
-    TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStatus,
+    TurnEventProjectionSource, TurnId, TurnPersistenceSnapshot, TurnRunId, TurnRunOrigin,
+    TurnRunRecord, TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStatus,
     run_profile::{LoopHostMilestoneSink, LoopRunContext},
 };
 
@@ -1309,6 +1309,7 @@ impl RebornRuntime {
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
+                run_origin: Some(TurnRunOrigin::WebUiChat),
             })
             .await
         {
@@ -2146,6 +2147,24 @@ pub async fn build_reborn_runtime(
         None
     };
 
+    let communication_context_provider: Option<
+        Arc<dyn ironclaw_turns::run_profile::CommunicationContextProvider>,
+    > =
+        local_runtime.map(|local_runtime| {
+            Arc::new(
+                crate::communication_context::RuntimeCommunicationContextProvider::new(Arc::new(
+                    crate::outbound_preferences::RebornOutboundPreferencesFacade::new(
+                        Arc::clone(&local_runtime.outbound_preferences),
+                        Arc::new(
+                            crate::outbound_preferences::OutboundDeliveryTargetRegistry::new(
+                                Vec::new(),
+                            ),
+                        ),
+                    ),
+                )),
+            ) as Arc<dyn ironclaw_turns::run_profile::CommunicationContextProvider>
+        });
+
     let planned_runtime_parts = DefaultPlannedRuntimeParts {
         turn_state: Arc::clone(&turn_state_store),
         thread_service: Arc::clone(&thread_service),
@@ -2199,6 +2218,7 @@ pub async fn build_reborn_runtime(
         hook_security_audit_sink: Some(Arc::new(ironclaw_events::TracingSecurityAuditSink)),
         turn_event_sink: None,
         hook_dispatcher_builder_factory,
+        communication_context_provider,
     };
     let composition = match planned_runtime_wake_channel {
         Some(wake_channel) => {
@@ -4399,6 +4419,7 @@ mod tests {
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
+                run_origin: None,
             })
             .await
             .expect("parent submitted");
@@ -6344,6 +6365,7 @@ mod tests {
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
+                run_origin: None,
             })
             .await
             .expect("submit turn");

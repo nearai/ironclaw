@@ -497,6 +497,7 @@ mod tests {
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor::default(),
+            run_origin: None,
         }
     }
 
@@ -676,6 +677,7 @@ mod tests {
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
+                run_origin: None,
             })
             .await
             .expect("submit turn");

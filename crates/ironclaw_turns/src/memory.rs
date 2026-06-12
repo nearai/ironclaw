@@ -1470,7 +1470,7 @@ impl Inner {
                     parent_run_id: run.parent_run_id,
                     subagent_depth: run.subagent_depth,
                     spawn_tree_root_run_id: run.spawn_tree_root_run_id,
-                    run_origin: None,
+                    run_origin: run.run_origin,
                 },
             );
         }
@@ -2589,6 +2589,7 @@ impl RunRecord {
             parent_run_id: self.parent_run_id,
             subagent_depth: self.subagent_depth,
             spawn_tree_root_run_id: self.spawn_tree_root_run_id,
+            run_origin: self.run_origin.clone(),
         }
     }
 
