@@ -646,6 +646,46 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn prompt_port_with_runtime_context_without_store_is_invalid_invocation() {
+        let context = test_context();
+        let runtime_ctx = LoopRuntimeContext {
+            loop_started_at_utc: chrono::Utc
+                .with_ymd_and_hms(2026, 6, 11, 21, 32, 0)
+                .unwrap(),
+            user_timezone: None,
+        };
+
+        let port = HostManagedLoopPromptPort::new(
+            context,
+            Arc::new(PanicContextPort),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        )
+        .with_runtime_context(runtime_ctx);
+
+        let result = port
+            .build_prompt_bundle(LoopPromptBundleRequest {
+                mode: PromptMode::TextOnly,
+                context_cursor: None,
+                surface_version: None,
+                checkpoint_state_ref: None,
+                max_messages: Some(8),
+                capability_view: None,
+                inline_messages: vec![],
+            })
+            .await;
+
+        let err = result.expect_err(
+            "building a prompt bundle with runtime_context but no materialization store must fail",
+        );
+        assert_eq!(
+            err.kind,
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "expected InvalidInvocation, got {:?}",
+            err.kind
+        );
+    }
+
     fn test_context() -> LoopRunContext {
         let scope = TurnScope::new(
             TenantId::new("tenant-prompt").unwrap(),
