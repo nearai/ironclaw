@@ -11,8 +11,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     CapabilityFailureDisposition, HostRuntime, HostRuntimeError, IdempotencyKey,
-    RuntimeBlockedReason, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind,
+    RuntimeBlockedReason, RuntimeCapabilityAuthResumeRequest, RuntimeCapabilityFailure,
+    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
+    RuntimeFailureKind,
 };
 use ironclaw_process_sandbox::{SandboxProcessPlan, ValidatedSandboxProcessPlan};
 use ironclaw_turns::{
@@ -1319,6 +1320,18 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                     "capability approval resume context is invalid",
                 )
             })?;
+        } else if let Some(auth_resume) = request.auth_resume.as_ref() {
+            // Reuse original invocation_id so the fingerprinted approval
+            // lease (scoped to that id) can still be matched and claimed.
+            let resume_invocation_id = invocation_id_from_resume_token(&auth_resume.resume_token)?;
+            invocation_context.invocation_id = resume_invocation_id;
+            invocation_context.resource_scope.invocation_id = resume_invocation_id;
+            invocation_context.validate().map_err(|_| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "capability auth resume context is invalid",
+                )
+            })?;
         }
         let invocation_id = invocation_context.invocation_id;
         let correlation_id = invocation_context.correlation_id;
@@ -1331,8 +1344,11 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             capability_id: request.capability_id.clone(),
         })
         .await?;
-        let outcome = match request.approval_resume.as_ref() {
-            Some(resume) => {
+        let outcome = match (
+            request.approval_resume.as_ref(),
+            request.auth_resume.as_ref(),
+        ) {
+            (Some(resume), _) => {
                 let runtime_request = RuntimeCapabilityResumeRequest::new(
                     invocation_context,
                     resume.approval_request_id,
@@ -1344,7 +1360,26 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 .with_idempotency_key(idempotency_key.clone());
                 dispatch_runtime_capability_resume(self.runtime.as_ref(), runtime_request).await
             }
-            None => {
+            (None, Some(auth_resume)) => {
+                tracing::debug!(
+                    invocation_id = %invocation_id,
+                    auth_resume = true,
+                    approval_request_id = auth_resume.approval_request_id.map(|id| id.to_string()).as_deref().unwrap_or("none"),
+                    "capability auth-resume re-dispatch with preserved invocation identity"
+                );
+                let runtime_request = RuntimeCapabilityAuthResumeRequest::new(
+                    invocation_context,
+                    request.capability_id,
+                    estimate.clone(),
+                    input.clone(),
+                    trust_decision,
+                    auth_resume.approval_request_id,
+                )
+                .with_idempotency_key(idempotency_key.clone());
+                dispatch_runtime_capability_auth_resume(self.runtime.as_ref(), runtime_request)
+                    .await
+            }
+            (None, None) => {
                 let runtime_request = RuntimeCapabilityRequest::new(
                     invocation_context,
                     request.capability_id,
@@ -1443,6 +1478,15 @@ async fn dispatch_runtime_capability_resume(
     } else {
         runtime.resume_capability(request).await
     }
+}
+
+/// Auth-resume dispatch: always uses `auth_resume_capability` (no spawn
+/// variant; sandbox spawns do not go through approval/auth gates).
+async fn dispatch_runtime_capability_auth_resume(
+    runtime: &(dyn HostRuntime + Send + Sync),
+    request: RuntimeCapabilityAuthResumeRequest,
+) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+    runtime.auth_resume_capability(request).await
 }
 
 fn host_runtime_input_for_capability(
@@ -3758,6 +3802,7 @@ mod tests {
             capability_id: candidate.capability_id,
             input_ref: candidate.input_ref,
             approval_resume: None,
+            auth_resume: None,
         };
         let outcome = port
             .invoke_capability(invocation.clone())
@@ -3769,6 +3814,7 @@ mod tests {
                 capability_id: invocation.capability_id,
                 input_ref: invocation.input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("capability_info invocation replays");
@@ -3820,6 +3866,7 @@ mod tests {
             capability_id: candidate.capability_id,
             input_ref: candidate.input_ref,
             approval_resume: None,
+            auth_resume: None,
         };
 
         let error = port
@@ -3889,6 +3936,7 @@ mod tests {
             capability_id: candidate.capability_id,
             input_ref: candidate.input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .expect("capability_info invocation succeeds");
@@ -3965,6 +4013,7 @@ mod tests {
                     capability_id: candidate.capability_id,
                     input_ref: candidate.input_ref,
                     approval_resume: None,
+                    auth_resume: None,
                 })
                 .await
                 .expect("invalid arguments should return a capability failure, not a host error");
@@ -4046,6 +4095,7 @@ mod tests {
                     capability_id: candidate.capability_id,
                     input_ref: candidate.input_ref,
                     approval_resume: None,
+                    auth_resume: None,
                 })
                 .await
                 .expect("invalid name should return a capability failure, not a host error");
@@ -4126,6 +4176,7 @@ mod tests {
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("unknown target should return a capability failure, not a host error");
@@ -4190,6 +4241,7 @@ mod tests {
                 input_ref: CapabilityInputRef::new("input:direct-capability-info")
                     .expect("test input ref"),
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("unstaged synthetic invocation should return a model-visible failure");
@@ -4269,6 +4321,7 @@ mod tests {
                     .expect("synthetic capability id"),
                 input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("excluded target should return a model-visible failure");
@@ -4414,6 +4467,7 @@ mod tests {
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("capability_info invocation succeeds");
@@ -4479,6 +4533,7 @@ mod tests {
             input_ref: CapabilityInputRef::new("input:old-builtin-capability-info")
                 .expect("valid input ref"),
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .expect("runtime capability invocation succeeds");
@@ -4597,6 +4652,7 @@ mod tests {
             capability_id: override_id.clone(),
             input_ref: input_ref.clone(),
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .expect("override invocation succeeds");
@@ -4605,6 +4661,7 @@ mod tests {
             capability_id: default_id.clone(),
             input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .expect("default invocation succeeds");
@@ -4665,6 +4722,7 @@ mod tests {
                 input_ref: CapabilityInputRef::new("input:process-sandbox-plan")
                     .expect("valid input ref"),
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("process sandbox invocation succeeds");
@@ -4763,6 +4821,7 @@ mod tests {
                 input_ref: CapabilityInputRef::new("input:direct-invalid")
                     .expect("valid input ref"),
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect_err("invalid direct input should fail before runtime dispatch");
@@ -4836,6 +4895,7 @@ mod tests {
                 capability_id,
                 input_ref: candidate.input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("schema-invalid provider calls should produce a capability failure");
@@ -4930,6 +4990,7 @@ mod tests {
                 capability_id,
                 input_ref: candidate.input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("schema-invalid provider calls should produce a capability failure");
@@ -5024,6 +5085,7 @@ mod tests {
                 capability_id,
                 input_ref: candidate.input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("schema-invalid provider calls should produce a capability failure");
@@ -5100,6 +5162,7 @@ mod tests {
             capability_id,
             input_ref: CapabilityInputRef::new("input:direct-normalized").expect("valid input ref"),
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .expect("valid direct input should dispatch");
@@ -5156,6 +5219,7 @@ mod tests {
                 input_ref: CapabilityInputRef::new("input:invalid-process-sandbox-plan")
                     .expect("valid input ref"),
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect_err("invalid process sandbox plan must fail before runtime dispatch");
@@ -5212,6 +5276,7 @@ mod tests {
                 input_ref: CapabilityInputRef::new("input:malformed-process-sandbox-plan")
                     .expect("valid input ref"),
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect_err("malformed process sandbox plan must fail before runtime dispatch");
@@ -5809,6 +5874,7 @@ mod tests {
             capability_id: candidate.capability_id,
             input_ref: candidate.input_ref,
             approval_resume: None,
+            auth_resume: None,
         }
     }
 

@@ -755,8 +755,7 @@ mod tests {
         let approval_request_id = ApprovalRequestId::new();
         state.pending_auth_resume = Some(PendingAuthResume {
             gate_ref: LoopGateRef::new("gate:auth-with-approval").expect("valid gate ref"),
-            capability_id: CapabilityId::new("gsuite.calendar.list_events")
-                .expect("valid cap id"),
+            capability_id: CapabilityId::new("gsuite.calendar.list_events").expect("valid cap id"),
             surface_version: CapabilitySurfaceVersion::new("surface-v2")
                 .expect("valid surface version"),
             input_ref: CapabilityInputRef::new("input:approval-auth").expect("valid input ref"),

@@ -342,12 +342,14 @@ async fn runtime_capability_batch_continues_after_runtime_failure_outcome() {
                     capability_id: first.capability_id,
                     input_ref: first.input_ref,
                     approval_resume: None,
+                    auth_resume: None,
                 },
                 CapabilityInvocation {
                     surface_version: second.surface_version,
                     capability_id: second.capability_id,
                     input_ref: second.input_ref,
                     approval_resume: None,
+                    auth_resume: None,
                 },
             ],
             stop_on_first_suspension: false,
@@ -788,6 +790,7 @@ async fn visible_runtime_invocation(port: &HostRuntimeLoopCapabilityPort) -> Cap
         capability_id: candidate.capability_id,
         input_ref: candidate.input_ref,
         approval_resume: None,
+        auth_resume: None,
     }
 }
 
@@ -855,6 +858,7 @@ async fn approval_resume_metadata_invokes_runtime_resume_with_original_invocatio
             )
             .expect("valid input ref"),
             approval_resume: Some(resume.clone()),
+            auth_resume: None,
         })
         .await
         .expect("approval resume dispatch succeeds");
@@ -941,6 +945,7 @@ async fn approval_resume_host_error_returns_failed_outcome_and_emits_failure_mil
             input_ref: CapabilityInputRef::new("input:approval-resume-host-error")
                 .expect("valid input ref"),
             approval_resume: Some(resume),
+            auth_resume: None,
         })
         .await
         .expect("approval resume host error should become a capability failure");

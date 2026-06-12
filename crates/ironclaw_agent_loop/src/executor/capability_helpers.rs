@@ -5,7 +5,7 @@ use ironclaw_turns::{
     LoopResultRef,
     run_profile::{
         AgentLoopDriverHost, AppendCapabilityResultRef, CapabilityApprovalResume,
-        CapabilityCallCandidate, CapabilityDescriptorView, CapabilityFailure,
+        CapabilityAuthResume, CapabilityCallCandidate, CapabilityDescriptorView, CapabilityFailure,
         CapabilityFailureDetail, CapabilityFailureKind, CapabilityInputIssue,
         CapabilityInputIssueCode, CapabilityInputRepair, CapabilityInvocation,
         CapabilityRecoveryHint, CapabilityResultMessage, CapabilitySurfaceVersion,
@@ -36,6 +36,33 @@ pub(super) fn capability_invocation_from_candidate(
         capability_id: call.capability_id,
         input_ref: call.input_ref,
         approval_resume,
+        auth_resume: None,
+    }
+}
+
+/// Builds a `CapabilityInvocation` from an auth-resumed candidate.
+///
+/// When `pending_auth.resume_token` is set (i.e., the invocation previously
+/// passed an approval gate), the returned invocation carries a
+/// `CapabilityAuthResume` so the host can reuse the original invocation_id
+/// and claim any matching approval lease.
+pub(super) fn capability_invocation_from_auth_resume_candidate(
+    call: CapabilityCallCandidate,
+    pending_auth: &PendingAuthResume,
+) -> CapabilityInvocation {
+    let auth_resume = pending_auth
+        .resume_token
+        .as_ref()
+        .map(|token| CapabilityAuthResume {
+            resume_token: token.clone(),
+            approval_request_id: pending_auth.approval_request_id,
+        });
+    CapabilityInvocation {
+        surface_version: call.surface_version,
+        capability_id: call.capability_id,
+        input_ref: call.input_ref,
+        approval_resume: None,
+        auth_resume,
     }
 }
 
