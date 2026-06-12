@@ -97,9 +97,10 @@ impl TurnScope {
     pub fn to_resource_scope(&self) -> ironclaw_host_api::ResourceScope {
         let mut scope = ironclaw_host_api::ResourceScope::system();
         scope.tenant_id = self.tenant_id.clone();
-        scope.user_id = self.explicit_owner_user_id().cloned().unwrap_or_else(|| {
-            UserId::from_trusted(ironclaw_host_api::SYSTEM_RESERVED_ID.to_string())
-        });
+        scope.user_id = self
+            .explicit_owner_user_id()
+            .cloned()
+            .unwrap_or_else(UserId::system_sentinel);
         scope.agent_id = self.agent_id.clone();
         scope.project_id = self.project_id.clone();
         scope.mission_id = None;

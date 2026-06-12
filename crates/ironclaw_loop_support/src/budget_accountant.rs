@@ -17,8 +17,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use dashmap::{DashMap, DashSet};
 use ironclaw_host_api::{
-    InvocationId, ResourceEstimate, ResourceReservationId, ResourceScope, ResourceUsage,
-    SYSTEM_RESERVED_ID, UserId,
+    InvocationId, ResourceEstimate, ResourceReservationId, ResourceScope, ResourceUsage, UserId,
 };
 use ironclaw_resources::{
     BudgetApprovalGate, BudgetEvent, BudgetEventSink, BudgetGateId, BudgetGateStatus,
@@ -397,7 +396,7 @@ impl GovernorBackedAccountant {
             .actor
             .as_ref()
             .map(|actor| actor.user_id.clone())
-            .unwrap_or_else(|| UserId::from_trusted(SYSTEM_RESERVED_ID.to_string()));
+            .unwrap_or_else(UserId::system_sentinel);
         ResourceScope {
             tenant_id: context.scope.tenant_id.clone(),
             user_id,
