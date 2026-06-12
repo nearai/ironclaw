@@ -42,6 +42,8 @@ pub(super) fn failed_exit(
         usage_summary_ref: None,
         diagnostic_ref: None,
         exit_id: exit_id(host, "failed")?,
+        explanation_message_refs: Vec::new(),
+        safe_summary: None,
     }))
 }
 

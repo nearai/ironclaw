@@ -119,6 +119,16 @@ impl TurnStateStore for StaticTurnStateStore {
         panic!("resume_turn should not be called by evidence tests")
     }
 
+    async fn retry_turn(
+        &self,
+        request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        // WS-3 implements this.
+        Err(TurnError::RunNotRetryable {
+            run_id: request.run_id,
+        })
+    }
+
     async fn request_cancel(
         &self,
         _request: CancelRunRequest,
@@ -520,7 +530,7 @@ impl TurnRunTransitionPort for RecordingTransitionPort {
                         Some(reason.gate_ref().clone()),
                     ))
                 }
-                ironclaw_turns::runner::TurnRunnerOutcome::Failed { failure } => {
+                ironclaw_turns::runner::TurnRunnerOutcome::Failed { failure, .. } => {
                     self.fail_run(FailRunRequest {
                         run_id: request.run_id,
                         runner_id: request.runner_id,

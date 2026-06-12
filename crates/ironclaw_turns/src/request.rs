@@ -94,6 +94,16 @@ pub struct ResumeTurnRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryTurnRequest {
+    pub scope: TurnScope,
+    pub actor: TurnActor,
+    pub run_id: TurnRunId,
+    pub source_binding_ref: SourceBindingRef,
+    pub reply_target_binding_ref: ReplyTargetBindingRef,
+    pub idempotency_key: IdempotencyKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CancelRunRequest {
     pub scope: TurnScope,
     pub actor: TurnActor,

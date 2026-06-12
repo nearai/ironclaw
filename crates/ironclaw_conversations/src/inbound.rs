@@ -374,6 +374,7 @@ fn should_rotate_submit_key(error: &TurnError) -> bool {
         | TurnError::InvalidRequest { .. }
         | TurnError::CapacityExceeded { .. }
         | TurnError::Conflict { .. }
+        | TurnError::RunNotRetryable { .. }
         | TurnError::InvalidTransition { .. }
         | TurnError::LeaseMismatch => false,
     }

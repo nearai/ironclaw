@@ -372,6 +372,7 @@ fn classify_materializer_inbound_error(error: InboundTurnError) -> TriggerError 
                 TurnError::ScopeNotFound
                 | TurnError::Unauthorized
                 | TurnError::InvalidRequest { .. }
+                | TurnError::RunNotRetryable { .. }
                 | TurnError::InvalidTransition { .. }
                 | TurnError::LeaseMismatch,
         } => rejected_trigger_materialization("trusted trigger submit rejected"),

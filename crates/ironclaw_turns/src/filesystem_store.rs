@@ -44,11 +44,11 @@ use crate::{
     AllowAllTurnAdmissionLimitProvider, CancelRunRequest, CancelRunResponse, EventCursor,
     GetLoopCheckpointRequest, GetRunStateRequest, InMemoryTurnStateStore,
     InMemoryTurnStateStoreLimits, LoopCheckpointRecord, LoopCheckpointStore,
-    PutLoopCheckpointRequest, ResumeTurnRequest, ResumeTurnResponse, RunProfileResolver,
-    SpawnTreeReservation, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse,
-    TurnAdmissionLimitProvider, TurnAdmissionPolicy, TurnError, TurnEventPage,
-    TurnEventProjectionSource, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord, TurnRunState,
-    TurnScope, TurnSpawnTreeStateStore, TurnStateStore,
+    PutLoopCheckpointRequest, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest,
+    RetryTurnResponse, RunProfileResolver, SpawnTreeReservation, SubmitChildRunRequest,
+    SubmitTurnRequest, SubmitTurnResponse, TurnAdmissionLimitProvider, TurnAdmissionPolicy,
+    TurnError, TurnEventPage, TurnEventProjectionSource, TurnPersistenceSnapshot, TurnRunId,
+    TurnRunRecord, TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStateStore,
     events::project_turn_events,
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
@@ -241,6 +241,18 @@ where
             let request = request.clone();
             async move {
                 let outcome = store.resume_turn(request).await;
+                (outcome, store)
+            }
+        })
+        .await
+    }
+
+    async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
+        self.apply(|store| {
+            let request = request.clone();
+            async move {
+                // WS-3 implements failed-run retry semantics and idempotency.
+                let outcome = store.retry_turn(request).await;
                 (outcome, store)
             }
         })

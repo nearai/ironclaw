@@ -836,6 +836,16 @@ impl TurnStateStore for StaticTurnStateStore {
         unreachable!("spawn tests do not resume through state store")
     }
 
+    async fn retry_turn(
+        &self,
+        request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        // WS-3 implements this.
+        Err(TurnError::RunNotRetryable {
+            run_id: request.run_id,
+        })
+    }
+
     async fn request_cancel(
         &self,
         request: CancelRunRequest,

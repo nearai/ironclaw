@@ -381,6 +381,8 @@ pub enum TurnError {
         resource: TurnCapacityResource,
         cap: u64,
     },
+    #[error("turn run {run_id} is not retryable")]
+    RunNotRetryable { run_id: TurnRunId },
     #[error("invalid turn transition from {from:?} to {to:?}")]
     InvalidTransition { from: TurnStatus, to: TurnStatus },
     #[error("turn run lease mismatch")]
@@ -403,9 +405,10 @@ impl TurnError {
             Self::Unauthorized => TurnErrorCategory::Unauthorized,
             Self::InvalidRequest { .. } => TurnErrorCategory::InvalidRequest,
             Self::Unavailable { .. } => TurnErrorCategory::Unavailable,
-            Self::Conflict { .. } | Self::InvalidTransition { .. } | Self::LeaseMismatch => {
-                TurnErrorCategory::Conflict
-            }
+            Self::Conflict { .. }
+            | Self::RunNotRetryable { .. }
+            | Self::InvalidTransition { .. }
+            | Self::LeaseMismatch => TurnErrorCategory::Conflict,
             Self::CapacityExceeded { .. } => TurnErrorCategory::CapacityExceeded,
         }
     }

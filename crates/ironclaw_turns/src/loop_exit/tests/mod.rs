@@ -174,6 +174,8 @@ fn completed_exit_without_durable_refs_maps_to_protocol_failure_or_recovery() {
         safe_decision.mapping,
         TurnRunnerOutcome::Failed {
             failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+            explanation_message_refs: Vec::new(),
+            resume_checkpoint_id: None,
         }
         .into()
     );
@@ -273,6 +275,8 @@ fn final_checkpoint_policy_rejects_terminal_exit_without_checkpoint() {
             decision.mapping,
             TurnRunnerOutcome::Failed {
                 failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+                explanation_message_refs: Vec::new(),
+                resume_checkpoint_id: None,
             }
             .into()
         );
@@ -293,6 +297,8 @@ fn validation_policy_requires_final_checkpoint_only_when_configured() {
             Some(LoopExitViolationKind::MissingFinalCheckpoint),
             TurnRunnerOutcome::Failed {
                 failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+                explanation_message_refs: Vec::new(),
+                resume_checkpoint_id: None,
             }
             .into(),
             "strict policy should reject terminal exits without a final checkpoint",
@@ -413,6 +419,8 @@ fn cancelled_exit_requires_observed_host_cancellation() {
         rejected.mapping,
         TurnRunnerOutcome::Failed {
             failure: SanitizedFailure::new("interrupted_unexpectedly").unwrap(),
+            explanation_message_refs: Vec::new(),
+            resume_checkpoint_id: None,
         }
         .into()
     );
@@ -449,6 +457,126 @@ fn iteration_limit_failure_maps_to_stable_sanitized_runner_failure_after_host_ve
         decision.mapping,
         TurnRunnerOutcome::Failed {
             failure: SanitizedFailure::new("iteration_limit").unwrap(),
+            explanation_message_refs: Vec::new(),
+            resume_checkpoint_id: None,
+        }
+        .into()
+    );
+}
+
+#[test]
+fn loop_failed_legacy_payload_deserializes_and_empty_new_fields_serialize_to_legacy_shape() {
+    let legacy = json!({
+        "reason_kind": "iteration_limit",
+        "checkpoint_id": null,
+        "usage_summary_ref": null,
+        "diagnostic_ref": null,
+        "exit_id": "exit:legacy-failed"
+    });
+
+    let failed = serde_json::from_value::<LoopFailed>(legacy.clone()).unwrap();
+
+    assert_eq!(failed.reason_kind, LoopFailureKind::IterationLimit);
+    assert!(failed.explanation_message_refs.is_empty());
+    assert_eq!(failed.safe_summary, None);
+    assert_eq!(serde_json::to_value(&failed).unwrap(), legacy);
+}
+
+#[test]
+fn verified_failed_exit_carries_explanation_refs_checkpoint_and_safe_summary() {
+    let checkpoint_id = TurnCheckpointId::new();
+    let explanation_ref = message_ref("msg:failure-explanation");
+    let safe_summary = SanitizedFailure::new("model_credits_exhausted").unwrap();
+    let decision = LoopExit::Failed(LoopFailed {
+        reason_kind: LoopFailureKind::ModelError,
+        checkpoint_id: Some(checkpoint_id),
+        usage_summary_ref: None,
+        diagnostic_ref: None,
+        exit_id: exit_id("exit:verified-failed"),
+        explanation_message_refs: vec![explanation_ref.clone()],
+        safe_summary: Some(safe_summary.clone()),
+    })
+    .validate(LoopExitValidationPolicy {
+        failure_evidence_verified: true,
+        ..LoopExitValidationPolicy::default()
+    });
+
+    assert_eq!(decision.violation, None);
+    assert_eq!(
+        decision.mapping,
+        TurnRunnerOutcome::Failed {
+            failure: safe_summary,
+            explanation_message_refs: vec![explanation_ref],
+            resume_checkpoint_id: Some(checkpoint_id),
+        }
+        .into()
+    );
+}
+
+#[test]
+fn unverified_failed_exit_drops_explanation_refs_and_keeps_existing_violation_behavior() {
+    let decision = LoopExit::Failed(LoopFailed {
+        reason_kind: LoopFailureKind::ModelError,
+        checkpoint_id: Some(TurnCheckpointId::new()),
+        usage_summary_ref: None,
+        diagnostic_ref: None,
+        exit_id: exit_id("exit:unverified-failed"),
+        explanation_message_refs: vec![message_ref("msg:unverified-explanation")],
+        safe_summary: Some(SanitizedFailure::new("model_credits_exhausted").unwrap()),
+    })
+    .validate(LoopExitValidationPolicy::default());
+
+    assert_eq!(
+        decision.violation.as_ref().map(LoopExitViolation::kind),
+        Some(LoopExitViolationKind::UnverifiedFailureEvidence)
+    );
+    assert_eq!(
+        decision.mapping,
+        TurnRunnerOutcome::Failed {
+            failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+            explanation_message_refs: Vec::new(),
+            resume_checkpoint_id: None,
+        }
+        .into()
+    );
+}
+
+#[test]
+fn strict_final_checkpoint_policy_admits_failed_resume_checkpoint_only_after_verification() {
+    let checkpoint_id = TurnCheckpointId::new();
+    let exit = LoopExit::Failed(LoopFailed {
+        reason_kind: LoopFailureKind::IterationLimit,
+        checkpoint_id: Some(checkpoint_id),
+        usage_summary_ref: None,
+        diagnostic_ref: None,
+        exit_id: exit_id("exit:strict-failed-checkpoint"),
+        explanation_message_refs: Vec::new(),
+        safe_summary: None,
+    });
+
+    let rejected = exit.clone().validate(LoopExitValidationPolicy {
+        require_final_checkpoint: true,
+        failure_evidence_verified: true,
+        ..LoopExitValidationPolicy::default()
+    });
+    assert_eq!(
+        rejected.violation.as_ref().map(LoopExitViolation::kind),
+        Some(LoopExitViolationKind::MissingFinalCheckpoint)
+    );
+
+    let accepted = exit.validate(LoopExitValidationPolicy {
+        require_final_checkpoint: true,
+        final_checkpoint_verified: true,
+        failure_evidence_verified: true,
+        ..LoopExitValidationPolicy::default()
+    });
+    assert_eq!(accepted.violation, None);
+    assert_eq!(
+        accepted.mapping,
+        TurnRunnerOutcome::Failed {
+            failure: SanitizedFailure::new("iteration_limit").unwrap(),
+            explanation_message_refs: Vec::new(),
+            resume_checkpoint_id: Some(checkpoint_id),
         }
         .into()
     );
@@ -584,6 +712,8 @@ fn no_reply_with_empty_refs_requires_explicit_policy_permission() {
         decision.mapping,
         TurnRunnerOutcome::Failed {
             failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+            explanation_message_refs: Vec::new(),
+            resume_checkpoint_id: None,
         }
         .into()
     );
@@ -724,6 +854,8 @@ fn completion_kind_must_match_durable_reference_shape() {
             decision.mapping,
             TurnRunnerOutcome::Failed {
                 failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+                explanation_message_refs: Vec::new(),
+                resume_checkpoint_id: None,
             }
             .into()
         );
@@ -820,6 +952,8 @@ fn all_failure_kinds_produce_stable_sanitized_category_strings() {
             decision.mapping,
             TurnRunnerOutcome::Failed {
                 failure: SanitizedFailure::new(*expected_category).unwrap(),
+                explanation_message_refs: Vec::new(),
+                resume_checkpoint_id: None,
             }
             .into(),
             "wrong category for {kind:?}"

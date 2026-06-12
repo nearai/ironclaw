@@ -9,10 +9,10 @@ use tracing::debug;
 
 use crate::{
     CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse,
-    RunProfileResolver, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse,
-    TurnAdmissionPolicy, TurnCommittedEventObserver, TurnError, TurnEventKind, TurnEventSink,
-    TurnLifecycleEvent, TurnRunId, TurnRunRecord, TurnRunState, TurnSpawnTreeStateStore,
-    TurnStateStore, TurnStatus,
+    RetryTurnRequest, RetryTurnResponse, RunProfileResolver, SubmitChildRunRequest,
+    SubmitTurnRequest, SubmitTurnResponse, TurnAdmissionPolicy, TurnCommittedEventObserver,
+    TurnError, TurnEventKind, TurnEventSink, TurnLifecycleEvent, TurnRunId, TurnRunRecord,
+    TurnRunState, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
     events::{EventCursor, lifecycle_owner_user_id},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
@@ -487,6 +487,11 @@ where
         self.publish_event_once_deferred(resume_event(&event_request, &response))
             .await?;
         Ok(response)
+    }
+
+    async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
+        // WS-3 implements retry lifecycle publication once retry persistence exists.
+        self.inner.retry_turn(request).await
     }
 
     async fn request_cancel(

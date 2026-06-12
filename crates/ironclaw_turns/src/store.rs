@@ -6,8 +6,8 @@ use ironclaw_host_api::{AgentId, ProjectId, RuntimeCredentialAuthRequirement, Te
 use crate::{
     AcceptedMessageRef, AdmissionRejection, CancelRunRequest, CancelRunResponse, GateRef,
     GetRunStateRequest, IdempotencyKey, LoopCheckpointRecord, ReplyTargetBindingRef,
-    ResumeTurnRequest, ResumeTurnResponse, RunProfileResolver, SourceBindingRef,
-    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
+    ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, RunProfileResolver,
+    SourceBindingRef, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
     TurnActiveRunRefState, TurnActor, TurnAdmissionPolicy, TurnAdmissionReservationRecord,
     TurnCapacityResource, TurnCheckpointId, TurnError, TurnErrorCategory, TurnId, TurnLeaseToken,
     TurnLifecycleEvent, TurnRunId, TurnRunProfile, TurnRunState, TurnRunnerId, TurnScope,
@@ -29,6 +29,8 @@ pub trait TurnStateStore: Send + Sync {
         &self,
         request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError>;
+
+    async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError>;
 
     async fn request_cancel(
         &self,
@@ -298,6 +300,7 @@ impl TurnIdempotencyOutcomeKind {
             TurnError::Unavailable { .. } => Self::Unavailable,
             TurnError::CapacityExceeded { .. } => Self::CapacityExceeded,
             TurnError::Conflict { .. }
+            | TurnError::RunNotRetryable { .. }
             | TurnError::InvalidTransition { .. }
             | TurnError::LeaseMismatch => Self::Conflict,
         }

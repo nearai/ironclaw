@@ -13,16 +13,16 @@ use crate::{
     AllowAllTurnAdmissionLimitProvider, BlockedReason, CancelRunRequest, CancelRunResponse,
     GateRef, GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, LoopCheckpointRecord,
     LoopCheckpointStore, LoopExitMapping, PutLoopCheckpointRequest, ReplyTargetBindingRef,
-    ResumeTurnRequest, ResumeTurnResponse, RunProfileResolutionError, RunProfileResolutionRequest,
-    RunProfileResolver, SanitizedFailure, SourceBindingRef, SpawnTreeReservation,
-    SpawnTreeReservationKey, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse,
-    ThreadBusy, TurnActiveLockKey, TurnActiveLockRecord, TurnActor, TurnAdmissionClass,
-    TurnAdmissionLimitProvider, TurnAdmissionPolicy, TurnAdmissionReservationRecord,
-    TurnCapacityResource, TurnCheckpointId, TurnCheckpointRecord, TurnError, TurnEventKind,
-    TurnIdempotencyErrorReplay, TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind,
-    TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLifecycleEvent, TurnLockVersion,
-    TurnPersistenceSnapshot, TurnRecord, TurnRunId, TurnRunProfile, TurnRunRecord, TurnRunState,
-    TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
+    ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse,
+    RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver, SanitizedFailure,
+    SourceBindingRef, SpawnTreeReservation, SpawnTreeReservationKey, SubmitChildRunRequest,
+    SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActiveLockKey, TurnActiveLockRecord,
+    TurnActor, TurnAdmissionClass, TurnAdmissionLimitProvider, TurnAdmissionPolicy,
+    TurnAdmissionReservationRecord, TurnCapacityResource, TurnCheckpointId, TurnCheckpointRecord,
+    TurnError, TurnEventKind, TurnIdempotencyErrorReplay, TurnIdempotencyOperationKind,
+    TurnIdempotencyOutcomeKind, TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLifecycleEvent,
+    TurnLockVersion, TurnPersistenceSnapshot, TurnRecord, TurnRunId, TurnRunProfile, TurnRunRecord,
+    TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
     admission::{TurnAdmissionBucket, admission_buckets},
     events::{EventCursor, TurnEventPage, TurnEventProjectionSource, project_turn_events},
     runner::{
@@ -674,6 +674,13 @@ impl TurnStateStore for InMemoryTurnStateStore {
         let result = inner.resume_turn_once(&request);
         inner.remember_resume_idempotency(idempotency_key, result.clone(), Utc::now());
         result
+    }
+
+    async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
+        // WS-3 implements failed-run retry semantics and idempotency.
+        Err(TurnError::RunNotRetryable {
+            run_id: request.run_id,
+        })
     }
 
     async fn request_cancel(
@@ -2122,7 +2129,7 @@ impl Inner {
                     state_ref,
                     reason,
                 }) => self.block_claimed_record(record, checkpoint_id, state_ref, reason),
-                LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Failed { failure }) => {
+                LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Failed { failure, .. }) => {
                     self.fail_claimed_record(record, failure)
                 }
                 LoopExitMapping::RecoveryRequired { failure } => {

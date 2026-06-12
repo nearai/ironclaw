@@ -2228,13 +2228,15 @@ fn turn_error_to_host_error(error: TurnError) -> AgentLoopHostError {
             "checkpoint state scope was not found for this loop run",
             &error,
         ),
-        TurnError::Conflict { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
-            "checkpoint_state",
-            "write",
-            AgentLoopHostErrorKind::CheckpointRejected,
-            "checkpoint state write conflicted with current turn state",
-            &error,
-        ),
+        TurnError::Conflict { .. } | TurnError::RunNotRetryable { .. } => {
+            ironclaw_loop_support::raw_agent_loop_host_error(
+                "checkpoint_state",
+                "write",
+                AgentLoopHostErrorKind::CheckpointRejected,
+                "checkpoint state write conflicted with current turn state",
+                &error,
+            )
+        }
         TurnError::CapacityExceeded { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
             "checkpoint_state",
             "write",

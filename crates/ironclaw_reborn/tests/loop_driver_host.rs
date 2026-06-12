@@ -7215,6 +7215,16 @@ impl TurnStateStore for StaticTurnStateStore {
         panic!("resume_turn should not be called by static test turn state store")
     }
 
+    async fn retry_turn(
+        &self,
+        request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        // WS-3 implements this.
+        Err(TurnError::RunNotRetryable {
+            run_id: request.run_id,
+        })
+    }
+
     async fn request_cancel(
         &self,
         _request: CancelRunRequest,

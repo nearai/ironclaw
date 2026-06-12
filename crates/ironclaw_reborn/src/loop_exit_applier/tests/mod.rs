@@ -319,6 +319,8 @@ async fn loop_exit_events_hide_raw_diagnostics() {
         usage_summary_ref: None,
         diagnostic_ref: None,
         exit_id: test_exit_id(),
+        explanation_message_refs: Vec::new(),
+        safe_summary: None,
     });
 
     let state = fixture
@@ -1158,6 +1160,8 @@ async fn thread_checkpoint_evidence_fails_closed_for_failure_evidence() {
         usage_summary_ref: None,
         diagnostic_ref: None,
         exit_id: test_exit_id(),
+        explanation_message_refs: Vec::new(),
+        safe_summary: None,
     };
     let verified = evidence
         .verify_failure_evidence(FailureEvidenceRequest {
@@ -1217,6 +1221,8 @@ async fn thread_checkpoint_evidence_verifies_failure_from_final_checkpoint_state
         usage_summary_ref: None,
         diagnostic_ref: None,
         exit_id: test_exit_id(),
+        explanation_message_refs: Vec::new(),
+        safe_summary: None,
     };
 
     let verified = evidence
@@ -1279,6 +1285,8 @@ async fn loop_exit_applier_accepts_thread_checkpoint_failure_evidence() {
         usage_summary_ref: None,
         diagnostic_ref: None,
         exit_id: test_exit_id(),
+        explanation_message_refs: Vec::new(),
+        safe_summary: None,
     });
 
     let state = applier.apply(&claimed, exit).await.expect("applied");
@@ -1333,6 +1341,8 @@ async fn thread_checkpoint_evidence_rejects_mismatched_failure_checkpoint_state(
         usage_summary_ref: None,
         diagnostic_ref: None,
         exit_id: test_exit_id(),
+        explanation_message_refs: Vec::new(),
+        safe_summary: None,
     };
 
     let verified = evidence
