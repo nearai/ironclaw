@@ -910,7 +910,7 @@ where
                 None,
             ));
         };
-        let service = crate::HostHttpEgressService::production(
+        let mut service = crate::HostHttpEgressService::production(
             network,
             SharedSecretStore(secret_store),
             Arc::clone(&self.network_policy_store),
@@ -920,6 +920,9 @@ where
         .with_unsafe_raw_diagnostics_allowed(
             crate::runtime_policy_allows_unsafe_raw_http_diagnostics(self.runtime_policy.as_ref()),
         );
+        if let Some(sink) = &self.security_audit_sink {
+            service = service.with_security_audit_sink(Arc::clone(sink));
+        }
         let runtime_http_egress = Arc::new(service);
         Ok(self.with_host_http_egress_service(runtime_http_egress))
     }

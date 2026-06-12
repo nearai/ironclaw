@@ -1,7 +1,10 @@
 use ironclaw_capabilities::{
     CapabilityObligationHandler, CapabilityObligationPhase, CapabilityObligationRequest,
 };
-use ironclaw_events::InMemoryAuditSink;
+use ironclaw_events::{
+    InMemoryAuditSink, InMemorySecurityAuditSink, SecurityAuditSink, SecurityBoundary,
+    SecurityDecision,
+};
 use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     AgentId, CapabilityId, CapabilitySet, CredentialStageError, ExecutionContext, ExtensionId,
@@ -3862,13 +3865,17 @@ async fn host_http_egress_blocks_runtime_supplied_sensitive_headers_before_netwo
         },
     });
     let network_recorder = network.requests.clone();
-    let service = request_policy_staging_egress(network);
+    let security_audit_sink = Arc::new(InMemorySecurityAuditSink::new());
+    let service =
+        request_policy_staging_egress_with_security_sink(network, Arc::clone(&security_audit_sink));
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
-            scope: sample_scope(),
-            capability_id: sample_capability_id(),
+            scope: scope.clone(),
+            capability_id: capability_id.clone(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![(
@@ -3891,6 +3898,13 @@ async fn host_http_egress_blocks_runtime_supplied_sensitive_headers_before_netwo
     ));
     assert!(error.to_string().contains("sensitive_header"));
     assert!(network_recorder.lock().unwrap().is_empty());
+    let events = security_audit_sink.snapshot();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].boundary, SecurityBoundary::NoExposureGuard);
+    assert_eq!(events[0].decision, SecurityDecision::Blocked);
+    assert_eq!(events[0].code, "no_exposure_sensitive_header_denied");
+    assert_eq!(events[0].capability_id.as_ref(), Some(&capability_id));
+    assert_eq!(events[0].scope.as_ref(), Some(&scope));
 }
 
 #[tokio::test]
@@ -3908,13 +3922,17 @@ async fn host_http_egress_blocks_leaky_response_header_values() {
             resolved_ip: None,
         },
     });
-    let service = request_policy_staging_egress(network);
+    let security_audit_sink = Arc::new(InMemorySecurityAuditSink::new());
+    let service =
+        request_policy_staging_egress_with_security_sink(network, Arc::clone(&security_audit_sink));
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
-            scope: sample_scope(),
-            capability_id: sample_capability_id(),
+            scope: scope.clone(),
+            capability_id: capability_id.clone(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -3933,6 +3951,13 @@ async fn host_http_egress_blocks_leaky_response_header_values() {
         ironclaw_host_api::RuntimeHttpEgressError::Response { ref reason, .. }
             if reason == "response_leak_blocked"
     ));
+    let events = security_audit_sink.snapshot();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].boundary, SecurityBoundary::NoExposureGuard);
+    assert_eq!(events[0].decision, SecurityDecision::Blocked);
+    assert_eq!(events[0].code, "no_exposure_response_leak_blocked");
+    assert_eq!(events[0].capability_id.as_ref(), Some(&capability_id));
+    assert_eq!(events[0].scope.as_ref(), Some(&scope));
 }
 
 #[tokio::test]
@@ -4439,6 +4464,19 @@ where
     N: NetworkHttpEgress + 'static,
 {
     let services = test_obligation_services();
+    let inner = Arc::new(services.host_http_egress(network));
+    Arc::new(RequestPolicyStagingEgress { services, inner })
+}
+
+fn request_policy_staging_egress_with_security_sink<N>(
+    network: N,
+    security_audit_sink: Arc<InMemorySecurityAuditSink>,
+) -> Arc<dyn RuntimeHttpEgress>
+where
+    N: NetworkHttpEgress + 'static,
+{
+    let security_audit_sink: Arc<dyn SecurityAuditSink> = security_audit_sink;
+    let services = test_obligation_services().with_security_audit_sink(security_audit_sink);
     let inner = Arc::new(services.host_http_egress(network));
     Arc::new(RequestPolicyStagingEgress { services, inner })
 }
