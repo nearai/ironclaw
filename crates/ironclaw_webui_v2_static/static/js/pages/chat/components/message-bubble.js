@@ -109,16 +109,19 @@ function MessageBubbleImpl({ message, onRetry }) {
 
   const timeLabel = formatTimestamp(timestamp);
   const showActions = (role === "assistant" || role === "user") && !isOptimistic;
+  const bubbleWidthClass = isUser ? "max-w-[85%]" : "w-full max-w-[85%]";
+  const contentWidthClass = isUser ? "" : "w-full min-w-0 max-w-full";
 
   return html`
     <div
       data-testid=${`msg-${role}`}
-      className=${["group flex flex-col", isUser ? "items-end" : "items-start"].join(" ")}
+      className=${["group flex w-full min-w-0 flex-col", isUser ? "items-end" : "items-start"].join(" ")}
     >
-      <div className="flex min-w-0 max-w-[85%] flex-col gap-1">
+      <div className=${["flex min-w-0 flex-col gap-1", bubbleWidthClass].join(" ")}>
         <div
           className=${[
             "text-sm leading-6",
+            contentWidthClass,
             ROLE_STYLES[role] || ROLE_STYLES.assistant,
             isOptimistic ? "opacity-70" : "",
           ].join(" ")}
