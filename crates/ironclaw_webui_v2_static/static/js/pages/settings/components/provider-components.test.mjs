@@ -626,7 +626,7 @@ test("isLocalDevOrigin detects loopback origins so NEAR AI SSO fails fast there"
 // Caller"): isLocalDevOrigin gates the NEAR AI login HTTP call, not just a
 // helper return value. setTimeout fires synchronously so the remote-origin
 // control path's poll resolves immediately.
-function runProviderLogin({ hostname, activeProviderId = null }) {
+function runProviderLogin({ hostname, activeProviderId = null, popupClosed = false }) {
   const stateLog = [];
   const httpCalls = [];
   let stateIndex = 0;
@@ -670,7 +670,9 @@ function runProviderLogin({ hostname, activeProviderId = null }) {
         httpCalls.push("open");
         // A usable popup handle for the synchronous-open + sever-opener +
         // navigate pattern: a settable location/opener and a no-op close.
-        return { location: { href: "" }, opener: null, closed: false, close() {} };
+        // `popupClosed` simulates the user closing the tab so the
+        // close-detection path can be driven (#4706).
+        return { location: { href: "" }, opener: null, closed: popupClosed, close() {} };
       },
       crypto: { randomUUID: () => "uuid" },
     },
@@ -680,16 +682,27 @@ function runProviderLogin({ hostname, activeProviderId = null }) {
     sourceForTest("../hooks/useProviderLogin.js", ["useProviderLogin"]),
     context
   );
-  // nearaiError is the 2nd useState (index 1).
-  const NEARAI_ERROR_SLOT = 1;
+  // useState order in the hook: nearaiBusy(0), nearaiError(1), codexBusy(2),
+  // codexError(3), codexCode(4).
   const NEARAI_BUSY_SLOT = 0;
+  const NEARAI_ERROR_SLOT = 1;
+  const CODEX_BUSY_SLOT = 2;
+  const CODEX_ERROR_SLOT = 3;
   return {
     hook: context.globalThis.__testExports.useProviderLogin({}),
     httpCalls,
     nearaiErrors: () =>
       stateLog.filter((e) => e.idx === NEARAI_ERROR_SLOT).map((e) => e.value),
+    codexErrors: () =>
+      stateLog.filter((e) => e.idx === CODEX_ERROR_SLOT).map((e) => e.value),
     busySetTrue: () =>
       stateLog.some((e) => e.idx === NEARAI_BUSY_SLOT && e.value === true),
+    // Both flows clear their busy flag in `finally`; a final `false` write
+    // means the buttons re-enable for an immediate retry without a refresh.
+    nearaiBusyCleared: () =>
+      stateLog.some((e) => e.idx === NEARAI_BUSY_SLOT && e.value === false),
+    codexBusyCleared: () =>
+      stateLog.some((e) => e.idx === CODEX_BUSY_SLOT && e.value === false),
   };
 }
 
@@ -721,4 +734,28 @@ test("startNearai fires the login HTTP call on a remote origin (predicate is the
   const run = runProviderLogin({ hostname: "app.example.com", activeProviderId: "nearai" });
   await run.hook.startNearai("github");
   assert.ok(run.httpCalls.includes("startNearaiLogin"), "remote origin proceeds to login");
+});
+
+test("startNearai recovers when the user closes the sign-in tab (#4706)", async () => {
+  // Closed popup + no active provider: the flow must conclude promptly with a
+  // retryable error and clear the busy flag instead of polling out the full
+  // five-minute deadline with the buttons stuck disabled.
+  const run = runProviderLogin({ hostname: "app.example.com", popupClosed: true });
+  await run.hook.startNearai("github");
+  assert.ok(
+    run.nearaiErrors().includes("onboarding.nearaiFailed"),
+    "a closed sign-in tab surfaces a retryable error"
+  );
+  assert.ok(run.nearaiBusyCleared(), "the busy flag is cleared so retry needs no refresh");
+});
+
+test("startCodex recovers when the user closes the verification tab (#4706)", async () => {
+  const run = runProviderLogin({ hostname: "app.example.com", popupClosed: true });
+  await run.hook.startCodex();
+  assert.ok(run.httpCalls.includes("open"), "opens the verification tab");
+  assert.ok(
+    run.codexErrors().includes("onboarding.codexFailed"),
+    "a closed verification tab surfaces a retryable error instead of waiting out the deadline"
+  );
+  assert.ok(run.codexBusyCleared(), "the busy flag is cleared so retry needs no refresh");
 });
