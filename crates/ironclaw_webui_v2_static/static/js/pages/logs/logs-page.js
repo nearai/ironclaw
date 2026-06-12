@@ -82,15 +82,24 @@ export function LogsPage() {
     setAutoScroll,
     serverLevel,
     changeServerLevel,
+    isLoading,
+    error,
   } = useLogs();
 
   const outputRef = React.useRef(null);
+  const followLatestRef = React.useRef(true);
 
   React.useEffect(() => {
-    if (autoScroll && outputRef.current) {
+    if (autoScroll && followLatestRef.current && outputRef.current) {
       outputRef.current.scrollTop = 0;
     }
   }, [entries, autoScroll]);
+
+  const handleOutputScroll = React.useCallback((event) => {
+    followLatestRef.current = event.currentTarget.scrollTop <= 48;
+  }, []);
+
+  const hasEntries = entries.length > 0;
 
   return html`
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -117,6 +126,10 @@ export function LogsPage() {
         />
 
         <div className="flex items-center gap-2 ml-auto">
+          <span className="hidden tabular-nums text-xs text-[var(--v2-text-muted)] sm:inline">
+            ${t("logs.entryCount", { count: totalCount })}
+          </span>
+
           <!-- Auto-scroll toggle -->
           <label className="flex cursor-pointer items-center gap-1.5 text-xs text-[var(--v2-text-muted)]">
             <input
@@ -175,9 +188,41 @@ export function LogsPage() {
       <!-- Log output -->
       <div
         ref=${outputRef}
+        onScroll=${handleOutputScroll}
         className="min-h-0 flex-1 overflow-y-auto bg-[var(--v2-canvas)]"
       >
-        ${entries.length === 0
+        ${error && hasEntries
+          ? html`
+              <div
+                className="sticky top-0 z-10 border-b border-red-500/25 bg-red-950/70 px-4 py-2 text-xs text-red-100 backdrop-blur"
+              >
+                ${t("error.loadFailed", {
+                  what: t("nav.logs"),
+                  message: error.message || error.statusText || "Request failed",
+                })}
+              </div>
+            `
+          : null}
+        ${error && !hasEntries
+          ? html`
+              <div
+                className="flex h-full items-center justify-center px-6 text-center text-sm text-red-300"
+              >
+                ${t("error.loadFailed", {
+                  what: t("nav.logs"),
+                  message: error.message || error.statusText || "Request failed",
+                })}
+              </div>
+            `
+          : isLoading && !hasEntries
+            ? html`
+                <div
+                  className="flex h-full items-center justify-center text-sm text-[var(--v2-text-muted)]"
+                >
+                  ${t("common.loading")}
+                </div>
+              `
+            : !hasEntries
           ? html`
               <div
                 className="flex h-full items-center justify-center text-sm text-[var(--v2-text-muted)]"
@@ -186,7 +231,7 @@ export function LogsPage() {
               </div>
             `
           : entries.map(
-              (entry, i) => html`<${LogEntry} key=${i} entry=${entry} />`
+              (entry) => html`<${LogEntry} key=${entry.id} entry=${entry} />`
             )}
       </div>
     </div>

@@ -32,15 +32,79 @@ mod trigger_poller;
 use trigger_poller::trigger_poller_settings;
 
 pub(crate) fn init_tracing() {
+    use tracing::field::{Field, Visit};
     use tracing_subscriber::EnvFilter;
     use tracing_subscriber::fmt;
+    use tracing_subscriber::layer::Context;
+    use tracing_subscriber::prelude::*;
     let filter = EnvFilter::try_from_env("IRONCLAW_REBORN_LOG").unwrap_or_else(|_| {
         EnvFilter::new("info,ironclaw_reborn=info,ironclaw_reborn_composition=info")
     });
-    let _ = fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt::layer().with_writer(std::io::stderr))
+        .with(OperatorLogLayer)
         .try_init();
+
+    struct OperatorLogLayer;
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for OperatorLogLayer {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            let metadata = event.metadata();
+            let mut visitor = MessageVisitor::new();
+            event.record(&mut visitor);
+            ironclaw_reborn_composition::capture_tracing_log(
+                metadata.level(),
+                metadata.target(),
+                visitor.finish(),
+            );
+        }
+    }
+
+    struct MessageVisitor {
+        message: String,
+        fields: Vec<String>,
+    }
+
+    impl MessageVisitor {
+        fn new() -> Self {
+            Self {
+                message: String::new(),
+                fields: Vec::new(),
+            }
+        }
+
+        fn finish(self) -> String {
+            if self.fields.is_empty() {
+                self.message
+            } else {
+                format!("{} {}", self.message, self.fields.join(" "))
+            }
+        }
+    }
+
+    impl Visit for MessageVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                let rendered = format!("{value:?}");
+                self.message = rendered
+                    .strip_prefix('"')
+                    .and_then(|value| value.strip_suffix('"'))
+                    .unwrap_or(rendered.as_str())
+                    .to_string();
+            } else {
+                self.fields.push(format!("{}={value:?}", field.name()));
+            }
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            if field.name() == "message" {
+                self.message = value.to_string();
+            } else {
+                self.fields.push(format!("{}={value}", field.name()));
+            }
+        }
+    }
 }
 
 pub(crate) fn block_on_cli<F, T, E>(future: F) -> anyhow::Result<T>
