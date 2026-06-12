@@ -1,7 +1,7 @@
 export interface IronclawSession {
-  tenantId?: string;
-  userId?: string;
-  capabilities?: string[];
+  tenant_id: string;
+  user_id: string;
+  capabilities: { operator_webui_config: boolean };
 }
 
 export interface Thread {
@@ -37,9 +37,13 @@ export interface Timeline {
 }
 
 export interface AcceptedResponse {
-  runId: string;
-  threadId: string;
+  outcome: string;
+  thread_id: string;
+  run_id?: string;
+  active_run_id?: string;
+  accepted_message_ref: string;
   status: string;
+  event_cursor?: number;
 }
 
 export interface ChatEvent {
@@ -58,10 +62,16 @@ export interface ChatEvent {
     | "projection_snapshot"
     | "projection_update"
     | "keep_alive";
-  ack?: { runId: string; threadId: string };
+  ack?: {
+    outcome: string;
+    thread_id: string;
+    run_id?: string;
+    accepted_message_ref: string;
+    status: string;
+  };
   progress?: { kind: string; message?: string };
-  reply?: { content?: string };
-  prompt?: { gateRef?: string; runId?: string };
+  reply?: { text?: string; turn_run_id?: string; generated_at?: string };
+  prompt?: { gate_ref?: string; run_id?: string };
 }
 
 export type GateResolution = "approved" | "denied" | "credential_provided" | "cancelled";
@@ -110,7 +120,8 @@ export class IronclawClient {
       Authorization: `Bearer ${this.token}`,
     };
 
-    if (body !== undefined) {
+    const bodyMethods = new Set(["POST", "PUT", "PATCH"]);
+    if (body !== undefined || bodyMethods.has(method.toUpperCase())) {
       headers["Content-Type"] = "application/json";
     }
 
@@ -140,14 +151,30 @@ export class IronclawClient {
     if (limit !== undefined) params.set("limit", String(limit));
     if (cursor !== undefined) params.set("cursor", cursor);
     const qs = params.toString();
-    return this.request<ThreadList>(
+    const raw: any = await this.request(
       "GET",
       `/api/webchat/v2/threads${qs ? `?${qs}` : ""}`,
     );
+    return {
+      data: (raw.threads ?? []).map((t: any) => ({
+        id: t.thread_id,
+        title: t.title ?? undefined,
+      })),
+      meta: {
+        total: 0,
+        hasMore: raw.next_cursor != null,
+        nextCursor: raw.next_cursor ?? null,
+      },
+    };
   }
 
   async createThread(): Promise<Thread> {
-    return this.request<Thread>("POST", "/api/webchat/v2/threads");
+    const raw: any = await this.request("POST", "/api/webchat/v2/threads");
+    const t = raw.thread ?? raw;
+    return {
+      id: t.thread_id,
+      title: t.title ?? undefined,
+    };
   }
 
   async deleteThread(threadId: string): Promise<void> {
@@ -157,11 +184,13 @@ export class IronclawClient {
   async sendMessage(
     threadId: string,
     content: string,
+    clientActionId?: string,
   ): Promise<AcceptedResponse> {
+    const client_action_id = clientActionId ?? crypto.randomUUID();
     return this.request<AcceptedResponse>(
       "POST",
       `/api/webchat/v2/threads/${encodeURIComponent(threadId)}/messages`,
-      { content },
+      { client_action_id, content },
     );
   }
 
@@ -174,10 +203,22 @@ export class IronclawClient {
     if (limit !== undefined) params.set("limit", String(limit));
     if (cursor !== undefined) params.set("cursor", cursor);
     const qs = params.toString();
-    return this.request<Timeline>(
+    const raw: any = await this.request(
       "GET",
       `/api/webchat/v2/threads/${encodeURIComponent(threadId)}/timeline${qs ? `?${qs}` : ""}`,
     );
+    return {
+      data: (raw.messages ?? []).map((m: any) => ({
+        id: m.message_id,
+        role: m.kind === "User" ? "user" : m.kind === "System" ? "system" : "assistant",
+        content: m.content ?? "",
+      })),
+      meta: {
+        total: 0,
+        hasMore: raw.next_cursor != null,
+        nextCursor: raw.next_cursor ?? null,
+      },
+    };
   }
 
   streamEvents(threadId: string): EventSource {

@@ -588,7 +588,7 @@ export const createStartServer = (onReady?: () => void) =>
             ...(isDev ? ["http:"] : ["https:"]),
             ...(uiConfig.url ? [new URL(uiConfig.url).origin] : []),
           ],
-          connectSrc: ["'self'", "https:", ...uniqueOrigins, ...wsOrigins, ...cdnOrigins],
+          connectSrc: ["'self'", "https:", "http:", ...uniqueOrigins, ...wsOrigins, ...cdnOrigins],
           fontSrc: viewerPath
             ? ["'self'", "data:", "https:", ...uniqueOrigins]
             : ["'self'", "https:", ...uniqueOrigins],

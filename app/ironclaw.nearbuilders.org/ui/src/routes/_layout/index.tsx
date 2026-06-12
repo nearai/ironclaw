@@ -159,6 +159,8 @@ function SetupScreen({
               onChange={(e) => setTokenInput(e.target.value)}
               placeholder="IRONCLAW_REBORN_WEBUI_TOKEN"
               type="password"
+              autoComplete="off"
+              data-1p-ignore
             />
           </div>
           <Button
@@ -243,6 +245,8 @@ function ChatScreen({
   const [inputText, setInputText] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [streamingEvent, setStreamingEvent] = useState<ChatEvent | null>(null);
+  const [currentRunId, setCurrentRunId] = useState<string | null>(null);
+  const [sseError, setSseError] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
 
@@ -271,6 +275,8 @@ function ChatScreen({
     async (threadId: string) => {
       setActiveThreadId(threadId);
       setStreamingEvent(null);
+      setCurrentRunId(null);
+      setSseError(false);
 
       if (eventSourceRef.current) {
         eventSourceRef.current.close();
@@ -281,7 +287,7 @@ function ChatScreen({
         const timeline: Timeline = await client.getTimeline(threadId, 100);
         const msgs: ChatMessage[] = timeline.data.map((entry) => ({
           id: entry.id,
-          role: entry.role === "assistant" ? "assistant" : "user",
+          role: entry.role === "user" ? "user" : "assistant",
           content: entry.content ?? "",
           timestamp: entry.createdAt ?? new Date().toISOString(),
         }));
@@ -293,33 +299,56 @@ function ChatScreen({
       const es = client.streamEvents(threadId);
       eventSourceRef.current = es;
 
-      es.onmessage = (event) => {
+      const handleSseEvent = (event: MessageEvent) => {
         try {
           const data: ChatEvent = JSON.parse(event.data);
+          setSseError(false);
           setStreamingEvent(data);
 
-          if (data.type === "final_reply" && data.reply?.content) {
+          if (data.type === "accepted" && data.ack?.run_id) {
+            setCurrentRunId(data.ack.run_id);
+          }
+
+          if (data.type === "final_reply" && (data.reply?.text ?? data.reply?.turn_run_id)) {
             setMessages((prev) => {
               const existing = prev.get(threadId) ?? [];
               return new Map(prev).set(threadId, [
                 ...existing,
                 {
-                  id: `reply-${Date.now()}`,
+                  id: `reply-${crypto.randomUUID()}`,
                   role: "assistant",
-                  content: data.reply!.content!,
+                  content: data.reply?.text ?? "",
                   timestamp: new Date().toISOString(),
                 },
               ]);
             });
             setStreamingEvent(null);
+            setCurrentRunId(null);
+          }
+
+          if (data.type === "cancelled" || data.type === "failed") {
+            setCurrentRunId(null);
           }
         } catch {
           console.error("Failed to parse SSE event");
         }
       };
 
+      const eventTypes = [
+        "accepted", "running", "capability_progress", "capability_activity",
+        "capability_display_preview", "gate", "auth_required",
+        "final_reply", "cancelled", "failed",
+        "projection_snapshot", "projection_update", "keep_alive",
+      ];
+
+      for (const type of eventTypes) {
+        es.addEventListener(type, handleSseEvent);
+      }
+
       es.onerror = () => {
-        console.error("SSE connection error");
+        if (es.readyState === EventSource.CLOSED || es.readyState === EventSource.CONNECTING) {
+          setSseError(true);
+        }
       };
     },
     [client],
@@ -375,7 +404,7 @@ function ChatScreen({
       return new Map(prev).set(activeThreadId, [
         ...existing,
         {
-          id: `user-${Date.now()}`,
+          id: `user-${crypto.randomUUID()}`,
           role: "user",
           content,
           timestamp: new Date().toISOString(),
@@ -424,11 +453,18 @@ function ChatScreen({
               </p>
             )}
             {threads.map((thread) => (
-              <button
+              <div
                 key={thread.id}
-                type="button"
+                role="button"
+                tabIndex={0}
                 onClick={() => openThread(thread.id)}
-                className={`group flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors ${
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    openThread(thread.id);
+                  }
+                }}
+                className={`group flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors cursor-pointer ${
                   activeThreadId === thread.id
                     ? "bg-accent text-accent-foreground"
                     : "text-muted-foreground hover:bg-muted"
@@ -448,7 +484,7 @@ function ChatScreen({
                 >
                   <Trash2 size={12} className="text-muted-foreground hover:text-destructive" />
                 </button>
-              </button>
+              </div>
             ))}
           </div>
         </ScrollArea>
@@ -475,6 +511,12 @@ function ChatScreen({
                     </div>
                   </div>
                 ))}
+                {currentRunId && streamingEvent?.type !== "running" && streamingEvent?.type !== "gate" && (
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    Message received, waiting...
+                  </div>
+                )}
                 {streamingEvent && streamingEvent.type === "running" && (
                   <div className="flex items-center gap-2 text-xs text-muted-foreground">
                     <Loader2 className="h-3 w-3 animate-spin" />
@@ -484,6 +526,22 @@ function ChatScreen({
                 {streamingEvent?.type === "gate" && (
                   <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-xs text-amber-600">
                     Gate requires resolution — check your ironclaw console
+                  </div>
+                )}
+                {streamingEvent?.type === "cancelled" && (
+                  <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-xs text-destructive">
+                    Run cancelled
+                  </div>
+                )}
+                {streamingEvent?.type === "failed" && (
+                  <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-xs text-destructive">
+                    Run failed
+                  </div>
+                )}
+                {sseError && (
+                  <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-xs text-amber-600">
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    Reconnecting to event stream...
                   </div>
                 )}
                 <div ref={messagesEndRef} />
