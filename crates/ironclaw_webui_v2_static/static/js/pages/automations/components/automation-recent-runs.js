@@ -4,6 +4,7 @@ import { StatusPill } from "../../../design-system/primitives.js";
 import { html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
 import { cn } from "../../../utils/cn.js";
+import { buildScopedLogsPath } from "../../logs/lib/logs-data.js";
 
 export function recentRunKey(run) {
   return run.run_id || run.thread_id || run.submitted_at || run.timestamp_source;
@@ -35,9 +36,14 @@ export function RunDots({ runs }) {
   `;
 }
 
-export function RecentRunRow({ run, onOpenRun }) {
+export function RecentRunRow({ run, onOpenRun, onOpenLogs }) {
   const t = useT();
   const canOpen = Boolean(run.chat_path);
+  const logsPath = buildScopedLogsPath({
+    threadId: run.thread_id,
+    runId: run.run_id,
+  });
+  const canOpenLogs = Boolean((run.thread_id || run.run_id) && onOpenLogs);
 
   return html`
     <div className="grid gap-3 border-b border-[var(--v2-panel-border)] py-3 last:border-0 sm:grid-cols-[6.5rem_minmax(0,1fr)_auto] sm:items-center">
@@ -58,15 +64,26 @@ export function RecentRunRow({ run, onOpenRun }) {
           </div>
         `}
       </div>
-      <${Button}
-        variant="secondary"
-        size="sm"
-        disabled=${!canOpen}
-        onClick=${canOpen ? () => onOpenRun(run.chat_path) : undefined}
-      >
-        <${Icon} name="chat" className="h-4 w-4" />
-        ${t("automations.detail.openRun")}
-      <//>
+      <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+        <${Button}
+          variant="secondary"
+          size="sm"
+          disabled=${!canOpen}
+          onClick=${canOpen ? () => onOpenRun(run.chat_path) : undefined}
+        >
+          <${Icon} name="chat" className="h-4 w-4" />
+          ${t("automations.detail.openRun")}
+        <//>
+        <${Button}
+          variant="ghost"
+          size="sm"
+          disabled=${!canOpenLogs}
+          onClick=${canOpenLogs ? () => onOpenLogs(logsPath) : undefined}
+        >
+          <${Icon} name="file" className="h-4 w-4" />
+          ${t("nav.logs")}
+        <//>
+      </div>
     </div>
   `;
 }

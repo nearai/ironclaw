@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildScopedLogsPath,
   normalizeLogEntry,
   normalizeOperatorLogsResponse,
 } from "./logs-data.js";
@@ -21,6 +22,12 @@ test("normalizeOperatorLogsResponse reads command-plane nested logs payload", ()
           level: "warn",
           target: "ironclaw::test",
           message: "something happened",
+          thread_id: "thread-a",
+          run_id: "run-a",
+          turn_id: "turn-a",
+          tool_call_id: "tool-a",
+          tool_name: "shell",
+          source: "slack",
         },
       ],
     },
@@ -37,6 +44,12 @@ test("normalizeOperatorLogsResponse reads command-plane nested logs payload", ()
       level: "warn",
       target: "ironclaw::test",
       message: "something happened",
+      threadId: "thread-a",
+      runId: "run-a",
+      turnId: "turn-a",
+      toolCallId: "tool-a",
+      toolName: "shell",
+      source: "slack",
     },
   ]);
 });
@@ -53,6 +66,12 @@ test("normalizeOperatorLogsResponse tolerates direct log payloads", () => {
       level: "error",
       target: "",
       message: "failed",
+      threadId: null,
+      runId: null,
+      turnId: null,
+      toolCallId: null,
+      toolName: null,
+      source: null,
     },
   ]);
 });
@@ -65,5 +84,21 @@ test("normalizeLogEntry creates a stable fallback id", () => {
       message: "hello",
     }).id,
     "2026-06-11T12:00:00Z:ironclaw::test:hello",
+  );
+});
+
+test("buildScopedLogsPath encodes structured log filters", () => {
+  assert.equal(
+    buildScopedLogsPath({
+      threadId: "thread a",
+      runId: "run-a",
+      toolCallId: "tool/a",
+      source: "slack",
+    }),
+    "/logs?thread_id=thread+a&run_id=run-a&tool_call_id=tool%2Fa&source=slack",
+  );
+  assert.equal(
+    buildScopedLogsPath({ threadId: "thread-a" }, { absolute: true }),
+    "/v2/logs?thread_id=thread-a",
   );
 });

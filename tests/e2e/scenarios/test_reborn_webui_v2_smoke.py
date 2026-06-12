@@ -25,11 +25,13 @@ Wiring confirmed manually before this test existed:
 """
 
 import asyncio
+import json
 import os
 import signal
 import socket
 import uuid
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import aiohttp
 import httpx
@@ -377,6 +379,89 @@ async def test_reborn_v2_response_links_open_in_new_tab(reborn_v2_page):
     assert await link.get_attribute("target") == "_blank", "link must open in a new tab"
     rel = await link.get_attribute("rel") or ""
     assert "noopener" in rel, f"link must be noopener, got rel={rel!r}"
+
+
+async def test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context(
+    reborn_v2_page, reborn_v2_server
+):
+    """The browser logs route passes URL scope to the API and renders scoped entries."""
+    requested_queries: list[dict[str, list[str]]] = []
+    logs_requested = asyncio.Event()
+
+    async def handle_operator_logs(route):
+        parsed = urlparse(route.request.url)
+        requested_queries.append(parse_qs(parsed.query))
+        logs_requested.set()
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "status": "available",
+                    "logs": {
+                        "source": "in_memory_tracing",
+                        "entries": [
+                            {
+                                "id": "ui-log-1",
+                                "timestamp": "2026-06-12T10:11:12.123Z",
+                                "level": "info",
+                                "target": "ironclaw::ui::logs",
+                                "message": "scoped log from browser fixture",
+                                "thread_id": "thread-ui",
+                                "run_id": "run-ui",
+                                "tool_call_id": "tool-call-ui",
+                                "tool_name": "shell",
+                                "source": "slack",
+                            }
+                        ],
+                        "next_cursor": None,
+                        "tail_supported": True,
+                        "follow_supported": False,
+                    },
+                }
+            ),
+        )
+
+    await reborn_v2_page.route("**/api/webchat/v2/operator/logs**", handle_operator_logs)
+    await reborn_v2_page.goto(
+        f"{reborn_v2_server}/v2/logs"
+        "?thread_id=thread-ui&run_id=run-ui&tool_call_id=tool-call-ui&source=slack"
+    )
+
+    await asyncio.wait_for(logs_requested.wait(), timeout=10)
+    first_query = requested_queries[0]
+    assert first_query.get("thread_id") == ["thread-ui"], first_query
+    assert first_query.get("run_id") == ["run-ui"], first_query
+    assert first_query.get("tool_call_id") == ["tool-call-ui"], first_query
+    assert first_query.get("source") == ["slack"], first_query
+    assert first_query.get("limit") == ["500"], first_query
+
+    await expect(
+        reborn_v2_page.locator(SEL_V2["logs_scope_toolbar"])
+    ).to_be_visible(timeout=10000)
+    await expect(
+        reborn_v2_page.locator(SEL_V2["logs_scope_chip"].format(key="thread_id"))
+    ).to_contain_text("thread-ui")
+    await expect(
+        reborn_v2_page.locator(SEL_V2["logs_scope_chip"].format(key="run_id"))
+    ).to_contain_text("run-ui")
+
+    entry = reborn_v2_page.locator(SEL_V2["logs_entry"]).first
+    await expect(entry.locator(SEL_V2["logs_entry_message"])).to_contain_text(
+        "scoped log from browser fixture"
+    )
+
+    await entry.locator(SEL_V2["logs_entry_row"]).click()
+    context = entry.locator(SEL_V2["logs_entry_context"])
+    await expect(
+        context.locator(SEL_V2["logs_context_chip"].format(key="tool_call_id"))
+    ).to_contain_text("tool-call-ui")
+    await expect(
+        context.locator(SEL_V2["logs_context_chip"].format(key="tool_name"))
+    ).to_contain_text("shell")
+    await expect(
+        context.locator(SEL_V2["logs_context_chip"].format(key="source"))
+    ).to_contain_text("slack")
 
 
 async def test_reborn_v2_thread_list_and_delete(reborn_v2_server):
