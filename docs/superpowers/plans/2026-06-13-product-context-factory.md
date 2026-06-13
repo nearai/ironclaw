@@ -136,7 +136,7 @@ pub struct ProductTurnContext {
 }
 ```
 
-- [ ] **Step 4: Add the error variant** — in `crates/ironclaw_turns/src/error.rs` (find the `TurnError` enum; if errors live elsewhere, grep `enum TurnError`), add:
+- [ ] **Step 4: Add the error variant** — in `crates/ironclaw_turns/src/status.rs` (find the `TurnError` enum; if errors live elsewhere, grep `enum TurnError`), add:
 
 ```rust
     #[error("invalid run-origin adapter: must be 1..=256 bytes")]

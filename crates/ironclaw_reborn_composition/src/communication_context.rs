@@ -64,19 +64,19 @@ impl CommunicationContextProvider for RuntimeCommunicationContextProvider {
             .outbound_preferences
             .get_outbound_preferences(caller.clone());
 
-        let lifecycle_context = self.lifecycle_facade.as_deref().map(|_| {
-            LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
-                tenant_id: caller.tenant_id.clone(),
-                user_id: caller.user_id.clone(),
-                agent_id: caller.agent_id.clone(),
-                project_id: caller.project_id.clone(),
-            })
-        });
-
-        // Both fetches share a single 500 ms budget: run them concurrently under
-        // one outer timeout so serial latency (~1 s) collapses to one RTT.
-        let combined_result = timeout(OUTBOUND_PREFERENCES_TIMEOUT, async {
-            join!(preferences_fut, async {
+        // Lifecycle fetch is only meaningful when classification is available.
+        // Skip the ExtensionList call entirely when the predicate is a stub so
+        // the 500 ms timeout budget is not consumed by a discarded result.
+        let lifecycle_fut = async {
+            if CHANNEL_CLASSIFICATION_AVAILABLE {
+                let lifecycle_context = self.lifecycle_facade.as_deref().map(|_| {
+                    LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
+                        tenant_id: caller.tenant_id.clone(),
+                        user_id: caller.user_id.clone(),
+                        agent_id: caller.agent_id.clone(),
+                        project_id: caller.project_id.clone(),
+                    })
+                });
                 match (&self.lifecycle_facade, lifecycle_context) {
                     (Some(facade), Some(ctx)) => Some(
                         facade
@@ -85,14 +85,22 @@ impl CommunicationContextProvider for RuntimeCommunicationContextProvider {
                     ),
                     _ => None,
                 }
-            })
+            } else {
+                None
+            }
+        };
+
+        // Outbound-preferences fetch runs under a 500 ms budget.  Lifecycle
+        // runs concurrently only when CHANNEL_CLASSIFICATION_AVAILABLE is true.
+        let combined_result = timeout(OUTBOUND_PREFERENCES_TIMEOUT, async {
+            join!(preferences_fut, lifecycle_fut)
         })
         .await;
 
         let (pref_result, lifecycle_result) = match combined_result {
             Ok(pair) => pair,
             Err(_) => {
-                // Shared budget expired — both are unknown.
+                // Budget expired — both are unknown.
                 return Some(CommunicationRuntimeContext {
                     connected_channels: ConnectedChannelsState::Unknown,
                     delivery_target: DeliveryTargetState::Unknown,
@@ -511,9 +519,9 @@ mod tests {
 
     #[tokio::test]
     async fn classification_unavailable_returns_unknown_for_empty_extension_list() {
-        // While CHANNEL_CLASSIFICATION_AVAILABLE is false the lifecycle success
-        // branch must return Unknown rather than Known([]) — the empty list would
-        // be false certainty ("none connected") when the predicate is a stub.
+        // While CHANNEL_CLASSIFICATION_AVAILABLE is false the lifecycle fetch is
+        // skipped entirely; connected_channels must be Unknown regardless of what
+        // the facade would return (never false-certainty Known([])).
         let provider = RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesFacade))
             .with_lifecycle_facade(Arc::new(EmptyLifecycleFacade));
         let ctx = provider
@@ -523,16 +531,15 @@ mod tests {
         assert_eq!(
             ctx.connected_channels,
             ConnectedChannelsState::Unknown,
-            "classification unavailable → Unknown, not Known([])"
+            "classification unavailable → lifecycle skipped → Unknown"
         );
     }
 
     #[tokio::test]
     async fn classification_unavailable_returns_unknown_for_non_channel_extensions() {
-        // Lifecycle summaries carry no channel discriminator until #4778's
-        // ProductAdapter surface projection. While CHANNEL_CLASSIFICATION_AVAILABLE
-        // is false the success branch returns Unknown regardless of what extensions
-        // are present — never false-certainty Known([]).
+        // While CHANNEL_CLASSIFICATION_AVAILABLE is false the lifecycle fetch is
+        // skipped entirely, so connected_channels is Unknown regardless of the
+        // extension list the facade would have returned.
         // When #4778 merges, flip CHANNEL_CLASSIFICATION_AVAILABLE to true and
         // grow a positive case here.
         let provider = RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesFacade))
@@ -563,6 +570,69 @@ mod tests {
             .await
             .expect("context");
         assert_eq!(ctx.connected_channels, ConnectedChannelsState::Unknown);
+    }
+
+    // --- Tests: timeout path ---
+
+    /// A preferences facade whose `get_outbound_preferences` never resolves.
+    /// Used to exercise the shared-timeout Unknown path.
+    ///
+    /// Note: `tokio/test-util` is not in this crate's feature set, so
+    /// `start_paused` / `tokio::time::advance` are unavailable. The test relies
+    /// on the real 500 ms wall-clock timeout firing against a `pending()` future.
+    struct HangingPreferencesFacade;
+
+    #[async_trait]
+    impl OutboundPreferencesProductFacade for HangingPreferencesFacade {
+        async fn get_outbound_preferences(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+        ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+            std::future::pending().await
+        }
+
+        async fn set_outbound_preferences(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _request: RebornSetOutboundPreferencesRequest,
+        ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+            Ok(RebornOutboundPreferencesResponse::default())
+        }
+
+        async fn list_outbound_delivery_targets(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+        ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
+            Ok(RebornOutboundDeliveryTargetListResponse {
+                targets: Vec::new(),
+                next_cursor: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_timeout_yields_unknown_for_both_delivery_and_channels() {
+        // The preferences future never resolves; the 500 ms outer timeout fires.
+        // Both delivery_target and connected_channels must be Unknown — never
+        // fabricated definitive states. Uses real wall-clock time (500 ms) since
+        // tokio/test-util is not in this crate's features.
+        let provider = RuntimeCommunicationContextProvider::new(Arc::new(HangingPreferencesFacade));
+
+        let ctx = provider
+            .communication_context(&scope(), Some(&actor()), false, None)
+            .await
+            .expect("communication_context must return Some even on timeout");
+
+        assert_eq!(
+            ctx.delivery_target,
+            DeliveryTargetState::Unknown,
+            "timed-out preferences must map to Unknown delivery_target"
+        );
+        assert_eq!(
+            ctx.connected_channels,
+            ConnectedChannelsState::Unknown,
+            "timed-out budget must leave connected_channels Unknown"
+        );
     }
 
     // --- Tests: product_context propagation ---

@@ -23,13 +23,14 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator,
-    TurnError, TurnRunId, TurnScope,
+    TurnError, TurnRunId, TurnScope, TurnSurfaceType,
 };
 use uuid::Uuid;
 
 use crate::binding::{
-    ConversationBindingService, ProductConversationBindingCreationPolicy, ResolveBindingRequest,
-    ResolvedBinding, binding_profile_for_trigger,
+    ConversationBindingService, ProductConversationBindingCreationPolicy,
+    ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
+    binding_profile_for_trigger,
 };
 use crate::binding_ref::{
     DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_idempotency_key, bounded_reply_target_binding_ref,
@@ -121,6 +122,7 @@ struct PreparedUserMessage {
     source_binding_id: String,
     submit_idempotency_key: String,
     adapter_id: ProductAdapterId,
+    surface_type: TurnSurfaceType,
 }
 
 /// Port for the inbound turn submission path.
@@ -279,6 +281,10 @@ where
             });
         };
         let (route_kind, creation_policy) = binding_profile_for_trigger(payload.trigger);
+        let surface_type = match route_kind {
+            ProductConversationRouteKind::Direct => TurnSurfaceType::Direct,
+            ProductConversationRouteKind::Shared => TurnSurfaceType::Channel,
+        };
         let binding_request = ResolveBindingRequest {
             adapter_id: envelope.adapter_id().clone(),
             installation_id: envelope.installation_id().clone(),
@@ -307,6 +313,7 @@ where
             source_binding_id,
             submit_idempotency_key,
             adapter_id: envelope.adapter_id().clone(),
+            surface_type,
         })
     }
 
@@ -392,6 +399,7 @@ where
             idempotency_key_raw: prepared.submit_idempotency_key,
             received_at: envelope.received_at(),
             adapter_id: prepared.adapter_id,
+            surface_type: prepared.surface_type,
         }))
         .submit_or_replay(&self.thread_service, &self.turn_coordinator)
         .await
@@ -446,6 +454,8 @@ impl ProductInboundTurnHandoff {
             binding,
             thread_scope,
             adapter_id,
+            // Surface type is unknown at replay time without the original trigger.
+            TurnSurfaceType::Direct,
         )
     }
 
@@ -462,6 +472,7 @@ impl ProductInboundTurnHandoff {
             prepared.binding.clone(),
             prepared.thread_scope.clone(),
             prepared.adapter_id.clone(),
+            prepared.surface_type,
         )
     }
 
@@ -472,6 +483,7 @@ impl ProductInboundTurnHandoff {
         binding: ResolvedBinding,
         thread_scope: ThreadScope,
         adapter_id: ProductAdapterId,
+        surface_type: TurnSurfaceType,
     ) -> Result<Self, ProductWorkflowError> {
         let accepted_message_ref = accepted_message_ref(replay.message_id)?;
 
@@ -526,6 +538,7 @@ impl ProductInboundTurnHandoff {
                 idempotency_key_raw: submit_idempotency_key,
                 received_at,
                 adapter_id,
+                surface_type,
             },
         )))
     }
@@ -565,6 +578,7 @@ struct AcceptedProductInboundTurn {
     idempotency_key_raw: String,
     received_at: DateTime<Utc>,
     adapter_id: ProductAdapterId,
+    surface_type: TurnSurfaceType,
 }
 
 impl AcceptedProductInboundTurn {
@@ -586,6 +600,7 @@ impl AcceptedProductInboundTurn {
             idempotency_key_raw,
             received_at,
             adapter_id,
+            surface_type,
         } = self;
         let turn_scope = TurnScope::new_with_owner(
             binding.tenant_id.clone(),
@@ -631,7 +646,7 @@ impl AcceptedProductInboundTurn {
             ironclaw_product_context::TrustLevel::Untrusted,
             false,
             run_adapter,
-            None,
+            Some(surface_type),
             turn_scope.product_owner(&actor),
         );
         let request = SubmitTurnRequest {
@@ -796,6 +811,7 @@ mod tests {
         ProductTriggerReason, UserMessagePayload,
     };
     use ironclaw_threads::ThreadScope;
+    use ironclaw_turns::TurnSurfaceType;
 
     use crate::action::SourceBindingKey;
 
@@ -959,6 +975,7 @@ mod tests {
             source_binding_id: "src:alpha".to_string(),
             submit_idempotency_key: "turn-key".to_string(),
             adapter_id: ProductAdapterId::new("test_adapter").unwrap(),
+            surface_type: TurnSurfaceType::Direct,
         };
 
         let handoff = ProductInboundTurnHandoff::from_replay_with_prepared(

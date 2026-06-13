@@ -21,7 +21,11 @@ pub enum TurnSurfaceType {
 
 /// Generic adapter identity carried into the turn context. Bounded validated string;
 /// callers convert their rich adapter id (e.g. `ProductAdapterId`, `AdapterKind`) into this.
+///
+/// Serializes as a plain string. Deserialization validates via `TryFrom<String>` so
+/// persisted payloads with empty or oversized values are rejected at the boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String")]
 pub struct RunOriginAdapter(String);
 
 impl RunOriginAdapter {
@@ -35,6 +39,14 @@ impl RunOriginAdapter {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl TryFrom<String> for RunOriginAdapter {
+    type Error = crate::TurnError;
+
+    fn try_from(v: String) -> Result<Self, Self::Error> {
+        Self::new(v)
     }
 }
 
@@ -85,5 +97,29 @@ mod tests {
     #[test]
     fn run_origin_adapter_rejects_empty() {
         assert!(RunOriginAdapter::new("").is_err());
+    }
+
+    #[test]
+    fn run_origin_adapter_rejects_over_256_bytes() {
+        let long = "a".repeat(257);
+        assert!(
+            RunOriginAdapter::new(long).is_err(),
+            "adapter exceeding 256 bytes must be rejected"
+        );
+    }
+
+    #[test]
+    fn deserialize_rejects_empty_adapter_in_product_turn_context() {
+        // The try_from serde gate must reject persisted payloads with an empty
+        // adapter string — the same invariant that new() enforces.
+        let json = r#"{
+            "origin": "inbound",
+            "adapter": "",
+            "owner": {"kind": "personal", "user": "u1"}
+        }"#;
+        assert!(
+            serde_json::from_str::<ProductTurnContext>(json).is_err(),
+            "empty adapter must fail deserialization via try_from"
+        );
     }
 }
