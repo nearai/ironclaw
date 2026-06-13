@@ -27,11 +27,12 @@ use crate::action::{ActionDispatchKind, ActionFingerprintKey, SourceBindingKey};
 use crate::approval_interaction::{
     ApprovalInteractionDecision, ApprovalInteractionRejectionKind, ApprovalInteractionService,
     ListPendingApprovalsRequest, RejectingApprovalInteractionService,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse, is_approval_gate_ref,
 };
 use crate::auth_interaction::{
     AuthInteractionDecision, AuthInteractionRejectionKind, AuthInteractionService,
     RejectingAuthInteractionService, ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
+    is_auth_gate_ref,
 };
 use crate::binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
@@ -465,6 +466,12 @@ async fn load_delivered_routes_for_envelope(
     binding: &ResolvedBinding,
     delivered_gate_routes: &dyn ironclaw_outbound::DeliveredGateRouteStore,
     expected_gate_ref: Option<&str>,
+    // When `Some`, only routes whose `gate_ref` satisfies the predicate are
+    // considered live. This separates approval routes (`is_approval_gate_ref`)
+    // from auth routes (`is_auth_gate_ref`) so that a lingering auth gate
+    // recorded in the same conversation bucket cannot make a bare "approve"
+    // look ambiguous, and vice-versa.
+    gate_kind_filter: Option<fn(&GateRef) -> bool>,
 ) -> DeliveredRouteOutcome {
     let conversation_ref = match delivered_route_conversation_ref(envelope) {
         Ok(conversation_ref) => conversation_ref,
@@ -495,8 +502,8 @@ async fn load_delivered_routes_for_envelope(
             return DeliveredRouteOutcome::Miss;
         }
     };
-    // Filter: non-expired, tenant+actor match, and (if explicit ref supplied)
-    // gate_ref match.
+    // Filter: non-expired, tenant+actor match, gate-kind match (when a kind
+    // filter is supplied), and (if an explicit ref is supplied) gate_ref match.
     let live: Vec<ironclaw_outbound::DeliveredGateRouteRecord> = all_routes
         .into_iter()
         .filter(|r| {
@@ -518,6 +525,20 @@ async fn load_delivered_routes_for_envelope(
             // interaction services authorize again.
             if r.tenant_id != binding.tenant_id || r.user_id != binding.actor_user_id {
                 return false;
+            }
+            // Gate-kind filter: when the caller knows it is resolving an
+            // approval (or auth) interaction, drop routes that belong to the
+            // other kind.  This prevents a lingering auth gate recorded in the
+            // same conversation fingerprint bucket from inflating the live-route
+            // count and triggering a spurious AmbiguousGate error on a bare
+            // "approve" (and vice-versa for a bare "auth deny").
+            if let Some(kind_filter) = gate_kind_filter {
+                let Ok(gate_ref) = GateRef::new(r.gate_ref.clone()) else {
+                    return false;
+                };
+                if !kind_filter(&gate_ref) {
+                    return false;
+                }
             }
             if let Some(expected) = expected_gate_ref
                 && r.gate_ref != expected
@@ -566,6 +587,7 @@ async fn select_delivered_gate_route(
     binding_service: &dyn ConversationBindingService,
     delivered_gate_routes: &dyn ironclaw_outbound::DeliveredGateRouteStore,
     expected_gate_ref: Option<&str>,
+    gate_kind_filter: Option<fn(&GateRef) -> bool>,
     pre_resolved_binding: Option<&ResolvedBinding>,
     ambiguity_error: impl Fn() -> ProductWorkflowError,
 ) -> Option<Result<SelectedDeliveredRoute, ProductWorkflowError>> {
@@ -588,6 +610,7 @@ async fn select_delivered_gate_route(
         binding,
         delivered_gate_routes,
         expected_gate_ref,
+        gate_kind_filter,
     )
     .await
     {
@@ -618,6 +641,10 @@ async fn resolve_via_delivered_approval_route(
         binding_service,
         delivered_gate_routes,
         expected_gate_ref,
+        // Bare approve must only match approval gates; a lingering auth gate
+        // recorded in the same conversation bucket must not count toward the
+        // ambiguity check or be forwarded to the approval service.
+        Some(is_approval_gate_ref),
         pre_resolved_binding,
         || ProductWorkflowError::ApprovalInteractionRejected {
             kind: ApprovalInteractionRejectionKind::AmbiguousGate,
@@ -691,6 +718,10 @@ async fn resolve_via_delivered_auth_route(
         binding_service,
         delivered_gate_routes,
         expected_gate_ref,
+        // Bare "auth deny" must only match auth gates; a lingering approval
+        // gate recorded in the same conversation bucket must not count toward
+        // the ambiguity check or be forwarded to the auth service.
+        Some(is_auth_gate_ref),
         pre_resolved_binding,
         || ProductWorkflowError::AuthInteractionRejected {
             kind: AuthInteractionRejectionKind::AmbiguousAuth,
