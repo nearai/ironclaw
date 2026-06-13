@@ -43,13 +43,6 @@ pub trait SessionThreadService: Send + Sync {
         turn_run_id: String,
     ) -> Result<ThreadMessageRecord, SessionThreadError>;
 
-    async fn mark_message_deferred_busy(
-        &self,
-        scope: &ThreadScope,
-        thread_id: &ThreadId,
-        message_id: ThreadMessageId,
-    ) -> Result<ThreadMessageRecord, SessionThreadError>;
-
     async fn mark_message_rejected_busy(
         &self,
         scope: &ThreadScope,
@@ -307,17 +300,6 @@ where
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         self.as_ref()
             .mark_message_submitted(scope, thread_id, message_id, turn_id, turn_run_id)
-            .await
-    }
-
-    async fn mark_message_deferred_busy(
-        &self,
-        scope: &ThreadScope,
-        thread_id: &ThreadId,
-        message_id: ThreadMessageId,
-    ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        self.as_ref()
-            .mark_message_deferred_busy(scope, thread_id, message_id)
             .await
     }
 

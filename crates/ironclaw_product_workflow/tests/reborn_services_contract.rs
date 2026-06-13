@@ -1283,15 +1283,6 @@ impl SessionThreadService for ScopeMismatchThreadStub {
         panic!("ScopeMismatchThreadStub::mark_message_submitted should not be reached")
     }
 
-    async fn mark_message_deferred_busy(
-        &self,
-        _scope: &ThreadScope,
-        _thread_id: &ThreadId,
-        _message_id: ThreadMessageId,
-    ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        panic!("ScopeMismatchThreadStub::mark_message_deferred_busy should not be reached")
-    }
-
     async fn mark_message_rejected_busy(
         &self,
         _scope: &ThreadScope,
@@ -1537,15 +1528,6 @@ impl SessionThreadService for ScriptedThreadService {
         _turn_run_id: String,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         scripted_stub_unreachable("mark_message_submitted")
-    }
-
-    async fn mark_message_deferred_busy(
-        &self,
-        _scope: &ThreadScope,
-        _thread_id: &ThreadId,
-        _message_id: ThreadMessageId,
-    ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        scripted_stub_unreachable("mark_message_deferred_busy")
     }
 
     async fn mark_message_rejected_busy(
@@ -5663,17 +5645,6 @@ impl SessionThreadService for FirstMissBackendErrorThreadService {
         _turn_run_id: String,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         panic!("FirstMissBackendErrorThreadService::mark_message_submitted should not be reached")
-    }
-
-    async fn mark_message_deferred_busy(
-        &self,
-        _scope: &ThreadScope,
-        _thread_id: &ThreadId,
-        _message_id: ThreadMessageId,
-    ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        panic!(
-            "FirstMissBackendErrorThreadService::mark_message_deferred_busy should not be reached"
-        )
     }
 
     async fn mark_message_rejected_busy(

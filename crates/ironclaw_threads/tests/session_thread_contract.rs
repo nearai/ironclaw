@@ -846,8 +846,10 @@ async fn busy_message_is_visible_deferred_and_not_tied_to_a_run() {
         .await
         .unwrap();
 
+    // Inject a legacy DeferredBusy row directly — the mark_message_deferred_busy
+    // writer has been retired; this back-door preserves read/replay coverage.
     service
-        .mark_message_deferred_busy(&scope("a"), &thread.thread_id, accepted.message_id)
+        .inject_legacy_deferred_busy_for_test(&scope("a"), &thread.thread_id, accepted.message_id)
         .await
         .unwrap();
 
@@ -902,36 +904,6 @@ async fn rejected_busy_marks_message_with_rejected_status() {
         .unwrap();
     assert_eq!(history.messages[0].status, MessageStatus::RejectedBusy);
     assert!(history.messages[0].turn_run_id.is_none());
-}
-
-#[tokio::test]
-async fn deferred_busy_rejects_non_user_and_non_accepted_messages() {
-    let service = InMemorySessionThreadService::default();
-    let thread = service
-        .ensure_thread(EnsureThreadRequest {
-            scope: scope("a"),
-            thread_id: None,
-            created_by_actor_id: "actor-a".into(),
-            title: None,
-            metadata_json: None,
-        })
-        .await
-        .unwrap();
-    let draft = service
-        .append_assistant_draft(AppendAssistantDraftRequest {
-            scope: scope("a"),
-            thread_id: thread.thread_id.clone(),
-            turn_run_id: "run-1".into(),
-            content: MessageContent::text("partial"),
-        })
-        .await
-        .unwrap();
-
-    let result = service
-        .mark_message_deferred_busy(&scope("a"), &thread.thread_id, draft.message_id)
-        .await;
-
-    assert!(result.is_err());
 }
 
 #[tokio::test]

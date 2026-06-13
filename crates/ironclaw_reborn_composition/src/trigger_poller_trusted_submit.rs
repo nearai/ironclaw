@@ -1026,15 +1026,6 @@ mod tests {
             unimplemented!("trigger prompt recorder tests do not mark messages submitted")
         }
 
-        async fn mark_message_deferred_busy(
-            &self,
-            _scope: &ThreadScope,
-            _thread_id: &ThreadId,
-            _message_id: ThreadMessageId,
-        ) -> Result<ThreadMessageRecord, SessionThreadError> {
-            unimplemented!("trigger prompt recorder tests do not defer messages")
-        }
-
         async fn mark_message_rejected_busy(
             &self,
             _scope: &ThreadScope,

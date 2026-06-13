@@ -867,27 +867,6 @@ where
         .await
     }
 
-    async fn mark_message_deferred_busy(
-        &self,
-        scope: &ThreadScope,
-        thread_id: &ThreadId,
-        message_id: ThreadMessageId,
-    ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        self.read_thread_versioned(scope, thread_id)
-            .await?
-            .ok_or_else(|| SessionThreadError::UnknownThread {
-                thread_id: thread_id.clone(),
-            })?;
-        self.apply_message_update(scope, thread_id, message_id, |message| {
-            ensure_user_accepted(message, "mark_message_deferred_busy")?;
-            message.status = MessageStatus::DeferredBusy;
-            message.turn_id = None;
-            message.turn_run_id = None;
-            Ok(())
-        })
-        .await
-    }
-
     async fn mark_message_rejected_busy(
         &self,
         scope: &ThreadScope,
