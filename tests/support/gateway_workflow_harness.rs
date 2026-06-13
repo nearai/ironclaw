@@ -210,6 +210,11 @@ impl GatewayWorkflowHarness {
         let scheduler_slot: ironclaw::tools::builtin::SchedulerSlot =
             Arc::new(tokio::sync::RwLock::new(None));
         let agent_session_manager = Arc::new(AgentSessionManager::new());
+        let tool_dispatcher = Arc::new(ironclaw::tools::dispatch::ToolDispatcher::new(
+            Arc::clone(&components.tools),
+            Arc::clone(&components.safety),
+            Arc::clone(&db),
+        ));
 
         let gateway_state = Arc::new(GatewayState {
             msg_tx: tokio::sync::RwLock::new(Some(gw_tx)),
@@ -259,7 +264,7 @@ impl GatewayWorkflowHarness {
             near_network: None,
             oauth_sweep_shutdown: None,
             frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-            tool_dispatcher: None,
+            tool_dispatcher: Some(Arc::clone(&tool_dispatcher)),
         });
 
         let mut agent = Agent::new(

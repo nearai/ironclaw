@@ -97,8 +97,9 @@ use crate::channels::web::features::oauth::{
 };
 use crate::channels::web::features::pairing::{pairing_approve_handler, pairing_list_handler};
 use crate::channels::web::features::routines::{
-    routines_delete_handler, routines_detail_handler, routines_list_handler, routines_runs_handler,
-    routines_summary_handler, routines_toggle_handler, routines_trigger_handler,
+    routines_create_handler, routines_delete_handler, routines_detail_handler,
+    routines_list_handler, routines_runs_handler, routines_summary_handler,
+    routines_toggle_handler, routines_trigger_handler,
 };
 use crate::channels::web::features::settings::{
     settings_delete_handler, settings_export_handler, settings_get_handler,
@@ -248,7 +249,10 @@ pub async fn start_server(
             post(pairing_approve_handler),
         )
         // Routines
-        .route("/api/routines", get(routines_list_handler))
+        .route(
+            "/api/routines",
+            get(routines_list_handler).post(routines_create_handler),
+        )
         .route("/api/routines/summary", get(routines_summary_handler))
         .route("/api/routines/{id}", get(routines_detail_handler))
         .route("/api/routines/{id}/trigger", post(routines_trigger_handler))

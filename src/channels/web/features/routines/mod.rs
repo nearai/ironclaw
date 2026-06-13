@@ -19,6 +19,104 @@ use crate::channels::web::platform::state::GatewayState;
 use crate::channels::web::types::*;
 use crate::error::RoutineError;
 use crate::ownership::Owned;
+use crate::tools::ToolError;
+use crate::tools::dispatch::DispatchSource;
+
+pub async fn routines_create_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+    Json(req): Json<CreateRoutineRequest>,
+) -> Result<(StatusCode, Json<RoutineInfo>), (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+    let dispatcher = state.tool_dispatcher.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Tool dispatcher not available".to_string(),
+    ))?;
+
+    let mut params = serde_json::Map::new();
+    params.insert("name".to_string(), serde_json::Value::String(req.name));
+    params.insert("prompt".to_string(), serde_json::Value::String(req.prompt));
+    params.insert("request".to_string(), req.request);
+    if let Some(description) = req.description {
+        params.insert(
+            "description".to_string(),
+            serde_json::Value::String(description),
+        );
+    }
+    if let Some(execution) = req.execution {
+        params.insert("execution".to_string(), execution);
+    }
+    if let Some(delivery) = req.delivery {
+        params.insert("delivery".to_string(), delivery);
+    }
+    if let Some(advanced) = req.advanced {
+        params.insert("advanced".to_string(), advanced);
+    }
+
+    let output = dispatcher
+        .dispatch(
+            "routine_create",
+            serde_json::Value::Object(params),
+            &user.user_id,
+            DispatchSource::Channel("gateway".to_string()),
+        )
+        .await
+        .map_err(|e| (routine_create_tool_error_status(&e), e.to_string()))?;
+
+    let routine_id = output
+        .result
+        .get("id")
+        .and_then(|value| value.as_str())
+        .ok_or((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "routine_create did not return a routine id".to_string(),
+        ))
+        .and_then(|id| {
+            Uuid::parse_str(id).map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "routine_create returned an invalid routine id".to_string(),
+                )
+            })
+        })?;
+
+    let mut routine = store
+        .get_routine(routine_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
+
+    if !routine.is_owned_by(&user.user_id) {
+        return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
+    }
+
+    if req.enabled == Some(false) && routine.enabled {
+        routine.enabled = false;
+        routine.next_fire_at = None;
+        store
+            .update_routine(&routine)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        if matches!(
+            routine.trigger,
+            Trigger::Event { .. } | Trigger::SystemEvent { .. }
+        ) {
+            let engine = { state.routine_engine.read().await.as_ref().cloned() };
+            if let Some(engine) = engine {
+                engine.refresh_event_cache().await;
+            }
+        }
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(RoutineInfo::from_routine(&routine, None)),
+    ))
+}
 
 pub async fn routines_list_handler(
     State(state): State<Arc<GatewayState>>,
@@ -407,6 +505,19 @@ pub(crate) async fn routines_runs_handler(
         "routine_id": routine_id,
         "runs": run_infos,
     })))
+}
+
+fn routine_create_tool_error_status(err: &ToolError) -> StatusCode {
+    match err {
+        ToolError::InvalidParameters(_) => StatusCode::BAD_REQUEST,
+        ToolError::NotAuthorized(_) => StatusCode::FORBIDDEN,
+        ToolError::RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
+        ToolError::Timeout(_) => StatusCode::GATEWAY_TIMEOUT,
+        ToolError::ExecutionFailed(message) if message.contains("tool not found") => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
 }
 
 /// Map `RoutineError` variants to appropriate HTTP status codes.
