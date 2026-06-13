@@ -50,13 +50,31 @@ where
 
 /// Specification for a lease that must be claimed AFTER authorization succeeds.
 ///
-/// Used by `resume_json` where the original code claims the approval lease only
-/// after `authorize_dispatch_with_trust` allows — keeping the lease `Active`
+/// Used by `resume_json` where the approval lease is claimed only after
+/// `authorize_dispatch_with_trust` returns `Allow` — keeping the lease `Active`
 /// if authorization is denied.
 struct PendingClaimAfterAuth<'r> {
     leases: &'r dyn CapabilityLeaseStore,
     grant_id: CapabilityGrantId,
     fingerprint: InvocationFingerprint,
+}
+
+/// Encodes the three mutually-exclusive approval-lease states that
+/// `dispatch_resumed_capability` must handle.
+enum ResumedLeaseState<'r> {
+    /// A one-shot `Active` lease to claim *after* `authorize_dispatch_with_trust`
+    /// returns `Allow`.  Used by `resume_json` so that a `Deny` leaves the
+    /// lease `Active` (the claim is deferred past the authorize call).
+    PendingClaim(PendingClaimAfterAuth<'r>),
+    /// A lease already transitioned to `Claimed` by a prior `resume_json` auth
+    /// bounce.  Used by `auth_resume_json` when the invocation previously passed
+    /// an approval gate; reuses the existing `Claimed` lease without a second
+    /// approval prompt.
+    AlreadyClaimed(&'r dyn CapabilityLeaseStore, Box<CapabilityLease>),
+    /// No prior approval lease is in play.  Used by `auth_resume_json` when
+    /// `approval_request_id` is `None` (the invocation never passed an approval
+    /// gate before hitting the auth gate).
+    NoPriorLease,
 }
 
 /// Parameters for the converging dispatch tail shared between `resume_json`
@@ -72,16 +90,8 @@ struct ResumedDispatchParams<'r> {
     trust_decision: TrustDecision,
     authorized_context: ExecutionContext,
     descriptor: &'r CapabilityDescriptor,
-    /// Lease to claim after a successful `Decision::Allow` from the authorizer.
-    /// Set only by `resume_json` to preserve the original claim-after-authorize order
-    /// (if authorization is denied, the lease stays `Active`).
-    /// Mutually exclusive with `claimed_lease` — exactly one of the two is `Some`.
-    pending_claim: Option<PendingClaimAfterAuth<'r>>,
-    /// Already-claimed approval lease and its store.
-    /// Set by `auth_resume_json` (claim happens in the preamble, before authorize).
-    /// Set to `None` for the no-prior-approval path of `auth_resume_json`.
-    /// Mutually exclusive with `pending_claim` — exactly one of the two is `Some`.
-    claimed_lease: Option<(&'r dyn CapabilityLeaseStore, CapabilityLease)>,
+    /// Approval-lease state for this resume.  See [`ResumedLeaseState`].
+    lease_state: ResumedLeaseState<'r>,
 }
 
 impl<'a, D> CapabilityHost<'a, D>
@@ -744,12 +754,11 @@ where
             trust_decision: request.trust_decision,
             authorized_context,
             descriptor,
-            pending_claim: Some(PendingClaimAfterAuth {
+            lease_state: ResumedLeaseState::PendingClaim(PendingClaimAfterAuth {
                 leases: capability_leases,
                 grant_id,
                 fingerprint: invocation_fingerprint,
             }),
-            claimed_lease: None,
         })
         .await
     }
@@ -991,8 +1000,10 @@ where
             trust_decision: request.trust_decision,
             authorized_context,
             descriptor,
-            pending_claim: None,
-            claimed_lease: approval_lease_to_consume,
+            lease_state: match approval_lease_to_consume {
+                Some((leases, lease)) => ResumedLeaseState::AlreadyClaimed(leases, Box::new(lease)),
+                None => ResumedLeaseState::NoPriorLease,
+            },
         })
         .await
     }
@@ -1644,8 +1655,7 @@ where
             trust_decision,
             authorized_context,
             descriptor,
-            pending_claim,
-            claimed_lease,
+            lease_state,
         } = params;
 
         let obligations = match self
@@ -1688,37 +1698,47 @@ where
             }
         };
 
-        // For `resume_json`, the approval lease is claimed AFTER authorization
-        // so that a Deny leaves the lease Active (the preamble only injects the
-        // grant for the authorize call; the actual Claimed transition is deferred
-        // to this point).
-        let claimed_lease = if let Some(pc) = pending_claim {
-            let grant_id = pc.grant_id;
-            match pc.leases.claim(&scope, grant_id, &pc.fingerprint).await {
-                Ok(claimed) => Some((pc.leases, claimed)),
-                Err(error) => {
-                    if claim_error_may_be_concurrent_resume(&error) {
-                        warn!(
-                            lease_id = %grant_id,
-                            invocation_id = %invocation_id,
-                            capability_id = %capability_id,
-                            error_kind = capability_lease_error_kind(&error),
-                            "approval lease claim lost to a concurrent resume; leaving run state unchanged",
-                        );
-                    } else {
-                        fail_run_if_configured(
-                            Some(run_state),
-                            &scope,
-                            invocation_id,
-                            "ApprovalLeaseClaim",
-                        )
-                        .await;
+        // For `resume_json` (`PendingClaim`), the approval lease is claimed AFTER
+        // authorization so that a `Deny` leaves the lease `Active` (the preamble
+        // only injects the grant for the authorize call; the actual `Claimed`
+        // transition is deferred to this point).
+        //
+        // For `auth_resume_json` with a prior approval (`AlreadyClaimed`), the
+        // lease was already transitioned to `Claimed` in the preamble; reuse it
+        // directly.
+        //
+        // For `auth_resume_json` with no prior approval (`NoPriorLease`), there
+        // is no lease to claim or consume.
+        let claimed_lease: Option<(&dyn CapabilityLeaseStore, CapabilityLease)> = match lease_state
+        {
+            ResumedLeaseState::PendingClaim(pc) => {
+                let grant_id = pc.grant_id;
+                match pc.leases.claim(&scope, grant_id, &pc.fingerprint).await {
+                    Ok(claimed) => Some((pc.leases, claimed)),
+                    Err(error) => {
+                        if claim_error_may_be_concurrent_resume(&error) {
+                            warn!(
+                                lease_id = %grant_id,
+                                invocation_id = %invocation_id,
+                                capability_id = %capability_id,
+                                error_kind = capability_lease_error_kind(&error),
+                                "approval lease claim lost to a concurrent resume; leaving run state unchanged",
+                            );
+                        } else {
+                            fail_run_if_configured(
+                                Some(run_state),
+                                &scope,
+                                invocation_id,
+                                "ApprovalLeaseClaim",
+                            )
+                            .await;
+                        }
+                        return Err(CapabilityInvocationError::Lease(Box::new(error)));
                     }
-                    return Err(CapabilityInvocationError::Lease(Box::new(error)));
                 }
             }
-        } else {
-            claimed_lease
+            ResumedLeaseState::AlreadyClaimed(leases, lease) => Some((leases, *lease)),
+            ResumedLeaseState::NoPriorLease => None,
         };
 
         let obligation_outcome = match self
