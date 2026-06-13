@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 
-use crate::TurnRunOrigin;
+use crate::{ProductTurnContext, TurnOriginKind};
 
 /// Model-visible runtime context for one loop execution.
 ///
@@ -63,7 +63,7 @@ pub struct CommunicationRuntimeContext {
     pub delivery_target: DeliveryTargetState,
     /// Whether outbound delivery tool names should appear in model guidance.
     pub delivery_tools_visible: bool,
-    pub run_origin: Option<TurnRunOrigin>,
+    pub product_context: Option<ProductTurnContext>,
 }
 
 impl LoopRuntimeContext {
@@ -148,22 +148,28 @@ impl LoopRuntimeContext {
         parts.push(delivery_line);
 
         // Run origin line (and optional ScheduledTrigger+NoneSet warning).
-        if let Some(origin) = &comm.run_origin {
-            let origin_line = match origin {
-                TurnRunOrigin::WebUiChat => {
+        if let Some(ctx) = &comm.product_context {
+            let origin_line = match ctx.origin {
+                TurnOriginKind::WebUi => {
                     "Run origin: WebUI chat; replies render in this chat.".to_string()
                 }
-                TurnRunOrigin::ProductInbound { adapter } => format!(
-                    "Run origin: inbound message via {}; replies post back to that conversation.",
-                    sanitize_prompt_string(adapter)
-                ),
-                TurnRunOrigin::ScheduledTrigger => {
+                TurnOriginKind::Inbound => {
+                    let adapter_str = ctx
+                        .adapter
+                        .as_ref()
+                        .map(|a| sanitize_prompt_string(a.as_str()))
+                        .unwrap_or_else(|| "unknown".to_string());
+                    format!(
+                        "Run origin: inbound message via {adapter_str}; replies post back to that conversation.",
+                    )
+                }
+                TurnOriginKind::ScheduledTrigger => {
                     "Run origin: scheduled trigger fire.".to_string()
                 }
             };
             parts.push(origin_line);
 
-            if matches!(origin, TurnRunOrigin::ScheduledTrigger)
+            if matches!(ctx.origin, TurnOriginKind::ScheduledTrigger)
                 && matches!(comm.delivery_target, DeliveryTargetState::NoneSet)
             {
                 if comm.delivery_tools_visible {
@@ -217,14 +223,16 @@ pub trait CommunicationContextProvider: Send + Sync {
         scope: &crate::scope::TurnScope,
         actor: Option<&crate::scope::TurnActor>,
         delivery_tools_visible: bool,
-        run_origin: Option<TurnRunOrigin>,
+        product_context: Option<ProductTurnContext>,
     ) -> Option<CommunicationRuntimeContext>;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TurnOwner;
     use chrono::TimeZone;
+    use ironclaw_host_api::UserId;
 
     fn stamp() -> chrono::DateTime<chrono::Utc> {
         chrono::Utc
@@ -323,7 +331,7 @@ mod tests {
                 ]),
                 delivery_target: DeliveryTargetState::Unknown,
                 delivery_tools_visible: false,
-                run_origin: None,
+                product_context: None,
             }),
         };
         let text = ctx.render_model_content();
@@ -347,7 +355,7 @@ mod tests {
                 }]),
                 delivery_target: DeliveryTargetState::Unknown,
                 delivery_tools_visible: false,
-                run_origin: None,
+                product_context: None,
             }),
         };
         let text = ctx.render_model_content();
@@ -370,7 +378,7 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Known(vec![]),
                 delivery_target: DeliveryTargetState::Unknown,
                 delivery_tools_visible: false,
-                run_origin: None,
+                product_context: None,
             }),
         };
         let text = ctx.render_model_content();
@@ -386,7 +394,7 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::Unknown,
                 delivery_tools_visible: false,
-                run_origin: None,
+                product_context: None,
             }),
         };
         let text = ctx.render_model_content();
@@ -402,7 +410,7 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::NoneSet,
                 delivery_tools_visible: true,
-                run_origin: None,
+                product_context: None,
             }),
         };
         let text = ctx.render_model_content();
@@ -429,7 +437,7 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::NoneSet,
                 delivery_tools_visible: false,
-                run_origin: None,
+                product_context: None,
             }),
         };
         let text = ctx.render_model_content();
@@ -452,7 +460,7 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::SetUnresolved,
                 delivery_tools_visible: true,
-                run_origin: None,
+                product_context: None,
             }),
         };
         let text = ctx.render_model_content();
@@ -483,7 +491,7 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::SetUnresolved,
                 delivery_tools_visible: false,
-                run_origin: None,
+                product_context: None,
             }),
         };
         let text = ctx.render_model_content();
@@ -509,7 +517,7 @@ mod tests {
                     channel: "slack".to_string(),
                 }),
                 delivery_tools_visible: false,
-                run_origin: None,
+                product_context: None,
             }),
         };
         let text = ctx.render_model_content();
@@ -532,7 +540,7 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::Unknown,
                 delivery_tools_visible: false,
-                run_origin: None,
+                product_context: None,
             }),
         };
         let text = ctx.render_model_content();
@@ -551,7 +559,14 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::Unknown,
                 delivery_tools_visible: false,
-                run_origin: Some(TurnRunOrigin::WebUiChat),
+                product_context: Some(ProductTurnContext {
+                    origin: TurnOriginKind::WebUi,
+                    surface_type: None,
+                    adapter: None,
+                    owner: TurnOwner::Personal {
+                        user: UserId::new("test-user").unwrap(),
+                    },
+                }),
             }),
         };
         let text = ctx.render_model_content();
@@ -570,8 +585,13 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::Unknown,
                 delivery_tools_visible: false,
-                run_origin: Some(TurnRunOrigin::ProductInbound {
-                    adapter: "slack".to_string(),
+                product_context: Some(ProductTurnContext {
+                    origin: TurnOriginKind::Inbound,
+                    surface_type: None,
+                    adapter: Some(crate::RunOriginAdapter::new("slack").unwrap()),
+                    owner: TurnOwner::Personal {
+                        user: UserId::new("test-user").unwrap(),
+                    },
                 }),
             }),
         };
@@ -596,7 +616,14 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::Unknown,
                 delivery_tools_visible: false,
-                run_origin: Some(TurnRunOrigin::ProductInbound { adapter: hostile }),
+                product_context: Some(ProductTurnContext {
+                    origin: TurnOriginKind::Inbound,
+                    surface_type: None,
+                    adapter: Some(crate::RunOriginAdapter::new(hostile).unwrap()),
+                    owner: TurnOwner::Personal {
+                        user: UserId::new("test-user").unwrap(),
+                    },
+                }),
             }),
         };
         let text = ctx.render_model_content();
@@ -624,7 +651,14 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::NoneSet,
                 delivery_tools_visible: false,
-                run_origin: Some(TurnRunOrigin::ScheduledTrigger),
+                product_context: Some(ProductTurnContext {
+                    origin: TurnOriginKind::ScheduledTrigger,
+                    surface_type: None,
+                    adapter: None,
+                    owner: TurnOwner::Personal {
+                        user: UserId::new("test-user").unwrap(),
+                    },
+                }),
             }),
         };
         let text = ctx.render_model_content();
@@ -643,7 +677,14 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::NoneSet,
                 delivery_tools_visible: true,
-                run_origin: Some(TurnRunOrigin::ScheduledTrigger),
+                product_context: Some(ProductTurnContext {
+                    origin: TurnOriginKind::ScheduledTrigger,
+                    surface_type: None,
+                    adapter: None,
+                    owner: TurnOwner::Personal {
+                        user: UserId::new("test-user").unwrap(),
+                    },
+                }),
             }),
         };
         let text = ctx.render_model_content();
@@ -670,7 +711,14 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::NoneSet,
                 delivery_tools_visible: false,
-                run_origin: Some(TurnRunOrigin::ScheduledTrigger),
+                product_context: Some(ProductTurnContext {
+                    origin: TurnOriginKind::ScheduledTrigger,
+                    surface_type: None,
+                    adapter: None,
+                    owner: TurnOwner::Personal {
+                        user: UserId::new("test-user").unwrap(),
+                    },
+                }),
             }),
         };
         let text = ctx.render_model_content();
@@ -698,7 +746,14 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::NoneSet,
                 delivery_tools_visible: true,
-                run_origin: Some(TurnRunOrigin::WebUiChat),
+                product_context: Some(ProductTurnContext {
+                    origin: TurnOriginKind::WebUi,
+                    surface_type: None,
+                    adapter: None,
+                    owner: TurnOwner::Personal {
+                        user: UserId::new("test-user").unwrap(),
+                    },
+                }),
             }),
         };
         let text = ctx.render_model_content();

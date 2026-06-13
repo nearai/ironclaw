@@ -31,7 +31,7 @@ mod system_inference;
 
 pub use crate::CapabilityActivityId;
 
-pub use crate::TurnRunOrigin;
+pub use crate::ProductTurnContext;
 pub use compaction::{
     CompactionInitiator, LoopCompactionError, LoopCompactionMode, LoopCompactionOutcome,
     LoopCompactionPort, LoopCompactionRequest, LoopCompactionResponse, LoopSummaryArtifactId,

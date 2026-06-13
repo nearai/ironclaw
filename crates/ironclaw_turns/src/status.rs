@@ -4,9 +4,9 @@ use thiserror::Error;
 use ironclaw_host_api::RuntimeCredentialAuthRequirement;
 
 use crate::{
-    AcceptedMessageRef, GateRef, ReplyTargetBindingRef, ResolvedRunProfile, RunProfileId,
-    RunProfileVersion, SourceBindingRef, TurnActor, TurnAdmissionClass, TurnCheckpointId, TurnId,
-    TurnRunId, TurnRunOrigin, TurnScope, events::EventCursor, request::TurnTimestamp,
+    AcceptedMessageRef, GateRef, ProductTurnContext, ReplyTargetBindingRef, ResolvedRunProfile,
+    RunProfileId, RunProfileVersion, SourceBindingRef, TurnActor, TurnAdmissionClass,
+    TurnCheckpointId, TurnId, TurnRunId, TurnScope, events::EventCursor, request::TurnTimestamp,
     run_profile::LoopModelRouteSnapshot,
 };
 
@@ -321,7 +321,7 @@ pub struct TurnRunState {
     pub failure: Option<SanitizedFailure>,
     pub event_cursor: EventCursor,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_origin: Option<TurnRunOrigin>,
+    pub product_context: Option<ProductTurnContext>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

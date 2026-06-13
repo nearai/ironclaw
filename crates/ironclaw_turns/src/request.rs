@@ -2,8 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AcceptedMessageRef, GateRef, IdempotencyKey, ReplyTargetBindingRef, RunProfileRequest,
-    SanitizedCancelReason, SourceBindingRef, TurnActor, TurnRunId, TurnRunOrigin, TurnScope,
+    AcceptedMessageRef, GateRef, IdempotencyKey, ProductTurnContext, ReplyTargetBindingRef,
+    RunProfileRequest, SanitizedCancelReason, SourceBindingRef, TurnActor, TurnRunId, TurnScope,
     TurnStatus,
 };
 
@@ -60,7 +60,7 @@ pub struct SubmitTurnRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawn_tree_root_run_id: Option<TurnRunId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_origin: Option<TurnRunOrigin>,
+    pub product_context: Option<ProductTurnContext>,
 }
 
 /// Request shape for callers that are creating a child run from an existing

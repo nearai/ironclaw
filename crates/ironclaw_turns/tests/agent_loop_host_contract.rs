@@ -10,9 +10,10 @@ use ironclaw_turns::{
     AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
     DefaultTurnCoordinator, IdempotencyKey, InMemoryTurnStateStore, LoopBlocked, LoopBlockedKind,
     LoopCompleted, LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef, LoopMessageRef,
-    LoopResultRef, ReplyTargetBindingRef, RunProfileRequest, RunProfileVersion, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnCoordinator,
-    TurnLeaseToken, TurnRunId, TurnRunOrigin, TurnRunState, TurnRunnerId, TurnStatus,
+    LoopResultRef, ProductTurnContext, ReplyTargetBindingRef, RunOriginAdapter, RunProfileRequest,
+    RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
+    TurnCheckpointId, TurnCoordinator, TurnLeaseToken, TurnOriginKind, TurnOwner, TurnRunId,
+    TurnRunState, TurnRunnerId, TurnStatus,
     events::EventCursor,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
@@ -2143,7 +2144,7 @@ async fn loop_prompt_bundle_public_serialization_hides_raw_content() {
         credential_requirements: Vec::new(),
         failure: None,
         event_cursor: EventCursor(0),
-        run_origin: None,
+        product_context: None,
     };
     let public_json = serde_json::to_string(&(bundle, host.milestones(), status)).unwrap();
     assert!(public_json.contains("prompt_bundle_built"));
@@ -3088,7 +3089,7 @@ async fn claimed_run_context() -> LoopRunContext {
             parent_run_id: None,
             subagent_depth: 0,
             spawn_tree_root_run_id: None,
-            run_origin: None,
+            product_context: None,
         })
         .await
         .unwrap();
@@ -3710,43 +3711,56 @@ async fn error_kind_mapping_through_host_managed_port() {
     }
 }
 
-// ── TurnRunOrigin serde round-trips ──────────────────────────────────────────
+// ── ProductTurnContext serde round-trips ──────────────────────────────────────
 
 #[test]
-fn turn_run_origin_serde_round_trips_all_variants() {
-    let web_ui = TurnRunOrigin::WebUiChat;
+fn product_turn_context_serde_round_trips_all_origin_kinds() {
+    let web_ui = ProductTurnContext {
+        origin: TurnOriginKind::WebUi,
+        surface_type: None,
+        adapter: None,
+        owner: TurnOwner::Personal {
+            user: UserId::new("user-serde-rt").unwrap(),
+        },
+    };
     let json = serde_json::to_value(&web_ui).unwrap();
-    assert_eq!(json, serde_json::json!({"kind": "web_ui_chat"}));
     assert_eq!(
-        serde_json::from_value::<TurnRunOrigin>(json).unwrap(),
+        serde_json::from_value::<ProductTurnContext>(json).unwrap(),
         web_ui
     );
 
-    let inbound = TurnRunOrigin::ProductInbound {
-        adapter: "slack".to_string(),
+    let inbound = ProductTurnContext {
+        origin: TurnOriginKind::Inbound,
+        surface_type: None,
+        adapter: Some(RunOriginAdapter::new("slack").unwrap()),
+        owner: TurnOwner::Personal {
+            user: UserId::new("user-serde-rt").unwrap(),
+        },
     };
     let json = serde_json::to_value(&inbound).unwrap();
     assert_eq!(
-        json,
-        serde_json::json!({"kind": "product_inbound", "adapter": "slack"})
-    );
-    assert_eq!(
-        serde_json::from_value::<TurnRunOrigin>(json).unwrap(),
+        serde_json::from_value::<ProductTurnContext>(json).unwrap(),
         inbound
     );
 
-    let trigger = TurnRunOrigin::ScheduledTrigger;
+    let trigger = ProductTurnContext {
+        origin: TurnOriginKind::ScheduledTrigger,
+        surface_type: None,
+        adapter: None,
+        owner: TurnOwner::Personal {
+            user: UserId::new("user-serde-rt").unwrap(),
+        },
+    };
     let json = serde_json::to_value(&trigger).unwrap();
-    assert_eq!(json, serde_json::json!({"kind": "scheduled_trigger"}));
     assert_eq!(
-        serde_json::from_value::<TurnRunOrigin>(json).unwrap(),
+        serde_json::from_value::<ProductTurnContext>(json).unwrap(),
         trigger
     );
 }
 
 #[test]
-fn submit_turn_request_run_origin_defaults_to_none_when_missing_from_json() {
-    // Old payloads without run_origin must deserialize successfully with None.
+fn submit_turn_request_product_context_defaults_to_none_when_missing_from_json() {
+    // Old payloads without product_context must deserialize successfully with None.
     let json = serde_json::json!({
         "scope": {
             "tenant_id": "tenant-serde",
@@ -3761,14 +3775,14 @@ fn submit_turn_request_run_origin_defaults_to_none_when_missing_from_json() {
     });
     let request: SubmitTurnRequest = serde_json::from_value(json).unwrap();
     assert!(
-        request.run_origin.is_none(),
-        "run_origin must default to None when absent from JSON"
+        request.product_context.is_none(),
+        "product_context must default to None when absent from JSON"
     );
 }
 
 #[tokio::test]
-async fn turn_run_state_run_origin_defaults_to_none_when_missing_from_json() {
-    // Old persisted TurnRunState payloads without run_origin must deserialize with None.
+async fn turn_run_state_product_context_defaults_to_none_when_missing_from_json() {
+    // Old persisted TurnRunState payloads without product_context must deserialize with None.
     let context = claimed_run_context().await;
     let state = TurnRunState {
         scope: context.scope.clone(),
@@ -3788,33 +3802,38 @@ async fn turn_run_state_run_origin_defaults_to_none_when_missing_from_json() {
         credential_requirements: Vec::new(),
         failure: None,
         event_cursor: EventCursor(0),
-        run_origin: None,
+        product_context: None,
     };
 
-    // Serialize without the run_origin field (simulate old wire).
+    // Serialize without the product_context field (simulate old wire).
     let mut json = serde_json::to_value(&state).unwrap();
-    json.as_object_mut().unwrap().remove("run_origin");
+    json.as_object_mut().unwrap().remove("product_context");
     let decoded: TurnRunState = serde_json::from_value(json).unwrap();
     assert!(
-        decoded.run_origin.is_none(),
-        "run_origin must default to None when absent from legacy JSON"
+        decoded.product_context.is_none(),
+        "product_context must default to None when absent from legacy JSON"
     );
 
     // Verify round-trip with a value present.
-    let state_with_origin = TurnRunState {
-        run_origin: Some(TurnRunOrigin::ScheduledTrigger),
+    let ctx_value = ProductTurnContext {
+        origin: TurnOriginKind::ScheduledTrigger,
+        surface_type: None,
+        adapter: None,
+        owner: TurnOwner::Personal {
+            user: UserId::new("user-origin-serde").unwrap(),
+        },
+    };
+    let state_with_ctx = TurnRunState {
+        product_context: Some(ctx_value.clone()),
         ..state
     };
-    let json_with_origin = serde_json::to_value(&state_with_origin).unwrap();
-    assert_eq!(
-        json_with_origin["run_origin"],
-        serde_json::json!({"kind": "scheduled_trigger"})
+    let json_with_ctx = serde_json::to_value(&state_with_ctx).unwrap();
+    assert!(
+        json_with_ctx["product_context"].is_object(),
+        "product_context must serialize as an object"
     );
-    let decoded_with: TurnRunState = serde_json::from_value(json_with_origin).unwrap();
-    assert_eq!(
-        decoded_with.run_origin,
-        Some(TurnRunOrigin::ScheduledTrigger)
-    );
+    let decoded_with: TurnRunState = serde_json::from_value(json_with_ctx).unwrap();
+    assert_eq!(decoded_with.product_context, Some(ctx_value));
 }
 
 // ── Communication runtime context rendering (integration with bundle) ─────────
@@ -3913,7 +3932,14 @@ async fn instruction_bundle_runtime_communication_renders_all_fields() {
                     channel: "slack".to_string(),
                 }),
                 delivery_tools_visible: true,
-                run_origin: Some(TurnRunOrigin::ScheduledTrigger),
+                product_context: Some(ProductTurnContext {
+                    origin: TurnOriginKind::ScheduledTrigger,
+                    surface_type: None,
+                    adapter: None,
+                    owner: TurnOwner::Personal {
+                        user: UserId::new("test-user").unwrap(),
+                    },
+                }),
             }),
         }),
     };
@@ -3974,7 +4000,14 @@ async fn instruction_bundle_runtime_scheduled_trigger_with_no_delivery_emits_war
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::NoneSet,
                 delivery_tools_visible: true,
-                run_origin: Some(TurnRunOrigin::ScheduledTrigger),
+                product_context: Some(ProductTurnContext {
+                    origin: TurnOriginKind::ScheduledTrigger,
+                    surface_type: None,
+                    adapter: None,
+                    owner: TurnOwner::Personal {
+                        user: UserId::new("test-user").unwrap(),
+                    },
+                }),
             }),
         }),
     };

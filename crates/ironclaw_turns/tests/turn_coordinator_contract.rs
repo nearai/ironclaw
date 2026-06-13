@@ -6201,7 +6201,7 @@ fn submit_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest {
         parent_run_id: None,
         subagent_depth: 0,
         spawn_tree_root_run_id: None,
-        run_origin: None,
+        product_context: None,
     }
 }
 
@@ -6593,7 +6593,7 @@ impl TurnRunTransitionPort for AtomicLoopExitPort {
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
-            run_origin: None,
+            product_context: None,
         })
     }
 }
