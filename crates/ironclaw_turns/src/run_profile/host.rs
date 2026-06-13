@@ -1448,7 +1448,7 @@ pub struct CapabilityApprovalResume {
 /// the matching fingerprinted lease.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityAuthResume {
-    /// Encodes the original `InvocationId`; decoded by the host via
+    /// Encodes the original invocation identifier; the host decodes it via
     /// `invocation_id_from_resume_token` to set `context.invocation_id`.
     pub resume_token: CapabilityResumeToken,
     /// Present when the invocation previously passed an approval gate.
