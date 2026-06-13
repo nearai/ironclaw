@@ -1551,6 +1551,11 @@ impl Inner {
                         };
                         retry_idempotency_order.push_back(key.clone());
                         retry_idempotency.insert(key, replay);
+                    } else if record.run_id.is_some()
+                        && matches!(record.replay, TurnIdempotencyReplay::RetryThreadBusy(_))
+                    {
+                        // Retry ThreadBusy records are retained in the durable snapshot for
+                        // auditability, but are intentionally not replayable.
                     } else {
                         warn_malformed_idempotency_record(&record);
                     }
@@ -1878,19 +1883,22 @@ impl Inner {
         result: Result<RetryTurnResponse, TurnError>,
         created_at: crate::TurnTimestamp,
     ) {
-        if !self.retry_idempotency.contains_key(&key) {
-            self.retry_idempotency_order.push_back(key.clone());
-        }
+        let replayable = !matches!(result, Err(TurnError::ThreadBusy(_)));
         let record = retry_idempotency_record(&key, &result, created_at);
         self.remember_persisted_idempotency(record);
-        self.retry_idempotency.insert(key, result);
-        let removed = prune_ordered_map(
-            &mut self.retry_idempotency,
-            &mut self.retry_idempotency_order,
-            self.limits.max_idempotency_records,
-        );
-        for key in removed {
-            self.remove_persisted_run_idempotency(TurnIdempotencyOperationKind::Retry, &key);
+        if replayable {
+            if !self.retry_idempotency.contains_key(&key) {
+                self.retry_idempotency_order.push_back(key.clone());
+            }
+            self.retry_idempotency.insert(key, result);
+            let removed = prune_ordered_map(
+                &mut self.retry_idempotency,
+                &mut self.retry_idempotency_order,
+                self.limits.max_idempotency_records,
+            );
+            for key in removed {
+                self.remove_persisted_run_idempotency(TurnIdempotencyOperationKind::Retry, &key);
+            }
         }
         self.prune_idempotency_records();
     }
@@ -3049,6 +3057,10 @@ fn retry_idempotency_record(
         Ok(response) => (
             TurnIdempotencyOutcomeKind::Retried,
             TurnIdempotencyReplay::RetrySucceeded(response.clone()),
+        ),
+        Err(TurnError::ThreadBusy(busy)) => (
+            TurnIdempotencyOutcomeKind::ThreadBusy,
+            TurnIdempotencyReplay::RetryThreadBusy(busy.clone()),
         ),
         Err(error) => (
             TurnIdempotencyOutcomeKind::from_error(error),

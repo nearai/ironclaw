@@ -280,6 +280,20 @@ fn webchat_v2_event_schema_has_stable_wire_names() {
 }
 
 #[test]
+fn projection_state_schema_serializes_run_retryability() {
+    let json = serde_json::to_value(projection_state()).expect("serialize projection state");
+    let items = json["items"].as_array().expect("projection items array");
+    let running_status = &items[1]["run_status"];
+    let failed_status = &items[2]["run_status"];
+
+    assert!(
+        running_status.get("retryable").is_none(),
+        "running run status should omit retryable: {running_status}"
+    );
+    assert_eq!(failed_status["retryable"], true);
+}
+
+#[test]
 fn outbound_payload_mapping_covers_every_browser_event_variant() {
     let cases = vec![
         (

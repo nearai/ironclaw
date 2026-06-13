@@ -67,7 +67,7 @@ pub struct MockAgentLoopDriverHost {
     model_requests: Mutex<Vec<LoopModelRequest>>,
     cancellation: Mutex<Option<LoopCancellationSignal>>,
     cancellation_notify: tokio::sync::Notify,
-    cancel_after_capability_batch: Option<LoopCancellationSignal>,
+    cancel_after_capability_batch: Mutex<Option<LoopCancellationSignal>>,
 }
 
 impl MockAgentLoopDriverHost {
@@ -254,7 +254,7 @@ impl MockAgentLoopDriverHostBuilder {
                 model_requests: Mutex::new(Vec::new()),
                 cancellation: Mutex::new(self.cancellation),
                 cancellation_notify: tokio::sync::Notify::new(),
-                cancel_after_capability_batch: self.cancel_after_capability_batch,
+                cancel_after_capability_batch: Mutex::new(self.cancel_after_capability_batch),
             },
             checkpoints,
         )
@@ -815,7 +815,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockAgentLoopDriverHost
             .collect::<Result<Vec<_>, _>>()?;
         let stopped_on_suspension = request.stop_on_first_suspension
             && outcomes.iter().any(CapabilityOutcome::is_suspension);
-        if let Some(signal) = self.cancel_after_capability_batch.clone() {
+        if let Some(signal) = lock_or_panic(&self.cancel_after_capability_batch).take() {
             self.set_cancellation_signal(signal);
         }
         Ok(CapabilityBatchOutcome {

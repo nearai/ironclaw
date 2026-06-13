@@ -1237,6 +1237,19 @@ mod tests {
     }
 
     #[test]
+    fn run_not_retryable_is_terminal_materialization_failure() {
+        let error = classify_materializer_inbound_error(InboundTurnError::TurnSubmissionFailed {
+            error: TurnError::RunNotRetryable {
+                run_id: TurnRunId::new(),
+            },
+        });
+
+        assert!(
+            matches!(error, TriggerError::InvalidMaterialization { reason } if reason == "trusted trigger submit rejected")
+        );
+    }
+
+    #[test]
     fn non_submission_inbound_errors_are_permanent_materialization_failures() {
         let error = classify_materializer_inbound_error(InboundTurnError::AccessDenied {
             actor_id: "actor-1".to_string(),

@@ -3,7 +3,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_turns::{
-    TurnError, TurnEventKind, TurnEventSink, TurnLifecycleEvent, TurnRunState, TurnStatus,
+    TurnCheckpointId, TurnError, TurnEventKind, TurnEventSink, TurnId, TurnLifecycleEvent,
+    TurnRunId, TurnRunState, TurnScope, TurnStatus,
     events::{TurnBlockedGateKind, TurnBlockedGateMetadata},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
@@ -127,6 +128,17 @@ impl TurnRunTransitionPort for EventPublishingTurnRunTransitionPort {
         Ok(response)
     }
 
+    async fn latest_resumable_checkpoint(
+        &self,
+        scope: &TurnScope,
+        turn_id: TurnId,
+        run_id: TurnRunId,
+    ) -> Result<Option<TurnCheckpointId>, TurnError> {
+        self.inner
+            .latest_resumable_checkpoint(scope, turn_id, run_id)
+            .await
+    }
+
     async fn record_model_route_snapshot(
         &self,
         request: RecordModelRouteSnapshotRequest,
@@ -209,5 +221,136 @@ impl TurnRunTransitionPort for EventPublishingTurnRunTransitionPort {
         )
         .await;
         Ok(state)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    use ironclaw_host_api::{AgentId, TenantId, ThreadId};
+
+    struct CheckpointProbeTransitionPort {
+        checkpoint_id: TurnCheckpointId,
+        calls: Mutex<Vec<(TurnScope, TurnId, TurnRunId)>>,
+    }
+
+    impl CheckpointProbeTransitionPort {
+        fn new(checkpoint_id: TurnCheckpointId) -> Self {
+            Self {
+                checkpoint_id,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl TurnRunTransitionPort for CheckpointProbeTransitionPort {
+        async fn claim_next_run(
+            &self,
+            _request: ClaimRunRequest,
+        ) -> Result<Option<ClaimedTurnRun>, TurnError> {
+            panic!("latest_resumable_checkpoint test must not claim runs")
+        }
+
+        async fn heartbeat(
+            &self,
+            _request: HeartbeatRequest,
+        ) -> Result<ironclaw_turns::EventCursor, TurnError> {
+            panic!("latest_resumable_checkpoint test must not heartbeat")
+        }
+
+        async fn recover_expired_leases(
+            &self,
+            _request: RecoverExpiredLeasesRequest,
+        ) -> Result<RecoverExpiredLeasesResponse, TurnError> {
+            panic!("latest_resumable_checkpoint test must not recover leases")
+        }
+
+        async fn latest_resumable_checkpoint(
+            &self,
+            scope: &TurnScope,
+            turn_id: TurnId,
+            run_id: TurnRunId,
+        ) -> Result<Option<TurnCheckpointId>, TurnError> {
+            self.calls
+                .lock()
+                .expect("calls mutex")
+                .push((scope.clone(), turn_id, run_id));
+            Ok(Some(self.checkpoint_id))
+        }
+
+        async fn record_model_route_snapshot(
+            &self,
+            _request: RecordModelRouteSnapshotRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            panic!("latest_resumable_checkpoint test must not record model route snapshots")
+        }
+
+        async fn block_run(&self, _request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
+            panic!("latest_resumable_checkpoint test must not block runs")
+        }
+
+        async fn complete_run(
+            &self,
+            _request: CompleteRunRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            panic!("latest_resumable_checkpoint test must not complete runs")
+        }
+
+        async fn cancel_run(
+            &self,
+            _request: CancelRunCompletionRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            panic!("latest_resumable_checkpoint test must not cancel runs")
+        }
+
+        async fn fail_run(&self, _request: FailRunRequest) -> Result<TurnRunState, TurnError> {
+            panic!("latest_resumable_checkpoint test must not fail runs")
+        }
+
+        async fn apply_validated_loop_exit(
+            &self,
+            _request: ApplyValidatedLoopExitRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            panic!("latest_resumable_checkpoint test must not apply loop exits")
+        }
+    }
+
+    struct NoopEventSink;
+
+    #[async_trait]
+    impl TurnEventSink for NoopEventSink {
+        async fn publish(&self, _event: TurnLifecycleEvent) -> Result<(), TurnError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn event_publishing_transition_port_forwards_latest_resumable_checkpoint() {
+        let checkpoint_id = TurnCheckpointId::new();
+        let inner = Arc::new(CheckpointProbeTransitionPort::new(checkpoint_id));
+        let port =
+            EventPublishingTurnRunTransitionPort::new(inner.clone(), Arc::new(NoopEventSink));
+        let scope = TurnScope::new(
+            TenantId::new("tenant-forward").expect("tenant id"),
+            Some(AgentId::new("agent-forward").expect("agent id")),
+            None,
+            ThreadId::new("thread-forward").expect("thread id"),
+        );
+        let turn_id = TurnId::new();
+        let run_id = TurnRunId::new();
+
+        let forwarded = port
+            .latest_resumable_checkpoint(&scope, turn_id, run_id)
+            .await
+            .expect("forwarded checkpoint lookup");
+
+        assert_eq!(forwarded, Some(checkpoint_id));
+        assert_eq!(
+            inner.calls.lock().expect("calls mutex").as_slice(),
+            &[(scope, turn_id, run_id)]
+        );
     }
 }

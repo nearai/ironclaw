@@ -12,23 +12,24 @@ use ironclaw_turns::{
     InMemoryTurnStateStore, LoopCheckpointKind, LoopCheckpointStateRef, LoopCheckpointStore,
     LoopExitMapping, PutLoopCheckpointRequest, ReplyTargetBindingRef, RetryTurnRequest,
     RunProfileRequest, RunProfileVersion, SanitizedFailure, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, ThreadBusy, TurnActor, TurnError, TurnLeaseToken, TurnRunId, TurnRunnerId,
-    TurnScope, TurnStateStore, TurnStatus,
+    SubmitTurnResponse, ThreadBusy, TurnActor, TurnError, TurnIdempotencyOperationKind,
+    TurnIdempotencyOutcomeKind, TurnIdempotencyReplay, TurnLeaseToken, TurnPersistenceSnapshot,
+    TurnRunId, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     runner::{
         ApplyValidatedLoopExitRequest, ClaimRunRequest, ClaimedTurnRun, FailRunRequest,
         RecoverExpiredLeasesRequest, TurnRunTransitionPort, TurnRunnerOutcome,
     },
 };
 
-fn engine_filesystem() -> LocalFilesystem {
-    let storage = tempfile::tempdir().unwrap().keep();
+fn engine_filesystem() -> (LocalFilesystem, tempfile::TempDir) {
+    let storage = tempfile::tempdir().unwrap();
     let mut fs = LocalFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/engine").unwrap(),
-        HostPath::from_path_buf(storage),
+        HostPath::from_path_buf(storage.path().to_path_buf()),
     )
     .unwrap();
-    fs
+    (fs, storage)
 }
 
 fn scoped_turns_fs<F>(backend: Arc<F>) -> Arc<ScopedFilesystem<F>>
@@ -162,6 +163,24 @@ where
                 explanation_message_refs: Vec::new(),
                 resume_checkpoint_id,
             }),
+        })
+        .await
+        .unwrap()
+}
+
+async fn complete_claimed_run<S>(
+    store: &S,
+    claimed: &ClaimedTurnRun,
+) -> ironclaw_turns::TurnRunState
+where
+    S: TurnRunTransitionPort + ?Sized,
+{
+    store
+        .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            run_id: claimed.state.run_id,
+            runner_id: claimed.runner_id,
+            lease_token: claimed.lease_token,
+            mapping: LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Completed),
         })
         .await
         .unwrap()
@@ -429,6 +448,110 @@ where
     );
 }
 
+struct RetryBusyScenario {
+    thread: String,
+    retry: RetryTurnRequest,
+    busy: ThreadBusy,
+}
+
+async fn create_retry_thread_busy_record<S>(store: &S, prefix: &str) -> RetryBusyScenario
+where
+    S: TurnStateStore + TurnRunTransitionPort + LoopCheckpointStore + ?Sized,
+{
+    let thread = format!("{prefix}-retry-busy");
+    let (failed_run_id, _) = seed_failed_run_with_checkpoint(
+        store,
+        &thread,
+        &format!("idem-{prefix}-retry-busy-submit"),
+        LoopCheckpointKind::BeforeModel,
+    )
+    .await;
+
+    let blocking = store
+        .submit_turn(
+            submit_request(&thread, &format!("idem-{prefix}-retry-busy-blocking")),
+            &AllowAllTurnAdmissionPolicy,
+            &InMemoryRunProfileResolver::default(),
+        )
+        .await
+        .unwrap();
+    let SubmitTurnResponse::Accepted {
+        run_id: blocking_run_id,
+        status: blocking_status,
+        event_cursor: blocking_cursor,
+        ..
+    } = blocking;
+    assert_eq!(blocking_status, TurnStatus::Queued);
+
+    let retry = retry_request(
+        &thread,
+        failed_run_id,
+        &format!("idem-{prefix}-retry-busy-retry"),
+    );
+    let busy = ThreadBusy {
+        active_run_id: blocking_run_id,
+        status: blocking_status,
+        event_cursor: blocking_cursor,
+    };
+    let error = store.retry_turn(retry.clone()).await.unwrap_err();
+    assert_eq!(error, TurnError::ThreadBusy(busy.clone()));
+
+    RetryBusyScenario {
+        thread,
+        retry,
+        busy,
+    }
+}
+
+fn assert_retry_busy_record_is_not_permanent_error(
+    snapshot: &TurnPersistenceSnapshot,
+    scenario: &RetryBusyScenario,
+) {
+    let record = snapshot
+        .idempotency_records
+        .iter()
+        .find(|record| {
+            record.operation == TurnIdempotencyOperationKind::Retry
+                && record.run_id == Some(scenario.retry.run_id)
+                && record.key == scenario.retry.idempotency_key
+        })
+        .expect("retry ThreadBusy attempt should be retained as a non-replayable record");
+    assert_eq!(record.outcome, TurnIdempotencyOutcomeKind::ThreadBusy);
+    assert!(
+        matches!(
+            &record.replay,
+            TurnIdempotencyReplay::RetryThreadBusy(busy) if busy == &scenario.busy
+        ),
+        "retry ThreadBusy must not be stored as permanent Error replay: {record:?}"
+    );
+    assert!(
+        record.replay_retry().is_none(),
+        "retry ThreadBusy must not be replayable"
+    );
+}
+
+async fn assert_retry_succeeds_after_busy_run_completes<S>(store: &S, scenario: RetryBusyScenario)
+where
+    S: TurnStateStore + TurnRunTransitionPort + LoopCheckpointStore + ?Sized,
+{
+    let blocking = store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(scope(&scenario.thread)),
+        })
+        .await
+        .unwrap()
+        .expect("blocking run should be claimable");
+    assert_eq!(blocking.state.run_id, scenario.busy.active_run_id);
+    let completed = complete_claimed_run(store, &blocking).await;
+    assert_eq!(completed.status, TurnStatus::Completed);
+
+    let retry = store.retry_turn(scenario.retry.clone()).await.unwrap();
+    assert_ne!(retry.run_id, scenario.retry.run_id);
+    assert_eq!(retry.status, TurnStatus::Queued);
+}
+
 #[tokio::test]
 async fn inmemory_retry_failed_turn_spawns_claimable_checkpointed_run() {
     let store = InMemoryTurnStateStore::default();
@@ -443,7 +566,8 @@ async fn inmemory_retry_failed_turn_spawns_claimable_checkpointed_run() {
 
 #[tokio::test]
 async fn filesystem_retry_failed_turn_spawns_claimable_checkpointed_run() {
-    let backend = Arc::new(engine_filesystem());
+    let (backend, _storage) = engine_filesystem();
+    let backend = Arc::new(backend);
     let store = FilesystemTurnStateStore::new(scoped_turns_fs(backend));
     assert_retry_happy_path_spawns_claimable_checkpointed_run(
         &store,
@@ -462,7 +586,8 @@ async fn inmemory_retry_failed_turn_rejects_invalid_sources_and_replays_idempote
 
 #[tokio::test]
 async fn filesystem_retry_failed_turn_rejects_invalid_sources_and_replays_idempotency() {
-    let backend = Arc::new(engine_filesystem());
+    let (backend, _storage) = engine_filesystem();
+    let backend = Arc::new(backend);
     let store = FilesystemTurnStateStore::new(scoped_turns_fs(backend));
     assert_retry_rejections_and_idempotency(&store, "filesystem-retry-reject").await;
 }
@@ -475,9 +600,29 @@ async fn inmemory_retry_failed_turn_reacquires_thread_active_lock() {
 
 #[tokio::test]
 async fn filesystem_retry_failed_turn_reacquires_thread_active_lock() {
-    let backend = Arc::new(engine_filesystem());
+    let (backend, _storage) = engine_filesystem();
+    let backend = Arc::new(backend);
     let store = FilesystemTurnStateStore::new(scoped_turns_fs(backend));
     assert_retry_reacquires_thread_active_lock(&store, "filesystem").await;
+}
+
+#[tokio::test]
+async fn inmemory_retry_thread_busy_is_not_permanent_idempotency_replay() {
+    let store = InMemoryTurnStateStore::default();
+    let scenario = create_retry_thread_busy_record(&store, "memory").await;
+    assert_retry_busy_record_is_not_permanent_error(&store.persistence_snapshot(), &scenario);
+    assert_retry_succeeds_after_busy_run_completes(&store, scenario).await;
+}
+
+#[tokio::test]
+async fn filesystem_retry_thread_busy_is_not_permanent_idempotency_replay() {
+    let (backend, _storage) = engine_filesystem();
+    let backend = Arc::new(backend);
+    let store = FilesystemTurnStateStore::new(scoped_turns_fs(backend));
+    let scenario = create_retry_thread_busy_record(&store, "filesystem").await;
+    let snapshot = store.persistence_snapshot().await.unwrap();
+    assert_retry_busy_record_is_not_permanent_error(&snapshot, &scenario);
+    assert_retry_succeeds_after_busy_run_completes(&store, scenario).await;
 }
 
 /// Regression for the lease-expired / externally-failed path: `fail_run`
@@ -647,7 +792,8 @@ async fn inmemory_external_fail_preserves_retryability() {
 
 #[tokio::test]
 async fn filesystem_external_fail_preserves_retryability() {
-    let backend = Arc::new(engine_filesystem());
+    let (backend, _storage) = engine_filesystem();
+    let backend = Arc::new(backend);
     let store = FilesystemTurnStateStore::new(scoped_turns_fs(backend));
     assert_external_fail_preserves_retryability(&store, "filesystem").await;
 }
@@ -660,7 +806,8 @@ async fn inmemory_lease_recovery_preserves_retryability() {
 
 #[tokio::test]
 async fn filesystem_lease_recovery_preserves_retryability() {
-    let backend = Arc::new(engine_filesystem());
+    let (backend, _storage) = engine_filesystem();
+    let backend = Arc::new(backend);
     let store = FilesystemTurnStateStore::new(scoped_turns_fs(backend));
     assert_lease_recovery_preserves_retryability(&store, "filesystem").await;
 }

@@ -507,13 +507,7 @@ impl RebornServicesApi for StubServices {
             .lock()
             .expect("lock")
             .pop_front()
-            .unwrap_or_else(|| {
-                Ok(RebornRetryRunResponse {
-                    run_id: TurnRunId::new(),
-                    status: TurnStatus::Queued,
-                    event_cursor: EventCursor(5),
-                })
-            })
+            .expect("retry_run test stub called without queued response")
     }
 
     async fn list_threads(
@@ -1329,6 +1323,11 @@ async fn resolve_gate_path_overrides_body_gate_ref() {
 #[tokio::test]
 async fn retry_run_path_overrides_body_run_id() {
     let services = Arc::new(StubServices::default());
+    services.enqueue_retry_run(Ok(RebornRetryRunResponse {
+        run_id: TurnRunId::new(),
+        status: TurnStatus::Queued,
+        event_cursor: EventCursor(5),
+    }));
     let router = router_with(services.clone());
 
     let response = router

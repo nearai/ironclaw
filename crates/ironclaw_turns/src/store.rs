@@ -316,6 +316,7 @@ pub enum TurnIdempotencyReplay {
     SubmitAdmissionRejected(AdmissionRejection),
     ResumeSucceeded(ResumeTurnResponse),
     RetrySucceeded(RetryTurnResponse),
+    RetryThreadBusy(ThreadBusy),
     CancelRecorded(CancelRunResponse),
     Error(TurnIdempotencyErrorReplay),
 }
@@ -444,6 +445,8 @@ impl TurnIdempotencyRecord {
         }
         match &self.replay {
             TurnIdempotencyReplay::RetrySucceeded(response) => Some(Ok(response.clone())),
+            // Same-thread busy is a transient lock state, not an idempotent retry outcome.
+            TurnIdempotencyReplay::RetryThreadBusy(_) => None,
             TurnIdempotencyReplay::Error(error)
                 if self.operation == TurnIdempotencyOperationKind::Retry =>
             {

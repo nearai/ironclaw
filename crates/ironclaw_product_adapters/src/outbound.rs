@@ -987,6 +987,7 @@ impl ProductProjectionItem {
                 status,
                 failure_category: _,
                 failure_summary,
+                retryable,
                 ..
             } => {
                 validate_bounded_text(
@@ -994,6 +995,12 @@ impl ProductProjectionItem {
                     status,
                     PROJECTION_ITEM_ID_MAX_BYTES,
                 )?;
+                if retryable.is_some() && status != "failed" {
+                    return Err(invalid(
+                        "projection_run_retryable",
+                        "retryable is only valid for failed run status entries",
+                    ));
+                }
                 if let Some(summary) = failure_summary {
                     validate_bounded_text(
                         "projection_failure_summary",
@@ -1439,6 +1446,47 @@ mod tests {
         let decoded: ProductProjectionState =
             serde_json::from_value(value).expect("deserialize run status projection");
         assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn projection_state_allows_retryable_failed_run_status() {
+        ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::RunStatus {
+                run_id: TurnRunId::new(),
+                status: "failed".to_string(),
+                failure_category: None,
+                failure_summary: None,
+                retryable: Some(true),
+            }],
+        )
+        .expect("failed run status may carry retryability");
+    }
+
+    #[test]
+    fn projection_state_rejects_retryable_non_failed_run_status() {
+        let error = ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::RunStatus {
+                run_id: TurnRunId::new(),
+                status: "running".to_string(),
+                failure_category: None,
+                failure_summary: None,
+                retryable: Some(true),
+            }],
+        )
+        .expect_err("running run status must not carry retryability");
+
+        assert!(
+            matches!(
+                error,
+                ProductAdapterError::InvalidIdentifier {
+                    kind: "projection_run_retryable",
+                    ..
+                }
+            ),
+            "unexpected error: {error:?}"
+        );
     }
 
     #[test]

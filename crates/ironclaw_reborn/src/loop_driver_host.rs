@@ -3174,7 +3174,7 @@ mod event_subscription_scope_tests {
 #[cfg(test)]
 mod turn_error_to_host_error_tests {
     use super::*;
-    use ironclaw_turns::{TurnCapacityResource, TurnError};
+    use ironclaw_turns::{TurnCapacityResource, TurnError, TurnRunId};
 
     #[test]
     fn capacity_exceeded_maps_to_unavailable() {
@@ -3189,6 +3189,14 @@ mod turn_error_to_host_error_tests {
     fn conflict_maps_to_checkpoint_rejected() {
         let error = turn_error_to_host_error(TurnError::Conflict {
             reason: "checkpoint conflict".to_string(),
+        });
+        assert_eq!(error.kind, AgentLoopHostErrorKind::CheckpointRejected);
+    }
+
+    #[test]
+    fn run_not_retryable_maps_to_checkpoint_rejected() {
+        let error = turn_error_to_host_error(TurnError::RunNotRetryable {
+            run_id: TurnRunId::new(),
         });
         assert_eq!(error.kind, AgentLoopHostErrorKind::CheckpointRejected);
     }

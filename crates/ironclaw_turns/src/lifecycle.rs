@@ -33,7 +33,7 @@ const MAX_DELIVERED_EVENT_CURSORS: usize = 4096;
 /// mutation.
 ///
 /// Two publication paths preserve the `TurnCommittedEventObserver` split:
-/// coordinator-origin operations (submit, resume, request_cancel, submit_child)
+/// coordinator-origin operations (submit, resume, retry, request_cancel, submit_child)
 /// emit only a lifecycle event and call `observe_committed_event`, while
 /// runner-origin transitions (claim, block, complete, fail, cancel, recovery,
 /// validated-loop-exit) carry the committed `TurnRunState` and call

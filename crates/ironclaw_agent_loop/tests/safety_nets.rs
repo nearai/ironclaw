@@ -1,15 +1,62 @@
 use std::collections::VecDeque;
 
+use chrono::{TimeZone, Utc};
 use ironclaw_agent_loop::{
     executor::{AgentLoopExecutor, CanonicalAgentLoopExecutor},
     families,
     state::{CheckpointKind, LoopExecutionState},
     test_support::{
         MockAgentLoopDriverHost, MockHostCall, ScenarioScript, ScriptedCapabilityCall,
-        ScriptedCapabilityOutcome, ScriptedModelResponse,
+        ScriptedCapabilityOutcome, ScriptedModelResponse, capability_id, surface_version,
     },
 };
-use ironclaw_turns::{LoopExit, LoopFailureKind, run_profile::LoopRunInfoPort};
+use ironclaw_turns::{
+    LoopExit, LoopFailureKind,
+    run_profile::{
+        CapabilityBatchInvocation, CapabilityInputRef, CapabilityInvocation, LoopCancelReasonKind,
+        LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopRunInfoPort,
+    },
+};
+
+#[tokio::test]
+async fn cancel_after_capability_batch_is_consumed_once() {
+    let first_signal = LoopCancellationSignal {
+        reason_kind: LoopCancelReasonKind::UserRequested,
+        requested_at: Utc.with_ymd_and_hms(2026, 6, 12, 10, 0, 0).unwrap(),
+    };
+    let second_signal = LoopCancellationSignal {
+        reason_kind: LoopCancelReasonKind::Policy,
+        requested_at: Utc.with_ymd_and_hms(2026, 6, 12, 10, 1, 0).unwrap(),
+    };
+    let (host, _) = MockAgentLoopDriverHost::builder()
+        .script(ScenarioScript {
+            model_responses: VecDeque::new(),
+            capability_outcomes: VecDeque::from([
+                vec![ScriptedCapabilityOutcome::completed("result:first")],
+                vec![ScriptedCapabilityOutcome::completed("result:second")],
+            ]),
+            single_call_retry_outcomes: VecDeque::new(),
+            pending_inputs: VecDeque::new(),
+        })
+        .cancel_after_capability_batch(first_signal.clone())
+        .build();
+    let request = CapabilityBatchInvocation {
+        invocations: vec![CapabilityInvocation {
+            surface_version: surface_version(),
+            capability_id: capability_id("demo.echo"),
+            input_ref: CapabilityInputRef::new("input:one-shot").unwrap(),
+            approval_resume: None,
+        }],
+        stop_on_first_suspension: false,
+    };
+
+    host.invoke_capability_batch(request.clone()).await.unwrap();
+    assert_eq!(host.observe_cancellation(), Some(first_signal));
+
+    host.set_cancellation_signal(second_signal.clone());
+    host.invoke_capability_batch(request).await.unwrap();
+    assert_eq!(host.observe_cancellation(), Some(second_signal));
+}
 
 #[tokio::test]
 async fn repeated_signature_warns_before_allowing_final_reply() {
