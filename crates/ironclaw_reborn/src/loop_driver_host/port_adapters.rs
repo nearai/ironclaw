@@ -268,7 +268,19 @@ fn checkpoint_state_store_ref(
     run_context: &LoopRunContext,
     state_ref: &LoopCheckpointStateRef,
 ) -> Result<LoopCheckpointStateRef, AgentLoopHostError> {
-    checkpoint_state_store_ref_and_run_id(run_context, state_ref).map(|(state_ref, _)| state_ref)
+    // Write path: a checkpoint record may only be staged under the current
+    // run's scope. Cross-run links (`checkpoint:{other_run}:{token}`) are a
+    // read-only retry-resume affordance resolved in `load_checkpoint_payload`;
+    // accepting one here would index the write against a foreign run's payload
+    // and later fail to load. Reject anything not scoped to this run.
+    let (store_ref, source_run_id) = checkpoint_state_store_ref_and_run_id(run_context, state_ref)?;
+    if source_run_id != run_context.run_id {
+        return Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::CheckpointRejected,
+            "checkpoint state ref is not scoped to this loop run",
+        ));
+    }
+    Ok(store_ref)
 }
 
 fn checkpoint_state_store_ref_and_run_id(

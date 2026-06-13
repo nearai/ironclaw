@@ -332,3 +332,28 @@ async fn validate_thread_scope_skips_owner_check_without_actor() {
     super::validate_thread_scope(&thread_scope, &context)
         .expect("absent actor must skip the owner check");
 }
+
+#[tokio::test]
+async fn checkpoint_write_rejects_foreign_run_scoped_state_ref() {
+    // Regression: the checkpoint WRITE path must only stage refs scoped to the
+    // current run. A `checkpoint:{other_run}:{token}` ref is a read-only
+    // retry-resume link; accepting it on write would index the record against a
+    // foreign run's payload and later fail to load. (CodeRabbit PR #4841.)
+    let context = test_run_context().await;
+    let foreign_run = TurnRunId::new();
+    let (port, _state_store, _checkpoint_store) = test_checkpoint_port(context);
+
+    let foreign_ref =
+        LoopCheckpointStateRef::new(format!("checkpoint:{foreign_run}:retry_state")).unwrap();
+
+    let error = port
+        .checkpoint(LoopCheckpointRequest {
+            kind: LoopCheckpointKind::BeforeModel,
+            state_ref: foreign_ref,
+            gate_ref: None,
+        })
+        .await
+        .expect_err("foreign run-scoped checkpoint ref must be rejected on write");
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::CheckpointRejected);
+}
