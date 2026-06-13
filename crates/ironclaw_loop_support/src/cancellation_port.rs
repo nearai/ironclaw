@@ -600,7 +600,7 @@ mod tests {
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
-            run_origin: None,
+            product_context: None,
         }
     }
 
