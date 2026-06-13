@@ -1,7 +1,10 @@
 use async_trait::async_trait;
 use ironclaw_turns::{
     LoopExit, LoopMessageRef,
-    run_profile::{AssistantReply, FinalizeAssistantMessage},
+    run_profile::{
+        AssistantReply, FinalizeAssistantMessage, LoopInlineMessage, LoopInlineMessageRole,
+        LoopModelCapabilityView, LoopModelRequest, LoopSafeSummary, ParentLoopOutput,
+    },
 };
 
 use crate::{
@@ -10,9 +13,105 @@ use crate::{
 };
 
 use super::{
-    AgentLoopExecutorError, CheckpointStage, ExecutorStage, StageContext, completed_exit,
-    failed_exit,
+    AgentLoopExecutorError, CheckpointStage, ExecutorStage, HostStage, StageContext,
+    completed_exit, failed_exit, model_preference_to_host,
 };
+
+/// Instruction injected by the final-answer nudge — drive the model to produce a
+/// closing answer with no tools available.
+pub(super) const FINAL_ANSWER_NUDGE: &str = "You have not given the user a final answer yet. \
+Based on the work you have already done, give your final answer to the user now. \
+Do not call any tools.";
+
+/// Driver-specific "final-answer" nudge: when the loop would otherwise end a turn
+/// with no real assistant answer (empty/trailed-off reply, model-call budget
+/// exhausted, or no-progress detected), issue ONE extra **tool-free** model call
+/// asking the model to synthesize a closing answer from the work done, and return
+/// the finalized reply ref. This is the reborn equivalent of the legacy loop's
+/// `on_tool_intent_nudge` / force-text-recovery.
+///
+/// Gated by `SteeringPolicy.allow_driver_specific_nudges` (off in production) and
+/// capped at one nudge per run. Returns `Ok(None)` when disabled, capped, or the
+/// model still declines to answer — callers then keep their existing behavior.
+/// Does NOT push to `state.assistant_refs` (the caller owns that, to stay
+/// consistent with each exit path's checkpoint ordering).
+pub(super) async fn try_final_answer_nudge(
+    ctx: StageContext<'_>,
+    state: &mut LoopExecutionState,
+) -> Result<Option<LoopMessageRef>, AgentLoopExecutorError> {
+    if !ctx
+        .host
+        .run_context()
+        .resolved_run_profile
+        .steering_policy
+        .allow_driver_specific_nudges
+    {
+        return Ok(None);
+    }
+    if state.final_answer_nudges_used >= 1 {
+        return Ok(None);
+    }
+
+    // Build a tool-free prompt bundle: leaving `surface_version`/`capability_view`
+    // as `None` makes the host render no tools, so the model must answer in prose.
+    let context_plan = ctx.planner.context().plan_context_request(state).await;
+    let mut request = context_plan.request;
+    request.surface_version = None;
+    request.capability_view = None;
+    let safe_body = LoopSafeSummary::new(FINAL_ANSWER_NUDGE.to_string()).map_err(|_| {
+        AgentLoopExecutorError::PlannerContract {
+            detail: "final-answer nudge body was invalid",
+        }
+    })?;
+    request.inline_messages.push(LoopInlineMessage {
+        role: LoopInlineMessageRole::User,
+        safe_body,
+    });
+    let bundle = ctx.host.build_prompt_bundle(request).await.map_err(|_| {
+        AgentLoopExecutorError::HostUnavailable {
+            stage: HostStage::Prompt,
+        }
+    })?;
+    // Count it before the call so a failure can't be retried into a loop.
+    state.final_answer_nudges_used += 1;
+
+    let model_preference = model_preference_to_host(ctx.planner.model().preference(state).await)?;
+    // An *empty* capability view (not `None`) is what actually forces a tool-free
+    // model call: the reborn gateway attaches tools whenever the loop port holds a
+    // capability port, filtered by this view — an empty visible set filters the
+    // surface to zero tools, so the provider gets a text-only request and must
+    // answer in prose. `surface_version: None` only strips tools from the prompt
+    // *text*, not from the provider tool array, so it is not sufficient on its own.
+    let model_request = LoopModelRequest {
+        messages: bundle.messages,
+        surface_version: None,
+        model_preference,
+        capability_view: Some(LoopModelCapabilityView {
+            visible_capability_ids: Vec::new(),
+        }),
+    };
+    let response = ctx.host.stream_model(model_request).await.map_err(|_| {
+        AgentLoopExecutorError::HostUnavailable {
+            stage: HostStage::Model,
+        }
+    })?;
+
+    match response.output {
+        ParentLoopOutput::AssistantReply(reply) if !reply.content.trim().is_empty() => {
+            let reply_ref = ctx
+                .host
+                .finalize_assistant_message(FinalizeAssistantMessage { reply })
+                .await
+                .map_err(|_| AgentLoopExecutorError::HostUnavailable {
+                    stage: HostStage::Transcript,
+                })?;
+            Ok(Some(reply_ref))
+        }
+        // Model ignored the no-tools instruction or returned empty — give up; the
+        // caller falls back to its existing (failed/canned) exit.
+        _ => Ok(None),
+    }
+}
 
 const NO_PROGRESS_FALLBACK_REPLY: &str = concat!(
     "I stopped because I was repeating the same step without making progress. ",
@@ -57,7 +156,13 @@ impl ExitStage {
             }
             StopKind::NoProgressDetected => {
                 let mut state = state;
-                let reply_ref = finalize_no_progress_fallback(ctx).await?;
+                // Prefer a real synthesized answer (nudge); fall back to the
+                // canned no-progress reply when nudges are disabled/capped or the
+                // model still won't answer.
+                let reply_ref = match try_final_answer_nudge(ctx, &mut state).await? {
+                    Some(reply_ref) => reply_ref,
+                    None => finalize_no_progress_fallback(ctx).await?,
+                };
                 state.assistant_refs.push(reply_ref);
                 let checked = CheckpointStage
                     .write(ctx, state, CheckpointKind::Final)

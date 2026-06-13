@@ -66,6 +66,13 @@ pub struct LoopExecutionState {
     /// (#3841 follow-up F1).
     pub recent_output_token_counts: BoundedRing<u32, 8>,
 
+    /// Count of final-answer nudges issued this run (driver-specific nudge,
+    /// gated by `SteeringPolicy.allow_driver_specific_nudges`). Capped so the
+    /// loop can't issue unbounded extra model calls. `#[serde(default)]` keeps
+    /// older checkpoints decodable.
+    #[serde(default)]
+    pub final_answer_nudges_used: u32,
+
     // strategy slots — one per strategy that mutates state.
     pub context_state: ContextStrategyState,
     pub capability_state: CapabilityStrategyState,
@@ -144,6 +151,7 @@ impl LoopExecutionState {
             recent_call_signatures: BoundedRing::new(),
             recent_failure_kinds: BoundedRing::new(),
             recent_output_token_counts: BoundedRing::new(),
+            final_answer_nudges_used: 0,
             context_state: ContextStrategyState::default(),
             capability_state: CapabilityStrategyState::default(),
             model_state: ModelStrategyState::default(),
