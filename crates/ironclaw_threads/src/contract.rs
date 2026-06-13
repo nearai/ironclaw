@@ -114,7 +114,17 @@ impl MessageContent {
         &self.attachments
     }
 
+    /// Consume the content into its text body, **discarding any attachment
+    /// references**. Only correct for content known to be attachment-free
+    /// (assistant drafts, tool results); use [`Self::into_parts`] whenever
+    /// attachments must survive. The debug assertion turns a silent drop into a
+    /// loud failure in debug/test builds.
     pub fn into_text(self) -> String {
+        debug_assert!(
+            self.attachments.is_empty(),
+            "into_text() dropped {} attachment ref(s); use into_parts() to keep them",
+            self.attachments.len()
+        );
         self.text
     }
 
@@ -517,11 +527,20 @@ mod tests {
     }
 
     #[test]
-    fn into_text_discards_attachments() {
-        // `into_text` is the text-only accessor; callers that must keep
-        // attachments use `into_parts`. This documents the lossy path.
-        let content = MessageContent::with_attachments("body", vec![sample_ref()]);
+    fn into_text_keeps_text_when_attachment_free() {
+        // The non-lossy use: `into_text` is the text-only accessor for content
+        // known to carry no attachments (assistant drafts, tool results).
+        let content = MessageContent::text("body");
         assert_eq!(content.into_text(), "body");
+    }
+
+    #[test]
+    #[should_panic(expected = "dropped 1 attachment ref")]
+    fn into_text_debug_asserts_when_it_would_drop_attachments() {
+        // Callers that must keep attachments use `into_parts`; `into_text` on
+        // attachment-bearing content is a bug and fails loudly in debug/tests.
+        let content = MessageContent::with_attachments("body", vec![sample_ref()]);
+        let _ = content.into_text();
     }
 
     #[test]

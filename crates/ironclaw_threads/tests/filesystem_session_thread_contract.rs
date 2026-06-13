@@ -1194,3 +1194,81 @@ async fn filesystem_persists_attachment_refs_and_clears_them_on_redaction() {
     assert!(after.messages[0].content.is_none());
     assert!(after.messages[0].attachments.is_empty());
 }
+
+#[tokio::test]
+async fn filesystem_persists_multiple_attachment_refs_in_order() {
+    // The single-ref test can't catch an ordering or per-element bug in the
+    // JSON array round trip. Drive a multi-ref message — distinct kinds, one
+    // with `extracted_text: Some(..)` (which the single-ref test never sets) —
+    // through the real serialize → store → deserialize path and assert the full
+    // vec survives in order.
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-multi-att", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let scope = scope("multi-attachments");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-multi-att").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let attachments = vec![
+        AttachmentRef {
+            id: "att-1".into(),
+            kind: AttachmentKind::Image,
+            mime_type: "image/png".into(),
+            filename: Some("diagram.png".into()),
+            size_bytes: Some(4096),
+            storage_key: Some("attachments/2026-06-09/m1-0-diagram.png".into()),
+            extracted_text: None,
+        },
+        AttachmentRef {
+            id: "att-2".into(),
+            kind: AttachmentKind::Document,
+            mime_type: "application/pdf".into(),
+            filename: Some("report.pdf".into()),
+            size_bytes: Some(20_480),
+            storage_key: Some("attachments/2026-06-09/m1-1-report.pdf".into()),
+            extracted_text: Some("Quarterly revenue up 12%".into()),
+        },
+        AttachmentRef {
+            id: "att-3".into(),
+            kind: AttachmentKind::Audio,
+            mime_type: "audio/mpeg".into(),
+            filename: Some("note.mp3".into()),
+            size_bytes: Some(8192),
+            storage_key: Some("attachments/2026-06-09/m1-2-note.mp3".into()),
+            extracted_text: None,
+        },
+    ];
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: Some("event-multi-att".into()),
+            content: MessageContent::with_attachments("three files", attachments.clone()),
+        })
+        .await
+        .unwrap();
+
+    // Re-open over the same backend so the assertion crosses the real JSON
+    // serialize → store → deserialize boundary.
+    let reopened = FilesystemSessionThreadService::new(scoped);
+    let history = reopened
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.messages.len(), 1);
+    assert_eq!(history.messages[0].attachments, attachments);
+}

@@ -748,7 +748,11 @@ where
             .reserve_sequence(&request.scope, &request.thread_id)
             .await?;
         let message_id = ThreadMessageId::new();
-        let (content_text, attachments) = request.content.clone().into_parts();
+        // Borrow `request` for the idempotency key before moving `content` out,
+        // so the content (now carrying attachment refs) is consumed by move
+        // rather than deep-cloned on this per-message hot path.
+        let idempotency_key = InboundIdempotencyKey::from_request(&request);
+        let (content_text, attachments) = request.content.into_parts();
         let message = ThreadMessageRecord {
             message_id,
             thread_id: request.thread_id.clone(),
@@ -769,7 +773,7 @@ where
         self.write_new_message(&request.scope, &request.thread_id, &message, "message")
             .await?;
 
-        if let Some(idempotency_key) = InboundIdempotencyKey::from_request(&request) {
+        if let Some(idempotency_key) = idempotency_key {
             let idem_record = InboundIdempotencyRecord {
                 scope: idempotency_key.scope.clone(),
                 source_binding_id: idempotency_key.source_binding_id.clone(),
