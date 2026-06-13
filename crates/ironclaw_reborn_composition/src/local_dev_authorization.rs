@@ -20,8 +20,93 @@ pub(crate) fn local_dev_authorizer(
         .map(|policy| policy.resolved_profile)
         .unwrap_or(RuntimeProfile::LocalDev);
     let gate_effects = capability_policy.approval_gate_effects();
+    let exempt_capabilities = capability_policy.approval_gate_exempt_capabilities();
     let gate_policy: Arc<dyn ProfileApprovalGatePolicy> = Arc::new(
-        RuntimeProfileApprovalGatePolicy::new(resolved_profile, gate_effects),
+        RuntimeProfileApprovalGatePolicy::new(resolved_profile, gate_effects)
+            .with_exempt_capabilities(exempt_capabilities),
     );
     profile_approval_authorizer(approval_policy, gate_policy)
+}
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_host_api::{
+        CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, MountView, PermissionMode,
+        ResourceEstimate, RuntimeKind, TrustClass,
+    };
+    use ironclaw_host_runtime::{
+        BUILTIN_FIRST_PARTY_PROVIDER, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+    };
+    use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+    use serde_json::json;
+
+    use super::*;
+    use crate::local_dev_capability_policy::local_dev_capability_policy;
+
+    #[tokio::test]
+    async fn local_dev_trace_commons_profile_set_skips_approval_gate() {
+        let capability_id =
+            CapabilityId::new(TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID).expect("capability id");
+        let descriptor = CapabilityDescriptor {
+            id: capability_id,
+            provider: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER).expect("provider id"),
+            runtime: RuntimeKind::FirstParty,
+            trust_ceiling: TrustClass::UserTrusted,
+            description: "test".to_string(),
+            parameters_schema: json!({}),
+            effects: vec![
+                EffectKind::ReadFilesystem,
+                EffectKind::Network,
+                EffectKind::ExternalWrite,
+            ],
+            default_permission: PermissionMode::Allow,
+            runtime_credentials: Vec::new(),
+            resource_profile: None,
+        };
+        let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
+        let provider_id = ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER).expect("provider id");
+        let grants = policy.builtin_grants(
+            &provider_id,
+            &MountView::default(),
+            &MountView::default(),
+            &MountView::default(),
+        );
+        let context = ironclaw_host_api::ExecutionContext::local_default(
+            ironclaw_host_api::UserId::new("test-user").expect("user id"),
+            provider_id,
+            RuntimeKind::FirstParty,
+            TrustClass::UserTrusted,
+            grants,
+            MountView::default(),
+        )
+        .expect("execution context");
+        let trust_decision = TrustDecision {
+            effective_trust: EffectiveTrustClass::user_trusted(),
+            authority_ceiling: AuthorityCeiling {
+                allowed_effects: vec![
+                    EffectKind::ReadFilesystem,
+                    EffectKind::Network,
+                    EffectKind::ExternalWrite,
+                ],
+                max_resource_ceiling: None,
+            },
+            provenance: TrustProvenance::AdminConfig,
+            evaluated_at: chrono::Utc::now(),
+        };
+        let authorizer = local_dev_authorizer(None, policy);
+
+        let decision = authorizer
+            .authorize_dispatch_with_trust(
+                &context,
+                &descriptor,
+                &ResourceEstimate::default(),
+                &trust_decision,
+            )
+            .await;
+
+        assert!(
+            matches!(decision, ironclaw_host_api::Decision::Allow { .. }),
+            "Trace Commons profile_set is consented in the agent turn and should not require a REPL approval gate, got {decision:?}"
+        );
+    }
 }

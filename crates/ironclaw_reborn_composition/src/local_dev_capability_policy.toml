@@ -44,6 +44,13 @@ ask_destructive = [
     "external_write",
     "financial",
 ]
+exempt_capabilities = [
+    # The user chooses the public handle/bio in-turn before the agent invokes
+    # this first-party Trace Commons profile update. REPL approval prompts are
+    # tracked separately; keep this exemption narrow so other external writes
+    # still use the local-dev approval gate.
+    "builtin.trace_commons.profile_set",
+]
 
 [approval_defaults.spawn_capability]
 effects = [
@@ -220,3 +227,33 @@ capability = "builtin.trigger_remove"
 effects = ["dispatch_capability", "external_write"]
 mounts = "ambient"
 network = "default"
+
+[[grants]]
+capability = "builtin.trace_commons.onboard"
+effects = ["dispatch_capability", "network", "external_write"]
+mounts = "ambient"
+network = "local_dev_wildcard"
+
+[[grants]]
+capability = "builtin.trace_commons.status"
+effects = ["dispatch_capability", "read_filesystem"]
+mounts = "ambient"
+network = "default"
+
+[[grants]]
+capability = "builtin.trace_commons.credits"
+effects = ["dispatch_capability", "read_filesystem"]
+mounts = "ambient"
+network = "default"
+
+[[grants]]
+capability = "builtin.trace_commons.profile_token"
+effects = ["dispatch_capability", "read_filesystem", "network", "external_write"]
+mounts = "ambient"
+network = "local_dev_wildcard"
+
+[[grants]]
+capability = "builtin.trace_commons.profile_set"
+effects = ["dispatch_capability", "read_filesystem", "network", "external_write"]
+mounts = "ambient"
+network = "local_dev_wildcard"

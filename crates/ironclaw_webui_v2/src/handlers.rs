@@ -38,11 +38,11 @@ use ironclaw_product_workflow::{
     RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
     RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
     RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest,
+    RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse,
+    SetActiveLlmRequest, UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -463,6 +463,41 @@ pub struct ListAutomationsQuery {
     /// Optional maximum number of recent runs to return per automation row.
     #[serde(default)]
     pub run_limit: Option<u32>,
+}
+
+/// `GET /api/webchat/v2/traces/credit`
+///
+/// Read-only Trace Commons credit summary scoped strictly to the
+/// authenticated caller — the facade derives the trace scope from the
+/// caller's user id; no scope input is accepted from the request. The
+/// response is the contributor-local view as of the last credit sync;
+/// the authoritative ledger is server-side. A caller with no local
+/// Trace Commons state receives the unenrolled zero-state, not an
+/// error.
+pub async fn trace_credits(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornTraceCreditsResponse>, WebUiV2HttpError> {
+    let response = state.services().trace_credits(caller).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/traces/holds/{submission_id}/authorize`
+///
+/// Authorize a held manual-review trace for submission (promote-as-is). The
+/// trace scope is derived from the authenticated caller; the `submission_id`
+/// path segment is never authority to cross scopes. A missing/already-resolved
+/// hold returns `{ authorized: false }`, not an error.
+pub async fn authorize_trace_hold(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(submission_id): Path<String>,
+) -> Result<Json<RebornTraceHoldAuthorizeResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .authorize_trace_hold(caller, submission_id)
+        .await?;
+    Ok(Json(response))
 }
 
 /// `GET /api/webchat/v2/channels/connectable`

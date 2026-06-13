@@ -95,6 +95,27 @@ impl WebuiAuthenticator for MultiUserToken {
     }
 }
 
+/// `WebuiAuthenticator` resolving [`VALID_TOKEN`] to a fixed,
+/// test-supplied user id. The trace-credits tests use it so the
+/// authenticated caller's user id equals a unique per-test trace
+/// scope — the facade derives the scope from the caller only.
+struct FixedUserToken {
+    user_id: String,
+}
+
+#[async_trait]
+impl WebuiAuthenticator for FixedUserToken {
+    async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
+        if token == VALID_TOKEN {
+            Some(WebuiAuthentication::operator(
+                UserId::new(self.user_id.as_str()).expect("user id"),
+            ))
+        } else {
+            None
+        }
+    }
+}
+
 #[tokio::test]
 async fn health_route_is_public_for_platform_probes() {
     let bundle = RebornWebuiBundle {
@@ -1261,6 +1282,119 @@ async fn missing_bearer_returns_401_before_facade() {
             .expect("lock")
             .is_empty()
     );
+}
+
+/// Removes a per-test trace scope directory on drop so a failed
+/// assertion cannot leak contributor-local state into the shared
+/// IronClaw base dir.
+struct TraceScopeCleanup(String);
+
+impl Drop for TraceScopeCleanup {
+    fn drop(&mut self) {
+        let dir = ironclaw_reborn_traces::contribution::trace_contribution_dir_for_scope(Some(
+            self.0.as_str(),
+        ));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+fn unique_trace_credits_user() -> String {
+    format!("webui-v2-trace-credits-{}", uuid::Uuid::new_v4())
+}
+
+#[tokio::test]
+async fn trace_credits_bearer_happy_path_returns_unenrolled_zero_state_for_fresh_scope() {
+    // Fresh, unique user scope: the facade derives the trace scope from
+    // the authenticated caller's user id only, so a uuid-suffixed user
+    // guarantees no contributor-local state exists and the response is
+    // the unenrolled zero-state — never an error.
+    let user_id = unique_trace_credits_user();
+    let (app, _services) = build_app_with_authenticator(Arc::new(FixedUserToken {
+        user_id: user_id.clone(),
+    }));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/traces/credit")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_str(&read_body_string(response).await).expect("trace credits json");
+    assert_eq!(body["enrolled"], false);
+    assert_eq!(body["submissions_total"], 0);
+    assert_eq!(body["submissions_submitted"], 0);
+    assert_eq!(body["credit_events_total"], 0);
+    assert_eq!(body["pending_credit"], 0.0);
+    assert_eq!(body["final_credit"], 0.0);
+    assert!(
+        body["note"]
+            .as_str()
+            .expect("note")
+            .contains("authoritative ledger is server-side"),
+        "response must carry the server-authoritative framing note",
+    );
+}
+
+#[tokio::test]
+async fn trace_credits_missing_bearer_returns_401() {
+    let (app, _services) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/traces/credit")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn trace_credits_reports_enrolled_for_caller_with_enabled_policy() {
+    use ironclaw_reborn_traces::contribution::{
+        StandingTraceContributionPolicy, write_trace_policy_for_scope,
+    };
+
+    // The authenticated user id IS the trace scope; write an enabled
+    // standing policy for a unique per-test scope and assert the route
+    // reflects enrollment for that caller only.
+    let user_id = unique_trace_credits_user();
+    let _cleanup = TraceScopeCleanup(user_id.clone());
+    let policy = StandingTraceContributionPolicy {
+        enabled: true,
+        ..StandingTraceContributionPolicy::default()
+    };
+    write_trace_policy_for_scope(Some(user_id.as_str()), &policy).expect("write trace policy");
+
+    let (app, _services) = build_app_with_authenticator(Arc::new(FixedUserToken {
+        user_id: user_id.clone(),
+    }));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/traces/credit")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_str(&read_body_string(response).await).expect("trace credits json");
+    assert_eq!(body["enrolled"], true);
+    assert_eq!(body["submissions_total"], 0);
 }
 
 #[tokio::test]

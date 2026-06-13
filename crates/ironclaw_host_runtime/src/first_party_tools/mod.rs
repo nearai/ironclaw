@@ -17,6 +17,7 @@ mod skill_management;
 mod skill_url_install;
 mod spawn_subagent;
 mod time;
+mod trace_commons;
 mod trigger_management;
 
 use std::{future::Future, panic::AssertUnwindSafe, sync::Arc, time::Instant};
@@ -57,6 +58,11 @@ pub use skill_management::{
 };
 pub use spawn_subagent::SPAWN_SUBAGENT_CAPABILITY_ID;
 pub use time::TIME_CAPABILITY_ID;
+pub use trace_commons::{
+    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
+    TRACE_COMMONS_STATUS_CAPABILITY_ID,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use trigger_management::TriggerManagementClock;
 pub use trigger_management::{
@@ -162,6 +168,11 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     http::save_manifest()?,
                     shell::manifest()?,
                     spawn_subagent::manifest()?,
+                    trace_commons::onboard_manifest()?,
+                    trace_commons::status_manifest()?,
+                    trace_commons::credits_manifest()?,
+                    trace_commons::profile_token_manifest()?,
+                    trace_commons::profile_set_manifest()?,
                 ];
                 capabilities.extend(memory::manifests()?);
                 capabilities.extend(coding_manifests()?);
@@ -265,6 +276,26 @@ fn builtin_first_party_base_registry() -> Result<FirstPartyCapabilityRegistry, H
         CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID)?,
         handler.clone(),
     );
+    registry.insert_handler(
+        CapabilityId::new(TRACE_COMMONS_ONBOARD_CAPABILITY_ID)?,
+        handler.clone(),
+    );
+    registry.insert_handler(
+        CapabilityId::new(TRACE_COMMONS_STATUS_CAPABILITY_ID)?,
+        handler.clone(),
+    );
+    registry.insert_handler(
+        CapabilityId::new(TRACE_COMMONS_CREDITS_CAPABILITY_ID)?,
+        handler.clone(),
+    );
+    registry.insert_handler(
+        CapabilityId::new(TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID)?,
+        handler.clone(),
+    );
+    registry.insert_handler(
+        CapabilityId::new(TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID)?,
+        handler,
+    );
     skill_management::insert_handlers(&mut registry)?;
     Ok(registry)
 }
@@ -355,6 +386,26 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                 ));
             }
             SPAWN_SUBAGENT_CAPABILITY_ID => (spawn_subagent::dispatch(), None),
+            // arch-exempt: network_egress_bytes not surfaced for the onboard
+            // call — it routes through the host runtime_http_egress (policy- and
+            // credential-checked), but dispatch_onboard returns only the output
+            // Value, so outbound byte accounting is not propagated back here.
+            // Low-frequency, consent-gated onboarding call.
+            TRACE_COMMONS_ONBOARD_CAPABILITY_ID => {
+                (trace_commons::dispatch_onboard(&request).await?, None)
+            }
+            TRACE_COMMONS_STATUS_CAPABILITY_ID => {
+                (trace_commons::dispatch_status(&request).await?, None)
+            }
+            TRACE_COMMONS_CREDITS_CAPABILITY_ID => {
+                (trace_commons::dispatch_credits(&request).await?, None)
+            }
+            TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID => {
+                (trace_commons::dispatch_profile_token(&request).await?, None)
+            }
+            TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID => {
+                (trace_commons::dispatch_profile_set(&request).await?, None)
+            }
             capability_id => {
                 let Some(metadata) = coding_capability_metadata(capability_id) else {
                     return Err(FirstPartyCapabilityError::new(

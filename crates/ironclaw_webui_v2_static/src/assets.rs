@@ -205,6 +205,68 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_trace_credits_card_assets_are_embedded() {
+        // The compact card is mounted in the sidebar above the conversation
+        // list and reuses the existing trace-credits hook + endpoint.
+        let card = asset_text("js/components/sidebar-trace-credits.js");
+        assert!(card.contains("export function SidebarTraceCredits"));
+        // Reuses the shared hook (and thus the `/api/webchat/v2/traces/credit`
+        // endpoint), not a parallel fetch.
+        assert!(card.contains("useTraceCredits"));
+        // Renders nothing unless enrolled — keeps the sidebar clean.
+        assert!(card.contains("if (!credits || !credits.enrolled) return null;"));
+        // Click-through opens the full Settings -> Trace Commons tab.
+        assert!(card.contains("to=\"/settings/traces\""));
+        assert!(card.contains("traceCommons.cardAccepted"));
+        // Held-for-review count surfaces only when there are holds.
+        assert!(card.contains("manual_review_hold_count"));
+        assert!(card.contains("heldCount > 0"));
+        assert!(card.contains("traceCommons.cardHeld"));
+
+        let sidebar = asset_text("js/components/sidebar.js");
+        assert!(sidebar.contains("SidebarTraceCredits"));
+        // Mounted between the nav and the threads list.
+        assert!(sidebar.contains("<${SidebarTraceCredits} />"));
+
+        // The Settings tab lists held traces (reason + submission id) sourced
+        // from the credits response `holds[]`.
+        let tab = asset_text("js/pages/settings/components/trace-commons-tab.js");
+        assert!(tab.contains("const holds = credits.holds || [];"));
+        assert!(tab.contains("traceCommons.heldTitle"));
+        assert!(tab.contains("traceCommons.heldDescription"));
+        assert!(tab.contains("hold.submission_id"));
+        assert!(tab.contains("hold.reason"));
+        // Per-hold Authorize button wired to the authorize mutation.
+        assert!(tab.contains("authorize.mutate(hold.submission_id)"));
+        assert!(tab.contains("traceCommons.authorize"));
+
+        // Authorize calls the POST endpoint and invalidates the credits query.
+        let settings_api = asset_text("js/pages/settings/lib/settings-api.js");
+        assert!(settings_api.contains("export function authorizeTraceHold"));
+        assert!(settings_api.contains("/authorize"));
+        assert!(settings_api.contains("method: \"POST\""));
+        let trace_hook = asset_text("js/pages/settings/hooks/useTraceCredits.js");
+        assert!(trace_hook.contains("authorizeTraceHold"));
+        assert!(trace_hook.contains("invalidateQueries({ queryKey: [\"trace-credits\"] })"));
+
+        // The hook refetches so the card and Settings tab reflect new
+        // accepted submissions without a manual reload.
+        let hook = asset_text("js/pages/settings/hooks/useTraceCredits.js");
+        assert!(hook.contains("refetchInterval: 60_000"));
+        assert!(hook.contains("refetchOnWindowFocus: true"));
+
+        // The new i18n keys are present in the eagerly-bundled English pack
+        // (other locales fall back to it if missing, but all 11 carry them).
+        let en = asset_text("js/i18n/en.js");
+        assert!(en.contains("\"traceCommons.cardAccepted\""));
+        assert!(en.contains("\"traceCommons.cardHeld\""));
+        assert!(en.contains("\"traceCommons.heldTitle\""));
+        assert!(en.contains("\"traceCommons.heldDescription\""));
+        assert!(en.contains("\"traceCommons.authorize\""));
+        assert!(en.contains("\"traceCommons.authorizing\""));
+    }
+
+    #[test]
     fn auth_session_assets_use_server_capabilities_for_admin_status() {
         let api = asset_text("js/lib/api.js");
         assert!(api.contains("fetchSession"));

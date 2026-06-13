@@ -1351,6 +1351,9 @@ impl Agent {
                         messages: &messages,
                         policy: &policy,
                         max_turns: 5,
+                        // v1 message transcripts carry structured outcome
+                        // payloads in tool_calls rows; no caller override.
+                        outcome_override: None,
                     },
                 )
                 .await

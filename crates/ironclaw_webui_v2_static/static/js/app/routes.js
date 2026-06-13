@@ -40,6 +40,9 @@ export const SETTINGS_SUB_ROUTES = [
   // { id: "networking", labelKey: "settings.networking", icon: "pulse" },
   // { id: "tools", labelKey: "settings.tools", icon: "tool" },
   { id: "skills", labelKey: "settings.skills", icon: "file" },
+  // Trace Commons is un-hidden: its api lib calls the real v2
+  // `/api/webchat/v2/traces/credit` endpoint.
+  { id: "traces", labelKey: "settings.traceCommons", icon: "layers" },
   // { id: "users", labelKey: "settings.users", icon: "lock" },
   { id: "language", labelKey: "settings.language", icon: "globe" },
 ];

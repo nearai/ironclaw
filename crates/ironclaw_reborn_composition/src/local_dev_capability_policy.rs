@@ -174,6 +174,10 @@ impl LocalDevCapabilityPolicy {
             self.approval_gates.ask_destructive.clone(),
         )
     }
+
+    pub(crate) fn approval_gate_exempt_capabilities(&self) -> Vec<CapabilityId> {
+        self.approval_gates.exempt_capabilities.clone()
+    }
 }
 
 pub(crate) fn local_dev_one_shot_lease_approval(constraints: GrantConstraints) -> LeaseApproval {
@@ -209,6 +213,8 @@ pub(crate) struct LocalDevProviderPolicy {
 pub(crate) struct LocalDevApprovalGatePolicy {
     pub(crate) ask_writes: Vec<EffectKind>,
     pub(crate) ask_destructive: Vec<EffectKind>,
+    #[serde(default)]
+    pub(crate) exempt_capabilities: Vec<CapabilityId>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -481,6 +487,12 @@ mod tests {
         );
         assert!(
             policy
+                .approval_gate_exempt_capabilities()
+                .iter()
+                .any(|capability| capability.as_str() == "builtin.trace_commons.profile_set")
+        );
+        assert!(
+            policy
                 .approval_defaults
                 .spawn_capability
                 .effects
@@ -524,6 +536,57 @@ mod tests {
             "builtin.trigger_remove",
             &[EffectKind::DispatchCapability, EffectKind::ExternalWrite],
         );
+
+        // Trace Commons capabilities must be granted here or they vanish from
+        // the model-visible tool surface in local-dev (REPL/serve) runs.
+        let onboard = policy
+            .grant(&CapabilityId::new("builtin.trace_commons.onboard").expect("capability id"))
+            .expect("trace_commons.onboard grant");
+        assert_eq!(
+            onboard.effects,
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::Network,
+                EffectKind::ExternalWrite,
+            ]
+        );
+        assert_eq!(onboard.mounts, LocalDevMountProfile::Ambient);
+        // Onboarding posts to an operator-chosen invite origin, so it needs the
+        // wildcard egress profile (private/metadata IP ranges stay blocked).
+        assert_eq!(onboard.network, LocalDevNetworkProfile::LocalDevWildcard);
+        for capability in [
+            "builtin.trace_commons.status",
+            "builtin.trace_commons.credits",
+        ] {
+            let grant = policy
+                .grant(&CapabilityId::new(capability).expect("capability id"))
+                .expect("trace_commons read grant");
+            assert_eq!(
+                grant.effects,
+                vec![EffectKind::DispatchCapability, EffectKind::ReadFilesystem]
+            );
+            assert_eq!(grant.mounts, LocalDevMountProfile::Ambient);
+            assert_eq!(grant.network, LocalDevNetworkProfile::Default);
+        }
+        for capability in [
+            "builtin.trace_commons.profile_token",
+            "builtin.trace_commons.profile_set",
+        ] {
+            let grant = policy
+                .grant(&CapabilityId::new(capability).expect("capability id"))
+                .expect("trace_commons profile grant");
+            assert_eq!(
+                grant.effects,
+                vec![
+                    EffectKind::DispatchCapability,
+                    EffectKind::ReadFilesystem,
+                    EffectKind::Network,
+                    EffectKind::ExternalWrite,
+                ]
+            );
+            assert_eq!(grant.mounts, LocalDevMountProfile::Ambient);
+            assert_eq!(grant.network, LocalDevNetworkProfile::LocalDevWildcard);
+        }
     }
 
     #[test]
