@@ -107,7 +107,10 @@ impl LoopRuntimeContext {
                                 "unauthenticated"
                             };
                             let active = if ch.active { "active" } else { "inactive" };
-                            format!("{} ({auth}, {active})", sanitize_prompt_string(&ch.name))
+                            format!(
+                                "{} ({auth}, {active})",
+                                model_safe_label(&ch.name, "a connected channel")
+                            )
                         })
                         .collect::<Vec<_>>()
                         .join(", ");
@@ -140,8 +143,8 @@ impl LoopRuntimeContext {
                 DeliveryTargetState::Set(summary) => format!(
                     "Outbound delivery target: {} ({}) \u{2014} applies to all routine and \
                      trigger results for this user (single preference, not per-trigger).",
-                    sanitize_prompt_string(&summary.display_name),
-                    sanitize_prompt_string(&summary.channel)
+                    model_safe_label(&summary.display_name, "a configured target"),
+                    model_safe_label(&summary.channel, "channel")
                 ),
             };
             parts.push(delivery_line);
@@ -157,7 +160,7 @@ impl LoopRuntimeContext {
                         let adapter_str = ctx
                             .adapter
                             .as_ref()
-                            .map(|a| sanitize_prompt_string(a.as_str()))
+                            .map(|a| model_safe_label(a.as_str(), "a connected product"))
                             .unwrap_or_else(|| "unknown".to_string());
                         format!(
                             "Run origin: inbound message via {adapter_str}; replies post back to that conversation.",
@@ -197,7 +200,7 @@ impl LoopRuntimeContext {
                     let adapter_str = ctx
                         .adapter
                         .as_ref()
-                        .map(|a| sanitize_prompt_string(a.as_str()))
+                        .map(|a| model_safe_label(a.as_str(), "a connected product"))
                         .unwrap_or_else(|| "unknown".to_string());
                     format!(
                         "Run origin: inbound message via {adapter_str}; replies post back to that conversation.",
@@ -233,6 +236,20 @@ fn sanitize_prompt_string(s: &str) -> String {
             }
         })
         .collect()
+}
+
+/// Render an external label (channel name, delivery target, adapter) for the
+/// model-visible slice. Sanitizes control/format characters, then verifies the
+/// result against the same model-safe-text policy the prompt bundle enforces.
+/// A label that would still trip that policy (e.g. a channel literally named
+/// `#secret-alerts`) degrades to `placeholder` so it can never fail prompt
+/// construction — the slice degrades instead of the whole bundle.
+fn model_safe_label(value: &str, placeholder: &str) -> String {
+    let sanitized = sanitize_prompt_string(value);
+    match super::prompt_text::validate_model_safe_text(sanitized.clone(), "runtime context label") {
+        Ok(_) => sanitized,
+        Err(_) => placeholder.to_string(),
+    }
 }
 
 /// Provider of model-visible communication state for a single loop execution.
@@ -556,6 +573,40 @@ mod tests {
         assert!(
             text.contains("single preference, not per-trigger"),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn delivery_target_label_tripping_model_safe_policy_degrades_to_placeholder() {
+        // A legitimate label can contain a word the model-safe-text policy rejects
+        // (e.g. "authorization"). It must degrade to a placeholder rather than
+        // surviving into the slice and later failing prompt-bundle construction.
+        let ctx = LoopRuntimeContext {
+            loop_started_at_utc: stamp(),
+            user_timezone: None,
+            communication: Some(CommunicationRuntimeContext {
+                connected_channels: ConnectedChannelsState::Unknown,
+                delivery_target: DeliveryTargetState::Set(DeliveryTargetSummary {
+                    display_name: "authorization".to_string(),
+                    channel: "slack".to_string(),
+                }),
+                delivery_tools_visible: false,
+            }),
+            product_context: None,
+        };
+        let text = ctx.render_model_content();
+        assert!(
+            !text.contains("authorization"),
+            "denylisted label word must not survive into the slice: {text}"
+        );
+        assert!(
+            text.contains("Outbound delivery target: a configured target (slack)"),
+            "label degrades to placeholder, safe channel preserved: {text}"
+        );
+        // The rendered slice must itself pass the model-safe-text policy.
+        assert!(
+            super::super::prompt_text::validate_model_safe_text(text.clone(), "test").is_ok(),
+            "degraded slice must be model-safe: {text}"
         );
     }
 
