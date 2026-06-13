@@ -1,0 +1,584 @@
+use async_trait::async_trait;
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use std::{sync::Arc, sync::Mutex};
+use thiserror::Error;
+
+use ironclaw_host_api::{RuntimeCredentialAuthRequirement, Timestamp, UserId};
+
+use crate::{GateRef, TurnError, TurnRunId, TurnRunState, TurnScope, TurnStatus};
+
+const MAX_IN_MEMORY_EVENTS: usize = 10_000;
+pub const MAX_TURN_EVENT_PROJECTION_LIMIT: usize = 1_000;
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
+)]
+#[serde(transparent)]
+pub struct EventCursor(pub u64);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TurnEventKind {
+    Submitted,
+    Resumed,
+    RunnerClaimed,
+    RunnerHeartbeat,
+    RecoveryRequired,
+    Blocked,
+    CancelRequested,
+    Cancelled,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnBlockedGateKind {
+    Approval,
+    Auth,
+    Resource,
+    AwaitDependentRun,
+}
+
+impl TurnBlockedGateKind {
+    pub fn from_status(status: TurnStatus) -> Option<Self> {
+        match status {
+            TurnStatus::BlockedApproval => Some(Self::Approval),
+            TurnStatus::BlockedAuth => Some(Self::Auth),
+            TurnStatus::BlockedResource => Some(Self::Resource),
+            TurnStatus::BlockedDependentRun => Some(Self::AwaitDependentRun),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnBlockedGateMetadata {
+    pub gate_ref: GateRef,
+    pub gate_kind: TurnBlockedGateKind,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnLifecycleEvent {
+    pub cursor: EventCursor,
+    pub scope: TurnScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurred_at: Option<Timestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_user_id: Option<UserId>,
+    pub run_id: TurnRunId,
+    pub status: TurnStatus,
+    pub kind: TurnEventKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_gate: Option<TurnBlockedGateMetadata>,
+    // `skip_serializing_if` matches the other optional fields above:
+    // pre-projection event rows emitted `"sanitized_reason": null`; new rows
+    // omit the field entirely. `serde(default)` rehydrates omitted fields as
+    // `None`, so the wire change is round-trip safe in both directions and
+    // adapters that persist `TurnLifecycleEvent` do not need a migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sanitized_reason: Option<String>,
+}
+
+impl TurnLifecycleEvent {
+    pub fn from_run_state(
+        state: &TurnRunState,
+        kind: TurnEventKind,
+        sanitized_reason: Option<String>,
+    ) -> Self {
+        let blocked_gate = if kind == TurnEventKind::Blocked {
+            state.gate_ref.clone().and_then(|gate_ref| {
+                TurnBlockedGateKind::from_status(state.status).map(|gate_kind| {
+                    TurnBlockedGateMetadata {
+                        gate_ref,
+                        gate_kind,
+                        credential_requirements: state.credential_requirements.clone(),
+                    }
+                })
+            })
+        } else {
+            None
+        };
+        Self {
+            cursor: state.event_cursor,
+            scope: state.scope.clone(),
+            occurred_at: Some(Utc::now()),
+            owner_user_id: lifecycle_owner_user_id(
+                &state.scope,
+                state.actor.as_ref().map(|actor| &actor.user_id),
+            ),
+            run_id: state.run_id,
+            status: state.status,
+            kind,
+            blocked_gate,
+            sanitized_reason,
+        }
+    }
+
+    /// Return the transport-facing lifecycle event view.
+    ///
+    /// Internal projection consumers may need gate and owner metadata to
+    /// materialize read models, but public lifecycle snapshots must not expose
+    /// resolution refs or owner identity.
+    pub fn into_public_projection_entry(mut self) -> Self {
+        self.blocked_gate = None;
+        self.owner_user_id = None;
+        self
+    }
+}
+
+pub(crate) fn lifecycle_owner_user_id(
+    scope: &TurnScope,
+    fallback_actor_user_id: Option<&UserId>,
+) -> Option<UserId> {
+    scope
+        .explicit_owner_user_id()
+        .cloned()
+        .or_else(|| fallback_actor_user_id.cloned())
+}
+
+#[async_trait]
+pub trait TurnEventSink: Send + Sync {
+    async fn publish(&self, event: TurnLifecycleEvent) -> Result<(), TurnError>;
+}
+
+#[async_trait]
+pub trait TurnCommittedEventObserver: Send + Sync {
+    /// Returns true when this observer must process a committed state.
+    ///
+    /// Observer errors are treated as required side-effect failures by most
+    /// coordinator and runner transitions. Callers that have already committed
+    /// a lease batch may log observer failures and return the committed state
+    /// so the runner does not lose track of persisted ownership.
+    fn observes_state(&self, _state: &TurnRunState) -> bool {
+        true
+    }
+
+    /// Returns true when this observer must process a committed event.
+    ///
+    /// Event observers run before best-effort event sinks. Errors are
+    /// propagated to the coordinator caller because the observer represents an
+    /// internal consistency side effect rather than external notification.
+    fn observes_event(&self, _event: &TurnLifecycleEvent) -> bool {
+        true
+    }
+
+    async fn observe_committed_state(&self, state: TurnRunState) -> Result<(), TurnError>;
+
+    async fn observe_committed_event(&self, event: TurnLifecycleEvent) -> Result<(), TurnError>;
+}
+
+#[derive(Default)]
+pub struct InMemoryTurnEventSink {
+    events: Mutex<Vec<TurnLifecycleEvent>>,
+}
+
+impl InMemoryTurnEventSink {
+    pub fn events(&self) -> Vec<TurnLifecycleEvent> {
+        match self.events.lock() {
+            Ok(events) => events.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl TurnEventSink for InMemoryTurnEventSink {
+    async fn publish(&self, event: TurnLifecycleEvent) -> Result<(), TurnError> {
+        let mut events = self.events.lock().map_err(|_| TurnError::Unavailable {
+            reason: "turn event sink mutex poisoned".to_string(),
+        })?;
+        events.push(event);
+        if events.len() > MAX_IN_MEMORY_EVENTS {
+            let excess = events.len() - MAX_IN_MEMORY_EVENTS;
+            events.drain(0..excess);
+        }
+        Ok(())
+    }
+}
+
+/// Scope-bound cursor for transport-agnostic turn lifecycle projections.
+///
+/// The cursor carries the exact [`TurnScope`] under which it was minted so a
+/// product adapter cannot use a cursor from one thread/project as bearer
+/// authority to skip or infer events from another scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct TurnEventProjectionCursor {
+    pub event: EventCursor,
+    pub scope: TurnScope,
+}
+
+impl TurnEventProjectionCursor {
+    pub fn for_scope(scope: TurnScope, event: EventCursor) -> Self {
+        Self { event, scope }
+    }
+
+    pub fn origin_for_scope(scope: TurnScope) -> Self {
+        Self {
+            event: EventCursor::default(),
+            scope,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnEventProjectionRequest {
+    pub scope: TurnScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_user_id: Option<UserId>,
+    pub after: Option<TurnEventProjectionCursor>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnEventProjectionSnapshot {
+    pub entries: Vec<TurnLifecycleEvent>,
+    pub next_cursor: TurnEventProjectionCursor,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnEventPage {
+    pub entries: Vec<TurnLifecycleEvent>,
+    pub next_cursor: EventCursor,
+    pub truncated: bool,
+    pub rebase_required: Option<EventCursor>,
+}
+
+#[derive(Debug, Error)]
+pub enum TurnEventProjectionError {
+    #[error("turn event projection request rejected: {reason}")]
+    InvalidRequest { reason: &'static str },
+    #[error("turn event projection rebase required")]
+    RebaseRequired {
+        requested: Box<TurnEventProjectionCursor>,
+        earliest: Box<TurnEventProjectionCursor>,
+    },
+    #[error("turn event projection source failed during {operation}")]
+    Source { operation: &'static str },
+}
+
+#[async_trait]
+pub trait TurnEventProjectionSource: Send + Sync {
+    async fn read_turn_events_after(
+        &self,
+        scope: &TurnScope,
+        owner_user_id: Option<&UserId>,
+        after: Option<EventCursor>,
+        limit: usize,
+    ) -> Result<TurnEventPage, TurnError>;
+}
+
+pub struct TurnEventProjectionService<S>
+where
+    S: TurnEventProjectionSource + ?Sized,
+{
+    source: Arc<S>,
+}
+
+impl<S> TurnEventProjectionService<S>
+where
+    S: TurnEventProjectionSource + ?Sized,
+{
+    pub fn new(source: Arc<S>) -> Self {
+        Self { source }
+    }
+
+    pub async fn snapshot(
+        &self,
+        request: TurnEventProjectionRequest,
+    ) -> Result<TurnEventProjectionSnapshot, TurnEventProjectionError> {
+        self.read(request).await
+    }
+
+    pub async fn updates(
+        &self,
+        request: TurnEventProjectionRequest,
+    ) -> Result<TurnEventProjectionSnapshot, TurnEventProjectionError> {
+        self.read(request).await
+    }
+
+    async fn read(
+        &self,
+        request: TurnEventProjectionRequest,
+    ) -> Result<TurnEventProjectionSnapshot, TurnEventProjectionError> {
+        if request.limit == 0 || request.limit > MAX_TURN_EVENT_PROJECTION_LIMIT {
+            return Err(TurnEventProjectionError::InvalidRequest {
+                reason: "limit must be between 1 and MAX_TURN_EVENT_PROJECTION_LIMIT",
+            });
+        }
+        if let Some(cursor) = request.after.as_ref()
+            && cursor.scope != request.scope
+        {
+            return Err(TurnEventProjectionError::RebaseRequired {
+                requested: Box::new(cursor.clone()),
+                earliest: Box::new(TurnEventProjectionCursor::origin_for_scope(
+                    request.scope.clone(),
+                )),
+            });
+        }
+        let after = request.after.as_ref().map(|cursor| cursor.event);
+        let page = self
+            .source
+            .read_turn_events_after(
+                &request.scope,
+                request.owner_user_id.as_ref(),
+                after,
+                request.limit,
+            )
+            .await
+            .map_err(|_| TurnEventProjectionError::Source {
+                operation: "read_turn_events_after",
+            })?;
+        if let Some(rebase_cursor) = page.rebase_required {
+            return Err(TurnEventProjectionError::RebaseRequired {
+                requested: Box::new(request.after.unwrap_or_else(|| {
+                    TurnEventProjectionCursor::origin_for_scope(request.scope.clone())
+                })),
+                earliest: Box::new(TurnEventProjectionCursor::for_scope(
+                    request.scope,
+                    rebase_cursor,
+                )),
+            });
+        }
+        Ok(TurnEventProjectionSnapshot {
+            entries: page
+                .entries
+                .into_iter()
+                .map(TurnLifecycleEvent::into_public_projection_entry)
+                .collect(),
+            next_cursor: TurnEventProjectionCursor::for_scope(request.scope, page.next_cursor),
+            truncated: page.truncated,
+        })
+    }
+}
+
+pub(crate) fn project_turn_events(
+    events: &[TurnLifecycleEvent],
+    scope: &TurnScope,
+    owner_user_id: Option<&UserId>,
+    after: Option<EventCursor>,
+    limit: usize,
+    retention_floor: EventCursor,
+) -> TurnEventPage {
+    let after = after.unwrap_or_default();
+    let mut scoped_events = events
+        .iter()
+        .filter(|event| {
+            &event.scope == scope
+                && owner_user_id.is_none_or(|owner| event.owner_user_id.as_ref() == Some(owner))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    scoped_events.sort_by_key(|event| event.cursor);
+
+    let latest_scoped_cursor = scoped_events.last().map(|event| event.cursor);
+    let rebase_required = if retention_floor > EventCursor::default() && after < retention_floor {
+        Some(retention_floor)
+    } else if let Some(latest) = latest_scoped_cursor {
+        (after > latest).then_some(latest)
+    } else {
+        (after > retention_floor).then_some(retention_floor)
+    };
+
+    if let Some(rebase_cursor) = rebase_required {
+        return TurnEventPage {
+            entries: Vec::new(),
+            next_cursor: rebase_cursor,
+            truncated: false,
+            rebase_required: Some(rebase_cursor),
+        };
+    }
+
+    let mut matching = scoped_events
+        .into_iter()
+        .filter(|event| event.cursor > after)
+        .collect::<Vec<_>>();
+    let truncated = matching.len() > limit;
+    if truncated {
+        matching.truncate(limit);
+    }
+    let next_cursor = matching.last().map(|event| event.cursor).unwrap_or(after);
+    TurnEventPage {
+        entries: matching,
+        next_cursor,
+        truncated,
+        rebase_required: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use async_trait::async_trait;
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+
+    use crate::{
+        AcceptedMessageRef, GateRef, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
+        SourceBindingRef, TurnActor, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope,
+        TurnStatus,
+        events::{
+            EventCursor, TurnBlockedGateKind, TurnBlockedGateMetadata, TurnEventKind,
+            TurnEventPage, TurnEventProjectionService, TurnEventProjectionSource,
+            TurnLifecycleEvent, project_turn_events,
+        },
+    };
+
+    fn scope(thread: &str) -> TurnScope {
+        TurnScope::new(
+            TenantId::new("tenant-a").expect("tenant"),
+            Some(AgentId::new("agent-a").expect("agent")),
+            Some(ProjectId::new("project-a").expect("project")),
+            ThreadId::new(thread).expect("thread"),
+        )
+    }
+
+    fn blocked_event(cursor: u64, scope: TurnScope) -> TurnLifecycleEvent {
+        TurnLifecycleEvent {
+            cursor: EventCursor(cursor),
+            scope,
+            occurred_at: None,
+            owner_user_id: Some(UserId::new("owner-a").expect("owner")),
+            run_id: TurnRunId::new(),
+            status: TurnStatus::BlockedApproval,
+            kind: TurnEventKind::Blocked,
+            blocked_gate: Some(TurnBlockedGateMetadata {
+                gate_ref: GateRef::new("gate:approval-a").expect("gate ref"),
+                gate_kind: TurnBlockedGateKind::Approval,
+                credential_requirements: Vec::new(),
+            }),
+            sanitized_reason: Some("approval_required".to_string()),
+        }
+    }
+
+    struct MemoryProjectionSource {
+        events: Vec<TurnLifecycleEvent>,
+    }
+
+    #[async_trait]
+    impl TurnEventProjectionSource for MemoryProjectionSource {
+        async fn read_turn_events_after(
+            &self,
+            scope: &TurnScope,
+            owner_user_id: Option<&UserId>,
+            after: Option<EventCursor>,
+            limit: usize,
+        ) -> Result<TurnEventPage, TurnError> {
+            Ok(project_turn_events(
+                &self.events,
+                scope,
+                owner_user_id,
+                after,
+                limit,
+                EventCursor::default(),
+            ))
+        }
+    }
+
+    #[test]
+    fn blocked_gate_kind_from_status_ignores_non_blocked_statuses() {
+        for status in [
+            TurnStatus::Queued,
+            TurnStatus::Running,
+            TurnStatus::Completed,
+            TurnStatus::Failed,
+            TurnStatus::Cancelled,
+        ] {
+            assert_eq!(TurnBlockedGateKind::from_status(status), None);
+        }
+    }
+
+    #[test]
+    fn run_state_lifecycle_event_prefers_explicit_owner_over_actor() {
+        let actor = UserId::new("user:actor").expect("actor");
+        let owner = UserId::new("user:subject").expect("subject");
+        let scope = TurnScope::new_with_owner(
+            TenantId::new("tenant-a").expect("tenant"),
+            Some(AgentId::new("agent-a").expect("agent")),
+            Some(ProjectId::new("project-a").expect("project")),
+            ThreadId::new("thread-a").expect("thread"),
+            Some(owner.clone()),
+        );
+        let state = TurnRunState {
+            scope,
+            actor: Some(TurnActor::new(actor)),
+            turn_id: TurnId::new(),
+            run_id: TurnRunId::new(),
+            status: TurnStatus::BlockedAuth,
+            accepted_message_ref: AcceptedMessageRef::new("accepted-a").expect("accepted ref"),
+            source_binding_ref: SourceBindingRef::new("source-a").expect("source ref"),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-a").expect("reply ref"),
+            resolved_run_profile_id: RunProfileId::default_profile(),
+            resolved_run_profile_version: RunProfileVersion::new(1),
+            resolved_model_route: None,
+            received_at: chrono::Utc::now(),
+            checkpoint_id: None,
+            gate_ref: Some(GateRef::new("gate:auth-a").expect("gate ref")),
+            credential_requirements: Vec::new(),
+            failure: None,
+            event_cursor: EventCursor(1),
+        };
+
+        let event = TurnLifecycleEvent::from_run_state(&state, TurnEventKind::Blocked, None);
+
+        assert_eq!(event.owner_user_id, Some(owner));
+    }
+
+    #[test]
+    fn public_projection_entry_strips_internal_projection_metadata() {
+        let event = blocked_event(1, scope("thread-a"));
+
+        let public = event.into_public_projection_entry();
+
+        assert_eq!(public.blocked_gate, None);
+        assert_eq!(public.owner_user_id, None);
+        assert_eq!(
+            public.sanitized_reason.as_deref(),
+            Some("approval_required")
+        );
+    }
+
+    #[test]
+    fn project_turn_events_allows_cursor_equal_to_retention_floor() {
+        let scope = scope("thread-a");
+        let event = blocked_event(6, scope.clone());
+
+        let page = project_turn_events(
+            std::slice::from_ref(&event),
+            &scope,
+            None,
+            Some(EventCursor(5)),
+            10,
+            EventCursor(5),
+        );
+
+        assert_eq!(page.rebase_required, None);
+        assert_eq!(page.entries, vec![event]);
+        assert_eq!(page.next_cursor, EventCursor(6));
+    }
+
+    #[tokio::test]
+    async fn projection_service_strips_internal_projection_metadata_from_snapshot() {
+        let scope = scope("thread-a");
+        let source = MemoryProjectionSource {
+            events: vec![blocked_event(1, scope.clone())],
+        };
+        let service = TurnEventProjectionService::new(std::sync::Arc::new(source));
+
+        let snapshot = service
+            .snapshot(crate::events::TurnEventProjectionRequest {
+                scope,
+                owner_user_id: None,
+                after: None,
+                limit: 10,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].blocked_gate, None);
+        assert_eq!(snapshot.entries[0].owner_user_id, None);
+    }
+}

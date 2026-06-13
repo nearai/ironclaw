@@ -1,0 +1,79 @@
+# Agent-loop execution — checkpoint (pause) and exit points. Render: d2 --layout elk loop-execution.d2 loop-execution.svg
+direction: down
+
+classes: {
+  checkpoint: {
+    shape: hexagon
+    style.fill: "#fff59d"
+    style.font-size: 18
+  }
+  decision: {
+    shape: diamond
+    style.fill: "#b3e5fc"
+    style.font-size: 18
+  }
+  step: {
+    style.fill: "#e3f2fd"
+    style.font-size: 18
+  }
+  exitok: {
+    shape: oval
+    style.fill: "#a5d6a7"
+    style.font-size: 18
+  }
+  exitpause: {
+    shape: oval
+    style.fill: "#ffcc80"
+    style.font-size: 18
+  }
+  exitbad: {
+    shape: oval
+    style.fill: "#ef9a9a"
+    style.font-size: 18
+  }
+}
+
+title: "Agent-loop execution — pause (checkpoint) and exit points" {
+  near: top-center
+  shape: text
+  style.font-size: 24
+  style.bold: true
+}
+
+start: "Run claimed by worker" {class: exitok}
+ctx: "Build context" {class: step}
+cpm: "checkpoint\nBeforeModel" {class: checkpoint}
+model: "LLM call" {class: step}
+resp: "Response?" {class: decision}
+cps: "checkpoint\nBeforeSideEffect" {class: checkpoint}
+caps: "Capability calls" {class: step}
+out: "Outcome?" {class: decision}
+cpb: "checkpoint\nBeforeBlock" {class: checkpoint}
+stop: "Stop condition?" {class: decision}
+cpf: "checkpoint\nFinal" {class: checkpoint}
+
+done: "EXIT — Completed" {class: exitok}
+blocked: "PAUSE — Blocked" {class: exitpause}
+failed: "EXIT — Failed" {class: exitbad}
+cancelled: "EXIT — Cancelled" {class: exitbad}
+
+start -> ctx
+ctx -> cpm
+cpm -> model
+model -> resp
+resp -> cpf: "text reply"
+resp -> cps: "tool calls"
+cps -> caps
+caps -> out
+out -> ctx: "result — continue"
+out -> cpb: "gate"
+cpb -> blocked
+cpf -> stop
+stop -> done: "met"
+stop -> ctx: "continue"
+ctx -> failed: "budget / error"
+ctx -> cancelled: "cancel signal"
+blocked -> start: "resume_turn — re-claimed" {
+  style.stroke: "#ef6c00"
+  style.stroke-dash: 4
+}

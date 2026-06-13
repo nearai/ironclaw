@@ -832,6 +832,7 @@ I18n.register('en', {
   'chat.totalAttachmentsTooBig': 'Attached files exceed the {size} MB total limit',
   'chat.readOnlyThread': 'Read-only thread (external channel)',
   'chat.threadCreateFailed': 'Failed to create thread: {message}',
+  'chat.runFinishedWithoutReply': 'The run finished without producing a reply. Try again, or check logs if this keeps happening.',
 
   // Common (dynamic)
   'common.copyFailed': 'Failed',

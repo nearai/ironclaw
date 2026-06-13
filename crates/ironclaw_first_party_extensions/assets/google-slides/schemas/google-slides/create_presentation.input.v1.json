@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Slides create_presentation",
+  "description": "Create a new presentation.",
+  "type": "object",
+  "required": [
+    "title"
+  ],
+  "properties": {
+    "title": {
+      "type": "string",
+      "description": "Presentation title."
+    }
+  },
+  "additionalProperties": false
+}

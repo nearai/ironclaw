@@ -1,0 +1,46 @@
+[package]
+name = "ironclaw_reborn_openai_compat"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Reborn-native OpenAI-compatible API contract surface"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[features]
+default = []
+# Compile the fail-closed axum route fragment. Host composition still owns
+# listener binding, auth middleware, CORS, body/rate limits, and mounting.
+openai-compat-beta = ["dep:async-stream", "dep:axum", "dep:futures-core"]
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["clock"] }
+hex = "0.4"
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+async-stream = { version = "0.3", optional = true }
+axum = { version = "0.8", optional = true }
+futures-core = { version = "0.3", optional = true }
+tokio = { version = "1", features = ["sync", "time"] }
+
+[dev-dependencies]
+http = "1"
+http-body-util = "0.1"
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters", features = ["test-support"] }
+ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
+tokio = { version = "1", features = ["macros", "rt", "time"] }
+tower = { version = "0.5", features = ["util"] }
+
+[lints]
+workspace = true

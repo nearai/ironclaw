@@ -28,7 +28,7 @@ use crate::provider::{
 };
 
 /// AWS Bedrock provider using the native Converse API.
-pub struct BedrockProvider {
+pub(crate) struct BedrockProvider {
     client: Client,
     /// Base model ID for display purposes (without prefix).
     display_model: String,
@@ -43,7 +43,7 @@ impl BedrockProvider {
     ///
     /// Async because the AWS SDK config loader requires an async context
     /// to resolve credentials from SSO profiles, IMDS, etc.
-    pub async fn new(config: &BedrockConfig) -> Result<Self, LlmError> {
+    pub(crate) async fn new(config: &BedrockConfig) -> Result<Self, LlmError> {
         let cross_region_prefix = config
             .cross_region
             .as_ref()
@@ -141,6 +141,7 @@ impl LlmProvider for BedrockProvider {
             output_tokens,
             finish_reason: map_stop_reason(response.stop_reason()),
             cache_creation_input_tokens: 0,
+            reasoning: None,
             cache_read_input_tokens: 0,
         })
     }
@@ -580,6 +581,7 @@ fn extract_content_blocks(
                     arguments: document_to_json(tu.input()),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 });
             }
             // Ignore reasoning, citations, images, etc.
@@ -819,6 +821,7 @@ mod tests {
             arguments: serde_json::json!({"text": "hi"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let tc2 = crate::provider::ToolCall {
             id: "call_2".to_string(),
@@ -826,6 +829,7 @@ mod tests {
             arguments: serde_json::json!({}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
 
         let messages = vec![
@@ -866,6 +870,7 @@ mod tests {
             arguments: serde_json::json!({"query": "test"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
 
         let messages = vec![
@@ -891,6 +896,7 @@ mod tests {
             arguments: serde_json::json!({}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
 
         let messages = vec![
@@ -1058,6 +1064,7 @@ mod tests {
             arguments: serde_json::json!({"city": "NYC"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let tc2 = crate::provider::ToolCall {
             id: "call_def".to_string(),
@@ -1065,6 +1072,7 @@ mod tests {
             arguments: serde_json::json!({"tz": "EST"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
 
         let messages = vec![
@@ -1228,6 +1236,7 @@ mod tests {
             arguments: serde_json::json!({"text": "hi"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
 
         let mut messages = vec![
@@ -1273,6 +1282,7 @@ mod tests {
             arguments: serde_json::json!({"city": "NYC"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
 
         let mut messages = vec![
@@ -1311,6 +1321,7 @@ mod tests {
             arguments: serde_json::json!({}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
 
         let mut messages = vec![
@@ -1349,6 +1360,7 @@ mod tests {
             arguments: serde_json::json!({"q": "test"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
 
         let mut messages = vec![
@@ -1405,6 +1417,7 @@ mod tests {
             arguments: serde_json::json!({}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
 
         let mut messages = vec![

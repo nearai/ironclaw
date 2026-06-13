@@ -829,6 +829,26 @@ pub struct PairingApproveRequest {
 
 // --- Skills ---
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillSourceKind {
+    User,
+    Installed,
+    Workspace,
+    System,
+}
+
+impl SkillSourceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Installed => "installed",
+            Self::Workspace => "workspace",
+            Self::System => "system",
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct SkillInfo {
     pub name: String,
@@ -836,6 +856,7 @@ pub struct SkillInfo {
     pub version: String,
     pub trust: String,
     pub source: String,
+    pub source_kind: SkillSourceKind,
     pub keywords: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage_hint: Option<String>,
@@ -849,12 +870,22 @@ pub struct SkillInfo {
     pub has_requirements: bool,
     #[serde(default)]
     pub has_scripts: bool,
+    #[serde(default)]
+    pub can_edit: bool,
+    #[serde(default)]
+    pub can_delete: bool,
 }
 
 #[derive(Debug, Serialize)]
 pub struct SkillListResponse {
     pub skills: Vec<SkillInfo>,
     pub count: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SkillContentResponse {
+    pub name: String,
+    pub content: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -880,6 +911,11 @@ pub struct SkillInstallRequest {
     pub slug: Option<String>,
     pub url: Option<String>,
     pub content: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillUpdateRequest {
+    pub content: String,
 }
 
 // --- WebSocket ---

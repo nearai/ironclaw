@@ -109,6 +109,14 @@ macro_rules! string_id {
                 Ok(Self(value))
             }
 
+            /// Construct without validation. Reserved for sentinel values
+            /// that intentionally contain bytes the validator rejects (e.g.
+            /// [`crate::SYSTEM_RESERVED_ID`]), so no caller-supplied
+            /// identifier can collide with them.
+            pub fn from_trusted(value: String) -> Self {
+                Self(value)
+            }
+
             pub fn as_str(&self) -> &str {
                 &self.0
             }
@@ -192,6 +200,11 @@ string_id!(ThreadId, "thread", validate_scope_id);
 string_id!(ExtensionId, "extension", validate_name_segment);
 string_id!(PackageId, "package", validate_name_segment);
 string_id!(SecretHandle, "secret", validate_name_segment);
+string_id!(
+    RuntimeCredentialAccountProviderId,
+    "runtime_credential_account_provider",
+    validate_name_segment
+);
 string_id!(SystemServiceId, "system_service", validate_name_segment);
 
 /// Extension-prefixed capability identifier.

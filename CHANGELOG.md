@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- *(reborn-cli)* document the standalone `config init` atomic-write dependency on `tempfile` and call out the default runner cadence change to 5s heartbeats / 200ms polling (down from 10s / 2s).
+- *(reborn)* expose runtime poll settings and document the standalone turn-runner cadence change for callers using `TurnRunnerSettings::default()`.
+
 ## [0.29.1](https://github.com/nearai/ironclaw/compare/ironclaw-v0.29.0...ironclaw-v0.29.1) - 2026-06-04
 
 ### Added

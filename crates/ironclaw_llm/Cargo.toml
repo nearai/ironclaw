@@ -16,6 +16,9 @@ dist = false
 [features]
 default = []
 bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]
+# Opt-in registry-provider factory for composition roots that already own
+# provider resolution and do not want v1 SessionManager plumbing.
+registry-provider-factory = []
 # Opt-in StubLlm + credentials helpers for downstream test code.
 testing = []
 

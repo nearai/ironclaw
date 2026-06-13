@@ -1,0 +1,29 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Docs insert_text",
+  "description": "Insert text at a document position.",
+  "type": "object",
+  "required": [
+    "document_id",
+    "text"
+  ],
+  "properties": {
+    "document_id": {
+      "type": "string",
+      "description": "The document ID."
+    },
+    "text": {
+      "type": "string",
+      "description": "Text to insert."
+    },
+    "index": {
+      "type": "integer",
+      "description": "Character index. Defaults to -1 to append."
+    },
+    "segment_id": {
+      "type": "string",
+      "description": "Segment ID. Defaults to body."
+    }
+  },
+  "additionalProperties": false
+}

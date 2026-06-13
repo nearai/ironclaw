@@ -7,6 +7,22 @@
 //! directly on `&mut [IncomingAttachment]` to fill `extracted_text` for
 //! audio inputs.
 
+/// Normalize a MIME type to its canonical comparison form: drop any
+/// `; parameter` suffix, trim surrounding whitespace, and lowercase.
+///
+/// MIME types are case-insensitive (RFC 2045 §5.1), so this is the single
+/// normalizer every MIME comparison in the workspace routes through — the
+/// attachment-format registry, kind inference, and audio transcription all call
+/// it instead of re-deriving `split(';').next().trim()` (and disagreeing on
+/// case) locally.
+pub fn normalize_mime_type(mime: &str) -> String {
+    mime.split(';')
+        .next()
+        .unwrap_or(mime)
+        .trim()
+        .to_ascii_lowercase()
+}
+
 /// Kind of attachment carried on an incoming message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttachmentKind {
@@ -21,7 +37,7 @@ pub enum AttachmentKind {
 impl AttachmentKind {
     /// Infer attachment kind from a MIME type string.
     pub fn from_mime_type(mime: &str) -> Self {
-        let base = mime.split(';').next().unwrap_or(mime).trim();
+        let base = normalize_mime_type(mime);
         if base.starts_with("audio/") {
             Self::Audio
         } else if base.starts_with("image/") {
@@ -57,4 +73,49 @@ pub struct IncomingAttachment {
     pub data: Vec<u8>,
     /// Duration in seconds (for audio/video).
     pub duration_secs: Option<u32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_mime_type_strips_params_trims_and_lowercases() {
+        // No-semicolon passthrough.
+        assert_eq!(normalize_mime_type("text/plain"), "text/plain");
+        // Parameter strip + case fold.
+        assert_eq!(
+            normalize_mime_type("TEXT/PLAIN; charset=UTF-8"),
+            "text/plain"
+        );
+        // Surrounding whitespace and embedded space before the `;` (RFC-legal).
+        assert_eq!(normalize_mime_type("  Image/PNG  "), "image/png");
+        assert_eq!(
+            normalize_mime_type("text/plain ; charset=utf-8"),
+            "text/plain"
+        );
+        // Multiple parameters.
+        assert_eq!(normalize_mime_type("a/b; x=1; y=2"), "a/b");
+        // Degenerate inputs collapse predictably.
+        assert_eq!(normalize_mime_type(""), "");
+        assert_eq!(normalize_mime_type("; charset=utf-8"), "");
+    }
+
+    #[test]
+    fn from_mime_type_normalizes_case_and_params() {
+        // Mixed/upper case must still classify (regression: before
+        // normalization, `"Image/JPEG".starts_with("image/")` was false).
+        assert_eq!(
+            AttachmentKind::from_mime_type("IMAGE/PNG"),
+            AttachmentKind::Image
+        );
+        assert_eq!(
+            AttachmentKind::from_mime_type("Audio/Ogg; codecs=opus"),
+            AttachmentKind::Audio
+        );
+        assert_eq!(
+            AttachmentKind::from_mime_type("APPLICATION/PDF"),
+            AttachmentKind::Document
+        );
+    }
 }

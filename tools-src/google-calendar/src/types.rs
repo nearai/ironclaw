@@ -16,7 +16,10 @@ pub enum GoogleCalendarAction {
         /// Calendar ID (default: "primary").
         #[serde(default = "default_calendar_id")]
         calendar_id: String,
-        /// Lower bound (RFC3339 timestamp) for filtering by start time.
+        /// Lower bound (RFC3339 timestamp) for event start time. When unset, the
+        /// tool fills in the current time, so results are upcoming events by
+        /// default. Pass an explicit earlier timestamp only when you want
+        /// past/historical events.
         #[serde(default)]
         time_min: Option<String>,
         /// Upper bound (RFC3339 timestamp) for filtering by end time.

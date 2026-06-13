@@ -1,0 +1,721 @@
+use std::{borrow::Cow, sync::Arc};
+
+use ironclaw_approvals::persistent_approval_grant_issuer;
+use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
+use ironclaw_host_api::{
+    Action, ApprovalRequest, ApprovalRequestId, CapabilityDescriptor, CapabilityGrant, Decision,
+    EffectKind, ExecutionContext, Principal, ResourceEstimate, Timestamp,
+    runtime_policy::ApprovalPolicy,
+};
+use ironclaw_trust::TrustDecision;
+
+pub(crate) trait ProfileApprovalGatePolicy: Send + Sync {
+    fn effects_require_approval(
+        &self,
+        approval_policy: ApprovalPolicy,
+        effects: &[EffectKind],
+    ) -> bool;
+}
+
+pub(crate) fn profile_approval_authorizer(
+    approval_policy: ApprovalPolicy,
+    gate_policy: Arc<dyn ProfileApprovalGatePolicy>,
+) -> Arc<dyn TrustAwareCapabilityDispatchAuthorizer> {
+    Arc::new(ProfileApprovalPolicyAuthorizer::new(
+        approval_policy,
+        gate_policy,
+    ))
+}
+
+struct ProfileApprovalPolicyAuthorizer {
+    inner: GrantAuthorizer,
+    approval_policy: ApprovalPolicy,
+    gate_policy: Arc<dyn ProfileApprovalGatePolicy>,
+}
+
+impl ProfileApprovalPolicyAuthorizer {
+    fn new(
+        approval_policy: ApprovalPolicy,
+        gate_policy: Arc<dyn ProfileApprovalGatePolicy>,
+    ) -> Self {
+        Self {
+            inner: GrantAuthorizer::new(),
+            approval_policy,
+            gate_policy,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl TrustAwareCapabilityDispatchAuthorizer for ProfileApprovalPolicyAuthorizer {
+    async fn authorize_dispatch_with_trust(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+        trust_decision: &TrustDecision,
+    ) -> Decision {
+        let decision = self
+            .inner
+            .authorize_dispatch_with_trust(context, descriptor, estimate, trust_decision)
+            .await;
+        require_approval_for_profile_policy(
+            decision,
+            context,
+            descriptor,
+            estimate,
+            ProfileApprovalActionKind::Dispatch,
+            self.approval_policy,
+            self.gate_policy.as_ref(),
+        )
+    }
+
+    async fn authorize_spawn_with_trust(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+        trust_decision: &TrustDecision,
+    ) -> Decision {
+        let decision = self
+            .inner
+            .authorize_spawn_with_trust(context, descriptor, estimate, trust_decision)
+            .await;
+        require_approval_for_profile_policy(
+            decision,
+            context,
+            descriptor,
+            estimate,
+            ProfileApprovalActionKind::SpawnCapability,
+            self.approval_policy,
+            self.gate_policy.as_ref(),
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ProfileApprovalActionKind {
+    Dispatch,
+    SpawnCapability,
+}
+
+fn require_approval_for_profile_policy(
+    decision: Decision,
+    context: &ExecutionContext,
+    descriptor: &CapabilityDescriptor,
+    estimate: &ResourceEstimate,
+    action_kind: ProfileApprovalActionKind,
+    approval_policy: ApprovalPolicy,
+    gate_policy: &dyn ProfileApprovalGatePolicy,
+) -> Decision {
+    // A spawn exercises SpawnProcess even when the capability's own descriptor
+    // does not declare it: the underlying GrantAuthorizer authorizes spawns
+    // against `spawn_descriptor`, which adds EffectKind::SpawnProcess. Evaluate
+    // the approval gate against the same elevated effect set so a dispatch-only
+    // capability cannot be spawned as a live process without an approval gate.
+    let gate_effects = approval_gate_effects(action_kind, descriptor);
+    if let Decision::Allow { .. } = &decision
+        && gate_policy.effects_require_approval(approval_policy, &gate_effects)
+        && !has_matching_approval_grant(
+            context,
+            descriptor,
+            &gate_effects,
+            approval_policy,
+            gate_policy,
+        )
+    {
+        return Decision::RequireApproval {
+            request: approval_request(context, descriptor, estimate, action_kind),
+        };
+    }
+    // Non-Allow decisions (Deny, RequireApproval) pass through unchanged:
+    // the profile approval gate only upgrades Allow to RequireApproval.
+    decision
+}
+
+/// Effects the profile approval gate evaluates for `action_kind`.
+///
+/// Mirrors `ironclaw_authorization::spawn_descriptor`: a spawn always exercises
+/// `SpawnProcess`, so it is added to the capability's declared effects when
+/// gating a spawn. Dispatch evaluates the declared effects unchanged.
+fn approval_gate_effects(
+    action_kind: ProfileApprovalActionKind,
+    descriptor: &CapabilityDescriptor,
+) -> Cow<'_, [EffectKind]> {
+    match action_kind {
+        ProfileApprovalActionKind::Dispatch => Cow::Borrowed(descriptor.effects.as_slice()),
+        ProfileApprovalActionKind::SpawnCapability => {
+            if descriptor.effects.contains(&EffectKind::SpawnProcess) {
+                Cow::Borrowed(descriptor.effects.as_slice())
+            } else {
+                let mut effects = descriptor.effects.clone();
+                effects.push(EffectKind::SpawnProcess);
+                Cow::Owned(effects)
+            }
+        }
+    }
+}
+
+fn has_matching_approval_grant(
+    context: &ExecutionContext,
+    descriptor: &CapabilityDescriptor,
+    gate_effects: &[EffectKind],
+    approval_policy: ApprovalPolicy,
+    gate_policy: &dyn ProfileApprovalGatePolicy,
+) -> bool {
+    let expected_grantee = Principal::Extension(context.extension_id.clone());
+    let expected_user_approver = Principal::User(context.user_id.clone());
+    let persistent_approval_issuer = persistent_approval_grant_issuer();
+    let now = chrono::Utc::now();
+    context.grants.grants.iter().any(|grant| {
+        let grant_unexpired = grant_is_unexpired(grant, &now);
+        let one_shot_approval_grant = grant.constraints.max_invocations == Some(1)
+            && (grant.issued_by == Principal::HostRuntime
+                || grant.issued_by == expected_user_approver)
+            && grant_unexpired;
+        let persistent_approval_grant = grant.constraints.max_invocations.is_none()
+            && grant.issued_by == persistent_approval_issuer
+            && grant_unexpired;
+        grant.capability == descriptor.id
+            && (one_shot_approval_grant || persistent_approval_grant)
+            && grant.grantee == expected_grantee
+            // Match against the spawn-elevated effect set so a one-shot lease
+            // that does not cover SpawnProcess cannot satisfy a spawn gate.
+            && gate_effects
+                .iter()
+                .all(|effect| grant.constraints.allowed_effects.contains(effect))
+            && gate_policy
+                .effects_require_approval(approval_policy, &grant.constraints.allowed_effects)
+    })
+}
+
+fn grant_is_unexpired(grant: &CapabilityGrant, now: &Timestamp) -> bool {
+    grant
+        .constraints
+        .expires_at
+        .as_ref()
+        .is_none_or(|expires_at| expires_at > now)
+}
+
+fn approval_request(
+    context: &ExecutionContext,
+    descriptor: &CapabilityDescriptor,
+    estimate: &ResourceEstimate,
+    action_kind: ProfileApprovalActionKind,
+) -> ApprovalRequest {
+    let action = match action_kind {
+        ProfileApprovalActionKind::Dispatch => Action::Dispatch {
+            capability: descriptor.id.clone(),
+            estimated_resources: estimate.clone(),
+        },
+        ProfileApprovalActionKind::SpawnCapability => Action::SpawnCapability {
+            capability: descriptor.id.clone(),
+            estimated_resources: estimate.clone(),
+        },
+    };
+    ApprovalRequest {
+        id: ApprovalRequestId::new(),
+        correlation_id: context.correlation_id,
+        requested_by: Principal::Extension(context.extension_id.clone()),
+        action: Box::new(action),
+        invocation_fingerprint: None,
+        reason: format!(
+            "approval required for {:?} of {}",
+            action_kind,
+            descriptor.id.as_str()
+        ),
+        reusable_scope: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_host_api::{
+        CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet,
+        EffectKind, ExecutionContext, ExtensionId, GrantConstraints, MountView, NetworkPolicy,
+        PermissionMode, Principal, ResourceEstimate, RuntimeKind, TrustClass,
+    };
+    use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+    use serde_json::json;
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct TestGatePolicy;
+
+    impl ProfileApprovalGatePolicy for TestGatePolicy {
+        fn effects_require_approval(
+            &self,
+            approval_policy: ApprovalPolicy,
+            effects: &[EffectKind],
+        ) -> bool {
+            match approval_policy {
+                ApprovalPolicy::Minimal => false,
+                ApprovalPolicy::AskAlways => !effects.is_empty(),
+                ApprovalPolicy::AskWrites | ApprovalPolicy::AskDestructive => {
+                    effects.contains(&EffectKind::SpawnProcess)
+                }
+                ApprovalPolicy::OrgPolicy => !effects.is_empty(),
+                _ => !effects.is_empty(),
+            }
+        }
+    }
+
+    fn test_descriptor(effects: Vec<EffectKind>) -> CapabilityDescriptor {
+        test_descriptor_with_id(CapabilityId::new("builtin.shell").unwrap(), effects)
+    }
+
+    fn test_descriptor_with_id(id: CapabilityId, effects: Vec<EffectKind>) -> CapabilityDescriptor {
+        CapabilityDescriptor {
+            id,
+            provider: ExtensionId::new("builtin").unwrap(),
+            runtime: RuntimeKind::FirstParty,
+            trust_ceiling: TrustClass::UserTrusted,
+            description: "test".to_string(),
+            parameters_schema: json!({}),
+            effects,
+            default_permission: PermissionMode::Allow,
+            runtime_credentials: Vec::new(),
+            resource_profile: None,
+        }
+    }
+
+    fn test_context(grants: CapabilitySet) -> ExecutionContext {
+        let ctx = ExecutionContext::local_default(
+            ironclaw_host_api::UserId::new("test-user").unwrap(),
+            ExtensionId::new("builtin").unwrap(),
+            RuntimeKind::FirstParty,
+            TrustClass::UserTrusted,
+            grants,
+            MountView::default(),
+        )
+        .unwrap();
+        ctx.validate().unwrap();
+        ctx
+    }
+
+    fn test_trust_decision() -> TrustDecision {
+        TrustDecision {
+            effective_trust: EffectiveTrustClass::user_trusted(),
+            authority_ceiling: AuthorityCeiling {
+                allowed_effects: vec![EffectKind::SpawnProcess, EffectKind::DispatchCapability],
+                max_resource_ceiling: None,
+            },
+            provenance: TrustProvenance::AdminConfig,
+            evaluated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn test_authorizer(
+        approval_policy: ApprovalPolicy,
+    ) -> Arc<dyn TrustAwareCapabilityDispatchAuthorizer> {
+        profile_approval_authorizer(approval_policy, Arc::new(TestGatePolicy))
+    }
+
+    #[tokio::test]
+    async fn dispatch_with_destructive_effect_requires_approval() {
+        let authorizer = test_authorizer(ApprovalPolicy::AskDestructive);
+
+        let shell_id = CapabilityId::new("builtin.shell").unwrap();
+        let descriptor = test_descriptor_with_id(shell_id.clone(), vec![EffectKind::SpawnProcess]);
+        let ctx = test_context(CapabilitySet {
+            grants: vec![CapabilityGrant {
+                id: CapabilityGrantId::new(),
+                capability: shell_id,
+                grantee: Principal::Extension(ExtensionId::new("builtin").unwrap()),
+                issued_by: Principal::HostRuntime,
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::SpawnProcess],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: None,
+                },
+            }],
+        });
+        let decision = authorizer
+            .authorize_dispatch_with_trust(
+                &ctx,
+                &descriptor,
+                &ResourceEstimate::default(),
+                &test_trust_decision(),
+            )
+            .await;
+
+        assert!(
+            matches!(decision, Decision::RequireApproval { .. }),
+            "destructive dispatch should require approval, got {decision:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_with_dispatch_only_capability_requires_approval() {
+        let authorizer = test_authorizer(ApprovalPolicy::AskDestructive);
+
+        let echo_id = CapabilityId::new("builtin.echo").unwrap();
+        let descriptor =
+            test_descriptor_with_id(echo_id.clone(), vec![EffectKind::DispatchCapability]);
+        let ctx = test_context(CapabilitySet {
+            grants: vec![CapabilityGrant {
+                id: CapabilityGrantId::new(),
+                capability: echo_id,
+                grantee: Principal::Extension(ExtensionId::new("builtin").unwrap()),
+                issued_by: Principal::HostRuntime,
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::SpawnProcess],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: None,
+                },
+            }],
+        });
+        let decision = authorizer
+            .authorize_spawn_with_trust(
+                &ctx,
+                &descriptor,
+                &ResourceEstimate::default(),
+                &test_trust_decision(),
+            )
+            .await;
+
+        assert!(
+            matches!(decision, Decision::RequireApproval { .. }),
+            "spawn of dispatch-only capability should require approval via SpawnProcess elevation, got {decision:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn minimal_policy_skips_approval_gate() {
+        let authorizer = test_authorizer(ApprovalPolicy::Minimal);
+
+        let descriptor = test_descriptor(vec![EffectKind::SpawnProcess]);
+        let ctx = test_context(CapabilitySet {
+            grants: vec![CapabilityGrant {
+                id: CapabilityGrantId::new(),
+                capability: CapabilityId::new("builtin.shell").unwrap(),
+                grantee: Principal::Extension(ExtensionId::new("builtin").unwrap()),
+                issued_by: Principal::HostRuntime,
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::SpawnProcess],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: None,
+                },
+            }],
+        });
+        let decision = authorizer
+            .authorize_dispatch_with_trust(
+                &ctx,
+                &descriptor,
+                &ResourceEstimate::default(),
+                &test_trust_decision(),
+            )
+            .await;
+
+        assert!(
+            matches!(decision, Decision::Allow { .. }),
+            "Minimal policy should delegate to GrantAuthorizer and Allow, got {decision:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_issued_one_shot_approval_grant_allows_resume() {
+        let authorizer = test_authorizer(ApprovalPolicy::AskDestructive);
+
+        let shell_id = CapabilityId::new("builtin.shell").unwrap();
+        let descriptor = test_descriptor_with_id(shell_id.clone(), vec![EffectKind::SpawnProcess]);
+        let base_ctx = test_context(CapabilitySet { grants: vec![] });
+        let ctx = test_context(CapabilitySet {
+            grants: vec![CapabilityGrant {
+                id: CapabilityGrantId::new(),
+                capability: shell_id,
+                grantee: Principal::Extension(base_ctx.extension_id.clone()),
+                issued_by: Principal::User(base_ctx.user_id.clone()),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::SpawnProcess],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
+            }],
+        });
+        let decision = authorizer
+            .authorize_dispatch_with_trust(
+                &ctx,
+                &descriptor,
+                &ResourceEstimate::default(),
+                &test_trust_decision(),
+            )
+            .await;
+
+        assert!(
+            matches!(decision, Decision::Allow { .. }),
+            "same-user one-shot approval lease should satisfy the local-dev gate, got {decision:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn persistent_approval_grant_allows_reuse() {
+        let authorizer = test_authorizer(ApprovalPolicy::AskDestructive);
+
+        let shell_id = CapabilityId::new("builtin.shell").unwrap();
+        let descriptor = test_descriptor_with_id(shell_id.clone(), vec![EffectKind::SpawnProcess]);
+        let base_ctx = test_context(CapabilitySet { grants: vec![] });
+        let ctx = test_context(CapabilitySet {
+            grants: vec![CapabilityGrant {
+                id: CapabilityGrantId::new(),
+                capability: shell_id,
+                grantee: Principal::Extension(base_ctx.extension_id.clone()),
+                issued_by: persistent_approval_grant_issuer(),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::SpawnProcess],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: None,
+                },
+            }],
+        });
+        let decision = authorizer
+            .authorize_dispatch_with_trust(
+                &ctx,
+                &descriptor,
+                &ResourceEstimate::default(),
+                &test_trust_decision(),
+            )
+            .await;
+
+        assert!(
+            matches!(decision, Decision::Allow { .. }),
+            "persistent approval grant should satisfy the local-dev gate, got {decision:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_issued_persistent_like_grant_does_not_allow_reuse() {
+        let authorizer = test_authorizer(ApprovalPolicy::AskDestructive);
+
+        let shell_id = CapabilityId::new("builtin.shell").unwrap();
+        let descriptor = test_descriptor_with_id(shell_id.clone(), vec![EffectKind::SpawnProcess]);
+        let base_ctx = test_context(CapabilitySet { grants: vec![] });
+        let ctx = test_context(CapabilitySet {
+            grants: vec![CapabilityGrant {
+                id: CapabilityGrantId::new(),
+                capability: shell_id,
+                grantee: Principal::Extension(base_ctx.extension_id.clone()),
+                issued_by: Principal::User(base_ctx.user_id.clone()),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::SpawnProcess],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: None,
+                },
+            }],
+        });
+        let decision = authorizer
+            .authorize_dispatch_with_trust(
+                &ctx,
+                &descriptor,
+                &ResourceEstimate::default(),
+                &test_trust_decision(),
+            )
+            .await;
+
+        assert!(
+            matches!(decision, Decision::RequireApproval { .. }),
+            "standing user grant must not impersonate persistent approval replay, got {decision:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn other_user_issued_persistent_like_grant_does_not_allow_reuse() {
+        let authorizer = test_authorizer(ApprovalPolicy::AskDestructive);
+
+        let shell_id = CapabilityId::new("builtin.shell").unwrap();
+        let descriptor = test_descriptor_with_id(shell_id.clone(), vec![EffectKind::SpawnProcess]);
+        let ctx = test_context(CapabilitySet {
+            grants: vec![CapabilityGrant {
+                id: CapabilityGrantId::new(),
+                capability: shell_id,
+                grantee: Principal::Extension(ExtensionId::new("builtin").unwrap()),
+                issued_by: Principal::User(ironclaw_host_api::UserId::new("other-user").unwrap()),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::SpawnProcess],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: None,
+                },
+            }],
+        });
+        let decision = authorizer
+            .authorize_dispatch_with_trust(
+                &ctx,
+                &descriptor,
+                &ResourceEstimate::default(),
+                &test_trust_decision(),
+            )
+            .await;
+
+        assert!(
+            matches!(decision, Decision::RequireApproval { .. }),
+            "different-user standing grant must not impersonate persistent approval replay, got {decision:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_persistent_approval_grant_does_not_allow_reuse() {
+        let authorizer = test_authorizer(ApprovalPolicy::AskDestructive);
+
+        let shell_id = CapabilityId::new("builtin.shell").unwrap();
+        let descriptor = test_descriptor_with_id(shell_id.clone(), vec![EffectKind::SpawnProcess]);
+        let base_ctx = test_context(CapabilitySet { grants: vec![] });
+        let ctx = test_context(CapabilitySet {
+            grants: vec![
+                CapabilityGrant {
+                    id: CapabilityGrantId::new(),
+                    capability: shell_id.clone(),
+                    grantee: Principal::Extension(base_ctx.extension_id.clone()),
+                    issued_by: Principal::HostRuntime,
+                    constraints: GrantConstraints {
+                        allowed_effects: vec![EffectKind::SpawnProcess],
+                        mounts: MountView::default(),
+                        network: NetworkPolicy::default(),
+                        secrets: Vec::new(),
+                        resource_ceiling: None,
+                        expires_at: None,
+                        max_invocations: None,
+                    },
+                },
+                CapabilityGrant {
+                    id: CapabilityGrantId::new(),
+                    capability: shell_id,
+                    grantee: Principal::Extension(base_ctx.extension_id.clone()),
+                    issued_by: persistent_approval_grant_issuer(),
+                    constraints: GrantConstraints {
+                        allowed_effects: vec![EffectKind::SpawnProcess],
+                        mounts: MountView::default(),
+                        network: NetworkPolicy::default(),
+                        secrets: Vec::new(),
+                        resource_ceiling: None,
+                        expires_at: Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
+                        max_invocations: None,
+                    },
+                },
+            ],
+        });
+        let decision = authorizer
+            .authorize_dispatch_with_trust(
+                &ctx,
+                &descriptor,
+                &ResourceEstimate::default(),
+                &test_trust_decision(),
+            )
+            .await;
+
+        assert!(
+            matches!(decision, Decision::RequireApproval { .. }),
+            "expired persistent approval grant must not satisfy the local-dev gate, got {decision:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn other_user_issued_approval_grant_does_not_allow_resume() {
+        let authorizer = test_authorizer(ApprovalPolicy::AskDestructive);
+
+        let shell_id = CapabilityId::new("builtin.shell").unwrap();
+        let descriptor = test_descriptor_with_id(shell_id.clone(), vec![EffectKind::SpawnProcess]);
+        let ctx = test_context(CapabilitySet {
+            grants: vec![CapabilityGrant {
+                id: CapabilityGrantId::new(),
+                capability: shell_id,
+                grantee: Principal::Extension(ExtensionId::new("builtin").unwrap()),
+                issued_by: Principal::User(ironclaw_host_api::UserId::new("other-user").unwrap()),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::SpawnProcess],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
+            }],
+        });
+        let decision = authorizer
+            .authorize_dispatch_with_trust(
+                &ctx,
+                &descriptor,
+                &ResourceEstimate::default(),
+                &test_trust_decision(),
+            )
+            .await;
+
+        assert!(
+            matches!(decision, Decision::RequireApproval { .. }),
+            "different-user approval lease must not satisfy the local-dev gate, got {decision:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn deny_decision_passes_through_unchanged() {
+        let authorizer = test_authorizer(ApprovalPolicy::AskDestructive);
+
+        let descriptor = test_descriptor(vec![EffectKind::DispatchCapability]);
+        let ctx = test_context(CapabilitySet { grants: vec![] });
+        let decision = authorizer
+            .authorize_dispatch_with_trust(
+                &ctx,
+                &descriptor,
+                &ResourceEstimate::default(),
+                &test_trust_decision(),
+            )
+            .await;
+
+        assert!(
+            matches!(decision, Decision::Deny { .. }),
+            "ungranted capability should return Deny unchanged, got {decision:?}"
+        );
+    }
+
+    #[test]
+    fn approval_request_reason_includes_capability_id() {
+        let descriptor = test_descriptor(vec![EffectKind::SpawnProcess]);
+        let ctx = test_context(CapabilitySet { grants: vec![] });
+        let req = approval_request(
+            &ctx,
+            &descriptor,
+            &ResourceEstimate::default(),
+            ProfileApprovalActionKind::Dispatch,
+        );
+
+        assert!(
+            req.reason.contains("builtin.shell"),
+            "reason should contain capability id, got: {:?}",
+            req.reason
+        );
+        assert!(
+            req.reason.contains("Dispatch"),
+            "reason should contain action kind, got: {:?}",
+            req.reason
+        );
+    }
+}

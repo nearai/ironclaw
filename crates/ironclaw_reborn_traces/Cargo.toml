@@ -1,0 +1,32 @@
+[package]
+name = "ironclaw_reborn_traces"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+base64 = "0.22.1"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
+hex = "0.4.3"
+ironclaw_common = { path = "../ironclaw_common", version = "0.4.1" }
+ironclaw_llm = { path = "../ironclaw_llm", version = "0.1.0" }
+ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
+jsonwebtoken = "9"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
+rust_decimal = { version = "1", features = ["serde", "serde-with-str", "maths"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+
+[dev-dependencies]
+axum = { version = "0.8", features = ["ws"] }

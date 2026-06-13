@@ -8510,6 +8510,7 @@ mod tests {
                     input_tokens: 0,
                     output_tokens: 0,
                     finish_reason: ironclaw_llm::FinishReason::Stop,
+                    reasoning: None,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                 })
@@ -8563,6 +8564,7 @@ mod tests {
             builder: None,
             llm_backend: "nearai".to_string(),
             tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+            runtime_policy: None,
         };
 
         let channels = Arc::new(crate::channels::ChannelManager::new());
@@ -10343,6 +10345,7 @@ mod tests {
             builder: None,
             llm_backend: "nearai".to_string(),
             tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+            runtime_policy: None,
         };
 
         let agent = Agent::new(

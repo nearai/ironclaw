@@ -5,16 +5,14 @@
 //! execute WASM modules, start Docker containers, connect to MCP servers, resolve
 //! secrets, or reserve resources.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
-
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, HostApiError, PackageId,
-    PackageIdentity, PackageSource, PermissionMode, RequestedTrustClass, ResourceProfile,
-    RuntimeKind, TrustClass, VirtualPath,
+    CapabilityDescriptor, CapabilityId, ExtensionId, ExtensionLifecycleOperation, HostApiError,
+    HostPortCatalog, PackageId, PackageIdentity, PackageSource, RequestedTrustClass, RuntimeKind,
+    TrustClass, VirtualPath, sha256_digest_token,
 };
 use ironclaw_trust::TrustPolicyInput;
-use serde::{Deserialize, Deserializer};
+use std::collections::{BTreeSet, HashSet};
 use thiserror::Error;
 
 /// Extension manifest and registry failures.
@@ -36,8 +34,17 @@ pub enum ExtensionError {
     },
     #[error("duplicate extension id {id}")]
     DuplicateExtension { id: ExtensionId },
+    #[error("extension id {id} was not found")]
+    ExtensionNotFound { id: ExtensionId },
     #[error("duplicate capability id {id}")]
     DuplicateCapability { id: CapabilityId },
+    #[error("extension lifecycle event sink failed during {operation} for {extension_id}")]
+    LifecycleEventSink {
+        extension_id: ExtensionId,
+        operation: ExtensionLifecycleOperation,
+    },
+    #[error(transparent)]
+    ManifestV2(#[from] v2::ManifestV2Error),
     #[error(transparent)]
     Filesystem(#[from] FilesystemError),
 }
@@ -67,7 +74,8 @@ impl ExtensionAssetPath {
     }
 }
 
-/// Declarative runtime metadata for an extension package.
+/// Declarative runtime metadata for an extension package after boundary
+/// validation has converted manifest strings into typed internal values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExtensionRuntime {
     Wasm {
@@ -103,104 +111,121 @@ impl ExtensionRuntime {
             Self::System { .. } => RuntimeKind::System,
         }
     }
+
+    fn from_v2(runtime: ExtensionRuntimeV2) -> Result<Self, ExtensionError> {
+        match runtime {
+            ExtensionRuntimeV2::Wasm { module } => Ok(Self::Wasm {
+                module: ExtensionAssetPath::new(module)?,
+            }),
+            ExtensionRuntimeV2::Script {
+                runner,
+                image,
+                command,
+                args,
+            } => Ok(Self::Script {
+                runner,
+                image,
+                command,
+                args,
+            }),
+            ExtensionRuntimeV2::Mcp {
+                transport,
+                command,
+                args,
+                url,
+            } => Ok(Self::Mcp {
+                transport,
+                command,
+                args,
+                url,
+            }),
+            ExtensionRuntimeV2::FirstParty { service } => Ok(Self::FirstParty { service }),
+            ExtensionRuntimeV2::System { service } => Ok(Self::System { service }),
+        }
+    }
 }
 
-/// Validated extension manifest.
+/// Validated production extension manifest.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExtensionManifest {
+    pub schema_version: String,
     pub id: ExtensionId,
     pub name: String,
     pub version: String,
     pub description: String,
-    /// Manifest-declared trust request. This is untrusted metadata and must
-    /// be evaluated by `ironclaw_trust` before it can affect authorization.
+    pub source: ManifestSource,
     pub requested_trust: RequestedTrustClass,
-    /// Safe declarative descriptor metadata derived from [`requested_trust`].
-    /// Privileged requests remain sandboxed here; effective privileged trust
-    /// only comes from a host policy [`TrustPolicyInput`].
-    pub trust: TrustClass,
+    pub descriptor_trust_default: TrustClass,
     pub runtime: ExtensionRuntime,
+    pub host_apis: Vec<HostApiRefV2>,
     pub capabilities: Vec<CapabilityManifest>,
+    /// Declarative hook entries the extension declared. Structurally
+    /// validated by the v2 parser; projected into typed hook entries by the
+    /// composition loader. Empty for the common no-hooks case.
+    pub hooks: Vec<HookSectionEntryV2>,
 }
 
 impl ExtensionManifest {
-    pub fn parse(input: &str) -> Result<Self, ExtensionError> {
-        let raw: RawManifest =
-            toml::from_str(input).map_err(|error| ExtensionError::ManifestParse {
-                reason: error.to_string(),
-            })?;
-        Self::from_raw(raw)
+    pub fn parse(
+        input: &str,
+        source: ManifestSource,
+        host_port_catalog: &HostPortCatalog,
+    ) -> Result<Self, ExtensionError> {
+        ExtensionManifestV2::parse(input, source, host_port_catalog)?.try_into()
+    }
+
+    pub fn parse_with_host_api_contracts(
+        input: &str,
+        source: ManifestSource,
+        host_port_catalog: &HostPortCatalog,
+        registry: &HostApiContractRegistry,
+    ) -> Result<Self, ExtensionError> {
+        ExtensionManifestV2::parse_with_host_api_contracts(
+            input,
+            source,
+            host_port_catalog,
+            registry,
+        )?
+        .try_into()
+    }
+
+    pub fn parse_with_optional_host_api_contracts(
+        input: &str,
+        source: ManifestSource,
+        host_port_catalog: &HostPortCatalog,
+        registry: &HostApiContractRegistry,
+    ) -> Result<Self, ExtensionError> {
+        ExtensionManifestV2::parse_with_optional_host_api_contracts(
+            input,
+            source,
+            host_port_catalog,
+            registry,
+        )?
+        .try_into()
     }
 
     pub fn runtime_kind(&self) -> RuntimeKind {
         self.runtime.kind()
     }
-
-    fn from_raw(raw: RawManifest) -> Result<Self, ExtensionError> {
-        if raw.name.trim().is_empty() {
-            return Err(ExtensionError::InvalidManifest {
-                reason: "name must not be empty".to_string(),
-            });
-        }
-        if raw.version.trim().is_empty() {
-            return Err(ExtensionError::InvalidManifest {
-                reason: "version must not be empty".to_string(),
-            });
-        }
-        if raw.capabilities.is_empty() {
-            return Err(ExtensionError::InvalidManifest {
-                reason: "at least one capability is required".to_string(),
-            });
-        }
-
-        let id = ExtensionId::new(raw.id)?;
-        let runtime = raw.runtime.into_runtime()?;
-        let capabilities = raw
-            .capabilities
-            .into_iter()
-            .map(CapabilityManifest::from_raw)
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let trust = requested_trust_to_descriptor_trust(raw.trust);
-
-        Ok(Self {
-            id,
-            name: raw.name,
-            version: raw.version,
-            description: raw.description,
-            requested_trust: raw.trust,
-            trust,
-            runtime,
-            capabilities,
-        })
-    }
 }
 
-/// Manifest capability declaration before registry/package context is applied.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CapabilityManifest {
-    pub id: CapabilityId,
-    pub description: String,
-    pub effects: Vec<EffectKind>,
-    pub default_permission: PermissionMode,
-    pub parameters_schema: serde_json::Value,
-    pub resource_profile: Option<ResourceProfile>,
-}
+impl TryFrom<ExtensionManifestV2> for ExtensionManifest {
+    type Error = ExtensionError;
 
-impl CapabilityManifest {
-    fn from_raw(raw: RawCapability) -> Result<Self, ExtensionError> {
-        if raw.description.trim().is_empty() {
-            return Err(ExtensionError::InvalidManifest {
-                reason: format!("capability {} description must not be empty", raw.id),
-            });
-        }
+    fn try_from(manifest: ExtensionManifestV2) -> Result<Self, Self::Error> {
         Ok(Self {
-            id: CapabilityId::new(raw.id)?,
-            description: raw.description,
-            effects: raw.effects,
-            default_permission: raw.default_permission,
-            parameters_schema: raw.parameters_schema,
-            resource_profile: raw.resource_profile,
+            schema_version: manifest.schema_version,
+            id: manifest.id,
+            name: manifest.name,
+            version: manifest.version,
+            description: manifest.description,
+            source: manifest.source,
+            requested_trust: manifest.requested_trust,
+            descriptor_trust_default: manifest.descriptor_trust_default,
+            runtime: ExtensionRuntime::from_v2(manifest.runtime)?,
+            host_apis: manifest.host_apis,
+            capabilities: manifest.capabilities,
+            hooks: manifest.hooks,
         })
     }
 }
@@ -212,6 +237,18 @@ pub struct ExtensionPackage {
     pub root: VirtualPath,
     pub manifest: ExtensionManifest,
     pub capabilities: Vec<CapabilityDescriptor>,
+    pub manifest_digest: Option<String>,
+    pub descriptor_schema_mode: CapabilityDescriptorSchemaMode,
+}
+
+/// How package capability descriptor schemas are derived from the manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityDescriptorSchemaMode {
+    /// Descriptors must carry the manifest's `$ref` schema projection.
+    ManifestRefs,
+    /// Descriptors may carry inline schemas, but all non-schema fields must
+    /// still match the manifest projection exactly.
+    InlineDynamic,
 }
 
 impl ExtensionPackage {
@@ -219,47 +256,99 @@ impl ExtensionPackage {
         manifest: ExtensionManifest,
         root: VirtualPath,
     ) -> Result<Self, ExtensionError> {
+        Self::from_manifest_with_digest(manifest, root, None)
+    }
+
+    pub fn from_manifest_toml(
+        manifest: ExtensionManifest,
+        root: VirtualPath,
+        manifest_toml: &str,
+    ) -> Result<Self, ExtensionError> {
+        Self::from_manifest_with_digest(
+            manifest,
+            root,
+            Some(sha256_digest_token(manifest_toml.as_bytes())),
+        )
+    }
+
+    pub fn from_manifest_with_digest(
+        manifest: ExtensionManifest,
+        root: VirtualPath,
+        manifest_digest: Option<String>,
+    ) -> Result<Self, ExtensionError> {
         ensure_extension_root_matches(&manifest.id, &root)?;
-        let expected_prefix = format!("{}.", manifest.id.as_str());
-        let mut seen_capabilities = HashSet::new();
-        let capabilities = manifest
-            .capabilities
-            .iter()
-            .map(|capability| {
-                if !capability.id.as_str().starts_with(&expected_prefix) {
-                    return Err(ExtensionError::InvalidManifest {
-                        reason: format!(
-                            "capability id {} must be provider-prefixed with {}",
-                            capability.id.as_str(),
-                            expected_prefix
-                        ),
-                    });
-                }
-                if !seen_capabilities.insert(capability.id.clone()) {
-                    return Err(ExtensionError::DuplicateCapability {
-                        id: capability.id.clone(),
-                    });
-                }
-                Ok(CapabilityDescriptor {
-                    id: capability.id.clone(),
-                    provider: manifest.id.clone(),
-                    runtime: manifest.runtime_kind(),
-                    trust_ceiling: manifest.trust,
-                    description: capability.description.clone(),
-                    parameters_schema: capability.parameters_schema.clone(),
-                    effects: capability.effects.clone(),
-                    default_permission: capability.default_permission,
-                    resource_profile: capability.resource_profile.clone(),
-                })
-            })
-            .collect::<Result<Vec<_>, ExtensionError>>()?;
+        let capabilities = capability_descriptors_from_manifest(&manifest)?;
 
         Ok(Self {
             id: manifest.id.clone(),
             root,
             manifest,
             capabilities,
+            manifest_digest,
+            descriptor_schema_mode: CapabilityDescriptorSchemaMode::ManifestRefs,
         })
+    }
+
+    pub fn from_host_bundled_manifest_with_inline_dynamic_schemas(
+        manifest: ExtensionManifest,
+        root: VirtualPath,
+        manifest_digest: Option<String>,
+        capabilities: Vec<CapabilityDescriptor>,
+    ) -> Result<Self, ExtensionError> {
+        if manifest.source != ManifestSource::HostBundled {
+            return Err(ExtensionError::InvalidManifest {
+                reason:
+                    "inline dynamic descriptor schemas are only supported for host-bundled packages"
+                        .to_string(),
+            });
+        }
+        ensure_extension_root_matches(&manifest.id, &root)?;
+        let expected = capability_descriptors_from_manifest(&manifest)?;
+        if !descriptors_match_except_schema(&capabilities, &expected) {
+            return Err(ExtensionError::InvalidManifest {
+                reason: "inline dynamic capability descriptors do not match manifest declarations"
+                    .to_string(),
+            });
+        }
+        Ok(Self {
+            id: manifest.id.clone(),
+            root,
+            manifest,
+            capabilities,
+            manifest_digest,
+            descriptor_schema_mode: CapabilityDescriptorSchemaMode::InlineDynamic,
+        })
+    }
+
+    pub fn manifest_digest(&self) -> Option<String> {
+        self.manifest_digest.clone()
+    }
+
+    pub(crate) fn validate_consistency(&self) -> Result<(), ExtensionError> {
+        if self.id != self.manifest.id {
+            return Err(ExtensionError::InvalidManifest {
+                reason: format!(
+                    "package id {} does not match manifest id {}",
+                    self.id, self.manifest.id
+                ),
+            });
+        }
+        ensure_extension_root_matches(&self.manifest.id, &self.root)?;
+        let expected = capability_descriptors_from_manifest(&self.manifest)?;
+        let consistent = match self.descriptor_schema_mode {
+            CapabilityDescriptorSchemaMode::ManifestRefs => self.capabilities == expected,
+            CapabilityDescriptorSchemaMode::InlineDynamic => {
+                self.manifest.source == ManifestSource::HostBundled
+                    && descriptors_match_except_schema(&self.capabilities, &expected)
+            }
+        };
+        if !consistent {
+            return Err(ExtensionError::InvalidManifest {
+                reason: "package capability descriptors do not match manifest declarations"
+                    .to_string(),
+            });
+        }
+        Ok(())
     }
 
     /// Build the trust-policy identity for this package.
@@ -273,7 +362,7 @@ impl ExtensionPackage {
         digest: Option<String>,
         signer: Option<String>,
     ) -> Result<PackageIdentity, ExtensionError> {
-        validate_package_consistency(self)?;
+        registry::validate_package_consistency(self)?;
         Ok(PackageIdentity::new(
             PackageId::new(self.manifest.id.as_str().to_string())?,
             source,
@@ -306,94 +395,53 @@ impl ExtensionPackage {
     }
 }
 
-/// Registry of validated extension packages and declared capabilities.
-#[derive(Debug, Default)]
-pub struct ExtensionRegistry {
-    packages: HashMap<ExtensionId, ExtensionPackage>,
-    capabilities: HashMap<CapabilityId, CapabilityDescriptor>,
-    extension_order: Vec<ExtensionId>,
-    capability_order: Vec<CapabilityId>,
+fn descriptors_match_except_schema(
+    actual: &[CapabilityDescriptor],
+    expected: &[CapabilityDescriptor],
+) -> bool {
+    actual.len() == expected.len()
+        && actual.iter().zip(expected).all(|(actual, expected)| {
+            let mut normalized = actual.clone();
+            normalized.parameters_schema = expected.parameters_schema.clone();
+            normalized == *expected
+        })
 }
 
-impl ExtensionRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
+pub mod host_api;
+mod hosted_mcp_discovery;
+mod installations;
+mod lifecycle;
+mod registry;
+pub mod v2;
 
-    pub fn insert(&mut self, package: ExtensionPackage) -> Result<(), ExtensionError> {
-        validate_package_consistency(&package)?;
+pub use host_api::capability_provider::{
+    CAPABILITY_PROVIDER_HOST_API_ID, CAPABILITY_PROVIDER_SECTION, CapabilityProviderHostApiContract,
+};
+pub use hosted_mcp_discovery::{
+    HostedMcpDiscoveredTool, HostedMcpDiscoveredToolAnnotations, is_hosted_http_mcp_package,
+    package_with_discovered_hosted_mcp_tools,
+};
+pub use v2::{
+    CapabilityDeclV2, CapabilityVisibility, ExtensionManifestV2, ExtensionRuntimeV2,
+    HookSectionEntryV2, HostApiContractRegistry, HostApiId, HostApiManifestContext,
+    HostApiManifestContract, HostApiManifestProjection, HostApiMultiplicity, HostApiRefV2,
+    MANIFEST_SCHEMA_VERSION, MAX_HOOK_ENTRY_BYTES, MAX_MANIFEST_BYTES, MAX_MANIFEST_HOOKS,
+    ManifestSectionPath, ManifestSource, ManifestV2Error, RESERVED_HOST_BUNDLED_ID_PREFIX,
+};
 
-        if self.packages.contains_key(&package.id) {
-            return Err(ExtensionError::DuplicateExtension { id: package.id });
-        }
+pub type CapabilityManifest = CapabilityDeclV2;
 
-        let mut seen_capabilities = HashSet::new();
-        for descriptor in &package.capabilities {
-            if !seen_capabilities.insert(descriptor.id.clone())
-                || self.capabilities.contains_key(&descriptor.id)
-            {
-                return Err(ExtensionError::DuplicateCapability {
-                    id: descriptor.id.clone(),
-                });
-            }
-            if descriptor.provider != package.id {
-                return Err(ExtensionError::InvalidManifest {
-                    reason: format!(
-                        "descriptor {} provider {} does not match package {}",
-                        descriptor.id, descriptor.provider, package.id
-                    ),
-                });
-            }
-        }
-
-        for descriptor in &package.capabilities {
-            self.capability_order.push(descriptor.id.clone());
-            self.capabilities
-                .insert(descriptor.id.clone(), descriptor.clone());
-        }
-        self.extension_order.push(package.id.clone());
-        self.packages.insert(package.id.clone(), package);
-        Ok(())
-    }
-
-    pub fn get_extension(&self, id: &ExtensionId) -> Option<&ExtensionPackage> {
-        self.packages.get(id)
-    }
-
-    pub fn get_capability(&self, id: &CapabilityId) -> Option<&CapabilityDescriptor> {
-        self.capabilities.get(id)
-    }
-
-    pub fn extensions(&self) -> impl Iterator<Item = &ExtensionPackage> {
-        self.extension_order
-            .iter()
-            .filter_map(|id| self.packages.get(id))
-    }
-
-    pub fn capabilities(&self) -> impl Iterator<Item = &CapabilityDescriptor> {
-        self.capability_order
-            .iter()
-            .filter_map(|id| self.capabilities.get(id))
-    }
-}
-
-fn validate_package_consistency(package: &ExtensionPackage) -> Result<(), ExtensionError> {
-    let expected = ExtensionPackage::from_manifest(package.manifest.clone(), package.root.clone())?;
-    if package.id != expected.id {
-        return Err(ExtensionError::InvalidManifest {
-            reason: format!(
-                "package id {} does not match manifest/root id {}",
-                package.id, expected.id
-            ),
-        });
-    }
-    if package.capabilities != expected.capabilities {
-        return Err(ExtensionError::InvalidManifest {
-            reason: "package capability descriptors do not match manifest declarations".to_string(),
-        });
-    }
-    Ok(())
-}
+pub use installations::{
+    ExtensionActivationState, ExtensionCredentialBinding, ExtensionCredentialHandle,
+    ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
+    ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
+    ExtensionManifestRecord, ExtensionManifestRef, InMemoryExtensionInstallationStore,
+    ManifestHash,
+};
+pub use lifecycle::{
+    ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,
+};
+pub use registry::{ExtensionRegistry, SharedExtensionRegistry};
 
 /// Filesystem-backed extension discovery.
 pub struct ExtensionDiscovery;
@@ -406,209 +454,247 @@ impl ExtensionDiscovery {
     where
         F: RootFilesystem,
     {
+        let host_port_catalog = HostPortCatalog::empty();
+        let host_api_contracts = HostApiContractRegistry::new();
+        Self::discover_with_manifest_contracts(
+            fs,
+            root,
+            ManifestSource::InstalledLocal,
+            &host_port_catalog,
+            &host_api_contracts,
+        )
+        .await
+    }
+
+    pub async fn discover_with_manifest_contracts<F>(
+        fs: &F,
+        root: &VirtualPath,
+        source: ManifestSource,
+        host_port_catalog: &HostPortCatalog,
+        host_api_contracts: &HostApiContractRegistry,
+    ) -> Result<ExtensionRegistry, ExtensionError>
+    where
+        F: RootFilesystem,
+    {
         let mut entries = fs.list_dir(root).await?;
         entries.sort_by(|left, right| left.name.cmp(&right.name));
 
         let mut registry = ExtensionRegistry::new();
         for entry in entries {
-            if entry.file_type != FileType::Directory {
-                continue;
-            }
-            let Ok(expected) = ExtensionId::new(entry.name.clone()) else {
+            let Some(expected) = Self::extension_dir_id(&entry) else {
                 continue;
             };
-            let manifest_path = VirtualPath::new(format!(
-                "{}/{}/manifest.toml",
-                root.as_str().trim_end_matches('/'),
-                entry.name
-            ))?;
-            let bytes = fs.read_file(&manifest_path).await?;
-            let text = String::from_utf8(bytes).map_err(|error| ExtensionError::ManifestParse {
-                reason: error.to_string(),
-            })?;
-            let manifest = ExtensionManifest::parse(&text)?;
-            if manifest.id != expected {
-                return Err(ExtensionError::ManifestIdMismatch {
-                    root: entry.path,
-                    expected,
-                    actual: manifest.id,
-                });
-            }
-            let package = ExtensionPackage::from_manifest(manifest, entry.path)?;
+            // All-or-nothing: any per-package failure fails the whole discovery.
+            let package = Self::load_package_entry(
+                fs,
+                root,
+                &entry,
+                expected,
+                source,
+                host_port_catalog,
+                host_api_contracts,
+            )
+            .await?;
             registry.insert(package)?;
         }
 
         Ok(registry)
     }
-}
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawManifest {
-    id: String,
-    name: String,
-    version: String,
-    description: String,
-    #[serde(
-        default = "default_requested_trust",
-        deserialize_with = "deserialize_requested_trust"
-    )]
-    trust: RequestedTrustClass,
-    runtime: RawRuntime,
-    #[serde(default)]
-    capabilities: Vec<RawCapability>,
-}
+    /// Tolerant + **bounded** discovery (DoS-hardened entry point).
+    ///
+    /// Two security properties separate this from
+    /// [`Self::discover_with_manifest_contracts`]:
+    ///
+    /// 1. **Bounded** — caps the expensive per-manifest read/parse/validate work
+    ///    to at most `max_extensions` extension directories. The directory is
+    ///    listed and sorted once (cheap), then only the FIRST `max_extensions`
+    ///    valid extension directory entries are read; the remainder are recorded
+    ///    as [`DiscoveryQuarantine`]s WITHOUT ever being read or parsed. A tenant
+    ///    with thousands of extension directories therefore cannot force
+    ///    unbounded read/parse work — the count cap fires *before* the read
+    ///    storm, not after (the per-file `MAX_MANIFEST_BYTES` pre-read bound is
+    ///    orthogonal and still applies to every read we do perform).
+    /// 2. **Tolerant** — a single malformed / oversized / id-mismatched package
+    ///    quarantines ONLY that package (collected into
+    ///    [`TolerantBoundedDiscovery::quarantined`]) and discovery CONTINUES. The
+    ///    only error that aborts the whole call is failure to LIST THE ROOT
+    ///    itself (the directory is unreadable) — surfaced as the outer `Err`.
+    ///
+    /// `max_extensions` counts *valid extension directory entries considered*
+    /// (post sort, post name-validation), so the surplus tail is quarantined
+    /// deterministically by sorted name. A `max_extensions` of `0` reads nothing.
+    pub async fn discover_with_manifest_contracts_tolerant_bounded<F>(
+        fs: &F,
+        root: &VirtualPath,
+        source: ManifestSource,
+        host_port_catalog: &HostPortCatalog,
+        host_api_contracts: &HostApiContractRegistry,
+        max_extensions: usize,
+    ) -> Result<TolerantBoundedDiscovery, ExtensionError>
+    where
+        F: RootFilesystem,
+    {
+        // Listing the root is the ONLY fatal step: if the tenant's extension
+        // directory is unreadable we cannot make a per-package decision, so the
+        // caller falls back (e.g. to builtin-only). A FilesystemError here
+        // propagates as the outer Err.
+        let mut entries = fs.list_dir(root).await?;
+        entries.sort_by(|left, right| left.name.cmp(&right.name));
 
-fn default_requested_trust() -> RequestedTrustClass {
-    RequestedTrustClass::Untrusted
-}
+        let mut registry = ExtensionRegistry::new();
+        let mut quarantined: Vec<DiscoveryQuarantine> = Vec::new();
+        let mut considered = 0usize;
 
-fn deserialize_requested_trust<'de, D>(deserializer: D) -> Result<RequestedTrustClass, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = String::deserialize(deserializer)?;
-    match value.as_str() {
-        "untrusted" => Ok(RequestedTrustClass::Untrusted),
-        "third_party" => Ok(RequestedTrustClass::ThirdParty),
-        "first_party_requested" => Ok(RequestedTrustClass::FirstPartyRequested),
-        "system_requested" => Ok(RequestedTrustClass::SystemRequested),
-        "sandbox" => Err(serde::de::Error::custom(
-            "trust = \"sandbox\" is obsolete; use \"untrusted\"",
-        )),
-        "user_trusted" => Err(serde::de::Error::custom(
-            "trust = \"user_trusted\" is obsolete; use \"third_party\"",
-        )),
-        "first_party" => Err(serde::de::Error::custom(
-            "trust = \"first_party\" is obsolete; use \"first_party_requested\"",
-        )),
-        "system" => Err(serde::de::Error::custom(
-            "trust = \"system\" is obsolete; use \"system_requested\"",
-        )),
-        _ => Err(serde::de::Error::custom(format!(
-            "unsupported trust value {value:?}; expected one of untrusted, third_party, first_party_requested, system_requested"
-        ))),
-    }
-}
+        for entry in entries {
+            let Some(expected) = Self::extension_dir_id(&entry) else {
+                // Not an extension directory (file, or non-id name): skip
+                // silently, do not count against the bound.
+                continue;
+            };
 
-fn requested_trust_to_descriptor_trust(requested: RequestedTrustClass) -> TrustClass {
-    match requested {
-        RequestedTrustClass::ThirdParty => TrustClass::UserTrusted,
-        RequestedTrustClass::Untrusted
-        | RequestedTrustClass::FirstPartyRequested
-        | RequestedTrustClass::SystemRequested => TrustClass::Sandbox,
-    }
-}
+            // ── Bound BEFORE the expensive read/parse. ──
+            // Once the count cap is hit, record the surplus as quarantined
+            // without reading its manifest at all. This is the DoS ceiling.
+            if considered >= max_extensions {
+                quarantined.push(DiscoveryQuarantine {
+                    extension_id: expected.as_str().to_string(),
+                    reason: format!(
+                        "exceeded discovery bound of {max_extensions} extension(s); \
+                         not read"
+                    ),
+                });
+                continue;
+            }
+            considered += 1;
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum RawRuntime {
-    Wasm {
-        module: String,
-    },
-    Script {
-        runner: Option<String>,
-        backend: Option<String>,
-        image: Option<String>,
-        command: String,
-        #[serde(default)]
-        args: Vec<String>,
-    },
-    Mcp {
-        transport: String,
-        command: Option<String>,
-        #[serde(default)]
-        args: Vec<String>,
-        url: Option<String>,
-    },
-    FirstParty {
-        service: String,
-    },
-    System {
-        service: String,
-    },
-}
-
-impl RawRuntime {
-    fn into_runtime(self) -> Result<ExtensionRuntime, ExtensionError> {
-        match self {
-            Self::Wasm { module } => Ok(ExtensionRuntime::Wasm {
-                module: ExtensionAssetPath::new(module)?,
-            }),
-            Self::Script {
-                runner,
-                backend,
-                image,
-                command,
-                args,
-            } => {
-                let runner = match (runner, backend) {
-                    (Some(runner), None) => runner,
-                    (None, Some(backend)) => backend,
-                    (Some(_), Some(_)) => {
-                        return Err(ExtensionError::InvalidManifest {
-                            reason: "script runtime must specify either runner or legacy backend, not both".to_string(),
+            match Self::load_package_entry(
+                fs,
+                root,
+                &entry,
+                expected.clone(),
+                source,
+                host_port_catalog,
+                host_api_contracts,
+            )
+            .await
+            {
+                Ok(package) => {
+                    if let Err(error) = registry.insert(package) {
+                        quarantined.push(DiscoveryQuarantine {
+                            extension_id: expected.as_str().to_string(),
+                            reason: error.to_string(),
                         });
                     }
-                    (None, None) => {
-                        return Err(ExtensionError::InvalidManifest {
-                            reason: "script runtime runner is required".to_string(),
-                        });
-                    }
-                };
-                validate_non_empty("script runner", &runner)?;
-                if runner == "docker" {
-                    let image = image.as_deref().unwrap_or_default();
-                    validate_non_empty("script image", image)?;
                 }
-                validate_non_empty("script command", &command)?;
-                Ok(ExtensionRuntime::Script {
-                    runner,
-                    image,
-                    command,
-                    args,
-                })
-            }
-            Self::Mcp {
-                transport,
-                command,
-                args,
-                url,
-            } => {
-                validate_mcp_runtime_shape(&transport, command.as_deref(), url.as_deref())?;
-                Ok(ExtensionRuntime::Mcp {
-                    transport,
-                    command,
-                    args,
-                    url,
-                })
-            }
-            Self::FirstParty { service } => {
-                validate_non_empty("first-party service", &service)?;
-                Err(ExtensionError::InvalidManifest {
-                    reason: "first-party and system runtimes are host-assigned and cannot be self-asserted by manifests".to_string(),
-                })
-            }
-            Self::System { service } => {
-                validate_non_empty("system service", &service)?;
-                Err(ExtensionError::InvalidManifest {
-                    reason: "first-party and system runtimes are host-assigned and cannot be self-asserted by manifests".to_string(),
-                })
+                Err(error) => {
+                    // Tolerant: one bad package drops only itself.
+                    quarantined.push(DiscoveryQuarantine {
+                        extension_id: expected.as_str().to_string(),
+                        reason: error.to_string(),
+                    });
+                }
             }
         }
+
+        Ok(TolerantBoundedDiscovery {
+            registry,
+            quarantined,
+        })
+    }
+
+    /// Map a directory entry to its expected [`ExtensionId`], or `None` if the
+    /// entry is not a usable extension directory (not a directory, or a name
+    /// that is not a valid extension id). Cheap: no filesystem read.
+    fn extension_dir_id(entry: &ironclaw_filesystem::DirEntry) -> Option<ExtensionId> {
+        if entry.file_type != FileType::Directory {
+            return None;
+        }
+        ExtensionId::new(entry.name.clone()).ok()
+    }
+
+    /// Read + parse + validate a single extension directory entry into an
+    /// [`ExtensionPackage`]. Shared by the all-or-nothing and tolerant+bounded
+    /// discovery paths so the per-package semantics are identical; only the
+    /// caller's handling of the `Err` differs (propagate vs quarantine).
+    async fn load_package_entry<F>(
+        fs: &F,
+        root: &VirtualPath,
+        entry: &ironclaw_filesystem::DirEntry,
+        expected: ExtensionId,
+        source: ManifestSource,
+        host_port_catalog: &HostPortCatalog,
+        host_api_contracts: &HostApiContractRegistry,
+    ) -> Result<ExtensionPackage, ExtensionError>
+    where
+        F: RootFilesystem,
+    {
+        let manifest_path = VirtualPath::new(format!(
+            "{}/{}/manifest.toml",
+            root.as_str().trim_end_matches('/'),
+            entry.name
+        ))?;
+        // DoS pre-read bound (threat-model: oversized manifest). Stat the
+        // file and refuse to read it at all if it exceeds the manifest size
+        // ceiling, rather than materializing the whole body first and only
+        // then rejecting in `parse` (`MAX_MANIFEST_BYTES` is also re-checked
+        // there as defense-in-depth). `read_file_bounded` stats before it
+        // materializes, so an attacker-controlled multi-gigabyte manifest is
+        // rejected without a full read.
+        let bytes = match fs
+            .read_file_bounded(&manifest_path, v2::MAX_MANIFEST_BYTES)
+            .await?
+        {
+            Some(bytes) => bytes,
+            None => {
+                return Err(ExtensionError::InvalidManifest {
+                    reason: format!(
+                        "extension manifest at {} exceeds the {}-byte ceiling and was \
+                         rejected before reading",
+                        manifest_path.as_str(),
+                        v2::MAX_MANIFEST_BYTES
+                    ),
+                });
+            }
+        };
+        let text = String::from_utf8(bytes).map_err(|error| ExtensionError::ManifestParse {
+            reason: error.to_string(),
+        })?;
+        let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
+            &text,
+            source,
+            host_port_catalog,
+            host_api_contracts,
+        )?;
+        if manifest.id != expected {
+            return Err(ExtensionError::ManifestIdMismatch {
+                root: entry.path.clone(),
+                expected,
+                actual: manifest.id,
+            });
+        }
+        ExtensionPackage::from_manifest_toml(manifest, entry.path.clone(), &text)
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawCapability {
-    id: String,
-    description: String,
-    effects: Vec<EffectKind>,
-    default_permission: PermissionMode,
-    parameters_schema: serde_json::Value,
-    #[serde(default)]
-    resource_profile: Option<ResourceProfile>,
+/// A package dropped during tolerant discovery, with a human-readable reason.
+/// The caller (the hook projection) turns each into a `hook.quarantined` audit
+/// event. Carries the extension id (directory name) so the audit names the
+/// offending package even when the manifest failed to parse.
+#[derive(Debug, Clone)]
+pub struct DiscoveryQuarantine {
+    pub extension_id: String,
+    pub reason: String,
+}
+
+/// Result of [`ExtensionDiscovery::discover_with_manifest_contracts_tolerant_bounded`]:
+/// the registry of packages that loaded successfully within the bound, plus the
+/// per-package quarantine record for every package that was dropped (malformed,
+/// duplicate, or beyond the discovery bound).
+#[derive(Debug)]
+pub struct TolerantBoundedDiscovery {
+    pub registry: ExtensionRegistry,
+    pub quarantined: Vec<DiscoveryQuarantine>,
 }
 
 fn ensure_extension_root_matches(
@@ -636,6 +722,45 @@ fn extension_id_from_package_root(root: &VirtualPath) -> Result<ExtensionId, Ext
     Ok(ExtensionId::new(extension_id.to_string())?)
 }
 
+fn capability_descriptors_from_manifest(
+    manifest: &ExtensionManifest,
+) -> Result<Vec<CapabilityDescriptor>, ExtensionError> {
+    let expected_prefix = format!("{}.", manifest.id.as_str());
+    let mut seen_capabilities = HashSet::new();
+    manifest
+        .capabilities
+        .iter()
+        .map(|capability| {
+            if !capability.id.as_str().starts_with(&expected_prefix) {
+                return Err(ExtensionError::InvalidManifest {
+                    reason: format!(
+                        "capability id {} must be provider-prefixed with {}",
+                        capability.id.as_str(),
+                        expected_prefix
+                    ),
+                });
+            }
+            if !seen_capabilities.insert(capability.id.clone()) {
+                return Err(ExtensionError::DuplicateCapability {
+                    id: capability.id.clone(),
+                });
+            }
+            Ok(CapabilityDescriptor {
+                id: capability.id.clone(),
+                provider: manifest.id.clone(),
+                runtime: manifest.runtime_kind(),
+                trust_ceiling: manifest.descriptor_trust_default,
+                description: capability.description.clone(),
+                parameters_schema: descriptor_schema_ref(capability),
+                effects: capability.effects.clone(),
+                default_permission: capability.default_permission,
+                runtime_credentials: capability.runtime_credentials.clone(),
+                resource_profile: capability.resource_profile.clone(),
+            })
+        })
+        .collect()
+}
+
 fn invalid_package_root(root: &VirtualPath) -> ExtensionError {
     ExtensionError::InvalidManifest {
         reason: format!(
@@ -643,6 +768,10 @@ fn invalid_package_root(root: &VirtualPath) -> ExtensionError {
             root.as_str()
         ),
     }
+}
+
+fn descriptor_schema_ref(capability: &CapabilityManifest) -> serde_json::Value {
+    serde_json::json!({ "$ref": capability.input_schema_ref.as_str() })
 }
 
 fn validate_asset_path(value: &str) -> Result<(), ExtensionError> {
@@ -685,77 +814,6 @@ fn validate_asset_path(value: &str) -> Result<(), ExtensionError> {
         }
     }
     Ok(())
-}
-
-fn validate_mcp_runtime_shape(
-    transport: &str,
-    command: Option<&str>,
-    url: Option<&str>,
-) -> Result<(), ExtensionError> {
-    validate_non_empty("mcp transport", transport)?;
-    if let Some(command) = command {
-        validate_non_empty("mcp command", command)?;
-    }
-    if let Some(url) = url {
-        validate_non_empty("mcp url", url)?;
-    }
-
-    match transport {
-        "stdio" => {
-            if url.is_some() {
-                return Err(ExtensionError::InvalidManifest {
-                    reason: "mcp stdio transport must not specify url".to_string(),
-                });
-            }
-            if command.is_none() {
-                return Err(ExtensionError::InvalidManifest {
-                    reason: "mcp stdio transport requires command".to_string(),
-                });
-            }
-        }
-        "http" | "sse" => {
-            if command.is_some() {
-                return Err(ExtensionError::InvalidManifest {
-                    reason: format!("mcp {transport} transport must not specify command"),
-                });
-            }
-            let Some(url) = url else {
-                return Err(ExtensionError::InvalidManifest {
-                    reason: format!("mcp {transport} transport requires url"),
-                });
-            };
-            validate_mcp_http_url(transport, url)?;
-        }
-        _ => {
-            return Err(ExtensionError::InvalidManifest {
-                reason: "mcp transport must be one of stdio, http, or sse".to_string(),
-            });
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_mcp_http_url(transport: &str, value: &str) -> Result<(), ExtensionError> {
-    let parsed = url::Url::parse(value).map_err(|_| ExtensionError::InvalidManifest {
-        reason: format!("mcp {transport} transport URL must be absolute http(s) URL"),
-    })?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err(ExtensionError::InvalidManifest {
-            reason: format!("mcp {transport} transport URL must use http or https"),
-        });
-    }
-    Ok(())
-}
-
-fn validate_non_empty(kind: &str, value: &str) -> Result<(), ExtensionError> {
-    if value.trim().is_empty() {
-        Err(ExtensionError::InvalidManifest {
-            reason: format!("{kind} must not be empty"),
-        })
-    } else {
-        Ok(())
-    }
 }
 
 fn looks_like_windows_path(value: &str) -> bool {

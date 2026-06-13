@@ -1051,6 +1051,15 @@ impl Tool for ShellTool {
          When Docker sandbox is enabled, commands run in isolated containers for security."
     }
 
+    fn runtime_affordance(&self) -> crate::tools::ToolRuntimeAffordance {
+        // Shell needs *some* process backend. Profiles that resolve to
+        // `process_backend == None` (e.g. `SecureDefault`) hide this tool
+        // from the model entirely. Tenant/org-dedicated process backends
+        // satisfy the affordance — the tool runs inside the matching
+        // sandbox, not on the provider host.
+        crate::tools::ToolRuntimeAffordance::AnyProcess
+    }
+
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",

@@ -207,15 +207,16 @@ def line_test_contexts(lines: list[str]) -> list[bool]:
 
 
 def is_test_only_path(path: str) -> bool:
-    """Return True for files that live inside a test-only directory.
+    """Return True for files that live in Rust test-only locations.
 
-    Files under ``src/**/tests/*.rs`` are Rust test sub-modules, typically
-    included behind ``#[cfg(test)]`` and never compiled in production.
-    Top-level ``tests/*.rs`` integration test files are already outside
-    ``src/`` / ``crates/`` and therefore never checked.
+    Files under ``src/**/tests/*.rs`` and ``src/**/tests.rs`` are Rust test
+    sub-modules, typically included behind ``#[cfg(test)]`` and never compiled
+    in production. Top-level ``tests/*.rs`` integration test files are already
+    outside ``src/`` / ``crates/`` and therefore never checked.
     """
-    parts = pathlib.PurePosixPath(path).parts
-    return "tests" in parts
+    posix_path = pathlib.PurePosixPath(path)
+    parts = posix_path.parts
+    return "tests" in parts or posix_path.name == "tests.rs"
 
 
 def changed_rust_files(base: str, head: str) -> list[pathlib.Path]:
@@ -379,6 +380,8 @@ class CheckNoPanicsTests(unittest.TestCase):
     def test_test_only_path_detection(self) -> None:
         self.assertTrue(is_test_only_path("src/channels/web/tests/multi_tenant.rs"))
         self.assertTrue(is_test_only_path("crates/foo/src/tests/helpers.rs"))
+        self.assertTrue(is_test_only_path("crates/foo/src/tests.rs"))
+        self.assertTrue(is_test_only_path("crates/foo/src/nested/tests.rs"))
         self.assertFalse(is_test_only_path("src/channels/web/mod.rs"))
         self.assertFalse(is_test_only_path("src/channels/web/test_helpers.rs"))
         self.assertFalse(is_test_only_path("crates/foo/src/lib.rs"))
