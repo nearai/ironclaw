@@ -1326,6 +1326,12 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             let resume_invocation_id = invocation_id_from_resume_token(&auth_resume.resume_token)?;
             invocation_context.invocation_id = resume_invocation_id;
             invocation_context.resource_scope.invocation_id = resume_invocation_id;
+            // Restore original correlation_id when present so the same
+            // trace-correlation id flows through the full capability lifecycle
+            // (mirrors how the approval-resume path restores correlation).
+            if let Some(correlation_id) = auth_resume.correlation_id {
+                invocation_context.correlation_id = correlation_id;
+            }
             invocation_context.validate().map_err(|_| {
                 AgentLoopHostError::new(
                     AgentLoopHostErrorKind::InvalidInvocation,

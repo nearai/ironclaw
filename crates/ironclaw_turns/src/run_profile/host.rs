@@ -1455,6 +1455,11 @@ pub struct CapabilityAuthResume {
     /// The host uses it to locate and claim the matching lease.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_request_id: Option<ApprovalRequestId>,
+    /// Original correlation id from the prior approval gate.  When present
+    /// the port restores it onto the invocation context so the same
+    /// trace-correlation id flows through the full capability lifecycle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<CorrelationId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

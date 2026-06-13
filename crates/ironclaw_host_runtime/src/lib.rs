@@ -943,26 +943,27 @@ pub trait HostRuntime: Send + Sync {
 
     /// Re-dispatch after an auth gate has been resolved.
     ///
-    /// The default implementation falls back to `invoke_capability` so
-    /// test stubs that do not need the approval-lease-claim path compile
-    /// without changes. Production hosts override this to route through
+    /// Production hosts override this to route through
     /// `CapabilityHost::auth_resume_json` which handles the `BlockedAuth`
     /// run-state and optionally claims the prior approval lease.
+    ///
+    /// The default implementation returns an explicit `Failed` outcome so that
+    /// test stubs that do not override this method fail loudly instead of
+    /// silently falling back to a fresh `invoke_capability` call (which would
+    /// bypass run-state validation and the approval-lease-claim path).  Any
+    /// `HostRuntime` implementation that participates in auth-resume flows must
+    /// provide an explicit override.
     async fn auth_resume_capability(
         &self,
         request: RuntimeCapabilityAuthResumeRequest,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-        let mut fallback = RuntimeCapabilityRequest::new(
-            request.context,
-            request.capability_id,
-            request.estimate,
-            request.input,
-            request.trust_decision,
-        );
-        if let Some(key) = request.idempotency_key {
-            fallback = fallback.with_idempotency_key(key);
-        }
-        self.invoke_capability(fallback).await
+        Ok(RuntimeCapabilityOutcome::Failed(
+            RuntimeCapabilityFailure::new(
+                request.capability_id,
+                RuntimeFailureKind::Unavailable,
+                Some("capability auth-resume is unsupported by this host runtime".to_string()),
+            ),
+        ))
     }
 
     async fn resume_spawn_capability(

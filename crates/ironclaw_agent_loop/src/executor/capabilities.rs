@@ -142,25 +142,15 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         // at a BlockedAuth checkpoint that also carried prior
                         // approval identity, re-dispatch through the auth-resume
                         // path so the original invocation_id is reused.
-                        if pending_auth_resume
+                        if let Some(auth) = pending_auth_resume
                             .as_ref()
-                            .is_some_and(|auth| auth.capability_id == call.capability_id)
+                            .filter(|auth| auth.capability_id == call.capability_id)
                         {
-                            let auth = pending_auth_resume.as_ref().unwrap();
                             return capability_invocation_from_auth_resume_candidate(call, auth);
                         }
                         let resume = pending_approval_resume
                             .take_if(|resume| resume.capability_id == call.capability_id)
-                            .map(
-                                |resume| ironclaw_turns::run_profile::CapabilityApprovalResume {
-                                    approval_request_id: resume.approval_request_id,
-                                    resume_token: resume.resume_token,
-                                    correlation_id: resume.correlation_id,
-                                    input_ref: resume.input_ref,
-                                    input: resume.input,
-                                    estimate: resume.estimate,
-                                },
-                            );
+                            .map(|resume| resume.to_approval_resume());
                         capability_invocation_from_candidate(call, resume)
                     })
                     .collect(),
@@ -522,14 +512,7 @@ impl CapabilityStage {
                     .pending_approval_resume
                     .as_ref()
                     .filter(|r| r.capability_id == call.capability_id)
-                    .map(|r| ironclaw_turns::run_profile::CapabilityApprovalResume {
-                        approval_request_id: r.approval_request_id,
-                        resume_token: r.resume_token.clone(),
-                        correlation_id: r.correlation_id,
-                        input_ref: r.input_ref.clone(),
-                        input: r.input.clone(),
-                        estimate: r.estimate.clone(),
-                    });
+                    .map(|r| r.to_approval_resume());
                 // Clearing here keeps the clear-on-every-outcome invariant; for auth
                 // outcomes GateStage re-populates the record when it blocks.
                 clear_matching_pending_approval_resume(&mut state, &call);

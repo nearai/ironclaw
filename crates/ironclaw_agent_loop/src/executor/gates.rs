@@ -64,14 +64,15 @@ impl ExecutorStage<GateInput> for GateStage {
                 state.last_gate = Some(gate_ref.clone());
                 // Extract approval identity before the Option is moved into
                 // the pending_approval_resume mapping below.
-                let (auth_resume_token, auth_approval_request_id) =
+                let (auth_resume_token, auth_approval_request_id, auth_correlation_id) =
                     if let Some(ref approval_resume) = input.approval_resume {
                         (
                             Some(approval_resume.resume_token.clone()),
                             Some(approval_resume.approval_request_id),
+                            Some(approval_resume.correlation_id),
                         )
                     } else {
-                        (None, None)
+                        (None, None, None)
                     };
                 state.pending_approval_resume =
                     input.approval_resume.map(|resume| PendingApprovalResume {
@@ -103,6 +104,7 @@ impl ExecutorStage<GateInput> for GateStage {
                         provider_replay: call.provider_replay.clone(),
                         resume_token: auth_resume_token,
                         approval_request_id: auth_approval_request_id,
+                        correlation_id: auth_correlation_id,
                     });
                 }
                 // Non-auth blocks do not invalidate a pending auth resume: a resource or

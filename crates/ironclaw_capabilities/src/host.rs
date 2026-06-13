@@ -950,6 +950,23 @@ where
                 status: run_record.status,
             });
         }
+        // Verify the capability_id on the request matches the one recorded in
+        // the run state when the run was originally started.  A mismatch means
+        // the caller is trying to resume a different capability than the one
+        // that was blocked — treat it as a context mismatch and fail the run.
+        if run_record.capability_id != request.capability_id {
+            fail_run_if_configured(
+                Some(run_state),
+                &scope,
+                invocation_id,
+                "ResumeContextMismatch",
+            )
+            .await;
+            return Err(CapabilityInvocationError::ResumeContextMismatch {
+                capability: request.capability_id,
+                kind: resume_context_mismatch_kind(true, false),
+            });
+        }
 
         // When the invocation previously passed an approval gate, validate and
         // claim the fingerprinted approval lease so the existing approval
@@ -1229,7 +1246,7 @@ where
             &scope,
             invocation_id,
             &capability_id,
-            "auth_resume_dispatch",
+            "dispatch",
         )
         .await;
         Ok(CapabilityInvocationResult { dispatch })
