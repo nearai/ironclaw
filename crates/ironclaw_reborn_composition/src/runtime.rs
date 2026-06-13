@@ -86,8 +86,8 @@ use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
     LoopGateRef, ReplyTargetBindingRef, RunProfileResolutionRequest, SanitizedCancelReason,
     SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
-    TurnEventProjectionSource, TurnId, TurnPersistenceSnapshot, TurnRunId, TurnRunOrigin,
-    TurnRunRecord, TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStatus,
+    TurnEventProjectionSource, TurnId, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord,
+    TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStatus,
     run_profile::{LoopHostMilestoneSink, LoopRunContext},
 };
 
@@ -1309,7 +1309,9 @@ impl RebornRuntime {
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
-                run_origin: Some(TurnRunOrigin::WebUiChat),
+                product_context: Some(ironclaw_product_context::resolve_web_ui(
+                    scope.product_owner(&TurnActor::new(self.actor_user_id.clone())),
+                )),
             })
             .await
         {
@@ -4426,7 +4428,7 @@ mod tests {
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
-                run_origin: None,
+                product_context: None,
             })
             .await
             .expect("parent submitted");
@@ -6372,7 +6374,7 @@ mod tests {
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
-                run_origin: None,
+                product_context: None,
             })
             .await
             .expect("submit turn");

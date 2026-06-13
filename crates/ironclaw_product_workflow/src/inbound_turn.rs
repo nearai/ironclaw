@@ -23,7 +23,7 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator,
-    TurnError, TurnRunId, TurnRunOrigin, TurnScope,
+    TurnError, TurnRunId, TurnScope,
 };
 use uuid::Uuid;
 
@@ -621,6 +621,19 @@ impl AcceptedProductInboundTurn {
             reason: format!("invalid turn ref: {e}"),
         })?;
 
+        let run_adapter =
+            ironclaw_turns::RunOriginAdapter::new(adapter_id.as_str()).map_err(|e| {
+                ProductWorkflowError::TurnSubmissionRejected {
+                    reason: e.to_string(),
+                }
+            })?;
+        let product_context = ironclaw_product_context::resolve_inbound(
+            ironclaw_product_context::TrustLevel::Untrusted,
+            false,
+            run_adapter,
+            None,
+            turn_scope.product_owner(&actor),
+        );
         let request = SubmitTurnRequest {
             scope: turn_scope,
             actor,
@@ -634,9 +647,7 @@ impl AcceptedProductInboundTurn {
             parent_run_id: None,
             subagent_depth: 0,
             spawn_tree_root_run_id: None,
-            run_origin: Some(TurnRunOrigin::ProductInbound {
-                adapter: adapter_id.as_str().to_string(),
-            }),
+            product_context: Some(product_context),
         };
 
         match turn_coordinator.submit_turn(request).await {

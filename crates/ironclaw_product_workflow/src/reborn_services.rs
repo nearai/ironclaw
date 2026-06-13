@@ -29,7 +29,7 @@ use ironclaw_threads::{
 use ironclaw_turns::{
     AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
     ResumeTurnRequest, SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCoordinator, TurnError, TurnRunId, TurnRunOrigin, TurnScope, TurnStatus,
+    TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
 };
 use secrecy::SecretString;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
@@ -1712,6 +1712,7 @@ impl RebornServicesApi for RebornServices {
             "webui-reply",
             &handoff.reply_target_binding_id,
         )?;
+        let product_context = ironclaw_product_context::resolve_web_ui(scope.product_owner(&actor));
         let submit = SubmitTurnRequest {
             scope: scope.clone(),
             actor,
@@ -1725,7 +1726,7 @@ impl RebornServicesApi for RebornServices {
             parent_run_id: None,
             subagent_depth: 0,
             spawn_tree_root_run_id: None,
-            run_origin: Some(TurnRunOrigin::WebUiChat),
+            product_context: Some(product_context),
         };
 
         self.record_skill_activation_message(&scope, &accepted_message_ref, &content)?;

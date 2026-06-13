@@ -76,7 +76,7 @@ use ironclaw_turns::{
     InMemoryTurnStateStore, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
     ResumeTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
     SubmitTurnResponse, TurnActor, TurnCapacityResource, TurnCoordinator, TurnError, TurnId,
-    TurnRunId, TurnRunOrigin, TurnRunState, TurnScope, TurnStatus,
+    TurnOriginKind, TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 use secrecy::SecretString;
 use serde_json::json;
@@ -323,12 +323,12 @@ impl FakeTurnCoordinator {
             .map(|request| request.scope.clone())
     }
 
-    fn last_submission_run_origin(&self) -> Option<TurnRunOrigin> {
+    fn last_submission_origin_kind(&self) -> Option<TurnOriginKind> {
         self.submissions
             .lock()
             .expect("lock")
             .last()
-            .and_then(|request| request.run_origin.clone())
+            .and_then(|request| request.product_context.as_ref().map(|c| c.origin))
     }
 
     fn last_cancellation_scope(&self) -> Option<TurnScope> {
@@ -454,7 +454,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(17),
-            run_origin: None,
+            product_context: None,
         })
     }
 }
@@ -549,7 +549,7 @@ impl TurnCoordinator for BlockingSubmitCoordinator {
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(29),
-            run_origin: None,
+            product_context: None,
         })
     }
 }
@@ -1814,9 +1814,9 @@ async fn submit_turn_uses_facade_and_thread_history_without_route_store_access()
         "project-alpha"
     );
     assert_eq!(
-        coordinator.last_submission_run_origin(),
-        Some(TurnRunOrigin::WebUiChat),
-        "WebUI submit must produce WebUiChat run_origin"
+        coordinator.last_submission_origin_kind(),
+        Some(TurnOriginKind::WebUi),
+        "WebUI submit must produce WebUi origin"
     );
 }
 

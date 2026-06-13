@@ -50,7 +50,7 @@ impl CommunicationContextProvider for RuntimeCommunicationContextProvider {
         scope: &TurnScope,
         actor: Option<&TurnActor>,
         delivery_tools_visible: bool,
-        run_origin: Option<ironclaw_turns::TurnRunOrigin>,
+        product_context: Option<ironclaw_turns::ProductTurnContext>,
     ) -> Option<CommunicationRuntimeContext> {
         let actor = actor?;
         let caller = WebUiAuthenticatedCaller::new(
@@ -97,7 +97,7 @@ impl CommunicationContextProvider for RuntimeCommunicationContextProvider {
                     connected_channels: ConnectedChannelsState::Unknown,
                     delivery_target: DeliveryTargetState::Unknown,
                     delivery_tools_visible,
-                    run_origin,
+                    product_context,
                 });
             }
         };
@@ -159,7 +159,7 @@ impl CommunicationContextProvider for RuntimeCommunicationContextProvider {
             connected_channels,
             delivery_target,
             delivery_tools_visible,
-            run_origin,
+            product_context,
         })
     }
 }
@@ -199,7 +199,7 @@ mod tests {
         RebornSetOutboundPreferencesRequest, WebUiAuthenticatedCaller,
     };
     use ironclaw_turns::{
-        TurnRunOrigin,
+        TurnOriginKind, TurnOwner,
         run_profile::{CommunicationContextProvider, ConnectedChannelsState, DeliveryTargetState},
         scope::{TurnActor, TurnScope},
     };
@@ -565,20 +565,25 @@ mod tests {
         assert_eq!(ctx.connected_channels, ConnectedChannelsState::Unknown);
     }
 
-    // --- Tests: run_origin propagation ---
+    // --- Tests: product_context propagation ---
 
     #[tokio::test]
-    async fn run_origin_is_passed_through() {
+    async fn product_context_is_passed_through() {
+        use ironclaw_host_api::UserId;
+        use ironclaw_turns::ProductTurnContext;
         let provider = RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesFacade));
+        let ctx_val = ProductTurnContext {
+            origin: TurnOriginKind::ScheduledTrigger,
+            surface_type: None,
+            adapter: None,
+            owner: TurnOwner::Personal {
+                user: UserId::new("u1").unwrap(),
+            },
+        };
         let ctx = provider
-            .communication_context(
-                &scope(),
-                Some(&actor()),
-                false,
-                Some(TurnRunOrigin::ScheduledTrigger),
-            )
+            .communication_context(&scope(), Some(&actor()), false, Some(ctx_val.clone()))
             .await
             .expect("context");
-        assert_eq!(ctx.run_origin, Some(TurnRunOrigin::ScheduledTrigger));
+        assert_eq!(ctx.product_context, Some(ctx_val));
     }
 }

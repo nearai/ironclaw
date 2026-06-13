@@ -86,7 +86,7 @@ fn auth_error_mapping_run_state(request: &GetRunStateRequest) -> TurnRunState {
         credential_requirements: Vec::new(),
         failure: None,
         event_cursor: EventCursor::default(),
-        run_origin: None,
+        product_context: None,
     }
 }
 
@@ -195,7 +195,7 @@ async fn local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator() {
             parent_run_id: None,
             subagent_depth: 0,
             spawn_tree_root_run_id: None,
-            run_origin: None,
+            product_context: None,
         })
         .await
         .expect("submit turn");
@@ -651,7 +651,7 @@ async fn submit_and_block_auth_run(
             parent_run_id: None,
             subagent_depth: 0,
             spawn_tree_root_run_id: None,
-            run_origin: None,
+            product_context: None,
         })
         .await
         .expect("submit turn");

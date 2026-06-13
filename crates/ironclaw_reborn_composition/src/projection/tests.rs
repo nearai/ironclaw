@@ -383,6 +383,6 @@ fn turn_run_state(
         credential_requirements: Vec::new(),
         failure: None,
         event_cursor: cursor,
-        run_origin: None,
+        product_context: None,
     }
 }

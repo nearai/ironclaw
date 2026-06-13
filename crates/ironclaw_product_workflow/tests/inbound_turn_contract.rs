@@ -47,7 +47,7 @@ use ironclaw_turns::{
     IdempotencyKey, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
     InMemoryTurnStateStore, LoopResultRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
     RunProfileVersion, SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
-    TurnActor, TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunOrigin, TurnRunState,
+    TurnActor, TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState,
     TurnRunWake, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
@@ -1288,11 +1288,18 @@ async fn reply_target_binding_ref_has_single_reply_prefix() {
     assert!(!reply_ref.starts_with("reply:reply:"));
     assert_eq!(reply_ref.matches("reply:").count(), 1);
     assert_eq!(
-        request.run_origin,
-        Some(TurnRunOrigin::ProductInbound {
-            adapter: "test_adapter".to_string(),
-        }),
-        "inbound turn must carry ProductInbound run_origin with adapter from envelope"
+        request.product_context.as_ref().map(|c| c.origin),
+        Some(TurnOriginKind::Inbound),
+        "inbound turn must carry Inbound origin"
+    );
+    assert_eq!(
+        request
+            .product_context
+            .as_ref()
+            .and_then(|c| c.adapter.as_ref())
+            .map(|a| a.as_str()),
+        Some("test_adapter"),
+        "inbound turn must carry adapter name from envelope"
     );
 }
 

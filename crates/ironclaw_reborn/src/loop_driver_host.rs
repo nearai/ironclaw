@@ -1532,7 +1532,7 @@ where
                         &run_context.scope,
                         run_context.actor(),
                         delivery_tools_visible,
-                        run_context.run_origin.clone(),
+                        run_context.product_context.clone(),
                     )
                     .await
             }
@@ -2038,8 +2038,8 @@ where
         if let Some(snapshot) = claimed.state.resolved_model_route.clone() {
             loop_run_context = loop_run_context.with_resolved_model_route(snapshot);
         }
-        if let Some(run_origin) = claimed.state.run_origin.clone() {
-            loop_run_context = loop_run_context.with_run_origin(run_origin);
+        if let Some(product_context) = claimed.state.product_context.clone() {
+            loop_run_context = loop_run_context.with_product_context(product_context);
         }
         let request = RebornLoopDriverHostRequest {
             claimed_run: claimed.clone(),
@@ -2312,6 +2312,13 @@ fn turn_error_to_host_error(error: TurnError) -> AgentLoopHostError {
                 &error,
             )
         }
+        TurnError::InvalidRunOriginAdapter => ironclaw_loop_support::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "request",
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "checkpoint state request contains an invalid run origin adapter",
+            &error,
+        ),
     }
 }
 

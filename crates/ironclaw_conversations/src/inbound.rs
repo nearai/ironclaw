@@ -9,7 +9,8 @@ use ironclaw_triggers::{
     TrustedTriggerSubmitRequest,
 };
 use ironclaw_turns::{
-    AdmissionRejectionReason, SubmitTurnRequest, TurnCoordinator, TurnError, TurnRunOrigin,
+    AdmissionRejectionReason, RunOriginAdapter, SubmitTurnRequest, TurnCoordinator, TurnError,
+    TurnSurfaceType,
 };
 
 use crate::trusted_trigger::{TrustedTriggerInboundFailureKind, classify_inbound_error};
@@ -92,15 +93,22 @@ where
             requested_run_profile,
         } = request;
 
-        let run_origin = if matches!(binding_policy, BindingResolutionPolicy::Trusted { .. })
-            && adapter_kind.is_trusted_trigger()
-        {
-            Some(TurnRunOrigin::ScheduledTrigger)
-        } else {
-            Some(TurnRunOrigin::ProductInbound {
-                adapter: adapter_kind.as_str().to_string(),
-            })
+        let trust = match &binding_policy {
+            BindingResolutionPolicy::Trusted { .. } => {
+                ironclaw_product_context::TrustLevel::Trusted
+            }
+            BindingResolutionPolicy::Untrusted => ironclaw_product_context::TrustLevel::Untrusted,
         };
+        let surface_type = match &route_kind {
+            ConversationRouteKind::Direct => Some(TurnSurfaceType::Direct),
+            ConversationRouteKind::Shared => Some(TurnSurfaceType::Channel),
+        };
+        let is_trigger = adapter_kind.is_trusted_trigger();
+        let run_adapter = RunOriginAdapter::new(adapter_kind.as_str()).map_err(|e| {
+            InboundTurnError::InvalidCanonicalRef {
+                reason: e.to_string(),
+            }
+        })?;
 
         let replay_lookup = AcceptedInboundMessageLookup {
             tenant_id: tenant_id.clone(),
@@ -116,7 +124,14 @@ where
             .await?
         {
             return self
-                .submit_or_replay(replay.resolution, replay.accepted_message, run_origin)
+                .submit_or_replay(
+                    replay.resolution,
+                    replay.accepted_message,
+                    trust,
+                    is_trigger,
+                    run_adapter,
+                    surface_type,
+                )
                 .await;
         }
 
@@ -176,15 +191,25 @@ where
             })
             .await?;
 
-        self.submit_or_replay(resolution, accepted_message, run_origin)
-            .await
+        self.submit_or_replay(
+            resolution,
+            accepted_message,
+            trust,
+            is_trigger,
+            run_adapter,
+            surface_type,
+        )
+        .await
     }
 
     async fn submit_or_replay(
         &self,
         mut resolution: ConversationBindingResolution,
         accepted_message: AcceptedInboundMessage,
-        run_origin: Option<TurnRunOrigin>,
+        trust: ironclaw_product_context::TrustLevel,
+        is_trigger: bool,
+        run_adapter: RunOriginAdapter,
+        surface_type: Option<TurnSurfaceType>,
     ) -> Result<InboundTurnResponse, InboundTurnError> {
         resolution.actor = accepted_message.actor.clone();
 
@@ -221,7 +246,13 @@ where
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
-                run_origin,
+                product_context: Some(ironclaw_product_context::resolve_inbound(
+                    trust,
+                    is_trigger,
+                    run_adapter,
+                    surface_type,
+                    resolution.turn_scope.product_owner(&accepted_message.actor),
+                )),
             })
             .await;
         let turn_submission = match turn_submission_result {
@@ -390,7 +421,8 @@ fn should_rotate_submit_key(error: &TurnError) -> bool {
         | TurnError::CapacityExceeded { .. }
         | TurnError::Conflict { .. }
         | TurnError::InvalidTransition { .. }
-        | TurnError::LeaseMismatch => false,
+        | TurnError::LeaseMismatch
+        | TurnError::InvalidRunOriginAdapter => false,
     }
 }
 
@@ -482,7 +514,7 @@ mod tests {
         CancelRunResponse, EventCursor, GetRunStateRequest, ReplyTargetBindingRef,
         ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef,
         SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnCapacityResource, TurnCoordinator,
-        TurnError, TurnId, TurnRunId, TurnRunOrigin, TurnRunState, TurnScope, TurnStatus,
+        TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState, TurnScope, TurnStatus,
     };
 
     use super::{
@@ -535,8 +567,11 @@ mod tests {
         assert_eq!(services.accepted_messages().await.len(), 1);
         assert_eq!(coordinator.submissions().len(), 1);
         assert_eq!(
-            coordinator.submissions()[0].run_origin,
-            Some(TurnRunOrigin::ScheduledTrigger)
+            coordinator.submissions()[0]
+                .product_context
+                .as_ref()
+                .map(|c| c.origin),
+            Some(TurnOriginKind::ScheduledTrigger)
         );
     }
 
@@ -1361,11 +1396,18 @@ mod tests {
         let submissions = coordinator.submissions();
         assert_eq!(submissions.len(), 1);
         assert_eq!(
-            submissions[0].run_origin,
-            Some(TurnRunOrigin::ProductInbound {
-                adapter: "trigger".to_string()
-            }),
-            "untrusted adapter_kind='trigger' must record ProductInbound, not ScheduledTrigger"
+            submissions[0].product_context.as_ref().map(|c| c.origin),
+            Some(TurnOriginKind::Inbound),
+            "untrusted adapter_kind='trigger' must record Inbound origin, not ScheduledTrigger"
+        );
+        assert_eq!(
+            submissions[0]
+                .product_context
+                .as_ref()
+                .and_then(|c| c.adapter.as_ref())
+                .map(|a| a.as_str()),
+            Some("trigger"),
+            "untrusted adapter_kind='trigger' must carry adapter name 'trigger'"
         );
     }
 
@@ -1419,11 +1461,18 @@ mod tests {
         let submissions = coordinator.submissions();
         assert_eq!(submissions.len(), 1);
         assert_eq!(
-            submissions[0].run_origin,
-            Some(TurnRunOrigin::ProductInbound {
-                adapter: "telegram".to_string()
-            }),
-            "ordinary inbound adapter must record ProductInbound with adapter name"
+            submissions[0].product_context.as_ref().map(|c| c.origin),
+            Some(TurnOriginKind::Inbound),
+            "ordinary inbound adapter must record Inbound origin"
+        );
+        assert_eq!(
+            submissions[0]
+                .product_context
+                .as_ref()
+                .and_then(|c| c.adapter.as_ref())
+                .map(|a| a.as_str()),
+            Some("telegram"),
+            "ordinary inbound adapter must carry adapter name"
         );
     }
 }
