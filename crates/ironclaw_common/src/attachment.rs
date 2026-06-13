@@ -95,12 +95,18 @@ pub struct IncomingAttachment {
 /// The bytes live behind the filesystem authority that owns `storage_key`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AttachmentRef {
-    /// Stable identifier for this attachment within its message.
+    /// Stable identifier for this attachment within its message. An opaque,
+    /// channel-provided token with no format contract (unique only within its
+    /// message, which `validate_attachment_refs` enforces), so it stays a
+    /// boundary `String` rather than a validated newtype.
     pub id: String,
     /// Image / Audio / Document.
     pub kind: AttachmentKind,
-    /// MIME type as received at the ingress boundary. Validated upstream
-    /// against the attachment format registry; stored verbatim here.
+    /// MIME type as received at the ingress boundary, stored verbatim. `kind`
+    /// and the fallback extension are derived from it through the attachment
+    /// format registry, which is a *recognizer, not an allowlist* — an unknown
+    /// but well-formed MIME type is accepted, not rejected — so this is
+    /// intentionally not gated to a registered set.
     pub mime_type: String,
     /// Original filename, when the source provided one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
