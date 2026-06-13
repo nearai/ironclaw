@@ -3,7 +3,7 @@
 //! `ironclaw_turns` owns the trusted applier and the private validation policy.
 //! This module provides Reborn-specific evidence adapters.
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_loop_support::RunCancellationFactory;
@@ -256,8 +256,10 @@ where
             .load_thread_history_for_turn(request.scope, request.run_id)
             .await?;
         let expected_run_id = request.run_id.to_string();
+        let verified_reply_ids = verified_reply_message_ids(&history, expected_run_id.as_str());
         let replies_verified = request.reply_message_refs.iter().all(|message_ref| {
-            verify_reply_message_ref(&history, message_ref, expected_run_id.as_str())
+            message_id_from_ref(message_ref)
+                .is_some_and(|message_id| verified_reply_ids.contains(&message_id))
         });
         let results_verified = request.result_refs.iter().all(|result_ref| {
             verify_tool_result_ref(&history, result_ref, expected_run_id.as_str())
@@ -393,12 +395,14 @@ where
             .load_thread_history_for_turn(request.scope, request.run_id)
             .await?;
         let expected_run_id = request.run_id.to_string();
+        let verified_reply_ids = verified_reply_message_ids(&history, expected_run_id.as_str());
         Ok(request
             .failed
             .explanation_message_refs
             .iter()
             .all(|message_ref| {
-                verify_reply_message_ref(&history, message_ref, expected_run_id.as_str())
+                message_id_from_ref(message_ref)
+                    .is_some_and(|message_id| verified_reply_ids.contains(&message_id))
             }))
     }
 
@@ -553,20 +557,20 @@ fn message_id_from_ref(message_ref: &LoopMessageRef) -> Option<ThreadMessageId> 
     ThreadMessageId::parse(raw).ok()
 }
 
-fn verify_reply_message_ref(
+fn verified_reply_message_ids(
     history: &ThreadHistory,
-    message_ref: &LoopMessageRef,
     expected_run_id: &str,
-) -> bool {
-    let Some(message_id) = message_id_from_ref(message_ref) else {
-        return false;
-    };
-    history.messages.iter().any(|message| {
-        message.message_id == message_id
-            && message.kind == MessageKind::Assistant
-            && message.status == MessageStatus::Finalized
-            && message.turn_run_id.as_deref() == Some(expected_run_id)
-    })
+) -> HashSet<ThreadMessageId> {
+    history
+        .messages
+        .iter()
+        .filter(|message| {
+            message.kind == MessageKind::Assistant
+                && message.status == MessageStatus::Finalized
+                && message.turn_run_id.as_deref() == Some(expected_run_id)
+        })
+        .map(|message| message.message_id)
+        .collect()
 }
 
 fn verify_tool_result_ref(

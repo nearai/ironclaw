@@ -2499,8 +2499,11 @@ impl Inner {
                 },
             };
         }
+        let retry_checkpoint_id = resume_checkpoint_id.or_else(|| {
+            self.latest_resumable_loop_checkpoint(&record.scope, record.turn_id, record.run_id)
+        });
         record.status = TurnStatus::Failed;
-        record.checkpoint_id = resume_checkpoint_id;
+        record.checkpoint_id = retry_checkpoint_id;
         record.failure = Some(failure.clone());
         record.runner_id = None;
         record.lease_token = None;

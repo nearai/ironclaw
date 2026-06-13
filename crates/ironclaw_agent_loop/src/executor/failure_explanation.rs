@@ -1,14 +1,19 @@
+use std::time::Duration;
+
 use ironclaw_turns::{
     LoopFailureKind, LoopMessageRef,
     run_profile::{
-        AgentLoopHostErrorKind, FinalizeAssistantMessage, LoopInlineMessage, LoopInlineMessageRole,
-        LoopModelRequest, LoopPromptBundleRequest, LoopSafeSummary, ParentLoopOutput, PromptMode,
+        AgentLoopHostError, AgentLoopHostErrorKind, FinalizeAssistantMessage, LoopInlineMessage,
+        LoopInlineMessageRole, LoopModelRequest, LoopModelResponse, LoopPromptBundleRequest,
+        LoopSafeSummary, ParentLoopOutput, PromptMode,
     },
 };
 
 use crate::state::LoopExecutionState;
 
 use super::{AgentLoopExecutorError, StageContext};
+
+const FAILURE_EXPLANATION_MODEL_DEADLINE: Duration = Duration::from_secs(10);
 
 /// Best-effort explanation plus state attachment: the only call path stages
 /// should use. Records the terminal reason before checkpointing, finalizes the
@@ -63,18 +68,19 @@ pub(super) async fn explain_failure(
         }
     };
 
-    let response = match ctx
-        .host
-        .stream_model(LoopModelRequest {
+    let response = match await_explanation_model_call(
+        ctx,
+        ctx.host.stream_model(LoopModelRequest {
             messages,
             surface_version: None,
             model_preference: None,
             capability_view: None,
-        })
-        .await
+        }),
+    )
+    .await
     {
-        Ok(response) => response,
-        Err(error) => {
+        ExplanationModelCallOutcome::Completed(Ok(response)) => response,
+        ExplanationModelCallOutcome::Completed(Err(error)) => {
             if error.kind == AgentLoopHostErrorKind::Cancelled {
                 return Err(AgentLoopExecutorError::Cancelled);
             }
@@ -86,6 +92,15 @@ pub(super) async fn explain_failure(
             );
             return Ok(None);
         }
+        ExplanationModelCallOutcome::TimedOut => {
+            tracing::debug!(
+                reason_kind = reason_kind.as_str(),
+                deadline_ms = FAILURE_EXPLANATION_MODEL_DEADLINE.as_millis(),
+                "failure explanation model call timed out"
+            );
+            return Ok(None);
+        }
+        ExplanationModelCallOutcome::Cancelled => return Err(AgentLoopExecutorError::Cancelled),
     };
 
     let reply = match response.output {
@@ -117,6 +132,32 @@ pub(super) async fn explain_failure(
             );
             Ok(None)
         }
+    }
+}
+
+enum ExplanationModelCallOutcome {
+    Completed(Result<LoopModelResponse, AgentLoopHostError>),
+    TimedOut,
+    Cancelled,
+}
+
+async fn await_explanation_model_call<F>(
+    ctx: StageContext<'_>,
+    call: F,
+) -> ExplanationModelCallOutcome
+where
+    F: std::future::Future<Output = Result<LoopModelResponse, AgentLoopHostError>>,
+{
+    tokio::pin!(call);
+    let timeout = tokio::time::sleep(FAILURE_EXPLANATION_MODEL_DEADLINE);
+    tokio::pin!(timeout);
+    let cancellation = ctx.host.cancellation_requested();
+    tokio::pin!(cancellation);
+
+    tokio::select! {
+        result = &mut call => ExplanationModelCallOutcome::Completed(result),
+        _ = &mut timeout => ExplanationModelCallOutcome::TimedOut,
+        _signal = &mut cancellation => ExplanationModelCallOutcome::Cancelled,
     }
 }
 

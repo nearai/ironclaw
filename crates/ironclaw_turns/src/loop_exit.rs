@@ -221,21 +221,6 @@ impl LoopExitApplier {
                         failed.checkpoint_id.as_ref(),
                     )
                     .await?;
-                policy.failure_resume_checkpoint_id = match self
-                    .transition_port
-                    .latest_resumable_checkpoint(scope, turn_id, run_id)
-                    .await
-                {
-                    Ok(checkpoint_id) => checkpoint_id,
-                    Err(error) => {
-                        tracing::warn!(
-                            run_id = ?run_id,
-                            error = %error,
-                            "failed to resolve failed-run retry checkpoint; recording failure as non-retryable"
-                        );
-                        None
-                    }
-                };
             }
         }
 

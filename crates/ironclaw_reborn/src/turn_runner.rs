@@ -25,24 +25,22 @@ use tracing::{debug, error, warn};
 
 use ironclaw_turns::{
     AgentLoopDriverError, AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, LoopExit,
-    LoopExitMapping, SanitizedFailure, TurnError, TurnLeaseToken, TurnRunId, TurnRunWake,
-    TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnStatus,
+    SanitizedFailure, TurnError, TurnLeaseToken, TurnRunId, TurnRunWake, TurnRunWakeNotifier,
+    TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnStatus,
     runner::{
-        ApplyValidatedLoopExitRequest, ClaimRunRequest, ClaimedTurnRun, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
-        RelinquishRunRequest, TurnRunTransitionPort, TurnRunnerOutcome,
+        ClaimRunRequest, ClaimedTurnRun, HeartbeatRequest, RecordModelRouteSnapshotRequest,
+        RecordRunnerFailureRequest, RecoverExpiredLeasesRequest, RelinquishRunRequest,
+        TurnRunTransitionPort,
     },
 };
 
 use crate::{
     driver_registry::{DriverRegistry, LoopDriverRegistryKey},
-    failure_categories::host_stage_unavailable_category,
+    failure_categories::{
+        MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
+        host_stage_unavailable_category,
+    },
     loop_exit_applier::LoopExitApplier,
-};
-
-#[cfg(test)]
-use crate::failure_categories::{
-    MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
 };
 
 /// Create a `SanitizedFailure` from a known-valid static category.
@@ -67,13 +65,15 @@ fn sanitized_failure(category: &'static str) -> Option<SanitizedFailure> {
 }
 
 fn sanitized_driver_failure(reason_kind: &str) -> Option<SanitizedFailure> {
-    match SanitizedFailure::new(reason_kind.to_string()) {
-        Ok(failure) => Some(failure),
-        Err(error) => {
+    match reason_kind {
+        MODEL_CREDITS_EXHAUSTED_CATEGORY => sanitized_failure(MODEL_CREDITS_EXHAUSTED_CATEGORY),
+        MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY => {
+            sanitized_failure(MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY)
+        }
+        _ => {
             debug!(
                 reason_kind,
-                %error,
-                "driver failure reason kind failed validation; using generic driver failure"
+                "driver failure reason kind is not host-allowlisted; using generic driver failure"
             );
             sanitized_failure("driver_failed")
         }
@@ -604,7 +604,7 @@ impl TurnRunnerWorker {
         }
 
         if let Some(failure) = self.driver_error_failure(error) {
-            self.apply_driver_failed_outcome(claimed, failure).await;
+            self.record_runner_failure(claimed, failure).await;
             return;
         }
 
@@ -638,6 +638,25 @@ impl TurnRunnerWorker {
         let Some(failure) = failure else {
             return;
         };
+        self.record_runner_failure(claimed, failure).await;
+    }
+
+    fn driver_error_failure(&self, error: &DriverInvocationError) -> Option<SanitizedFailure> {
+        match error {
+            DriverInvocationError::DriverError(AgentLoopDriverError::Unavailable { reason }) => {
+                sanitized_failure(host_stage_unavailable_category(reason))
+            }
+            DriverInvocationError::DriverError(AgentLoopDriverError::Failed { reason_kind }) => {
+                sanitized_driver_failure(reason_kind)
+            }
+            _ => None,
+        }
+    }
+
+    async fn record_runner_failure(&self, claimed: &ClaimedTurnRun, failure: SanitizedFailure) {
+        let run_id = claimed.state.run_id;
+        let runner_id = claimed.runner_id;
+        let lease_token = claimed.lease_token;
         let request = RecordRunnerFailureRequest {
             run_id,
             runner_id,
@@ -652,79 +671,6 @@ impl TurnRunnerWorker {
                 &err,
                 "failed to record terminal failure",
             );
-        }
-    }
-
-    fn driver_error_failure(&self, error: &DriverInvocationError) -> Option<SanitizedFailure> {
-        match error {
-            DriverInvocationError::DriverError(AgentLoopDriverError::Unavailable { reason }) => {
-                sanitized_driver_failure(host_stage_unavailable_category(reason))
-            }
-            DriverInvocationError::DriverError(AgentLoopDriverError::Failed { reason_kind }) => {
-                sanitized_driver_failure(reason_kind)
-            }
-            _ => None,
-        }
-    }
-
-    async fn apply_driver_failed_outcome(
-        &self,
-        claimed: &ClaimedTurnRun,
-        failure: SanitizedFailure,
-    ) {
-        let run_id = claimed.state.run_id;
-        let runner_id = claimed.runner_id;
-        let lease_token = claimed.lease_token;
-        let resume_checkpoint_id = self.retry_checkpoint_for_claimed_run(claimed).await;
-        let request = ApplyValidatedLoopExitRequest {
-            run_id,
-            runner_id,
-            lease_token,
-            mapping: LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Failed {
-                failure,
-                explanation_message_refs: Vec::new(),
-                resume_checkpoint_id,
-            }),
-        };
-
-        if let Err(err) = self
-            .transition_port
-            .apply_validated_loop_exit(request)
-            .await
-        {
-            log_runner_failure_record_error(
-                runner_id,
-                run_id,
-                &err,
-                "failed to apply driver terminal failure",
-            );
-        }
-    }
-
-    async fn retry_checkpoint_for_claimed_run(
-        &self,
-        claimed: &ClaimedTurnRun,
-    ) -> Option<ironclaw_turns::TurnCheckpointId> {
-        match self
-            .transition_port
-            .latest_resumable_checkpoint(
-                &claimed.state.scope,
-                claimed.state.turn_id,
-                claimed.state.run_id,
-            )
-            .await
-        {
-            Ok(Some(checkpoint_id)) => Some(checkpoint_id),
-            Ok(None) => None,
-            Err(error) => {
-                warn!(
-                    runner_id = ?claimed.runner_id,
-                    run_id = ?claimed.state.run_id,
-                    error = %error,
-                    "failed to query latest resumable checkpoint for driver failure"
-                );
-                None
-            }
         }
     }
 }

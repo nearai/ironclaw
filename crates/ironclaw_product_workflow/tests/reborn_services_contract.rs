@@ -3332,6 +3332,43 @@ async fn retry_run_uses_turn_facade_and_stable_response() {
 }
 
 #[tokio::test]
+async fn retry_run_rejects_invalid_run_id_without_turn_facade() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+
+    let err = services
+        .retry_run(
+            caller(),
+            serde_json::from_value::<WebUiRetryRunRequest>(json!({
+                "client_action_id": "retry-invalid-run",
+                "thread_id": "thread-alpha",
+                "run_id": "not-a-run-uuid"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("invalid run id should fail validation");
+
+    assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
+    assert_eq!(err.kind, RebornServicesErrorKind::Validation);
+    assert_eq!(err.status_code, 400);
+    assert_eq!(err.field.as_deref(), Some("run_id"));
+    assert_eq!(
+        err.validation_code,
+        Some(WebUiInboundValidationCode::InvalidId)
+    );
+    assert_eq!(
+        coordinator.retry_attempt_count(),
+        0,
+        "validation must fail before TurnCoordinator::retry_turn"
+    );
+    assert_eq!(coordinator.retry_count(), 0);
+}
+
+#[tokio::test]
 async fn retry_run_maps_not_retryable_to_non_retryable_conflict() {
     let run_id = TurnRunId::parse(&run_id_string()).expect("run id");
     let coordinator = Arc::new(FakeTurnCoordinator::with_retry_error(

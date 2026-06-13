@@ -269,6 +269,74 @@ async fn assert_retry_happy_path_spawns_claimable_checkpointed_run<S>(
     assert_eq!(claimed.state.checkpoint_id, Some(retry_checkpoint_id));
 }
 
+async fn assert_retry_leaves_source_failed_run_unchanged<S>(
+    store: &S,
+    thread: &str,
+    submit_idem: &str,
+    retry_idem: &str,
+) where
+    S: TurnStateStore + TurnRunTransitionPort + LoopCheckpointStore + ?Sized,
+{
+    let (failed_run_id, _) = seed_failed_run_with_checkpoint(
+        store,
+        thread,
+        submit_idem,
+        LoopCheckpointKind::BeforeModel,
+    )
+    .await;
+    let before_retry = store
+        .get_run_state(GetRunStateRequest {
+            scope: scope(thread),
+            run_id: failed_run_id,
+        })
+        .await
+        .unwrap();
+
+    let retry = store
+        .retry_turn(retry_request(thread, failed_run_id, retry_idem))
+        .await
+        .unwrap();
+    assert_ne!(retry.run_id, failed_run_id);
+
+    let after_retry = store
+        .get_run_state(GetRunStateRequest {
+            scope: scope(thread),
+            run_id: failed_run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        after_retry, before_retry,
+        "retry must create a new run without mutating the source failed run"
+    );
+}
+
+async fn assert_failed_transition_uses_latest_resumable_checkpoint<S>(
+    store: &S,
+    thread: &str,
+    submit_idem: &str,
+    retry_idem: &str,
+) where
+    S: TurnStateStore + TurnRunTransitionPort + LoopCheckpointStore + ?Sized,
+{
+    let claimed = submit_and_claim(store, thread, submit_idem).await;
+    let checkpoint = put_loop_checkpoint(store, &claimed, LoopCheckpointKind::BeforeModel).await;
+
+    let failed = fail_claimed_run(store, &claimed, None).await;
+    assert_eq!(
+        failed.checkpoint_id,
+        Some(checkpoint.checkpoint_id),
+        "failed transition should preserve the latest resumable checkpoint"
+    );
+
+    let retry = store
+        .retry_turn(retry_request(thread, claimed.state.run_id, retry_idem))
+        .await
+        .expect("stored retry checkpoint should make failed run retryable");
+    assert_ne!(retry.run_id, claimed.state.run_id);
+    assert_eq!(retry.status, TurnStatus::Queued);
+}
+
 async fn assert_retry_rejections_and_idempotency<S>(store: &S, prefix: &str)
 where
     S: TurnStateStore + TurnRunTransitionPort + LoopCheckpointStore + ?Sized,
@@ -574,6 +642,58 @@ async fn filesystem_retry_failed_turn_spawns_claimable_checkpointed_run() {
         "thread-filesystem-retry-happy",
         "idem-filesystem-retry-happy-submit",
         "idem-filesystem-retry-happy",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn inmemory_retry_failed_turn_leaves_source_failed_run_unchanged() {
+    let store = InMemoryTurnStateStore::default();
+    assert_retry_leaves_source_failed_run_unchanged(
+        &store,
+        "thread-memory-retry-source-unchanged",
+        "idem-memory-retry-source-unchanged-submit",
+        "idem-memory-retry-source-unchanged",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn filesystem_retry_failed_turn_leaves_source_failed_run_unchanged() {
+    let (backend, _storage) = engine_filesystem();
+    let backend = Arc::new(backend);
+    let store = FilesystemTurnStateStore::new(scoped_turns_fs(backend));
+    assert_retry_leaves_source_failed_run_unchanged(
+        &store,
+        "thread-filesystem-retry-source-unchanged",
+        "idem-filesystem-retry-source-unchanged-submit",
+        "idem-filesystem-retry-source-unchanged",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn inmemory_failed_transition_uses_latest_resumable_checkpoint() {
+    let store = InMemoryTurnStateStore::default();
+    assert_failed_transition_uses_latest_resumable_checkpoint(
+        &store,
+        "thread-memory-failed-transition-checkpoint",
+        "idem-memory-failed-transition-checkpoint-submit",
+        "idem-memory-failed-transition-checkpoint",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn filesystem_failed_transition_uses_latest_resumable_checkpoint() {
+    let (backend, _storage) = engine_filesystem();
+    let backend = Arc::new(backend);
+    let store = FilesystemTurnStateStore::new(scoped_turns_fs(backend));
+    assert_failed_transition_uses_latest_resumable_checkpoint(
+        &store,
+        "thread-filesystem-failed-transition-checkpoint",
+        "idem-filesystem-failed-transition-checkpoint-submit",
+        "idem-filesystem-failed-transition-checkpoint",
     )
     .await;
 }
