@@ -99,9 +99,7 @@ function IronclawSettings() {
                 required
               />
               <p className="text-xs text-muted-foreground">
-                Set via <code className="rounded bg-secondary px-1 py-0.5 font-mono text-xs">
-                  IRONCLAW_REBORN_WEBUI_TOKEN
-                </code> when starting your binary.
+                Must match the bearer token configured on your Reborn binary.
               </p>
             </div>
           </Card>
@@ -129,10 +127,8 @@ function IronclawSettings() {
           ngrok http http://localhost:3001
         </code>
         <p className="text-xs text-muted-foreground">
-          Copy the ngrok URL into the Tunnel URL field above. Make sure the API Token matches your
-          binary&apos;s <code className="rounded bg-secondary px-1 py-0.5 font-mono text-xs">
-            IRONCLAW_REBORN_WEBUI_TOKEN
-          </code>.
+          Copy the ngrok URL into the Tunnel URL field above. The API Token must match
+          the bearer token configured on your Reborn binary.
         </p>
       </div>
     </div>

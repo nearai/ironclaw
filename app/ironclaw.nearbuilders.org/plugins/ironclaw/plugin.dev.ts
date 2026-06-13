@@ -8,10 +8,8 @@ export default {
   port: Number(process.env.PORT) || 3010,
   config: {
     variables: {
-      baseUrl: process.env.IRONCLAW_BASE_URL || "http://localhost:3001",
+      baseUrl: "http://localhost:3001",
     },
-    secrets: {
-      apiToken: process.env.IRONCLAW_API_TOKEN || "dev-token",
-    },
+    secrets: {},
   } satisfies PluginConfigInput<typeof Plugin>,
 };

@@ -6,13 +6,21 @@ import { z } from "every-plugin/zod";
 import { contract } from "./contract";
 import { IronclawService } from "./service";
 
+const PLACEHOLDER_RE = /^\{\{[A-Z0-9_]+\}\}$/;
+
+function isConfigured(value: string | undefined): boolean {
+  if (!value || value.length === 0) return false;
+  if (PLACEHOLDER_RE.test(value)) return false;
+  return true;
+}
+
 export default createPlugin({
   variables: z.object({
     baseUrl: z.url().default("http://localhost:3001"),
   }),
 
   secrets: z.object({
-    apiToken: z.string().min(1, "API token is required").default("dev-token"),
+    IRONCLAW_API_TOKEN: z.string().optional(),
   }),
 
   context: z.object({
@@ -28,26 +36,30 @@ export default createPlugin({
 
   initialize: (config) =>
     Effect.gen(function* () {
-      const baseUrl = config.variables.baseUrl.href;
-      const apiToken = config.secrets.apiToken;
-      const defaultService = new IronclawService(baseUrl, apiToken);
-      yield* defaultService.ping();
-      return { config, defaultService };
+      return { config };
     }),
 
   shutdown: () => Effect.void,
 
   createRouter: (context, builder) => {
-    const { config, defaultService } = context;
+    const { config } = context;
+
+    const defaultToken = isConfigured(config.secrets.IRONCLAW_API_TOKEN)
+      ? config.secrets.IRONCLAW_API_TOKEN
+      : undefined;
 
     const resolveService = (reqCtx: {
       baseUrl?: string;
       apiToken?: string;
     }) => {
-      const baseUrl = reqCtx.baseUrl ?? config.variables.baseUrl.href;
-      const apiToken = reqCtx.apiToken ?? config.secrets.apiToken;
-      if (baseUrl === config.variables.baseUrl.href && apiToken === config.secrets.apiToken) {
-        return defaultService;
+      const baseUrl = reqCtx.baseUrl ?? config.variables.baseUrl;
+      const apiToken = reqCtx.apiToken ?? defaultToken;
+      if (!isConfigured(apiToken)) {
+        throw new ORPCError("PRECONDITION_FAILED", {
+          message:
+            "IronClaw is not configured. Set the API token in Settings → IronClaw, "
+            + "or provide IRONCLAW_API_TOKEN via the plugin secrets configuration.",
+        });
       }
       return new IronclawService(baseUrl, apiToken);
     };

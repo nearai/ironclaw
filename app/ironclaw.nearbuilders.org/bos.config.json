@@ -39,7 +39,11 @@
       "extends": "bos://work.efiz.near/nearbuilders.org"
     },
     "ironclaw": {
-      "development": "local:plugins/ironclaw"
+      "development": "local:plugins/ironclaw",
+      "secrets": [
+        "IRONCLAW_BASE_URL",
+        "IRONCLAW_API_TOKEN"
+      ]
     }
   }
 }
