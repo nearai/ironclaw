@@ -1197,7 +1197,7 @@ mod tests {
         assert!(
             list_tool
                 .description
-                .contains("before builtin.trigger_create"),
+                .contains("before builtin__trigger_create"),
             "list tool description should steer delivery requests before trigger creation"
         );
         let set_tool = tool_definitions
