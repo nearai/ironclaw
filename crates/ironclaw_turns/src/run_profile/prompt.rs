@@ -582,6 +582,7 @@ mod tests {
                 .unwrap(),
             user_timezone: None,
             communication: None,
+            product_context: None,
         };
 
         let port_with = HostManagedLoopPromptPort::new(
@@ -662,6 +663,7 @@ mod tests {
                 .unwrap(),
             user_timezone: None,
             communication: None,
+            product_context: None,
         };
 
         let port = HostManagedLoopPromptPort::new(

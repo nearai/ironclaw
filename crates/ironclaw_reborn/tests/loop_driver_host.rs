@@ -983,7 +983,6 @@ impl CommunicationContextProvider for StubCommunicationContextProvider {
         _scope: &TurnScope,
         _actor: Option<&TurnActor>,
         _delivery_tools_visible: bool,
-        _product_context: Option<ironclaw_turns::ProductTurnContext>,
     ) -> Option<CommunicationRuntimeContext> {
         Some(CommunicationRuntimeContext {
             connected_channels: ConnectedChannelsState::Known(vec![ConnectedChannelSummary {
@@ -993,7 +992,6 @@ impl CommunicationContextProvider for StubCommunicationContextProvider {
             }]),
             delivery_target: DeliveryTargetState::NoneSet,
             delivery_tools_visible: false,
-            product_context: None,
         })
     }
 }
@@ -1040,7 +1038,6 @@ struct RecordingCommunicationContextProvider {
     recorded_delivery_tools_visible: Mutex<Option<bool>>,
     recorded_thread_id: Mutex<Option<ThreadId>>,
     recorded_actor_present: Mutex<Option<bool>>,
-    recorded_product_context: Mutex<Option<Option<ironclaw_turns::ProductTurnContext>>>,
 }
 
 impl RecordingCommunicationContextProvider {
@@ -1049,7 +1046,6 @@ impl RecordingCommunicationContextProvider {
             recorded_delivery_tools_visible: Mutex::new(None),
             recorded_thread_id: Mutex::new(None),
             recorded_actor_present: Mutex::new(None),
-            recorded_product_context: Mutex::new(None),
         })
     }
 
@@ -1066,11 +1062,6 @@ impl RecordingCommunicationContextProvider {
     fn actor_present(&self) -> Option<bool> {
         *self.recorded_actor_present.lock().unwrap()
     }
-
-    #[allow(dead_code)]
-    fn product_context(&self) -> Option<Option<ironclaw_turns::ProductTurnContext>> {
-        self.recorded_product_context.lock().unwrap().clone()
-    }
 }
 
 #[async_trait]
@@ -1080,17 +1071,14 @@ impl CommunicationContextProvider for RecordingCommunicationContextProvider {
         scope: &TurnScope,
         actor: Option<&TurnActor>,
         delivery_tools_visible: bool,
-        product_context: Option<ironclaw_turns::ProductTurnContext>,
     ) -> Option<CommunicationRuntimeContext> {
         *self.recorded_delivery_tools_visible.lock().unwrap() = Some(delivery_tools_visible);
         *self.recorded_thread_id.lock().unwrap() = Some(scope.thread_id.clone());
         *self.recorded_actor_present.lock().unwrap() = Some(actor.is_some());
-        *self.recorded_product_context.lock().unwrap() = Some(product_context.clone());
         Some(CommunicationRuntimeContext {
             connected_channels: ConnectedChannelsState::Unknown,
             delivery_target: DeliveryTargetState::NoneSet,
             delivery_tools_visible,
-            product_context,
         })
     }
 }

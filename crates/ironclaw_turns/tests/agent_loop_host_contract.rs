@@ -528,6 +528,7 @@ async fn instruction_bundle_renders_runtime_context_section() {
                 .unwrap(),
             user_timezone: None,
             communication: None,
+            product_context: None,
         }),
     };
 
@@ -614,6 +615,7 @@ async fn instruction_bundle_runtime_fingerprint_stable_within_minute() {
                 .unwrap(),
             user_timezone: None,
             communication: None,
+            product_context: None,
         }),
     };
 
@@ -628,6 +630,7 @@ async fn instruction_bundle_runtime_fingerprint_stable_within_minute() {
                 .unwrap(),
             user_timezone: None,
             communication: None,
+            product_context: None,
         }),
     };
 
@@ -696,6 +699,7 @@ async fn instruction_bundle_renders_runtime_context_exactly_once_per_build() {
                 .unwrap(),
             user_timezone: None,
             communication: None,
+            product_context: None,
         }),
     };
 
@@ -787,6 +791,7 @@ async fn instruction_bundle_without_runtime_context_renders_no_runtime_section()
                 .unwrap(),
             user_timezone: None,
             communication: None,
+            product_context: None,
         }),
         ..request
     };
@@ -3867,6 +3872,7 @@ async fn instruction_bundle_runtime_communication_none_is_byte_identical_to_4795
             loop_started_at_utc: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
             user_timezone: None,
             communication: None,
+            product_context: None,
         }),
     };
 
@@ -3932,15 +3938,15 @@ async fn instruction_bundle_runtime_communication_renders_all_fields() {
                     channel: "slack".to_string(),
                 }),
                 delivery_tools_visible: true,
-                product_context: Some(ProductTurnContext::new(
-                    TurnOriginKind::ScheduledTrigger,
-                    None,
-                    None,
-                    TurnOwner::Personal {
-                        user: UserId::new("test-user").unwrap(),
-                    },
-                )),
             }),
+            product_context: Some(ProductTurnContext::new(
+                TurnOriginKind::ScheduledTrigger,
+                None,
+                None,
+                TurnOwner::Personal {
+                    user: UserId::new("test-user").unwrap(),
+                },
+            )),
         }),
     };
 
@@ -4000,15 +4006,15 @@ async fn instruction_bundle_runtime_scheduled_trigger_with_no_delivery_emits_war
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::NoneSet,
                 delivery_tools_visible: true,
-                product_context: Some(ProductTurnContext::new(
-                    TurnOriginKind::ScheduledTrigger,
-                    None,
-                    None,
-                    TurnOwner::Personal {
-                        user: UserId::new("test-user").unwrap(),
-                    },
-                )),
             }),
+            product_context: Some(ProductTurnContext::new(
+                TurnOriginKind::ScheduledTrigger,
+                None,
+                None,
+                TurnOwner::Personal {
+                    user: UserId::new("test-user").unwrap(),
+                },
+            )),
         }),
     };
 

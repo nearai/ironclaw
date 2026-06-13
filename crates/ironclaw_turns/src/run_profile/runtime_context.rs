@@ -21,6 +21,9 @@ pub struct LoopRuntimeContext {
     /// Channel, delivery, and run-origin state for this loop execution.
     /// `None` means the communication slice was not populated for this run; the rendered prompt carries only the time line.
     pub communication: Option<CommunicationRuntimeContext>,
+    /// Per-turn run-origin context (origin kind, surface, adapter, owner).
+    /// Rendered directly from here rather than routed through the communication provider.
+    pub product_context: Option<ProductTurnContext>,
 }
 
 /// Connected channels known to the system for this user at loop start.
@@ -56,14 +59,13 @@ pub struct DeliveryTargetSummary {
     pub channel: String,
 }
 
-/// Communication runtime context: channels, delivery target, and run origin.
+/// Communication runtime context: live channel, delivery, and tool-visibility state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommunicationRuntimeContext {
     pub connected_channels: ConnectedChannelsState,
     pub delivery_target: DeliveryTargetState,
     /// Whether outbound delivery tool names should appear in model guidance.
     pub delivery_tools_visible: bool,
-    pub product_context: Option<ProductTurnContext>,
 }
 
 impl LoopRuntimeContext {
@@ -86,69 +88,107 @@ impl LoopRuntimeContext {
             ),
         };
 
-        let Some(comm) = &self.communication else {
-            return time_line;
-        };
-
         let mut parts = vec![time_line];
 
-        // Connected channels line.
-        let channels_line = match &comm.connected_channels {
-            ConnectedChannelsState::Unknown => "Connected channels: unknown.".to_string(),
-            ConnectedChannelsState::Known(channels) if channels.is_empty() => {
-                "Connected channels: none.".to_string()
-            }
-            ConnectedChannelsState::Known(channels) => {
-                let joined = channels
-                    .iter()
-                    .map(|ch| {
-                        let auth = if ch.authenticated {
-                            "authenticated"
-                        } else {
-                            "unauthenticated"
-                        };
-                        let active = if ch.active { "active" } else { "inactive" };
-                        format!("{} ({auth}, {active})", sanitize_prompt_string(&ch.name))
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("Connected channels: {joined}.")
-            }
-        };
-        parts.push(channels_line);
+        if let Some(comm) = &self.communication {
+            // Connected channels line.
+            let channels_line = match &comm.connected_channels {
+                ConnectedChannelsState::Unknown => "Connected channels: unknown.".to_string(),
+                ConnectedChannelsState::Known(channels) if channels.is_empty() => {
+                    "Connected channels: none.".to_string()
+                }
+                ConnectedChannelsState::Known(channels) => {
+                    let joined = channels
+                        .iter()
+                        .map(|ch| {
+                            let auth = if ch.authenticated {
+                                "authenticated"
+                            } else {
+                                "unauthenticated"
+                            };
+                            let active = if ch.active { "active" } else { "inactive" };
+                            format!("{} ({auth}, {active})", sanitize_prompt_string(&ch.name))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("Connected channels: {joined}.")
+                }
+            };
+            parts.push(channels_line);
 
-        // Outbound delivery target line.
-        let delivery_line = match &comm.delivery_target {
-            DeliveryTargetState::Unknown => "Outbound delivery target: unknown.".to_string(),
-            DeliveryTargetState::NoneSet if comm.delivery_tools_visible => {
-                "Outbound delivery target: none set. To deliver routine or trigger results \
-                 to a channel, call builtin__outbound_delivery_targets_list, then \
-                 builtin__outbound_delivery_target_set, before creating the routine or trigger."
-                    .to_string()
-            }
-            DeliveryTargetState::NoneSet => "Outbound delivery target: none set.".to_string(),
-            DeliveryTargetState::SetUnresolved if comm.delivery_tools_visible => {
-                "Outbound delivery target: configured (details unavailable here; call \
-                 builtin__outbound_delivery_targets_list to inspect) \u{2014} applies to all \
-                 routine and trigger results for this user (single preference, not per-trigger)."
-                    .to_string()
-            }
-            DeliveryTargetState::SetUnresolved => {
-                "Outbound delivery target: configured \u{2014} applies to all routine and \
-                 trigger results for this user (single preference, not per-trigger)."
-                    .to_string()
-            }
-            DeliveryTargetState::Set(summary) => format!(
-                "Outbound delivery target: {} ({}) \u{2014} applies to all routine and \
-                 trigger results for this user (single preference, not per-trigger).",
-                sanitize_prompt_string(&summary.display_name),
-                sanitize_prompt_string(&summary.channel)
-            ),
-        };
-        parts.push(delivery_line);
+            // Outbound delivery target line.
+            let delivery_line = match &comm.delivery_target {
+                DeliveryTargetState::Unknown => "Outbound delivery target: unknown.".to_string(),
+                DeliveryTargetState::NoneSet if comm.delivery_tools_visible => {
+                    "Outbound delivery target: none set. To deliver routine or trigger results \
+                     to a channel, call builtin__outbound_delivery_targets_list, then \
+                     builtin__outbound_delivery_target_set, before creating the routine or trigger."
+                        .to_string()
+                }
+                DeliveryTargetState::NoneSet => "Outbound delivery target: none set.".to_string(),
+                DeliveryTargetState::SetUnresolved if comm.delivery_tools_visible => {
+                    "Outbound delivery target: configured (details unavailable here; call \
+                     builtin__outbound_delivery_targets_list to inspect) \u{2014} applies to all \
+                     routine and trigger results for this user (single preference, not per-trigger)."
+                        .to_string()
+                }
+                DeliveryTargetState::SetUnresolved => {
+                    "Outbound delivery target: configured \u{2014} applies to all routine and \
+                     trigger results for this user (single preference, not per-trigger)."
+                        .to_string()
+                }
+                DeliveryTargetState::Set(summary) => format!(
+                    "Outbound delivery target: {} ({}) \u{2014} applies to all routine and \
+                     trigger results for this user (single preference, not per-trigger).",
+                    sanitize_prompt_string(&summary.display_name),
+                    sanitize_prompt_string(&summary.channel)
+                ),
+            };
+            parts.push(delivery_line);
 
-        // Run origin line (and optional ScheduledTrigger+NoneSet warning).
-        if let Some(ctx) = &comm.product_context {
+            // Run origin line (and optional ScheduledTrigger+NoneSet warning) when
+            // both origin (self.product_context) and delivery state (comm) are present.
+            if let Some(ctx) = &self.product_context {
+                let origin_line = match ctx.origin {
+                    TurnOriginKind::WebUi => {
+                        "Run origin: WebUI chat; replies render in this chat.".to_string()
+                    }
+                    TurnOriginKind::Inbound => {
+                        let adapter_str = ctx
+                            .adapter
+                            .as_ref()
+                            .map(|a| sanitize_prompt_string(a.as_str()))
+                            .unwrap_or_else(|| "unknown".to_string());
+                        format!(
+                            "Run origin: inbound message via {adapter_str}; replies post back to that conversation.",
+                        )
+                    }
+                    TurnOriginKind::ScheduledTrigger => {
+                        "Run origin: scheduled trigger fire.".to_string()
+                    }
+                };
+                parts.push(origin_line);
+
+                if matches!(ctx.origin, TurnOriginKind::ScheduledTrigger)
+                    && matches!(comm.delivery_target, DeliveryTargetState::NoneSet)
+                {
+                    if comm.delivery_tools_visible {
+                        parts.push(
+                            "Warning: no delivery target is set \u{2014} this run's result will not be \
+                             delivered. Set one with builtin__outbound_delivery_target_set."
+                                .to_string(),
+                        );
+                    } else {
+                        parts.push(
+                            "Warning: no delivery target is set \u{2014} this run's result will not be \
+                             delivered."
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+        } else if let Some(ctx) = &self.product_context {
+            // No communication provider, but origin is available — render origin only.
             let origin_line = match ctx.origin {
                 TurnOriginKind::WebUi => {
                     "Run origin: WebUI chat; replies render in this chat.".to_string()
@@ -168,27 +208,13 @@ impl LoopRuntimeContext {
                 }
             };
             parts.push(origin_line);
-
-            if matches!(ctx.origin, TurnOriginKind::ScheduledTrigger)
-                && matches!(comm.delivery_target, DeliveryTargetState::NoneSet)
-            {
-                if comm.delivery_tools_visible {
-                    parts.push(
-                        "Warning: no delivery target is set \u{2014} this run's result will not be \
-                         delivered. Set one with builtin__outbound_delivery_target_set."
-                            .to_string(),
-                    );
-                } else {
-                    parts.push(
-                        "Warning: no delivery target is set \u{2014} this run's result will not be \
-                         delivered."
-                            .to_string(),
-                    );
-                }
-            }
         }
 
-        parts.join("\n")
+        if parts.len() == 1 {
+            parts.remove(0)
+        } else {
+            parts.join("\n")
+        }
     }
 }
 
@@ -223,7 +249,6 @@ pub trait CommunicationContextProvider: Send + Sync {
         scope: &crate::scope::TurnScope,
         actor: Option<&crate::scope::TurnActor>,
         delivery_tools_visible: bool,
-        product_context: Option<ProductTurnContext>,
     ) -> Option<CommunicationRuntimeContext>;
 }
 
@@ -245,6 +270,7 @@ mod tests {
             loop_started_at_utc: stamp(),
             user_timezone: None,
             communication: None,
+            product_context: None,
         }
     }
 
@@ -255,6 +281,7 @@ mod tests {
             loop_started_at_utc: stamp(),
             user_timezone: Some(tz),
             communication: None,
+            product_context: None,
         };
         let text = ctx.render_model_content();
         assert!(
@@ -290,6 +317,7 @@ mod tests {
             loop_started_at_utc: stamp(),
             user_timezone: None,
             communication: None,
+            product_context: None,
         };
         assert_eq!(
             ctx_with_none.render_model_content(),
@@ -307,7 +335,7 @@ mod tests {
         );
         assert!(
             !text.contains("Run origin"),
-            "no origin line when communication is None: {text}"
+            "no origin line when communication is None and product_context is None: {text}"
         );
     }
 
@@ -331,8 +359,8 @@ mod tests {
                 ]),
                 delivery_target: DeliveryTargetState::Unknown,
                 delivery_tools_visible: false,
-                product_context: None,
             }),
+            product_context: None,
         };
         let text = ctx.render_model_content();
         assert!(
@@ -355,8 +383,8 @@ mod tests {
                 }]),
                 delivery_target: DeliveryTargetState::Unknown,
                 delivery_tools_visible: false,
-                product_context: None,
             }),
+            product_context: None,
         };
         let text = ctx.render_model_content();
         assert!(
@@ -378,8 +406,8 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Known(vec![]),
                 delivery_target: DeliveryTargetState::Unknown,
                 delivery_tools_visible: false,
-                product_context: None,
             }),
+            product_context: None,
         };
         let text = ctx.render_model_content();
         assert!(text.contains("Connected channels: none."), "{text}");
@@ -394,8 +422,8 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::Unknown,
                 delivery_tools_visible: false,
-                product_context: None,
             }),
+            product_context: None,
         };
         let text = ctx.render_model_content();
         assert!(text.contains("Connected channels: unknown."), "{text}");
@@ -410,8 +438,8 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::NoneSet,
                 delivery_tools_visible: true,
-                product_context: None,
             }),
+            product_context: None,
         };
         let text = ctx.render_model_content();
         assert!(
@@ -437,8 +465,8 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::NoneSet,
                 delivery_tools_visible: false,
-                product_context: None,
             }),
+            product_context: None,
         };
         let text = ctx.render_model_content();
         assert!(
@@ -460,8 +488,8 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::SetUnresolved,
                 delivery_tools_visible: true,
-                product_context: None,
             }),
+            product_context: None,
         };
         let text = ctx.render_model_content();
         assert!(
@@ -491,8 +519,8 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::SetUnresolved,
                 delivery_tools_visible: false,
-                product_context: None,
             }),
+            product_context: None,
         };
         let text = ctx.render_model_content();
         assert!(
@@ -517,8 +545,8 @@ mod tests {
                     channel: "slack".to_string(),
                 }),
                 delivery_tools_visible: false,
-                product_context: None,
             }),
+            product_context: None,
         };
         let text = ctx.render_model_content();
         assert!(
@@ -540,8 +568,8 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::Unknown,
                 delivery_tools_visible: false,
-                product_context: None,
             }),
+            product_context: None,
         };
         let text = ctx.render_model_content();
         assert!(
@@ -567,8 +595,8 @@ mod tests {
                     channel: hostile_channel,
                 }),
                 delivery_tools_visible: false,
-                product_context: None,
             }),
+            product_context: None,
         };
         let text = ctx.render_model_content();
         assert!(
@@ -598,15 +626,15 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::Unknown,
                 delivery_tools_visible: false,
-                product_context: Some(ProductTurnContext::new(
-                    TurnOriginKind::WebUi,
-                    None,
-                    None,
-                    TurnOwner::Personal {
-                        user: UserId::new("test-user").unwrap(),
-                    },
-                )),
             }),
+            product_context: Some(ProductTurnContext::new(
+                TurnOriginKind::WebUi,
+                None,
+                None,
+                TurnOwner::Personal {
+                    user: UserId::new("test-user").unwrap(),
+                },
+            )),
         };
         let text = ctx.render_model_content();
         assert!(
@@ -624,15 +652,15 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::Unknown,
                 delivery_tools_visible: false,
-                product_context: Some(ProductTurnContext::new(
-                    TurnOriginKind::Inbound,
-                    None,
-                    Some(crate::RunOriginAdapter::new("slack").unwrap()),
-                    TurnOwner::Personal {
-                        user: UserId::new("test-user").unwrap(),
-                    },
-                )),
             }),
+            product_context: Some(ProductTurnContext::new(
+                TurnOriginKind::Inbound,
+                None,
+                Some(crate::RunOriginAdapter::new("slack").unwrap()),
+                TurnOwner::Personal {
+                    user: UserId::new("test-user").unwrap(),
+                },
+            )),
         };
         let text = ctx.render_model_content();
         assert!(
@@ -655,15 +683,15 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::Unknown,
                 delivery_tools_visible: false,
-                product_context: Some(ProductTurnContext::new(
-                    TurnOriginKind::Inbound,
-                    None,
-                    Some(crate::RunOriginAdapter::new(hostile).unwrap()),
-                    TurnOwner::Personal {
-                        user: UserId::new("test-user").unwrap(),
-                    },
-                )),
             }),
+            product_context: Some(ProductTurnContext::new(
+                TurnOriginKind::Inbound,
+                None,
+                Some(crate::RunOriginAdapter::new(hostile).unwrap()),
+                TurnOwner::Personal {
+                    user: UserId::new("test-user").unwrap(),
+                },
+            )),
         };
         let text = ctx.render_model_content();
         // The sanitizer neutralizes structure-breaking characters (newline,
@@ -690,15 +718,15 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::NoneSet,
                 delivery_tools_visible: false,
-                product_context: Some(ProductTurnContext::new(
-                    TurnOriginKind::ScheduledTrigger,
-                    None,
-                    None,
-                    TurnOwner::Personal {
-                        user: UserId::new("test-user").unwrap(),
-                    },
-                )),
             }),
+            product_context: Some(ProductTurnContext::new(
+                TurnOriginKind::ScheduledTrigger,
+                None,
+                None,
+                TurnOwner::Personal {
+                    user: UserId::new("test-user").unwrap(),
+                },
+            )),
         };
         let text = ctx.render_model_content();
         assert!(
@@ -716,15 +744,15 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::NoneSet,
                 delivery_tools_visible: true,
-                product_context: Some(ProductTurnContext {
-                    origin: TurnOriginKind::ScheduledTrigger,
-                    surface_type: None,
-                    adapter: None,
-                    owner: TurnOwner::Personal {
-                        user: UserId::new("test-user").unwrap(),
-                    },
-                }),
             }),
+            product_context: Some(ProductTurnContext::new(
+                TurnOriginKind::ScheduledTrigger,
+                None,
+                None,
+                TurnOwner::Personal {
+                    user: UserId::new("test-user").unwrap(),
+                },
+            )),
         };
         let text = ctx.render_model_content();
         assert!(
@@ -750,15 +778,15 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::NoneSet,
                 delivery_tools_visible: false,
-                product_context: Some(ProductTurnContext {
-                    origin: TurnOriginKind::ScheduledTrigger,
-                    surface_type: None,
-                    adapter: None,
-                    owner: TurnOwner::Personal {
-                        user: UserId::new("test-user").unwrap(),
-                    },
-                }),
             }),
+            product_context: Some(ProductTurnContext::new(
+                TurnOriginKind::ScheduledTrigger,
+                None,
+                None,
+                TurnOwner::Personal {
+                    user: UserId::new("test-user").unwrap(),
+                },
+            )),
         };
         let text = ctx.render_model_content();
         assert!(
@@ -785,20 +813,52 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::NoneSet,
                 delivery_tools_visible: true,
-                product_context: Some(ProductTurnContext {
-                    origin: TurnOriginKind::WebUi,
-                    surface_type: None,
-                    adapter: None,
-                    owner: TurnOwner::Personal {
-                        user: UserId::new("test-user").unwrap(),
-                    },
-                }),
             }),
+            product_context: Some(ProductTurnContext::new(
+                TurnOriginKind::WebUi,
+                None,
+                None,
+                TurnOwner::Personal {
+                    user: UserId::new("test-user").unwrap(),
+                },
+            )),
         };
         let text = ctx.render_model_content();
         assert!(
             !text.contains("Warning: no delivery target is set"),
             "warning must not fire for WebUiChat: {text}"
+        );
+    }
+
+    #[test]
+    fn origin_renders_without_communication_provider() {
+        // origin/surface renders from LoopRuntimeContext.product_context even
+        // when communication is None — it no longer depends on the provider.
+        let ctx = LoopRuntimeContext {
+            loop_started_at_utc: stamp(),
+            user_timezone: None,
+            communication: None,
+            product_context: Some(ProductTurnContext::new(
+                TurnOriginKind::WebUi,
+                None,
+                None,
+                TurnOwner::Personal {
+                    user: UserId::new("test-user").unwrap(),
+                },
+            )),
+        };
+        let text = ctx.render_model_content();
+        assert!(
+            text.contains("Run origin: WebUI chat; replies render in this chat."),
+            "origin must render even when communication is None: {text}"
+        );
+        assert!(
+            !text.contains("Connected channels"),
+            "no channel line when communication is None: {text}"
+        );
+        assert!(
+            !text.contains("Outbound delivery"),
+            "no delivery line when communication is None: {text}"
         );
     }
 }

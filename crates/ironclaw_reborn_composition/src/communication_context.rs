@@ -50,7 +50,6 @@ impl CommunicationContextProvider for RuntimeCommunicationContextProvider {
         scope: &TurnScope,
         actor: Option<&TurnActor>,
         delivery_tools_visible: bool,
-        product_context: Option<ironclaw_turns::ProductTurnContext>,
     ) -> Option<CommunicationRuntimeContext> {
         let actor = actor?;
         let caller = WebUiAuthenticatedCaller::new(
@@ -105,7 +104,6 @@ impl CommunicationContextProvider for RuntimeCommunicationContextProvider {
                     connected_channels: ConnectedChannelsState::Unknown,
                     delivery_target: DeliveryTargetState::Unknown,
                     delivery_tools_visible,
-                    product_context,
                 });
             }
         };
@@ -167,7 +165,6 @@ impl CommunicationContextProvider for RuntimeCommunicationContextProvider {
             connected_channels,
             delivery_target,
             delivery_tools_visible,
-            product_context,
         })
     }
 }
@@ -207,7 +204,6 @@ mod tests {
         RebornSetOutboundPreferencesRequest, WebUiAuthenticatedCaller,
     };
     use ironclaw_turns::{
-        TurnOriginKind, TurnOwner,
         run_profile::{CommunicationContextProvider, ConnectedChannelsState, DeliveryTargetState},
         scope::{TurnActor, TurnScope},
     };
@@ -451,9 +447,7 @@ mod tests {
     #[tokio::test]
     async fn actor_none_returns_none() {
         let provider = RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesFacade));
-        let result = provider
-            .communication_context(&scope(), None, false, None)
-            .await;
+        let result = provider.communication_context(&scope(), None, false).await;
         assert!(result.is_none(), "actor None must return None");
     }
 
@@ -463,7 +457,7 @@ mod tests {
     async fn none_configured_maps_to_none_set() {
         let provider = RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesFacade));
         let ctx = provider
-            .communication_context(&scope(), Some(&actor()), false, None)
+            .communication_context(&scope(), Some(&actor()), false)
             .await
             .expect("context");
         assert_eq!(ctx.delivery_target, DeliveryTargetState::NoneSet);
@@ -474,7 +468,7 @@ mod tests {
         let provider =
             RuntimeCommunicationContextProvider::new(Arc::new(UnavailablePreferencesFacade));
         let ctx = provider
-            .communication_context(&scope(), Some(&actor()), false, None)
+            .communication_context(&scope(), Some(&actor()), false)
             .await
             .expect("context");
         assert_eq!(ctx.delivery_target, DeliveryTargetState::SetUnresolved);
@@ -485,7 +479,7 @@ mod tests {
         let provider =
             RuntimeCommunicationContextProvider::new(Arc::new(TargetSetPreferencesFacade));
         let ctx = provider
-            .communication_context(&scope(), Some(&actor()), false, None)
+            .communication_context(&scope(), Some(&actor()), false)
             .await
             .expect("context");
         assert!(
@@ -499,7 +493,7 @@ mod tests {
     async fn preferences_error_maps_to_unknown() {
         let provider = RuntimeCommunicationContextProvider::new(Arc::new(ErrorPreferencesFacade));
         let ctx = provider
-            .communication_context(&scope(), Some(&actor()), false, None)
+            .communication_context(&scope(), Some(&actor()), false)
             .await
             .expect("context");
         assert_eq!(ctx.delivery_target, DeliveryTargetState::Unknown);
@@ -511,7 +505,7 @@ mod tests {
     async fn no_lifecycle_facade_returns_unknown_channels() {
         let provider = RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesFacade));
         let ctx = provider
-            .communication_context(&scope(), Some(&actor()), false, None)
+            .communication_context(&scope(), Some(&actor()), false)
             .await
             .expect("context");
         assert_eq!(ctx.connected_channels, ConnectedChannelsState::Unknown);
@@ -525,7 +519,7 @@ mod tests {
         let provider = RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesFacade))
             .with_lifecycle_facade(Arc::new(EmptyLifecycleFacade));
         let ctx = provider
-            .communication_context(&scope(), Some(&actor()), false, None)
+            .communication_context(&scope(), Some(&actor()), false)
             .await
             .expect("context");
         assert_eq!(
@@ -551,7 +545,7 @@ mod tests {
                 ],
             }));
         let ctx = provider
-            .communication_context(&scope(), Some(&actor()), false, None)
+            .communication_context(&scope(), Some(&actor()), false)
             .await
             .expect("context");
         assert_eq!(
@@ -566,7 +560,7 @@ mod tests {
         let provider = RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesFacade))
             .with_lifecycle_facade(Arc::new(ErrorLifecycleFacade));
         let ctx = provider
-            .communication_context(&scope(), Some(&actor()), false, None)
+            .communication_context(&scope(), Some(&actor()), false)
             .await
             .expect("context");
         assert_eq!(ctx.connected_channels, ConnectedChannelsState::Unknown);
@@ -619,7 +613,7 @@ mod tests {
         let provider = RuntimeCommunicationContextProvider::new(Arc::new(HangingPreferencesFacade));
 
         let ctx = provider
-            .communication_context(&scope(), Some(&actor()), false, None)
+            .communication_context(&scope(), Some(&actor()), false)
             .await
             .expect("communication_context must return Some even on timeout");
 
@@ -633,27 +627,5 @@ mod tests {
             ConnectedChannelsState::Unknown,
             "timed-out budget must leave connected_channels Unknown"
         );
-    }
-
-    // --- Tests: product_context propagation ---
-
-    #[tokio::test]
-    async fn product_context_is_passed_through() {
-        use ironclaw_host_api::UserId;
-        use ironclaw_turns::ProductTurnContext;
-        let provider = RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesFacade));
-        let ctx_val = ProductTurnContext::new(
-            TurnOriginKind::ScheduledTrigger,
-            None,
-            None,
-            TurnOwner::Personal {
-                user: UserId::new("u1").unwrap(),
-            },
-        );
-        let ctx = provider
-            .communication_context(&scope(), Some(&actor()), false, Some(ctx_val.clone()))
-            .await
-            .expect("context");
-        assert_eq!(ctx.product_context, Some(ctx_val));
     }
 }

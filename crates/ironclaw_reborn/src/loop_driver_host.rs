@@ -1532,7 +1532,6 @@ where
                         &run_context.scope,
                         run_context.actor(),
                         delivery_tools_visible,
-                        run_context.product_context.clone(),
                     )
                     .await
             }
@@ -1555,6 +1554,7 @@ where
             loop_started_at_utc: chrono::Utc::now(),
             user_timezone: None,
             communication,
+            product_context: run_context.product_context.clone(),
         });
         let mut prompt: Arc<dyn LoopPromptPort> = Arc::new(prompt_port);
         if let Some(dispatcher) = per_build_dispatcher.as_ref() {
