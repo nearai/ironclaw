@@ -1721,8 +1721,12 @@ impl RebornServicesApi for RebornServices {
         } else {
             // Land attachment bytes (if any) into project storage before the
             // message is accepted, recording each as a transcript reference.
-            // Uses the stable per-message external_event_id for the storage
-            // path so a retry re-lands at the same deterministic location.
+            // The stable per-message external_event_id is the path's message
+            // segment, so a same-day retry re-lands at the same path; the lander
+            // also partitions by UTC day, so a retry that crosses midnight UTC
+            // lands under the new day's directory (the earlier bytes are left
+            // addressable but unreferenced). Idempotency is enforced at message
+            // acceptance, not by the storage path.
             let message_content = if attachments.is_empty() {
                 MessageContent::text(content.clone())
             } else {

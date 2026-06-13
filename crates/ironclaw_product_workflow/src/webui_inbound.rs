@@ -105,14 +105,6 @@ pub struct WebUiSendMessageRequest {
     pub attachments: Vec<WebUiInboundAttachment>,
 }
 
-fn normalize_attachment_mime(raw: &str) -> String {
-    raw.split(';')
-        .next()
-        .unwrap_or(raw)
-        .trim()
-        .to_ascii_lowercase()
-}
-
 impl WebUiSendMessageRequest {
     /// Validate and decode the inline attachments into bytes-bearing
     /// [`InboundAttachment`]s ready for landing.
@@ -137,7 +129,7 @@ impl WebUiSendMessageRequest {
         let mut decoded = Vec::with_capacity(self.attachments.len());
         let mut total_bytes = 0usize;
         for (index, attachment) in self.attachments.iter().enumerate() {
-            let mime = normalize_attachment_mime(&attachment.mime_type);
+            let mime = ironclaw_common::normalize_mime_type(&attachment.mime_type);
             if !ironclaw_common::is_supported_mime(&mime) {
                 return Err(WebUiInboundValidationError::new(
                     "attachments.mime_type",
