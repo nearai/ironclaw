@@ -92,7 +92,7 @@ pub struct DefaultHostRuntime {
     /// remains the enforcement backstop regardless.
     // arch-exempt: optional_arc, credential pre-flight is disabled in minimal/test
     // host-runtime graphs that do not wire a secret store, plan #4539 (Fix B)
-    secret_store: Option<Arc<dyn SecretStore>>,
+    credential_preflight_store: Option<Arc<dyn SecretStore>>,
     surface_version: CapabilitySurfaceVersion,
     runtime_policy: EffectiveRuntimePolicy,
 }
@@ -158,7 +158,7 @@ impl DefaultHostRuntime {
             surface_filesystem: None,
             runtime_health: None,
             obligation_handler: None,
-            secret_store: None,
+            credential_preflight_store: None,
             surface_version,
             runtime_policy,
         }
@@ -325,7 +325,7 @@ impl DefaultHostRuntime {
     // never need pre-flight skip this; production wires it from HostRuntimeServices,
     // plan #4539 (Fix B)
     pub fn with_credential_preflight_store(mut self, secret_store: Arc<dyn SecretStore>) -> Self {
-        self.secret_store = Some(secret_store);
+        self.credential_preflight_store = Some(secret_store);
         self
     }
 
@@ -402,18 +402,23 @@ impl HostRuntime for DefaultHostRuntime {
         };
         context.trust = trust_decision.effective_trust.class();
 
+        let registry = self.registry.snapshot();
+
         // Pre-flight credential check: surface AuthRequired BEFORE the approval
         // gate fires. This prevents a human approval being consumed for an action
         // that cannot yet succeed because a required credential is missing.
-        // The dispatch-time obligation check remains the enforcement backstop.
+        //
+        // Design note: the pre-flight is trust-class-agnostic by design — it runs
+        // before the authorizer and trust/authorization checks. The dispatch-time
+        // obligation check (which runs after those checks) is the enforcing layer.
+        // The pre-flight provides ordering only (credentials before approval gate).
         if let Some(auth_required) = self
-            .credential_preflight_check(&capability_id, &scope)
+            .credential_preflight_check(&capability_id, &scope, &registry)
             .await
         {
             return Ok(auth_required);
         }
 
-        let registry = self.registry.snapshot();
         self.apply_persistent_approval_policy(
             &mut context,
             &registry,
@@ -496,16 +501,19 @@ impl HostRuntime for DefaultHostRuntime {
         };
         context.trust = trust_decision.effective_trust.class();
 
+        let registry = self.registry.snapshot();
+
         // Pre-flight credential check: surface AuthRequired BEFORE the approval
-        // gate fires. The dispatch-time obligation check remains the enforcement backstop.
+        // gate fires. The pre-flight is trust-class-agnostic by design — the
+        // dispatch-time obligation check (which runs after trust/authorization)
+        // is the enforcing layer.
         if let Some(auth_required) = self
-            .credential_preflight_check(&capability_id, &scope)
+            .credential_preflight_check(&capability_id, &scope, &registry)
             .await
         {
             return Ok(auth_required);
         }
 
-        let registry = self.registry.snapshot();
         self.apply_persistent_approval_policy(
             &mut context,
             &registry,
@@ -1285,20 +1293,32 @@ impl DefaultHostRuntime {
     /// Checks whether all required credentials declared in the capability
     /// manifest are present in the secret store.
     ///
+    /// `registry` is the already-snapshotted registry from the caller; the
+    /// caller is responsible for taking a single snapshot and passing it here
+    /// to avoid a redundant `registry.snapshot()` inside this method.
+    ///
     /// Returns `Some(RuntimeCapabilityOutcome::AuthRequired)` if any required
     /// secret is absent, or `None` when all secrets are present (or when no
     /// secret store is wired, i.e. pre-flight is disabled).
     ///
     /// The dispatch-time obligation check remains the enforcement backstop —
     /// this method provides ordering only (credentials before approval gate).
+    ///
+    /// ## Failure handling
+    ///
+    /// On a transient secret-store `Err`, the pre-flight is skipped entirely
+    /// (returns `None`) rather than treating the error as "credential absent"
+    /// and firing `AuthRequired`. A backend failure must not burn a user auth
+    /// interaction — the dispatch-time obligation check enforces the credential
+    /// requirement and will catch genuine absences at execution time.
     async fn credential_preflight_check(
         &self,
         capability_id: &CapabilityId,
         scope: &ResourceScope,
+        registry: &ExtensionRegistry,
     ) -> Option<RuntimeCapabilityOutcome> {
-        let secret_store = self.secret_store.as_ref()?;
+        let secret_store = self.credential_preflight_store.as_ref()?;
 
-        let registry = self.registry.snapshot();
         let descriptor = registry.get_capability(capability_id)?;
 
         let (required_secrets, credential_requirements) =
@@ -1325,18 +1345,18 @@ impl DefaultHostRuntime {
                         credential_requirements,
                     ));
                 }
-                Err(error) => {
+                Err(_) => {
+                    // Fail-open: a transient store error must not masquerade as a
+                    // missing credential and burn a user auth interaction. Skip the
+                    // pre-flight entirely — the dispatch-time obligation check is the
+                    // enforcement backstop and will catch genuine absences at execution
+                    // time.
                     tracing::debug!(
                         capability_id = %capability_id,
                         secret_handle = handle.as_str(),
-                        error = %error,
-                        "credential pre-flight: secret store metadata query failed; treating as absent"
+                        "credential pre-flight: secret store metadata query failed; skipping pre-flight (dispatch-time check enforces)"
                     );
-                    return Some(auth_required_outcome(
-                        capability_id.clone(),
-                        required_secrets,
-                        credential_requirements,
-                    ));
+                    return None;
                 }
             }
         }
