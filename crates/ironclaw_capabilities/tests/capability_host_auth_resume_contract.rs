@@ -932,8 +932,7 @@ async fn auth_resume_after_real_approval_bounce_reuses_claimed_lease() {
     // went through inner.dispatch_json which recorded the request.
     let dispatched_request = dispatcher.inner.take_request();
     assert_eq!(
-        dispatched_request.scope.invocation_id,
-        original_invocation_id,
+        dispatched_request.scope.invocation_id, original_invocation_id,
         "(e) capability must be dispatched with the original invocation_id"
     );
 }
