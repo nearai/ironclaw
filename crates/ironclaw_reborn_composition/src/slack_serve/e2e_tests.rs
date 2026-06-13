@@ -191,7 +191,16 @@ impl Harness {
 }
 
 async fn build_harness(mode: TurnMode) -> Harness {
-    build_harness_with_actor_user_resolver(mode, static_personal_actor_user_resolver()).await
+    build_harness_with_max_wait(mode, Duration::from_secs(2)).await
+}
+
+async fn build_harness_with_max_wait(mode: TurnMode, max_wait: Duration) -> Harness {
+    build_harness_with_actor_user_resolver_and_max_wait(
+        mode,
+        static_personal_actor_user_resolver(),
+        max_wait,
+    )
+    .await
 }
 
 async fn build_harness_with_actor_user_resolver(
@@ -202,10 +211,33 @@ async fn build_harness_with_actor_user_resolver(
         .await
 }
 
+async fn build_harness_with_actor_user_resolver_and_max_wait(
+    mode: TurnMode,
+    actor_user_resolver: Arc<dyn ProductActorUserResolver>,
+    max_wait: Duration,
+) -> Harness {
+    build_harness_with_full_settings(mode, actor_user_resolver, None, max_wait).await
+}
+
 async fn build_harness_with_actor_user_resolver_and_auth_challenges(
     mode: TurnMode,
     actor_user_resolver: Arc<dyn ProductActorUserResolver>,
     auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
+) -> Harness {
+    build_harness_with_full_settings(
+        mode,
+        actor_user_resolver,
+        auth_challenges,
+        Duration::from_secs(2),
+    )
+    .await
+}
+
+async fn build_harness_with_full_settings(
+    mode: TurnMode,
+    actor_user_resolver: Arc<dyn ProductActorUserResolver>,
+    auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
+    max_wait: Duration,
 ) -> Harness {
     let conversations = Arc::new(InMemoryConversationServices::default());
     let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
@@ -298,7 +330,7 @@ async fn build_harness_with_actor_user_resolver_and_auth_challenges(
         },
         SlackFinalReplyDeliverySettings {
             poll_interval: Duration::from_millis(1),
-            max_wait: Duration::from_secs(2),
+            max_wait,
             max_concurrent_deliveries: std::num::NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
             max_pending_deliveries: std::num::NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
         },
@@ -1140,6 +1172,97 @@ async fn slack_approval_reply_resumes_and_delivers_final_reply() {
     assert_eq!(approvals[0].gate_ref.as_str(), GATE);
 }
 
+/// Regression test: each gate prompt is posted exactly once even when the
+/// delivery loop for the original user message (L1) is still alive when the
+/// approval ack arrives.
+///
+/// Pre-fix behaviour (bug): the approval resolution ack carried the same
+/// `submitted_run_id` as the original user-message ack (it resumes the
+/// pre-existing run). `should_deliver_after_ack` returned `true` for
+/// `ApprovalResolution(Allow)`, so a second `deliver_final_reply` loop (L2)
+/// was spawned with `delivered_blocked_marker = None`. L2 immediately saw the
+/// run as `Completed` (the approval service calls `complete_run` inline) and
+/// posted the final reply; L1, still alive and polling, also saw `Completed`
+/// and posted it again. Result: 3 messages total (approval prompt + 2 final
+/// replies) instead of 2.
+///
+/// Post-fix behaviour: the single-flight guard in `observe_workflow_ack`
+/// detects that L1 is already watching `run_id` and returns early for L2.
+/// Only L1 delivers the final reply exactly once.
+///
+/// To keep L1 alive (not timed-out) when the approval ack arrives, we use a
+/// long `max_wait` (10 s) and poll for the approval prompt before posting
+/// the approve event, mirroring the pattern in
+/// `slack_dm_delivers_final_reply_after_auth_completes_outside_slack`.
+#[tokio::test]
+async fn gate_prompt_is_posted_exactly_once_when_approval_ack_races_live_delivery_loop() {
+    // Use a long max_wait so L1 is still alive when the approval ack arrives.
+    let harness =
+        build_harness_with_max_wait(TurnMode::BlockApproval, Duration::from_secs(10)).await;
+
+    // Post user message — L1 spawns, polls, sees BlockedApproval, posts the
+    // approval prompt, then waits for the run to advance.
+    let first = harness
+        .post_event(dm_message("Ev-fanout-block", "needs approval fanout"))
+        .await;
+    assert_eq!(first.status(), StatusCode::OK);
+
+    // Poll until the approval prompt appears (L1 has posted it and is looping).
+    for _ in 0..200 {
+        if harness.slack_messages().len() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let messages = harness.slack_messages();
+    assert_eq!(
+        messages.len(),
+        1,
+        "expected exactly one approval prompt before the approve event; got {}: {:?}",
+        messages.len(),
+        messages
+    );
+    assert!(
+        messages[0]["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("Approval needed")),
+        "first message must be the approval prompt; got {:?}",
+        messages[0]["text"]
+    );
+
+    // Post the approve event while L1 is still alive.
+    // RecordingApprovalInteractionService::resolve immediately marks the run
+    // as Completed. Without the fix, the resolution ack spawns L2 which also
+    // sees Completed and posts a second final reply, giving 3 messages total.
+    let second = harness
+        .post_event(dm_message("Ev-fanout-approve", "approve"))
+        .await;
+    assert_eq!(second.status(), StatusCode::OK);
+
+    // Drain all tasks (L1 + the approval-ack task). L1 observes Completed and
+    // posts the final reply; the single-flight guard prevents L2 from also
+    // delivering, so the final reply is posted exactly once.
+    harness.drain().await;
+
+    let messages = harness.slack_messages();
+    assert_eq!(
+        messages.len(),
+        2,
+        "expected exactly 2 messages: approval prompt + final reply, not {} (duplicate final reply was posted without the fix)",
+        messages.len()
+    );
+    assert!(
+        messages[0]["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("Approval needed")),
+        "messages[0] must be the approval prompt"
+    );
+    assert_eq!(
+        messages[1]["text"], "approved and finished",
+        "messages[1] must be the final reply"
+    );
+}
+
 #[tokio::test]
 async fn slack_thread_auth_deny_with_bot_mention_cancels_auth_gate_without_agent_turn() {
     let harness = build_harness(TurnMode::BlockAuth).await;
@@ -1835,6 +1958,9 @@ fn dm_message(event_id: &'static str, text: &'static str) -> &'static str {
         ("Ev-identity", "hello") => DM_IDENTITY,
         ("Ev-auth", "needs auth") => DM_AUTH,
         ("Ev-working", "think") => DM_WORKING,
+        // Gate-fanout regression fixtures
+        ("Ev-fanout-block", "needs approval fanout") => DM_FANOUT_BLOCK,
+        ("Ev-fanout-approve", "approve") => DM_FANOUT_APPROVE,
         _ => panic!("unknown fixture"),
     }
 }
@@ -1979,4 +2105,26 @@ const DM_APPROVE_EXPLICIT_GATE: &str = r#"{
   "api_app_id":"A-slack",
   "event_id":"Ev-approve-explicit",
   "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"approve gate:approve-slack","ts":"1710000000.000005"}
+}"#;
+
+// ── Gate-fanout regression fixtures ──────────────────────────────────────────
+// Used by `gate_prompt_is_posted_exactly_once_when_approval_ack_races_live_delivery_loop`.
+// Distinct event_ids avoid idempotency-ledger collisions with all other fixtures.
+
+/// User message that triggers a BlockApproval turn (gate-fanout regression).
+const DM_FANOUT_BLOCK: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-fanout-block",
+  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"needs approval fanout","ts":"1710000002.000001"}
+}"#;
+
+/// Approve event for the gate-fanout regression (resolves the BlockApproval gate).
+const DM_FANOUT_APPROVE: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-fanout-approve",
+  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"approve","ts":"1710000002.000002"}
 }"#;

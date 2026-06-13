@@ -139,6 +139,16 @@ pub struct SlackFinalReplyDeliveryObserver {
     /// Caps Slack API usage per blocked run; bounded FIFO eviction keeps memory O(1);
     /// a false-negative after eviction just means one extra hint, harmless.
     hint_seen: HintSeenSet,
+    /// Single-flight guard: at most one live `deliver_final_reply` loop per run_id.
+    ///
+    /// A gate-resolution ack (`ApprovalResolution(Allow)` / `AuthResolution(Allowed)`)
+    /// carries the same `submitted_run_id` as the original user-message ack because it
+    /// resumes the pre-existing run rather than creating a new one. Without this guard,
+    /// each resolution ack would spawn a second delivery loop for the same run while the
+    /// original loop is still watching — N resolutions ⇒ N+1 concurrent loops ⇒ gate N
+    /// posted N times. The original loop detects the unblock and posts the next gate
+    /// exactly once, so resolution-ack loops are always redundant duplicates.
+    active_delivery_run_ids: Mutex<HashSet<TurnRunId>>,
 }
 
 impl SlackFinalReplyDeliveryObserver {
@@ -155,6 +165,7 @@ impl SlackFinalReplyDeliveryObserver {
             settings,
             delivery_permits: Arc::new(Semaphore::new(settings.max_concurrent_deliveries.get())),
             hint_seen: Mutex::new((VecDeque::new(), HashSet::new())),
+            active_delivery_run_ids: Mutex::new(HashSet::new()),
         }
     }
 
@@ -1061,7 +1072,51 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
             );
             return;
         };
-        if let Err(error) = self.deliver_final_reply(envelope.clone(), ack).await {
+        // Single-flight guard: at most one live delivery loop per run_id.
+        //
+        // A gate-resolution ack (ApprovalResolution(Allow) / AuthResolution(Allowed))
+        // carries the same submitted_run_id as the original user-message ack because
+        // it resumes the pre-existing run. The original loop is still alive and will
+        // observe the unblock on its next poll, posting the next gate or final reply
+        // exactly once. Spawning a second loop for the same run_id would produce
+        // duplicate posts (N resolutions ⇒ N+1 loops ⇒ gate N posted N times).
+        //
+        // `should_deliver_after_ack` only filters Deny resolutions; Allow resolutions
+        // pass through here. We guard by run_id rather than by ack type so the fix
+        // is robust to future ack variants that may also target an existing run.
+        let run_id_for_guard = submitted_run_id(&ack);
+        if let Some(run_id) = run_id_for_guard {
+            let already_delivering = {
+                let mut guard = self
+                    .active_delivery_run_ids
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if guard.contains(&run_id) {
+                    true
+                } else {
+                    guard.insert(run_id);
+                    false
+                }
+            };
+            if already_delivering {
+                tracing::debug!(
+                    target = "ironclaw::reborn::slack_delivery",
+                    %run_id,
+                    "skipping redundant delivery loop: a loop is already watching this run"
+                );
+                return;
+            }
+        }
+        let delivery_result = self.deliver_final_reply(envelope.clone(), ack).await;
+        // Release the single-flight guard for this run before handling the error so
+        // a future retry (e.g. after a process restart) is not permanently blocked.
+        if let Some(run_id) = run_id_for_guard {
+            self.active_delivery_run_ids
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&run_id);
+        }
+        if let Err(error) = delivery_result {
             tracing::warn!(
                 target = "ironclaw::reborn::slack_delivery",
                 error = %error,
