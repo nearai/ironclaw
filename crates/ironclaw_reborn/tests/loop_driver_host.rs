@@ -983,6 +983,7 @@ impl CommunicationContextProvider for StubCommunicationContextProvider {
         _scope: &TurnScope,
         _actor: Option<&TurnActor>,
         _delivery_tools_visible: bool,
+        _run_origin: Option<ironclaw_turns::TurnRunOrigin>,
     ) -> Option<CommunicationRuntimeContext> {
         Some(CommunicationRuntimeContext {
             connected_channels: ConnectedChannelsState::Known(vec![ConnectedChannelSummary {
@@ -1030,6 +1031,137 @@ async fn text_only_host_factory_with_communication_context_provider_injects_comm
             .content
             .contains("Outbound delivery target: none set.")),
         "model request must contain provider-supplied outbound delivery target state"
+    );
+}
+
+// Provider that forwards the delivery_tools_visible and run_origin arguments
+// to the returned context so callers can assert what the host passed.
+struct RecordingCommunicationContextProvider {
+    recorded_delivery_tools_visible: Mutex<Option<bool>>,
+}
+
+impl RecordingCommunicationContextProvider {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            recorded_delivery_tools_visible: Mutex::new(None),
+        })
+    }
+
+    fn delivery_tools_visible(&self) -> Option<bool> {
+        *self.recorded_delivery_tools_visible.lock().unwrap()
+    }
+}
+
+#[async_trait]
+impl CommunicationContextProvider for RecordingCommunicationContextProvider {
+    async fn communication_context(
+        &self,
+        _scope: &TurnScope,
+        _actor: Option<&TurnActor>,
+        delivery_tools_visible: bool,
+        run_origin: Option<ironclaw_turns::TurnRunOrigin>,
+    ) -> Option<CommunicationRuntimeContext> {
+        *self.recorded_delivery_tools_visible.lock().unwrap() = Some(delivery_tools_visible);
+        Some(CommunicationRuntimeContext {
+            connected_channels: ConnectedChannelsState::Unknown,
+            delivery_target: DeliveryTargetState::NoneSet,
+            delivery_tools_visible,
+            run_origin,
+        })
+    }
+}
+
+// f-test-5: when the visible surface includes builtin.outbound_delivery_target_set,
+// the host passes delivery_tools_visible=true to the communication context provider.
+#[tokio::test]
+async fn communication_context_provider_receives_delivery_tools_visible_true_when_capability_in_surface()
+ {
+    let mut fixture = HostFixture::new("thread-comm-delivery-visible", "hello delivery").await;
+    let driver = TextOnlyModelReplyDriver::default();
+    assign_driver_to_fixture(&mut fixture, driver.descriptor());
+
+    let delivery_id = CapabilityId::new("builtin.outbound_delivery_target_set").unwrap();
+    let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
+        capability_descriptor(delivery_id.as_str()),
+    ])));
+    let io = Arc::new(InMemoryCapabilityIo::default());
+    let capability_port = HostRuntimeLoopCapabilityPort::new(
+        runtime.clone(),
+        fixture.context.clone(),
+        host_runtime_visible_request(&fixture, ["builtin"]),
+        io.clone(),
+        io,
+        fixture.milestone_sink.clone(),
+    );
+    let surface_resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
+        CapabilityAllowSet::allowlist([delivery_id.clone()]),
+    ));
+    let recording_provider = RecordingCommunicationContextProvider::new();
+
+    let host = fixture
+        .factory()
+        .with_communication_context_provider(
+            Arc::clone(&recording_provider) as Arc<dyn CommunicationContextProvider>
+        )
+        .build_text_only_host_with_profiled_capabilities(
+            RebornLoopDriverHostRequest {
+                claimed_run: fixture.claimed.clone(),
+                loop_run_context: fixture.context.clone(),
+            },
+            Arc::new(capability_port),
+            surface_resolver,
+        )
+        .await
+        .unwrap();
+
+    driver
+        .run(driver_request(&fixture.context), &host)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        recording_provider.delivery_tools_visible(),
+        Some(true),
+        "host must pass delivery_tools_visible=true when builtin.outbound_delivery_target_set is in surface"
+    );
+}
+
+// f-test-6: when claimed.state.run_origin is ScheduledTrigger, the model request
+// contains the "Run origin: scheduled trigger fire." line.
+#[tokio::test]
+async fn scheduled_trigger_run_origin_appears_in_model_request() {
+    let mut fixture = HostFixture::new("thread-comm-sched-trigger", "hello trigger").await;
+    let driver = TextOnlyModelReplyDriver::default();
+    assign_driver_to_fixture(&mut fixture, driver.descriptor());
+
+    let loop_run_context = fixture
+        .context
+        .clone()
+        .with_run_origin(ironclaw_turns::TurnRunOrigin::ScheduledTrigger);
+    let host = fixture
+        .factory()
+        .with_communication_context_provider(
+            RecordingCommunicationContextProvider::new() as Arc<dyn CommunicationContextProvider>
+        )
+        .build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: fixture.claimed.clone(),
+            loop_run_context: loop_run_context.clone(),
+        })
+        .await
+        .unwrap();
+
+    driver
+        .run(driver_request(&loop_run_context), &host)
+        .await
+        .unwrap();
+
+    let requests = fixture.gateway.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].messages.iter().any(|message| message
+            .content
+            .contains("Run origin: scheduled trigger fire.")),
+        "model request must contain scheduled trigger run origin line"
     );
 }
 
@@ -6720,7 +6852,7 @@ fn host_runtime_visible_request(
         .unwrap_or_else(|| UserId::new("user-text-host").unwrap());
     let mut context = ExecutionContext::local_default(
         user_id,
-        ExtensionId::new(fixture.context.loop_driver_id.as_str()).unwrap(),
+        loop_driver_execution_extension_id(&fixture.context).unwrap(),
         RuntimeKind::FirstParty,
         TrustClass::System,
         CapabilitySet::default(),

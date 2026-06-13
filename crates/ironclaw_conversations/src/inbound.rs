@@ -5,8 +5,8 @@ use ironclaw_safety::{
     InjectionScanner, PromptSafetyRejection, Sanitizer, validate_trusted_trigger_prompt,
 };
 use ironclaw_triggers::{
-    TRIGGER_TRUSTED_ADAPTER_KIND, TriggerError, TrustedTriggerFireSubmitOutcome,
-    TrustedTriggerFireSubmitter, TrustedTriggerSubmitRequest,
+    TriggerError, TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter,
+    TrustedTriggerSubmitRequest,
 };
 use ironclaw_turns::{
     AdmissionRejectionReason, SubmitTurnRequest, TurnCoordinator, TurnError, TurnRunOrigin,
@@ -92,7 +92,7 @@ where
             requested_run_profile,
         } = request;
 
-        let run_origin = if adapter_kind.as_str() == TRIGGER_TRUSTED_ADAPTER_KIND {
+        let run_origin = if adapter_kind.is_trusted_trigger() {
             Some(TurnRunOrigin::ScheduledTrigger)
         } else {
             Some(TurnRunOrigin::ProductInbound {
@@ -480,7 +480,7 @@ mod tests {
         CancelRunResponse, EventCursor, GetRunStateRequest, ReplyTargetBindingRef,
         ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef,
         SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnCapacityResource, TurnCoordinator,
-        TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+        TurnError, TurnId, TurnRunId, TurnRunOrigin, TurnRunState, TurnScope, TurnStatus,
     };
 
     use super::{
@@ -532,6 +532,10 @@ mod tests {
         assert!(duplicate.replayed_turn_submission);
         assert_eq!(services.accepted_messages().await.len(), 1);
         assert_eq!(coordinator.submissions().len(), 1);
+        assert_eq!(
+            coordinator.submissions()[0].run_origin,
+            Some(TurnRunOrigin::ScheduledTrigger)
+        );
     }
 
     #[tokio::test]

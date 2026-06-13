@@ -2149,9 +2149,15 @@ pub async fn build_reborn_runtime(
 
     let communication_context_provider: Option<
         Arc<dyn ironclaw_turns::run_profile::CommunicationContextProvider>,
-    > =
-        local_runtime.map(|local_runtime| {
-            Arc::new(
+    > = local_runtime.map(|local_runtime| {
+        let mut lifecycle_facade = crate::lifecycle::RebornLocalLifecycleFacade::new(Arc::clone(
+            &local_runtime.skill_management,
+        ));
+        if let Some(extension_management) = &local_runtime.extension_management {
+            lifecycle_facade =
+                lifecycle_facade.with_extension_management(Arc::clone(extension_management));
+        }
+        Arc::new(
                 crate::communication_context::RuntimeCommunicationContextProvider::new(Arc::new(
                     crate::outbound_preferences::RebornOutboundPreferencesFacade::new(
                         Arc::clone(&local_runtime.outbound_preferences),
@@ -2161,9 +2167,10 @@ pub async fn build_reborn_runtime(
                             ),
                         ),
                     ),
-                )),
+                ))
+                .with_lifecycle_facade(Arc::new(lifecycle_facade)),
             ) as Arc<dyn ironclaw_turns::run_profile::CommunicationContextProvider>
-        });
+    });
 
     let planned_runtime_parts = DefaultPlannedRuntimeParts {
         turn_state: Arc::clone(&turn_state_store),

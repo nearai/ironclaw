@@ -47,8 +47,8 @@ use ironclaw_turns::{
     IdempotencyKey, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
     InMemoryTurnStateStore, LoopResultRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
     RunProfileVersion, SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
-    TurnActor, TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnRunWake, TurnScope,
-    TurnStateStore, TurnStatus,
+    TurnActor, TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunOrigin, TurnRunState,
+    TurnRunWake, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
         LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken,
@@ -1287,6 +1287,13 @@ async fn reply_target_binding_ref_has_single_reply_prefix() {
     assert!(reply_ref.starts_with("reply:"));
     assert!(!reply_ref.starts_with("reply:reply:"));
     assert_eq!(reply_ref.matches("reply:").count(), 1);
+    assert_eq!(
+        request.run_origin,
+        Some(TurnRunOrigin::ProductInbound {
+            adapter: "test_adapter".to_string(),
+        }),
+        "inbound turn must carry ProductInbound run_origin with adapter from envelope"
+    );
 }
 
 #[tokio::test]

@@ -13,7 +13,8 @@ use chrono::{DateTime, Utc};
 #[cfg(test)]
 use ironclaw_host_api::UserId;
 use ironclaw_product_adapters::{
-    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductRejection,
+    ProductAdapterId, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
+    ProductRejection,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest, MessageContent,
@@ -119,7 +120,7 @@ struct PreparedUserMessage {
     thread_scope: ThreadScope,
     source_binding_id: String,
     submit_idempotency_key: String,
-    adapter_id: String,
+    adapter_id: ProductAdapterId,
 }
 
 /// Port for the inbound turn submission path.
@@ -305,7 +306,7 @@ where
             thread_scope,
             source_binding_id,
             submit_idempotency_key,
-            adapter_id: envelope.adapter_id().as_str().to_string(),
+            adapter_id: envelope.adapter_id().clone(),
         })
     }
 
@@ -434,6 +435,7 @@ impl ProductInboundTurnHandoff {
         replay: AcceptedInboundMessageReplay,
         submit_idempotency_key: String,
         received_at: DateTime<Utc>,
+        adapter_id: ProductAdapterId,
     ) -> Result<Self, ProductWorkflowError> {
         let binding = binding_from_replay(&replay)?;
         let thread_scope = replay.scope.clone();
@@ -443,7 +445,7 @@ impl ProductInboundTurnHandoff {
             received_at,
             binding,
             thread_scope,
-            String::new(),
+            adapter_id,
         )
     }
 
@@ -469,7 +471,7 @@ impl ProductInboundTurnHandoff {
         received_at: DateTime<Utc>,
         binding: ResolvedBinding,
         thread_scope: ThreadScope,
-        adapter_id: String,
+        adapter_id: ProductAdapterId,
     ) -> Result<Self, ProductWorkflowError> {
         let accepted_message_ref = accepted_message_ref(replay.message_id)?;
 
@@ -562,7 +564,7 @@ struct AcceptedProductInboundTurn {
     reply_target_binding_id: String,
     idempotency_key_raw: String,
     received_at: DateTime<Utc>,
-    adapter_id: String,
+    adapter_id: ProductAdapterId,
 }
 
 impl AcceptedProductInboundTurn {
@@ -633,7 +635,7 @@ impl AcceptedProductInboundTurn {
             subagent_depth: 0,
             spawn_tree_root_run_id: None,
             run_origin: Some(TurnRunOrigin::ProductInbound {
-                adapter: adapter_id,
+                adapter: adapter_id.as_str().to_string(),
             }),
         };
 
@@ -839,6 +841,7 @@ mod tests {
             ),
             "turn-key".to_string(),
             received_at(),
+            ProductAdapterId::new("test_adapter").unwrap(),
         )
         .expect("submitted replay handoff");
 
@@ -872,6 +875,7 @@ mod tests {
             ),
             "turn-key".to_string(),
             received_at(),
+            ProductAdapterId::new("test_adapter").unwrap(),
         )
         .expect("deferred replay handoff");
 
@@ -896,9 +900,13 @@ mod tests {
         );
         replay.actor_id = None;
 
-        let handoff =
-            ProductInboundTurnHandoff::from_replay(replay, "turn-key".to_string(), received_at())
-                .expect("legacy replay handoff");
+        let handoff = ProductInboundTurnHandoff::from_replay(
+            replay,
+            "turn-key".to_string(),
+            received_at(),
+            ProductAdapterId::new("test_adapter").unwrap(),
+        )
+        .expect("legacy replay handoff");
 
         let ProductInboundTurnHandoff::NeedsSubmission(submission) = handoff else {
             panic!("expected legacy replay to require a new turn submission")
@@ -939,7 +947,7 @@ mod tests {
             },
             source_binding_id: "src:alpha".to_string(),
             submit_idempotency_key: "turn-key".to_string(),
-            adapter_id: "test_adapter".to_string(),
+            adapter_id: ProductAdapterId::new("test_adapter").unwrap(),
         };
 
         let handoff = ProductInboundTurnHandoff::from_replay_with_prepared(

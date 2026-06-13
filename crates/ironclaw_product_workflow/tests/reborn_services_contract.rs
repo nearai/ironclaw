@@ -76,7 +76,7 @@ use ironclaw_turns::{
     InMemoryTurnStateStore, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
     ResumeTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
     SubmitTurnResponse, TurnActor, TurnCapacityResource, TurnCoordinator, TurnError, TurnId,
-    TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    TurnRunId, TurnRunOrigin, TurnRunState, TurnScope, TurnStatus,
 };
 use secrecy::SecretString;
 use serde_json::json;
@@ -321,6 +321,14 @@ impl FakeTurnCoordinator {
             .expect("lock")
             .last()
             .map(|request| request.scope.clone())
+    }
+
+    fn last_submission_run_origin(&self) -> Option<TurnRunOrigin> {
+        self.submissions
+            .lock()
+            .expect("lock")
+            .last()
+            .and_then(|request| request.run_origin.clone())
     }
 
     fn last_cancellation_scope(&self) -> Option<TurnScope> {
@@ -1804,6 +1812,11 @@ async fn submit_turn_uses_facade_and_thread_history_without_route_store_access()
     assert_eq!(
         submission_scope.project_id.expect("project").as_str(),
         "project-alpha"
+    );
+    assert_eq!(
+        coordinator.last_submission_run_origin(),
+        Some(TurnRunOrigin::WebUiChat),
+        "WebUI submit must produce WebUiChat run_origin"
     );
 }
 

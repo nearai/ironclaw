@@ -1505,6 +1505,9 @@ where
             .map_err(|error| RebornLoopDriverHostError::InvalidRequest {
                 reason: error.safe_summary,
             })?;
+        // SurfaceTrackingLoopCapabilityPort::visible_capabilities calls
+        // surface_state.set_current() synchronously before returning, so
+        // surface_state.current() here is always populated.
         let delivery_tools_visible = surface_state
             .current()
             .ok()
@@ -1518,17 +1521,14 @@ where
             .unwrap_or(false);
         let communication = match &self.communication_context_provider {
             Some(provider) => {
-                let mut comm = provider
+                provider
                     .communication_context(
                         &run_context.scope,
                         run_context.actor(),
                         delivery_tools_visible,
+                        run_context.run_origin.clone(),
                     )
-                    .await;
-                if let Some(ref mut c) = comm {
-                    c.run_origin = run_context.run_origin.clone();
-                }
-                comm
+                    .await
             }
             None => None,
         };
