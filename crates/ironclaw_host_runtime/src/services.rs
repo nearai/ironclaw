@@ -375,6 +375,10 @@ where
         }
     }
 
+    pub fn security_audit_sink(&self) -> Option<Arc<dyn SecurityAuditSink>> {
+        self.security_audit_sink.clone()
+    }
+
     /// Builds a runtime dispatcher with every configured runtime adapter.
     fn runtime_dispatcher(&self) -> RuntimeDispatcher<'static, F, G> {
         let mut dispatcher = RuntimeDispatcher::from_shared_registry(

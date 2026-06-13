@@ -9,6 +9,7 @@ use ironclaw_auth::{
     TurnRunRef,
 };
 use ironclaw_capabilities::{CapabilityObligationHandler, CapabilityObligationRequest};
+use ironclaw_events::{InMemorySecurityAuditSink, SecurityBoundary, SecurityDecision};
 use ironclaw_host_api::{
     AgentId, InvocationId, ProjectId, ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressError,
     RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, TenantId, ThreadId, UserId,
@@ -25,6 +26,8 @@ use ironclaw_turns::{
 };
 use secrecy::SecretString;
 use std::sync::Mutex;
+
+use crate::auth::AUTH_CONTINUATION_DISPATCH_FAILED_CODE;
 
 use super::*;
 use crate::notion_oauth::{NOTION_PROVIDER_ID, notion_provider_spec};
@@ -528,9 +531,12 @@ async fn oauth_callback_continuation_dispatch_maps_turn_error_categories() {
             Arc::new(InMemoryAuthProductServices::new()),
             Arc::new(ProductAuthTurnGateResumeDispatcher::new(coordinator)),
         );
+        let security_audit_sink = Arc::new(InMemorySecurityAuditSink::new());
+        let services = services.with_security_audit_sink(security_audit_sink.clone());
         let scope = turn_scope();
         let actor = TurnActor::new(UserId::new("alice").unwrap());
         let auth_scope = auth_scope_for_turn(&scope, &actor);
+        let expected_scope = auth_scope.resource.clone();
         let flow_id = create_flow(
             &services,
             auth_scope.clone(),
@@ -548,6 +554,13 @@ async fn oauth_callback_continuation_dispatch_maps_turn_error_categories() {
 
         assert_eq!(error.code, expected_code);
         assert_eq!(error.retryable, expected_retryable);
+
+        let events = security_audit_sink.snapshot();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].boundary, SecurityBoundary::AuthContinuation);
+        assert_eq!(events[0].decision, SecurityDecision::Blocked);
+        assert_eq!(events[0].code, AUTH_CONTINUATION_DISPATCH_FAILED_CODE);
+        assert_eq!(events[0].scope.as_ref(), Some(&expected_scope));
     }
 }
 
