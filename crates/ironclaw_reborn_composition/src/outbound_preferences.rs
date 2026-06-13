@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, RwLock},
+};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -78,6 +81,91 @@ impl std::fmt::Debug for OutboundDeliveryTargetRegistry {
 impl OutboundDeliveryTargetRegistry {
     pub(crate) fn new(providers: Vec<Arc<dyn OutboundDeliveryTargetProvider>>) -> Self {
         Self { providers }
+    }
+}
+
+pub(crate) struct MutableOutboundDeliveryTargetRegistry {
+    providers: RwLock<BTreeMap<String, Arc<dyn OutboundDeliveryTargetProvider>>>,
+}
+
+impl std::fmt::Debug for MutableOutboundDeliveryTargetRegistry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let provider_count = self
+            .providers
+            .read()
+            .map(|providers| providers.len())
+            .unwrap_or_default();
+        formatter
+            .debug_struct("MutableOutboundDeliveryTargetRegistry")
+            .field("providers", &provider_count)
+            .finish()
+    }
+}
+
+impl Default for MutableOutboundDeliveryTargetRegistry {
+    fn default() -> Self {
+        Self {
+            providers: RwLock::new(BTreeMap::new()),
+        }
+    }
+}
+
+impl MutableOutboundDeliveryTargetRegistry {
+    #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(dead_code))]
+    pub(crate) fn register_provider(
+        &self,
+        provider_key: impl Into<String>,
+        provider: Arc<dyn OutboundDeliveryTargetProvider>,
+    ) -> bool {
+        let Ok(mut providers) = self.providers.write() else {
+            tracing::warn!(
+                target = "ironclaw::reborn::outbound_preferences",
+                "outbound target registry lock failed while registering provider"
+            );
+            return false;
+        };
+        providers.insert(provider_key.into(), provider).is_none()
+    }
+
+    fn providers(
+        &self,
+    ) -> Result<Vec<Arc<dyn OutboundDeliveryTargetProvider>>, RebornServicesError> {
+        self.providers
+            .read()
+            .map(|providers| providers.values().cloned().collect())
+            .map_err(|_| outbound_target_registry_error())
+    }
+}
+
+#[async_trait]
+impl OutboundDeliveryTargetProvider for MutableOutboundDeliveryTargetRegistry {
+    async fn list_outbound_delivery_targets(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+    ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        OutboundDeliveryTargetRegistry::new(self.providers()?)
+            .list_outbound_delivery_targets(caller)
+            .await
+    }
+
+    async fn resolve_outbound_delivery_target(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        target_id: &RebornOutboundDeliveryTargetId,
+    ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        OutboundDeliveryTargetRegistry::new(self.providers()?)
+            .resolve_outbound_delivery_target(caller, target_id)
+            .await
+    }
+
+    async fn resolve_reply_target_binding(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        target: &ReplyTargetBindingRef,
+    ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        OutboundDeliveryTargetRegistry::new(self.providers()?)
+            .resolve_reply_target_binding(caller, target)
+            .await
     }
 }
 
@@ -323,6 +411,17 @@ fn outbound_target_not_found() -> RebornServicesError {
         status_code: 404,
         retryable: false,
         field: Some("final_reply_target_id".to_string()),
+        validation_code: None,
+    }
+}
+
+fn outbound_target_registry_error() -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Internal,
+        kind: RebornServicesErrorKind::Internal,
+        status_code: 500,
+        retryable: false,
+        field: None,
         validation_code: None,
     }
 }

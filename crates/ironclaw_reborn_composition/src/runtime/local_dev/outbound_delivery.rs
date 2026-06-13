@@ -30,7 +30,7 @@ pub(crate) const OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID: &str =
     "builtin.outbound_delivery_targets_list";
 const OUTBOUND_DELIVERY_TARGETS_LIST_PROVIDER_TOOL_NAME: &str =
     "builtin__outbound_delivery_targets_list";
-const OUTBOUND_DELIVERY_TARGETS_LIST_DESCRIPTION: &str = "List available outbound delivery targets for final replies and routine/trigger results, such as Slack DMs or Slack channels. Use before saying a delivery product is unavailable or asking the user to reconnect it.";
+const OUTBOUND_DELIVERY_TARGETS_LIST_DESCRIPTION: &str = "List available outbound delivery targets for final replies and routine/trigger results, such as Slack DMs or Slack channels. When the user asks to send routine or trigger results through Slack or another product/channel, call this before builtin__trigger_create and before saying a delivery product is unavailable or asking the user to reconnect it.";
 
 pub(crate) const OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID: &str =
     "builtin.outbound_delivery_target_set";

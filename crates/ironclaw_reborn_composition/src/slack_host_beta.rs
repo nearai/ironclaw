@@ -249,11 +249,11 @@ pub enum SlackHostBetaBuildError {
     InvalidConfig { field: &'static str, reason: String },
 }
 
+#[non_exhaustive]
 pub struct SlackHostBetaMounts {
     pub events: PublicRouteMount,
     pub personal_binding_pairing: SlackPersonalBindingPairingRouteConfig,
     pub channel_routes: SlackChannelRouteAdminRouteConfig,
-    pub(crate) outbound_delivery_target_provider: Arc<dyn OutboundDeliveryTargetProvider>,
 }
 
 pub fn build_slack_events_route_mount(
@@ -462,11 +462,20 @@ pub fn build_slack_host_beta_mounts(
             channel_route_store,
             Arc::clone(&personal_dm_target_store),
         ));
+    let registered = runtime.register_outbound_delivery_target_provider(
+        SLACK_V2_ADAPTER_ID,
+        Arc::clone(&outbound_delivery_target_provider),
+    );
+    if !registered {
+        tracing::debug!(
+            target = "ironclaw::reborn::slack_host_beta",
+            "Slack outbound delivery target provider replaced an existing registration"
+        );
+    }
     Ok(SlackHostBetaMounts {
         events,
         personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
         channel_routes,
-        outbound_delivery_target_provider,
     })
 }
 
@@ -1816,6 +1825,17 @@ mod tests {
         assert_eq!(target.target.channel.as_str(), "slack");
         assert_eq!(target.target.display_name.as_str(), "Slack channel C0HOST");
         assert!(target.capabilities.final_replies);
+        let runtime_targets = runtime
+            .outbound_delivery_target_provider()
+            .expect("Slack mounts should register runtime outbound target provider")
+            .list_outbound_delivery_targets(&shared_subject)
+            .await
+            .expect("runtime target list");
+        assert_eq!(runtime_targets.len(), 1);
+        assert_eq!(
+            runtime_targets[0].summary.target_id.as_str(),
+            target.target.target_id.as_str()
+        );
 
         let selected = bundle
             .api

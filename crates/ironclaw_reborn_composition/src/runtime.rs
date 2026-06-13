@@ -55,7 +55,7 @@ use ironclaw_product_workflow::{
     ApprovalBlockedTurnRun, ApprovalInteractionScope, ApprovalInteractionService,
     ApprovalResolverPort, ApprovalTurnRunLocator, AuthInteractionService,
     DefaultApprovalInteractionService, DefaultAuthInteractionService,
-    RunStateApprovalInteractionReadModel,
+    OutboundPreferencesProductFacade, RunStateApprovalInteractionReadModel,
 };
 use ironclaw_reborn::loop_exit_applier::{
     ApprovalGateEvidenceStore, ThreadCheckpointLoopExitEvidencePort,
@@ -94,6 +94,10 @@ use ironclaw_turns::{
 use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore, builtin_extension_registry};
 use crate::local_dev_capability_policy::local_dev_capability_policy;
+use crate::outbound_preferences::{
+    MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetProvider,
+    RebornOutboundPreferencesFacade,
+};
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::runtime_input::{
     PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerAuthorizerConfig,
@@ -236,6 +240,9 @@ mod auth_interaction_tests;
 #[path = "runtime/tests/default_system_prompt.rs"]
 mod default_system_prompt_tests;
 mod local_dev;
+#[cfg(test)]
+#[path = "runtime/tests/outbound_delivery.rs"]
+mod outbound_delivery_tests;
 mod production;
 mod skills;
 
@@ -386,6 +393,7 @@ pub struct RebornRuntime {
     #[cfg(any(test, feature = "test-support"))]
     trigger_conversation_pairing:
         Option<Arc<dyn ironclaw_conversations::ConversationActorPairingService>>,
+    outbound_delivery_target_registry: Option<Arc<MutableOutboundDeliveryTargetRegistry>>,
     budget_event_projection: Option<crate::budget_events::BudgetEventProjection>,
     poll_settings: PollSettings,
     actor_user_id: UserId,
@@ -894,6 +902,7 @@ impl RebornRuntime {
     )]
     pub(crate) fn clear_local_runtime_for_test(&mut self) {
         self.services.local_runtime = None;
+        self.outbound_delivery_target_registry = None;
     }
 
     /// Operator boot config, when the runtime was assembled with one. The
@@ -1068,6 +1077,33 @@ impl RebornRuntime {
 
     pub(crate) fn webui_auth_interaction_service(&self) -> Arc<dyn AuthInteractionService> {
         self.auth_interaction_service.clone()
+    }
+
+    pub(crate) fn outbound_delivery_target_provider(
+        &self,
+    ) -> Option<Arc<dyn OutboundDeliveryTargetProvider>> {
+        self.outbound_delivery_target_registry
+            .as_ref()
+            .map(|registry| {
+                let registry = Arc::clone(registry);
+                let provider: Arc<dyn OutboundDeliveryTargetProvider> = registry;
+                provider
+            })
+    }
+
+    #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(dead_code))]
+    pub(crate) fn register_outbound_delivery_target_provider(
+        &self,
+        provider_key: impl Into<String>,
+        provider: Arc<dyn OutboundDeliveryTargetProvider>,
+    ) -> bool {
+        let Some(registry) = self.outbound_delivery_target_registry.as_ref() else {
+            tracing::debug!(
+                "register_outbound_delivery_target_provider: local runtime registry unavailable"
+            );
+            return false;
+        };
+        registry.register_provider(provider_key, provider)
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
@@ -2349,6 +2385,21 @@ pub async fn build_reborn_runtime(
             )
             .map_err(|error| RebornRuntimeError::SkillExecution(error.to_string()))?;
     }
+    let outbound_delivery_target_registry =
+        local_runtime.map(|_| Arc::new(MutableOutboundDeliveryTargetRegistry::default()));
+    let outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>> =
+        match (local_runtime, &outbound_delivery_target_registry) {
+            (Some(local_runtime), Some(registry)) => {
+                let registry = Arc::clone(registry);
+                let provider: Arc<dyn OutboundDeliveryTargetProvider> = registry;
+                Some(Arc::new(RebornOutboundPreferencesFacade::new(
+                    Arc::clone(&local_runtime.outbound_preferences),
+                    provider,
+                ))
+                    as Arc<dyn OutboundPreferencesProductFacade>)
+            }
+            _ => None,
+        };
     let milestone_sink = projection_services.with_live_progress_milestone_sink_for_publisher(
         durable_milestone_sink,
         live_projection_publisher,
@@ -2378,7 +2429,7 @@ pub async fn build_reborn_runtime(
             model_gateway,
             milestone_sink.clone(),
             skill_activation_source.clone(),
-            None,
+            outbound_preferences_facade.clone(),
             trajectory_observer,
         )
         .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
@@ -2486,28 +2537,27 @@ pub async fn build_reborn_runtime(
 
     let communication_context_provider: Option<
         Arc<dyn ironclaw_turns::run_profile::CommunicationContextProvider>,
-    > = local_runtime.map(|local_runtime| {
-        let mut lifecycle_facade = crate::lifecycle::RebornLocalLifecycleFacade::new(Arc::clone(
-            &local_runtime.skill_management,
-        ));
-        if let Some(extension_management) = &local_runtime.extension_management {
-            lifecycle_facade =
-                lifecycle_facade.with_extension_management(Arc::clone(extension_management));
-        }
-        Arc::new(
-                crate::communication_context::RuntimeCommunicationContextProvider::new(Arc::new(
-                    crate::outbound_preferences::RebornOutboundPreferencesFacade::new(
-                        Arc::clone(&local_runtime.outbound_preferences),
-                        Arc::new(
-                            crate::outbound_preferences::OutboundDeliveryTargetRegistry::new(
-                                Vec::new(),
-                            ),
-                        ),
-                    ),
-                ))
+    > = match (local_runtime, outbound_preferences_facade.clone()) {
+        (Some(local_runtime), Some(outbound_preferences_facade)) => {
+            let mut lifecycle_facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
+                Arc::clone(&local_runtime.skill_management),
+            );
+            if let Some(extension_management) = &local_runtime.extension_management {
+                lifecycle_facade =
+                    lifecycle_facade.with_extension_management(Arc::clone(extension_management));
+            }
+            Some(Arc::new(
+                crate::communication_context::RuntimeCommunicationContextProvider::new(
+                    outbound_preferences_facade,
+                )
                 .with_lifecycle_facade(Arc::new(lifecycle_facade)),
-            ) as Arc<dyn ironclaw_turns::run_profile::CommunicationContextProvider>
-    });
+            )
+                as Arc<
+                    dyn ironclaw_turns::run_profile::CommunicationContextProvider,
+                >)
+        }
+        _ => None,
+    };
 
     let planned_runtime_parts = DefaultPlannedRuntimeParts {
         turn_state: Arc::clone(&turn_state_store),
@@ -2790,6 +2840,7 @@ pub async fn build_reborn_runtime(
         post_submit_hook_slot: runtime_post_submit_hook_slot,
         #[cfg(any(test, feature = "test-support"))]
         trigger_conversation_pairing: trigger_conversation_pairing_value,
+        outbound_delivery_target_registry,
         budget_event_projection,
         poll_settings: poll,
         actor_user_id,
