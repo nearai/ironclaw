@@ -7,6 +7,14 @@ use ironclaw_host_api::{HostApiError, ResourceScope, ScopedPath};
 /// Subdirectory, under the project mount, where landed attachments live.
 pub const ATTACHMENTS_DIR: &str = "attachments";
 
+/// Defensive ceiling on the size of a single landed attachment (25 MiB).
+///
+/// This is a sane default callers may pass to [`land_attachment`], not a policy
+/// authority — channel adapters that know their own provider limits should pass
+/// a tighter bound. It exists so the leaf write routine always has *some* cap
+/// rather than persisting an unbounded `Vec<u8>`.
+pub const DEFAULT_MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
+
 /// Failure landing an attachment into the project filesystem.
 #[derive(Debug, thiserror::Error)]
 pub enum AttachmentLandingError {
@@ -16,6 +24,11 @@ pub enum AttachmentLandingError {
     /// configuration error, not a user-input error.
     #[error("invalid attachment path: {0}")]
     InvalidPath(#[from] HostApiError),
+    /// The attachment exceeds the caller-supplied `max_bytes`. Rejected before
+    /// any write so an oversized upload cannot grow project storage without
+    /// bound — the write-side counterpart to `read_bytes_bounded`.
+    #[error("attachment is {size} bytes, over the {max} byte limit")]
+    TooLarge { size: usize, max: usize },
     /// Writing through the scoped filesystem failed. Notably
     /// [`FilesystemError::PermissionDenied`] when the project `MountView` lacks
     /// a write grant — landing fails closed rather than escaping the authority.
@@ -120,6 +133,12 @@ pub fn attachment_scoped_path(
 /// resolve through the same `MountView`, the returned `ScopedPath` is readable
 /// by `file_read`/`list_dir` in this and later turns with no extra wiring.
 ///
+/// `bytes` is rejected with [`AttachmentLandingError::TooLarge`] before any
+/// write when it exceeds `max_bytes` (see [`DEFAULT_MAX_ATTACHMENT_BYTES`]).
+/// The bytes are already materialized at this boundary; callers that can should
+/// enforce the same bound on a streaming reader *before* buffering the full
+/// `Vec<u8>`, so an oversized upload is rejected without full materialization.
+///
 /// [`MountPermissions`]: ironclaw_host_api::MountPermissions
 pub async fn land_attachment<F>(
     filesystem: &ScopedFilesystem<F>,
@@ -128,10 +147,17 @@ pub async fn land_attachment<F>(
     date: &str,
     landing: &AttachmentLanding<'_>,
     bytes: Vec<u8>,
+    max_bytes: usize,
 ) -> Result<ScopedPath, AttachmentLandingError>
 where
     F: RootFilesystem,
 {
+    if bytes.len() > max_bytes {
+        return Err(AttachmentLandingError::TooLarge {
+            size: bytes.len(),
+            max: max_bytes,
+        });
+    }
     let path = attachment_scoped_path(project_alias, date, landing)?;
     filesystem.write_bytes(scope, &path, bytes).await?;
     Ok(path)
@@ -291,6 +317,7 @@ mod tests {
             "2026-06-09",
             &landing("msg1", Some("report.pdf")),
             bytes.clone(),
+            DEFAULT_MAX_ATTACHMENT_BYTES,
         )
         .await
         .expect("write succeeds through a read-write mount");
@@ -323,6 +350,7 @@ mod tests {
             "2026-06-09",
             &landing("msg1", Some("report.pdf")),
             b"bytes".to_vec(),
+            DEFAULT_MAX_ATTACHMENT_BYTES,
         )
         .await
         .expect_err("write must be rejected without a write grant");
@@ -334,5 +362,98 @@ mod tests {
             ),
             "expected fail-closed PermissionDenied, got: {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn land_rejects_oversized_attachment_before_writing() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let writer = scoped(Arc::clone(&backend), MountPermissions::read_write());
+        let scope = test_scope();
+
+        let err = land_attachment(
+            &writer,
+            &scope,
+            PROJECT_ALIAS,
+            "2026-06-09",
+            &landing("msg1", Some("big.bin")),
+            vec![0u8; 9],
+            8,
+        )
+        .await
+        .expect_err("over-limit attachment must be rejected");
+        assert!(
+            matches!(err, AttachmentLandingError::TooLarge { size: 9, max: 8 }),
+            "expected TooLarge, got: {err:?}"
+        );
+
+        // The rejection happens before any write, so nothing landed.
+        let reader = scoped(backend, MountPermissions::read_only());
+        let path = attachment_scoped_path(
+            PROJECT_ALIAS,
+            "2026-06-09",
+            &landing("msg1", Some("big.bin")),
+        )
+        .unwrap();
+        assert!(
+            reader
+                .get(&scope, &path)
+                .await
+                .expect("read succeeds")
+                .is_none(),
+            "oversized attachment must not have been written"
+        );
+    }
+
+    #[tokio::test]
+    async fn same_named_attachments_land_without_clobbering() {
+        // Two attachments in one message sharing a filename must keep their own
+        // bytes — the index prefix gives them distinct paths, so the second land
+        // does not overwrite the first.
+        let backend = Arc::new(InMemoryBackend::new());
+        let writer = scoped(Arc::clone(&backend), MountPermissions::read_write());
+        let scope = test_scope();
+
+        let mut first = landing("msg1", Some("photo.jpg"));
+        first.index = 0;
+        let mut second = landing("msg1", Some("photo.jpg"));
+        second.index = 1;
+
+        let first_path = land_attachment(
+            &writer,
+            &scope,
+            PROJECT_ALIAS,
+            "2026-06-09",
+            &first,
+            b"first-bytes".to_vec(),
+            DEFAULT_MAX_ATTACHMENT_BYTES,
+        )
+        .await
+        .expect("first land succeeds");
+        let second_path = land_attachment(
+            &writer,
+            &scope,
+            PROJECT_ALIAS,
+            "2026-06-09",
+            &second,
+            b"second-bytes".to_vec(),
+            DEFAULT_MAX_ATTACHMENT_BYTES,
+        )
+        .await
+        .expect("second land succeeds");
+
+        assert_ne!(first_path.as_str(), second_path.as_str());
+        let reader = scoped(backend, MountPermissions::read_only());
+        let first_back = reader
+            .get(&scope, &first_path)
+            .await
+            .expect("read succeeds")
+            .expect("first attachment present");
+        let second_back = reader
+            .get(&scope, &second_path)
+            .await
+            .expect("read succeeds")
+            .expect("second attachment present");
+        assert_eq!(first_back.entry.body, b"first-bytes");
+        assert_eq!(second_back.entry.body, b"second-bytes");
     }
 }

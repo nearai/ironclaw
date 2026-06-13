@@ -20,6 +20,6 @@
 mod landing;
 
 pub use landing::{
-    ATTACHMENTS_DIR, AttachmentLanding, AttachmentLandingError, attachment_scoped_path,
-    land_attachment,
+    ATTACHMENTS_DIR, AttachmentLanding, AttachmentLandingError, DEFAULT_MAX_ATTACHMENT_BYTES,
+    attachment_scoped_path, land_attachment,
 };
