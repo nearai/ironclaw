@@ -3017,7 +3017,118 @@ async fn host_runtime_services_resume_runtime_policy_denial_fails_matching_block
 }
 
 // ---------------------------------------------------------------------------
-// FIX 3: auth-resume preflight rejection must fail the BlockedAuth run record
+// Happy-path auth-resume: BlockedAuth run with credential present → dispatch+complete
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn host_runtime_services_auth_resume_dispatches_blocked_auth_run() {
+    // Setup: uses ApprovalThenSecretObligationAuthorizer so the first invoke
+    // fires an approval gate, and the first resume (missing credential) bounces
+    // to BlockedAuth.  After adding the credential we verify that
+    // auth_resume_capability dispatches and completes the run.
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_handle = SecretHandle::new("auth_resume_token").unwrap();
+    let script_runtime = Arc::new(RecordingScriptExecutor::default());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenSecretObligationAuthorizer {
+            handle: secret_handle.clone(),
+        }),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability],
+    )))
+    .with_run_state(Arc::clone(&run_state))
+    .with_approval_requests(Arc::clone(&approval_requests))
+    .with_capability_leases(Arc::clone(&capability_leases))
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_script_runtime(Arc::clone(&script_runtime));
+    let runtime = services.host_runtime_for_local_testing();
+    let context = execution_context_without_grants();
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "auth-resume dispatch"});
+
+    // Phase 1: invoke → approval gate.
+    let gate = block_for_approval(&runtime, context.clone(), estimate.clone(), input.clone()).await;
+    approve_dispatch_for_services(&services, &scope, gate.approval_request_id, None).await;
+
+    // Phase 2: resume with credential absent → AuthRequired / BlockedAuth.
+    let auth_gate = runtime
+        .resume_capability(RuntimeCapabilityResumeRequest::new(
+            context.clone(),
+            gate.approval_request_id,
+            script_capability_id(),
+            estimate.clone(),
+            input.clone(),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        matches!(auth_gate, RuntimeCapabilityOutcome::AuthRequired(_)),
+        "expected AuthRequired after credential-missing resume, got {auth_gate:?}"
+    );
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(
+        run.status,
+        RunStatus::BlockedAuth,
+        "pre-condition: run must be BlockedAuth"
+    );
+
+    // Phase 3: add credential, then auth_resume → dispatch + complete.
+    secret_store
+        .put(
+            scope.clone(),
+            secret_handle,
+            SecretMaterial::from("test-secret-value"),
+        )
+        .await
+        .unwrap();
+
+    let auth_resumed = runtime
+        .auth_resume_capability(RuntimeCapabilityAuthResumeRequest::new(
+            context.clone(),
+            script_capability_id(),
+            estimate.clone(),
+            input.clone(),
+            trust_decision_with_dispatch_authority(),
+            Some(gate.approval_request_id),
+        ))
+        .await
+        .unwrap();
+
+    match auth_resumed {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, script_capability_id());
+            assert_eq!(completed.output, input);
+        }
+        other => panic!("expected completed auth-resume outcome, got {other:?}"),
+    }
+    let completed_run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(
+        completed_run.status,
+        RunStatus::Completed,
+        "auth_resume must complete the BlockedAuth run"
+    );
+    assert_eq!(
+        script_runtime.recorded_mounts().len(),
+        1,
+        "dispatch must have been called exactly once"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// auth-resume preflight rejection must fail the BlockedAuth run record
 //
 // Before the fix, `auth_resume_capability` returned a terminal failure outcome
 // on preflight errors (policy/trust) WITHOUT transitioning the BlockedAuth run

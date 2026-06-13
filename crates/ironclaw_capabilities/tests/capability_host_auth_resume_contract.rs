@@ -1,18 +1,8 @@
-/// Contract tests for `CapabilityHost::auth_resume_json`.
-///
-/// These tests prove the fix that allows a one-shot approval lease to survive
-/// an auth-gate re-dispatch: when `PendingAuthResume` carries the original
-/// `invocation_id` (encoded as a resume token), auth_resume_json reuses it so
-/// the fingerprinted lease — whose scope embeds the original invocation_id —
-/// can still be matched and claimed.
-///
-/// # What would fail without the fix
-///
-/// Before the fix, re-dispatch after an auth gate always called `invoke_json`
-/// with a fresh `InvocationId::new()`. The lease was scoped to the old
-/// invocation_id, so `matching_approval_lease` found nothing — and a new
-/// `RequireApproval` gate fired, producing the infinite re-approval loop
-/// observed in Slack QA.
+// Contract tests for `CapabilityHost::auth_resume_json`.
+//
+// Covers: lease survival across auth-gate re-dispatch, concurrent-claim race
+// handling, terminal vs non-terminal bounce lease disposition, and approval
+// fingerprint validation.
 use ironclaw_approvals::*;
 use ironclaw_authorization::*;
 use ironclaw_capabilities::*;
@@ -412,7 +402,7 @@ async fn auth_resume_json_with_approval_request_id_claims_active_lease_and_dispa
 }
 
 // ---------------------------------------------------------------------------
-// FIX 1: auth_resume_json rejects capability_id mismatch against run record
+// auth_resume_json rejects capability_id mismatch against run record
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -478,7 +468,7 @@ async fn auth_resume_json_rejects_capability_id_mismatch_against_run_record() {
 }
 
 // ---------------------------------------------------------------------------
-// FIX 7a: auth_resume_json_rejects_approval_not_yet_approved
+// auth_resume_json_rejects_approval_not_yet_approved
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -576,7 +566,7 @@ async fn auth_resume_json_rejects_approval_not_yet_approved() {
 }
 
 // ---------------------------------------------------------------------------
-// FIX 7b: auth_resume_json returns ResumeStoreMissing when approval_requests
+// auth_resume_json returns ResumeStoreMissing when approval_requests
 //         store is absent but approval_request_id is Some.
 // ---------------------------------------------------------------------------
 
@@ -938,7 +928,7 @@ async fn auth_resume_after_real_approval_bounce_reuses_claimed_lease() {
 }
 
 // ---------------------------------------------------------------------------
-// FIX 2a: terminal dispatch failure in auth_resume_json revokes the lease
+// Terminal dispatch failure in auth_resume_json revokes the lease
 //
 // When auth_resume_json encounters a terminal dispatch failure (any error
 // other than AuthorizationRequiresAuth, which is the non-terminal BlockAuth
@@ -1104,7 +1094,7 @@ async fn auth_resume_json_terminal_dispatch_failure_revokes_claimed_lease() {
 }
 
 // ---------------------------------------------------------------------------
-// FIX 2b: non-terminal auth bounce in auth_resume_json leaves lease Claimed
+// Non-terminal auth bounce in auth_resume_json leaves lease Claimed
 //
 // When auth_resume_json encounters AuthorizationRequiresAuth (which transitions
 // the run to BlockedAuth — the non-terminal path), the claimed approval lease
@@ -1252,5 +1242,194 @@ async fn auth_resume_json_non_terminal_auth_bounce_leaves_lease_claimed() {
         run.status,
         RunStatus::BlockedAuth,
         "run must still be BlockedAuth after non-terminal bounce"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Concurrent auth-resume: lease claim race loser returns lease error without
+// failing the run
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn concurrent_auth_resume_claim_loser_returns_lease_error_without_failing_run() {
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // A lease store that delegates everything to an inner InMemoryCapabilityLeaseStore
+    // except `claim()`, which returns InactiveLease { status: Claimed } once the
+    // `fail_next_claim` flag is set — simulating the loser of a concurrent claim race.
+    struct ClaimFailingLeaseStore {
+        inner: InMemoryCapabilityLeaseStore,
+        fail_next_claim: AtomicBool,
+    }
+
+    impl ClaimFailingLeaseStore {
+        fn new() -> Self {
+            Self {
+                inner: InMemoryCapabilityLeaseStore::new(),
+                fail_next_claim: AtomicBool::new(false),
+            }
+        }
+
+        fn arm_claim_failure(&self) {
+            self.fail_next_claim.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl CapabilityLeaseStore for ClaimFailingLeaseStore {
+        async fn issue(
+            &self,
+            lease: CapabilityLease,
+        ) -> Result<CapabilityLease, CapabilityLeaseError> {
+            self.inner.issue(lease).await
+        }
+
+        async fn revoke(
+            &self,
+            scope: &ResourceScope,
+            lease_id: CapabilityGrantId,
+        ) -> Result<CapabilityLease, CapabilityLeaseError> {
+            self.inner.revoke(scope, lease_id).await
+        }
+
+        async fn get(
+            &self,
+            scope: &ResourceScope,
+            lease_id: CapabilityGrantId,
+        ) -> Option<CapabilityLease> {
+            self.inner.get(scope, lease_id).await
+        }
+
+        async fn claim(
+            &self,
+            scope: &ResourceScope,
+            lease_id: CapabilityGrantId,
+            invocation_fingerprint: &InvocationFingerprint,
+        ) -> Result<CapabilityLease, CapabilityLeaseError> {
+            if self.fail_next_claim.swap(false, Ordering::SeqCst) {
+                // Return the error a concurrent winner would trigger: the lease
+                // is now Claimed (the other caller got there first).
+                return Err(CapabilityLeaseError::InactiveLease {
+                    lease_id,
+                    status: CapabilityLeaseStatus::Claimed,
+                });
+            }
+            self.inner
+                .claim(scope, lease_id, invocation_fingerprint)
+                .await
+        }
+
+        async fn consume(
+            &self,
+            scope: &ResourceScope,
+            lease_id: CapabilityGrantId,
+        ) -> Result<CapabilityLease, CapabilityLeaseError> {
+            self.inner.consume(scope, lease_id).await
+        }
+
+        async fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease> {
+            self.inner.leases_for_scope(scope).await
+        }
+
+        async fn active_leases_for_context(
+            &self,
+            context: &ExecutionContext,
+        ) -> Vec<CapabilityLease> {
+            self.inner.active_leases_for_context(context).await
+        }
+    }
+
+    let registry = registry_with_echo_capability();
+    let dispatcher = RecordingDispatcher::default();
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let leases = ClaimFailingLeaseStore::new();
+
+    // Phase 1: invoke → BlockedApproval.
+    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    let original_context = execution_context(CapabilitySet::default());
+    let scope = original_context.resource_scope.clone();
+    let invocation_id = original_context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "concurrent claim race"});
+
+    block_host
+        .invoke_json(CapabilityInvocationRequest {
+            context: original_context.clone(),
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+
+    let approval_id = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .approval_request_id
+        .unwrap();
+
+    // Phase 2: approve → Active lease issued (one-shot).
+    ApprovalResolver::new(&approval_requests, &leases)
+        .approve_dispatch(&scope, approval_id, dispatch_lease_approval())
+        .await
+        .unwrap();
+
+    // Phase 3: move run to BlockedAuth (shortcut, as in the clean-ordering test).
+    run_state
+        .block_auth(&scope, invocation_id, "AuthRequired".to_string())
+        .await
+        .unwrap();
+
+    // Phase 4: arm the claim failure to simulate concurrent race loser, then
+    // call auth_resume_json — it must return Err(Lease) WITHOUT failing the run.
+    leases.arm_claim_failure();
+
+    let mut resume_context = original_context.clone();
+    resume_context.grants = CapabilitySet {
+        grants: vec![dispatch_grant()],
+    };
+    let authorizer = GrantAuthorizer::new();
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+
+    let err = host
+        .auth_resume_json(CapabilityAuthResumeRequest {
+            context: resume_context,
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+            approval_request_id: Some(approval_id),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, CapabilityInvocationError::Lease(_)),
+        "concurrent claim loser must return Lease error, got {err:?}"
+    );
+
+    // Run must still be BlockedAuth — concurrent-resume loser must not fail the run.
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(
+        run.status,
+        RunStatus::BlockedAuth,
+        "concurrent claim loser must not transition run to Failed \
+         (run left resumable for the winner or a subsequent retry)"
+    );
+
+    // Dispatch must not have been called (claim failed before dispatch).
+    assert!(
+        !dispatcher.has_request(),
+        "concurrent claim loser must not dispatch"
     );
 }

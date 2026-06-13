@@ -4696,6 +4696,10 @@ async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id
         phase3_pa.approval_request_id, approval_request_id,
         "auth_resume.prior_approval.approval_request_id must match the original approval request id"
     );
+    assert_eq!(
+        phase3_pa.correlation_id, correlation_id,
+        "auth_resume.prior_approval.correlation_id must match the original correlation id from the approval"
+    );
 
     // Final state: pending_auth_resume cleared and result recorded.
     let final_state = final_staged_state(&host);
@@ -4707,6 +4711,136 @@ async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id
         final_state.result_refs,
         vec![completed_ref],
         "completed result ref must be recorded"
+    );
+}
+
+/// Verify that `pending_auth_resume.prior_approval.correlation_id` equals the
+/// approval's own `correlation_id` throughout the approval → auth-block → auth-resume
+/// pipeline.  This is the dedicated regression test for the correlation-id axis
+/// (the broader `auth_resume_after_approval_carries_resume_token_and_approval_request_id`
+/// test covers the other fields).
+#[tokio::test]
+async fn auth_resume_after_approval_carries_original_correlation_id() {
+    // The three-phase flow:
+    //   phase 1 — model turn → approval gate (records correlation_id in approval_resume)
+    //   phase 2 — approval-resume → auth gate → Blocked
+    //             (pending_auth_resume.prior_approval.correlation_id must equal approval's)
+    //   phase 3 — auth-resume → Completed
+    //             (phase-3 invocation.auth_resume.prior_approval.correlation_id must match)
+
+    let approval_request_id = ApprovalRequestId::new();
+    let resume_token =
+        CapabilityResumeToken::new("resume-token:corr-id-test").expect("valid token");
+    let correlation_id = CorrelationId::new();
+    let original_input_ref = CapabilityInputRef::new("input:corr-id-original").expect("valid");
+    let completed_ref = LoopResultRef::new("result:corr-id-done").expect("valid");
+
+    let approval_resume = CapabilityApprovalResume {
+        approval_request_id,
+        resume_token: resume_token.clone(),
+        correlation_id,
+        input_ref: original_input_ref.clone(),
+        input: serde_json::json!({ "message": "hello" }),
+        estimate: ResourceEstimate::default(),
+    };
+
+    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+        // Phase 1: approval gate blocks.
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::ApprovalRequired {
+                gate_ref: LoopGateRef::new("gate:corr-id-approval").expect("valid"),
+                safe_summary: "approval required".to_string(),
+                approval_resume: Some(approval_resume.clone()),
+            }],
+            stopped_on_suspension: true,
+        },
+        // Phase 2: auth gate blocks after approval-resume re-dispatch.
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::AuthRequired {
+                gate_ref: LoopGateRef::new("gate:corr-id-auth").expect("valid"),
+                credential_requirements: Vec::new(),
+                safe_summary: "auth required".to_string(),
+            }],
+            stopped_on_suspension: true,
+        },
+        // Phase 3: auth-resume re-dispatch completes.
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Completed(
+                ironclaw_turns::run_profile::CapabilityResultMessage {
+                    result_ref: completed_ref.clone(),
+                    safe_summary: "done".to_string(),
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    terminate_hint: true,
+                    byte_len: 0,
+                },
+            )],
+            stopped_on_suspension: false,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+
+    // Phase 1: model → approval gate.
+    let initial_state = LoopExecutionState::initial_for_run(host.run_context());
+    let phase1_exit = executor
+        .execute_family(&crate::families::default(), &host, initial_state)
+        .await
+        .expect("phase 1 must block on approval gate");
+    assert!(matches!(phase1_exit, LoopExit::Blocked(_)));
+
+    // Phase 2: approval-resume → auth gate.
+    let phase1_bb = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+    let phase2_exit = executor
+        .execute_family(&crate::families::default(), &host, phase1_bb)
+        .await
+        .expect("phase 2 must block on auth gate");
+    assert!(matches!(phase2_exit, LoopExit::Blocked(_)));
+
+    // KEY: pending_auth_resume.prior_approval.correlation_id must equal the
+    // original approval correlation_id written by the approval-gate outcome.
+    let phase2_bb_states: Vec<_> = host
+        .staged_payloads()
+        .into_iter()
+        .filter(|p| p.kind == LoopCheckpointKind::BeforeBlock)
+        .map(|p| {
+            LoopExecutionState::from_checkpoint_payload(&p.payload, CheckpointKind::BeforeBlock)
+                .expect("phase 2 BeforeBlock payload")
+        })
+        .collect();
+    let phase2_bb = phase2_bb_states.last().expect("at least one").clone();
+    let pending_auth = phase2_bb
+        .pending_auth_resume
+        .as_ref()
+        .expect("phase 2 BeforeBlock must carry pending_auth_resume");
+    let pending_pa = pending_auth
+        .prior_approval
+        .as_ref()
+        .expect("pending_auth_resume.prior_approval must be set when approval preceded auth");
+    assert_eq!(
+        pending_pa.correlation_id, correlation_id,
+        "pending_auth_resume.prior_approval.correlation_id must equal the approval's correlation_id"
+    );
+
+    // Phase 3: auth-resume → Completed.
+    let phase3_exit = executor
+        .execute_family(&crate::families::default(), &host, phase2_bb)
+        .await
+        .expect("phase 3 must complete");
+    assert!(matches!(phase3_exit, LoopExit::Completed(_)));
+
+    // Phase-3 invocation must carry prior_approval.correlation_id.
+    let batch_invocations = host.batch_invocations();
+    assert_eq!(batch_invocations.len(), 3);
+    let phase3_ar = batch_invocations[2].invocations[0]
+        .auth_resume
+        .as_ref()
+        .expect("phase 3 invocation must carry auth_resume");
+    let phase3_pa = phase3_ar
+        .prior_approval
+        .as_ref()
+        .expect("phase 3 auth_resume.prior_approval must be set");
+    assert_eq!(
+        phase3_pa.correlation_id, correlation_id,
+        "phase 3 auth_resume.prior_approval.correlation_id must match the original approval correlation_id"
     );
 }
 
@@ -4810,9 +4944,15 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
         .await
         .expect("capability stage");
 
+    let final_state = match step {
+        TurnCompletedStep::Continue { state, .. } => state,
+        TurnCompletedStep::Exit(exit) => {
+            panic!("expected Continue from CapabilityStage; got Exit({exit:?})")
+        }
+    };
     assert!(
-        matches!(step, TurnCompletedStep::Continue { .. }),
-        "expected Continue from CapabilityStage; got {step:?}"
+        final_state.pending_auth_resume.is_none(),
+        "pending_auth_resume must be consumed after the auth-resume slot is dispatched"
     );
 
     let batch_invocations = host.batch_invocations();
