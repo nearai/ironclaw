@@ -7,6 +7,7 @@ mod slots;
 
 pub use bounded_ring::BoundedRing;
 pub use ironclaw_turns::LoopFailureKind;
+pub use ironclaw_turns::run_profile::AuthResumeApprovalIdentity;
 pub use signature::{ArgsHash, CapabilityCallSignature, CapabilityCallSignatureError};
 pub use slots::{
     CapabilityStrategyState, CompactionPromptSnapshot, CompactionStrategyState,
@@ -126,15 +127,20 @@ impl PendingApprovalResume {
 /// Auth-gated capability call parked at a blocked-auth checkpoint.
 ///
 /// When the invocation previously passed a one-shot approval (`resume_token`
-/// and `approval_request_id` are `Some`), re-dispatch must reuse the original
-/// `invocation_id` (encoded in `resume_token`) so the fingerprinted approval
-/// lease — whose scope embeds the original invocation_id — can still be
-/// matched and claimed. Without this, a fresh invocation_id would never match
-/// the existing lease, causing an infinite re-approval loop.
+/// is `Some` and `prior_approval` is `Some`), re-dispatch must reuse the
+/// original invocation identifier (encoded in `resume_token`) so the
+/// fingerprinted approval lease — whose scope embeds that identifier — can
+/// still be matched and claimed.  Without this, a fresh invocation identifier
+/// would never match the existing lease, causing an infinite re-approval loop.
 ///
-/// When the invocation never needed approval (both fields are `None`), the
-/// re-dispatch goes through the normal `invoke_json` path with a fresh
-/// invocation_id, preserving current behavior.
+/// When the invocation never needed approval (`resume_token` is `None` and
+/// `prior_approval` is `None`), the re-dispatch goes through the normal
+/// `invoke_json` path with a fresh invocation identifier, preserving current
+/// behavior.
+///
+/// The `prior_approval` field collapses the two formerly-independent
+/// `approval_request_id`/`correlation_id` options into a typed all-or-none
+/// value: both sub-fields are present together or neither is.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingAuthResume {
     pub gate_ref: LoopGateRef,
@@ -146,21 +152,16 @@ pub struct PendingAuthResume {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_replay: Option<ProviderToolCallReplay>,
     /// Original invocation resume token, set when the invocation previously
-    /// passed an approval gate. Encodes the original `InvocationId` so
+    /// passed an approval gate.  Encodes the original invocation identifier so
     /// re-dispatch can reuse it instead of minting a fresh one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_token: Option<CapabilityResumeToken>,
-    /// Approval request id from the prior approval gate, set when
-    /// `resume_token` is `Some`. Carried so the auth-resume dispatch can
-    /// claim the matching approval lease.
+    /// Prior-approval identity, set together with `resume_token` when the
+    /// invocation had previously passed a one-shot approval gate.
+    /// `approval_request_id` and `correlation_id` are always set as a pair;
+    /// see [`AuthResumeApprovalIdentity`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub approval_request_id: Option<ApprovalRequestId>,
-    /// Original correlation id from the prior approval gate, set when
-    /// `resume_token` is `Some`. Restored onto the invocation context at
-    /// auth-resume so the same trace-correlation id flows through the full
-    /// lifecycle (matching how the approval-resume path restores correlation).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub correlation_id: Option<CorrelationId>,
+    pub prior_approval: Option<AuthResumeApprovalIdentity>,
 }
 
 impl LoopExecutionState {
@@ -253,7 +254,7 @@ pub enum CheckpointPayloadError {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{CapabilityId, CorrelationId, TenantId, ThreadId};
+    use ironclaw_host_api::{CapabilityId, TenantId, ThreadId};
     use ironclaw_turns::{
         AgentLoopDriverDescriptor, RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
         run_profile::{
@@ -707,8 +708,7 @@ mod tests {
             effective_capability_ids: vec![],
             provider_replay: None,
             resume_token: None,
-            approval_request_id: None,
-            correlation_id: None,
+            prior_approval: None,
         });
         let payload = encode_payload(&state);
         let restored =
@@ -762,18 +762,18 @@ mod tests {
         );
     }
 
-    /// Checkpoints written before `resume_token` and `approval_request_id`
-    /// were added to `PendingAuthResume` must decode to `None` for those
-    /// fields (backward compat: serde `default` on optional fields).
+    /// Checkpoints written before `resume_token` and `prior_approval` were
+    /// added to `PendingAuthResume` must decode to `None` for those fields
+    /// (backward compat: serde `default` on optional fields).
     #[test]
     fn pending_auth_resume_without_resume_token_fields_decodes_to_none() {
-        use ironclaw_host_api::ApprovalRequestId;
-        use ironclaw_turns::run_profile::CapabilityResumeToken;
+        use ironclaw_host_api::{ApprovalRequestId, CorrelationId};
+        use ironclaw_turns::run_profile::{AuthResumeApprovalIdentity, CapabilityResumeToken};
 
         let context = test_run_context();
         let mut state = LoopExecutionState::initial_for_run(&context);
 
-        // Build a PendingAuthResume with all new optional fields set.
+        // Build a PendingAuthResume with all optional fields set.
         let resume_token = CapabilityResumeToken::new("00000000-0000-0000-0000-000000000001")
             .expect("valid resume token");
         let approval_request_id = ApprovalRequestId::new();
@@ -787,8 +787,10 @@ mod tests {
             effective_capability_ids: vec![],
             provider_replay: None,
             resume_token: Some(resume_token.clone()),
-            approval_request_id: Some(approval_request_id),
-            correlation_id: Some(correlation_id),
+            prior_approval: Some(AuthResumeApprovalIdentity {
+                approval_request_id,
+                correlation_id,
+            }),
         });
 
         // Round-trip: all optional fields must survive encode/decode.
@@ -804,15 +806,16 @@ mod tests {
             Some(resume_token),
             "resume_token must survive checkpoint encode/decode"
         );
+        let pa = pending
+            .prior_approval
+            .expect("prior_approval must survive checkpoint encode/decode");
         assert_eq!(
-            pending.approval_request_id,
-            Some(approval_request_id),
-            "approval_request_id must survive checkpoint encode/decode"
+            pa.approval_request_id, approval_request_id,
+            "prior_approval.approval_request_id must survive checkpoint encode/decode"
         );
         assert_eq!(
-            pending.correlation_id,
-            Some(correlation_id),
-            "correlation_id must survive checkpoint encode/decode"
+            pa.correlation_id, correlation_id,
+            "prior_approval.correlation_id must survive checkpoint encode/decode"
         );
 
         // Compat: strip the new fields from JSON to simulate a pre-existing
@@ -826,8 +829,7 @@ mod tests {
             .as_object_mut()
             .expect("pending_auth_resume is object");
         auth_resume.remove("resume_token");
-        auth_resume.remove("approval_request_id");
-        auth_resume.remove("correlation_id");
+        auth_resume.remove("prior_approval");
         let stripped_payload = serde_json::to_vec(&value).expect("re-encode");
         let from_legacy = LoopExecutionState::from_checkpoint_payload(
             &stripped_payload,
@@ -842,12 +844,8 @@ mod tests {
             "resume_token absent from checkpoint payload must decode to None"
         );
         assert!(
-            legacy_pending.approval_request_id.is_none(),
-            "approval_request_id absent from checkpoint payload must decode to None"
-        );
-        assert!(
-            legacy_pending.correlation_id.is_none(),
-            "correlation_id absent from checkpoint payload must decode to None"
+            legacy_pending.prior_approval.is_none(),
+            "prior_approval absent from checkpoint payload must decode to None"
         );
     }
 }

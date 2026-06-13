@@ -1,14 +1,18 @@
-use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
+use ironclaw_authorization::{
+    CapabilityLease, CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer,
+};
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{
-    CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher, Decision,
-    DenyReason, ExecutionContext, Obligation, ProcessId, ResourceEstimate,
+    CapabilityDescriptor, CapabilityDispatchRequest, CapabilityDispatchResult,
+    CapabilityDispatcher, CapabilityGrantId, CapabilityId, Decision, DenyReason, ExecutionContext,
+    InvocationFingerprint, InvocationId, Obligation, ProcessId, ResourceEstimate, ResourceScope,
 };
 use ironclaw_processes::{ProcessManager, ProcessStart};
 use ironclaw_run_state::{
     ApprovalRequestStore, ApprovalStatus, RunStart, RunStateApprovalStore, RunStateError,
     RunStateStore, RunStatus,
 };
+use ironclaw_trust::TrustDecision;
 use tracing::{debug, warn};
 
 use crate::helpers::{
@@ -42,6 +46,42 @@ where
     capability_leases: Option<&'a dyn CapabilityLeaseStore>,
     process_manager: Option<&'a dyn ProcessManager>,
     obligation_handler: Option<&'a dyn CapabilityObligationHandler>,
+}
+
+/// Specification for a lease that must be claimed AFTER authorization succeeds.
+///
+/// Used by `resume_json` where the original code claims the approval lease only
+/// after `authorize_dispatch_with_trust` allows — keeping the lease `Active`
+/// if authorization is denied.
+struct PendingClaimAfterAuth<'r> {
+    leases: &'r dyn CapabilityLeaseStore,
+    grant_id: CapabilityGrantId,
+    fingerprint: InvocationFingerprint,
+}
+
+/// Parameters for the converging dispatch tail shared between `resume_json`
+/// and `auth_resume_json`.  All fields are resolved by the respective
+/// method preamble before the shared tail begins.
+struct ResumedDispatchParams<'r> {
+    run_state: &'r dyn RunStateStore,
+    scope: ResourceScope,
+    invocation_id: InvocationId,
+    capability_id: CapabilityId,
+    estimate: ResourceEstimate,
+    input: serde_json::Value,
+    trust_decision: TrustDecision,
+    authorized_context: ExecutionContext,
+    descriptor: &'r CapabilityDescriptor,
+    /// Lease to claim after a successful `Decision::Allow` from the authorizer.
+    /// Set only by `resume_json` to preserve the original claim-after-authorize order
+    /// (if authorization is denied, the lease stays `Active`).
+    /// Mutually exclusive with `claimed_lease` — exactly one of the two is `Some`.
+    pending_claim: Option<PendingClaimAfterAuth<'r>>,
+    /// Already-claimed approval lease and its store.
+    /// Set by `auth_resume_json` (claim happens in the preamble, before authorize).
+    /// Set to `None` for the no-prior-approval path of `auth_resume_json`.
+    /// Mutually exclusive with `pending_claim` — exactly one of the two is `Some`.
+    claimed_lease: Option<(&'r dyn CapabilityLeaseStore, CapabilityLease)>,
 }
 
 impl<'a, D> CapabilityHost<'a, D>
@@ -689,233 +729,29 @@ where
         };
         let mut authorized_context = request.context.clone();
         authorized_context.grants.grants.push(lease.grant.clone());
+        // The lease is claimed INSIDE `dispatch_resumed_capability`, after
+        // `authorize_dispatch_with_trust` returns Allow.  Deferring the claim
+        // preserves the original contract: a Deny leaves the lease Active.
+        let grant_id = lease.grant.id;
 
-        let obligations = match self
-            .authorizer
-            .authorize_dispatch_with_trust(
-                &authorized_context,
-                descriptor,
-                &request.estimate,
-                &request.trust_decision,
-            )
-            .await
-        {
-            Decision::Allow {
-                obligations: allowed_obligations,
-            } => allowed_obligations.into_vec(),
-            Decision::Deny { reason } => {
-                fail_run_if_configured(
-                    Some(run_state),
-                    &scope,
-                    invocation_id,
-                    "AuthorizationDenied",
-                )
-                .await;
-                return Err(CapabilityInvocationError::AuthorizationDenied {
-                    capability: request.capability_id,
-                    reason,
-                });
-            }
-            Decision::RequireApproval { .. } => {
-                fail_run_if_configured(
-                    Some(run_state),
-                    &scope,
-                    invocation_id,
-                    "AuthorizationRequiresApproval",
-                )
-                .await;
-                return Err(CapabilityInvocationError::AuthorizationRequiresApproval {
-                    capability: request.capability_id,
-                });
-            }
-        };
-
-        let claimed_lease = match capability_leases
-            .claim(&scope, lease.grant.id, &invocation_fingerprint)
-            .await
-        {
-            Ok(lease) => lease,
-            Err(error) => {
-                if claim_error_may_be_concurrent_resume(&error) {
-                    warn!(
-                        lease_id = %lease.grant.id,
-                        invocation_id = %invocation_id,
-                        capability_id = %capability_id,
-                        error_kind = capability_lease_error_kind(&error),
-                        "approval lease claim lost to a concurrent resume; leaving run state unchanged",
-                    );
-                } else {
-                    fail_run_if_configured(
-                        Some(run_state),
-                        &scope,
-                        invocation_id,
-                        "ApprovalLeaseClaim",
-                    )
-                    .await;
-                }
-                return Err(CapabilityInvocationError::Lease(Box::new(error)));
-            }
-        };
-
-        let obligation_outcome = match self
-            .prepare_obligations(
-                CapabilityObligationPhase::Resume,
-                &authorized_context,
-                &request.capability_id,
-                &request.estimate,
-                obligations.clone(),
-            )
-            .await
-        {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                apply_run_state_transition_if_configured(
-                    Some(run_state),
-                    &scope,
-                    invocation_id,
-                    &error,
-                )
-                .await;
-                // Non-terminal auth bounce: leave the lease Claimed so the same
-                // invocation can resume via auth_resume_json without a new approval.
-                if !is_block_auth_transition(&error)
-                    && let Err(revoke_error) = capability_leases
-                        .revoke(&scope, claimed_lease.grant.id)
-                        .await
-                {
-                    warn!(
-                        lease_id = %claimed_lease.grant.id,
-                        invocation_id = %invocation_id,
-                        capability_id = %capability_id,
-                        obligation_error = %error,
-                        revoke_error_kind = capability_lease_error_kind(&revoke_error),
-                        "capability lease revoke failed after obligation failure; lease may remain claimed",
-                    );
-                }
-                return Err(error);
-            }
-        };
-
-        let dispatch = match self
-            .dispatcher
-            .dispatch_json(CapabilityDispatchRequest {
-                capability_id: request.capability_id.clone(),
-                scope: scope.clone(),
-                estimate: request.estimate.clone(),
-                mounts: obligation_outcome.mounts.clone(),
-                resource_reservation: obligation_outcome.resource_reservation.clone(),
-                input: request.input,
-            })
-            .await
-        {
-            Ok(dispatch) => dispatch,
-            Err(error) => {
-                self.abort_obligations(
-                    CapabilityObligationPhase::Resume,
-                    &authorized_context,
-                    &request.capability_id,
-                    &request.estimate,
-                    obligations.as_slice(),
-                    &obligation_outcome,
-                )
-                .await;
-                let invocation_error = CapabilityInvocationError::from(error);
-                apply_run_state_transition_if_configured(
-                    Some(run_state),
-                    &scope,
-                    invocation_id,
-                    &invocation_error,
-                )
-                .await;
-                // Non-terminal auth bounce: leave the lease Claimed so the same
-                // invocation can resume via auth_resume_json without a new approval.
-                if !is_block_auth_transition(&invocation_error)
-                    && let Err(revoke_error) = capability_leases
-                        .revoke(&scope, claimed_lease.grant.id)
-                        .await
-                {
-                    warn!(
-                        lease_id = %claimed_lease.grant.id,
-                        invocation_id = %invocation_id,
-                        capability_id = %capability_id,
-                        dispatch_error = %invocation_error,
-                        revoke_error_kind = capability_lease_error_kind(&revoke_error),
-                        "capability lease revoke failed after dispatch failure; lease may remain claimed",
-                    );
-                }
-                return Err(invocation_error);
-            }
-        };
-
-        let dispatch = match self
-            .complete_dispatch_obligations(
-                CapabilityObligationPhase::Resume,
-                &authorized_context,
-                &request.capability_id,
-                &request.estimate,
-                obligations.as_slice(),
-                &dispatch,
-            )
-            .await
-        {
-            Ok(dispatch) => dispatch,
-            Err(error) => {
-                let cleanup_outcome = CapabilityObligationOutcome::default();
-                self.abort_obligations(
-                    CapabilityObligationPhase::Resume,
-                    &authorized_context,
-                    &request.capability_id,
-                    &request.estimate,
-                    obligations.as_slice(),
-                    &cleanup_outcome,
-                )
-                .await;
-                fail_run_if_configured(
-                    Some(run_state),
-                    &scope,
-                    invocation_id,
-                    obligation_invocation_error_kind(&error),
-                )
-                .await;
-                if let Err(revoke_error) = capability_leases
-                    .revoke(&scope, claimed_lease.grant.id)
-                    .await
-                {
-                    warn!(
-                        lease_id = %claimed_lease.grant.id,
-                        invocation_id = %invocation_id,
-                        capability_id = %capability_id,
-                        obligation_error = %error,
-                        revoke_error_kind = capability_lease_error_kind(&revoke_error),
-                        "capability lease revoke failed after completion obligation failure; lease may remain claimed",
-                    );
-                }
-                return Err(error);
-            }
-        };
-
-        if let Err(error) = capability_leases
-            .consume(&scope, claimed_lease.grant.id)
-            .await
-        {
-            warn!(
-                lease_id = %claimed_lease.grant.id,
-                invocation_id = %invocation_id,
-                capability_id = %capability_id,
-                error_kind = capability_lease_error_kind(&error),
-                "capability lease consume failed after successful dispatch; lease left in claimed state",
-            );
-        }
-
-        complete_run_after_side_effect(
+        self.dispatch_resumed_capability(ResumedDispatchParams {
             run_state,
-            &scope,
+            scope,
             invocation_id,
-            &capability_id,
-            "dispatch",
-        )
-        .await;
-        Ok(CapabilityInvocationResult { dispatch })
+            capability_id,
+            estimate: request.estimate,
+            input: request.input,
+            trust_decision: request.trust_decision,
+            authorized_context,
+            descriptor,
+            pending_claim: Some(PendingClaimAfterAuth {
+                leases: capability_leases,
+                grant_id,
+                fingerprint: invocation_fingerprint,
+            }),
+            claimed_lease: None,
+        })
+        .await
     }
 
     /// Resume an invocation that was previously blocked at an auth gate.
@@ -1145,209 +981,20 @@ where
             });
         };
 
-        let obligations = match self
-            .authorizer
-            .authorize_dispatch_with_trust(
-                &authorized_context,
-                descriptor,
-                &request.estimate,
-                &request.trust_decision,
-            )
-            .await
-        {
-            Decision::Allow {
-                obligations: allowed_obligations,
-            } => allowed_obligations.into_vec(),
-            Decision::Deny { reason } => {
-                fail_run_if_configured(
-                    Some(run_state),
-                    &scope,
-                    invocation_id,
-                    "AuthorizationDenied",
-                )
-                .await;
-                return Err(CapabilityInvocationError::AuthorizationDenied {
-                    capability: request.capability_id,
-                    reason,
-                });
-            }
-            Decision::RequireApproval { .. } => {
-                fail_run_if_configured(
-                    Some(run_state),
-                    &scope,
-                    invocation_id,
-                    "AuthorizationRequiresApproval",
-                )
-                .await;
-                return Err(CapabilityInvocationError::AuthorizationRequiresApproval {
-                    capability: request.capability_id,
-                });
-            }
-        };
-
-        let obligation_outcome = match self
-            .prepare_obligations(
-                CapabilityObligationPhase::Resume,
-                &authorized_context,
-                &request.capability_id,
-                &request.estimate,
-                obligations.clone(),
-            )
-            .await
-        {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                apply_run_state_transition_if_configured(
-                    Some(run_state),
-                    &scope,
-                    invocation_id,
-                    &error,
-                )
-                .await;
-                // Non-terminal auth bounce: leave the lease Claimed so the same
-                // invocation can resume via auth_resume_json without a new approval.
-                if let Some((capability_leases, claimed_lease)) = &approval_lease_to_consume
-                    && !is_block_auth_transition(&error)
-                    && let Err(revoke_error) = capability_leases
-                        .revoke(&scope, claimed_lease.grant.id)
-                        .await
-                {
-                    warn!(
-                        lease_id = %claimed_lease.grant.id,
-                        invocation_id = %invocation_id,
-                        capability_id = %capability_id,
-                        obligation_error = %error,
-                        revoke_error_kind = capability_lease_error_kind(&revoke_error),
-                        "capability lease revoke failed after obligation failure in auth-resume; lease may remain claimed",
-                    );
-                }
-                return Err(error);
-            }
-        };
-
-        let dispatch = match self
-            .dispatcher
-            .dispatch_json(CapabilityDispatchRequest {
-                capability_id: request.capability_id.clone(),
-                scope: scope.clone(),
-                estimate: request.estimate.clone(),
-                mounts: obligation_outcome.mounts.clone(),
-                resource_reservation: obligation_outcome.resource_reservation.clone(),
-                input: request.input,
-            })
-            .await
-        {
-            Ok(dispatch) => dispatch,
-            Err(error) => {
-                self.abort_obligations(
-                    CapabilityObligationPhase::Resume,
-                    &authorized_context,
-                    &request.capability_id,
-                    &request.estimate,
-                    obligations.as_slice(),
-                    &obligation_outcome,
-                )
-                .await;
-                let invocation_error = CapabilityInvocationError::from(error);
-                apply_run_state_transition_if_configured(
-                    Some(run_state),
-                    &scope,
-                    invocation_id,
-                    &invocation_error,
-                )
-                .await;
-                // Non-terminal auth bounce: leave the lease Claimed so the same
-                // invocation can resume via auth_resume_json without a new approval.
-                if let Some((capability_leases, claimed_lease)) = &approval_lease_to_consume
-                    && !is_block_auth_transition(&invocation_error)
-                    && let Err(revoke_error) = capability_leases
-                        .revoke(&scope, claimed_lease.grant.id)
-                        .await
-                {
-                    warn!(
-                        lease_id = %claimed_lease.grant.id,
-                        invocation_id = %invocation_id,
-                        capability_id = %capability_id,
-                        dispatch_error = %invocation_error,
-                        revoke_error_kind = capability_lease_error_kind(&revoke_error),
-                        "capability lease revoke failed after dispatch failure in auth-resume; lease may remain claimed",
-                    );
-                }
-                return Err(invocation_error);
-            }
-        };
-
-        let dispatch = match self
-            .complete_dispatch_obligations(
-                CapabilityObligationPhase::Resume,
-                &authorized_context,
-                &request.capability_id,
-                &request.estimate,
-                obligations.as_slice(),
-                &dispatch,
-            )
-            .await
-        {
-            Ok(dispatch) => dispatch,
-            Err(error) => {
-                let cleanup_outcome = CapabilityObligationOutcome::default();
-                self.abort_obligations(
-                    CapabilityObligationPhase::Resume,
-                    &authorized_context,
-                    &request.capability_id,
-                    &request.estimate,
-                    obligations.as_slice(),
-                    &cleanup_outcome,
-                )
-                .await;
-                fail_run_if_configured(
-                    Some(run_state),
-                    &scope,
-                    invocation_id,
-                    obligation_invocation_error_kind(&error),
-                )
-                .await;
-                if let Some((capability_leases, claimed_lease)) = &approval_lease_to_consume
-                    && let Err(revoke_error) = capability_leases
-                        .revoke(&scope, claimed_lease.grant.id)
-                        .await
-                {
-                    warn!(
-                        lease_id = %claimed_lease.grant.id,
-                        invocation_id = %invocation_id,
-                        capability_id = %capability_id,
-                        obligation_error = %error,
-                        revoke_error_kind = capability_lease_error_kind(&revoke_error),
-                        "capability lease revoke failed after completion obligation failure in auth-resume; lease may remain claimed",
-                    );
-                }
-                return Err(error);
-            }
-        };
-
-        if let Some((capability_leases, claimed_lease)) = approval_lease_to_consume
-            && let Err(error) = capability_leases
-                .consume(&scope, claimed_lease.grant.id)
-                .await
-        {
-            warn!(
-                lease_id = %claimed_lease.grant.id,
-                invocation_id = %invocation_id,
-                capability_id = %capability_id,
-                error_kind = capability_lease_error_kind(&error),
-                "capability lease consume failed after successful auth-resume dispatch; lease left in claimed state",
-            );
-        }
-
-        complete_run_after_side_effect(
+        self.dispatch_resumed_capability(ResumedDispatchParams {
             run_state,
-            &scope,
+            scope,
             invocation_id,
-            &capability_id,
-            "dispatch",
-        )
-        .await;
-        Ok(CapabilityInvocationResult { dispatch })
+            capability_id,
+            estimate: request.estimate,
+            input: request.input,
+            trust_decision: request.trust_decision,
+            authorized_context,
+            descriptor,
+            pending_claim: None,
+            claimed_lease: approval_lease_to_consume,
+        })
+        .await
     }
 
     pub async fn resume_spawn_json(
@@ -1971,6 +1618,267 @@ where
         }
 
         Ok(CapabilitySpawnResult { process })
+    }
+
+    /// Converging tail shared by `resume_json` and `auth_resume_json`.
+    ///
+    /// Runs: trust-aware authorization → prepare obligations (Resume phase) →
+    /// `dispatcher.dispatch_json` → complete dispatch obligations → optional
+    /// lease consume → `complete_run_after_side_effect` → Ok.
+    ///
+    /// On any failure: aborts applicable obligations, transitions run state,
+    /// and revokes the claimed lease unless the error is a non-terminal
+    /// `BlockAuth` transition (in which case the lease stays Claimed so a
+    /// subsequent `auth_resume_json` can reuse it without a second approval).
+    async fn dispatch_resumed_capability(
+        &self,
+        params: ResumedDispatchParams<'_>,
+    ) -> Result<CapabilityInvocationResult, CapabilityInvocationError> {
+        let ResumedDispatchParams {
+            run_state,
+            scope,
+            invocation_id,
+            capability_id,
+            estimate,
+            input,
+            trust_decision,
+            authorized_context,
+            descriptor,
+            pending_claim,
+            claimed_lease,
+        } = params;
+
+        let obligations = match self
+            .authorizer
+            .authorize_dispatch_with_trust(
+                &authorized_context,
+                descriptor,
+                &estimate,
+                &trust_decision,
+            )
+            .await
+        {
+            Decision::Allow {
+                obligations: allowed_obligations,
+            } => allowed_obligations.into_vec(),
+            Decision::Deny { reason } => {
+                fail_run_if_configured(
+                    Some(run_state),
+                    &scope,
+                    invocation_id,
+                    "AuthorizationDenied",
+                )
+                .await;
+                return Err(CapabilityInvocationError::AuthorizationDenied {
+                    capability: capability_id,
+                    reason,
+                });
+            }
+            Decision::RequireApproval { .. } => {
+                fail_run_if_configured(
+                    Some(run_state),
+                    &scope,
+                    invocation_id,
+                    "AuthorizationRequiresApproval",
+                )
+                .await;
+                return Err(CapabilityInvocationError::AuthorizationRequiresApproval {
+                    capability: capability_id,
+                });
+            }
+        };
+
+        // For `resume_json`, the approval lease is claimed AFTER authorization
+        // so that a Deny leaves the lease Active (the preamble only injects the
+        // grant for the authorize call; the actual Claimed transition is deferred
+        // to this point).
+        let claimed_lease = if let Some(pc) = pending_claim {
+            let grant_id = pc.grant_id;
+            match pc.leases.claim(&scope, grant_id, &pc.fingerprint).await {
+                Ok(claimed) => Some((pc.leases, claimed)),
+                Err(error) => {
+                    if claim_error_may_be_concurrent_resume(&error) {
+                        warn!(
+                            lease_id = %grant_id,
+                            invocation_id = %invocation_id,
+                            capability_id = %capability_id,
+                            error_kind = capability_lease_error_kind(&error),
+                            "approval lease claim lost to a concurrent resume; leaving run state unchanged",
+                        );
+                    } else {
+                        fail_run_if_configured(
+                            Some(run_state),
+                            &scope,
+                            invocation_id,
+                            "ApprovalLeaseClaim",
+                        )
+                        .await;
+                    }
+                    return Err(CapabilityInvocationError::Lease(Box::new(error)));
+                }
+            }
+        } else {
+            claimed_lease
+        };
+
+        let obligation_outcome = match self
+            .prepare_obligations(
+                CapabilityObligationPhase::Resume,
+                &authorized_context,
+                &capability_id,
+                &estimate,
+                obligations.clone(),
+            )
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                apply_run_state_transition_if_configured(
+                    Some(run_state),
+                    &scope,
+                    invocation_id,
+                    &error,
+                )
+                .await;
+                // Non-terminal auth bounce: leave the lease Claimed so the same
+                // invocation can resume via auth_resume_json without a new approval.
+                if let Some((capability_leases, ref claimed)) = claimed_lease
+                    && !is_block_auth_transition(&error)
+                    && let Err(revoke_error) =
+                        capability_leases.revoke(&scope, claimed.grant.id).await
+                {
+                    warn!(
+                        lease_id = %claimed.grant.id,
+                        invocation_id = %invocation_id,
+                        capability_id = %capability_id,
+                        obligation_error = %error,
+                        revoke_error_kind = capability_lease_error_kind(&revoke_error),
+                        "capability lease revoke failed after obligation failure; lease may remain claimed",
+                    );
+                }
+                return Err(error);
+            }
+        };
+
+        let dispatch = match self
+            .dispatcher
+            .dispatch_json(CapabilityDispatchRequest {
+                capability_id: capability_id.clone(),
+                scope: scope.clone(),
+                estimate: estimate.clone(),
+                mounts: obligation_outcome.mounts.clone(),
+                resource_reservation: obligation_outcome.resource_reservation.clone(),
+                input,
+            })
+            .await
+        {
+            Ok(dispatch) => dispatch,
+            Err(error) => {
+                self.abort_obligations(
+                    CapabilityObligationPhase::Resume,
+                    &authorized_context,
+                    &capability_id,
+                    &estimate,
+                    obligations.as_slice(),
+                    &obligation_outcome,
+                )
+                .await;
+                let invocation_error = CapabilityInvocationError::from(error);
+                apply_run_state_transition_if_configured(
+                    Some(run_state),
+                    &scope,
+                    invocation_id,
+                    &invocation_error,
+                )
+                .await;
+                // Non-terminal auth bounce: leave the lease Claimed so the same
+                // invocation can resume via auth_resume_json without a new approval.
+                if let Some((capability_leases, ref claimed)) = claimed_lease
+                    && !is_block_auth_transition(&invocation_error)
+                    && let Err(revoke_error) =
+                        capability_leases.revoke(&scope, claimed.grant.id).await
+                {
+                    warn!(
+                        lease_id = %claimed.grant.id,
+                        invocation_id = %invocation_id,
+                        capability_id = %capability_id,
+                        dispatch_error = %invocation_error,
+                        revoke_error_kind = capability_lease_error_kind(&revoke_error),
+                        "capability lease revoke failed after dispatch failure; lease may remain claimed",
+                    );
+                }
+                return Err(invocation_error);
+            }
+        };
+
+        let dispatch = match self
+            .complete_dispatch_obligations(
+                CapabilityObligationPhase::Resume,
+                &authorized_context,
+                &capability_id,
+                &estimate,
+                obligations.as_slice(),
+                &dispatch,
+            )
+            .await
+        {
+            Ok(dispatch) => dispatch,
+            Err(error) => {
+                let cleanup_outcome = CapabilityObligationOutcome::default();
+                self.abort_obligations(
+                    CapabilityObligationPhase::Resume,
+                    &authorized_context,
+                    &capability_id,
+                    &estimate,
+                    obligations.as_slice(),
+                    &cleanup_outcome,
+                )
+                .await;
+                fail_run_if_configured(
+                    Some(run_state),
+                    &scope,
+                    invocation_id,
+                    obligation_invocation_error_kind(&error),
+                )
+                .await;
+                if let Some((capability_leases, ref claimed)) = claimed_lease
+                    && let Err(revoke_error) =
+                        capability_leases.revoke(&scope, claimed.grant.id).await
+                {
+                    warn!(
+                        lease_id = %claimed.grant.id,
+                        invocation_id = %invocation_id,
+                        capability_id = %capability_id,
+                        obligation_error = %error,
+                        revoke_error_kind = capability_lease_error_kind(&revoke_error),
+                        "capability lease revoke failed after completion obligation failure; lease may remain claimed",
+                    );
+                }
+                return Err(error);
+            }
+        };
+
+        if let Some((capability_leases, claimed)) = claimed_lease
+            && let Err(error) = capability_leases.consume(&scope, claimed.grant.id).await
+        {
+            warn!(
+                lease_id = %claimed.grant.id,
+                invocation_id = %invocation_id,
+                capability_id = %capability_id,
+                error_kind = capability_lease_error_kind(&error),
+                "capability lease consume failed after successful dispatch; lease left in claimed state",
+            );
+        }
+
+        complete_run_after_side_effect(
+            run_state,
+            &scope,
+            invocation_id,
+            &capability_id,
+            "dispatch",
+        )
+        .await;
+        Ok(CapabilityInvocationResult { dispatch })
     }
 
     async fn prepare_obligations(

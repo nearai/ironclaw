@@ -3865,8 +3865,7 @@ async fn non_auth_gate_block_preserves_pending_auth_resume() {
         effective_capability_ids: Vec::new(),
         provider_replay: None,
         resume_token: None,
-        approval_request_id: None,
-        correlation_id: None,
+        prior_approval: None,
     };
     let mut initial_state = LoopExecutionState::initial_for_run(host.run_context());
     initial_state.pending_auth_resume = Some(seeded_auth_resume.clone());
@@ -4275,8 +4274,7 @@ async fn gate_stage_skip_and_continue_clears_stale_pending_auth_resume() {
         effective_capability_ids: Vec::new(),
         provider_replay: None,
         resume_token: None,
-        approval_request_id: None,
-        correlation_id: None,
+        prior_approval: None,
     });
     let call = match provider_calls_response().output {
         ParentLoopOutput::CapabilityCalls(mut calls) => calls.remove(0),
@@ -4336,8 +4334,7 @@ async fn gate_stage_abort_clears_stale_pending_auth_resume() {
         effective_capability_ids: Vec::new(),
         provider_replay: None,
         resume_token: None,
-        approval_request_id: None,
-        correlation_id: None,
+        prior_approval: None,
     });
     let call = match provider_calls_response().output {
         ParentLoopOutput::CapabilityCalls(mut calls) => calls.remove(0),
@@ -4400,8 +4397,7 @@ async fn gate_stage_skip_does_not_clear_auth_resume_for_different_capability() {
         effective_capability_ids: Vec::new(),
         provider_replay: None,
         resume_token: None,
-        approval_request_id: None,
-        correlation_id: None,
+        prior_approval: None,
     });
     // The call being dispatched through GateStage is capability_id() ("demo.echo"),
     // not the seeded "other.cap".
@@ -4601,7 +4597,7 @@ async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id
     );
 
     // BeforeBlock checkpoint for phase 2 carries pending_auth_resume.
-    // It must propagate the resume_token and approval_request_id from the approval.
+    // It must propagate the resume_token and prior_approval from the approval.
     let phase2_bb_states: Vec<_> = host
         .staged_payloads()
         .into_iter()
@@ -4625,10 +4621,13 @@ async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id
         Some(resume_token.clone()),
         "pending_auth_resume.resume_token must carry the approval resume token"
     );
+    let pending_auth_pa = pending_auth
+        .prior_approval
+        .as_ref()
+        .expect("pending_auth_resume.prior_approval must be set when approval preceded auth");
     assert_eq!(
-        pending_auth.approval_request_id,
-        Some(approval_request_id),
-        "pending_auth_resume.approval_request_id must match the approval request"
+        pending_auth_pa.approval_request_id, approval_request_id,
+        "pending_auth_resume.prior_approval.approval_request_id must match the approval request"
     );
 
     // ── Phase 3: auth-resume → Completed ─────────────────────────────────────
@@ -4674,10 +4673,10 @@ async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id
     );
 
     // Phase 3 invocation: this is the auth-resume re-dispatch.
-    // auth_resume must be set and carry the original resume_token + approval_request_id.
+    // auth_resume must be set and carry the original resume_token + prior_approval.
     // Pre-fix: auth_resume would be None (resume_token was never propagated).
     // Post-fix: auth_resume carries the token so the host can reuse the original
-    // invocation_id and match the fingerprinted approval lease.
+    // invocation identifier and match the fingerprinted approval lease.
     let phase3_auth_resume = batch_invocations[2].invocations[0]
         .auth_resume
         .as_ref()
@@ -4689,10 +4688,13 @@ async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id
         phase3_auth_resume.resume_token, resume_token,
         "auth_resume.resume_token must match the original approval resume token"
     );
+    let phase3_pa = phase3_auth_resume
+        .prior_approval
+        .as_ref()
+        .expect("phase 3 auth_resume.prior_approval must be set");
     assert_eq!(
-        phase3_auth_resume.approval_request_id,
-        Some(approval_request_id),
-        "auth_resume.approval_request_id must match the original approval request id"
+        phase3_pa.approval_request_id, approval_request_id,
+        "auth_resume.prior_approval.approval_request_id must match the original approval request id"
     );
 
     // Final state: pending_auth_resume cleared and result recorded.
@@ -4777,8 +4779,10 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
         effective_capability_ids: vec![],
         provider_replay: None,
         resume_token: Some(resume_token.clone()),
-        approval_request_id: Some(approval_request_id),
-        correlation_id: Some(correlation_id),
+        prior_approval: Some(crate::state::AuthResumeApprovalIdentity {
+            approval_request_id,
+            correlation_id,
+        }),
     });
 
     // Two calls to the same capability_id — extracted from the two_calls_response fixture.
@@ -4829,10 +4833,13 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
         first_auth.resume_token, resume_token,
         "first call auth_resume.resume_token must match"
     );
+    let first_pa = first_auth
+        .prior_approval
+        .as_ref()
+        .expect("first call auth_resume.prior_approval must be set");
     assert_eq!(
-        first_auth.approval_request_id,
-        Some(approval_request_id),
-        "first call auth_resume.approval_request_id must match"
+        first_pa.approval_request_id, approval_request_id,
+        "first call auth_resume.prior_approval.approval_request_id must match"
     );
 
     // Second call: auth_resume must be None — slot was consumed by the first call.

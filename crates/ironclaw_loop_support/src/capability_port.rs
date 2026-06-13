@@ -1321,16 +1321,17 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 )
             })?;
         } else if let Some(auth_resume) = request.auth_resume.as_ref() {
-            // Reuse original invocation_id so the fingerprinted approval
-            // lease (scoped to that id) can still be matched and claimed.
+            // Reuse original invocation identifier so the fingerprinted
+            // approval lease (scoped to that identifier) can still be matched
+            // and claimed.
             let resume_invocation_id = invocation_id_from_resume_token(&auth_resume.resume_token)?;
             invocation_context.invocation_id = resume_invocation_id;
             invocation_context.resource_scope.invocation_id = resume_invocation_id;
-            // Restore original correlation_id when present so the same
-            // trace-correlation id flows through the full capability lifecycle
-            // (mirrors how the approval-resume path restores correlation).
-            if let Some(correlation_id) = auth_resume.correlation_id {
-                invocation_context.correlation_id = correlation_id;
+            // Restore original correlation identifier when a prior approval is
+            // present so the same trace-correlation identifier flows through
+            // the full capability lifecycle (mirrors the approval-resume path).
+            if let Some(pa) = auth_resume.prior_approval.as_ref() {
+                invocation_context.correlation_id = pa.correlation_id;
             }
             invocation_context.validate().map_err(|_| {
                 AgentLoopHostError::new(
@@ -1367,10 +1368,14 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 dispatch_runtime_capability_resume(self.runtime.as_ref(), runtime_request).await
             }
             (None, Some(auth_resume)) => {
+                let prior_approval_id = auth_resume
+                    .prior_approval
+                    .as_ref()
+                    .map(|pa| pa.approval_request_id);
                 tracing::debug!(
                     invocation_id = %invocation_id,
                     auth_resume = true,
-                    approval_request_id = auth_resume.approval_request_id.map(|id| id.to_string()).as_deref().unwrap_or("none"),
+                    approval_request_id = prior_approval_id.map(|id| id.to_string()).as_deref().unwrap_or("none"),
                     "capability auth-resume re-dispatch with preserved invocation identity"
                 );
                 let runtime_request = RuntimeCapabilityAuthResumeRequest::new(
@@ -1379,7 +1384,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                     estimate.clone(),
                     input.clone(),
                     trust_decision,
-                    auth_resume.approval_request_id,
+                    prior_approval_id,
                 )
                 .with_idempotency_key(idempotency_key.clone());
                 dispatch_runtime_capability_auth_resume(self.runtime.as_ref(), runtime_request)
@@ -1838,8 +1843,9 @@ fn invocation_idempotency_key(
         (None, Some(auth_resume)) => format!(
             "auth-resume:{}:{}",
             auth_resume
-                .approval_request_id
-                .map(|id| id.to_string())
+                .prior_approval
+                .as_ref()
+                .map(|pa| pa.approval_request_id.to_string())
                 .unwrap_or_else(|| "none".to_string()),
             auth_resume.resume_token
         ),

@@ -44,8 +44,8 @@ pub(super) fn capability_invocation_from_candidate(
 ///
 /// When `pending_auth.resume_token` is set (i.e., the invocation previously
 /// passed an approval gate), the returned invocation carries a
-/// `CapabilityAuthResume` so the host can reuse the original invocation_id
-/// and claim any matching approval lease.
+/// `CapabilityAuthResume` so the host can reuse the original invocation
+/// identifier and claim any matching approval lease.
 pub(super) fn capability_invocation_from_auth_resume_candidate(
     call: CapabilityCallCandidate,
     pending_auth: &PendingAuthResume,
@@ -55,8 +55,12 @@ pub(super) fn capability_invocation_from_auth_resume_candidate(
         .as_ref()
         .map(|token| CapabilityAuthResume {
             resume_token: token.clone(),
-            approval_request_id: pending_auth.approval_request_id,
-            correlation_id: pending_auth.correlation_id,
+            prior_approval: pending_auth.prior_approval.as_ref().map(|pa| {
+                ironclaw_turns::run_profile::AuthResumeApprovalIdentity {
+                    approval_request_id: pa.approval_request_id,
+                    correlation_id: pa.correlation_id,
+                }
+            }),
         });
     CapabilityInvocation {
         surface_version: call.surface_version,
@@ -563,8 +567,7 @@ mod tests {
             effective_capability_ids: vec![cap_a.clone(), cap_b.clone()],
             provider_replay: None,
             resume_token: None,
-            approval_request_id: None,
-            correlation_id: None,
+            prior_approval: None,
         };
         let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
 
@@ -595,8 +598,7 @@ mod tests {
             effective_capability_ids: vec![cap.clone()],
             provider_replay: None,
             resume_token: None, // no prior approval — the key precondition
-            approval_request_id: None,
-            correlation_id: None,
+            prior_approval: None,
         };
         let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
         let call = CapabilityCallCandidate {

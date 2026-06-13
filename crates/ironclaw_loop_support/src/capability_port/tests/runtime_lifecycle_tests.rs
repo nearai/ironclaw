@@ -973,10 +973,12 @@ async fn auth_resume_after_approval_reuses_original_invocation_identity() {
             approval_resume: None,
             auth_resume: Some(CapabilityAuthResume {
                 resume_token: resume.resume_token.clone(),
-                approval_request_id: Some(approval_request_id),
-                // Carry the original correlation_id from the approval so the
-                // port restores it onto the invocation context (FIX 3).
-                correlation_id: Some(original_correlation_id),
+                // Carry the prior approval so the port restores the original
+                // correlation identifier onto the invocation context.
+                prior_approval: Some(ironclaw_turns::run_profile::AuthResumeApprovalIdentity {
+                    approval_request_id,
+                    correlation_id: original_correlation_id,
+                }),
             }),
         })
         .await
@@ -986,8 +988,8 @@ async fn auth_resume_after_approval_reuses_original_invocation_identity() {
         "auth resume must dispatch and complete, got {auth_resumed:?}"
     );
 
-    // The pre-fix behavior minted InvocationId::new() here, which made the
-    // one-shot approval lease unmatchable and forced a second human approval.
+    // The pre-fix behavior minted a fresh invocation identifier here, which
+    // made the one-shot approval lease unmatchable and forced a second approval.
     let original_invocation_id =
         ironclaw_host_api::InvocationId::parse(resume.resume_token.as_str())
             .expect("resume token carries original invocation id");
@@ -1006,7 +1008,7 @@ async fn auth_resume_after_approval_reuses_original_invocation_identity() {
         Some(approval_request_id),
         "the granted approval must travel with the auth re-dispatch"
     );
-    // FIX 3: original correlation_id must be restored onto the invocation context.
+    // Original correlation identifier must be restored onto the invocation context.
     assert_eq!(
         auth_resume_requests[0].context.correlation_id, original_correlation_id,
         "auth re-dispatch must restore the original correlation_id"

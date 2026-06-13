@@ -64,16 +64,16 @@ impl ExecutorStage<GateInput> for GateStage {
                 state.last_gate = Some(gate_ref.clone());
                 // Extract approval identity before the Option is moved into
                 // the pending_approval_resume mapping below.
-                let (auth_resume_token, auth_approval_request_id, auth_correlation_id) =
-                    if let Some(ref approval_resume) = input.approval_resume {
-                        (
-                            Some(approval_resume.resume_token.clone()),
-                            Some(approval_resume.approval_request_id),
-                            Some(approval_resume.correlation_id),
-                        )
-                    } else {
-                        (None, None, None)
-                    };
+                let auth_resume_token = input
+                    .approval_resume
+                    .as_ref()
+                    .map(|r| r.resume_token.clone());
+                let auth_prior_approval = input.approval_resume.as_ref().map(|r| {
+                    crate::state::AuthResumeApprovalIdentity {
+                        approval_request_id: r.approval_request_id,
+                        correlation_id: r.correlation_id,
+                    }
+                });
                 state.pending_approval_resume =
                     input.approval_resume.map(|resume| PendingApprovalResume {
                         gate_ref: gate_ref.clone(),
@@ -93,8 +93,9 @@ impl ExecutorStage<GateInput> for GateStage {
                     // slot: when the invocation already passed a one-shot
                     // approval (`approval_resume` is Some), the re-dispatch
                     // after auth completion must reuse the original
-                    // invocation_id so the fingerprinted approval lease —
-                    // whose scope embeds that id — can still be matched.
+                    // invocation identifier so the fingerprinted approval
+                    // lease — whose scope embeds that identifier — can still
+                    // be matched.
                     state.pending_auth_resume = Some(PendingAuthResume {
                         gate_ref: gate_ref.clone(),
                         capability_id: call.capability_id.clone(),
@@ -103,8 +104,7 @@ impl ExecutorStage<GateInput> for GateStage {
                         effective_capability_ids: call.effective_capability_ids.clone(),
                         provider_replay: call.provider_replay.clone(),
                         resume_token: auth_resume_token,
-                        approval_request_id: auth_approval_request_id,
-                        correlation_id: auth_correlation_id,
+                        prior_approval: auth_prior_approval,
                     });
                 }
                 // Non-auth blocks do not invalidate a pending auth resume: a resource or
