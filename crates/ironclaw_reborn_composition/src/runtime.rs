@@ -1304,10 +1304,22 @@ impl RebornRuntime {
         }
         .await;
 
-        if let Some(skill_activation_source) = &self.skill_activation_source {
-            skill_activation_source
+        if let Some(skill_activation_source) = &self.skill_activation_source
+            && let Err(clear_error) = skill_activation_source
                 .clear_accepted_message(&submitted.scope, &submitted.accepted_message_ref)
-                .map_err(|error| RebornRuntimeError::TurnSubmission(error.to_string()))?;
+        {
+            if reply.is_ok() {
+                // Primary turn succeeded, so the cleanup failure is the only
+                // error to surface.
+                return Err(RebornRuntimeError::TurnSubmission(clear_error.to_string()));
+            }
+            // Primary turn already failed: don't mask it with the cleanup
+            // error — log the secondary (sanitized id only) and return the
+            // primary. See error-handling.md.
+            tracing::debug!(
+                accepted_message_ref = submitted.accepted_message_ref.as_str(),
+                "failed to clear accepted message after primary turn failure"
+            );
         }
 
         reply
@@ -1618,37 +1630,65 @@ impl RebornRuntime {
                     run_id,
                 })
                 .await?;
-            let blocked_on_gate = matches!(
-                state.status,
+            // Exhaustive on purpose: a new `TurnStatus` variant must force a
+            // compile error here rather than silently defaulting to "not a
+            // gate". Only the user-resolvable gates short-circuit recording.
+            // `BlockedDependentRun` is an internal wait on a child run (the
+            // upstream contract names it `AwaitDependentRun`) — it is not
+            // resolvable through the gate facade, so it keeps polling like
+            // `Queued`/`Running` until the dependent run completes or the poll
+            // budget expires.
+            let blocked_on_gate = match state.status {
                 TurnStatus::BlockedApproval
-                    | TurnStatus::BlockedAuth
-                    | TurnStatus::BlockedResource
-                    | TurnStatus::BlockedDependentRun
-            );
+                | TurnStatus::BlockedAuth
+                | TurnStatus::BlockedResource => true,
+                TurnStatus::BlockedDependentRun
+                | TurnStatus::Queued
+                | TurnStatus::Running
+                | TurnStatus::CancelRequested
+                | TurnStatus::Cancelled
+                | TurnStatus::Completed
+                | TurnStatus::Failed
+                | TurnStatus::RecoveryRequired => false,
+            };
             if state.status.is_terminal() || blocked_on_gate {
                 return Ok(state);
             }
             if start.elapsed() > self.poll_settings.max_total {
-                self.cancel_run(
-                    scope,
-                    run_id,
-                    SanitizedCancelReason::Timeout,
-                    "timeout-cancel",
-                )
-                .await?;
+                // Surface the primary `RunTimeout`; a failure of the secondary
+                // cancel is logged with a sanitized id only and must not mask
+                // it (see error-handling.md). `debug!` not `warn!` per the
+                // logging rule — this runtime is REPL/TUI-reachable.
+                if self
+                    .cancel_run(
+                        scope,
+                        run_id,
+                        SanitizedCancelReason::Timeout,
+                        "timeout-cancel",
+                    )
+                    .await
+                    .is_err()
+                {
+                    tracing::debug!(run_id = %run_id, "failed to cancel run after recorder timeout");
+                }
                 return Err(RebornRuntimeError::RunTimeout {
                     timeout: self.poll_settings.max_total,
                 });
             }
             tokio::select! {
                 _ = cancellation.cancelled() => {
-                    self.cancel_run(
-                        scope,
-                        run_id,
-                        SanitizedCancelReason::UserRequested,
-                        "caller-cancel",
-                    )
-                    .await?;
+                    if self
+                        .cancel_run(
+                            scope,
+                            run_id,
+                            SanitizedCancelReason::UserRequested,
+                            "caller-cancel",
+                        )
+                        .await
+                        .is_err()
+                    {
+                        tracing::debug!(run_id = %run_id, "failed to cancel run after caller cancellation");
+                    }
                     return Err(RebornRuntimeError::OperationCancelled);
                 }
                 _ = tokio::time::sleep(self.poll_settings.interval) => {}
@@ -1708,10 +1748,22 @@ impl RebornRuntime {
         }
         .await;
 
-        if let Some(skill_activation_source) = &self.skill_activation_source {
-            skill_activation_source
+        if let Some(skill_activation_source) = &self.skill_activation_source
+            && let Err(clear_error) = skill_activation_source
                 .clear_accepted_message(&submitted.scope, &submitted.accepted_message_ref)
-                .map_err(|error| RebornRuntimeError::TurnSubmission(error.to_string()))?;
+        {
+            if outcome.is_ok() {
+                // Primary turn succeeded, so the cleanup failure is the only
+                // error to surface.
+                return Err(RebornRuntimeError::TurnSubmission(clear_error.to_string()));
+            }
+            // Primary turn already failed: don't mask it with the cleanup
+            // error — log the secondary (sanitized id only) and return the
+            // primary. See error-handling.md.
+            tracing::debug!(
+                accepted_message_ref = submitted.accepted_message_ref.as_str(),
+                "failed to clear accepted message after primary turn failure"
+            );
         }
 
         outcome
