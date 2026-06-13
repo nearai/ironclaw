@@ -231,6 +231,24 @@ mod tests {
     }
 
     #[test]
+    fn uuid_message_ids_are_sanitization_stable_so_distinct_messages_never_alias() {
+        // In production `message_id` is a v4 UUID (Display = lowercase hex +
+        // hyphens). `sanitize_attachment_segment` keeps `[alnum.-_]`, so a UUID
+        // passes through unchanged — two distinct message ids can never collapse
+        // to one path segment. Path uniqueness is carried by (message_id, index);
+        // the filename segment is cosmetic and its lossy sanitization cannot
+        // cause an overwrite because no two attachments share that prefix.
+        let uuid = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+        assert_eq!(sanitize_attachment_segment(uuid), uuid);
+        let other = "a1b2c3d4-0000-4000-8000-000000000000";
+        assert_ne!(
+            sanitize_attachment_segment(uuid),
+            sanitize_attachment_segment(other),
+            "distinct uuid message ids must not alias to one path segment"
+        );
+    }
+
+    #[test]
     fn scoped_path_is_built_under_the_project_mount() {
         let path = attachment_scoped_path(
             "/workspace",
