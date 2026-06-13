@@ -42,10 +42,11 @@ pub struct InboundAttachment {
 /// and `size_bytes` set to the landed byte count.
 ///
 /// Writes go through `filesystem`, so a read-only project mount fails closed
-/// (see [`land_attachment`]). On the first failure the whole batch returns the
-/// error; partial writes that may already have landed are left in place (the
-/// filesystem authority makes them addressable, and a retry re-lands at the
-/// same deterministic paths).
+/// (see [`land_attachment`]). Each attachment is bounded by `max_bytes` and an
+/// over-limit one fails the batch with [`AttachmentLandingError::TooLarge`]. On
+/// the first failure the whole batch returns the error; partial writes that may
+/// already have landed are left in place (the filesystem authority makes them
+/// addressable, and a retry re-lands at the same deterministic paths).
 ///
 /// [`ScopedPath`]: ironclaw_host_api::ScopedPath
 pub async fn land_inbound_attachments<F>(
@@ -55,6 +56,7 @@ pub async fn land_inbound_attachments<F>(
     date: &str,
     message_id: &str,
     attachments: Vec<InboundAttachment>,
+    max_bytes: usize,
 ) -> Result<Vec<AttachmentRef>, AttachmentLandingError>
 where
     F: RootFilesystem,
@@ -78,8 +80,16 @@ where
             filename: filename.as_deref(),
             fallback_extension,
         };
-        let stored =
-            land_attachment(filesystem, scope, project_alias, date, &landing, bytes).await?;
+        let stored = land_attachment(
+            filesystem,
+            scope,
+            project_alias,
+            date,
+            &landing,
+            bytes,
+            max_bytes,
+        )
+        .await?;
         refs.push(AttachmentRef {
             id,
             kind,
@@ -98,6 +108,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    use crate::DEFAULT_MAX_ATTACHMENT_BYTES;
     use ironclaw_common::AttachmentKind;
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
@@ -163,6 +174,7 @@ mod tests {
                 inbound("att-0", "application/pdf", "report.pdf", &doc_bytes),
                 inbound("att-1", "image/png", "diagram.png", &img_bytes),
             ],
+            DEFAULT_MAX_ATTACHMENT_BYTES,
         )
         .await
         .expect("batch lands");
@@ -217,6 +229,7 @@ mod tests {
                 inbound("att-0", "text/csv", "data.csv", b"a,b\n1,2"),
                 inbound("att-1", "text/csv", "data.csv", b"c,d\n3,4"),
             ],
+            DEFAULT_MAX_ATTACHMENT_BYTES,
         )
         .await
         .expect("batch lands");
@@ -238,6 +251,7 @@ mod tests {
             "2026-06-09",
             "msg1",
             vec![inbound("att-0", "application/pdf", "report.pdf", b"%PDF")],
+            DEFAULT_MAX_ATTACHMENT_BYTES,
         )
         .await
         .expect_err("a read-only project mount must reject the landing");
@@ -264,6 +278,7 @@ mod tests {
                 filename: None,
                 bytes: vec![0x89, 0x50],
             }],
+            DEFAULT_MAX_ATTACHMENT_BYTES,
         )
         .await
         .expect("lands");
@@ -308,6 +323,7 @@ mod tests {
                 inbound("att-0", "text/plain", "a.txt", b"ok"),
                 inbound("att-1", "text/plain", "b.txt", b"boom"),
             ],
+            DEFAULT_MAX_ATTACHMENT_BYTES,
         )
         .await
         .expect_err("a later landing failure fails the whole batch");
@@ -325,5 +341,44 @@ mod tests {
             .expect("read succeeds")
             .expect("att-0 bytes are still present");
         assert_eq!(landed.entry.body, b"ok");
+    }
+
+    #[tokio::test]
+    async fn rejects_an_oversized_attachment_in_the_batch() {
+        // The bridge threads its `max_bytes` bound to each landing; an item over
+        // the cap fails the batch with TooLarge before its bytes are written.
+        let backend = Arc::new(InMemoryBackend::new());
+        let writer = project_mount(Arc::clone(&backend), MountPermissions::read_write());
+        let scope = test_scope();
+
+        let err = land_inbound_attachments(
+            &writer,
+            &scope,
+            DEFAULT_PROJECT_MOUNT_ALIAS,
+            "2026-06-09",
+            "msg1",
+            vec![inbound("att-0", "text/plain", "big.txt", b"0123456789")],
+            8,
+        )
+        .await
+        .expect_err("an over-limit attachment must fail the batch");
+        assert!(matches!(
+            err,
+            AttachmentLandingError::TooLarge { size: 10, max: 8 }
+        ));
+
+        // Rejected before any write — nothing landed.
+        let reader = project_mount(backend, MountPermissions::read_only());
+        assert!(
+            reader
+                .get(
+                    &scope,
+                    &ScopedPath::new("/workspace/attachments/2026-06-09/msg1-1-big.txt").unwrap(),
+                )
+                .await
+                .expect("read succeeds")
+                .is_none(),
+            "oversized attachment must not have been written"
+        );
     }
 }
