@@ -983,7 +983,7 @@ impl CommunicationContextProvider for StubCommunicationContextProvider {
         _scope: &TurnScope,
         _actor: Option<&TurnActor>,
         _delivery_tools_visible: bool,
-        _run_origin: Option<ironclaw_turns::TurnRunOrigin>,
+        _product_context: Option<ironclaw_turns::ProductTurnContext>,
     ) -> Option<CommunicationRuntimeContext> {
         Some(CommunicationRuntimeContext {
             connected_channels: ConnectedChannelsState::Known(vec![ConnectedChannelSummary {
@@ -993,7 +993,7 @@ impl CommunicationContextProvider for StubCommunicationContextProvider {
             }]),
             delivery_target: DeliveryTargetState::NoneSet,
             delivery_tools_visible: false,
-            run_origin: None,
+            product_context: None,
         })
     }
 }
@@ -1040,7 +1040,7 @@ struct RecordingCommunicationContextProvider {
     recorded_delivery_tools_visible: Mutex<Option<bool>>,
     recorded_thread_id: Mutex<Option<ThreadId>>,
     recorded_actor_present: Mutex<Option<bool>>,
-    recorded_run_origin: Mutex<Option<Option<ironclaw_turns::TurnRunOrigin>>>,
+    recorded_product_context: Mutex<Option<Option<ironclaw_turns::ProductTurnContext>>>,
 }
 
 impl RecordingCommunicationContextProvider {
@@ -1049,7 +1049,7 @@ impl RecordingCommunicationContextProvider {
             recorded_delivery_tools_visible: Mutex::new(None),
             recorded_thread_id: Mutex::new(None),
             recorded_actor_present: Mutex::new(None),
-            recorded_run_origin: Mutex::new(None),
+            recorded_product_context: Mutex::new(None),
         })
     }
 
@@ -1068,8 +1068,8 @@ impl RecordingCommunicationContextProvider {
     }
 
     #[allow(dead_code)]
-    fn run_origin(&self) -> Option<Option<ironclaw_turns::TurnRunOrigin>> {
-        self.recorded_run_origin.lock().unwrap().clone()
+    fn product_context(&self) -> Option<Option<ironclaw_turns::ProductTurnContext>> {
+        self.recorded_product_context.lock().unwrap().clone()
     }
 }
 
@@ -1080,17 +1080,17 @@ impl CommunicationContextProvider for RecordingCommunicationContextProvider {
         scope: &TurnScope,
         actor: Option<&TurnActor>,
         delivery_tools_visible: bool,
-        run_origin: Option<ironclaw_turns::TurnRunOrigin>,
+        product_context: Option<ironclaw_turns::ProductTurnContext>,
     ) -> Option<CommunicationRuntimeContext> {
         *self.recorded_delivery_tools_visible.lock().unwrap() = Some(delivery_tools_visible);
         *self.recorded_thread_id.lock().unwrap() = Some(scope.thread_id.clone());
         *self.recorded_actor_present.lock().unwrap() = Some(actor.is_some());
-        *self.recorded_run_origin.lock().unwrap() = Some(run_origin.clone());
+        *self.recorded_product_context.lock().unwrap() = Some(product_context.clone());
         Some(CommunicationRuntimeContext {
             connected_channels: ConnectedChannelsState::Unknown,
             delivery_target: DeliveryTargetState::NoneSet,
             delivery_tools_visible,
-            run_origin,
+            product_context,
         })
     }
 }
@@ -1150,7 +1150,7 @@ async fn communication_context_provider_receives_delivery_tools_visible_true_whe
     );
 }
 
-// f-test-6: when claimed.state.run_origin is ScheduledTrigger, the model request
+// f-test-6: when claimed.state.product_context.origin is ScheduledTrigger, the model request
 // contains the "Run origin: scheduled trigger fire." line.
 #[tokio::test]
 async fn scheduled_trigger_run_origin_appears_in_model_request() {
@@ -1158,10 +1158,18 @@ async fn scheduled_trigger_run_origin_appears_in_model_request() {
     let driver = TextOnlyModelReplyDriver::default();
     assign_driver_to_fixture(&mut fixture, driver.descriptor());
 
-    let loop_run_context = fixture
-        .context
-        .clone()
-        .with_run_origin(ironclaw_turns::TurnRunOrigin::ScheduledTrigger);
+    let loop_run_context =
+        fixture
+            .context
+            .clone()
+            .with_product_context(ironclaw_turns::ProductTurnContext {
+                origin: ironclaw_turns::TurnOriginKind::ScheduledTrigger,
+                surface_type: None,
+                adapter: None,
+                owner: ironclaw_turns::TurnOwner::Personal {
+                    user: UserId::new("user-comm-sched-trigger").unwrap(),
+                },
+            });
     let host = fixture
         .factory()
         .with_communication_context_provider(
@@ -1601,7 +1609,7 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
                     parent_run_id: None,
                     subagent_depth: 0,
                     spawn_tree_root_run_id: None,
-                    run_origin: None,
+                    product_context: None,
                 },
                 &ironclaw_turns::AllowAllTurnAdmissionPolicy,
                 &resolver,
@@ -2876,7 +2884,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
             parent_run_id: None,
             subagent_depth: 0,
             spawn_tree_root_run_id: None,
-            run_origin: None,
+            product_context: None,
         })
         .await
         .unwrap();
@@ -7494,7 +7502,7 @@ async fn queue_fixture_turn(
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
-                run_origin: None,
+                product_context: None,
             },
             &ironclaw_turns::AllowAllTurnAdmissionPolicy,
             resolver,
@@ -7622,7 +7630,7 @@ impl HostFixture {
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
-            run_origin: None,
+            product_context: None,
         };
         let claimed = ClaimedTurnRun {
             state,
