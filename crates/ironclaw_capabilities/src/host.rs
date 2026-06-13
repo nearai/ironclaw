@@ -1204,6 +1204,23 @@ where
                     &error,
                 )
                 .await;
+                // Non-terminal auth bounce: leave the lease Claimed so the same
+                // invocation can resume via auth_resume_json without a new approval.
+                if let Some((capability_leases, claimed_lease)) = &approval_lease_to_consume
+                    && !is_block_auth_transition(&error)
+                    && let Err(revoke_error) = capability_leases
+                        .revoke(&scope, claimed_lease.grant.id)
+                        .await
+                {
+                    warn!(
+                        lease_id = %claimed_lease.grant.id,
+                        invocation_id = %invocation_id,
+                        capability_id = %capability_id,
+                        obligation_error = %error,
+                        revoke_error_kind = capability_lease_error_kind(&revoke_error),
+                        "capability lease revoke failed after obligation failure in auth-resume; lease may remain claimed",
+                    );
+                }
                 return Err(error);
             }
         };
@@ -1239,6 +1256,23 @@ where
                     &invocation_error,
                 )
                 .await;
+                // Non-terminal auth bounce: leave the lease Claimed so the same
+                // invocation can resume via auth_resume_json without a new approval.
+                if let Some((capability_leases, claimed_lease)) = &approval_lease_to_consume
+                    && !is_block_auth_transition(&invocation_error)
+                    && let Err(revoke_error) = capability_leases
+                        .revoke(&scope, claimed_lease.grant.id)
+                        .await
+                {
+                    warn!(
+                        lease_id = %claimed_lease.grant.id,
+                        invocation_id = %invocation_id,
+                        capability_id = %capability_id,
+                        dispatch_error = %invocation_error,
+                        revoke_error_kind = capability_lease_error_kind(&revoke_error),
+                        "capability lease revoke failed after dispatch failure in auth-resume; lease may remain claimed",
+                    );
+                }
                 return Err(invocation_error);
             }
         };
@@ -1273,6 +1307,20 @@ where
                     obligation_invocation_error_kind(&error),
                 )
                 .await;
+                if let Some((capability_leases, claimed_lease)) = &approval_lease_to_consume
+                    && let Err(revoke_error) = capability_leases
+                        .revoke(&scope, claimed_lease.grant.id)
+                        .await
+                {
+                    warn!(
+                        lease_id = %claimed_lease.grant.id,
+                        invocation_id = %invocation_id,
+                        capability_id = %capability_id,
+                        obligation_error = %error,
+                        revoke_error_kind = capability_lease_error_kind(&revoke_error),
+                        "capability lease revoke failed after completion obligation failure in auth-resume; lease may remain claimed",
+                    );
+                }
                 return Err(error);
             }
         };

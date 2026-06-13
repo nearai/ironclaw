@@ -936,3 +936,321 @@ async fn auth_resume_after_real_approval_bounce_reuses_claimed_lease() {
         "(e) capability must be dispatched with the original invocation_id"
     );
 }
+
+// ---------------------------------------------------------------------------
+// FIX 2a: terminal dispatch failure in auth_resume_json revokes the lease
+//
+// When auth_resume_json encounters a terminal dispatch failure (any error
+// other than AuthorizationRequiresAuth, which is the non-terminal BlockAuth
+// path), the claimed approval lease must be Revoked — not left Claimed.
+// Before the fix the lease was left Claimed because auth_resume_json was
+// missing the guarded-revoke logic that resume_json has.
+//
+// This drives the real path: invoke → approve → resume_json (auth bounce,
+// lease stays Claimed) → auth_resume_json with terminal dispatcher → Revoked.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn auth_resume_json_terminal_dispatch_failure_revokes_claimed_lease() {
+    use async_trait::async_trait;
+
+    // Phase 1+2 use an auth-bounce dispatcher (AuthRequired on first call
+    // so resume_json bounces and leaves the lease Claimed).
+    // Phase 3 (auth_resume_json) uses a terminal-fail dispatcher
+    // (UnknownCapability on first call so auth_resume_json errors terminally).
+    struct TerminalFailDispatcher {
+        call_count: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Default for TerminalFailDispatcher {
+        fn default() -> Self {
+            Self {
+                call_count: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl CapabilityDispatcher for TerminalFailDispatcher {
+        async fn dispatch_json(
+            &self,
+            request: CapabilityDispatchRequest,
+        ) -> Result<CapabilityDispatchResult, DispatchError> {
+            let count = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if count == 0 {
+                // First call (from resume_json): auth bounce → lease stays Claimed.
+                Err(DispatchError::AuthRequired {
+                    capability: request.capability_id,
+                    required_secrets: vec![],
+                    credential_requirements: vec![],
+                })
+            } else {
+                // Second call (from auth_resume_json): terminal failure.
+                Err(DispatchError::UnknownCapability {
+                    capability: request.capability_id,
+                })
+            }
+        }
+    }
+
+    let registry = registry_with_echo_capability();
+    let dispatcher = TerminalFailDispatcher::default();
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let leases = InMemoryCapabilityLeaseStore::new();
+
+    // Phase 1: invoke → BlockedApproval.
+    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    let original_context = execution_context(CapabilitySet::default());
+    let scope = original_context.resource_scope.clone();
+    let invocation_id = original_context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "terminal fail test"});
+
+    block_host
+        .invoke_json(CapabilityInvocationRequest {
+            context: original_context.clone(),
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+
+    let approval_id = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .approval_request_id
+        .unwrap();
+
+    // Phase 2: approve → lease issued (Active).
+    let issued_lease = ApprovalResolver::new(&approval_requests, &leases)
+        .approve_dispatch(&scope, approval_id, dispatch_lease_approval())
+        .await
+        .unwrap();
+    let lease_id = issued_lease.grant.id;
+
+    // Phase 3: resume_json — first call returns AuthRequired → lease Claimed
+    // (via the non-terminal BlockAuth guard that already exists in resume_json).
+    let mut resume_context = original_context.clone();
+    resume_context.grants = CapabilitySet {
+        grants: vec![dispatch_grant()],
+    };
+    let resume_authorizer = GrantAuthorizer::new();
+    let resume_host = CapabilityHost::new(&registry, &dispatcher, &resume_authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+
+    let _ = resume_host
+        .resume_json(CapabilityResumeRequest {
+            context: resume_context.clone(),
+            approval_request_id: approval_id,
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+
+    // Verify lease is now Claimed (non-terminal auth bounce guard works).
+    let lease_after_resume = leases.get(&scope, lease_id).await.unwrap();
+    assert_eq!(
+        lease_after_resume.status,
+        CapabilityLeaseStatus::Claimed,
+        "pre-condition: lease must be Claimed after resume_json auth bounce"
+    );
+
+    // Phase 4: auth_resume_json — second call is terminal (UnknownCapability).
+    let auth_resume_authorizer = GrantAuthorizer::new();
+    let auth_resume_host = CapabilityHost::new(&registry, &dispatcher, &auth_resume_authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+
+    let err = auth_resume_host
+        .auth_resume_json(CapabilityAuthResumeRequest {
+            context: resume_context,
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+            approval_request_id: Some(approval_id),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, CapabilityInvocationError::Dispatch { .. }),
+        "expected Dispatch error from terminal failure, got {err:?}"
+    );
+
+    // Lease must be Revoked after terminal dispatch failure (pre-fix: stayed Claimed).
+    let lease_after = leases.get(&scope, lease_id).await.unwrap();
+    assert_eq!(
+        lease_after.status,
+        CapabilityLeaseStatus::Revoked,
+        "lease must be Revoked after terminal dispatch failure in auth_resume_json \
+         (pre-fix: was left Claimed because guarded-revoke was missing)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FIX 2b: non-terminal auth bounce in auth_resume_json leaves lease Claimed
+//
+// When auth_resume_json encounters AuthorizationRequiresAuth (which transitions
+// the run to BlockedAuth — the non-terminal path), the claimed approval lease
+// must stay Claimed so the NEXT auth_resume_json call can reuse it.
+// This is the guard that prevents burning the approval on every auth retry.
+//
+// This drives: invoke → approve → resume_json (bounce 1, Claimed) →
+// auth_resume_json (bounce 2, AuthRequired again) → lease still Claimed.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn auth_resume_json_non_terminal_auth_bounce_leaves_lease_claimed() {
+    use async_trait::async_trait;
+
+    // A dispatcher that always returns AuthRequired (non-terminal BlockAuth path).
+    struct AlwaysAuthRequiredDispatcher;
+
+    #[async_trait]
+    impl CapabilityDispatcher for AlwaysAuthRequiredDispatcher {
+        async fn dispatch_json(
+            &self,
+            request: CapabilityDispatchRequest,
+        ) -> Result<CapabilityDispatchResult, DispatchError> {
+            Err(DispatchError::AuthRequired {
+                capability: request.capability_id,
+                required_secrets: vec![],
+                credential_requirements: vec![],
+            })
+        }
+    }
+
+    let registry = registry_with_echo_capability();
+    let dispatcher = AlwaysAuthRequiredDispatcher;
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let leases = InMemoryCapabilityLeaseStore::new();
+
+    // Phase 1: invoke → BlockedApproval.
+    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    let original_context = execution_context(CapabilitySet::default());
+    let scope = original_context.resource_scope.clone();
+    let invocation_id = original_context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "non-terminal auth bounce"});
+
+    block_host
+        .invoke_json(CapabilityInvocationRequest {
+            context: original_context.clone(),
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+
+    let approval_id = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .approval_request_id
+        .unwrap();
+
+    // Phase 2: approve → lease issued (Active).
+    let issued_lease = ApprovalResolver::new(&approval_requests, &leases)
+        .approve_dispatch(&scope, approval_id, dispatch_lease_approval())
+        .await
+        .unwrap();
+    let lease_id = issued_lease.grant.id;
+
+    // Phase 3: resume_json → auth bounce → lease Claimed (existing non-terminal guard).
+    let mut resume_context = original_context.clone();
+    resume_context.grants = CapabilitySet {
+        grants: vec![dispatch_grant()],
+    };
+    let resume_authorizer = GrantAuthorizer::new();
+    let resume_host = CapabilityHost::new(&registry, &dispatcher, &resume_authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+
+    let _ = resume_host
+        .resume_json(CapabilityResumeRequest {
+            context: resume_context.clone(),
+            approval_request_id: approval_id,
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+
+    // Verify lease is Claimed before auth_resume_json.
+    let lease_after_resume = leases.get(&scope, lease_id).await.unwrap();
+    assert_eq!(
+        lease_after_resume.status,
+        CapabilityLeaseStatus::Claimed,
+        "pre-condition: lease must be Claimed after resume_json auth bounce"
+    );
+
+    // Phase 4: auth_resume_json — dispatcher again returns AuthRequired.
+    // This exercises the same reuse path from the prior test but now the
+    // dispatcher bounces again: the lease must stay Claimed for another retry.
+    let auth_resume_authorizer = GrantAuthorizer::new();
+    let auth_resume_host = CapabilityHost::new(&registry, &dispatcher, &auth_resume_authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+
+    let err = auth_resume_host
+        .auth_resume_json(CapabilityAuthResumeRequest {
+            context: resume_context,
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+            approval_request_id: Some(approval_id),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            CapabilityInvocationError::AuthorizationRequiresAuth { .. }
+        ),
+        "expected AuthorizationRequiresAuth (non-terminal bounce), got {err:?}"
+    );
+
+    // Lease must remain Claimed — NOT Revoked — so the next auth_resume can reuse it.
+    let lease_after = leases.get(&scope, lease_id).await.unwrap();
+    assert_eq!(
+        lease_after.status,
+        CapabilityLeaseStatus::Claimed,
+        "lease must remain Claimed after non-terminal BlockAuth bounce in auth_resume_json \
+         (pre-fix: guarded-revoke was missing so behavior was undefined)"
+    );
+    // Verify invocation_id is unchanged (still the original).
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(
+        run.status,
+        RunStatus::BlockedAuth,
+        "run must still be BlockedAuth after non-terminal bounce"
+    );
+}
