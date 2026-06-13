@@ -1814,9 +1814,11 @@ async fn get_session_returns_caller_identity_and_capabilities() {
         })
         .collect();
     assert_eq!(accept, expected.accept);
+    // The registry emits explicit canonical extensions (only the supported
+    // formats), not broad `image/*` wildcards that would admit unsupported ones.
     assert!(
-        accept.iter().any(|t| t == "image/*"),
-        "registry-derived accept must include the image wildcard: {accept:?}"
+        accept.iter().any(|t| t == ".png"),
+        "registry-derived accept must include an image extension: {accept:?}"
     );
     assert!(
         accept.iter().any(|t| t == ".pdf"),

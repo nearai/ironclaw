@@ -35,6 +35,15 @@ export function ChatInput({
   const [dragOver, setDragOver] = React.useState(false);
   const textareaRef = React.useRef(null);
   const fileInputRef = React.useRef(null);
+  // Mirror of `attachments` plus a serial promise, so overlapping addFiles()
+  // calls validate against the latest staged set rather than a stale snapshot
+  // (each stageFiles is async; without this two fast drops could both admit
+  // files past the per-message budget).
+  const attachmentsRef = React.useRef([]);
+  const stagingQueueRef = React.useRef(Promise.resolve());
+  React.useEffect(() => {
+    attachmentsRef.current = attachments;
+  }, [attachments]);
 
   // Debounce draft persistence: localStorage writes are synchronous and
   // disk-backed, so writing on every keystroke can add typing latency. We
@@ -108,19 +117,27 @@ export function ChatInput({
   // combined notice. `stageFiles` reads bytes to base64 off the main file
   // list, so this is async.
   const addFiles = React.useCallback(
-    async (files) => {
+    (files) => {
       if (!files || files.length === 0) return;
-      const { staged, errors } = await stageFiles(files, {
-        limits,
-        existing: attachments,
-        t,
+      // Chain on the staging queue so calls run one-at-a-time and each sees the
+      // attachments admitted by the previous one (via attachmentsRef).
+      stagingQueueRef.current = stagingQueueRef.current.then(async () => {
+        const { staged, errors } = await stageFiles(files, {
+          limits,
+          existing: attachmentsRef.current,
+          t,
+        });
+        if (staged.length > 0) {
+          setAttachments((prev) => {
+            const next = [...prev, ...staged];
+            attachmentsRef.current = next;
+            return next;
+          });
+        }
+        setAttachmentError(errors.length > 0 ? errors.join(" ") : "");
       });
-      if (staged.length > 0) {
-        setAttachments((prev) => [...prev, ...staged]);
-      }
-      setAttachmentError(errors.length > 0 ? errors.join(" ") : "");
     },
-    [attachments, limits, t]
+    [limits, t]
   );
 
   const removeAttachment = React.useCallback((id) => {

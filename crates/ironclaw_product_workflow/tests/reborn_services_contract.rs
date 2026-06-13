@@ -8141,8 +8141,11 @@ async fn get_timeline_returns_attachment_refs_on_the_user_message() {
     assert_eq!(attachment_ref.mime_type, "text/csv");
     assert_eq!(attachment_ref.filename.as_deref(), Some("data.csv"));
     assert!(
-        attachment_ref.storage_key.is_some(),
-        "timeline ref must carry a storage_key so the agent can re-read it later"
+        attachment_ref
+            .storage_key
+            .as_deref()
+            .is_some_and(|key| !key.is_empty()),
+        "timeline ref must carry a non-empty storage_key so the agent can re-read it later"
     );
 }
 

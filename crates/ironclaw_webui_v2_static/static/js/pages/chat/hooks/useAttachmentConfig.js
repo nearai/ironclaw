@@ -11,7 +11,11 @@ export function attachmentLimitsFromSession(session) {
   const a = session?.attachments;
   if (!a) return FALLBACK_ATTACHMENT_LIMITS;
   return {
-    accept: Array.isArray(a.accept) ? a.accept : FALLBACK_ATTACHMENT_LIMITS.accept,
+    // Keep only string tokens: a non-string would throw in `isAcceptedFile`'s
+    // `token.trim()` and break staging for the whole picker.
+    accept: Array.isArray(a.accept)
+      ? a.accept.filter((token) => typeof token === "string")
+      : FALLBACK_ATTACHMENT_LIMITS.accept,
     maxCount: Number.isFinite(a.max_count)
       ? a.max_count
       : FALLBACK_ATTACHMENT_LIMITS.maxCount,

@@ -414,12 +414,12 @@ async def test_reborn_v2_oversize_attachment_is_rejected(reborn_gateway_server):
     assert response.status_code in (400, 413, 422), response.text
 
 
-@pytest.mark.skip(
-    reason="Requires the webui-v2-beta SPA binary. Build with "
-    "`cargo build --features libsql,webui-v2-beta` and serve `/v2`."
-)
 async def test_reborn_v2_attachment_card_renders_and_survives_refresh(reborn_gateway_server, browser):
     """The SPA stages a file, renders its card in-thread, and keeps it after reload."""
+    # Skip only when the v2 SPA isn't mounted (runtime probe), like the sibling
+    # tests — never an unconditional skip. This test drives the reborn gateway
+    # fixture (not the default `page` fixture's server), so it owns its context.
+    await _require_v2(reborn_gateway_server)
     context = await browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
     try:
@@ -430,7 +430,7 @@ async def test_reborn_v2_attachment_card_renders_and_survives_refresh(reborn_gat
             files=[{"name": "notes.txt", "mimeType": "text/plain", "buffer": b"hello from a file"}],
         )
         await expect(page.get_by_text("notes.txt")).to_be_visible()
-        await page.locator("textarea").fill("look at the attached file")
+        await page.locator('[data-testid="chat-composer"]').fill("look at the attached file")
         await page.get_by_role("button", name="Send message").click()
 
         # The card renders in the thread bubble...
