@@ -79,7 +79,9 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     mut outbound_delivery_target_providers: Vec<Arc<dyn OutboundDeliveryTargetProvider>>,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
     let services = runtime.services();
-    if let Some(provider) = runtime.outbound_delivery_target_provider() {
+    if services.local_runtime.is_some()
+        && let Some(provider) = runtime.outbound_delivery_target_provider()
+    {
         outbound_delivery_target_providers.push(provider);
     }
 

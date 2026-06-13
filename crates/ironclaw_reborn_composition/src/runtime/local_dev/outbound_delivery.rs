@@ -25,8 +25,8 @@ const OUTBOUND_DELIVERY_TARGETS_LIST_PROVIDER_TOOL_NAME: &str =
     "builtin__outbound_delivery_targets_list";
 const OUTBOUND_DELIVERY_TARGET_SET_PROVIDER_TOOL_NAME: &str =
     "builtin__outbound_delivery_target_set";
-const OUTBOUND_DELIVERY_TARGETS_LIST_DESCRIPTION: &str = "List available outbound delivery targets for final replies and routine/trigger results, such as Slack DMs or Slack channels. Use before saying a delivery product is unavailable or asking the user to reconnect it.";
-const OUTBOUND_DELIVERY_TARGET_SET_DESCRIPTION: &str = "Set the current user's final-reply delivery target to an id returned by builtin__outbound_delivery_targets_list. Use only after the user asks to send replies or routine/trigger results through that product or channel.";
+const OUTBOUND_DELIVERY_TARGETS_LIST_DESCRIPTION: &str = "List available outbound delivery targets for final replies and routine/trigger results, such as Slack DMs or Slack channels. When the user asks to send routine or trigger results through Slack or another product/channel, call this before builtin__trigger_create and before saying a delivery product is unavailable or asking the user to reconnect it.";
+const OUTBOUND_DELIVERY_TARGET_SET_DESCRIPTION: &str = "Set the current user's final-reply delivery target to an id returned by builtin__outbound_delivery_targets_list. Use after the user asks to send replies or routine/trigger results through that product or channel, and before creating the routine or trigger.";
 
 pub(super) fn outbound_delivery_capabilities(
     facade: Arc<dyn OutboundPreferencesProductFacade>,
