@@ -1596,10 +1596,16 @@ fn completed_outcome_from(
 /// Returns the required secrets and OAuth credential requirements declared in
 /// the capability descriptor.
 ///
-/// This is the **single source of truth** for what credentials a capability
-/// needs. Both the pre-flight credential presence check (before the approval
-/// gate) and the dispatch-time obligation check call this function —
-/// callers must not recompute the requirement set independently.
+/// This is the canonical extraction used by the **pre-flight credential
+/// presence check** (before the approval gate). The dispatch-time obligation
+/// check remains the enforcement backstop; it derives the same handles through
+/// the obligation-handler iteration over `descriptor.runtime_credentials`
+/// (same source, different code path — both iterate `required == true` entries).
+/// The two paths agree on which handles are required; the pre-flight additionally
+/// computes `credential_requirements` for the auth-gate payload.
+///
+/// Callers outside the pre-flight check must not recompute the requirement set
+/// independently — call this function instead.
 ///
 /// Only entries with `required == true` are included.
 pub fn capability_credential_requirements(
