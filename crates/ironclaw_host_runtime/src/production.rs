@@ -622,6 +622,13 @@ impl HostRuntime for DefaultHostRuntime {
                 runtime_policy_error_kind = error.kind(),
                 "capability runtime policy rejected auth-resume before dispatch"
             );
+            self.fail_matching_blocked_auth_resume_on_preflight_error(
+                &context,
+                &capability_id,
+                approval_request_id,
+                error.kind(),
+            )
+            .await;
             return Ok(runtime_policy_failure(capability_id, error));
         }
 
@@ -633,6 +640,13 @@ impl HostRuntime for DefaultHostRuntime {
                     trust_error_kind = error.kind(),
                     "capability trust evaluation failed before auth-resume"
                 );
+                self.fail_matching_blocked_auth_resume_on_preflight_error(
+                    &context,
+                    &capability_id,
+                    approval_request_id,
+                    error.kind(),
+                )
+                .await;
                 return Ok(trust_evaluation_failure(capability_id, error));
             }
         };
@@ -1212,6 +1226,61 @@ impl DefaultHostRuntime {
                 preflight_error_kind = error_kind,
                 transition_error = %unavailable_from_run_state(error),
                 "blocked resume preflight failed, but run-state fail transition failed; original failure is returned to caller",
+            );
+        }
+    }
+
+    /// Mirrors `fail_matching_blocked_resume_on_preflight_error` for
+    /// `auth_resume_capability` preflight rejections.  Checks for a
+    /// `BlockedAuth` run record matching the capability and optional
+    /// `approval_request_id`; if found, transitions it to `Failed` so
+    /// it is not left as a stale resumable gate after the caller has
+    /// returned a terminal failure outcome.
+    async fn fail_matching_blocked_auth_resume_on_preflight_error(
+        &self,
+        context: &ironclaw_host_api::ExecutionContext,
+        capability_id: &CapabilityId,
+        approval_request_id: Option<ApprovalRequestId>,
+        error_kind: &'static str,
+    ) {
+        if context.validate().is_err() {
+            return;
+        }
+        let Some(run_state) = self.run_state.as_ref() else {
+            return;
+        };
+        let scope = &context.resource_scope;
+        let invocation_id = context.invocation_id;
+        let record = match run_state.get(scope, invocation_id).await {
+            Ok(Some(record)) => record,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(
+                    invocation_id = %invocation_id,
+                    capability_id = %capability_id,
+                    preflight_error_kind = error_kind,
+                    transition_error = %unavailable_from_run_state(error),
+                    "blocked auth-resume preflight failed, but run-state lookup failed; leaving run state unchanged",
+                );
+                return;
+            }
+        };
+        if record.status != RunStatus::BlockedAuth
+            || &record.capability_id != capability_id
+            || record.approval_request_id != approval_request_id
+        {
+            return;
+        }
+        if let Err(error) = run_state
+            .fail(scope, invocation_id, error_kind.to_string())
+            .await
+        {
+            tracing::warn!(
+                invocation_id = %invocation_id,
+                capability_id = %capability_id,
+                preflight_error_kind = error_kind,
+                transition_error = %unavailable_from_run_state(error),
+                "blocked auth-resume preflight failed, but run-state fail transition failed; original failure is returned to caller",
             );
         }
     }

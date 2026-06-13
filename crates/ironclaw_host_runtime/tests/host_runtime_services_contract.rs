@@ -44,10 +44,10 @@ use ironclaw_host_runtime::{
     BuiltinObligationHandler, BuiltinObligationServices, CancelReason, CancelRuntimeWorkRequest,
     CapabilitySurfaceVersion, CommandExecutionOutput, CommandExecutionRequest, DefaultHostRuntime,
     HostRuntime, HostRuntimeServices, ProcessObligationLifecycleStore, ProductionWiringComponent,
-    ProductionWiringConfig, ProductionWiringIssueKind, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind,
-    RuntimeProcessError, RuntimeProcessPort, RuntimeStatusRequest, RuntimeWorkId,
-    SandboxCommandTransport, TenantSandboxProcessPort, builtin_first_party_handlers,
+    ProductionWiringConfig, ProductionWiringIssueKind, RuntimeCapabilityAuthResumeRequest,
+    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
+    RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort, RuntimeStatusRequest,
+    RuntimeWorkId, SandboxCommandTransport, TenantSandboxProcessPort, builtin_first_party_handlers,
     builtin_first_party_package,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutionResult, McpExecutor};
@@ -3011,6 +3011,123 @@ async fn host_runtime_services_resume_runtime_policy_denial_fails_matching_block
         "runtime-policy preflight failure must not claim or consume the approval lease"
     );
     assert!(fixture.events.events().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// FIX 3: auth-resume preflight rejection must fail the BlockedAuth run record
+//
+// Before the fix, `auth_resume_capability` returned a terminal failure outcome
+// on preflight errors (policy/trust) WITHOUT transitioning the BlockedAuth run
+// to Failed — leaving a stale resumable gate after the caller saw a terminal
+// failure.  The approval-resume path (`resume_capability`) already called
+// `fail_matching_blocked_resume_on_preflight_error`.  This test verifies the
+// equivalent now exists for auth-resume.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn host_runtime_services_auth_resume_trust_preflight_failure_fails_blocked_auth_run() {
+    // Setup: use the standard fixture so we get a real run_state/approval_requests.
+    let fixture = approval_resume_fixture();
+    let _runtime = fixture.services.host_runtime_for_local_testing();
+    let context = execution_context_without_grants();
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "auth-resume preflight fix"});
+
+    // Put the run in BlockedAuth directly (mirrors what happens after approval →
+    // resume_json auth bounce: run is BlockedAuth).
+    fixture
+        .run_state
+        .start(RunStart {
+            invocation_id,
+            scope: scope.clone(),
+            capability_id: script_capability_id(),
+        })
+        .await
+        .unwrap();
+    fixture
+        .run_state
+        .block_auth(&scope, invocation_id, "AuthRequired".to_string())
+        .await
+        .unwrap();
+
+    let run = fixture
+        .run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        run.status,
+        RunStatus::BlockedAuth,
+        "pre-condition: run must be BlockedAuth"
+    );
+
+    // Build a broken runtime (empty extension registry → trust preflight fails).
+    let broken_runtime = resume_runtime_with_empty_registry(&fixture);
+
+    // Wrong-scope call: preflight fails with wrong scope, must NOT fail the
+    // matching BlockedAuth run (different scope = different invocation).
+    let wrong_scope = ResourceScope {
+        user_id: UserId::new("other-user").unwrap(),
+        ..scope.clone()
+    };
+    let wrong_context = execution_context_without_grants_for_scope(wrong_scope);
+    let wrong_outcome = broken_runtime
+        .auth_resume_capability(RuntimeCapabilityAuthResumeRequest::new(
+            wrong_context,
+            script_capability_id(),
+            estimate.clone(),
+            input.clone(),
+            trust_decision_with_dispatch_authority(),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_failed_outcome(wrong_outcome, RuntimeFailureKind::MissingRuntime);
+
+    // Matching run must still be BlockedAuth (wrong scope → guard skips it).
+    let run_after_wrong = fixture
+        .run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        run_after_wrong.status,
+        RunStatus::BlockedAuth,
+        "wrong-scope preflight failure must not affect the matching BlockedAuth run"
+    );
+
+    // Matching-scope call: preflight fails → must transition the BlockedAuth run to Failed.
+    // Pre-fix: the run was left as stale BlockedAuth because
+    // fail_matching_blocked_auth_resume_on_preflight_error was not called.
+    let matching_outcome = broken_runtime
+        .auth_resume_capability(RuntimeCapabilityAuthResumeRequest::new(
+            context.clone(),
+            script_capability_id(),
+            estimate.clone(),
+            input.clone(),
+            trust_decision_with_dispatch_authority(),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_failed_outcome(matching_outcome, RuntimeFailureKind::MissingRuntime);
+
+    let failed_run = fixture
+        .run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        failed_run.status,
+        RunStatus::Failed,
+        "matching-scope auth-resume preflight failure must transition BlockedAuth run to Failed \
+         (pre-fix: run was left as stale BlockedAuth)"
+    );
 }
 
 #[tokio::test]
