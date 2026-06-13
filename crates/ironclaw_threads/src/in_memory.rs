@@ -147,6 +147,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         let sequence = thread.next_sequence;
         thread.next_sequence += 1;
         let (content_text, attachments) = request.content.into_parts();
+        crate::contract::validate_attachment_refs(&attachments)?;
         thread.messages.push(ThreadMessageRecord {
             message_id,
             thread_id: request.thread_id.clone(),
@@ -464,6 +465,10 @@ impl SessionThreadService for InMemorySessionThreadService {
         )?;
         ensure_draft(message)?;
         message.content = Some(request.content.into_text());
+        // Keep content and attachments in lockstep (as redaction does): an
+        // assistant draft carries no attachments, so a content update must not
+        // leave stale refs behind if a future draft path ever sets them.
+        message.attachments = Vec::new();
         Ok(message.clone())
     }
 
@@ -479,6 +484,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         ensure_draft(message)?;
         message.status = MessageStatus::Finalized;
         message.content = Some(content.into_text());
+        message.attachments = Vec::new();
         Ok(message.clone())
     }
 

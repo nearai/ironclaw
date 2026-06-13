@@ -2583,3 +2583,49 @@ async fn accept_inbound_message_carries_attachment_refs_through_history() {
     assert!(after.messages[0].content.is_none());
     assert!(after.messages[0].attachments.is_empty());
 }
+
+#[tokio::test]
+async fn accept_inbound_message_rejects_oversized_extracted_text() {
+    // Drive the real accept caller (not just the validator) with an attachment
+    // whose extracted_text exceeds the contract cap, and assert nothing was
+    // persisted on rejection.
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("att-oversize");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-att-oversize").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let mut oversized = sample_attachment_ref();
+    // 200_001 chars — one past MAX_EXTRACTED_TEXT_CHARS (kept crate-internal, so
+    // assert the boundary by size rather than importing the constant).
+    oversized.extracted_text = Some("x".repeat(200_001));
+    let err = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: Some("event-att-oversize".into()),
+            content: MessageContent::with_attachments("huge", vec![oversized]),
+        })
+        .await
+        .expect_err("oversized extracted_text must be rejected at accept");
+    assert!(matches!(err, SessionThreadError::InvalidAttachment(_)));
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert!(history.messages.is_empty());
+}

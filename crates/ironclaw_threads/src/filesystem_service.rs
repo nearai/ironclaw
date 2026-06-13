@@ -753,6 +753,7 @@ where
         // rather than deep-cloned on this per-message hot path.
         let idempotency_key = InboundIdempotencyKey::from_request(&request);
         let (content_text, attachments) = request.content.into_parts();
+        crate::contract::validate_attachment_refs(&attachments)?;
         let message = ThreadMessageRecord {
             message_id,
             thread_id: request.thread_id.clone(),
@@ -1200,6 +1201,9 @@ where
             |message| {
                 ensure_draft(message)?;
                 message.content = Some(request.content.clone().into_text());
+                // Keep content and attachments in lockstep (as redaction does):
+                // a content update must not leave stale attachment refs behind.
+                message.attachments = Vec::new();
                 Ok(())
             },
         )
@@ -1222,6 +1226,7 @@ where
             ensure_draft(message)?;
             message.status = MessageStatus::Finalized;
             message.content = Some(content.clone().into_text());
+            message.attachments = Vec::new();
             Ok(())
         })
         .await

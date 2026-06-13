@@ -1272,3 +1272,57 @@ async fn filesystem_persists_multiple_attachment_refs_in_order() {
     assert_eq!(history.messages.len(), 1);
     assert_eq!(history.messages[0].attachments, attachments);
 }
+
+#[tokio::test]
+async fn filesystem_accept_rejects_duplicate_attachment_ids() {
+    // The accept path validates attachment refs before persisting. Drive the
+    // real caller (not just the helper) so a regression that drops the check
+    // would fail here, and assert nothing was written on rejection.
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-dup-att", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let scope = scope("dup-attachments");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-dup-att").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let dup = AttachmentRef {
+        id: "att-dup".into(),
+        kind: AttachmentKind::Image,
+        mime_type: "image/png".into(),
+        filename: Some("diagram.png".into()),
+        size_bytes: Some(4096),
+        storage_key: Some("attachments/2026-06-09/m1-0-diagram.png".into()),
+        extracted_text: None,
+    };
+    let err = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: Some("event-dup-att".into()),
+            content: MessageContent::with_attachments("two refs, one id", vec![dup.clone(), dup]),
+        })
+        .await
+        .expect_err("duplicate attachment ids must be rejected at accept");
+    assert!(matches!(err, SessionThreadError::InvalidAttachment(_)));
+
+    // Rejection must not leave a half-written message behind.
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert!(history.messages.is_empty());
+}

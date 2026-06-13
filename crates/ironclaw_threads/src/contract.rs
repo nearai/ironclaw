@@ -136,6 +136,44 @@ impl MessageContent {
     }
 }
 
+/// Upper bound on a single attachment's `extracted_text` accepted at the
+/// transcript boundary.
+///
+/// Extraction caps text upstream (~100K chars); this is a generous defensive
+/// ceiling so a misbehaving producer cannot persist an unbounded blob that is
+/// then pulled inline on every message load. The contract rejects loudly at
+/// this layer rather than silently truncating.
+pub(crate) const MAX_EXTRACTED_TEXT_CHARS: usize = 200_000;
+
+/// Validate the attachment references on an inbound message before they are
+/// persisted. Enforces the invariants the doc comments promise but the plain
+/// `String`/`Vec` shapes cannot: ids are unique within the message (so
+/// per-attachment lookup/update/delete is unambiguous) and `extracted_text` is
+/// bounded ([`MAX_EXTRACTED_TEXT_CHARS`]).
+pub(crate) fn validate_attachment_refs(
+    attachments: &[AttachmentRef],
+) -> Result<(), crate::error::SessionThreadError> {
+    let mut seen = std::collections::HashSet::with_capacity(attachments.len());
+    for attachment in attachments {
+        if !seen.insert(attachment.id.as_str()) {
+            return Err(crate::error::SessionThreadError::InvalidAttachment(
+                format!("duplicate attachment id {:?} in one message", attachment.id),
+            ));
+        }
+        if let Some(text) = &attachment.extracted_text
+            && text.chars().count() > MAX_EXTRACTED_TEXT_CHARS
+        {
+            return Err(crate::error::SessionThreadError::InvalidAttachment(
+                format!(
+                    "attachment {:?} extracted_text exceeds {MAX_EXTRACTED_TEXT_CHARS} chars",
+                    attachment.id
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Canonical kind of a transcript message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -524,6 +562,42 @@ mod tests {
         let (text, attachments) = content.into_parts();
         assert_eq!(text, "see attached");
         assert_eq!(attachments, vec![sample_ref()]);
+    }
+
+    #[test]
+    fn validate_attachment_refs_accepts_distinct_ids() {
+        let mut second = sample_ref();
+        second.id = "att-2".to_string();
+        assert!(validate_attachment_refs(&[sample_ref(), second]).is_ok());
+    }
+
+    #[test]
+    fn validate_attachment_refs_rejects_duplicate_ids() {
+        let err = validate_attachment_refs(&[sample_ref(), sample_ref()])
+            .expect_err("duplicate attachment ids must be rejected");
+        assert!(matches!(
+            err,
+            crate::error::SessionThreadError::InvalidAttachment(_)
+        ));
+    }
+
+    #[test]
+    fn validate_attachment_refs_rejects_oversized_extracted_text() {
+        let mut oversized = sample_ref();
+        oversized.extracted_text = Some("x".repeat(MAX_EXTRACTED_TEXT_CHARS + 1));
+        let err = validate_attachment_refs(&[oversized])
+            .expect_err("extracted_text past the cap must be rejected");
+        assert!(matches!(
+            err,
+            crate::error::SessionThreadError::InvalidAttachment(_)
+        ));
+    }
+
+    #[test]
+    fn validate_attachment_refs_accepts_extracted_text_at_cap() {
+        let mut at_cap = sample_ref();
+        at_cap.extracted_text = Some("x".repeat(MAX_EXTRACTED_TEXT_CHARS));
+        assert!(validate_attachment_refs(&[at_cap]).is_ok());
     }
 
     #[test]

@@ -46,6 +46,8 @@ pub enum SessionThreadError {
         start_sequence: u64,
         end_sequence: u64,
     },
+    #[error("invalid attachment on inbound message: {0}")]
+    InvalidAttachment(String),
     #[error("failed to create generated thread id: {0}")]
     GeneratedThreadId(String),
     #[error("serialization error: {0}")]
