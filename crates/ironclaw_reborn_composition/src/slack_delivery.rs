@@ -66,9 +66,6 @@ const SLACK_DELIVERY_ERROR_MESSAGE: &str =
 /// Posted when the blocking run is `BlockedApproval` and no gate_ref is available.
 const SLACK_DEFERRED_BUSY_APPROVAL_MESSAGE: &str = "Ironclaw is waiting on a pending approval before taking new messages — reply `approve` or `deny` (or `approve gate:<ref>`) to resume.";
 /// Posted for any other non-terminal blocking state, or when the state lookup fails.
-///
-/// Honest copy: no queue yet — deferred-message drain ships in a separate PR (#4812).
-/// Revisit this wording once #4812 lands and automatic retry is available.
 const SLACK_DEFERRED_BUSY_GENERIC_MESSAGE: &str = "Ironclaw is still working on a previous message and can't take this one yet — please resend it once the current task finishes.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]

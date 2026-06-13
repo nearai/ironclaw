@@ -1454,6 +1454,18 @@ mod tests {
             ))
         }
 
+        async fn mark_message_rejected_busy(
+            &self,
+            _scope: &ThreadScope,
+            _thread_id: &ThreadId,
+            _message_id: ironclaw_threads::ThreadMessageId,
+        ) -> Result<ironclaw_threads::ThreadMessageRecord, ironclaw_threads::SessionThreadError>
+        {
+            Err(ironclaw_threads::SessionThreadError::Backend(
+                "not used".to_string(),
+            ))
+        }
+
         async fn append_assistant_draft(
             &self,
             _request: AppendAssistantDraftRequest,

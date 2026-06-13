@@ -1182,6 +1182,253 @@ async fn send_message_path_overrides_body_thread_id() {
     );
 }
 
+// Regression: RejectedBusy must round-trip as {"outcome":"rejected_busy","notice":"..."} on the
+// POST /messages wire. Per `.claude/rules/testing.md` "Test Through the Caller", the serde tag
+// sits between the axum handler and the browser — only a caller-level test catches a missing
+// variant or a broken tag.
+#[tokio::test]
+async fn send_message_rejected_busy_wire_shape() {
+    struct RejectedBusyServices;
+
+    #[async_trait]
+    impl RebornServicesApi for RejectedBusyServices {
+        async fn create_thread(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _request: WebUiCreateThreadRequest,
+        ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn submit_turn(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _request: WebUiSendMessageRequest,
+        ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
+            Ok(RebornSubmitTurnResponse::RejectedBusy {
+                thread_id: ThreadId::new("thread-alpha").expect("thread id"),
+                accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("msg:fake")
+                    .expect("ref"),
+                active_run_id: TurnRunId::new(),
+                status: TurnStatus::BlockedApproval,
+                event_cursor: EventCursor(1),
+                notice: "An approval gate is open on this thread — resolve it (approve or deny) before continuing, then resend your message.".to_string(),
+            })
+        }
+
+        async fn delete_thread(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _request: RebornDeleteThreadRequest,
+        ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn get_timeline(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _request: RebornTimelineRequest,
+        ) -> Result<RebornTimelineResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn stream_events(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _request: RebornStreamEventsRequest,
+        ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn cancel_run(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _request: WebUiCancelRunRequest,
+        ) -> Result<RebornCancelRunResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn resolve_gate(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _request: WebUiResolveGateRequest,
+        ) -> Result<RebornResolveGateResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn get_run_state(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _request: RebornGetRunStateRequest,
+        ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn list_threads(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _request: WebUiListThreadsRequest,
+        ) -> Result<RebornListThreadsResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn list_automations(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _request: WebUiListAutomationsRequest,
+        ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn get_outbound_preferences(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+        ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn set_outbound_preferences(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _request: RebornSetOutboundPreferencesRequest,
+        ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn list_outbound_delivery_targets(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+        ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn list_extensions(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+        ) -> Result<RebornExtensionListResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn list_skills(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+        ) -> Result<RebornSkillListResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn search_skills(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _query: String,
+        ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn install_skill(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _name: String,
+            _content: Option<String>,
+        ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn read_skill_content(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _name: String,
+        ) -> Result<RebornSkillContentResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn update_skill(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _name: String,
+            _content: String,
+        ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn remove_skill(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _name: String,
+        ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn list_extension_registry(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+        ) -> Result<RebornExtensionRegistryResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn install_extension(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _package_ref: LifecyclePackageRef,
+        ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn activate_extension(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _package_ref: LifecyclePackageRef,
+        ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn remove_extension(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _package_ref: LifecyclePackageRef,
+        ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn setup_extension(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _package_ref: LifecyclePackageRef,
+            _request: WebUiSetupExtensionRequest,
+        ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+    }
+
+    let services: Arc<dyn RebornServicesApi> = Arc::new(RejectedBusyServices);
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/threads/thread-alpha/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"content":"hello"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(
+        body["outcome"], "rejected_busy",
+        "RejectedBusy must serialize with outcome tag 'rejected_busy'"
+    );
+    assert!(
+        body["notice"]
+            .as_str()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
+        "RejectedBusy must include a non-empty 'notice' field"
+    );
+}
+
 #[tokio::test]
 async fn get_timeline_threads_path_into_request() {
     let services = Arc::new(StubServices::default());

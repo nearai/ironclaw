@@ -2359,7 +2359,7 @@ async fn before_inbound_policy_does_not_block_staged_deferred_retry() {
     policy.allow();
     let accepted_message_ref = AcceptedMessageRef::new("msg:policy-busy").expect("valid msg ref");
     let busy_run = TurnRunId::new();
-    inbound.program_outcome(InboundTurnOutcome::DeferredBusy {
+    inbound.program_outcome(InboundTurnOutcome::RejectedBusy {
         accepted_message_ref: accepted_message_ref.clone(),
         active_run_id: busy_run,
         binding: fake_binding(),
@@ -2593,7 +2593,7 @@ async fn fake_inbound_turn_service_replays_programmed_outcomes_in_order() {
     let first_run = TurnRunId::new();
     let second_run = TurnRunId::new();
     inbound.program_replay_outcomes([
-        InboundTurnOutcome::DeferredBusy {
+        InboundTurnOutcome::RejectedBusy {
             accepted_message_ref: AcceptedMessageRef::new("msg:first").expect("valid"),
             active_run_id: first_run,
             binding: fake_binding(),
@@ -2612,7 +2612,7 @@ async fn fake_inbound_turn_service_replays_programmed_outcomes_in_order() {
         .expect("first programmed outcome");
     assert!(matches!(
         first,
-        InboundTurnOutcome::DeferredBusy { active_run_id, .. } if active_run_id == first_run
+        InboundTurnOutcome::RejectedBusy { active_run_id, .. } if active_run_id == first_run
     ));
     let second = inbound
         .replay_accepted_user_message(&envelope)
@@ -5648,7 +5648,7 @@ async fn deferred_busy_is_not_settled_and_retry_can_submit_same_message() {
     let (workflow, inbound, ledger) = build_workflow();
     let accepted_message_ref = AcceptedMessageRef::new("msg:busy-retry").expect("valid msg ref");
     let busy_run = TurnRunId::new();
-    inbound.program_outcome(InboundTurnOutcome::DeferredBusy {
+    inbound.program_outcome(InboundTurnOutcome::RejectedBusy {
         accepted_message_ref: accepted_message_ref.clone(),
         active_run_id: busy_run,
         binding: fake_binding(),

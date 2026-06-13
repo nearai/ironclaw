@@ -50,6 +50,13 @@ pub trait SessionThreadService: Send + Sync {
         message_id: ThreadMessageId,
     ) -> Result<ThreadMessageRecord, SessionThreadError>;
 
+    async fn mark_message_rejected_busy(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+    ) -> Result<ThreadMessageRecord, SessionThreadError>;
+
     async fn append_assistant_draft(
         &self,
         request: AppendAssistantDraftRequest,
@@ -311,6 +318,17 @@ where
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         self.as_ref()
             .mark_message_deferred_busy(scope, thread_id, message_id)
+            .await
+    }
+
+    async fn mark_message_rejected_busy(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.as_ref()
+            .mark_message_rejected_busy(scope, thread_id, message_id)
             .await
     }
 

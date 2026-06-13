@@ -863,6 +863,48 @@ async fn busy_message_is_visible_deferred_and_not_tied_to_a_run() {
 }
 
 #[tokio::test]
+async fn rejected_busy_marks_message_with_rejected_status() {
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("a"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("arrived while busy"),
+        })
+        .await
+        .unwrap();
+
+    service
+        .mark_message_rejected_busy(&scope("a"), &thread.thread_id, accepted.message_id)
+        .await
+        .unwrap();
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.messages[0].status, MessageStatus::RejectedBusy);
+    assert!(history.messages[0].turn_run_id.is_none());
+}
+
+#[tokio::test]
 async fn deferred_busy_rejects_non_user_and_non_accepted_messages() {
     let service = InMemorySessionThreadService::default();
     let thread = service

@@ -76,8 +76,9 @@ pub enum InboundTurnOutcome {
         binding: ResolvedBinding,
     },
     /// Turn submission was busy (thread already has an active run). The message
-    /// was accepted but deferred.
-    DeferredBusy {
+    /// was recorded as RejectedBusy — it will NOT be auto-resubmitted; the user
+    /// must resend once the current task finishes.
+    RejectedBusy {
         accepted_message_ref: AcceptedMessageRef,
         active_run_id: TurnRunId,
         binding: ResolvedBinding,
@@ -96,7 +97,7 @@ impl InboundTurnOutcome {
                 accepted_message_ref: accepted_message_ref.clone(),
                 submitted_run_id: *submitted_run_id,
             },
-            Self::DeferredBusy {
+            Self::RejectedBusy {
                 accepted_message_ref,
                 active_run_id,
                 ..
@@ -487,7 +488,7 @@ impl ProductInboundTurnHandoff {
 
         if !matches!(
             replay.status,
-            MessageStatus::Accepted | MessageStatus::DeferredBusy
+            MessageStatus::Accepted | MessageStatus::DeferredBusy | MessageStatus::RejectedBusy
         ) {
             return Err(ProductWorkflowError::TurnSubmissionRejected {
                 reason: format!(
@@ -647,12 +648,12 @@ impl AcceptedProductInboundTurn {
             }
             Err(TurnError::ThreadBusy(busy)) => {
                 thread_service
-                    .mark_message_deferred_busy(&thread_scope, &binding.thread_id, message_id)
+                    .mark_message_rejected_busy(&thread_scope, &binding.thread_id, message_id)
                     .await
                     .map_err(|e| ProductWorkflowError::Transient {
-                        reason: format!("failed to mark message deferred: {e}"),
+                        reason: format!("failed to mark message rejected: {e}"),
                     })?;
-                Ok(InboundTurnOutcome::DeferredBusy {
+                Ok(InboundTurnOutcome::RejectedBusy {
                     accepted_message_ref,
                     active_run_id: busy.active_run_id,
                     binding,
@@ -851,7 +852,7 @@ mod tests {
         let handoff = ProductInboundTurnHandoff::from_replay(
             replay(
                 message_id,
-                MessageStatus::DeferredBusy,
+                MessageStatus::RejectedBusy,
                 Some("src:alpha"),
                 Some("reply:alpha"),
                 None,

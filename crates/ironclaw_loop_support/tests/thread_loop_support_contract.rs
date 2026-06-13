@@ -3964,6 +3964,17 @@ impl SessionThreadService for GatedFinalizeThreadService {
             .await
     }
 
+    async fn mark_message_rejected_busy(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.inner
+            .mark_message_rejected_busy(scope, thread_id, message_id)
+            .await
+    }
+
     async fn append_assistant_draft(
         &self,
         request: AppendAssistantDraftRequest,
@@ -4141,6 +4152,15 @@ impl SessionThreadService for StaticContextThreadService {
         _message_id: ThreadMessageId,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         panic!("static context service does not defer messages")
+    }
+
+    async fn mark_message_rejected_busy(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("static context service does not reject messages")
     }
 
     async fn append_assistant_draft(

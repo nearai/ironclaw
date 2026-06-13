@@ -545,6 +545,7 @@ fn classify_compaction_message(
     if matches!(
         status,
         MessageStatus::DeferredBusy
+            | MessageStatus::RejectedBusy
             | MessageStatus::Draft
             | MessageStatus::Interrupted
             | MessageStatus::Superseded

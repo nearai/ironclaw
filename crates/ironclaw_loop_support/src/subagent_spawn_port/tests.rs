@@ -706,6 +706,17 @@ impl SessionThreadService for FailingMarkThreadService {
             .await
     }
 
+    async fn mark_message_rejected_busy(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.inner
+            .mark_message_rejected_busy(scope, thread_id, message_id)
+            .await
+    }
+
     async fn append_assistant_draft(
         &self,
         request: AppendAssistantDraftRequest,

@@ -220,12 +220,13 @@ pub enum RebornSubmitTurnResponse {
         resolved_run_profile_version: u64,
         event_cursor: EventCursor,
     },
-    DeferredBusy {
+    RejectedBusy {
         thread_id: ThreadId,
         accepted_message_ref: AcceptedMessageRef,
         active_run_id: TurnRunId,
         status: TurnStatus,
         event_cursor: EventCursor,
+        notice: String,
     },
     AlreadySubmitted {
         thread_id: ThreadId,

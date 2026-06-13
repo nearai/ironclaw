@@ -3024,7 +3024,7 @@ mod tests {
     use ironclaw_skills::SkillTrust;
     use ironclaw_threads::{
         AppendToolResultReferenceRequest, EnsureThreadRequest, LoadContextMessagesRequest,
-        MessageKind, ThreadHistoryRequest, ThreadScope, ToolResultSafeSummary,
+        MessageKind, MessageStatus, ThreadHistoryRequest, ThreadScope, ToolResultSafeSummary,
     };
     use ironclaw_turns::{
         AcceptedMessageRef, AllowAllTurnAdmissionPolicy, BlockedReason, GetRunStateRequest,
@@ -6826,6 +6826,201 @@ mod tests {
             reply.text,
         );
         assert_eq!(reply.text.as_deref(), Some("multi-tool surface-change ok"));
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    /// Regression guard: a message that arrives while the thread is busy is stored with
+    /// `RejectedBusy` status and must NOT be auto-resubmitted when the blocking run
+    /// reaches a terminal state.
+    ///
+    /// Scenario:
+    ///  A – submitted via `turn_coordinator.submit_turn`; worker is stopped so it stays
+    ///      Queued and holds the active-lock.
+    ///  B – submitted via `bundle.api.submit_turn` (WebUI path); thread is busy → stored
+    ///      as `RejectedBusy`; response carries a non-empty `notice`.
+    ///  Cancel A → B stays `RejectedBusy` (no auto-resubmission).
+    ///  C – submitted after A is cancelled; thread is free → `Submitted`.
+    #[tokio::test]
+    async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "busy-drain ok".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-rejected-busy-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-rejected-busy-tenant".to_string(),
+            agent_id: "runtime-rejected-busy-agent".to_string(),
+            source_binding_id: "runtime-rejected-busy-source".to_string(),
+            reply_target_binding_id: "runtime-rejected-busy-reply".to_string(),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        // Stop the worker so run A stays Queued and holds the thread active-lock.
+        stop_turn_runner_worker_for_manual_state_test(&runtime).await;
+
+        let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new("runtime-rejected-busy-tenant").unwrap(),
+            UserId::new("runtime-rejected-busy-owner").unwrap(),
+            Some(AgentId::new("runtime-rejected-busy-agent").unwrap()),
+            None,
+        );
+
+        // Create the thread via WebUI so the thread record exists.
+        let created = bundle
+            .api
+            .create_thread(
+                caller.clone(),
+                WebUiCreateThreadRequest {
+                    client_action_id: Some("create-rejected-busy-thread".to_string()),
+                    requested_thread_id: None,
+                },
+            )
+            .await
+            .expect("create thread");
+        let thread_id = created.thread.thread_id.clone();
+
+        // Submit message A directly so we hold the active-lock (worker is stopped,
+        // so the run stays Queued indefinitely).
+        let scope = caller.turn_scope(thread_id.clone());
+        let actor = caller.actor();
+        let submitted_a = runtime
+            .turn_coordinator
+            .submit_turn(SubmitTurnRequest {
+                scope: scope.clone(),
+                actor: actor.clone(),
+                accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy-a").unwrap(),
+                source_binding_ref: SourceBindingRef::new("source:rejected-busy-a").unwrap(),
+                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:rejected-busy-a")
+                    .unwrap(),
+                requested_run_profile: None,
+                idempotency_key: IdempotencyKey::new("rejected-busy-a").unwrap(),
+                received_at: Utc::now(),
+                requested_run_id: None,
+                parent_run_id: None,
+                subagent_depth: 0,
+                spawn_tree_root_run_id: None,
+            })
+            .await
+            .expect("message A submitted");
+        let SubmitTurnResponse::Accepted {
+            run_id: run_id_a, ..
+        } = submitted_a;
+
+        // Submit message B through the WebUI path — thread is busy, must get RejectedBusy.
+        let response_b = bundle
+            .api
+            .submit_turn(
+                caller.clone(),
+                WebUiSendMessageRequest {
+                    client_action_id: Some("send-rejected-busy-b".to_string()),
+                    thread_id: Some(thread_id.to_string()),
+                    content: Some("message B while thread is busy".to_string()),
+                },
+            )
+            .await
+            .expect("message B submit should not error");
+
+        let RebornSubmitTurnResponse::RejectedBusy {
+            notice: notice_b,
+            active_run_id: busy_run_id,
+            ..
+        } = response_b
+        else {
+            panic!("expected RejectedBusy for message B, got {response_b:?}");
+        };
+        assert_eq!(
+            busy_run_id, run_id_a,
+            "RejectedBusy should report run A as the active run"
+        );
+        assert!(
+            !notice_b.is_empty(),
+            "RejectedBusy response must carry a non-empty notice"
+        );
+
+        // Verify message B is stored with RejectedBusy status.
+        let history = runtime
+            .thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: runtime.thread_scope.clone(),
+                thread_id: thread_id.clone(),
+            })
+            .await
+            .expect("thread history after B");
+        let rejected_messages: Vec<_> = history
+            .messages
+            .iter()
+            .filter(|m| matches!(m.status, MessageStatus::RejectedBusy))
+            .collect();
+        assert_eq!(
+            rejected_messages.len(),
+            1,
+            "exactly one message should be stored as RejectedBusy after thread-busy submit"
+        );
+        assert_eq!(
+            rejected_messages[0].kind,
+            MessageKind::User,
+            "the RejectedBusy message must be of kind User"
+        );
+
+        // Cancel run A — this is the terminal event that (must NOT) auto-resubmit B.
+        runtime
+            .cancel_run(
+                &scope,
+                run_id_a,
+                SanitizedCancelReason::UserRequested,
+                "rejected-busy-cancel-a",
+            )
+            .await
+            .expect("run A cancellation succeeds");
+
+        // B must remain RejectedBusy — no auto-resubmission should have fired.
+        let history_after_cancel = runtime
+            .thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: runtime.thread_scope.clone(),
+                thread_id: thread_id.clone(),
+            })
+            .await
+            .expect("thread history after cancel");
+        let rejected_after_cancel: Vec<_> = history_after_cancel
+            .messages
+            .iter()
+            .filter(|m| matches!(m.status, MessageStatus::RejectedBusy))
+            .collect();
+        assert_eq!(
+            rejected_after_cancel.len(),
+            1,
+            "message B must remain RejectedBusy after run A is cancelled — no auto-resubmission"
+        );
+
+        // Submit message C — thread is free again, must be Submitted.
+        let response_c = bundle
+            .api
+            .submit_turn(
+                caller.clone(),
+                WebUiSendMessageRequest {
+                    client_action_id: Some("send-rejected-busy-c".to_string()),
+                    thread_id: Some(thread_id.to_string()),
+                    content: Some("message C after thread is free".to_string()),
+                },
+            )
+            .await
+            .expect("message C submit should not error");
+
+        assert!(
+            matches!(response_c, RebornSubmitTurnResponse::Submitted { .. }),
+            "message C must be accepted after run A is cancelled, got {response_c:?}"
+        );
 
         runtime.shutdown().await.expect("runtime shutdown");
     }

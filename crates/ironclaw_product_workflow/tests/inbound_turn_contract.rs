@@ -1069,10 +1069,10 @@ async fn busy_thread_persists_second_message_as_deferred() {
         .accept_user_message(&second)
         .await
         .expect("second deferred");
-    assert!(matches!(outcome, InboundTurnOutcome::DeferredBusy { .. }));
+    assert!(matches!(outcome, InboundTurnOutcome::RejectedBusy { .. }));
 
     let binding = match outcome {
-        InboundTurnOutcome::DeferredBusy { binding, .. } => binding,
+        InboundTurnOutcome::RejectedBusy { binding, .. } => binding,
         _ => unreachable!(),
     };
     let history = thread_service
@@ -1090,7 +1090,7 @@ async fn busy_thread_persists_second_message_as_deferred() {
         .expect("history");
     assert_eq!(history.messages.len(), 2);
     assert_eq!(history.messages[1].content.as_deref(), Some("second"));
-    assert_eq!(history.messages[1].status, MessageStatus::DeferredBusy);
+    assert_eq!(history.messages[1].status, MessageStatus::RejectedBusy);
 }
 
 #[tokio::test]
@@ -1235,7 +1235,7 @@ async fn deferred_busy_retry_resubmits_existing_message() {
         .accept_user_message(&envelope)
         .await
         .expect("first busy");
-    assert!(matches!(first, InboundTurnOutcome::DeferredBusy { .. }));
+    assert!(matches!(first, InboundTurnOutcome::RejectedBusy { .. }));
 
     let second = service
         .accept_user_message(&envelope)

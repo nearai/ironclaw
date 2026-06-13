@@ -1292,6 +1292,15 @@ impl SessionThreadService for ScopeMismatchThreadStub {
         panic!("ScopeMismatchThreadStub::mark_message_deferred_busy should not be reached")
     }
 
+    async fn mark_message_rejected_busy(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("ScopeMismatchThreadStub::mark_message_rejected_busy should not be reached")
+    }
+
     async fn append_assistant_draft(
         &self,
         _request: AppendAssistantDraftRequest,
@@ -1515,6 +1524,15 @@ impl SessionThreadService for ScriptedThreadService {
         _message_id: ThreadMessageId,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         scripted_stub_unreachable("mark_message_deferred_busy")
+    }
+
+    async fn mark_message_rejected_busy(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        scripted_stub_unreachable("mark_message_rejected_busy")
     }
 
     async fn append_assistant_draft(
@@ -1902,7 +1920,7 @@ async fn busy_submit_clears_skill_activation_message() {
 
     assert!(matches!(
         deferred,
-        RebornSubmitTurnResponse::DeferredBusy {
+        RebornSubmitTurnResponse::RejectedBusy {
             active_run_id: id,
             ..
         } if id == active_run_id
@@ -2423,14 +2441,14 @@ async fn concurrent_duplicate_submit_creates_one_message_and_replays_outcome() {
     let first_run_id = match &first {
         RebornSubmitTurnResponse::Submitted { run_id, .. }
         | RebornSubmitTurnResponse::AlreadySubmitted { run_id, .. } => *run_id,
-        RebornSubmitTurnResponse::DeferredBusy { .. } => {
+        RebornSubmitTurnResponse::RejectedBusy { .. } => {
             panic!("duplicate submit must not defer while deduping")
         }
     };
     let second_run_id = match &second {
         RebornSubmitTurnResponse::Submitted { run_id, .. }
         | RebornSubmitTurnResponse::AlreadySubmitted { run_id, .. } => *run_id,
-        RebornSubmitTurnResponse::DeferredBusy { .. } => {
+        RebornSubmitTurnResponse::RejectedBusy { .. } => {
             panic!("duplicate submit must not defer while deduping")
         }
     };
@@ -5633,6 +5651,17 @@ impl SessionThreadService for FirstMissBackendErrorThreadService {
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         panic!(
             "FirstMissBackendErrorThreadService::mark_message_deferred_busy should not be reached"
+        )
+    }
+
+    async fn mark_message_rejected_busy(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!(
+            "FirstMissBackendErrorThreadService::mark_message_rejected_busy should not be reached"
         )
     }
 

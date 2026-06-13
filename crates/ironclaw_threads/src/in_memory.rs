@@ -249,6 +249,21 @@ impl SessionThreadService for InMemorySessionThreadService {
         Ok(message.clone())
     }
 
+    async fn mark_message_rejected_busy(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let mut state = self.state.lock().await;
+        let message = get_message_mut(&mut state, scope, thread_id, message_id)?;
+        ensure_user_accepted(message, "mark_message_rejected_busy")?;
+        message.status = MessageStatus::RejectedBusy;
+        message.turn_id = None;
+        message.turn_run_id = None;
+        Ok(message.clone())
+    }
+
     async fn append_assistant_draft(
         &self,
         request: AppendAssistantDraftRequest,
@@ -867,7 +882,7 @@ fn ensure_user_accepted(
     if message.kind == MessageKind::User
         && matches!(
             message.status,
-            MessageStatus::Accepted | MessageStatus::DeferredBusy
+            MessageStatus::Accepted | MessageStatus::DeferredBusy | MessageStatus::RejectedBusy
         )
     {
         return Ok(());
