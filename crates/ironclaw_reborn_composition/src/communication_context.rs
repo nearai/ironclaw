@@ -13,6 +13,7 @@ use ironclaw_turns::{
     },
     scope::{TurnActor, TurnScope},
 };
+use tokio::join;
 use tokio::time::timeout;
 
 /// Shared timeout budget for both outbound-preferences and lifecycle fetches.
@@ -59,15 +60,50 @@ impl CommunicationContextProvider for RuntimeCommunicationContextProvider {
             scope.project_id.clone(),
         );
 
-        // Fetch outbound delivery preferences.
-        let delivery_target = match timeout(
-            OUTBOUND_PREFERENCES_TIMEOUT,
-            self.outbound_preferences
-                .get_outbound_preferences(caller.clone()),
-        )
-        .await
-        {
-            Ok(Ok(response)) => match (
+        let preferences_fut = self
+            .outbound_preferences
+            .get_outbound_preferences(caller.clone());
+
+        let lifecycle_context = self.lifecycle_facade.as_deref().map(|_| {
+            LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
+                tenant_id: caller.tenant_id.clone(),
+                user_id: caller.user_id.clone(),
+                agent_id: caller.agent_id.clone(),
+                project_id: caller.project_id.clone(),
+            })
+        });
+
+        // Both fetches share a single 500 ms budget: run them concurrently under
+        // one outer timeout so serial latency (~1 s) collapses to one RTT.
+        let combined_result = timeout(OUTBOUND_PREFERENCES_TIMEOUT, async {
+            join!(preferences_fut, async {
+                match (&self.lifecycle_facade, lifecycle_context) {
+                    (Some(facade), Some(ctx)) => Some(
+                        facade
+                            .execute(ctx, LifecycleProductAction::ExtensionList)
+                            .await,
+                    ),
+                    _ => None,
+                }
+            })
+        })
+        .await;
+
+        let (pref_result, lifecycle_result) = match combined_result {
+            Ok(pair) => pair,
+            Err(_) => {
+                // Shared budget expired — both are unknown.
+                return Some(CommunicationRuntimeContext {
+                    connected_channels: ConnectedChannelsState::Unknown,
+                    delivery_target: DeliveryTargetState::Unknown,
+                    delivery_tools_visible,
+                    run_origin,
+                });
+            }
+        };
+
+        let delivery_target = match pref_result {
+            Ok(response) => match (
                 response.final_reply_target,
                 response.final_reply_target_status,
             ) {
@@ -84,59 +120,39 @@ impl CommunicationContextProvider for RuntimeCommunicationContextProvider {
                 }
                 (None, _) => DeliveryTargetState::NoneSet,
             },
-            Ok(Err(_)) | Err(_) => DeliveryTargetState::Unknown,
+            Err(_) => DeliveryTargetState::Unknown,
         };
 
-        // Fetch connected channels from the lifecycle facade when available.
-        let connected_channels = match &self.lifecycle_facade {
-            Some(facade) => {
-                let context = LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
-                    tenant_id: caller.tenant_id,
-                    user_id: caller.user_id,
-                    agent_id: caller.agent_id,
-                    project_id: caller.project_id,
-                });
-                match timeout(
-                    OUTBOUND_PREFERENCES_TIMEOUT,
-                    facade.execute(context, LifecycleProductAction::ExtensionList),
-                )
-                .await
-                {
-                    Ok(Ok(response)) => {
-                        let extensions = match response.payload {
-                            Some(LifecycleProductPayload::ExtensionList { extensions, .. }) => {
-                                extensions
-                            }
-                            _ => Vec::new(),
-                        };
-                        let channels: Vec<ConnectedChannelSummary> = extensions
-                            .into_iter()
-                            .filter(|ext| {
-                                // Only channel-surface extensions count as connected
-                                // channels. Lifecycle summaries carry no channel
-                                // discriminator yet — #4778 adds the ProductAdapter
-                                // surface-kind projection; switch this predicate to it
-                                // when that lands. Until then nothing matches and the
-                                // slice truthfully renders "Connected channels: none."
-                                extension_is_channel_surface(ext)
-                                    && ext.phase == LifecyclePhase::Active
-                            })
-                            .map(|ext| ConnectedChannelSummary {
-                                name: ext.summary.name.clone(),
-                                // An Active channel extension passed through activation;
-                                // treat it as authenticated. Credential readiness would
-                                // require ExtensionCredentialSetupService which is not
-                                // wired in this provider.
-                                authenticated: true,
-                                active: true,
-                            })
-                            .collect();
-                        ConnectedChannelsState::Known(channels)
-                    }
-                    Ok(Err(_)) | Err(_) => ConnectedChannelsState::Unknown,
+        let connected_channels = match lifecycle_result {
+            Some(Ok(response)) => {
+                if !CHANNEL_CLASSIFICATION_AVAILABLE {
+                    // Channel-surface classification is a stub until #4778's
+                    // ProductAdapter surface projection lands. Returning Known([])
+                    // would be false certainty ("none connected") when the predicate
+                    // cannot yet distinguish channel extensions from tool extensions.
+                    ConnectedChannelsState::Unknown
+                } else {
+                    let extensions = match response.payload {
+                        Some(LifecycleProductPayload::ExtensionList { extensions, .. }) => {
+                            extensions
+                        }
+                        _ => Vec::new(),
+                    };
+                    let channels: Vec<ConnectedChannelSummary> = extensions
+                        .into_iter()
+                        .filter(|ext| {
+                            extension_is_channel_surface(ext) && ext.phase == LifecyclePhase::Active
+                        })
+                        .map(|ext| ConnectedChannelSummary {
+                            name: ext.summary.name.clone(),
+                            authenticated: true,
+                            active: true,
+                        })
+                        .collect();
+                    ConnectedChannelsState::Known(channels)
                 }
             }
-            None => ConnectedChannelsState::Unknown,
+            Some(Err(_)) | None => ConnectedChannelsState::Unknown,
         };
 
         Some(CommunicationRuntimeContext {
@@ -147,6 +163,12 @@ impl CommunicationContextProvider for RuntimeCommunicationContextProvider {
         })
     }
 }
+
+/// Whether channel-surface classification is available.
+///
+/// Flips to `true` when #4778's `ProductAdapter` surface projection merges and
+/// `extension_is_channel_surface` becomes a real predicate rather than a stub.
+const CHANNEL_CLASSIFICATION_AVAILABLE: bool = false;
 
 /// Whether a lifecycle extension exposes a channel surface (e.g. Slack).
 ///
@@ -488,7 +510,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_extension_list_returns_known_empty() {
+    async fn classification_unavailable_returns_unknown_for_empty_extension_list() {
+        // While CHANNEL_CLASSIFICATION_AVAILABLE is false the lifecycle success
+        // branch must return Unknown rather than Known([]) — the empty list would
+        // be false certainty ("none connected") when the predicate is a stub.
         let provider = RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesFacade))
             .with_lifecycle_facade(Arc::new(EmptyLifecycleFacade));
         let ctx = provider
@@ -497,19 +522,19 @@ mod tests {
             .expect("context");
         assert_eq!(
             ctx.connected_channels,
-            ConnectedChannelsState::Known(vec![]),
-            "no channel-kind extensions → Known([])"
+            ConnectedChannelsState::Unknown,
+            "classification unavailable → Unknown, not Known([])"
         );
     }
 
     #[tokio::test]
-    async fn non_channel_extensions_never_appear_as_connected() {
+    async fn classification_unavailable_returns_unknown_for_non_channel_extensions() {
         // Lifecycle summaries carry no channel discriminator until #4778's
-        // ProductAdapter surface projection: no extension qualifies, so even
-        // active first-party extensions must NOT be presented as connected
-        // channels (a web-access tool extension is not a channel). When #4778
-        // merges, extension_is_channel_surface switches to the projected
-        // surface kind and this test should grow a positive case.
+        // ProductAdapter surface projection. While CHANNEL_CLASSIFICATION_AVAILABLE
+        // is false the success branch returns Unknown regardless of what extensions
+        // are present — never false-certainty Known([]).
+        // When #4778 merges, flip CHANNEL_CLASSIFICATION_AVAILABLE to true and
+        // grow a positive case here.
         let provider = RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesFacade))
             .with_lifecycle_facade(Arc::new(ChannelListLifecycleFacade {
                 extensions: vec![
@@ -524,8 +549,8 @@ mod tests {
             .expect("context");
         assert_eq!(
             ctx.connected_channels,
-            ConnectedChannelsState::Known(vec![]),
-            "no channel discriminator pre-#4778 → Known([]) renders 'none'"
+            ConnectedChannelsState::Unknown,
+            "classification unavailable → Unknown, not Known([])"
         );
     }
 

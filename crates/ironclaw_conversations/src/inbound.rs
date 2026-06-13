@@ -92,7 +92,9 @@ where
             requested_run_profile,
         } = request;
 
-        let run_origin = if adapter_kind.is_trusted_trigger() {
+        let run_origin = if matches!(binding_policy, BindingResolutionPolicy::Trusted { .. })
+            && adapter_kind.is_trusted_trigger()
+        {
             Some(TurnRunOrigin::ScheduledTrigger)
         } else {
             Some(TurnRunOrigin::ProductInbound {
@@ -1306,5 +1308,122 @@ mod tests {
         ) -> Result<TurnRunState, TurnError> {
             unimplemented!("not used by inbound facade tests")
         }
+    }
+
+    // --- Tests: run_origin integrity ---
+
+    /// An untrusted inbound request with adapter_kind "trigger" must NOT be
+    /// labelled ScheduledTrigger — only a Trusted binding policy + trusted-trigger
+    /// adapter qualifies.
+    #[tokio::test]
+    async fn untrusted_trigger_adapter_records_product_inbound_not_scheduled_trigger() {
+        let services = InMemoryConversationServices::default();
+        services
+            .pair_external_actor(
+                tenant(),
+                trigger_adapter(),
+                trigger_installation(),
+                external_actor("alice"),
+                user("alice"),
+            )
+            .await;
+        let coordinator = Arc::new(RecordingTurnCoordinator::default());
+        let inbound =
+            InboundTurnService::new(services.clone(), services.clone(), coordinator.clone());
+
+        // Untrusted path: handle_inbound_turn uses BindingResolutionPolicy::Untrusted.
+        let request = InboundTurnRequest {
+            tenant_id: tenant(),
+            adapter_kind: trigger_adapter(),
+            adapter_installation_id: trigger_installation(),
+            external_actor_ref: external_actor("alice"),
+            external_conversation_ref: ExternalConversationRef::new(
+                None,
+                "untrusted-trigger-conv",
+                Some("untrusted-trigger-thread"),
+                None,
+            )
+            .unwrap(),
+            external_event_id: ExternalEventId::new("untrusted-trigger-event").unwrap(),
+            route_kind: ConversationRouteKind::Direct,
+            content_ref: InboundMessageContentRef::new("content:untrusted-trigger").unwrap(),
+            requested_agent_id: None,
+            requested_project_id: None,
+            received_at: Utc.with_ymd_and_hms(2026, 6, 13, 10, 0, 0).unwrap(),
+            requested_run_profile: None,
+        };
+
+        inbound
+            .handle_inbound_turn(request)
+            .await
+            .expect("untrusted inbound succeeds");
+
+        let submissions = coordinator.submissions();
+        assert_eq!(submissions.len(), 1);
+        assert_eq!(
+            submissions[0].run_origin,
+            Some(TurnRunOrigin::ProductInbound {
+                adapter: "trigger".to_string()
+            }),
+            "untrusted adapter_kind='trigger' must record ProductInbound, not ScheduledTrigger"
+        );
+    }
+
+    /// A normal (non-trigger) inbound adapter through the standard untrusted path
+    /// must record ProductInbound with the adapter name.
+    #[tokio::test]
+    async fn ordinary_inbound_adapter_records_product_inbound_with_adapter_name() {
+        let telegram = AdapterKind::new("telegram").unwrap();
+        let telegram_install = AdapterInstallationId::new("telegram-install").unwrap();
+        let telegram_actor = ExternalActorRef::new("telegram", "user-alice").unwrap();
+        let services = InMemoryConversationServices::default();
+        services
+            .pair_external_actor(
+                tenant(),
+                telegram.clone(),
+                telegram_install.clone(),
+                telegram_actor.clone(),
+                user("alice"),
+            )
+            .await;
+        let coordinator = Arc::new(RecordingTurnCoordinator::default());
+        let inbound =
+            InboundTurnService::new(services.clone(), services.clone(), coordinator.clone());
+
+        let request = InboundTurnRequest {
+            tenant_id: tenant(),
+            adapter_kind: telegram,
+            adapter_installation_id: telegram_install,
+            external_actor_ref: telegram_actor,
+            external_conversation_ref: ExternalConversationRef::new(
+                None,
+                "telegram-conv",
+                Some("telegram-thread"),
+                None,
+            )
+            .unwrap(),
+            external_event_id: ExternalEventId::new("telegram-event-1").unwrap(),
+            route_kind: ConversationRouteKind::Direct,
+            content_ref: InboundMessageContentRef::new("content:telegram-1").unwrap(),
+            requested_agent_id: None,
+            requested_project_id: None,
+            received_at: Utc.with_ymd_and_hms(2026, 6, 13, 10, 0, 0).unwrap(),
+            requested_run_profile: None,
+        };
+
+        inbound
+            .handle_inbound_turn(request)
+            .await
+            .expect("telegram inbound succeeds");
+
+        let submissions = coordinator.submissions();
+        assert_eq!(submissions.len(), 1);
+        assert_eq!(
+            submissions[0].run_origin,
+            Some(TurnRunOrigin::ProductInbound {
+                adapter: "telegram".to_string()
+            }),
+            "ordinary inbound adapter must record ProductInbound with adapter name"
+        );
     }
 }

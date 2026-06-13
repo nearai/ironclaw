@@ -1034,21 +1034,42 @@ async fn text_only_host_factory_with_communication_context_provider_injects_comm
     );
 }
 
-// Provider that forwards the delivery_tools_visible and run_origin arguments
-// to the returned context so callers can assert what the host passed.
+// Provider that forwards all arguments from communication_context() to internal
+// state so callers can assert what the host passed.
 struct RecordingCommunicationContextProvider {
     recorded_delivery_tools_visible: Mutex<Option<bool>>,
+    recorded_thread_id: Mutex<Option<ThreadId>>,
+    recorded_actor_present: Mutex<Option<bool>>,
+    recorded_run_origin: Mutex<Option<Option<ironclaw_turns::TurnRunOrigin>>>,
 }
 
 impl RecordingCommunicationContextProvider {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             recorded_delivery_tools_visible: Mutex::new(None),
+            recorded_thread_id: Mutex::new(None),
+            recorded_actor_present: Mutex::new(None),
+            recorded_run_origin: Mutex::new(None),
         })
     }
 
     fn delivery_tools_visible(&self) -> Option<bool> {
         *self.recorded_delivery_tools_visible.lock().unwrap()
+    }
+
+    #[allow(dead_code)]
+    fn thread_id(&self) -> Option<ThreadId> {
+        self.recorded_thread_id.lock().unwrap().clone()
+    }
+
+    #[allow(dead_code)]
+    fn actor_present(&self) -> Option<bool> {
+        *self.recorded_actor_present.lock().unwrap()
+    }
+
+    #[allow(dead_code)]
+    fn run_origin(&self) -> Option<Option<ironclaw_turns::TurnRunOrigin>> {
+        self.recorded_run_origin.lock().unwrap().clone()
     }
 }
 
@@ -1056,12 +1077,15 @@ impl RecordingCommunicationContextProvider {
 impl CommunicationContextProvider for RecordingCommunicationContextProvider {
     async fn communication_context(
         &self,
-        _scope: &TurnScope,
-        _actor: Option<&TurnActor>,
+        scope: &TurnScope,
+        actor: Option<&TurnActor>,
         delivery_tools_visible: bool,
         run_origin: Option<ironclaw_turns::TurnRunOrigin>,
     ) -> Option<CommunicationRuntimeContext> {
         *self.recorded_delivery_tools_visible.lock().unwrap() = Some(delivery_tools_visible);
+        *self.recorded_thread_id.lock().unwrap() = Some(scope.thread_id.clone());
+        *self.recorded_actor_present.lock().unwrap() = Some(actor.is_some());
+        *self.recorded_run_origin.lock().unwrap() = Some(run_origin.clone());
         Some(CommunicationRuntimeContext {
             connected_channels: ConnectedChannelsState::Unknown,
             delivery_target: DeliveryTargetState::NoneSet,

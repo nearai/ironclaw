@@ -1,3 +1,4 @@
+use ironclaw_triggers::TRIGGER_TRUSTED_ADAPTER_KIND;
 use serde::{Deserialize, Serialize};
 
 use crate::InboundTurnError;
@@ -42,12 +43,8 @@ bounded_string_id!(AdapterKind, "adapter_kind");
 
 impl AdapterKind {
     /// Returns `true` when this adapter kind is the trusted-trigger adapter.
-    // "trigger" mirrors ironclaw_triggers::trusted_submit::TRIGGER_TRUSTED_ADAPTER_KIND.
-    // Kept as a local constant comparison to avoid a dependency from ids.rs's type
-    // on the triggers crate constant; the crate-level dependency on ironclaw_triggers
-    // is already present via inbound.rs.
     pub fn is_trusted_trigger(&self) -> bool {
-        self.0 == "trigger"
+        self.0 == TRIGGER_TRUSTED_ADAPTER_KIND
     }
 }
 

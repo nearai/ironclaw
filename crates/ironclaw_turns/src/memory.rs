@@ -799,7 +799,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
                 spawn_tree_root_run_id: Some(
                     parent.spawn_tree_root_run_id.unwrap_or(parent.run_id),
                 ),
-                run_origin: None,
+                run_origin: parent.run_origin.clone(),
             }
         };
 
@@ -892,6 +892,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
         let parent_run_id = parent.run_id;
         let subagent_depth = parent.subagent_depth + 1;
         let root_run_id = parent.spawn_tree_root_run_id.unwrap_or(parent.run_id);
+        let parent_run_origin = parent.run_origin.clone();
         let Some(root) = inner.records.get(&root_run_id) else {
             let response = Err(TurnError::ScopeNotFound);
             inner.remember_submit_idempotency(
@@ -1040,7 +1041,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
             parent_run_id: Some(parent_run_id),
             subagent_depth,
             spawn_tree_root_run_id: Some(root_run_id),
-            run_origin: None,
+            run_origin: parent_run_origin,
         };
         inner.turns.insert(turn_id, turn_record);
         inner.active_locks.insert(
