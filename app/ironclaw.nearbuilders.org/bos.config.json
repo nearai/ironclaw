@@ -2,8 +2,8 @@
   "extends": "bos://work.efiz.near/nearbuilders.org",
   "account": "work.efiz.near",
   "domain": "ironclaw.nearbuilders.org",
-  "title": "everything.dev",
-  "description": "Open runtime for apps on NEAR, composed from published config and loaded through a shared host, UI, and API runtime.",
+  "title": "IronClaw",
+  "description": "IronClaw Reborn Dashboard Interface",
   "staging": {
     "domain": "dev.everything.dev"
   },

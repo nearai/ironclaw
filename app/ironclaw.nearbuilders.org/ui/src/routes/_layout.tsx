@@ -199,7 +199,7 @@ function Layout() {
             </div>
           </header>
 
-          <main className="flex-1 w-full min-h-0 overflow-hidden animate-fade-in-up">
+          <main className="flex-1 w-full min-h-0 overflow-y-auto animate-fade-in-up">
             <Outlet />
           </main>
 

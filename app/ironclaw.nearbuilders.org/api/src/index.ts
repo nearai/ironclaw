@@ -6,7 +6,7 @@ import { z } from "every-plugin/zod";
 import { contract } from "./contract";
 import { loadMigrations } from "./db/load-migrations";
 import { migrate } from "./db/migrator";
-import { registrations, submissions } from "./db/schema";
+import { registrations, submissions, tenantCredentials } from "./db/schema";
 import { createAuthMiddleware } from "./lib/auth";
 import type { PluginsClient } from "./lib/plugins-types.gen";
 import type { ContractRouterClient } from "@orpc/contract";
@@ -86,7 +86,36 @@ export default createPlugin.withPlugins<PluginsClient>()({
     }),
 
   createRouter: (services, builder) => {
+    const s = services as any;
     const { requireAuth } = createAuthMiddleware(builder);
+
+    const resolveCredentials = builder.middleware(async ({ context, next }) => {
+      const tenantId = context.organizationId ?? context.userId;
+      if (tenantId && s.db) {
+        try {
+          const creds = await s.db
+            .select()
+            .from(tenantCredentials)
+            .where(eq(tenantCredentials.tenantId, tenantId));
+          if (creds.length > 0) {
+            return next({
+              context: {
+                ...context,
+                baseUrl: creds[0].tunnelUrl,
+                apiToken: creds[0].apiToken,
+              },
+            });
+          }
+        } catch {
+          // DB error, continue without credentials
+        }
+      }
+      return next({ context });
+    });
+
+    const ic = {
+      credentials: resolveCredentials,
+    };
 
     return {
       ping: builder.ping.handler(async () => ({
@@ -211,116 +240,165 @@ export default createPlugin.withPlugins<PluginsClient>()({
       },
 
       ironclaw: {
-        ping: builder.ironclaw.ping.handler(h0(services, ic => ic.ping)),
+        ping: builder.ironclaw.ping.use(ic.credentials).handler(
+          h0(services, ic => ic.ping),
+        ),
 
-        session: builder.ironclaw.session.use(requireAuth).handler(
+        session: builder.ironclaw.session.use(requireAuth).use(ic.credentials).handler(
           h0(services, ic => ic.session),
         ),
 
+        settings: {
+          get: builder.ironclaw.settings.get.use(requireAuth).handler(async ({ context }) => {
+            const tenantId = context.organizationId ?? context.userId;
+            if (!tenantId) {
+              throw new ORPCError("UNAUTHORIZED", { message: "No tenant or user context" });
+            }
+            const db = s.db;
+            const creds = await db
+              .select()
+              .from(tenantCredentials)
+              .where(eq(tenantCredentials.tenantId, tenantId));
+            if (creds.length === 0) {
+              throw new ORPCError("NOT_FOUND", { message: "No ironclaw settings configured" });
+            }
+            return {
+              tunnelUrl: creds[0].tunnelUrl,
+              apiToken: creds[0].apiToken,
+              updatedAt: creds[0].updatedAt?.toISOString(),
+            };
+          }),
+
+          update: builder.ironclaw.settings.update.use(requireAuth).handler(async ({ input, context }) => {
+            const tenantId = context.organizationId ?? context.userId;
+            if (!tenantId) {
+              throw new ORPCError("UNAUTHORIZED", { message: "No tenant or user context" });
+            }
+            const db = s.db;
+            await db
+              .insert(tenantCredentials)
+              .values({
+                tenantId,
+                tunnelUrl: input.tunnelUrl,
+                apiToken: input.apiToken,
+                updatedBy: context.userId,
+              })
+              .onConflictDoUpdate({
+                target: tenantCredentials.tenantId,
+                set: {
+                  tunnelUrl: input.tunnelUrl,
+                  apiToken: input.apiToken,
+                  updatedBy: context.userId,
+                },
+              });
+            return { success: true };
+          }),
+        },
+
         threads: {
-          list: builder.ironclaw.threads.list.use(requireAuth).handler(
+          list: builder.ironclaw.threads.list.use(requireAuth).use(ic.credentials).handler(
             h1(services, ic => ic.threads.list),
           ),
-          create: builder.ironclaw.threads.create.use(requireAuth).handler(
+          create: builder.ironclaw.threads.create.use(requireAuth).use(ic.credentials).handler(
             h0(services, ic => ic.threads.create),
           ),
-          delete: builder.ironclaw.threads.delete.use(requireAuth).handler(
+          delete: builder.ironclaw.threads.delete.use(requireAuth).use(ic.credentials).handler(
             h1(services, ic => ic.threads.delete),
           ),
-          sendMessage: builder.ironclaw.threads.sendMessage.use(requireAuth).handler(
+          sendMessage: builder.ironclaw.threads.sendMessage.use(requireAuth).use(ic.credentials).handler(
             h1(services, ic => ic.threads.sendMessage),
           ),
-          getTimeline: builder.ironclaw.threads.getTimeline.use(requireAuth).handler(
+          getTimeline: builder.ironclaw.threads.getTimeline.use(requireAuth).use(ic.credentials).handler(
             h1(services, ic => ic.threads.getTimeline),
           ),
-          cancelRun: builder.ironclaw.threads.cancelRun.use(requireAuth).handler(
+          cancelRun: builder.ironclaw.threads.cancelRun.use(requireAuth).use(ic.credentials).handler(
             h1(services, ic => ic.threads.cancelRun),
           ),
-          resolveGate: builder.ironclaw.threads.resolveGate.use(requireAuth).handler(
+          resolveGate: builder.ironclaw.threads.resolveGate.use(requireAuth).use(ic.credentials).handler(
             h1(services, ic => ic.threads.resolveGate),
           ),
-          streamEvents: builder.ironclaw.threads.streamEvents.use(requireAuth).handler(
+          streamEvents: builder.ironclaw.threads.streamEvents.use(requireAuth).use(ic.credentials).handler(
             hStream(services, ic => ic.threads.streamEvents),
           ),
         },
 
         automations: {
-          list: builder.ironclaw.automations.list.use(requireAuth).handler(
+          list: builder.ironclaw.automations.list.use(requireAuth).use(ic.credentials).handler(
             h1(services, ic => ic.automations.list),
           ),
         },
 
         outbound: {
-          getPreferences: builder.ironclaw.outbound.getPreferences.use(requireAuth).handler(
+          getPreferences: builder.ironclaw.outbound.getPreferences.use(requireAuth).use(ic.credentials).handler(
             h0(services, ic => ic.outbound.getPreferences),
           ),
-          setPreferences: builder.ironclaw.outbound.setPreferences.use(requireAuth).handler(
+          setPreferences: builder.ironclaw.outbound.setPreferences.use(requireAuth).use(ic.credentials).handler(
             h1(services, ic => ic.outbound.setPreferences),
           ),
-          listTargets: builder.ironclaw.outbound.listTargets.use(requireAuth).handler(
+          listTargets: builder.ironclaw.outbound.listTargets.use(requireAuth).use(ic.credentials).handler(
             h0(services, ic => ic.outbound.listTargets),
           ),
         },
 
         extensions: {
-          list: builder.ironclaw.extensions.list.use(requireAuth).handler(
+          list: builder.ironclaw.extensions.list.use(requireAuth).use(ic.credentials).handler(
             h0(services, ic => ic.extensions.list),
           ),
-          listRegistry: builder.ironclaw.extensions.listRegistry.use(requireAuth).handler(
+          listRegistry: builder.ironclaw.extensions.listRegistry.use(requireAuth).use(ic.credentials).handler(
             h0(services, ic => ic.extensions.listRegistry),
           ),
-          install: builder.ironclaw.extensions.install.use(requireAuth).handler(
+          install: builder.ironclaw.extensions.install.use(requireAuth).use(ic.credentials).handler(
             h1(services, ic => ic.extensions.install),
           ),
-          activate: builder.ironclaw.extensions.activate.use(requireAuth).handler(
+          activate: builder.ironclaw.extensions.activate.use(requireAuth).use(ic.credentials).handler(
             h1(services, ic => ic.extensions.activate),
           ),
-          remove: builder.ironclaw.extensions.remove.use(requireAuth).handler(
+          remove: builder.ironclaw.extensions.remove.use(requireAuth).use(ic.credentials).handler(
             h1(services, ic => ic.extensions.remove),
           ),
-          getSetup: builder.ironclaw.extensions.getSetup.use(requireAuth).handler(
+          getSetup: builder.ironclaw.extensions.getSetup.use(requireAuth).use(ic.credentials).handler(
             h1(services, ic => ic.extensions.getSetup),
           ),
-          setup: builder.ironclaw.extensions.setup.use(requireAuth).handler(
+          setup: builder.ironclaw.extensions.setup.use(requireAuth).use(ic.credentials).handler(
             h1(services, ic => ic.extensions.setup),
           ),
         },
 
         skills: {
-          list: builder.ironclaw.skills.list.use(requireAuth).handler(
+          list: builder.ironclaw.skills.list.use(requireAuth).use(ic.credentials).handler(
             h0(services, ic => ic.skills.list),
           ),
-          search: builder.ironclaw.skills.search.use(requireAuth).handler(
+          search: builder.ironclaw.skills.search.use(requireAuth).use(ic.credentials).handler(
             h1(services, ic => ic.skills.search),
           ),
-          install: builder.ironclaw.skills.install.use(requireAuth).handler(
+          install: builder.ironclaw.skills.install.use(requireAuth).use(ic.credentials).handler(
             h1(services, ic => ic.skills.install),
           ),
-          get: builder.ironclaw.skills.get.use(requireAuth).handler(
+          get: builder.ironclaw.skills.get.use(requireAuth).use(ic.credentials).handler(
             h1(services, ic => ic.skills.get),
           ),
-          update: builder.ironclaw.skills.update.use(requireAuth).handler(
+          update: builder.ironclaw.skills.update.use(requireAuth).use(ic.credentials).handler(
             h1(services, ic => ic.skills.update),
           ),
-          remove: builder.ironclaw.skills.remove.use(requireAuth).handler(
+          remove: builder.ironclaw.skills.remove.use(requireAuth).use(ic.credentials).handler(
             h1(services, ic => ic.skills.remove),
           ),
         },
 
         channels: {
-          listConnectable: builder.ironclaw.channels.listConnectable.use(requireAuth).handler(
+          listConnectable: builder.ironclaw.channels.listConnectable.use(requireAuth).use(ic.credentials).handler(
             h0(services, ic => ic.channels.listConnectable),
           ),
         },
 
         auth: {
-          listProviders: builder.ironclaw.auth.listProviders.handler(
+          listProviders: builder.ironclaw.auth.listProviders.use(ic.credentials).handler(
             h0(services, ic => ic.auth.listProviders),
           ),
-          exchangeLoginTicket: builder.ironclaw.auth.exchangeLoginTicket.handler(
+          exchangeLoginTicket: builder.ironclaw.auth.exchangeLoginTicket.use(ic.credentials).handler(
             h1(services, ic => ic.auth.exchangeLoginTicket),
           ),
-          logout: builder.ironclaw.auth.logout.use(requireAuth).handler(
+          logout: builder.ironclaw.auth.logout.use(requireAuth).use(ic.credentials).handler(
             h0(services, ic => ic.auth.logout),
           ),
         },

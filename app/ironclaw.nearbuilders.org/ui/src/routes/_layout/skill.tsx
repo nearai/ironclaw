@@ -30,10 +30,10 @@ export const Route = createFileRoute("/_layout/skill")({
   },
   head: () => ({
     meta: [
-      { title: "Skill | app" },
+      { title: "Setup Skill | NEAR Builders" },
       {
         name: "description",
-        content: "Agent-oriented instructions for running, editing, and publishing this runtime.",
+        content: "Agent-oriented instructions for setting up the IronClaw reborn binary and connecting to NEAR Builders.",
       },
     ],
   }),
@@ -78,8 +78,8 @@ function SkillPage() {
                     <span className="text-base font-semibold text-foreground">{appName}</span>
                   </div>
                   <p className="mt-1 text-sm text-muted-foreground">
-                    Agent-ready prompt for TanStack Intent, local development, UI changes, and
-                    publish flow.
+                    Agent-ready prompt for IronClaw reborn binary setup, dashboard connection, chat
+                    usage, and hackathon participation.
                   </p>
                 </div>
               </div>
@@ -105,8 +105,8 @@ function SkillPage() {
             </div>
 
             <div className="rounded-[8px] border border-border bg-muted px-3.5 py-3 text-sm text-muted-foreground">
-              Best entry points: `npx @tanstack/intent@latest load everything-dev`, `/skill.md`, and
-              the registry page above.
+              Best entry points: `/skill.md`, the `/ironclaw` setup guide, and the chat dashboard at
+              `/`.
             </div>
           </div>
 

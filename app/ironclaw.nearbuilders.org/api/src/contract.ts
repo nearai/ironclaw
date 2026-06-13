@@ -1,4 +1,4 @@
-import { BAD_REQUEST, UNAUTHORIZED } from "every-plugin/errors";
+import { BAD_REQUEST, UNAUTHORIZED, NOT_FOUND } from "every-plugin/errors";
 import { oc } from "every-plugin/orpc";
 import { z } from "every-plugin/zod";
 import { contract as ironclawContract } from "../../plugins/ironclaw/src/contract";
@@ -26,6 +26,12 @@ export const LeaderboardEntrySchema = z.object({
   participantName: z.string(),
   projectTitle: z.string(),
   submittedAt: z.iso.datetime(),
+});
+
+export const IronclawSettingsSchema = z.object({
+  tunnelUrl: z.string().url(),
+  apiToken: z.string().min(1),
+  updatedAt: z.iso.datetime().optional(),
 });
 
 export const contract = oc.router({
@@ -67,7 +73,22 @@ export const contract = oc.router({
     ),
   },
 
-  ironclaw: ironclawContract,
+  ironclaw: {
+    ...ironclawContract,
+
+    settings: {
+      get: oc
+        .route({ method: "GET", path: "/ironclaw/settings", summary: "Get ironclaw connection settings" })
+        .output(IronclawSettingsSchema)
+        .errors({ UNAUTHORIZED, NOT_FOUND }),
+
+      update: oc
+        .route({ method: "PUT", path: "/ironclaw/settings", summary: "Update ironclaw connection settings" })
+        .input(IronclawSettingsSchema)
+        .output(z.object({ success: z.boolean() }))
+        .errors({ UNAUTHORIZED, BAD_REQUEST }),
+    },
+  },
 });
 
 export type ContractType = typeof contract;

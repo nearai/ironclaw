@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp, uniqueIndex, boolean } from "drizzle-orm/pg-core";
+import { pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 
 export const registrations = pgTable(
   "hackathon_registrations",
@@ -30,3 +30,11 @@ export const submissions = pgTable(
   },
   (table) => [uniqueIndex("submission_agent_unique").on(table.agentId)],
 );
+
+export const tenantCredentials = pgTable("tenant_credentials", {
+  tenantId: text("tenant_id").primaryKey(),
+  tunnelUrl: text("tunnel_url").notNull(),
+  apiToken: text("api_token").notNull(),
+  updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).defaultNow().notNull(),
+  updatedBy: text("updated_by"),
+});
