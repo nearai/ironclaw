@@ -105,7 +105,9 @@ mod tests {
         ScopedPath, TenantId, UserId, VirtualPath,
     };
 
-    use crate::landing::DEFAULT_PROJECT_MOUNT_ALIAS;
+    // The crate no longer exports a default alias (the host composition owns
+    // the canonical `/workspace` mount alias); the bridge tests pin it locally.
+    const DEFAULT_PROJECT_MOUNT_ALIAS: &str = "/workspace";
 
     fn project_mount(
         backend: Arc<InMemoryBackend>,
@@ -174,7 +176,7 @@ mod tests {
         assert_eq!(refs[0].size_bytes, Some(doc_bytes.len() as u64));
         assert_eq!(
             refs[0].storage_key.as_deref(),
-            Some("/workspace/attachments/2026-06-09/msg1-0-report.pdf")
+            Some("/workspace/attachments/2026-06-09/msg1-1-report.pdf")
         );
         assert!(refs[0].extracted_text.is_none());
 
@@ -182,7 +184,7 @@ mod tests {
         assert_eq!(refs[1].kind, AttachmentKind::Image);
         assert_eq!(
             refs[1].storage_key.as_deref(),
-            Some("/workspace/attachments/2026-06-09/msg1-1-diagram.png")
+            Some("/workspace/attachments/2026-06-09/msg1-2-diagram.png")
         );
 
         // The bytes are addressable at each ref's storage_key through the same
@@ -240,5 +242,88 @@ mod tests {
         .await
         .expect_err("a read-only project mount must reject the landing");
         assert!(matches!(err, AttachmentLandingError::Write(_)));
+    }
+
+    #[tokio::test]
+    async fn lands_with_synthesized_filename_when_filename_absent() {
+        // The `filename = None` path: the landed name is synthesized from the
+        // index and the registry-derived extension, and the ref's `filename`
+        // stays `None`. Exercises the InboundAttachment -> landing wiring the
+        // named-file tests never reach.
+        let backend = Arc::new(InMemoryBackend::new());
+        let writer = project_mount(backend, MountPermissions::read_write());
+        let refs = land_inbound_attachments(
+            &writer,
+            &test_scope(),
+            DEFAULT_PROJECT_MOUNT_ALIAS,
+            "2026-06-09",
+            "msg1",
+            vec![InboundAttachment {
+                id: "att-0".to_string(),
+                mime_type: "image/png".to_string(),
+                filename: None,
+                bytes: vec![0x89, 0x50],
+            }],
+        )
+        .await
+        .expect("lands");
+        assert_eq!(
+            refs[0].storage_key.as_deref(),
+            // `png` is derived from `image/png`; `1` is the 1-based attachment
+            // index; the synthesized name is `attachment.<ext>`.
+            Some("/workspace/attachments/2026-06-09/msg1-1-attachment.png")
+        );
+        assert!(refs[0].filename.is_none());
+    }
+
+    #[tokio::test]
+    async fn later_item_failure_fails_the_batch_and_leaves_earlier_bytes_landed() {
+        // Documents the batch boundary the rustdoc promises: the first failure
+        // returns Err, and bytes already landed for earlier items are left in
+        // place (dangling — no ref is returned for them).
+        let backend = Arc::new(InMemoryBackend::new());
+        let writer = project_mount(Arc::clone(&backend), MountPermissions::read_write());
+        let scope = test_scope();
+
+        // Force att-1's write to fail: seed a child under its computed path so
+        // the backend rejects writing a file where a directory now exists.
+        // att-1 is the 2nd attachment, so its 1-based index segment is `2`.
+        let att1_path = "/workspace/attachments/2026-06-09/msg1-2-b.txt";
+        writer
+            .write_bytes(
+                &scope,
+                &ScopedPath::new(format!("{att1_path}/sentinel")).unwrap(),
+                b"x".to_vec(),
+            )
+            .await
+            .expect("seed a child so att-1's path is a directory");
+
+        let err = land_inbound_attachments(
+            &writer,
+            &scope,
+            DEFAULT_PROJECT_MOUNT_ALIAS,
+            "2026-06-09",
+            "msg1",
+            vec![
+                inbound("att-0", "text/plain", "a.txt", b"ok"),
+                inbound("att-1", "text/plain", "b.txt", b"boom"),
+            ],
+        )
+        .await
+        .expect_err("a later landing failure fails the whole batch");
+        assert!(matches!(err, AttachmentLandingError::Write(_)));
+
+        // att-0 landed before att-1 failed: its bytes remain addressable even
+        // though the batch returned no refs.
+        let reader = project_mount(backend, MountPermissions::read_only());
+        let landed = reader
+            .get(
+                &scope,
+                &ScopedPath::new("/workspace/attachments/2026-06-09/msg1-1-a.txt").unwrap(),
+            )
+            .await
+            .expect("read succeeds")
+            .expect("att-0 bytes are still present");
+        assert_eq!(landed.entry.body, b"ok");
     }
 }
