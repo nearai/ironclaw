@@ -8035,33 +8035,38 @@ async fn invoke_capability_no_credential_requirement_proceeds_normally() {
     // approval gate, not a spurious AuthRequired.
     match outcome {
         RuntimeCapabilityOutcome::ApprovalRequired(_) => {}
-        other => panic!(
-            "expected ApprovalRequired for no-credential capability, got {other:?}"
-        ),
+        other => panic!("expected ApprovalRequired for no-credential capability, got {other:?}"),
     }
 }
 
-/// Pin the single-source-of-truth invariant: the handles returned by the
-/// `capability_credential_requirements` extraction function must be the same
-/// handles the dispatch-time obligation check uses. Both paths must agree on
-/// what credentials the capability requires.
+/// Regression guard for the single-source-of-truth constraint from the plan review
+/// ("do NOT create a second credential-requirements computation"):
+/// `capability_credential_requirements` must agree with what the obligation
+/// handler iterates over in `descriptor.runtime_credentials`.
 ///
-/// This is the regression guard for the HARD CONSTRAINT from the plan review:
-/// "do NOT create a second credential-requirements computation."
+/// SCOPE NOTE: this test verifies the canonical extraction function against the
+/// descriptor directly. The obligation handler (in `BuiltinObligationHandler`)
+/// iterates `runtime_credentials` through its own code path; the agreement is at
+/// the *source data* level (both read the same `required == true` entries from
+/// the same descriptor). Gate-ID identity between pre-flight and the dispatch-time
+/// backstop is confirmed by `invoke_capability_missing_credential_returns_auth_before_approval`
+/// (which verifies the pre-flight fires and no approval is persisted — the backstop
+/// never fires when pre-flight is wired, making gate-ID divergence moot in practice).
 #[tokio::test]
-async fn credential_requirements_preflight_and_dispatch_agree_on_same_handles() {
+async fn credential_requirements_extraction_matches_descriptor_required_credentials() {
     // Build a registry from the credentialed manifest and extract the descriptor.
     let registry = registry_with_manifest(SCRIPT_WITH_CREDENTIAL_MANIFEST);
     let cap_id = script_capability_id();
     let descriptor = registry.get_capability(&cap_id).unwrap();
 
     // Call the canonical extraction function directly (the one pre-flight uses).
-    let (preflight_handles, _preflight_reqs) =
+    let (preflight_handles, preflight_reqs) =
         ironclaw_host_runtime::capability_credential_requirements(descriptor);
 
-    // Verify the descriptor's own `runtime_credentials` field produces the same
-    // handles — this is what the obligation handler iterates over at dispatch time.
-    let dispatch_handles: Vec<SecretHandle> = descriptor
+    // The obligation handler iterates `descriptor.runtime_credentials` filtered
+    // to `required == true` — verify `capability_credential_requirements` produces
+    // the same handles from the same source.
+    let expected_handles: Vec<SecretHandle> = descriptor
         .runtime_credentials
         .iter()
         .filter(|cred| cred.required)
@@ -8069,14 +8074,25 @@ async fn credential_requirements_preflight_and_dispatch_agree_on_same_handles() 
         .collect();
 
     assert_eq!(
-        preflight_handles,
-        dispatch_handles,
-        "pre-flight and dispatch-time must derive identical required secret handles"
+        preflight_handles, expected_handles,
+        "capability_credential_requirements must return exactly the required handles from the descriptor"
     );
 
-    // Confirm both see exactly one handle — the declared 'script_api_token'.
-    assert_eq!(preflight_handles.len(), 1);
-    assert_eq!(preflight_handles[0].as_str(), "script_api_token");
+    // Confirm we see exactly one handle — the declared 'script_api_token'.
+    assert_eq!(preflight_handles.len(), 1, "expected one required handle");
+    assert_eq!(
+        preflight_handles[0].as_str(),
+        "script_api_token",
+        "required handle must be script_api_token"
+    );
+    // The manifest source is `secret_handle` (not `product_auth_account`), so
+    // `product_auth_requirement_for` returns None — credential_requirements is empty.
+    // This confirms the extraction does not fabricate OAuth requirements for plain
+    // secret-handle credentials.
+    assert!(
+        preflight_reqs.is_empty(),
+        "credential_requirements must be empty for secret_handle source (no product_auth_account)"
+    );
 }
 
 const SCRIPT_MANIFEST: &str = r#"
