@@ -11,7 +11,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_attachments::{InboundAttachment, land_inbound_attachments};
+use ironclaw_attachments::{
+    DEFAULT_MAX_ATTACHMENT_BYTES, InboundAttachment, land_inbound_attachments,
+};
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_product_workflow::{InboundAttachmentLander, RebornServicesError};
 use ironclaw_threads::{AttachmentRef, ThreadScope};
@@ -22,6 +24,10 @@ use crate::local_dev_mounts::WORKSPACE_ALIAS;
 pub(crate) struct ProjectScopedAttachmentLander<F: RootFilesystem> {
     filesystem: Arc<ScopedFilesystem<F>>,
     project_alias: String,
+    /// Per-attachment size ceiling passed to the landing routine. The
+    /// `send_message` route's 14 MiB body cap is the primary gate; this is
+    /// defense in depth so a single attachment can never land unbounded bytes.
+    max_attachment_bytes: usize,
 }
 
 impl<F: RootFilesystem> ProjectScopedAttachmentLander<F> {
@@ -29,6 +35,7 @@ impl<F: RootFilesystem> ProjectScopedAttachmentLander<F> {
         Self {
             filesystem,
             project_alias: WORKSPACE_ALIAS.to_string(),
+            max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
         }
     }
 }
@@ -53,6 +60,7 @@ impl<F: RootFilesystem> InboundAttachmentLander for ProjectScopedAttachmentLande
             &date,
             message_id,
             attachments,
+            self.max_attachment_bytes,
         )
         .await
         .map_err(|error| {
