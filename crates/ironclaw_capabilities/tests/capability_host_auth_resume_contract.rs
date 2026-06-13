@@ -411,6 +411,235 @@ async fn auth_resume_json_with_approval_request_id_claims_lease_and_dispatches()
 }
 
 // ---------------------------------------------------------------------------
+// FIX 1: auth_resume_json rejects capability_id mismatch against run record
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn auth_resume_json_rejects_capability_id_mismatch_against_run_record() {
+    let registry = registry_with_echo_capability();
+    let authorizer = GrantAuthorizer::new();
+    let dispatcher = RecordingDispatcher::default();
+    let run_state = InMemoryRunStateStore::new();
+
+    // Start the run with the canonical capability_id.
+    let context = execution_context(CapabilitySet {
+        grants: vec![dispatch_grant()],
+    });
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+
+    run_state
+        .start(RunStart {
+            invocation_id,
+            scope: scope.clone(),
+            capability_id: capability_id(), // echo.say
+        })
+        .await
+        .unwrap();
+    run_state
+        .block_auth(&scope, invocation_id, "AuthRequired".to_string())
+        .await
+        .unwrap();
+
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
+
+    // Attempt auth_resume with a DIFFERENT capability_id.
+    let different_id = CapabilityId::new("other.capability").unwrap();
+    let err = host
+        .auth_resume_json(CapabilityAuthResumeRequest {
+            context,
+            capability_id: different_id,
+            estimate: ResourceEstimate::default(),
+            input: serde_json::json!({"message": "mismatch"}),
+            trust_decision: trust_decision(),
+            approval_request_id: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, CapabilityInvocationError::ResumeContextMismatch { .. }),
+        "capability_id mismatch against run record must be rejected, got {err:?}"
+    );
+    assert_eq!(
+        dispatcher.dispatch_count(),
+        0,
+        "dispatch must not fire on capability_id mismatch"
+    );
+    // Run must still be in BlockedAuth (not failed) — the run state is preserved
+    // except when fail_run_if_configured transitions it.
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_ne!(
+        run.status,
+        RunStatus::Completed,
+        "run must not be completed after a mismatch rejection"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FIX 7a: auth_resume_json_rejects_approval_not_yet_approved
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn auth_resume_json_rejects_approval_not_yet_approved() {
+    // When approval_request_id is Some but the approval is still Pending,
+    // auth_resume_json must return Err(ApprovalNotApproved), fire zero dispatches,
+    // and leave the run in its original BlockedAuth status.
+    let registry = registry_with_echo_capability();
+    let authorizer = GrantAuthorizer::new();
+    let dispatcher = RecordingDispatcher::default();
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let leases = InMemoryCapabilityLeaseStore::new();
+
+    // Start and block at auth.
+    let context = execution_context(CapabilitySet {
+        grants: vec![dispatch_grant()],
+    });
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+
+    run_state
+        .start(RunStart {
+            invocation_id,
+            scope: scope.clone(),
+            capability_id: capability_id(),
+        })
+        .await
+        .unwrap();
+    run_state
+        .block_auth(&scope, invocation_id, "AuthRequired".to_string())
+        .await
+        .unwrap();
+
+    // Insert a Pending approval into the store (not yet approved).
+    let approval_id = ApprovalRequestId::new();
+    approval_requests
+        .save_pending(
+            scope.clone(),
+            ApprovalRequest {
+                id: approval_id,
+                correlation_id: context.correlation_id,
+                requested_by: Principal::HostRuntime,
+                action: Box::new(Action::Dispatch {
+                    capability: capability_id(),
+                    estimated_resources: ResourceEstimate::default(),
+                }),
+                invocation_fingerprint: None,
+                reason: "pending approval".to_string(),
+                reusable_scope: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+
+    let err = host
+        .auth_resume_json(CapabilityAuthResumeRequest {
+            context,
+            capability_id: capability_id(),
+            estimate: ResourceEstimate::default(),
+            input: serde_json::json!({"message": "pending approval"}),
+            trust_decision: trust_decision(),
+            approval_request_id: Some(approval_id),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            CapabilityInvocationError::ApprovalNotApproved {
+                status: ApprovalStatus::Pending,
+                ..
+            }
+        ),
+        "expected ApprovalNotApproved(Pending), got {err:?}"
+    );
+    assert_eq!(
+        dispatcher.dispatch_count(),
+        0,
+        "dispatch must not fire when approval is still Pending"
+    );
+    // Run must remain in BlockedAuth (Pending approval → no fail_run_if_configured call).
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(
+        run.status,
+        RunStatus::BlockedAuth,
+        "run must remain BlockedAuth when approval is Pending"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FIX 7b: auth_resume_json returns ResumeStoreMissing when approval_requests
+//         store is absent but approval_request_id is Some.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn auth_resume_json_returns_store_missing_when_approval_requests_absent() {
+    // When auth_resume_json is called with approval_request_id = Some but the
+    // host was wired WITHOUT an approval_requests store, the function must return
+    // Err(ResumeStoreMissing { store: "approval_requests" }) immediately.
+    let registry = registry_with_echo_capability();
+    let authorizer = GrantAuthorizer::new();
+    let dispatcher = RecordingDispatcher::default();
+    let run_state = InMemoryRunStateStore::new();
+
+    let context = execution_context(CapabilitySet {
+        grants: vec![dispatch_grant()],
+    });
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+
+    run_state
+        .start(RunStart {
+            invocation_id,
+            scope: scope.clone(),
+            capability_id: capability_id(),
+        })
+        .await
+        .unwrap();
+    run_state
+        .block_auth(&scope, invocation_id, "AuthRequired".to_string())
+        .await
+        .unwrap();
+
+    // Host has run_state but NO approval_requests store.
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
+
+    let approval_id = ApprovalRequestId::new();
+    let err = host
+        .auth_resume_json(CapabilityAuthResumeRequest {
+            context,
+            capability_id: capability_id(),
+            estimate: ResourceEstimate::default(),
+            input: serde_json::json!({"message": "needs approval store"}),
+            trust_decision: trust_decision(),
+            approval_request_id: Some(approval_id),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            CapabilityInvocationError::ResumeStoreMissing { store, .. }
+            if store == "approval_requests"
+        ),
+        "expected ResumeStoreMissing {{ store: \"approval_requests\" }}, got {err:?}"
+    );
+    assert_eq!(
+        dispatcher.dispatch_count(),
+        0,
+        "dispatch must not fire when approval_requests store is absent"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Deliverable 1e: without approval_request_id — skips lease path cleanly
 // ---------------------------------------------------------------------------
 

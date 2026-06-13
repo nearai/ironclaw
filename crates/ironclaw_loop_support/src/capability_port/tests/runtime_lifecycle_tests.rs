@@ -963,6 +963,8 @@ async fn auth_resume_after_approval_reuses_original_invocation_identity() {
 
     // Re-dispatch after the auth gate the way the executor does: carrying the
     // ORIGINAL invocation identity and the already-granted approval.
+    // Use a stable correlation_id so we can assert it arrives at the runtime.
+    let original_correlation_id = resume.correlation_id;
     let auth_resumed = port
         .invoke_capability(CapabilityInvocation {
             surface_version: surface.version,
@@ -972,6 +974,9 @@ async fn auth_resume_after_approval_reuses_original_invocation_identity() {
             auth_resume: Some(CapabilityAuthResume {
                 resume_token: resume.resume_token.clone(),
                 approval_request_id: Some(approval_request_id),
+                // Carry the original correlation_id from the approval so the
+                // port restores it onto the invocation context (FIX 3).
+                correlation_id: Some(original_correlation_id),
             }),
         })
         .await
@@ -1000,6 +1005,11 @@ async fn auth_resume_after_approval_reuses_original_invocation_identity() {
         auth_resume_requests[0].approval_request_id,
         Some(approval_request_id),
         "the granted approval must travel with the auth re-dispatch"
+    );
+    // FIX 3: original correlation_id must be restored onto the invocation context.
+    assert_eq!(
+        auth_resume_requests[0].context.correlation_id, original_correlation_id,
+        "auth re-dispatch must restore the original correlation_id"
     );
     assert_eq!(runtime.invoke_count(), 1, "no fresh first-call invocation");
     assert_eq!(runtime.resume_requests().len(), 1);

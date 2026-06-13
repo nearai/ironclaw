@@ -3866,6 +3866,7 @@ async fn non_auth_gate_block_preserves_pending_auth_resume() {
         provider_replay: None,
         resume_token: None,
         approval_request_id: None,
+        correlation_id: None,
     };
     let mut initial_state = LoopExecutionState::initial_for_run(host.run_context());
     initial_state.pending_auth_resume = Some(seeded_auth_resume.clone());
@@ -4275,6 +4276,7 @@ async fn gate_stage_skip_and_continue_clears_stale_pending_auth_resume() {
         provider_replay: None,
         resume_token: None,
         approval_request_id: None,
+        correlation_id: None,
     });
     let call = match provider_calls_response().output {
         ParentLoopOutput::CapabilityCalls(mut calls) => calls.remove(0),
@@ -4335,6 +4337,7 @@ async fn gate_stage_abort_clears_stale_pending_auth_resume() {
         provider_replay: None,
         resume_token: None,
         approval_request_id: None,
+        correlation_id: None,
     });
     let call = match provider_calls_response().output {
         ParentLoopOutput::CapabilityCalls(mut calls) => calls.remove(0),
@@ -4398,6 +4401,7 @@ async fn gate_stage_skip_does_not_clear_auth_resume_for_different_capability() {
         provider_replay: None,
         resume_token: None,
         approval_request_id: None,
+        correlation_id: None,
     });
     // The call being dispatched through GateStage is capability_id() ("demo.echo"),
     // not the seeded "other.cap".
