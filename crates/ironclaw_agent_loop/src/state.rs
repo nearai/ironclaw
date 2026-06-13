@@ -762,7 +762,7 @@ mod tests {
             effective_capability_ids: vec![],
             provider_replay: None,
             resume_token: Some(resume_token.clone()),
-            approval_request_id: Some(approval_request_id.clone()),
+            approval_request_id: Some(approval_request_id),
         });
 
         // Round-trip: both new fields must survive encode/decode.
