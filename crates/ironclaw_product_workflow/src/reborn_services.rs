@@ -3669,6 +3669,12 @@ fn map_thread_error(error: SessionThreadError) -> RebornServicesError {
         | SessionThreadError::OverlappingSummaryRange { .. } => {
             RebornServicesError::from_status(RebornServicesErrorCode::Conflict, 409, false)
         }
+        SessionThreadError::InvalidAttachment(_) => RebornServicesError::from_status_kind(
+            RebornServicesErrorCode::InvalidRequest,
+            RebornServicesErrorKind::Validation,
+            400,
+            false,
+        ),
         SessionThreadError::GeneratedThreadId(_)
         | SessionThreadError::Serialization(_)
         | SessionThreadError::Deserialization(_)
