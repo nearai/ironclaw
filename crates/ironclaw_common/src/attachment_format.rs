@@ -58,6 +58,11 @@ pub enum ExtractorId {
 /// same format (e.g. `image/jpg` for `image/jpeg`, `audio/x-wav` for
 /// `audio/wav`). Lookups normalize the input (strip parameters, trim, lowercase)
 /// before matching against `mime` or any alias.
+///
+/// `ext_aliases` are additional common filename extensions for the same format
+/// (e.g. `jpeg` for the canonical `jpg`). They are symmetric with
+/// `mime_aliases` and feed [`accept_tokens`] so the file picker surfaces every
+/// real-world spelling; they are never used for the MIME-based authority check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachmentFormat {
     /// Canonical, lowercase MIME type (the primary key).
@@ -66,6 +71,9 @@ pub struct AttachmentFormat {
     pub mime_aliases: &'static [&'static str],
     /// Canonical file extension, without the leading dot.
     pub canonical_ext: &'static str,
+    /// Additional common filename extensions for this format (no leading dot),
+    /// e.g. `["jpeg"]` for `canonical_ext: "jpg"`. Picker hints only.
+    pub ext_aliases: &'static [&'static str],
     /// Attachment kind (Image / Audio / Document).
     pub kind: AttachmentKind,
     /// Which extractor produces `extracted_text` for this format.
@@ -91,6 +99,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "image/png",
         mime_aliases: &[],
         canonical_ext: "png",
+        ext_aliases: &[],
         kind: AttachmentKind::Image,
         extractor: ExtractorId::None,
     },
@@ -98,6 +107,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "image/jpeg",
         mime_aliases: &["image/jpg"],
         canonical_ext: "jpg",
+        ext_aliases: &["jpeg", "jfif"],
         kind: AttachmentKind::Image,
         extractor: ExtractorId::None,
     },
@@ -105,6 +115,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "image/gif",
         mime_aliases: &[],
         canonical_ext: "gif",
+        ext_aliases: &[],
         kind: AttachmentKind::Image,
         extractor: ExtractorId::None,
     },
@@ -112,6 +123,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "image/webp",
         mime_aliases: &[],
         canonical_ext: "webp",
+        ext_aliases: &[],
         kind: AttachmentKind::Image,
         extractor: ExtractorId::None,
     },
@@ -120,6 +132,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "application/pdf",
         mime_aliases: &[],
         canonical_ext: "pdf",
+        ext_aliases: &[],
         kind: AttachmentKind::Document,
         extractor: ExtractorId::Pdf,
     },
@@ -127,6 +140,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "text/plain",
         mime_aliases: &[],
         canonical_ext: "txt",
+        ext_aliases: &[],
         kind: AttachmentKind::Document,
         extractor: ExtractorId::Utf8Text,
     },
@@ -134,6 +148,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "text/markdown",
         mime_aliases: &[],
         canonical_ext: "md",
+        ext_aliases: &["markdown"],
         kind: AttachmentKind::Document,
         extractor: ExtractorId::Utf8Text,
     },
@@ -141,6 +156,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "text/csv",
         mime_aliases: &[],
         canonical_ext: "csv",
+        ext_aliases: &[],
         kind: AttachmentKind::Document,
         extractor: ExtractorId::Utf8Text,
     },
@@ -148,6 +164,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "application/json",
         mime_aliases: &[],
         canonical_ext: "json",
+        ext_aliases: &[],
         kind: AttachmentKind::Document,
         extractor: ExtractorId::Utf8Text,
     },
@@ -155,6 +172,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "application/xml",
         mime_aliases: &["text/xml"],
         canonical_ext: "xml",
+        ext_aliases: &[],
         kind: AttachmentKind::Document,
         extractor: ExtractorId::Utf8Text,
     },
@@ -162,6 +180,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "application/rtf",
         mime_aliases: &["text/rtf"],
         canonical_ext: "rtf",
+        ext_aliases: &[],
         kind: AttachmentKind::Document,
         extractor: ExtractorId::Rtf,
     },
@@ -172,6 +191,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "text/tab-separated-values",
         mime_aliases: &[],
         canonical_ext: "tsv",
+        ext_aliases: &[],
         kind: AttachmentKind::Document,
         extractor: ExtractorId::Utf8Text,
     },
@@ -179,6 +199,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "text/html",
         mime_aliases: &[],
         canonical_ext: "html",
+        ext_aliases: &["htm"],
         kind: AttachmentKind::Document,
         extractor: ExtractorId::Utf8Text,
     },
@@ -186,6 +207,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "text/javascript",
         mime_aliases: &[],
         canonical_ext: "js",
+        ext_aliases: &["mjs", "cjs"],
         kind: AttachmentKind::Document,
         extractor: ExtractorId::Utf8Text,
     },
@@ -193,6 +215,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "text/css",
         mime_aliases: &[],
         canonical_ext: "css",
+        ext_aliases: &[],
         kind: AttachmentKind::Document,
         extractor: ExtractorId::Utf8Text,
     },
@@ -200,6 +223,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "text/x-python",
         mime_aliases: &[],
         canonical_ext: "py",
+        ext_aliases: &[],
         kind: AttachmentKind::Document,
         extractor: ExtractorId::Utf8Text,
     },
@@ -207,6 +231,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "text/x-java",
         mime_aliases: &[],
         canonical_ext: "java",
+        ext_aliases: &[],
         kind: AttachmentKind::Document,
         extractor: ExtractorId::Utf8Text,
     },
@@ -214,6 +239,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "text/x-c",
         mime_aliases: &[],
         canonical_ext: "c",
+        ext_aliases: &[],
         kind: AttachmentKind::Document,
         extractor: ExtractorId::Utf8Text,
     },
@@ -221,6 +247,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "text/x-c++",
         mime_aliases: &[],
         canonical_ext: "cpp",
+        ext_aliases: &["cc", "cxx", "hpp"],
         kind: AttachmentKind::Document,
         extractor: ExtractorId::Utf8Text,
     },
@@ -228,6 +255,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "text/x-rust",
         mime_aliases: &[],
         canonical_ext: "rs",
+        ext_aliases: &[],
         kind: AttachmentKind::Document,
         extractor: ExtractorId::Utf8Text,
     },
@@ -235,6 +263,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "text/x-go",
         mime_aliases: &[],
         canonical_ext: "go",
+        ext_aliases: &[],
         kind: AttachmentKind::Document,
         extractor: ExtractorId::Utf8Text,
     },
@@ -242,6 +271,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "text/x-ruby",
         mime_aliases: &[],
         canonical_ext: "rb",
+        ext_aliases: &[],
         kind: AttachmentKind::Document,
         extractor: ExtractorId::Utf8Text,
     },
@@ -249,6 +279,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "text/x-shellscript",
         mime_aliases: &["application/x-sh"],
         canonical_ext: "sh",
+        ext_aliases: &[],
         kind: AttachmentKind::Document,
         extractor: ExtractorId::Utf8Text,
     },
@@ -256,6 +287,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "text/x-toml",
         mime_aliases: &["application/toml"],
         canonical_ext: "toml",
+        ext_aliases: &[],
         kind: AttachmentKind::Document,
         extractor: ExtractorId::Utf8Text,
     },
@@ -263,6 +295,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "text/x-yaml",
         mime_aliases: &["application/yaml", "application/x-yaml"],
         canonical_ext: "yaml",
+        ext_aliases: &["yml"],
         kind: AttachmentKind::Document,
         extractor: ExtractorId::Utf8Text,
     },
@@ -270,6 +303,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "text/x-log",
         mime_aliases: &[],
         canonical_ext: "log",
+        ext_aliases: &[],
         kind: AttachmentKind::Document,
         extractor: ExtractorId::Utf8Text,
     },
@@ -277,6 +311,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "application/msword",
         mime_aliases: &[],
         canonical_ext: "doc",
+        ext_aliases: &[],
         kind: AttachmentKind::Document,
         extractor: ExtractorId::LegacyOffice,
     },
@@ -284,6 +319,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         mime_aliases: &[],
         canonical_ext: "docx",
+        ext_aliases: &[],
         kind: AttachmentKind::Document,
         extractor: ExtractorId::Docx,
     },
@@ -291,6 +327,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "application/vnd.ms-excel",
         mime_aliases: &[],
         canonical_ext: "xls",
+        ext_aliases: &[],
         kind: AttachmentKind::Document,
         extractor: ExtractorId::LegacyOffice,
     },
@@ -298,6 +335,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         mime_aliases: &[],
         canonical_ext: "xlsx",
+        ext_aliases: &[],
         kind: AttachmentKind::Document,
         extractor: ExtractorId::Xlsx,
     },
@@ -305,6 +343,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "application/vnd.ms-powerpoint",
         mime_aliases: &[],
         canonical_ext: "ppt",
+        ext_aliases: &[],
         kind: AttachmentKind::Document,
         extractor: ExtractorId::LegacyOffice,
     },
@@ -312,6 +351,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         mime_aliases: &[],
         canonical_ext: "pptx",
+        ext_aliases: &[],
         kind: AttachmentKind::Document,
         extractor: ExtractorId::Pptx,
     },
@@ -320,6 +360,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "audio/mpeg",
         mime_aliases: &["audio/mp3"],
         canonical_ext: "mp3",
+        ext_aliases: &[],
         kind: AttachmentKind::Audio,
         extractor: ExtractorId::AudioTranscription,
     },
@@ -327,6 +368,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "audio/ogg",
         mime_aliases: &["audio/opus"],
         canonical_ext: "ogg",
+        ext_aliases: &["opus"],
         kind: AttachmentKind::Audio,
         extractor: ExtractorId::AudioTranscription,
     },
@@ -334,6 +376,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "audio/wav",
         mime_aliases: &["audio/x-wav", "audio/wave"],
         canonical_ext: "wav",
+        ext_aliases: &[],
         kind: AttachmentKind::Audio,
         extractor: ExtractorId::AudioTranscription,
     },
@@ -341,6 +384,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "audio/mp4",
         mime_aliases: &[],
         canonical_ext: "mp4",
+        ext_aliases: &[],
         kind: AttachmentKind::Audio,
         extractor: ExtractorId::AudioTranscription,
     },
@@ -348,6 +392,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "audio/x-m4a",
         mime_aliases: &["audio/m4a"],
         canonical_ext: "m4a",
+        ext_aliases: &[],
         kind: AttachmentKind::Audio,
         extractor: ExtractorId::AudioTranscription,
     },
@@ -355,6 +400,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "audio/aac",
         mime_aliases: &[],
         canonical_ext: "aac",
+        ext_aliases: &[],
         kind: AttachmentKind::Audio,
         extractor: ExtractorId::AudioTranscription,
     },
@@ -362,6 +408,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "audio/flac",
         mime_aliases: &["audio/x-flac"],
         canonical_ext: "flac",
+        ext_aliases: &[],
         kind: AttachmentKind::Audio,
         extractor: ExtractorId::AudioTranscription,
     },
@@ -369,6 +416,7 @@ const FORMATS: &[AttachmentFormat] = &[
         mime: "audio/webm",
         mime_aliases: &[],
         canonical_ext: "webm",
+        ext_aliases: &[],
         kind: AttachmentKind::Audio,
         extractor: ExtractorId::AudioTranscription,
     },
@@ -385,7 +433,14 @@ pub fn lookup(mime: &str) -> Option<&'static AttachmentFormat> {
     })
 }
 
-/// Whether the registry recognizes (and therefore allows) a MIME type.
+/// Whether the registry recognizes a MIME type as a known attachment format.
+///
+/// This answers "does the registry know how to classify/extract this format",
+/// not "is this MIME authorized to be uploaded on an untrusted channel". The
+/// registry deliberately recognizes extractor-capable formats (HTML, source
+/// code, …) that a given channel may still choose to deny; channel upload
+/// authorization stays with the channel and should narrow this set, not treat
+/// it as the gate.
 pub fn is_supported_mime(mime: &str) -> bool {
     lookup(mime).is_some()
 }
@@ -426,18 +481,27 @@ pub fn all_formats() -> &'static [AttachmentFormat] {
 /// This is the single source the frontend `accept=` list should be generated
 /// from or asserted against.
 ///
-/// Every kind — image, document, and audio — is advertised the same way, by its
-/// canonical extension. We deliberately do *not* emit `image/*` / `audio/*`
-/// wildcards: a wildcard tells the browser to accept *any* image/audio type,
-/// including ones the registry rejects (`image/svg+xml`, `image/bmp`, …), so the
-/// picker would offer files that then fail server-side validation — the exact
-/// drift this registry exists to remove. Advertising exactly the registry's
-/// extensions keeps the picker and [`is_supported_mime`] in lockstep.
+/// Every kind — image, document, and audio — is advertised the same way: each
+/// format's canonical extension plus its registry
+/// [`AttachmentFormat::ext_aliases`] (e.g. `.jpeg` for `image/jpeg`). We
+/// deliberately do *not* emit `image/*` / `audio/*` wildcards, which would tell
+/// the browser to accept *any* image/audio type including ones the registry
+/// rejects (`image/svg+xml`, `image/bmp`, …).
+///
+/// These are picker *hints*, not an authorization boundary. An extension does
+/// not map 1:1 to a MIME type — container extensions like `.mp4` / `.webm` /
+/// `.ogg` can carry an unsupported type (`video/mp4`), so the picker may still
+/// offer a file that [`is_supported_mime`] then rejects. Server-side validation
+/// by MIME is always authoritative; these tokens only widen what the picker
+/// *shows*, never what is *accepted*.
 pub fn accept_tokens() -> Vec<String> {
-    FORMATS
-        .iter()
-        .map(|format| format!(".{}", format.canonical_ext))
-        .collect()
+    let alias_count: usize = FORMATS.iter().map(|f| f.ext_aliases.len()).sum();
+    let mut tokens = Vec::with_capacity(FORMATS.len() + alias_count);
+    for format in FORMATS {
+        tokens.push(format!(".{}", format.canonical_ext));
+        tokens.extend(format.ext_aliases.iter().map(|alias| format!(".{alias}")));
+    }
+    tokens
 }
 
 /// The comma-joined `accept` attribute value for an HTML file input, generated
@@ -597,15 +661,24 @@ mod tests {
         let unique: HashSet<&String> = tokens.iter().collect();
         assert_eq!(unique.len(), tokens.len(), "accept tokens must be unique");
 
-        // The advertised set is exactly the canonical extension of every
-        // registered format — including images, so the picker and
-        // `is_supported_mime` stay in lockstep.
+        // The advertised set covers the canonical extension of every registered
+        // format (so the picker and `is_supported_mime` stay in lockstep) plus a
+        // few common spelling aliases for real-world filenames.
         let token_set: HashSet<String> = tokens.iter().cloned().collect();
-        let expected: HashSet<String> = all_formats()
+        let canonical: HashSet<String> = all_formats()
             .iter()
             .map(|f| format!(".{}", f.canonical_ext))
             .collect();
-        assert_eq!(token_set, expected);
+        assert!(
+            canonical.is_subset(&token_set),
+            "every canonical extension must be advertised: {tokens:?}"
+        );
+        for alias in [".jpeg", ".htm", ".yml", ".opus", ".cc", ".mjs"] {
+            assert!(
+                token_set.contains(alias),
+                "accept tokens must include the {alias} alias: {tokens:?}"
+            );
+        }
 
         // Images are advertised by explicit extension, not a wildcard.
         assert!(tokens.contains(&".png".to_string()));
