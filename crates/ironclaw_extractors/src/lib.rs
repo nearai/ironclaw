@@ -575,6 +575,26 @@ fn try_extract_by_extension(data: &[u8], filename: Option<&str>) -> Option<Strin
     }
 }
 
+/// Marker appended to extracted text that was truncated for length.
+pub const TRUNCATION_MARKER: &str = "\n[... truncated, document too long ...]";
+
+/// Truncate `text` to at most `max_chars` characters on a UTF-8 character
+/// boundary, appending [`TRUNCATION_MARKER`] when truncation occurred.
+///
+/// Consumers cap extracted text before handing it to the model; this is the
+/// canonical, char-boundary-safe truncation (`char_indices`, never byte
+/// slicing) so each consumer doesn't re-roll it with subtly different limits.
+pub fn truncate_to_chars(text: &str, max_chars: usize) -> String {
+    match text.char_indices().nth(max_chars) {
+        Some((byte_idx, _)) => {
+            let mut out = text[..byte_idx].to_string();
+            out.push_str(TRUNCATION_MARKER);
+            out
+        }
+        None => text.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -583,6 +603,23 @@ mod tests {
     fn strip_xml_basic() {
         let xml = "<root><p>Hello</p><p>World</p></root>";
         assert_eq!(strip_xml_tags(xml), "Hello World");
+    }
+
+    #[test]
+    fn truncate_to_chars_appends_marker_only_when_over_limit() {
+        assert_eq!(truncate_to_chars("short", 100), "short");
+
+        let truncated = truncate_to_chars("abcdef", 3);
+        assert!(truncated.starts_with("abc"));
+        assert!(truncated.ends_with(TRUNCATION_MARKER));
+    }
+
+    #[test]
+    fn truncate_to_chars_splits_on_a_char_boundary() {
+        // Each `é` is two bytes; truncating at 2 chars must not split a codepoint.
+        let truncated = truncate_to_chars("éééé", 2);
+        assert!(truncated.starts_with("éé"));
+        assert!(truncated.ends_with(TRUNCATION_MARKER));
     }
 
     #[test]

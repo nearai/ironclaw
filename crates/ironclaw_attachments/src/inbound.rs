@@ -4,10 +4,11 @@
 //! attachment's bytes through the project filesystem authority (see
 //! [`crate::land_attachment`]) and produces the channel-agnostic
 //! [`AttachmentRef`] the transcript persists, with `storage_key` set to the
-//! landed [`ScopedPath`]. `extracted_text` is left `None` here — document
-//! extraction and audio transcription run in a later pipeline stage.
+//! landed [`ScopedPath`]. Document attachments are also run through
+//! [`ironclaw_extractors`] to fill `extracted_text`; audio transcription is
+//! provider-backed and handled by a later pipeline stage.
 
-use ironclaw_common::{AttachmentRef, canonical_extension, kind_for_mime};
+use ironclaw_common::{AttachmentKind, AttachmentRef, canonical_extension, kind_for_mime};
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::ResourceScope;
 
@@ -74,6 +75,16 @@ where
         // `kind` is always consistent with its `mime_type`.
         let kind = kind_for_mime(&mime_type);
         let fallback_extension = canonical_extension(&mime_type).unwrap_or(UNKNOWN_EXTENSION);
+        // Extract document text before the bytes are moved into the write.
+        // Images go to the vision model; audio transcription is provider-backed
+        // and handled by a later pipeline stage, so both leave `extracted_text`
+        // unset here.
+        let extracted_text = match kind {
+            AttachmentKind::Document => {
+                extract_document_text(&bytes, &mime_type, filename.as_deref())
+            }
+            AttachmentKind::Image | AttachmentKind::Audio => None,
+        };
         let landing = AttachmentLanding {
             message_id,
             index,
@@ -97,10 +108,31 @@ where
             filename,
             size_bytes: Some(size_bytes),
             storage_key: Some(stored.as_str().to_string()),
-            extracted_text: None,
+            extracted_text,
         });
     }
     Ok(refs)
+}
+
+/// Maximum characters of extracted document text retained on a reference
+/// (~25K tokens). Mirrors the v1 document-extraction cap.
+const MAX_EXTRACTED_TEXT_CHARS: usize = 100_000;
+
+/// Run the type-aware text extractor over a document attachment's bytes and
+/// return the extracted text, truncated to [`MAX_EXTRACTED_TEXT_CHARS`].
+///
+/// Returns `None` when extraction yields nothing or fails — the attachment is
+/// still landed and referenced, the model just won't have its text.
+fn extract_document_text(bytes: &[u8], mime: &str, filename: Option<&str>) -> Option<String> {
+    let text = ironclaw_extractors::extract_text(bytes, mime, filename).ok()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(ironclaw_extractors::truncate_to_chars(
+        trimmed,
+        MAX_EXTRACTED_TEXT_CHARS,
+    ))
 }
 
 #[cfg(test)]
@@ -380,5 +412,58 @@ mod tests {
                 .is_none(),
             "oversized attachment must not have been written"
         );
+    }
+
+    #[tokio::test]
+    async fn document_attachment_gets_extracted_text() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let writer = project_mount(backend, MountPermissions::read_write());
+        let refs = land_inbound_attachments(
+            &writer,
+            &test_scope(),
+            DEFAULT_PROJECT_MOUNT_ALIAS,
+            "2026-06-09",
+            "msg1",
+            vec![inbound("att-0", "text/csv", "data.csv", b"name,score\nalice,9")],
+            DEFAULT_MAX_ATTACHMENT_BYTES,
+        )
+        .await
+        .expect("batch lands");
+        assert_eq!(
+            refs[0].extracted_text.as_deref(),
+            Some("name,score\nalice,9")
+        );
+    }
+
+    #[tokio::test]
+    async fn image_attachment_has_no_extracted_text() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let writer = project_mount(backend, MountPermissions::read_write());
+        let refs = land_inbound_attachments(
+            &writer,
+            &test_scope(),
+            DEFAULT_PROJECT_MOUNT_ALIAS,
+            "2026-06-09",
+            "msg1",
+            vec![inbound("att-0", "image/png", "x.png", &[0x89, 0x50, 0x4E, 0x47])],
+            DEFAULT_MAX_ATTACHMENT_BYTES,
+        )
+        .await
+        .expect("batch lands");
+        assert!(refs[0].extracted_text.is_none());
+    }
+
+    #[test]
+    fn extract_document_text_truncates_long_text() {
+        let long = "x".repeat(MAX_EXTRACTED_TEXT_CHARS + 50);
+        let out = extract_document_text(long.as_bytes(), "text/plain", None)
+            .expect("non-empty text extracts");
+        assert!(out.contains("[... truncated"));
+        assert!(out.chars().count() <= MAX_EXTRACTED_TEXT_CHARS + 60);
+    }
+
+    #[test]
+    fn extract_document_text_is_none_on_empty() {
+        assert!(extract_document_text(b"   \n  ", "text/plain", None).is_none());
     }
 }
