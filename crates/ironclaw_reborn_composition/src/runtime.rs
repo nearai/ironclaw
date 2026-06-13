@@ -1748,6 +1748,13 @@ impl RebornRuntime {
         }
         .await;
 
+        // Clearing the accepted message is safe even on the `BlockedOnGate`
+        // path, where the run is still live and resumable: the inbound message
+        // is already consumed during the first prompt build (the skill-context
+        // source `take`s it), so this is idempotent cleanup of an
+        // already-taken entry, and a later gate-resume rebuilds from the active
+        // plan candidates rather than this entry. The QA recorder also discards
+        // the runtime immediately after, so nothing resumes here in practice.
         if let Some(skill_activation_source) = &self.skill_activation_source
             && let Err(clear_error) = skill_activation_source
                 .clear_accepted_message(&submitted.scope, &submitted.accepted_message_ref)
