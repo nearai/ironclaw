@@ -387,6 +387,8 @@ pub enum TurnError {
     InvalidTransition { from: TurnStatus, to: TurnStatus },
     #[error("turn run lease mismatch")]
     LeaseMismatch,
+    #[error("invalid run-origin adapter: must be 1..=256 bytes")]
+    InvalidRunOriginAdapter,
 }
 
 impl TurnError {
@@ -409,6 +411,7 @@ impl TurnError {
                 TurnErrorCategory::Conflict
             }
             Self::CapacityExceeded { .. } => TurnErrorCategory::CapacityExceeded,
+            Self::InvalidRunOriginAdapter => TurnErrorCategory::InvalidRequest,
         }
     }
 

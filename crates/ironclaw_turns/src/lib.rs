@@ -69,7 +69,9 @@ pub use loop_exit::{
     LoopExitViolationKind, LoopFailed, LoopFailureKind,
 };
 pub use memory::{InMemoryTurnStateStore, InMemoryTurnStateStoreLimits};
-pub use origin::TurnRunOrigin;
+pub use origin::{
+    ProductTurnContext, RunOriginAdapter, TurnOriginKind, TurnOwner, TurnSurfaceType,
+};
 pub use request::{
     CancelRunRequest, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
     SubmitChildRunRequest, SubmitTurnRequest, TurnTimestamp,

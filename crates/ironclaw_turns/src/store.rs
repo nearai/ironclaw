@@ -302,6 +302,7 @@ impl TurnIdempotencyOutcomeKind {
             TurnError::Conflict { .. }
             | TurnError::InvalidTransition { .. }
             | TurnError::LeaseMismatch => Self::Conflict,
+            TurnError::InvalidRunOriginAdapter => Self::InvalidRequest,
         }
     }
 }
