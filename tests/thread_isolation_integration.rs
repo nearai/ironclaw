@@ -101,6 +101,7 @@ async fn start_server_with_db() -> (
         auth_manager: None,
         chat_rate_limiter: PerUserRateLimiter::new(30, 60),
         oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
+        ironhub_catalog_rate_limiter: PerUserRateLimiter::new(30, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),

@@ -559,6 +559,7 @@ fn gateway_state_has_multi_tenant_fields() {
         auth_manager: None,
         chat_rate_limiter: PerUserRateLimiter::new(30, 60), // Multi-tenant: per-user
         oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
+        ironhub_catalog_rate_limiter: PerUserRateLimiter::new(30, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
@@ -652,6 +653,7 @@ async fn start_owner_scoped_sender_server() -> (
         auth_manager: None,
         chat_rate_limiter: PerUserRateLimiter::new(30, 60),
         oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
+        ironhub_catalog_rate_limiter: PerUserRateLimiter::new(30, 60),
         webhook_rate_limiter: RateLimiter::new(10, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
@@ -1134,6 +1136,7 @@ async fn start_multi_user_server_with_db() -> (
         auth_manager: None,
         chat_rate_limiter: PerUserRateLimiter::new(30, 60),
         oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
+        ironhub_catalog_rate_limiter: PerUserRateLimiter::new(30, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),

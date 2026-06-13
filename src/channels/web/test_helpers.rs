@@ -48,6 +48,9 @@ pub struct TestGatewayBuilder {
     llm_provider: Option<Arc<dyn ironclaw_llm::LlmProvider>>,
     user_id: String,
     tool_registry: Option<Arc<crate::tools::ToolRegistry>>,
+    tool_dispatcher: Option<Arc<crate::tools::dispatch::ToolDispatcher>>,
+    secrets_store: Option<Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
+    ironhub_catalog_rate_limit: Option<(u64, u64)>,
 }
 
 impl Default for TestGatewayBuilder {
@@ -57,6 +60,9 @@ impl Default for TestGatewayBuilder {
             llm_provider: None,
             user_id: "test-user".to_string(),
             tool_registry: None,
+            tool_dispatcher: None,
+            secrets_store: None,
+            ironhub_catalog_rate_limit: None,
         }
     }
 }
@@ -94,6 +100,27 @@ impl TestGatewayBuilder {
         self
     }
 
+    pub fn with_tool_dispatcher(
+        mut self,
+        dispatcher: Arc<crate::tools::dispatch::ToolDispatcher>,
+    ) -> Self {
+        self.tool_dispatcher = Some(dispatcher);
+        self
+    }
+
+    pub fn with_secrets_store(
+        mut self,
+        store: Arc<dyn crate::secrets::SecretsStore + Send + Sync>,
+    ) -> Self {
+        self.secrets_store = Some(store);
+        self
+    }
+
+    pub fn with_ironhub_catalog_rate_limit(mut self, max_requests: u64, window_secs: u64) -> Self {
+        self.ironhub_catalog_rate_limit = Some((max_requests, window_secs));
+        self
+    }
+
     /// Build the `Arc<GatewayState>` without starting a server.
     pub fn build(self) -> Arc<GatewayState> {
         Arc::new(GatewayState {
@@ -124,6 +151,10 @@ impl TestGatewayBuilder {
             scheduler: None,
             chat_rate_limiter: PerUserRateLimiter::new(30, 60),
             oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
+            ironhub_catalog_rate_limiter: {
+                let (max, window) = self.ironhub_catalog_rate_limit.unwrap_or((30, 60));
+                PerUserRateLimiter::new(max, window)
+            },
             webhook_rate_limiter: RateLimiter::new(10, 60),
             registry_entries: Vec::new(),
             cost_guard: None,
@@ -132,7 +163,7 @@ impl TestGatewayBuilder {
             active_config: Arc::new(tokio::sync::RwLock::new(
                 crate::channels::web::platform::state::ActiveConfigSnapshot::default(),
             )),
-            secrets_store: None,
+            secrets_store: self.secrets_store,
             db_auth: None,
             pairing_store: None,
             oauth_providers: None,
@@ -144,7 +175,7 @@ impl TestGatewayBuilder {
             near_network: None,
             oauth_sweep_shutdown: None,
             frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
-            tool_dispatcher: None,
+            tool_dispatcher: self.tool_dispatcher,
         })
     }
 
@@ -240,6 +271,7 @@ pub(crate) fn test_gateway_state_with_dependencies(
         scheduler: None,
         chat_rate_limiter: PerUserRateLimiter::new(30, 60),
         oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
+        ironhub_catalog_rate_limiter: PerUserRateLimiter::new(30, 60),
         webhook_rate_limiter: RateLimiter::new(10, 60),
         registry_entries: vec![],
         cost_guard: None,
@@ -297,6 +329,7 @@ pub(crate) fn test_gateway_state_with_store_and_session_manager(
         scheduler: None,
         chat_rate_limiter: PerUserRateLimiter::new(30, 60),
         oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
+        ironhub_catalog_rate_limiter: PerUserRateLimiter::new(30, 60),
         webhook_rate_limiter: RateLimiter::new(10, 60),
         registry_entries: vec![],
         cost_guard: None,

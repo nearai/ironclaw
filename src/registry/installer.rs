@@ -9,15 +9,63 @@ use crate::bootstrap::ironclaw_base_dir;
 use crate::registry::catalog::RegistryError;
 use crate::registry::manifest::{BundleDefinition, ExtensionManifest, ManifestKind, SourceSpec};
 
-// GitHub-only by design. New trusted hosts (e.g. a NEAR AI CDN) must be
-// explicitly added here; unknown hosts fall back to source build with a
-// warning rather than surfacing a clear "host not allowed" error.
 const ALLOWED_ARTIFACT_HOSTS: &[&str] = &[
+    "hub.ironclaw.com",
     "github.com",
     "objects.githubusercontent.com",
     "github-releases.githubusercontent.com",
     "raw.githubusercontent.com",
 ];
+
+fn extra_artifact_hosts() -> &'static [String] {
+    use std::sync::OnceLock;
+    static EXTRA: OnceLock<Vec<String>> = OnceLock::new();
+    EXTRA.get_or_init(|| {
+        parse_extra_artifact_hosts(
+            std::env::var("IRONHUB_EXTRA_ARTIFACT_HOSTS")
+                .ok()
+                .as_deref(),
+        )
+    })
+}
+
+fn parse_extra_artifact_hosts(env_value: Option<&str>) -> Vec<String> {
+    env_value
+        .unwrap_or("")
+        .split(',')
+        .map(|h| h.trim().to_ascii_lowercase())
+        .filter(|h| !h.is_empty())
+        .filter(|h| !host_is_disallowed_target(h))
+        .collect()
+}
+
+fn host_is_disallowed_target(host: &str) -> bool {
+    let h = host.strip_suffix('.').unwrap_or(host);
+    let ip_form = h
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(h);
+    if ip_form.parse::<IpAddr>().is_ok() {
+        return true;
+    }
+    if h == "localhost" {
+        return true;
+    }
+    const INTERNAL_SUFFIXES: &[&str] = &[
+        ".localhost",
+        ".local",
+        ".internal",
+        ".intranet",
+        ".lan",
+        ".home",
+        ".corp",
+        ".private",
+    ];
+    if INTERNAL_SUFFIXES.iter().any(|s| h.ends_with(s)) {
+        return true;
+    }
+    !h.contains('.')
+}
 
 fn should_attempt_source_fallback(err: &RegistryError) -> bool {
     match err {
@@ -39,13 +87,18 @@ fn should_attempt_source_fallback(err: &RegistryError) -> bool {
 }
 
 fn is_allowed_artifact_host(host: &str) -> bool {
+    is_allowed_artifact_host_with_extras(host, extra_artifact_hosts())
+}
+
+fn is_allowed_artifact_host_with_extras(host: &str, extras: &[String]) -> bool {
     ALLOWED_ARTIFACT_HOSTS
         .iter()
         .any(|allowed| host.eq_ignore_ascii_case(allowed))
         || host.ends_with(".githubusercontent.com")
+        || extras.iter().any(|h| host.eq_ignore_ascii_case(h))
 }
 
-fn validate_artifact_url(
+pub(crate) fn validate_artifact_url(
     manifest_name: &str,
     field: &'static str,
     url: &str,
@@ -72,7 +125,7 @@ fn validate_artifact_url(
             reason: "URL host is missing".to_string(),
         })?;
 
-    if host.parse::<IpAddr>().is_ok() || !is_allowed_artifact_host(host) {
+    if host_is_disallowed_target(host) || !is_allowed_artifact_host(host) {
         return Err(RegistryError::InvalidManifest {
             name: manifest_name.to_string(),
             field,
@@ -468,7 +521,8 @@ impl RegistryInstaller {
             "Downloading {} '{}'...",
             manifest.kind, manifest.display_name
         );
-        let bytes = download_artifact(url).await?;
+        const MAX_REGISTRY_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
+        let bytes = download_artifact(url, MAX_REGISTRY_ARTIFACT_BYTES).await?;
         verify_sha256(&bytes, expected_sha, url)?;
 
         let target_caps = target_dir.join(format!("{}.capabilities.json", manifest.name));
@@ -495,7 +549,7 @@ impl RegistryInstaller {
                     caps_url,
                 )?;
                 const MAX_CAPS_SIZE: usize = 1024 * 1024; // 1 MB
-                match download_artifact(caps_url).await {
+                match download_artifact(caps_url, MAX_CAPS_SIZE as u64).await {
                     Ok(caps_bytes) if caps_bytes.len() <= MAX_CAPS_SIZE => {
                         fs::write(&target_caps, &caps_bytes)
                             .await
@@ -633,8 +687,22 @@ impl RegistryInstaller {
     }
 }
 
-/// Download an artifact from a URL.
-async fn download_artifact(url: &str) -> Result<bytes::Bytes, RegistryError> {
+fn enforce_size_cap(observed: u64, max_bytes: u64, url: &str) -> Result<(), RegistryError> {
+    if observed > max_bytes {
+        return Err(RegistryError::DownloadFailed {
+            url: url.to_string(),
+            reason: format!("response exceeds {max_bytes} byte size cap"),
+        });
+    }
+    Ok(())
+}
+
+/// Download an artifact from a URL, streaming with a hard size cap so a
+/// malicious or oversized response cannot exhaust memory.
+pub(crate) async fn download_artifact(
+    url: &str,
+    max_bytes: u64,
+) -> Result<bytes::Bytes, RegistryError> {
     let response = reqwest::get(url)
         .await
         .map_err(|e| RegistryError::DownloadFailed {
@@ -642,7 +710,7 @@ async fn download_artifact(url: &str) -> Result<bytes::Bytes, RegistryError> {
             reason: download_failure_reason(&e),
         })?;
 
-    let response = response
+    let mut response = response
         .error_for_status()
         .map_err(|e| RegistryError::DownloadFailed {
             url: url.to_string(),
@@ -653,23 +721,36 @@ async fn download_artifact(url: &str) -> Result<bytes::Bytes, RegistryError> {
             ),
         })?;
 
-    response
-        .bytes()
+    if let Some(len) = response.content_length() {
+        enforce_size_cap(len, max_bytes, url)?;
+    }
+
+    let mut buf: Vec<u8> = Vec::new();
+    let mut total: u64 = 0;
+    while let Some(chunk) = response
+        .chunk()
         .await
         .map_err(|e| RegistryError::DownloadFailed {
             url: url.to_string(),
             reason: format!("failed to read response body: {}", e),
-        })
+        })?
+    {
+        total += chunk.len() as u64;
+        enforce_size_cap(total, max_bytes, url)?;
+        buf.extend_from_slice(&chunk);
+    }
+
+    Ok(bytes::Bytes::from(buf))
 }
 
 /// Verify SHA256 of downloaded bytes.
-fn verify_sha256(bytes: &[u8], expected: &str, url: &str) -> Result<(), RegistryError> {
+pub(crate) fn verify_sha256(bytes: &[u8], expected: &str, url: &str) -> Result<(), RegistryError> {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     let actual = format!("{:x}", hasher.finalize());
 
-    if actual != expected {
+    if !actual.eq_ignore_ascii_case(expected) {
         return Err(RegistryError::ChecksumMismatch {
             url: url.to_string(),
             expected_sha256: expected.to_string(),
@@ -879,6 +960,16 @@ mod tests {
     fn test_verify_sha256_invalid() {
         let err = verify_sha256(b"data", "0000", "test://url").expect_err("checksum mismatch");
         assert!(matches!(err, RegistryError::ChecksumMismatch { .. }));
+    }
+
+    #[test]
+    fn test_verify_sha256_accepts_uppercase_expected() {
+        use sha2::{Digest, Sha256};
+        let data = b"hello world";
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        let hash = format!("{:X}", hasher.finalize());
+        assert!(verify_sha256(data, &hash, "test://url").is_ok());
     }
 
     #[tokio::test]
@@ -1368,6 +1459,116 @@ mod tests {
                 );
             }
             other => panic!("expected ManifestRead for channel, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn allowlist_includes_hub_and_github() {
+        assert!(is_allowed_artifact_host("hub.ironclaw.com"));
+        assert!(is_allowed_artifact_host("github.com"));
+        assert!(is_allowed_artifact_host("objects.githubusercontent.com"));
+    }
+
+    #[test]
+    fn allowlist_excludes_tigris_and_spoofs() {
+        assert!(!is_allowed_artifact_host("fly.storage.tigris.dev"));
+        assert!(!is_allowed_artifact_host("hub.ironclaw.com.evil.com"));
+        assert!(!is_allowed_artifact_host("evil.hub.ironclaw.com"));
+        assert!(!is_allowed_artifact_host("ironclaw.com"));
+    }
+
+    #[test]
+    fn parse_extra_artifact_hosts_handles_unset_empty_and_comma_list() {
+        assert!(parse_extra_artifact_hosts(None).is_empty());
+        assert!(parse_extra_artifact_hosts(Some("")).is_empty());
+        assert!(parse_extra_artifact_hosts(Some(" , , ")).is_empty());
+        assert_eq!(
+            parse_extra_artifact_hosts(Some("ironhub-staging.up.railway.app")),
+            vec!["ironhub-staging.up.railway.app".to_string()]
+        );
+        assert_eq!(
+            parse_extra_artifact_hosts(Some(" Foo.Example , bar.example ,  ")),
+            vec!["foo.example".to_string(), "bar.example".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_extra_artifact_hosts_filters_unsafe_targets() {
+        assert_eq!(
+            parse_extra_artifact_hosts(Some(
+                "ironhub-staging.up.railway.app, localhost, 127.0.0.1, metadata.internal, intranet, partner.example.com"
+            )),
+            vec![
+                "ironhub-staging.up.railway.app".to_string(),
+                "partner.example.com".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn extras_allow_listed_host_without_widening_const_allowlist() {
+        let extras = vec!["ironhub-staging.up.railway.app".to_string()];
+        assert!(is_allowed_artifact_host_with_extras(
+            "ironhub-staging.up.railway.app",
+            &extras
+        ));
+        assert!(is_allowed_artifact_host_with_extras(
+            "IRONHUB-STAGING.up.railway.app",
+            &extras
+        ));
+        assert!(!is_allowed_artifact_host_with_extras(
+            "evil.example.com",
+            &extras
+        ));
+        assert!(is_allowed_artifact_host_with_extras(
+            "hub.ironclaw.com",
+            &extras
+        ));
+        assert!(!is_allowed_artifact_host_with_extras(
+            "ironhub-staging.up.railway.app",
+            &[]
+        ));
+    }
+
+    #[test]
+    fn validate_artifact_url_rejects_non_https_ip_and_unknown_host() {
+        assert!(validate_artifact_url("m", "f", "http://hub.ironclaw.com/x").is_err());
+        assert!(validate_artifact_url("m", "f", "https://1.2.3.4/x").is_err());
+        assert!(validate_artifact_url("m", "f", "https://[::1]/x").is_err());
+        assert!(validate_artifact_url("m", "f", "https://[fd00::1]/x").is_err());
+        assert!(validate_artifact_url("m", "f", "https://localhost/x").is_err());
+        assert!(validate_artifact_url("m", "f", "https://metadata.internal/x").is_err());
+        assert!(validate_artifact_url("m", "f", "https://intranet/x").is_err());
+        assert!(validate_artifact_url("m", "f", "https://evil.example.com/x").is_err());
+        assert!(validate_artifact_url("m", "f", "https://hub.ironclaw.com/catalog/x.wasm").is_ok());
+    }
+
+    #[test]
+    fn host_is_disallowed_target_rejects_ip_internal_and_bare() {
+        assert!(host_is_disallowed_target("127.0.0.1"));
+        assert!(host_is_disallowed_target("169.254.169.254"));
+        assert!(host_is_disallowed_target("[::1]"));
+        assert!(host_is_disallowed_target("localhost"));
+        assert!(host_is_disallowed_target("foo.localhost"));
+        assert!(host_is_disallowed_target("svc.internal"));
+        assert!(host_is_disallowed_target("db.local"));
+        assert!(host_is_disallowed_target("intranet"));
+        assert!(host_is_disallowed_target("router.lan."));
+        assert!(!host_is_disallowed_target("hub.ironclaw.com"));
+        assert!(!host_is_disallowed_target("ironhub-staging.up.railway.app"));
+        assert!(!host_is_disallowed_target("objects.githubusercontent.com"));
+    }
+
+    #[test]
+    fn enforce_size_cap_allows_within_and_rejects_over() {
+        assert!(enforce_size_cap(0, 1024, "u").is_ok());
+        assert!(enforce_size_cap(1024, 1024, "u").is_ok());
+        let err = enforce_size_cap(1025, 1024, "u").expect_err("over cap must fail");
+        match err {
+            RegistryError::DownloadFailed { reason, .. } => {
+                assert!(reason.contains("exceeds 1024 byte size cap"));
+            }
+            other => panic!("expected DownloadFailed, got {:?}", other),
         }
     }
 }

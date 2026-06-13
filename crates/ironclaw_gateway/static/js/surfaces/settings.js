@@ -223,6 +223,107 @@ function loadInferenceSettings() {
 
 function loadAgentSettings() {
   loadStructuredSettings('settings-agent-content', AGENT_SETTINGS);
+  loadIronhubSigningKeyCard();
+}
+
+function renderIronhubSigningKeyCard(rowHtml) {
+  var card = document.getElementById('settings-ironhub-card');
+  if (!card) return;
+  card.innerHTML =
+    '<div class="settings-group">' +
+    '<div class="settings-group-title">' +
+    escapeHtml(I18n.t('ironhub.signingKey.title')) + '</div>' +
+    rowHtml +
+    '</div>';
+  var form = document.getElementById('ironhub-key-form');
+  if (form) form.addEventListener('submit', ironhubSaveSigningKey);
+  var revokeBtn = document.getElementById('ironhub-revoke-btn');
+  if (revokeBtn) revokeBtn.addEventListener('click', ironhubRevokeSigningKey);
+}
+
+function ironhubSigningKeyRowHtml(statusHtml, hasKey) {
+  var submitLabel = hasKey
+    ? I18n.t('ironhub.signingKey.replace')
+    : I18n.t('ironhub.signingKey.save');
+  var revoke = hasKey
+    ? '<button class="btn-ext" id="ironhub-revoke-btn" type="button">' +
+      escapeHtml(I18n.t('ironhub.signingKey.revoke')) + '</button>'
+    : '';
+  return '' +
+    '<div class="settings-row">' +
+    '<div class="settings-label-wrap">' +
+    '<label class="settings-label" for="ironhub-key-input">' +
+    escapeHtml(I18n.t('ironhub.signingKey.label')) + '</label>' +
+    '<div class="settings-description">' +
+    escapeHtml(I18n.t('ironhub.signingKey.description')) + '</div>' +
+    statusHtml +
+    '</div>' +
+    '<form id="ironhub-key-form" style="display:flex;align-items:center;gap:8px">' +
+    '<input type="password" class="settings-input" id="ironhub-key-input" autocomplete="off" ' +
+    'placeholder="' + escapeHtml(I18n.t('ironhub.signingKey.placeholder')) + '" />' +
+    '<button class="btn-ext install" type="submit">' + escapeHtml(submitLabel) + '</button>' +
+    revoke +
+    '</form>' +
+    '</div>';
+}
+
+function loadIronhubSigningKeyCard() {
+  renderIronhubSigningKeyCard(
+    '<div class="settings-row"><div class="settings-label-wrap">' +
+    '<div class="settings-description">' + escapeHtml(I18n.t('extensions.loading')) + '</div>' +
+    '</div></div>'
+  );
+  apiFetch('/api/ironhub/signing-key').then(function(meta) {
+    var status =
+      '<div class="settings-description">' +
+      escapeHtml(I18n.t('ironhub.signingKey.active', {
+        fingerprint: meta.fingerprint,
+        created: meta.created_at,
+      })) + '</div>';
+    renderIronhubSigningKeyCard(ironhubSigningKeyRowHtml(status, true));
+  }).catch(function() {
+    var status =
+      '<div class="settings-description">' +
+      escapeHtml(I18n.t('ironhub.signingKey.none')) + '</div>';
+    renderIronhubSigningKeyCard(ironhubSigningKeyRowHtml(status, false));
+  });
+}
+
+function ironhubSaveSigningKey(evt) {
+  if (evt && evt.preventDefault) evt.preventDefault();
+  var input = document.getElementById('ironhub-key-input');
+  if (!input) return;
+  var key = (input.value || '').trim();
+  if (key.indexOf('ihub_sk_') !== 0) {
+    showToast(I18n.t('ironhub.signingKey.invalidPrefix'), 'error');
+    return;
+  }
+  if (key.length < 32) {
+    showToast(I18n.t('ironhub.signingKey.invalidLength'), 'error');
+    return;
+  }
+  apiFetch('/api/ironhub/signing-key', {
+    method: 'POST',
+    body: { shared_key: key },
+  }).then(function() {
+    showToast(I18n.t('ironhub.signingKey.saved'), 'success');
+    loadIronhubSigningKeyCard();
+  }).catch(function(err) {
+    showToast(I18n.t('ironhub.signingKey.error', {
+      message: err && err.message ? err.message : 'unknown error',
+    }), 'error');
+  });
+}
+
+function ironhubRevokeSigningKey() {
+  apiFetch('/api/ironhub/signing-key', { method: 'DELETE' }).then(function() {
+    showToast(I18n.t('ironhub.signingKey.revoked'), 'success');
+    loadIronhubSigningKeyCard();
+  }).catch(function(err) {
+    showToast(I18n.t('ironhub.signingKey.error', {
+      message: err && err.message ? err.message : 'unknown error',
+    }), 'error');
+  });
 }
 
 function loadStructuredSettings(containerId, settingsDefs) {

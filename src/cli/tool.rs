@@ -21,32 +21,25 @@ fn default_tools_dir() -> PathBuf {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum ToolCommand {
-    /// Install a WASM tool from source directory or .wasm file
+    /// Install a WASM tool from a source dir or .wasm file. For IronHub installs use `ironclaw hub install <name>`.
     Install {
-        /// Path to tool source directory (with Cargo.toml) or .wasm file
         path: PathBuf,
 
-        /// Tool name (defaults to directory/file name)
         #[arg(short, long)]
         name: Option<String>,
 
-        /// Path to capabilities JSON file (auto-detected if not specified)
         #[arg(long)]
         capabilities: Option<PathBuf>,
 
-        /// Target directory for installation (default: ~/.ironclaw/tools/)
         #[arg(short, long)]
         target: Option<PathBuf>,
 
-        /// Build in release mode (default: true)
         #[arg(long, default_value = "true")]
         release: bool,
 
-        /// Skip compilation (use existing .wasm file)
         #[arg(long)]
         skip_build: bool,
 
-        /// Force overwrite if tool already exists
         #[arg(short, long)]
         force: bool,
     },

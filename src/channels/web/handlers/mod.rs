@@ -4,6 +4,7 @@
 
 pub mod auth;
 pub mod engine;
+pub mod ironhub;
 pub mod llm;
 pub mod memory;
 pub mod secrets;

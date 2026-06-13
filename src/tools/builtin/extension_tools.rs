@@ -33,7 +33,7 @@ fn activation_error_requires_auth(err: &str) -> bool {
         || err.contains("401")
 }
 
-fn output_from_ensure_ready(outcome: EnsureReadyOutcome) -> serde_json::Value {
+pub(crate) fn output_from_ensure_ready(outcome: EnsureReadyOutcome) -> serde_json::Value {
     match outcome {
         EnsureReadyOutcome::Ready {
             name,
