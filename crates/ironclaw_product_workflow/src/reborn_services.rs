@@ -27,9 +27,9 @@ use ironclaw_threads::{
     SessionThreadService, ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
-    ResumeTurnRequest, SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
+    AcceptedMessageRef, EventCursor, GateRef, GetRunStateRequest, IdempotencyKey,
+    ResumeTurnPrecondition, ResumeTurnRequest, SanitizedCancelReason, SubmitTurnRequest,
+    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
 };
 use secrecy::SecretString;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
@@ -1675,9 +1675,23 @@ impl RebornServicesApi for RebornServices {
                         event_cursor: state.event_cursor,
                     });
                 }
-                MessageStatus::Accepted
-                | MessageStatus::DeferredBusy
-                | MessageStatus::RejectedBusy => AcceptedWebUiMessage {
+                MessageStatus::RejectedBusy => {
+                    // Idempotent re-rejection: the original busy rejection was
+                    // lost before it reached the client.  The blocking run may
+                    // already be finished, so we cannot recover its run-id or
+                    // cursor.  Return a fresh RejectedBusy with a generic notice
+                    // so the client knows to resend rather than treating this as
+                    // a new submission.
+                    return Ok(RebornSubmitTurnResponse::RejectedBusy {
+                        thread_id: replay.thread_id,
+                        accepted_message_ref: accepted_message_ref(replay.message_id.to_string())?,
+                        active_run_id: TurnRunId::new(),
+                        status: TurnStatus::Running,
+                        event_cursor: EventCursor(0),
+                        notice: NOTICE_BUSY_GENERIC.to_string(),
+                    });
+                }
+                MessageStatus::Accepted | MessageStatus::DeferredBusy => AcceptedWebUiMessage {
                     thread_id: replay.thread_id,
                     message_id: replay.message_id,
                     actor_id: actor.user_id.as_str().to_string(),

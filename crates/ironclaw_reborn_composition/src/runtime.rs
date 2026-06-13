@@ -6992,15 +6992,36 @@ mod tests {
             })
             .await
             .expect("thread history after cancel");
-        let rejected_after_cancel: Vec<_> = history_after_cancel
+        // Identify message B by the message_id we captured from the pre-cancel history.
+        // Using the stable message_id (rather than a simple RejectedBusy count) ensures
+        // a regression that leaves the RejectedBusy row AND adds a Submitted row for the
+        // same message cannot slip past as "still one RejectedBusy".
+        let msg_b_id = rejected_messages[0].message_id;
+
+        let msg_b_after_cancel: Vec<_> = history_after_cancel
             .messages
             .iter()
-            .filter(|m| matches!(m.status, MessageStatus::RejectedBusy))
+            .filter(|m| m.message_id == msg_b_id)
             .collect();
         assert_eq!(
-            rejected_after_cancel.len(),
+            msg_b_after_cancel.len(),
             1,
-            "message B must remain RejectedBusy after run A is cancelled — no auto-resubmission"
+            "message B must appear exactly once in history after run A is cancelled"
+        );
+        assert_eq!(
+            msg_b_after_cancel[0].status,
+            MessageStatus::RejectedBusy,
+            "message B must still be RejectedBusy after run A is cancelled — no auto-resubmission"
+        );
+        // Guard: no additional Submitted row must have been created for message B's message_id.
+        let submitted_for_b: Vec<_> = history_after_cancel
+            .messages
+            .iter()
+            .filter(|m| matches!(m.status, MessageStatus::Submitted) && m.message_id == msg_b_id)
+            .collect();
+        assert!(
+            submitted_for_b.is_empty(),
+            "no Submitted row must exist for message B after run A is cancelled — got {submitted_for_b:?}"
         );
 
         // Submit message C — thread is free again, must be Submitted.

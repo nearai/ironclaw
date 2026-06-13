@@ -80,7 +80,7 @@ pub enum InboundTurnOutcome {
     /// must resend once the current task finishes.
     RejectedBusy {
         accepted_message_ref: AcceptedMessageRef,
-        active_run_id: TurnRunId,
+        active_run_id: Option<TurnRunId>,
         binding: ResolvedBinding,
     },
 }
@@ -101,7 +101,7 @@ impl InboundTurnOutcome {
                 accepted_message_ref,
                 active_run_id,
                 ..
-            } => ProductInboundAck::DeferredBusy {
+            } => ProductInboundAck::RejectedBusy {
                 accepted_message_ref: accepted_message_ref.clone(),
                 active_run_id: *active_run_id,
             },
@@ -423,6 +423,11 @@ enum ProductInboundTurnHandoff {
         submitted_run_id: TurnRunId,
         binding: ResolvedBinding,
     },
+    AlreadyRejected {
+        accepted_message_ref: AcceptedMessageRef,
+        binding: ResolvedBinding,
+        active_run_id: Option<TurnRunId>,
+    },
     NeedsSubmission(AcceptedProductInboundTurn),
 }
 
@@ -486,9 +491,22 @@ impl ProductInboundTurnHandoff {
             });
         }
 
+        if replay.status == MessageStatus::RejectedBusy {
+            let active_run_id = replay
+                .turn_run_id
+                .as_deref()
+                .and_then(|s| Uuid::parse_str(s).ok())
+                .map(TurnRunId::from_uuid);
+            return Ok(Self::AlreadyRejected {
+                accepted_message_ref,
+                binding,
+                active_run_id,
+            });
+        }
+
         if !matches!(
             replay.status,
-            MessageStatus::Accepted | MessageStatus::DeferredBusy | MessageStatus::RejectedBusy
+            MessageStatus::Accepted | MessageStatus::DeferredBusy
         ) {
             return Err(ProductWorkflowError::TurnSubmissionRejected {
                 reason: format!(
@@ -537,6 +555,15 @@ impl ProductInboundTurnHandoff {
             } => Ok(InboundTurnOutcome::Submitted {
                 accepted_message_ref,
                 submitted_run_id,
+                binding,
+            }),
+            Self::AlreadyRejected {
+                accepted_message_ref,
+                binding,
+                active_run_id,
+            } => Ok(InboundTurnOutcome::RejectedBusy {
+                accepted_message_ref,
+                active_run_id,
                 binding,
             }),
             Self::NeedsSubmission(submission) => {
@@ -655,7 +682,7 @@ impl AcceptedProductInboundTurn {
                     })?;
                 Ok(InboundTurnOutcome::RejectedBusy {
                     accepted_message_ref,
-                    active_run_id: busy.active_run_id,
+                    active_run_id: Some(busy.active_run_id),
                     binding,
                 })
             }
@@ -847,7 +874,7 @@ mod tests {
     }
 
     #[test]
-    fn deferred_replay_becomes_needs_submission_handoff() {
+    fn rejected_busy_replay_becomes_already_rejected_handoff() {
         let message_id = ThreadMessageId::new();
         let handoff = ProductInboundTurnHandoff::from_replay(
             replay(
@@ -860,15 +887,22 @@ mod tests {
             "turn-key".to_string(),
             received_at(),
         )
-        .expect("deferred replay handoff");
+        .expect("rejected busy replay handoff");
 
-        let ProductInboundTurnHandoff::NeedsSubmission(submission) = handoff else {
-            panic!("expected deferred replay to require a new turn submission")
+        let ProductInboundTurnHandoff::AlreadyRejected {
+            accepted_message_ref: actual_message_ref,
+            active_run_id,
+            ..
+        } = handoff
+        else {
+            panic!("expected rejected busy replay to be terminal, not resubmitted")
         };
 
-        assert_eq!(submission.message_id, message_id);
-        assert_eq!(submission.source_binding_id, "src:alpha");
-        assert_eq!(submission.reply_target_binding_id, "reply:alpha");
+        assert_eq!(
+            actual_message_ref,
+            accepted_message_ref(message_id).unwrap()
+        );
+        assert!(active_run_id.is_none());
     }
 
     #[test]

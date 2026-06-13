@@ -1054,7 +1054,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
 }
 
 #[tokio::test]
-async fn busy_thread_persists_second_message_as_deferred() {
+async fn busy_thread_persists_second_message_as_rejected_busy() {
     let binding_service = FakeConversationBindingService::new();
     let thread_service = InMemorySessionThreadService::default();
     let store = Arc::new(InMemoryTurnStateStore::default());
@@ -1217,7 +1217,7 @@ async fn replay_lookup_is_namespaced_by_installation() {
 }
 
 #[tokio::test]
-async fn deferred_busy_retry_resubmits_existing_message() {
+async fn legacy_deferred_busy_retry_resubmits_existing_message() {
     let binding_service = FakeConversationBindingService::new();
     let thread_service = InMemorySessionThreadService::default();
     let coordinator = ScriptedTurnCoordinator::default();
@@ -1240,9 +1240,15 @@ async fn deferred_busy_retry_resubmits_existing_message() {
     let second = service
         .accept_user_message(&envelope)
         .await
-        .expect("retry submits existing deferred message");
-    let InboundTurnOutcome::Submitted { binding, .. } = second else {
-        panic!("expected submitted retry")
+        .expect("replay of rejected busy message");
+    assert!(
+        matches!(second, InboundTurnOutcome::RejectedBusy { .. }),
+        "RejectedBusy replay must return RejectedBusy, not resubmit"
+    );
+
+    let binding = match second {
+        InboundTurnOutcome::RejectedBusy { ref binding, .. } => binding.clone(),
+        _ => unreachable!(),
     };
     let history = thread_service
         .list_thread_history(ThreadHistoryRequest {
@@ -1258,7 +1264,7 @@ async fn deferred_busy_retry_resubmits_existing_message() {
         .await
         .expect("history");
     assert_eq!(history.messages.len(), 1);
-    assert_eq!(history.messages[0].status, MessageStatus::Submitted);
+    assert_eq!(history.messages[0].status, MessageStatus::RejectedBusy);
 }
 
 #[tokio::test]
@@ -1354,4 +1360,66 @@ async fn binding_failure_surfaces_workflow_error() {
         err,
         ProductWorkflowError::BindingResolutionFailed { .. }
     ));
+}
+
+#[tokio::test]
+async fn rejected_busy_replay_is_re_rejected_not_resubmitted() {
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let coordinator = ScriptedTurnCoordinator::default();
+    let active_run_id = TurnRunId::new();
+    coordinator.push_result(Err(TurnError::ThreadBusy(ThreadBusy {
+        active_run_id,
+        status: TurnStatus::Running,
+        event_cursor: EventCursor::default(),
+    })));
+    let service =
+        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
+
+    let envelope = sample_user_message_envelope("rejected-busy-replay");
+    let first = service
+        .accept_user_message(&envelope)
+        .await
+        .expect("first busy");
+    assert!(
+        matches!(first, InboundTurnOutcome::RejectedBusy { .. }),
+        "first submission should be rejected busy"
+    );
+
+    let replayed = service
+        .accept_user_message(&envelope)
+        .await
+        .expect("replay of rejected busy message");
+    assert!(
+        matches!(replayed, InboundTurnOutcome::RejectedBusy { .. }),
+        "replay of a rejected busy message must return RejectedBusy, not submit a new turn"
+    );
+
+    let binding = match replayed {
+        InboundTurnOutcome::RejectedBusy { ref binding, .. } => binding.clone(),
+        _ => unreachable!(),
+    };
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: ThreadScope {
+                tenant_id: binding.tenant_id.clone(),
+                agent_id: binding.agent_id.clone().expect("agent id"),
+                project_id: binding.project_id.clone(),
+                owner_user_id: binding.subject_user_id.clone(),
+                mission_id: None,
+            },
+            thread_id: binding.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(
+        history.messages.len(),
+        1,
+        "replay must not create a new submitted message row"
+    );
+    assert_eq!(
+        history.messages[0].status,
+        MessageStatus::RejectedBusy,
+        "original message must remain RejectedBusy, not Submitted"
+    );
 }

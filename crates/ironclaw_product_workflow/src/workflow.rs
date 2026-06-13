@@ -1286,6 +1286,13 @@ fn dispatch_kind_from_ack(
                 run_id: *active_run_id,
             })
         }
+        ProductInboundAck::RejectedBusy { active_run_id, .. } => {
+            if let Some(run_id) = active_run_id {
+                Ok(ActionDispatchKind::UserMessageTurn { run_id: *run_id })
+            } else {
+                ActionDispatchKind::try_from_payload(payload)
+            }
+        }
         ProductInboundAck::Rejected(rejection) => Ok(ActionDispatchKind::Rejected {
             kind: rejection.kind.clone(),
         }),
@@ -1298,7 +1305,9 @@ fn dispatch_kind_from_command_ack(
     payload: &ProductInboundPayload,
 ) -> Result<ActionDispatchKind, ProductWorkflowError> {
     match ack {
-        ProductInboundAck::Accepted { .. } | ProductInboundAck::DeferredBusy { .. } => {
+        ProductInboundAck::Accepted { .. }
+        | ProductInboundAck::DeferredBusy { .. }
+        | ProductInboundAck::RejectedBusy { .. } => {
             Err(ProductWorkflowError::UnsupportedActionKind {
                 kind: "turn_ack_from_product_command".into(),
             })
@@ -1531,6 +1540,18 @@ mod tests {
                 run_id: active_run_id
             }
         );
+
+        let rejected_run_id = TurnRunId::new();
+        let rejected_busy = ProductInboundAck::RejectedBusy {
+            accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy").expect("valid ref"),
+            active_run_id: Some(rejected_run_id),
+        };
+        assert_eq!(
+            dispatch_kind_from_ack(&rejected_busy, &ProductInboundPayload::NoOp).expect("kind"),
+            ActionDispatchKind::UserMessageTurn {
+                run_id: rejected_run_id
+            }
+        );
     }
 
     #[test]
@@ -1628,6 +1649,10 @@ mod tests {
         assert!(!should_settle_ack(&ProductInboundAck::DeferredBusy {
             accepted_message_ref: AcceptedMessageRef::new("msg:busy").expect("valid ref"),
             active_run_id: TurnRunId::new(),
+        }));
+        assert!(should_settle_ack(&ProductInboundAck::RejectedBusy {
+            accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy").expect("valid ref"),
+            active_run_id: Some(TurnRunId::new()),
         }));
     }
 

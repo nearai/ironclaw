@@ -935,6 +935,92 @@ async fn deferred_busy_rejects_non_user_and_non_accepted_messages() {
 }
 
 #[tokio::test]
+async fn rejected_busy_rejects_non_user_message() {
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("a"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let draft = service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            content: MessageContent::text("partial"),
+        })
+        .await
+        .unwrap();
+
+    let result = service
+        .mark_message_rejected_busy(&scope("a"), &thread.thread_id, draft.message_id)
+        .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(SessionThreadError::InvalidMessageTransition { .. })
+        ),
+        "mark_message_rejected_busy must fail with InvalidMessageTransition on a non-user (assistant draft) message, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn rejected_busy_rejects_already_finalized_user_message() {
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("a"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    // Accept and then submit the message so it is in Submitted state (finalized).
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("already submitted"),
+        })
+        .await
+        .unwrap();
+    service
+        .mark_message_submitted(
+            &scope("a"),
+            &thread.thread_id,
+            accepted.message_id,
+            "turn-id-x".into(),
+            "run-id-x".into(),
+        )
+        .await
+        .unwrap();
+
+    let result = service
+        .mark_message_rejected_busy(&scope("a"), &thread.thread_id, accepted.message_id)
+        .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(SessionThreadError::InvalidMessageTransition { .. })
+        ),
+        "mark_message_rejected_busy must fail with InvalidMessageTransition on an already-finalized (Submitted) user message, got {result:?}"
+    );
+}
+
+#[tokio::test]
 async fn assistant_streaming_updates_one_draft_and_finalizes_one_canonical_message() {
     let service = InMemorySessionThreadService::default();
     let thread = service
