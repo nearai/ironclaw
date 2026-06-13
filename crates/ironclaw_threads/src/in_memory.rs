@@ -792,7 +792,11 @@ impl InMemorySessionThreadService {
     /// that legacy-row read/replay tests can construct pre-existing
     /// `DeferredBusy` rows without going through the now-retired
     /// `mark_message_deferred_busy` writer.  Never call from production code.
-    #[doc(hidden)]
+    ///
+    /// Gated behind `#[cfg(any(test, feature = "test-support"))]` so it is
+    /// absent from production builds. Integration tests in a separate
+    /// compilation unit must enable the `test-support` feature.
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn inject_legacy_deferred_busy_for_test(
         &self,
         scope: &ThreadScope,

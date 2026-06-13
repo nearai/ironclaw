@@ -1064,6 +1064,158 @@ async fn filesystem_list_threads_for_scope_derives_title_from_first_user_message
     );
 }
 
+// ---------------------------------------------------------------------------
+// mark_message_rejected_busy — filesystem backend coverage
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn filesystem_rejected_busy_marks_user_message_and_persists_status() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-rb-ok", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("rb-ok");
+
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("arrived while busy"),
+        })
+        .await
+        .unwrap();
+    let rejected = service
+        .mark_message_rejected_busy(&scope, &thread.thread_id, accepted.message_id)
+        .await
+        .unwrap();
+    assert_eq!(rejected.status, MessageStatus::RejectedBusy);
+    assert!(rejected.turn_run_id.is_none());
+
+    // Re-list to confirm the status was persisted to the filesystem store.
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.messages.len(), 1);
+    assert_eq!(history.messages[0].status, MessageStatus::RejectedBusy);
+    assert!(history.messages[0].turn_run_id.is_none());
+}
+
+#[tokio::test]
+async fn filesystem_rejected_busy_rejects_non_user_message() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-rb-non-user", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("rb-non-user");
+
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    // An assistant draft is not a user message — the transition must be rejected.
+    let draft = service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            content: MessageContent::text("partial"),
+        })
+        .await
+        .unwrap();
+
+    let result = service
+        .mark_message_rejected_busy(&scope, &thread.thread_id, draft.message_id)
+        .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(SessionThreadError::InvalidMessageTransition { .. })
+        ),
+        "mark_message_rejected_busy must return InvalidMessageTransition for a non-user (assistant draft) message, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_rejected_busy_rejects_already_submitted_user_message() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-rb-submitted", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("rb-submitted");
+
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("already submitted"),
+        })
+        .await
+        .unwrap();
+
+    // Advance past Accepted → Submitted so the message is finalized.
+    service
+        .mark_message_submitted(
+            &scope,
+            &thread.thread_id,
+            accepted.message_id,
+            "turn-id-x".into(),
+            "run-id-x".into(),
+        )
+        .await
+        .unwrap();
+
+    let result = service
+        .mark_message_rejected_busy(&scope, &thread.thread_id, accepted.message_id)
+        .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(SessionThreadError::InvalidMessageTransition { .. })
+        ),
+        "mark_message_rejected_busy must return InvalidMessageTransition on an already-submitted user message, got {result:?}"
+    );
+}
+
 fn scope(label: &str) -> ThreadScope {
     ThreadScope {
         tenant_id: TenantId::new(format!("tenant-{label}")).unwrap(),

@@ -51,6 +51,10 @@ enum CompactionMessageDisposition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CompactionSkipReason {
     CapabilityDisplayPreview,
+    /// The message has a stable terminal status that is not model-visible (e.g.
+    /// `RejectedBusy`, legacy `DeferredBusy`).  It is silently excluded from
+    /// the compacted transcript but does not block the range from completing.
+    StableNonModelVisible,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -542,13 +546,22 @@ fn classify_compaction_message(
             CompactionRejectReason::UnsupportedStatus,
         );
     }
+    // RejectedBusy is a stable terminal status (user must resend; never auto-retried).
+    // DeferredBusy is a frozen legacy status that is no longer written and will
+    // never transition further.  Neither is model-visible, so both are skipped
+    // rather than treated as unstable — preventing them from blocking compaction
+    // ranges indefinitely.
     if matches!(
         status,
-        MessageStatus::DeferredBusy
-            | MessageStatus::RejectedBusy
-            | MessageStatus::Draft
-            | MessageStatus::Interrupted
-            | MessageStatus::Superseded
+        MessageStatus::RejectedBusy | MessageStatus::DeferredBusy
+    ) {
+        return CompactionMessageDisposition::SkipEphemeral(
+            CompactionSkipReason::StableNonModelVisible,
+        );
+    }
+    if matches!(
+        status,
+        MessageStatus::Draft | MessageStatus::Interrupted | MessageStatus::Superseded
     ) {
         return CompactionMessageDisposition::DeferUntilStable(
             CompactionDeferralReason::UnstableTranscriptStatus,

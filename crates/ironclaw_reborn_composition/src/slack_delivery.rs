@@ -1190,6 +1190,7 @@ fn submitted_run_id(ack: &ProductInboundAck) -> Option<TurnRunId> {
         } => Some(*submitted_run_id),
         ProductInboundAck::Duplicate { .. } => None,
         ProductInboundAck::DeferredBusy { .. }
+        | ProductInboundAck::RejectedBusy { .. }
         | ProductInboundAck::Rejected(_)
         | ProductInboundAck::CommandResult { .. }
         | ProductInboundAck::NoOp => None,
@@ -1257,7 +1258,13 @@ fn rejection_hint_for_resolution(
 }
 
 /// Returns `Some(active_run_id)` when the ack + payload combination should trigger
-/// the deferred-busy hint flow: a plain `DeferredBusy` ack on a `UserMessage` payload.
+/// the deferred-busy hint flow: a `DeferredBusy` or `RejectedBusy` ack on a
+/// `UserMessage` payload.
+///
+/// `RejectedBusy { active_run_id: Some(run_id) }` carries a live blocking run whose
+/// state can be fetched to produce a gate-aware hint.  When `active_run_id` is `None`
+/// (e.g. a replay with no live run) we return `None` — there is no run state to
+/// inspect so no hint is appropriate.
 ///
 /// Returns `None` for `Duplicate` acks (the idempotency ledger never settles
 /// `DeferredBusy`, so Slack transport retries re-process as a fresh plain
@@ -1278,6 +1285,16 @@ fn deferred_busy_user_message_run_id(
     }
     match ack {
         ProductInboundAck::DeferredBusy { active_run_id, .. } => Some(*active_run_id),
+        // RejectedBusy with a live blocking run → hint is gated on the run state.
+        // RejectedBusy with no run (replay / no live run) → no hint.
+        ProductInboundAck::RejectedBusy {
+            active_run_id: Some(run_id),
+            ..
+        } => Some(*run_id),
+        ProductInboundAck::RejectedBusy {
+            active_run_id: None,
+            ..
+        } => None,
         _ => None,
     }
 }
@@ -3707,6 +3724,150 @@ mod tests {
         assert!(
             !calls.iter().any(|c| c.path == "/api/chat.postMessage"),
             "no chat.postMessage expected when binding authorization fails"
+        );
+    }
+
+    // ── RejectedBusy ack feedback tests ───────────────────────────────────────
+    //
+    // PR #4838 replaced `DeferredBusy` with `RejectedBusy` for busy user-message
+    // outcomes.  The hint path must recognise the new variant and produce the same
+    // gate-aware (BlockedApproval/BlockedAuth) or generic copy as it does for the
+    // legacy `DeferredBusy` variant.
+
+    fn rejected_busy_ack_with_run_id() -> ProductInboundAck {
+        ProductInboundAck::RejectedBusy {
+            accepted_message_ref: AcceptedMessageRef::new("slack:rejected-busy").expect("ref"),
+            active_run_id: Some(TurnRunId::new()),
+        }
+    }
+
+    fn rejected_busy_ack_no_run_id() -> ProductInboundAck {
+        ProductInboundAck::RejectedBusy {
+            accepted_message_ref: AcceptedMessageRef::new("slack:rejected-busy-none").expect("ref"),
+            active_run_id: None,
+        }
+    }
+
+    /// RejectedBusy { active_run_id: Some(..) } + UserMessage + BlockedApproval with
+    /// gate_ref → exactly one Slack post containing the concrete `approve {ref}` command.
+    #[tokio::test]
+    async fn rejected_busy_ack_with_run_id_posts_approval_hint() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "7000.1"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let gate_ref_str = "gate:approval-rb123";
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+            TurnStatus::BlockedApproval,
+            Some(gate_ref_str),
+        )]));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+        let env = envelope(user_message_payload());
+        let ack = rejected_busy_ack_with_run_id();
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "expected exactly one chat.postMessage for RejectedBusy(Some) + BlockedApproval"
+        );
+        let body = std::str::from_utf8(&post_calls[0].body).expect("utf8 body");
+        assert!(
+            body.contains("waiting on a pending approval"),
+            "RejectedBusy hint must mention 'waiting on a pending approval', got: {body}"
+        );
+        assert!(
+            body.contains(gate_ref_str),
+            "RejectedBusy approval hint must embed the concrete gate ref '{gate_ref_str}', got: {body}"
+        );
+    }
+
+    /// RejectedBusy { active_run_id: Some(..) } + UserMessage + BlockedAuth state →
+    /// auth copy with concrete `auth deny <ref>` command posted.
+    #[tokio::test]
+    async fn rejected_busy_ack_with_run_id_posts_auth_hint() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "7001.1"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let gate_ref_str = "gate:auth-rb456";
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+            TurnStatus::BlockedAuth,
+            Some(gate_ref_str),
+        )]));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+        let env = envelope(user_message_payload());
+        let ack = rejected_busy_ack_with_run_id();
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "expected exactly one chat.postMessage for RejectedBusy(Some) + BlockedAuth"
+        );
+        let body = std::str::from_utf8(&post_calls[0].body).expect("utf8 body");
+        assert!(
+            body.contains("authentication step"),
+            "RejectedBusy auth hint must mention 'authentication step', got: {body}"
+        );
+        assert!(
+            body.contains(gate_ref_str),
+            "RejectedBusy auth hint must embed the concrete gate ref '{gate_ref_str}', got: {body}"
+        );
+    }
+
+    /// RejectedBusy { active_run_id: None } + UserMessage → no hint posted.
+    ///
+    /// When there is no live blocking run there is no run state to inspect, so
+    /// the hint flow is skipped entirely.
+    #[tokio::test]
+    async fn rejected_busy_ack_with_no_run_id_posts_nothing() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::BlockedApproval,
+        ));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+        let env = envelope(user_message_payload());
+        let ack = rejected_busy_ack_no_run_id();
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        let calls = egress.calls();
+        assert!(
+            !calls.iter().any(|c| c.path == "/api/chat.postMessage"),
+            "no chat.postMessage expected for RejectedBusy(None) — no live run to inspect"
         );
     }
 

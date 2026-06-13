@@ -495,8 +495,14 @@ impl ProductInboundTurnHandoff {
             let active_run_id = replay
                 .turn_run_id
                 .as_deref()
-                .and_then(|s| Uuid::parse_str(s).ok())
-                .map(TurnRunId::from_uuid);
+                .map(|s| {
+                    Uuid::parse_str(s).map(TurnRunId::from_uuid).map_err(|e| {
+                        ProductWorkflowError::TurnSubmissionRejected {
+                            reason: format!("invalid rejected busy turn_run_id: {e}"),
+                        }
+                    })
+                })
+                .transpose()?;
             return Ok(Self::AlreadyRejected {
                 accepted_message_ref,
                 binding,

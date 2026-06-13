@@ -6939,7 +6939,8 @@ mod tests {
             panic!("expected RejectedBusy for message B, got {response_b:?}");
         };
         assert_eq!(
-            busy_run_id, run_id_a,
+            busy_run_id,
+            Some(run_id_a),
             "RejectedBusy should report run A as the active run"
         );
         assert!(

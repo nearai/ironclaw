@@ -544,6 +544,89 @@ async fn compaction_task_rejects_update_mode_until_update_prompt_is_wired() {
     assert!(inference.last_input().is_empty());
 }
 
+#[tokio::test]
+async fn compaction_port_completes_range_containing_rejected_busy_message() {
+    // RejectedBusy is a stable terminal status — the thread is no longer busy
+    // and the message will never be auto-retried.  A range that contains one
+    // must COMPLETE (not Deferred) and the rejected message must be absent from
+    // the model-visible compacted input.
+    let fixture = CompactionFixture::new().await;
+    let rejected_id = fixture.append_user("rejected-busy-content").await;
+    fixture
+        .threads
+        .mark_message_rejected_busy(&fixture.scope, &fixture.thread_id, rejected_id)
+        .await
+        .unwrap();
+    fixture.append_user("visible-after-rejected").await;
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(CleanLeakScanner),
+        fixture.scope.clone(),
+    );
+
+    let outcome = port
+        .compact_loop_context(fixture.request(2))
+        .await
+        .expect("range containing RejectedBusy should complete, not defer");
+
+    assert!(
+        matches!(outcome, LoopCompactionOutcome::Compacted(_)),
+        "expected Compacted, got {outcome:?}",
+    );
+    let input = inference.last_input();
+    assert!(
+        input.contains("visible-after-rejected"),
+        "model-visible message should appear in compaction input",
+    );
+    assert!(
+        !input.contains("rejected-busy-content"),
+        "RejectedBusy message must not appear in model-visible compaction input",
+    );
+}
+
+#[tokio::test]
+async fn compaction_port_completes_range_containing_deferred_busy_message() {
+    // DeferredBusy is a frozen legacy status that is no longer written.  Rows
+    // with this status will never transition further, so they must be skipped
+    // (not treated as unstable) to prevent compaction from deferring forever.
+    let fixture = CompactionFixture::new().await;
+    let deferred_id = fixture.append_user("deferred-busy-content").await;
+    fixture
+        .threads
+        .inject_legacy_deferred_busy_for_test(&fixture.scope, &fixture.thread_id, deferred_id)
+        .await
+        .unwrap();
+    fixture.append_user("visible-after-deferred").await;
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(CleanLeakScanner),
+        fixture.scope.clone(),
+    );
+
+    let outcome = port
+        .compact_loop_context(fixture.request(2))
+        .await
+        .expect("range containing DeferredBusy should complete, not defer");
+
+    assert!(
+        matches!(outcome, LoopCompactionOutcome::Compacted(_)),
+        "expected Compacted, got {outcome:?}",
+    );
+    let input = inference.last_input();
+    assert!(
+        input.contains("visible-after-deferred"),
+        "model-visible message should appear in compaction input",
+    );
+    assert!(
+        !input.contains("deferred-busy-content"),
+        "DeferredBusy message must not appear in model-visible compaction input",
+    );
+}
+
 struct CompactionFixture {
     threads: Arc<InMemorySessionThreadService>,
     scope: ThreadScope,

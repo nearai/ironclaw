@@ -1925,7 +1925,7 @@ async fn busy_submit_clears_skill_activation_message() {
     assert!(matches!(
         deferred,
         RebornSubmitTurnResponse::RejectedBusy {
-            active_run_id: id,
+            active_run_id: Some(id),
             ..
         } if id == active_run_id
     ));
@@ -8027,7 +8027,11 @@ async fn rejected_busy_notice_blocked_approval_contains_approval_copy() {
         .expect("busy submit succeeds with RejectedBusy");
 
     match response {
-        RebornSubmitTurnResponse::RejectedBusy { status, notice, .. } => {
+        RebornSubmitTurnResponse::RejectedBusy {
+            status: Some(status),
+            notice,
+            ..
+        } => {
             assert_eq!(status, TurnStatus::BlockedApproval);
             assert_eq!(
                 notice,
@@ -8065,7 +8069,11 @@ async fn rejected_busy_notice_blocked_auth_contains_auth_copy() {
         .expect("busy submit succeeds with RejectedBusy");
 
     match response {
-        RebornSubmitTurnResponse::RejectedBusy { status, notice, .. } => {
+        RebornSubmitTurnResponse::RejectedBusy {
+            status: Some(status),
+            notice,
+            ..
+        } => {
             assert_eq!(status, TurnStatus::BlockedAuth);
             assert_eq!(
                 notice,
@@ -8103,7 +8111,11 @@ async fn rejected_busy_notice_generic_status_contains_generic_copy() {
         .expect("busy submit succeeds with RejectedBusy");
 
     match response {
-        RebornSubmitTurnResponse::RejectedBusy { status, notice, .. } => {
+        RebornSubmitTurnResponse::RejectedBusy {
+            status: Some(status),
+            notice,
+            ..
+        } => {
             assert_eq!(status, TurnStatus::Running);
             assert_eq!(
                 notice,
@@ -8151,4 +8163,123 @@ async fn replayed_rejected_busy_returns_rejected_busy_without_new_submission() {
         0,
         "a replayed RejectedBusy must not produce a new turn submission"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Option<> run-metadata contract: replay path yields None; fresh path yields Some
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn replayed_rejected_busy_returns_none_run_metadata() {
+    // Replay: the original blocking run is gone — run metadata must be None,
+    // not a fabricated run-id or status that the client cannot query.
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(ScriptedThreadService::rejected_busy_replay()),
+        coordinator.clone(),
+    );
+
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-replay-none-metadata",
+                "thread_id": "thread-alpha",
+                "content": "replay with none metadata"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("replayed RejectedBusy must succeed");
+
+    match response {
+        RebornSubmitTurnResponse::RejectedBusy {
+            active_run_id,
+            status,
+            event_cursor,
+            notice,
+            ..
+        } => {
+            assert!(
+                active_run_id.is_none(),
+                "replayed RejectedBusy must not fabricate active_run_id, got {active_run_id:?}"
+            );
+            assert!(
+                status.is_none(),
+                "replayed RejectedBusy must not fabricate status, got {status:?}"
+            );
+            assert!(
+                event_cursor.is_none(),
+                "replayed RejectedBusy must not fabricate event_cursor, got {event_cursor:?}"
+            );
+            assert!(
+                !notice.is_empty(),
+                "replayed RejectedBusy must carry a notice"
+            );
+        }
+        other => panic!("expected RejectedBusy, got {other:?}"),
+    }
+    assert_eq!(
+        coordinator.submission_count(),
+        0,
+        "replay must not produce a new turn submission"
+    );
+}
+
+#[tokio::test]
+async fn fresh_rejected_busy_returns_some_run_metadata() {
+    // Fresh ThreadBusy: the blocking run is live — run metadata must be Some
+    // with the real values so the client can poll the existing run.
+    let active_run_id = TurnRunId::new();
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id,
+            status: TurnStatus::Running,
+            event_cursor: EventCursor(7),
+        }),
+    ));
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let services = RebornServices::new(threads, coordinator.clone());
+    create_thread_for(&services, caller(), "thread-busy-fresh").await;
+
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-fresh-busy-metadata",
+                "thread_id": "thread-busy-fresh",
+                "content": "hello busy"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("fresh RejectedBusy must succeed");
+
+    match response {
+        RebornSubmitTurnResponse::RejectedBusy {
+            active_run_id: returned_run_id,
+            status: returned_status,
+            event_cursor: returned_cursor,
+            notice,
+            ..
+        } => {
+            assert_eq!(
+                returned_run_id,
+                Some(active_run_id),
+                "fresh RejectedBusy must carry the real blocking run id"
+            );
+            assert_eq!(
+                returned_status,
+                Some(TurnStatus::Running),
+                "fresh RejectedBusy must carry the real blocking run status"
+            );
+            assert_eq!(
+                returned_cursor,
+                Some(EventCursor(7)),
+                "fresh RejectedBusy must carry the real event cursor"
+            );
+            assert!(!notice.is_empty(), "fresh RejectedBusy must carry a notice");
+        }
+        other => panic!("expected RejectedBusy, got {other:?}"),
+    }
 }

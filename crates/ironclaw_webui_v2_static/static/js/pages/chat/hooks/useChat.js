@@ -359,19 +359,29 @@ export function useChat(threadId) {
           );
         }
         // When the thread was busy, the message is rejected (not deferred).
-        // Display the server's notice as a system message so the user knows
-        // to resend.
-        if (response?.outcome === "rejected_busy" && response?.notice) {
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: `system-${Date.now()}`,
-              role: "system",
-              content: response.notice,
-              timestamp: new Date().toISOString(),
-              isOptimistic: false,
-            },
-          ]);
+        // Mark the optimistic user message as failed and display the
+        // server's notice (if present) as a system message so the user
+        // knows to resend.
+        if (response?.outcome === "rejected_busy") {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === optimisticId
+                ? { ...m, isOptimistic: false, status: "error" }
+                : m,
+            ),
+          );
+          if (response?.notice) {
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `system-rejected-${pendingSeqRef.current++}`,
+                role: "system",
+                content: response.notice,
+                timestamp: new Date().toISOString(),
+                isOptimistic: false,
+              },
+            ]);
+          }
           setIsProcessing(false);
         }
         return response;
