@@ -4,45 +4,40 @@ use ironclaw_turns::{
     ProductTurnContext, RunOriginAdapter, TurnOriginKind, TurnOwner, TurnSurfaceType,
 };
 
-/// Ingress trust level. Callers map their policy (e.g. `BindingResolutionPolicy`) onto this.
+/// Ingress classification. Callers collapse their (trust policy, trigger-adapter) signal
+/// into one value, so the resolver cannot receive a contradictory pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrustLevel {
-    Trusted,
+pub enum InboundClassification {
+    /// Trusted ingress whose adapter is the trusted-trigger adapter.
+    TrustedTrigger,
+    /// Trusted ingress, non-trigger adapter.
+    TrustedOther,
+    /// Untrusted ingress (adapter identity is irrelevant — never a trigger).
     Untrusted,
 }
 
 /// Resolve an inbound submission into a generic product context.
 ///
-/// `ScheduledTrigger` is minted ONLY when `trust == Trusted && is_trigger_adapter`.
-/// Any other combination is `Inbound` — an untrusted caller cannot mint a trigger origin.
+/// `ScheduledTrigger` is minted ONLY when `classification == TrustedTrigger`.
+/// Any other combination yields `Inbound` — an untrusted caller cannot mint a trigger origin.
 pub fn resolve_inbound(
-    trust: TrustLevel,
-    is_trigger_adapter: bool,
+    classification: InboundClassification,
     adapter: RunOriginAdapter,
     surface_type: Option<TurnSurfaceType>,
     owner: TurnOwner,
 ) -> ProductTurnContext {
-    let origin = if trust == TrustLevel::Trusted && is_trigger_adapter {
-        TurnOriginKind::ScheduledTrigger
-    } else {
-        TurnOriginKind::Inbound
+    let origin = match classification {
+        InboundClassification::TrustedTrigger => TurnOriginKind::ScheduledTrigger,
+        InboundClassification::TrustedOther | InboundClassification::Untrusted => {
+            TurnOriginKind::Inbound
+        }
     };
-    ProductTurnContext {
-        origin,
-        surface_type,
-        adapter: Some(adapter),
-        owner,
-    }
+    ProductTurnContext::new(origin, surface_type, Some(adapter), owner)
 }
 
 /// Resolve a WebUI submission. Always `WebUi`, no adapter/surface.
 pub fn resolve_web_ui(owner: TurnOwner) -> ProductTurnContext {
-    ProductTurnContext {
-        origin: TurnOriginKind::WebUi,
-        surface_type: None,
-        adapter: None,
-        owner,
-    }
+    ProductTurnContext::new(TurnOriginKind::WebUi, None, None, owner)
 }
 
 #[cfg(test)]
@@ -61,13 +56,18 @@ mod tests {
 
     #[test]
     fn trusted_trigger_adapter_yields_scheduled_trigger() {
-        let ctx = resolve_inbound(TrustLevel::Trusted, true, adapter(), None, owner());
+        let ctx = resolve_inbound(
+            InboundClassification::TrustedTrigger,
+            adapter(),
+            None,
+            owner(),
+        );
         assert_eq!(ctx.origin, TurnOriginKind::ScheduledTrigger);
     }
 
     #[test]
     fn untrusted_trigger_adapter_yields_inbound_not_trigger() {
-        let ctx = resolve_inbound(TrustLevel::Untrusted, true, adapter(), None, owner());
+        let ctx = resolve_inbound(InboundClassification::Untrusted, adapter(), None, owner());
         assert_eq!(ctx.origin, TurnOriginKind::Inbound);
     }
 
@@ -75,8 +75,7 @@ mod tests {
     fn trusted_non_trigger_adapter_yields_inbound() {
         let a = RunOriginAdapter::new("telegram").unwrap();
         let ctx = resolve_inbound(
-            TrustLevel::Trusted,
-            false,
+            InboundClassification::TrustedOther,
             a,
             Some(TurnSurfaceType::Channel),
             owner(),

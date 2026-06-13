@@ -1162,14 +1162,14 @@ async fn scheduled_trigger_run_origin_appears_in_model_request() {
         fixture
             .context
             .clone()
-            .with_product_context(ironclaw_turns::ProductTurnContext {
-                origin: ironclaw_turns::TurnOriginKind::ScheduledTrigger,
-                surface_type: None,
-                adapter: None,
-                owner: ironclaw_turns::TurnOwner::Personal {
+            .with_product_context(ironclaw_turns::ProductTurnContext::new(
+                ironclaw_turns::TurnOriginKind::ScheduledTrigger,
+                None,
+                None,
+                ironclaw_turns::TurnOwner::Personal {
                     user: UserId::new("user-comm-sched-trigger").unwrap(),
                 },
-            });
+            ));
     let host = fixture
         .factory()
         .with_communication_context_provider(

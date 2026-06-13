@@ -642,14 +642,14 @@ mod tests {
         use ironclaw_host_api::UserId;
         use ironclaw_turns::ProductTurnContext;
         let provider = RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesFacade));
-        let ctx_val = ProductTurnContext {
-            origin: TurnOriginKind::ScheduledTrigger,
-            surface_type: None,
-            adapter: None,
-            owner: TurnOwner::Personal {
+        let ctx_val = ProductTurnContext::new(
+            TurnOriginKind::ScheduledTrigger,
+            None,
+            None,
+            TurnOwner::Personal {
                 user: UserId::new("u1").unwrap(),
             },
-        };
+        );
         let ctx = provider
             .communication_context(&scope(), Some(&actor()), false, Some(ctx_val.clone()))
             .await

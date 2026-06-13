@@ -454,14 +454,14 @@ async fn filesystem_turn_state_store_persists_product_context_through_snapshot_r
 
     // Submit with a non-None product context.
     let mut request = submit_request_for(turn_scope("thread-origin-rt"), "idem-origin-rt");
-    let expected_ctx = ProductTurnContext {
-        origin: TurnOriginKind::Inbound,
-        surface_type: None,
-        adapter: Some(RunOriginAdapter::new("telegram_v2").unwrap()),
-        owner: TurnOwner::Personal {
+    let expected_ctx = ProductTurnContext::new(
+        TurnOriginKind::Inbound,
+        None,
+        Some(RunOriginAdapter::new("telegram_v2").unwrap()),
+        TurnOwner::Personal {
             user: ironclaw_host_api::UserId::new("user-rt").unwrap(),
         },
-    };
+    );
     request.product_context = Some(expected_ctx.clone());
     let response = store
         .submit_turn(request.clone(), &AllowAllTurnAdmissionPolicy, &resolver)

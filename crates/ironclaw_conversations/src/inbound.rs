@@ -93,17 +93,21 @@ where
             requested_run_profile,
         } = request;
 
-        let trust = match &binding_policy {
-            BindingResolutionPolicy::Trusted { .. } => {
-                ironclaw_product_context::TrustLevel::Trusted
+        let classification = match (&binding_policy, adapter_kind.is_trusted_trigger()) {
+            (BindingResolutionPolicy::Trusted { .. }, true) => {
+                ironclaw_product_context::InboundClassification::TrustedTrigger
             }
-            BindingResolutionPolicy::Untrusted => ironclaw_product_context::TrustLevel::Untrusted,
+            (BindingResolutionPolicy::Trusted { .. }, false) => {
+                ironclaw_product_context::InboundClassification::TrustedOther
+            }
+            (BindingResolutionPolicy::Untrusted, _) => {
+                ironclaw_product_context::InboundClassification::Untrusted
+            }
         };
         let surface_type = match &route_kind {
             ConversationRouteKind::Direct => Some(TurnSurfaceType::Direct),
             ConversationRouteKind::Shared => Some(TurnSurfaceType::Channel),
         };
-        let is_trigger = adapter_kind.is_trusted_trigger();
         let run_adapter = RunOriginAdapter::new(adapter_kind.as_str()).map_err(|e| {
             InboundTurnError::InvalidCanonicalRef {
                 reason: e.to_string(),
@@ -127,8 +131,7 @@ where
                 .submit_or_replay(
                     replay.resolution,
                     replay.accepted_message,
-                    trust,
-                    is_trigger,
+                    classification,
                     run_adapter,
                     surface_type,
                 )
@@ -194,8 +197,7 @@ where
         self.submit_or_replay(
             resolution,
             accepted_message,
-            trust,
-            is_trigger,
+            classification,
             run_adapter,
             surface_type,
         )
@@ -206,8 +208,7 @@ where
         &self,
         mut resolution: ConversationBindingResolution,
         accepted_message: AcceptedInboundMessage,
-        trust: ironclaw_product_context::TrustLevel,
-        is_trigger: bool,
+        classification: ironclaw_product_context::InboundClassification,
         run_adapter: RunOriginAdapter,
         surface_type: Option<TurnSurfaceType>,
     ) -> Result<InboundTurnResponse, InboundTurnError> {
@@ -247,8 +248,7 @@ where
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
                 product_context: Some(ironclaw_product_context::resolve_inbound(
-                    trust,
-                    is_trigger,
+                    classification,
                     run_adapter,
                     surface_type,
                     resolution.turn_scope.product_owner(&accepted_message.actor),

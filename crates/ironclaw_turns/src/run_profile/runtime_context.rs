@@ -598,14 +598,14 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::Unknown,
                 delivery_tools_visible: false,
-                product_context: Some(ProductTurnContext {
-                    origin: TurnOriginKind::WebUi,
-                    surface_type: None,
-                    adapter: None,
-                    owner: TurnOwner::Personal {
+                product_context: Some(ProductTurnContext::new(
+                    TurnOriginKind::WebUi,
+                    None,
+                    None,
+                    TurnOwner::Personal {
                         user: UserId::new("test-user").unwrap(),
                     },
-                }),
+                )),
             }),
         };
         let text = ctx.render_model_content();
@@ -624,14 +624,14 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::Unknown,
                 delivery_tools_visible: false,
-                product_context: Some(ProductTurnContext {
-                    origin: TurnOriginKind::Inbound,
-                    surface_type: None,
-                    adapter: Some(crate::RunOriginAdapter::new("slack").unwrap()),
-                    owner: TurnOwner::Personal {
+                product_context: Some(ProductTurnContext::new(
+                    TurnOriginKind::Inbound,
+                    None,
+                    Some(crate::RunOriginAdapter::new("slack").unwrap()),
+                    TurnOwner::Personal {
                         user: UserId::new("test-user").unwrap(),
                     },
-                }),
+                )),
             }),
         };
         let text = ctx.render_model_content();
@@ -655,14 +655,14 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::Unknown,
                 delivery_tools_visible: false,
-                product_context: Some(ProductTurnContext {
-                    origin: TurnOriginKind::Inbound,
-                    surface_type: None,
-                    adapter: Some(crate::RunOriginAdapter::new(hostile).unwrap()),
-                    owner: TurnOwner::Personal {
+                product_context: Some(ProductTurnContext::new(
+                    TurnOriginKind::Inbound,
+                    None,
+                    Some(crate::RunOriginAdapter::new(hostile).unwrap()),
+                    TurnOwner::Personal {
                         user: UserId::new("test-user").unwrap(),
                     },
-                }),
+                )),
             }),
         };
         let text = ctx.render_model_content();
@@ -690,14 +690,14 @@ mod tests {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::NoneSet,
                 delivery_tools_visible: false,
-                product_context: Some(ProductTurnContext {
-                    origin: TurnOriginKind::ScheduledTrigger,
-                    surface_type: None,
-                    adapter: None,
-                    owner: TurnOwner::Personal {
+                product_context: Some(ProductTurnContext::new(
+                    TurnOriginKind::ScheduledTrigger,
+                    None,
+                    None,
+                    TurnOwner::Personal {
                         user: UserId::new("test-user").unwrap(),
                     },
-                }),
+                )),
             }),
         };
         let text = ctx.render_model_content();

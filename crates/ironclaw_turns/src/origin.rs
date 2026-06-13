@@ -65,6 +65,12 @@ pub enum TurnOwner {
 
 /// Generic, persisted product context for one turn. Resolved once at ingress by
 /// `ironclaw_product_context`; rendered into the model-visible runtime context.
+///
+/// `#[non_exhaustive]` blocks struct-literal construction from external crates, making
+/// `ProductTurnContext::new(...)` the single *intended* mint point. Turn submission is a
+/// trusted internal boundary; `new(ScheduledTrigger, ..)` is not prevented, but this raises
+/// friction and keeps grep results unambiguous.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProductTurnContext {
     pub origin: TurnOriginKind,
@@ -75,20 +81,36 @@ pub struct ProductTurnContext {
     pub owner: TurnOwner,
 }
 
+impl ProductTurnContext {
+    pub fn new(
+        origin: TurnOriginKind,
+        surface_type: Option<TurnSurfaceType>,
+        adapter: Option<RunOriginAdapter>,
+        owner: TurnOwner,
+    ) -> Self {
+        Self {
+            origin,
+            surface_type,
+            adapter,
+            owner,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn product_turn_context_round_trips_through_json() {
-        let ctx = ProductTurnContext {
-            origin: TurnOriginKind::Inbound,
-            surface_type: Some(TurnSurfaceType::Channel),
-            adapter: Some(RunOriginAdapter::new("telegram").unwrap()),
-            owner: TurnOwner::Personal {
+        let ctx = ProductTurnContext::new(
+            TurnOriginKind::Inbound,
+            Some(TurnSurfaceType::Channel),
+            Some(RunOriginAdapter::new("telegram").unwrap()),
+            TurnOwner::Personal {
                 user: ironclaw_host_api::UserId::new("u1").unwrap(),
             },
-        };
+        );
         let json = serde_json::to_string(&ctx).unwrap();
         let back: ProductTurnContext = serde_json::from_str(&json).unwrap();
         assert_eq!(ctx, back);

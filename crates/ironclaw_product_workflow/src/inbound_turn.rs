@@ -643,8 +643,7 @@ impl AcceptedProductInboundTurn {
                 }
             })?;
         let product_context = ironclaw_product_context::resolve_inbound(
-            ironclaw_product_context::TrustLevel::Untrusted,
-            false,
+            ironclaw_product_context::InboundClassification::Untrusted,
             run_adapter,
             Some(surface_type),
             turn_scope.product_owner(&actor),

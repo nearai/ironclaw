@@ -3715,42 +3715,42 @@ async fn error_kind_mapping_through_host_managed_port() {
 
 #[test]
 fn product_turn_context_serde_round_trips_all_origin_kinds() {
-    let web_ui = ProductTurnContext {
-        origin: TurnOriginKind::WebUi,
-        surface_type: None,
-        adapter: None,
-        owner: TurnOwner::Personal {
+    let web_ui = ProductTurnContext::new(
+        TurnOriginKind::WebUi,
+        None,
+        None,
+        TurnOwner::Personal {
             user: UserId::new("user-serde-rt").unwrap(),
         },
-    };
+    );
     let json = serde_json::to_value(&web_ui).unwrap();
     assert_eq!(
         serde_json::from_value::<ProductTurnContext>(json).unwrap(),
         web_ui
     );
 
-    let inbound = ProductTurnContext {
-        origin: TurnOriginKind::Inbound,
-        surface_type: None,
-        adapter: Some(RunOriginAdapter::new("slack").unwrap()),
-        owner: TurnOwner::Personal {
+    let inbound = ProductTurnContext::new(
+        TurnOriginKind::Inbound,
+        None,
+        Some(RunOriginAdapter::new("slack").unwrap()),
+        TurnOwner::Personal {
             user: UserId::new("user-serde-rt").unwrap(),
         },
-    };
+    );
     let json = serde_json::to_value(&inbound).unwrap();
     assert_eq!(
         serde_json::from_value::<ProductTurnContext>(json).unwrap(),
         inbound
     );
 
-    let trigger = ProductTurnContext {
-        origin: TurnOriginKind::ScheduledTrigger,
-        surface_type: None,
-        adapter: None,
-        owner: TurnOwner::Personal {
+    let trigger = ProductTurnContext::new(
+        TurnOriginKind::ScheduledTrigger,
+        None,
+        None,
+        TurnOwner::Personal {
             user: UserId::new("user-serde-rt").unwrap(),
         },
-    };
+    );
     let json = serde_json::to_value(&trigger).unwrap();
     assert_eq!(
         serde_json::from_value::<ProductTurnContext>(json).unwrap(),
@@ -3815,14 +3815,14 @@ async fn turn_run_state_product_context_defaults_to_none_when_missing_from_json(
     );
 
     // Verify round-trip with a value present.
-    let ctx_value = ProductTurnContext {
-        origin: TurnOriginKind::ScheduledTrigger,
-        surface_type: None,
-        adapter: None,
-        owner: TurnOwner::Personal {
+    let ctx_value = ProductTurnContext::new(
+        TurnOriginKind::ScheduledTrigger,
+        None,
+        None,
+        TurnOwner::Personal {
             user: UserId::new("user-origin-serde").unwrap(),
         },
-    };
+    );
     let state_with_ctx = TurnRunState {
         product_context: Some(ctx_value.clone()),
         ..state
@@ -3932,14 +3932,14 @@ async fn instruction_bundle_runtime_communication_renders_all_fields() {
                     channel: "slack".to_string(),
                 }),
                 delivery_tools_visible: true,
-                product_context: Some(ProductTurnContext {
-                    origin: TurnOriginKind::ScheduledTrigger,
-                    surface_type: None,
-                    adapter: None,
-                    owner: TurnOwner::Personal {
+                product_context: Some(ProductTurnContext::new(
+                    TurnOriginKind::ScheduledTrigger,
+                    None,
+                    None,
+                    TurnOwner::Personal {
                         user: UserId::new("test-user").unwrap(),
                     },
-                }),
+                )),
             }),
         }),
     };
@@ -4000,14 +4000,14 @@ async fn instruction_bundle_runtime_scheduled_trigger_with_no_delivery_emits_war
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::NoneSet,
                 delivery_tools_visible: true,
-                product_context: Some(ProductTurnContext {
-                    origin: TurnOriginKind::ScheduledTrigger,
-                    surface_type: None,
-                    adapter: None,
-                    owner: TurnOwner::Personal {
+                product_context: Some(ProductTurnContext::new(
+                    TurnOriginKind::ScheduledTrigger,
+                    None,
+                    None,
+                    TurnOwner::Personal {
                         user: UserId::new("test-user").unwrap(),
                     },
-                }),
+                )),
             }),
         }),
     };
