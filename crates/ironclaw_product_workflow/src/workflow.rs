@@ -470,8 +470,11 @@ async fn load_delivered_routes_for_envelope(
     // considered live. This separates approval routes (`is_approval_gate_ref`)
     // from auth routes (`is_auth_gate_ref`) so that a lingering auth gate
     // recorded in the same conversation bucket cannot make a bare "approve"
-    // look ambiguous, and vice-versa.
-    gate_kind_filter: Option<fn(&GateRef) -> bool>,
+    // look ambiguous, and vice-versa.  The predicate receives the raw stored
+    // gate string directly — no `GateRef::new` wrap — so routes whose stored
+    // string fails validation are not silently dropped before the predicate
+    // runs.
+    gate_kind_filter: Option<fn(&str) -> bool>,
 ) -> DeliveredRouteOutcome {
     let conversation_ref = match delivered_route_conversation_ref(envelope) {
         Ok(conversation_ref) => conversation_ref,
@@ -532,13 +535,10 @@ async fn load_delivered_routes_for_envelope(
             // same conversation fingerprint bucket from inflating the live-route
             // count and triggering a spurious AmbiguousGate error on a bare
             // "approve" (and vice-versa for a bare "auth deny").
-            if let Some(kind_filter) = gate_kind_filter {
-                let Ok(gate_ref) = GateRef::new(r.gate_ref.clone()) else {
-                    return false;
-                };
-                if !kind_filter(&gate_ref) {
-                    return false;
-                }
+            if let Some(kind_filter) = gate_kind_filter
+                && !kind_filter(&r.gate_ref)
+            {
+                return false;
             }
             if let Some(expected) = expected_gate_ref
                 && r.gate_ref != expected
@@ -587,7 +587,7 @@ async fn select_delivered_gate_route(
     binding_service: &dyn ConversationBindingService,
     delivered_gate_routes: &dyn ironclaw_outbound::DeliveredGateRouteStore,
     expected_gate_ref: Option<&str>,
-    gate_kind_filter: Option<fn(&GateRef) -> bool>,
+    gate_kind_filter: Option<fn(&str) -> bool>,
     pre_resolved_binding: Option<&ResolvedBinding>,
     ambiguity_error: impl Fn() -> ProductWorkflowError,
 ) -> Option<Result<SelectedDeliveredRoute, ProductWorkflowError>> {

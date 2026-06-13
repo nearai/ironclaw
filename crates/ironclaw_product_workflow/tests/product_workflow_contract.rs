@@ -2050,6 +2050,101 @@ async fn auth_two_live_routes_same_conversation_rejects_ambiguous() {
     );
 }
 
+/// A bare auth-deny arrives in a conversation that has a stale APPROVAL gate
+/// route stored under the same conversation fingerprint.  The auth-kind filter
+/// (`is_auth_gate_ref`) must drop the approval route so it neither:
+///  (a) inflates the live-route count and produces a spurious `AmbiguousAuth` error, nor
+///  (b) forwards the approval route's `run_id` as a `run_id_hint` to the auth service.
+///
+/// This is the symmetric counterpart of `scoped_approval_two_live_routes_same_conversation_rejects_ambiguous`
+/// (which verifies the opposite direction: a lingering auth route does not pollute a bare "approve").
+///
+/// Regression test for the `fn(&GateRef) -> bool` filter shape: the old code
+/// called `GateRef::new(r.gate_ref.clone())` before the predicate, which would
+/// silently drop any route whose stored string failed `GateRef` validation —
+/// meaning the filter never even ran on invalid-but-stale routes.  The new
+/// `fn(&str) -> bool` shape tests the raw stored string directly, eliminating
+/// both the per-route allocation and the silent-drop.
+#[tokio::test]
+async fn bare_auth_deny_with_stale_approval_route_selects_auth_route_not_approval() {
+    let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
+        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+    // Store a live APPROVAL-prefixed route in the same conversation bucket.
+    let stale_approval_gate =
+        approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
+    let (stale_run_id, _stale_scope) = record_conversation_route_for_gate_ref(
+        route_store.as_ref(),
+        stale_approval_gate.as_str(),
+        Utc::now(),
+    )
+    .await;
+
+    // The auth deny uses a different, auth-prefixed gate_ref — the one that
+    // was actually delivered with the auth prompt.
+    let auth_gate_ref = GateRef::new("gate:auth-deny-with-stale-approval").expect("auth gate ref");
+    let auth_service = Arc::new(MissingAuthThenRecordingAuthService::default());
+    let workflow = DefaultProductWorkflow::new(
+        Arc::new(FakeInboundTurnService::new()),
+        Arc::new(FakeIdempotencyLedger::new()),
+        Arc::new(FakeConversationBindingService::new()),
+    )
+    .with_auth_interaction_service(auth_service.clone())
+    .with_delivered_gate_routes(route_store);
+
+    // The auth deny must not succeed (the auth route was never stored), but
+    // the key assertion is that the stale approval route is not forwarded to
+    // the auth service as a run_id_hint.
+    let err = workflow
+        .accept_inbound(auth_thread_reply_envelope(
+            "bare-auth-deny-stale-approval",
+            auth_gate_ref.as_str(),
+        ))
+        .await
+        .expect_err("auth gate not stored — must fall through to MissingAuth rejection");
+
+    // MissingAuth (404) — the auth route was never stored, so after the kind
+    // filter drops the stale approval route the lookup is a Miss and the
+    // workflow falls back to the normal auth-service path with no run_id_hint.
+    assert!(
+        matches!(
+            err,
+            ProductAdapterError::WorkflowRejected {
+                kind: ProductWorkflowRejectionKind::ScopeNotFound,
+                status_code: 404,
+                ..
+            }
+        ),
+        "expected ScopeNotFound/404 (MissingAuth fallthrough), got: {err:?}"
+    );
+
+    // The auth service receives exactly one call:
+    //  • The initial direct-binding attempt, which returns `MissingAuth`.
+    //    After that, the delivered-route fallback runs: the kind filter drops
+    //    the stale approval route (wrong prefix), leaving a Miss.  A Miss means
+    //    the fallback returns `None`, so the workflow re-surfaces the original
+    //    `MissingAuth` error — no second service call is made.
+    let resolutions = auth_service.resolutions();
+    assert_eq!(
+        resolutions.len(),
+        1,
+        "auth service must receive exactly one call (direct attempt; fallback Miss suppresses second), got: {resolutions:?}"
+    );
+    // The single call must not carry the stale approval route's run_id.
+    assert_ne!(
+        resolutions[0].run_id_hint,
+        Some(stale_run_id),
+        "stale approval route's run_id must never reach the auth service"
+    );
+    assert_eq!(
+        resolutions[0].run_id_hint, None,
+        "no auth delivered route matched — run_id_hint must be None"
+    );
+    assert_eq!(
+        resolutions[0].gate_ref, auth_gate_ref,
+        "auth service must receive the auth gate_ref, not the stale approval gate_ref"
+    );
+}
+
 /// Explicit auth with a gate_ref that matches no stored delivered route must
 /// fall through to the interaction service with the original gate_ref.
 #[tokio::test]
