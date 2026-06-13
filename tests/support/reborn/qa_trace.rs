@@ -27,7 +27,7 @@ use ironclaw_loop_support::HostManagedModelGateway;
 use ironclaw_reborn::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
 use ironclaw_reborn_composition::{
     AssistantReply, RebornCompositionProfile, RebornLocalRuntimeProfileOptions, RebornRuntime,
-    RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,
+    RebornRuntimeIdentity, RebornRuntimeInput, RebornTurnDriveOutcome, build_reborn_runtime,
     local_runtime_build_input_with_options,
 };
 use ironclaw_turns::run_profile::ModelProfileId;
@@ -161,23 +161,59 @@ pub async fn record_qa_phrase(fixture_name: &str, phrase: &str) {
 
     let root = tempfile::tempdir().expect("tempdir");
     let runtime = build_qa_trace_runtime(&root, Arc::new(gateway)).await;
-    let reply = send_qa_phrase(&runtime, phrase).await;
+    // Drive the phrase to a terminal status *or* the first gate it raises.
+    // Using `send_user_message_until_gate` (not `send_user_message`) means an
+    // OAuth/approval-gated phrase records the agent's decisions up to the gate
+    // and reports the pause, instead of parking in the non-terminal
+    // `BlockedAuth` state until `RunTimeout`. Resolving the gate to record the
+    // post-auth turns is a deliberate follow-up that goes through the WebUI
+    // facade with a seeded credential — not wired here.
+    let conversation = runtime
+        .new_conversation()
+        .await
+        .expect("new QA conversation");
+    let outcome = runtime
+        .send_user_message_until_gate(&conversation, phrase)
+        .await
+        .expect("QA phrase reaches a terminal status or a gate");
     runtime.shutdown().await.expect("runtime shutdown");
 
     recorder.flush().await.expect("flush recorded QA trace");
-    assert!(
-        reply.is_successful_final_reply(),
-        "recorded QA phrase {fixture_name:?} did not complete successfully \
-         (status {:?}); trace still flushed to {} for inspection — scrub and \
-         re-record before committing",
-        reply.status,
-        fixture_path.display()
-    );
-    println!(
-        "recorded QA trace {} (reply: {})",
-        fixture_path.display(),
-        reply.text.as_deref().unwrap_or("<none>")
-    );
+    match outcome {
+        RebornTurnDriveOutcome::Terminal(reply) => {
+            assert!(
+                reply.is_successful_final_reply(),
+                "recorded QA phrase {fixture_name:?} did not complete successfully \
+                 (status {:?}); trace still flushed to {} for inspection — scrub and \
+                 re-record before committing",
+                reply.status,
+                fixture_path.display()
+            );
+            println!(
+                "recorded QA trace {} (reply: {})",
+                fixture_path.display(),
+                reply.text.as_deref().unwrap_or("<none>")
+            );
+        }
+        RebornTurnDriveOutcome::BlockedOnGate {
+            status,
+            gate_ref,
+            partial_text,
+            ..
+        } => {
+            // A gate pause is the expected recordable outcome for phrases that
+            // require interactive auth/approval (e.g. "connect to Gmail"): the
+            // agent routed to the gate, which is exactly what the contract for
+            // those phrases pins. The trace is flushed up to the gate.
+            println!(
+                "recorded QA trace {} (paused at gate: status {:?}, gate_ref {:?}, partial reply: {})",
+                fixture_path.display(),
+                status,
+                gate_ref.as_ref().map(|gate| gate.as_str()),
+                partial_text.as_deref().unwrap_or("<none>")
+            );
+        }
+    }
 
     // Give the recording a 2s settle so background turn-state writes finish
     // before the tempdir drops.

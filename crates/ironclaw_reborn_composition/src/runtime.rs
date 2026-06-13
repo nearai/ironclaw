@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use thiserror::Error;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -274,6 +274,40 @@ impl AssistantReply {
     pub fn is_successful_final_reply(&self) -> bool {
         self.status == TurnStatus::Completed && self.text.is_some()
     }
+}
+
+/// Accepted-turn handle returned by `RebornRuntime::submit_user_turn`. Holds
+/// the per-conversation send lock for its lifetime so the caller's wait phase
+/// retains the same mutual exclusion the inline submit path used to.
+struct SubmittedTurn {
+    _send_guard: OwnedMutexGuard<()>,
+    scope: TurnScope,
+    run_id: TurnRunId,
+    accepted_message_ref: AcceptedMessageRef,
+}
+
+/// Outcome of driving a single turn that may pause on a gate.
+///
+/// Test/recording-support only — produced by
+/// [`RebornRuntime::send_user_message_until_gate`], which mirrors the
+/// production [`RebornRuntime::send_user_message`] submit path but returns when
+/// the run first reaches a terminal status *or* parks on a `Blocked*` gate,
+/// instead of waiting only for a terminal status. Gate *resolution* stays on
+/// the WebUI `RebornServicesApi` facade (`resolve_gate`) per the #3094 seam;
+/// this type only observes where a run paused.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone)]
+pub enum RebornTurnDriveOutcome {
+    /// The run reached a terminal status without pausing on a gate.
+    Terminal(AssistantReply),
+    /// The run parked on a gate (auth/approval/resource/dependent-run) and is
+    /// awaiting resolution through the facade.
+    BlockedOnGate {
+        run_id: TurnRunId,
+        status: TurnStatus,
+        gate_ref: Option<ironclaw_turns::GateRef>,
+        partial_text: Option<String>,
+    },
 }
 
 /// Errors returned by `RebornRuntime` methods.
@@ -1240,8 +1274,60 @@ impl RebornRuntime {
         cancellation: CancellationToken,
         capture_skill_execution_plan: bool,
     ) -> Result<AssistantReply, RebornRuntimeError> {
+        let submitted = self
+            .submit_user_turn(
+                conversation,
+                text,
+                &cancellation,
+                capture_skill_execution_plan,
+            )
+            .await?;
+
+        let reply = async {
+            let terminal_state = self
+                .wait_for_terminal(&submitted.scope, submitted.run_id, &cancellation)
+                .await?;
+            let assistant_text = self
+                .read_latest_assistant_text(&conversation.0, submitted.run_id)
+                .await?;
+
+            Ok(AssistantReply {
+                conversation: conversation.clone(),
+                run_id: submitted.run_id,
+                status: terminal_state.status,
+                failure_category: terminal_state
+                    .failure
+                    .as_ref()
+                    .map(|failure| failure.category().to_string()),
+                text: assistant_text,
+            })
+        }
+        .await;
+
+        if let Some(skill_activation_source) = &self.skill_activation_source {
+            skill_activation_source
+                .clear_accepted_message(&submitted.scope, &submitted.accepted_message_ref)
+                .map_err(|error| RebornRuntimeError::TurnSubmission(error.to_string()))?;
+        }
+
+        reply
+    }
+
+    /// Submit a user message turn and return once the run is accepted, holding
+    /// the per-conversation send lock for the returned `SubmittedTurn`'s
+    /// lifetime. Shared by [`Self::send_user_message_internal`] and the
+    /// test-support [`Self::send_user_message_until_gate`] so both drive an
+    /// identical accept/submit path and differ only in how they wait for the
+    /// run to settle.
+    async fn submit_user_turn(
+        &self,
+        conversation: &ConversationId,
+        text: &str,
+        cancellation: &CancellationToken,
+        capture_skill_execution_plan: bool,
+    ) -> Result<SubmittedTurn, RebornRuntimeError> {
         let send_lock = self.send_lock_for(conversation).await;
-        let _send_guard = send_lock.lock().await;
+        let _send_guard = send_lock.lock_owned().await;
         if self.worker_handle.is_finished() {
             return Err(RebornRuntimeError::WorkerStopped);
         }
@@ -1343,34 +1429,12 @@ impl RebornRuntime {
         }
         self.wake_sender.wake();
 
-        let reply = async {
-            let terminal_state = self
-                .wait_for_terminal(&scope, run_id, &cancellation)
-                .await?;
-            let assistant_text = self
-                .read_latest_assistant_text(&conversation.0, run_id)
-                .await?;
-
-            Ok(AssistantReply {
-                conversation: conversation.clone(),
-                run_id,
-                status: terminal_state.status,
-                failure_category: terminal_state
-                    .failure
-                    .as_ref()
-                    .map(|failure| failure.category().to_string()),
-                text: assistant_text,
-            })
-        }
-        .await;
-
-        if let Some(skill_activation_source) = &self.skill_activation_source {
-            skill_activation_source
-                .clear_accepted_message(&scope, &accepted_message_ref)
-                .map_err(|error| RebornRuntimeError::TurnSubmission(error.to_string()))?;
-        }
-
-        reply
+        Ok(SubmittedTurn {
+            _send_guard,
+            scope,
+            run_id,
+            accepted_message_ref,
+        })
     }
 
     /// Submit a skill-aware message through the normal Reborn loop and return
@@ -1527,6 +1591,130 @@ impl RebornRuntime {
                 _ = tokio::time::sleep(self.poll_settings.interval) => {}
             }
         }
+    }
+
+    /// Like [`Self::wait_for_terminal`], but also returns when the run parks on
+    /// a `Blocked*` gate (auth/approval/resource/dependent-run) instead of
+    /// polling until those non-terminal states either resolve or hit
+    /// `RunTimeout`. The returned state carries the `Blocked*` status and
+    /// `gate_ref`; the caller decides whether to resolve (through the WebUI
+    /// facade) or stop. Test/recording-support only.
+    #[cfg(any(test, feature = "test-support"))]
+    async fn wait_for_terminal_or_gate(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        cancellation: &CancellationToken,
+    ) -> Result<TurnRunState, RebornRuntimeError> {
+        let start = std::time::Instant::now();
+        loop {
+            if self.worker_handle.is_finished() {
+                return Err(RebornRuntimeError::WorkerStopped);
+            }
+            let state = self
+                .turn_coordinator
+                .get_run_state(GetRunStateRequest {
+                    scope: scope.clone(),
+                    run_id,
+                })
+                .await?;
+            let blocked_on_gate = matches!(
+                state.status,
+                TurnStatus::BlockedApproval
+                    | TurnStatus::BlockedAuth
+                    | TurnStatus::BlockedResource
+                    | TurnStatus::BlockedDependentRun
+            );
+            if state.status.is_terminal() || blocked_on_gate {
+                return Ok(state);
+            }
+            if start.elapsed() > self.poll_settings.max_total {
+                self.cancel_run(
+                    scope,
+                    run_id,
+                    SanitizedCancelReason::Timeout,
+                    "timeout-cancel",
+                )
+                .await?;
+                return Err(RebornRuntimeError::RunTimeout {
+                    timeout: self.poll_settings.max_total,
+                });
+            }
+            tokio::select! {
+                _ = cancellation.cancelled() => {
+                    self.cancel_run(
+                        scope,
+                        run_id,
+                        SanitizedCancelReason::UserRequested,
+                        "caller-cancel",
+                    )
+                    .await?;
+                    return Err(RebornRuntimeError::OperationCancelled);
+                }
+                _ = tokio::time::sleep(self.poll_settings.interval) => {}
+            }
+        }
+    }
+
+    /// Test/recording-support sibling of [`Self::send_user_message`] that
+    /// returns when the run first reaches a terminal status *or* parks on a
+    /// `Blocked*` gate, rather than waiting only for a terminal status.
+    ///
+    /// The QA-trace recorder (`tests/support/reborn/qa_trace.rs`) uses this so
+    /// an OAuth/approval-gated phrase records the agent's decisions up to the
+    /// gate and reports the pause, instead of sitting in the non-terminal
+    /// `BlockedAuth` state until `RunTimeout` (a real recorder hang this method
+    /// exists to eliminate). This method only *observes* where the run paused;
+    /// gate *resolution* stays on the WebUI `RebornServicesApi` facade
+    /// (`resolve_gate`) per the #3094 seam — do not add a resolution path here.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn send_user_message_until_gate(
+        &self,
+        conversation: &ConversationId,
+        text: &str,
+    ) -> Result<RebornTurnDriveOutcome, RebornRuntimeError> {
+        let cancellation = CancellationToken::new();
+        let submitted = self
+            .submit_user_turn(conversation, text, &cancellation, false)
+            .await?;
+
+        let outcome = async {
+            let state = self
+                .wait_for_terminal_or_gate(&submitted.scope, submitted.run_id, &cancellation)
+                .await?;
+            let assistant_text = self
+                .read_latest_assistant_text(&conversation.0, submitted.run_id)
+                .await?;
+
+            if state.status.is_terminal() {
+                Ok(RebornTurnDriveOutcome::Terminal(AssistantReply {
+                    conversation: conversation.clone(),
+                    run_id: submitted.run_id,
+                    status: state.status,
+                    failure_category: state
+                        .failure
+                        .as_ref()
+                        .map(|failure| failure.category().to_string()),
+                    text: assistant_text,
+                }))
+            } else {
+                Ok(RebornTurnDriveOutcome::BlockedOnGate {
+                    run_id: submitted.run_id,
+                    status: state.status,
+                    gate_ref: state.gate_ref.clone(),
+                    partial_text: assistant_text,
+                })
+            }
+        }
+        .await;
+
+        if let Some(skill_activation_source) = &self.skill_activation_source {
+            skill_activation_source
+                .clear_accepted_message(&submitted.scope, &submitted.accepted_message_ref)
+                .map_err(|error| RebornRuntimeError::TurnSubmission(error.to_string()))?;
+        }
+
+        outcome
     }
 
     async fn cancel_run(
