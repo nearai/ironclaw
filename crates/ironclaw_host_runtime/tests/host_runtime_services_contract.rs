@@ -2704,13 +2704,16 @@ async fn host_runtime_services_resume_missing_runtime_secret_returns_auth_gate()
         .unwrap();
     assert_eq!(run.status, RunStatus::BlockedAuth);
     assert_eq!(run.error_kind.as_deref(), Some("AuthRequired"));
+    // A missing-credential bounce parks the run at BlockedAuth (non-terminal):
+    // the claimed approval lease is intentionally preserved, not revoked, so the
+    // same invocation can reuse it on auth-resume without a second human approval.
     assert_eq!(
         capability_leases
             .get(&scope, lease.grant.id)
             .await
             .unwrap()
             .status,
-        CapabilityLeaseStatus::Revoked
+        CapabilityLeaseStatus::Claimed
     );
     assert!(
         script_runtime.recorded_mounts().is_empty(),
