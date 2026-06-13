@@ -4707,3 +4707,138 @@ async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id
         "completed result ref must be recorded"
     );
 }
+
+// ── auth-resume slot consumed on first batch match (batch duplicate guard) ──
+
+#[tokio::test]
+async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_call() {
+    // Regression test: pending_auth_resume must be consumed on the FIRST batch
+    // call whose capability_id matches, not shared across all matching calls.
+    //
+    // Before the fix `pending_auth_resume` was accessed via `as_ref().filter(…)`
+    // (non-consuming), so two calls to the same capability_id in one batch would
+    // BOTH receive the same auth_resume — reusing one resume_token/invocation_id
+    // across distinct calls (correctness + security bug).
+    //
+    // After the fix `pending_auth_resume` uses `take_if` (consuming on first
+    // match), so only the FIRST matching call carries auth_resume; the second is
+    // a normal dispatch (auth_resume = None).
+    //
+    // We drive CapabilityStage directly (rather than the full executor) because
+    // when pending_auth_resume is set the executor routes through the single-call
+    // ResumeAuth prompt path — the two-call batch can only be exercised at the
+    // CapabilityStage boundary where the mapping loop lives.
+    let approval_request_id = ApprovalRequestId::new();
+    let resume_token =
+        CapabilityResumeToken::new("resume-token:batch-dup-guard").expect("valid token");
+    let correlation_id = CorrelationId::new();
+    let input_ref = CapabilityInputRef::new("input:batch-dup-guard").expect("valid");
+
+    // Two outcomes for the two calls; both complete so no suspension complicates things.
+    let host = MockHost::new(Vec::new()).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![
+                CapabilityOutcome::Completed(
+                    ironclaw_turns::run_profile::CapabilityResultMessage {
+                        result_ref: LoopResultRef::new("result:first").expect("valid"),
+                        safe_summary: "first done".to_string(),
+                        progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                        terminate_hint: false,
+                        byte_len: 0,
+                    },
+                ),
+                CapabilityOutcome::Completed(
+                    ironclaw_turns::run_profile::CapabilityResultMessage {
+                        result_ref: LoopResultRef::new("result:second").expect("valid"),
+                        safe_summary: "second done".to_string(),
+                        progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                        terminate_hint: false,
+                        byte_len: 0,
+                    },
+                ),
+            ],
+            stopped_on_suspension: false,
+        },
+    ]);
+
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+
+    // State with pending_auth_resume set — capability_id() matches both calls below.
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.pending_auth_resume = Some(PendingAuthResume {
+        gate_ref: LoopGateRef::new("gate:batch-dup-auth").expect("valid"),
+        capability_id: capability_id(),
+        surface_version: surface_version(),
+        input_ref: input_ref.clone(),
+        effective_capability_ids: vec![],
+        provider_replay: None,
+        resume_token: Some(resume_token.clone()),
+        approval_request_id: Some(approval_request_id),
+        correlation_id: Some(correlation_id),
+    });
+
+    // Two calls to the same capability_id — extracted from the two_calls_response fixture.
+    let calls = match two_calls_response().output {
+        ParentLoopOutput::CapabilityCalls(calls) => calls,
+        ParentLoopOutput::AssistantReply(_) => panic!("expected calls fixture"),
+    };
+
+    let surface = ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+        &host,
+        VisibleCapabilityRequest,
+    )
+    .await
+    .expect("visible surface");
+
+    let step = CapabilityStage
+        .process(
+            ctx,
+            CapabilityInput {
+                state,
+                surface,
+                calls,
+            },
+        )
+        .await
+        .expect("capability stage");
+
+    assert!(
+        matches!(step, TurnCompletedStep::Continue { .. }),
+        "expected Continue from CapabilityStage; got {step:?}"
+    );
+
+    let batch_invocations = host.batch_invocations();
+    assert_eq!(
+        batch_invocations.len(),
+        1,
+        "expected exactly one batch invocation"
+    );
+    let invocations = &batch_invocations[0].invocations;
+    assert_eq!(invocations.len(), 2, "batch must have two calls");
+
+    // First call: auth_resume is set (slot consumed here).
+    let first_auth = invocations[0]
+        .auth_resume
+        .as_ref()
+        .expect("first batch call must carry auth_resume (pre-fix: both carried it)");
+    assert_eq!(
+        first_auth.resume_token, resume_token,
+        "first call auth_resume.resume_token must match"
+    );
+    assert_eq!(
+        first_auth.approval_request_id,
+        Some(approval_request_id),
+        "first call auth_resume.approval_request_id must match"
+    );
+
+    // Second call: auth_resume must be None — slot was consumed by the first call.
+    assert_eq!(
+        invocations[1].auth_resume, None,
+        "second batch call must NOT carry auth_resume — slot must be consumed on first match \
+         (pre-fix: was Some, reusing the same resume_token)"
+    );
+}

@@ -130,7 +130,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             .await;
 
         let mut pending_approval_resume = state.pending_approval_resume.clone();
-        let pending_auth_resume = state.pending_auth_resume.clone();
+        let mut pending_auth_resume = state.pending_auth_resume.clone();
         let batch_result = ctx
             .host
             .invoke_capability_batch(CapabilityBatchInvocation {
@@ -142,11 +142,16 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         // at a BlockedAuth checkpoint that also carried prior
                         // approval identity, re-dispatch through the auth-resume
                         // path so the original invocation_id is reused.
+                        //
+                        // Consume the slot on first match so that a batch with two
+                        // calls to the same capability_id does not tag both as
+                        // auth-resume (which would reuse one resume_token across
+                        // distinct calls — a correctness and security bug).  Mirror
+                        // the approval path immediately below which uses take_if.
                         if let Some(auth) = pending_auth_resume
-                            .as_ref()
-                            .filter(|auth| auth.capability_id == call.capability_id)
+                            .take_if(|auth| auth.capability_id == call.capability_id)
                         {
-                            return capability_invocation_from_auth_resume_candidate(call, auth);
+                            return capability_invocation_from_auth_resume_candidate(call, &auth);
                         }
                         let resume = pending_approval_resume
                             .take_if(|resume| resume.capability_id == call.capability_id)
