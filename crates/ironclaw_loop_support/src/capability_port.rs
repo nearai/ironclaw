@@ -1818,16 +1818,27 @@ fn invocation_idempotency_key(
     request: &CapabilityInvocation,
     input_ref: &CapabilityInputRef,
 ) -> Result<IdempotencyKey, AgentLoopHostError> {
-    let resume_scope = request
-        .approval_resume
-        .as_ref()
-        .map(|resume| {
-            format!(
-                "resume:{}:{}",
-                resume.approval_request_id, resume.resume_token
-            )
-        })
-        .unwrap_or_else(|| "dispatch".to_string());
+    // Each mode must hash to a distinct key: a colliding key would replay the
+    // prior mode's recorded outcome (e.g. an auth re-dispatch receiving the
+    // original cached ApprovalRequired gate) instead of dispatching.
+    let resume_scope = match (
+        request.approval_resume.as_ref(),
+        request.auth_resume.as_ref(),
+    ) {
+        (Some(resume), _) => format!(
+            "resume:{}:{}",
+            resume.approval_request_id, resume.resume_token
+        ),
+        (None, Some(auth_resume)) => format!(
+            "auth-resume:{}:{}",
+            auth_resume
+                .approval_request_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            auth_resume.resume_token
+        ),
+        (None, None) => "dispatch".to_string(),
+    };
     let payload = format!(
         "loop-capability\nrun={}\nsurface={}\ncapability={}\ninput={}\nmode={}",
         run_context.run_id,

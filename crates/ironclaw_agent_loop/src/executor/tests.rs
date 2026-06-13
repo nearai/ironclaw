@@ -4477,3 +4477,229 @@ async fn non_stale_batch_failure_stays_terminal() {
         }
     );
 }
+
+// ── Approval-then-auth resume: invocation_id preserved ───────────────────────
+
+#[tokio::test]
+async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id() {
+    // Regression test for the fix that makes auth-gate re-dispatch reuse the
+    // ORIGINAL invocation_id so a one-shot approval lease survives the auth gate.
+    //
+    // Without the fix: `capability_invocation_from_auth_resume_candidate` returned
+    // `auth_resume: None` because `pending_auth.resume_token` was never set.
+    // With the fix: `pending_auth.resume_token` carries the approval resume token and
+    // `auth_resume` is populated, allowing the host to match the fingerprinted lease.
+    //
+    // This test drives the full 3-phase executor path:
+    //   Phase 1: model → ApprovalRequired (with resume token) → Blocked
+    //   Phase 2: approval-resume re-dispatch → AuthRequired → Blocked
+    //   Phase 3: auth-resume re-dispatch → Completed
+    // and asserts that the phase-3 invocation carries the correct auth_resume.
+
+    let approval_request_id = ApprovalRequestId::new();
+    let resume_token =
+        CapabilityResumeToken::new("resume-token:approval-auth-test").expect("valid token");
+    let correlation_id = CorrelationId::new();
+    let original_input_ref =
+        CapabilityInputRef::new("input:approval-auth-original").expect("valid");
+    let auth_gate_ref = LoopGateRef::new("gate:auth-after-approval").expect("valid");
+    let completed_ref = LoopResultRef::new("result:auth-after-approval-done").expect("valid");
+
+    let approval_resume = CapabilityApprovalResume {
+        approval_request_id,
+        resume_token: resume_token.clone(),
+        correlation_id,
+        input_ref: original_input_ref.clone(),
+        input: serde_json::json!({ "message": "hello" }),
+        estimate: ResourceEstimate::default(),
+    };
+
+    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+        // Phase 1: approval gate blocks with resume metadata
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::ApprovalRequired {
+                gate_ref: LoopGateRef::new("gate:approval-then-auth").expect("valid"),
+                safe_summary: "approval required".to_string(),
+                approval_resume: Some(approval_resume.clone()),
+            }],
+            stopped_on_suspension: true,
+        },
+        // Phase 2: auth gate blocks after approval-resume re-dispatch
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::AuthRequired {
+                gate_ref: auth_gate_ref.clone(),
+                credential_requirements: Vec::new(),
+                safe_summary: "auth required after approval".to_string(),
+            }],
+            stopped_on_suspension: true,
+        },
+        // Phase 3: auth-resume re-dispatch completes
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Completed(
+                ironclaw_turns::run_profile::CapabilityResultMessage {
+                    result_ref: completed_ref.clone(),
+                    safe_summary: "completed after auth resume".to_string(),
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    terminate_hint: true,
+                    byte_len: 0,
+                },
+            )],
+            stopped_on_suspension: false,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+
+    // ── Phase 1: model turn → approval gate → Blocked ────────────────────────
+    let initial_state = LoopExecutionState::initial_for_run(host.run_context());
+    let phase1_exit = executor
+        .execute_family(&crate::families::default(), &host, initial_state)
+        .await
+        .expect("phase 1 must block on approval gate");
+    assert!(
+        matches!(phase1_exit, LoopExit::Blocked(_)),
+        "expected Blocked exit from approval gate; got {phase1_exit:?}"
+    );
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "phase 1 must make exactly one model call"
+    );
+
+    // BeforeBlock checkpoint carries pending_approval_resume with the resume token.
+    let phase1_bb = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+    let pending_approval = phase1_bb
+        .pending_approval_resume
+        .as_ref()
+        .expect("phase 1 BeforeBlock must carry pending_approval_resume");
+    assert_eq!(
+        pending_approval.resume_token, resume_token,
+        "phase 1 pending_approval_resume.resume_token must match the scripted token"
+    );
+    assert_eq!(
+        pending_approval.approval_request_id, approval_request_id,
+        "phase 1 pending_approval_resume.approval_request_id must match"
+    );
+
+    // ── Phase 2: approval-resume → auth gate → Blocked ───────────────────────
+    let phase2_exit = executor
+        .execute_family(&crate::families::default(), &host, phase1_bb)
+        .await
+        .expect("phase 2 must block on auth gate");
+    assert!(
+        matches!(phase2_exit, LoopExit::Blocked(_)),
+        "expected Blocked exit from auth gate; got {phase2_exit:?}"
+    );
+    // No new model call — approval-resume re-dispatched before the model.
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "phase 2 (approval-resume) must not trigger a new model call"
+    );
+
+    // BeforeBlock checkpoint for phase 2 carries pending_auth_resume.
+    // It must propagate the resume_token and approval_request_id from the approval.
+    let phase2_bb_states: Vec<_> = host
+        .staged_payloads()
+        .into_iter()
+        .filter(|p| p.kind == LoopCheckpointKind::BeforeBlock)
+        .map(|p| {
+            LoopExecutionState::from_checkpoint_payload(&p.payload, CheckpointKind::BeforeBlock)
+                .expect("phase 2 BeforeBlock payload")
+        })
+        .collect();
+    assert!(
+        phase2_bb_states.len() >= 2,
+        "expected at least two BeforeBlock checkpoints (phase 1 + phase 2)"
+    );
+    let phase2_bb = phase2_bb_states.last().expect("at least one").clone();
+    let pending_auth = phase2_bb
+        .pending_auth_resume
+        .as_ref()
+        .expect("phase 2 BeforeBlock must carry pending_auth_resume");
+    assert_eq!(
+        pending_auth.resume_token,
+        Some(resume_token.clone()),
+        "pending_auth_resume.resume_token must carry the approval resume token"
+    );
+    assert_eq!(
+        pending_auth.approval_request_id,
+        Some(approval_request_id),
+        "pending_auth_resume.approval_request_id must match the approval request"
+    );
+
+    // ── Phase 3: auth-resume → Completed ─────────────────────────────────────
+    let phase3_exit = executor
+        .execute_family(&crate::families::default(), &host, phase2_bb)
+        .await
+        .expect("phase 3 must complete after auth resume");
+    assert!(
+        matches!(phase3_exit, LoopExit::Completed(_)),
+        "expected Completed exit after auth resume; got {phase3_exit:?}"
+    );
+    // Still no additional model call.
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "phase 3 (auth-resume) must not trigger a new model call"
+    );
+
+    // Three total batch invocations: phase 1 (approval block) + phase 2 (auth
+    // block) + phase 3 (completed).
+    let batch_invocations = host.batch_invocations();
+    assert_eq!(
+        batch_invocations.len(),
+        3,
+        "expected three batch invocations (phase 1 approval + phase 2 auth + phase 3 complete)"
+    );
+
+    // Phase 1 invocation: plain, no approval_resume and no auth_resume.
+    assert_eq!(
+        batch_invocations[0].invocations[0].approval_resume, None,
+        "phase 1 invocation must not carry approval_resume (set on the outcome, not the request)"
+    );
+    assert_eq!(
+        batch_invocations[0].invocations[0].auth_resume, None,
+        "phase 1 invocation must not carry auth_resume"
+    );
+
+    // Phase 2 invocation: this is the approval-resume re-dispatch.
+    // approval_resume is set; auth_resume is not (auth hasn't happened yet).
+    assert_eq!(
+        batch_invocations[1].invocations[0].auth_resume, None,
+        "phase 2 (approval-resume) invocation must not carry auth_resume"
+    );
+
+    // Phase 3 invocation: this is the auth-resume re-dispatch.
+    // auth_resume must be set and carry the original resume_token + approval_request_id.
+    // Pre-fix: auth_resume would be None (resume_token was never propagated).
+    // Post-fix: auth_resume carries the token so the host can reuse the original
+    // invocation_id and match the fingerprinted approval lease.
+    let phase3_auth_resume = batch_invocations[2].invocations[0]
+        .auth_resume
+        .as_ref()
+        .expect(
+            "phase 3 (auth-resume) invocation must carry auth_resume \
+                 (pre-fix: was None because resume_token was not propagated)",
+        );
+    assert_eq!(
+        phase3_auth_resume.resume_token, resume_token,
+        "auth_resume.resume_token must match the original approval resume token"
+    );
+    assert_eq!(
+        phase3_auth_resume.approval_request_id,
+        Some(approval_request_id),
+        "auth_resume.approval_request_id must match the original approval request id"
+    );
+
+    // Final state: pending_auth_resume cleared and result recorded.
+    let final_state = final_staged_state(&host);
+    assert!(
+        final_state.pending_auth_resume.is_none(),
+        "pending_auth_resume must be cleared after successful auth-resume re-dispatch"
+    );
+    assert_eq!(
+        final_state.result_refs,
+        vec![completed_ref],
+        "completed result ref must be recorded"
+    );
+}
