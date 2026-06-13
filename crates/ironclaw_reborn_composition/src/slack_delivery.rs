@@ -151,6 +151,29 @@ pub struct SlackFinalReplyDeliveryObserver {
     active_delivery_run_ids: Mutex<HashSet<TurnRunId>>,
 }
 
+/// RAII guard that removes a `run_id` from `active_delivery_run_ids` on drop.
+///
+/// Acquired before the delivery semaphore permit so that a concurrent ack for
+/// the same run_id is rejected immediately — without competing for a permit and
+/// without the TOCTOU window that existed when the permit was acquired first.
+///
+/// Panic-safe: `Drop` uses `unwrap_or_else(|e| e.into_inner())` to tolerate a
+/// poisoned mutex, so the run_id is always removed even if `deliver_final_reply`
+/// panics.
+struct RunDeliveryGuard<'a> {
+    set: &'a Mutex<HashSet<TurnRunId>>,
+    run_id: TurnRunId,
+}
+
+impl Drop for RunDeliveryGuard<'_> {
+    fn drop(&mut self) {
+        self.set
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.run_id);
+    }
+}
+
 impl SlackFinalReplyDeliveryObserver {
     pub fn new(services: SlackFinalReplyDeliveryServices) -> Self {
         Self::with_settings(services, SlackFinalReplyDeliverySettings::default())
@@ -1065,13 +1088,6 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
             }
             return;
         }
-        let Ok(_permit) = self.delivery_permits.clone().acquire_owned().await else {
-            tracing::warn!(
-                target = "ironclaw::reborn::slack_delivery",
-                "Slack final reply delivery skipped because delivery semaphore was closed"
-            );
-            return;
-        };
         // Single-flight guard: at most one live delivery loop per run_id.
         //
         // A gate-resolution ack (ApprovalResolution(Allow) / AuthResolution(Allowed))
@@ -1084,8 +1100,16 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
         // `should_deliver_after_ack` only filters Deny resolutions; Allow resolutions
         // pass through here. We guard by run_id rather than by ack type so the fix
         // is robust to future ack variants that may also target an existing run.
-        let run_id_for_guard = submitted_run_id(&ack);
-        if let Some(run_id) = run_id_for_guard {
+        //
+        // IMPORTANT: the guard is checked and inserted BEFORE acquiring the delivery
+        // semaphore permit. Without this ordering, a second ack (L2) for the same
+        // run_id could block on the permit while L1 is delivering; when L1 releases
+        // the permit and removes the run_id, L2 would wake and pass a now-empty guard
+        // set — the exact TOCTOU race this ordering closes.
+        //
+        // The `RunDeliveryGuard` RAII type ensures the run_id is removed on drop even
+        // if `deliver_final_reply` panics, preventing a permanent delivery block.
+        let _delivery_guard = if let Some(run_id) = submitted_run_id(&ack) {
             let already_delivering = {
                 let mut guard = self
                     .active_delivery_run_ids
@@ -1106,16 +1130,25 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
                 );
                 return;
             }
-        }
+            Some(RunDeliveryGuard {
+                set: &self.active_delivery_run_ids,
+                run_id,
+            })
+        } else {
+            None
+        };
+        let Ok(_permit) = self.delivery_permits.clone().acquire_owned().await else {
+            tracing::warn!(
+                target = "ironclaw::reborn::slack_delivery",
+                "Slack final reply delivery skipped because delivery semaphore was closed"
+            );
+            return;
+        };
         let delivery_result = self.deliver_final_reply(envelope.clone(), ack).await;
-        // Release the single-flight guard for this run before handling the error so
-        // a future retry (e.g. after a process restart) is not permanently blocked.
-        if let Some(run_id) = run_id_for_guard {
-            self.active_delivery_run_ids
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&run_id);
-        }
+        // `_delivery_guard` is dropped here automatically, removing the run_id from
+        // `active_delivery_run_ids` even if `deliver_final_reply` returned an error.
+        // Explicit drop makes the cleanup point visible at the call site.
+        drop(_delivery_guard);
         if let Err(error) = delivery_result {
             tracing::warn!(
                 target = "ironclaw::reborn::slack_delivery",
@@ -5308,5 +5341,181 @@ mod tests {
             recorded[0].scope, expected_scope,
             "GetRunStateRequest scope must be derived from the authorized binding"
         );
+    }
+
+    /// A delivery that errors or times out must NOT leave the run_id in
+    /// `active_delivery_run_ids` permanently. A subsequent `observe_workflow_ack`
+    /// for the same run_id must proceed to delivery instead of being rejected by
+    /// the guard.
+    ///
+    /// Test setup: the coordinator always returns `Running`; `max_wait = 1 ms`
+    /// forces a timeout on every attempt. After the first timeout the RAII guard
+    /// drops the run_id, so the second attempt reaches `wait_for_actionable` and
+    /// polls `get_run_state` at least once more.
+    ///
+    /// If the guard were NOT released after an error, the second call would return
+    /// early without ever calling `get_run_state`, and the total call count would
+    /// equal the first attempt's count.
+    #[tokio::test]
+    async fn guard_is_released_after_delivery_error_so_subsequent_ack_proceeds() {
+        let install = "test-install";
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::Running,
+        ));
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+
+        // Build an observer with a very short max_wait so delivery times out quickly.
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let services = SlackFinalReplyDeliveryServices {
+            binding_service: Arc::new(
+                ironclaw_product_workflow::FakeConversationBindingService::new(),
+            ),
+            thread_service,
+            turn_coordinator: coordinator.clone(),
+            outbound_store: outbound.clone(),
+            route_store: Arc::new(InMemoryDeliveredGateRouteStore::default()),
+            communication_preferences: outbound,
+            adapter: test_adapter(install),
+            egress: egress.clone(),
+            delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
+            auth_challenges: None,
+        };
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_millis(1),
+            max_concurrent_deliveries: NonZeroUsize::new(4).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let observer = SlackFinalReplyDeliveryObserver::with_settings(services, settings);
+
+        let run_id = TurnRunId::new();
+        let ack = ProductInboundAck::Accepted {
+            accepted_message_ref: AcceptedMessageRef::new("msg:guard-release-test")
+                .expect("accepted message ref"), // safety: static test ref is valid.
+            submitted_run_id: run_id,
+        };
+        let env = envelope(user_message_payload());
+
+        // First delivery: times out; guard must be released on return.
+        observer
+            .observe_workflow_ack(env.clone(), ack.clone())
+            .await;
+        let calls_after_first = {
+            let c = coordinator.calls.lock().expect("coordinator calls lock");
+            *c
+        };
+        assert!(
+            calls_after_first >= 1,
+            "first delivery attempt must poll get_run_state at least once; got {calls_after_first}"
+        );
+
+        // Second delivery for the same run_id: if the guard were not released the
+        // observer would return early and get_run_state would not be called again.
+        observer.observe_workflow_ack(env, ack).await;
+        let calls_after_second = {
+            let c = coordinator.calls.lock().expect("coordinator calls lock");
+            *c
+        };
+        assert!(
+            calls_after_second > calls_after_first,
+            "second delivery attempt must reach get_run_state (guard was not released after the first error); \
+             calls after first={calls_after_first}, calls after second={calls_after_second}"
+        );
+    }
+
+    /// Single-flight fanout regression: while one delivery loop is in flight for a
+    /// run_id, a second ack carrying the SAME run_id must be rejected by the guard
+    /// WITHOUT competing for the delivery semaphore permit.
+    ///
+    /// Real-world case: an `AuthResolution(Allowed)` / `ApprovalResolution(Allow)`
+    /// resolution resumes the pre-existing run and is ack'd with the original
+    /// `submitted_run_id`. The original loop is still watching, so a second loop
+    /// would post gate N a second time (N resolutions ⇒ N+1 loops).
+    ///
+    /// This locks the TOCTOU ordering specifically: with `max_concurrent_deliveries
+    /// = 1`, the first (blocked) delivery holds the only permit. If the guard were
+    /// checked AFTER acquiring the permit, the second call would block on the
+    /// semaphore and the `timeout` below would elapse. Because the guard is checked
+    /// and inserted BEFORE the permit, the second call returns immediately.
+    #[tokio::test]
+    async fn concurrent_ack_for_same_run_id_is_rejected_before_acquiring_permit() {
+        let install = "test-install";
+        // Always-Running coordinator + large max_wait ⇒ the first delivery blocks in
+        // wait_for_actionable, holding the single delivery permit for the test's life.
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::Running,
+        ));
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let services = SlackFinalReplyDeliveryServices {
+            binding_service: Arc::new(
+                ironclaw_product_workflow::FakeConversationBindingService::new(),
+            ),
+            thread_service,
+            turn_coordinator: coordinator.clone(),
+            outbound_store: outbound.clone(),
+            route_store: Arc::new(InMemoryDeliveredGateRouteStore::default()),
+            communication_preferences: outbound,
+            adapter: test_adapter(install),
+            egress: egress.clone(),
+            delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
+            auth_challenges: None,
+        };
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::from_millis(1),
+            max_wait: std::time::Duration::from_secs(60),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let observer = Arc::new(SlackFinalReplyDeliveryObserver::with_settings(
+            services, settings,
+        ));
+
+        let run_id = TurnRunId::new();
+        let make_ack = |slug: &str| ProductInboundAck::Accepted {
+            accepted_message_ref: AcceptedMessageRef::new(slug).expect("accepted message ref"),
+            submitted_run_id: run_id,
+        };
+        let env = envelope(user_message_payload());
+
+        // First delivery: acquires the guard + the only permit, then blocks.
+        let first = {
+            let observer = observer.clone();
+            let env = env.clone();
+            let ack = make_ack("msg:first");
+            tokio::spawn(async move { observer.observe_workflow_ack(env, ack).await })
+        };
+
+        // Wait until the first loop registered the run_id in the single-flight set.
+        loop {
+            let registered = observer
+                .active_delivery_run_ids
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&run_id);
+            if registered {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+
+        // Second ack for the SAME run_id while the first still holds the permit.
+        // Must return promptly via the guard skip, NOT block on the semaphore.
+        let second = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            observer.observe_workflow_ack(env, make_ack("msg:second")),
+        )
+        .await;
+        assert!(
+            second.is_ok(),
+            "second ack for an in-flight run_id must be rejected by the single-flight guard \
+             before acquiring the delivery permit; it blocked on the semaphore instead"
+        );
+
+        first.abort();
     }
 }
