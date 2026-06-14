@@ -1266,19 +1266,21 @@ fn rejection_hint_for_resolution(
 /// (e.g. a replay with no live run) we return `None` — there is no run state to
 /// inspect so no hint is appropriate.
 ///
-/// Returns `None` for `Duplicate` acks (the idempotency ledger never settles
-/// `DeferredBusy`, so Slack transport retries re-process as a fresh plain
-/// `DeferredBusy`, never `Duplicate{DeferredBusy}`; suppressing all `Duplicate`
-/// matches the invariant in `rejection_hint_for_resolution`) and for all non-user-
-/// message payloads (resolution/control payloads must stay silent).
+/// `Duplicate { prior }` — `RejectedBusy` is a settled outcome, so a Slack transport
+/// retry of the same external event arrives as `Duplicate { prior: RejectedBusy { .. } }`.
+/// We unwrap the prior and re-apply the same extraction so that `Duplicate { prior:
+/// RejectedBusy { active_run_id: Some(run) } }` still yields the blocking run id.
+/// The per-(conversation, run_id) throttle prevents a double-post when the first
+/// delivery already succeeded — the retry only posts if the original hint was lost.
+/// `Duplicate { prior: DeferredBusy }` returns `None` (DeferredBusy is never settled,
+/// so this case is unreachable in practice; suppressing it is safe).
+///
+/// Returns `None` for all non-user-message payloads (resolution/control payloads must
+/// stay silent).
 fn busy_hint_user_message_run_id(
     envelope: &ProductInboundEnvelope,
     ack: &ProductInboundAck,
 ) -> Option<TurnRunId> {
-    // All Duplicate acks are suppressed — same pattern as rejection_hint_for_resolution.
-    if matches!(ack, ProductInboundAck::Duplicate { .. }) {
-        return None;
-    }
     // Only reply to user messages — resolution/control/noop payloads must stay silent.
     if !matches!(envelope.payload(), ProductInboundPayload::UserMessage(_)) {
         return None;
@@ -1295,6 +1297,12 @@ fn busy_hint_user_message_run_id(
             active_run_id: None,
             ..
         } => None,
+        // Unwrap Duplicate and re-apply extraction on the prior ack.
+        // RejectedBusy is a settled outcome, so transport retries arrive as
+        // Duplicate{RejectedBusy{..}} — the prior still carries the blocking run id.
+        // DeferredBusy is never settled, so Duplicate{DeferredBusy} is unreachable
+        // in practice; the recursive call returns None safely for that case.
+        ProductInboundAck::Duplicate { prior } => busy_hint_user_message_run_id(envelope, prior),
         _ => None,
     }
 }
@@ -3453,22 +3461,30 @@ mod tests {
         );
     }
 
-    /// Duplicate { prior: DeferredBusy } + UserMessage → nothing posted.
+    /// Duplicate { prior: DeferredBusy } + UserMessage → hint posted (run id extracted
+    /// from the prior, same as for a plain DeferredBusy).
     ///
     /// `should_settle_ack` returns false for DeferredBusy, so the idempotency
-    /// ledger never settles it. Slack transport retries re-process as a fresh
-    /// plain DeferredBusy (never Duplicate{DeferredBusy}), making this case
-    /// unreachable in practice. We still enforce None-for-all-Duplicate for
-    /// safety, matching the invariant in `rejection_hint_for_resolution`.
+    /// ledger never settles it and this case is unreachable in practice. However,
+    /// the Duplicate unwrap arm delegates to the prior ack's extraction, so
+    /// DeferredBusy inside a Duplicate consistently yields the run id rather than
+    /// silently dropping it.
     #[tokio::test]
-    async fn duplicate_deferred_busy_with_user_message_posts_nothing() {
+    async fn duplicate_deferred_busy_with_user_message_posts_hint() {
         let install = "test-install";
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "8001.1"),
+            )),
+        );
 
         let outbound = Arc::new(InMemoryOutboundStateStore::default());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
-            TurnStatus::Running,
+            TurnStatus::BlockedApproval,
         ));
         let observer = make_observer(coordinator, egress.clone(), outbound, install);
         let env = envelope(user_message_payload());
@@ -3479,9 +3495,14 @@ mod tests {
         observer.observe_workflow_ack(env, ack).await;
 
         let calls = egress.calls();
-        assert!(
-            !calls.iter().any(|c| c.path == "/api/chat.postMessage"),
-            "Duplicate{{DeferredBusy}} must NOT post a hint (None-for-all-Duplicate invariant)"
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "Duplicate{{DeferredBusy}} must post a hint — run id extracted from prior"
         );
     }
 
@@ -3868,6 +3889,120 @@ mod tests {
         assert!(
             !calls.iter().any(|c| c.path == "/api/chat.postMessage"),
             "no chat.postMessage expected for RejectedBusy(None) — no live run to inspect"
+        );
+    }
+
+    /// Duplicate { prior: RejectedBusy { active_run_id: Some(..) } } + UserMessage +
+    /// BlockedApproval state → hint posted (gate-aware approval copy).
+    ///
+    /// `RejectedBusy` is a settled outcome, so a Slack transport retry of the same
+    /// external event arrives as `Duplicate { prior: RejectedBusy { .. } }`.  The
+    /// busy-hint helper must unwrap the prior and extract the blocking run id so the
+    /// retry can still post the hint if the original was lost.
+    #[tokio::test]
+    async fn duplicate_rejected_busy_with_run_id_posts_approval_hint() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "8100.1"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let gate_ref_str = "gate:approval-dup-rb001";
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+            TurnStatus::BlockedApproval,
+            Some(gate_ref_str),
+        )]));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+        let env = envelope(user_message_payload());
+        let ack = ProductInboundAck::Duplicate {
+            prior: Box::new(rejected_busy_ack_with_run_id()),
+        };
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "Duplicate{{RejectedBusy(Some)}} + UserMessage must post exactly one hint"
+        );
+        let body = std::str::from_utf8(&post_calls[0].body).expect("utf8 body");
+        assert!(
+            body.contains("waiting on a pending approval"),
+            "Duplicate{{RejectedBusy}} hint must mention 'waiting on a pending approval', got: {body}"
+        );
+        assert!(
+            body.contains(gate_ref_str),
+            "Duplicate{{RejectedBusy}} approval hint must embed gate ref '{gate_ref_str}', got: {body}"
+        );
+    }
+
+    /// Duplicate { prior: RejectedBusy { active_run_id: Some(..) } } delivered twice
+    /// with the same (conversation, run_id) → exactly one post (throttle suppresses
+    /// the second).
+    ///
+    /// The per-(conversation, run_id) throttle prevents double-posting: the first
+    /// delivery (regardless of whether it was the original plain `RejectedBusy` or a
+    /// `Duplicate{RejectedBusy}`) inserts the key, and the second delivery is
+    /// suppressed because the key is already present.
+    #[tokio::test]
+    async fn duplicate_rejected_busy_throttle_suppresses_second_delivery() {
+        let install = "test-install";
+        let run_id = TurnRunId::new();
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // Only one response slot — if two posts were attempted the second would
+        // error, making the assertion below a double-check.
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "8101.1"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::BlockedApproval,
+        ));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+
+        let make_dup_ack = || ProductInboundAck::Duplicate {
+            prior: Box::new(ProductInboundAck::RejectedBusy {
+                accepted_message_ref: AcceptedMessageRef::new("slack:dup-rb-throttle")
+                    .expect("ref"),
+                active_run_id: Some(run_id),
+            }),
+        };
+
+        // First delivery: extracts run_id from prior, inserts throttle key, posts hint.
+        observer
+            .observe_workflow_ack(envelope(user_message_payload()), make_dup_ack())
+            .await;
+        // Second delivery: same (conversation, run_id) pair → throttle key present → suppressed.
+        observer
+            .observe_workflow_ack(envelope(user_message_payload()), make_dup_ack())
+            .await;
+
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "throttle must suppress the second Duplicate{{RejectedBusy}} hint for the same (conversation, run_id)"
         );
     }
 

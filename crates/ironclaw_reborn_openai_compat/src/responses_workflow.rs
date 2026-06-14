@@ -894,7 +894,7 @@ fn accepted_ack_from_ack(
         match ack {
             ProductInboundAck::Accepted { .. } => return Ok(ack),
             ProductInboundAck::Duplicate { prior } => ack = *prior,
-            ProductInboundAck::DeferredBusy { .. } => {
+            ProductInboundAck::DeferredBusy { .. } | ProductInboundAck::RejectedBusy { .. } => {
                 return Err(OpenAiCompatHttpError::from_kind(
                     429,
                     true,
@@ -917,7 +917,7 @@ fn accepted_cancel_ack_from_ack(mut ack: ProductInboundAck) -> Result<(), OpenAi
                 return Ok(());
             }
             ProductInboundAck::Duplicate { prior } => ack = *prior,
-            ProductInboundAck::DeferredBusy { .. } => {
+            ProductInboundAck::DeferredBusy { .. } | ProductInboundAck::RejectedBusy { .. } => {
                 return Err(OpenAiCompatHttpError::from_kind(
                     429,
                     true,

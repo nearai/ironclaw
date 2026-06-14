@@ -414,6 +414,7 @@ async fn responses_empty_tools_array_is_absent_equivalent() {
 #[tokio::test]
 async fn responses_create_ack_error_paths_are_sanitized() {
     assert_fixed_ack_status(deferred_busy_ack(), http::StatusCode::TOO_MANY_REQUESTS).await;
+    assert_fixed_ack_status(rejected_busy_ack(), http::StatusCode::TOO_MANY_REQUESTS).await;
     assert_fixed_ack_status(
         rejected_ack(ProductRejectionKind::AccessDenied),
         http::StatusCode::FORBIDDEN,
@@ -1116,6 +1117,13 @@ fn deferred_busy_ack() -> ProductInboundAck {
     ProductInboundAck::DeferredBusy {
         accepted_message_ref: AcceptedMessageRef::new("msg:busy").expect("accepted ref"),
         active_run_id: TurnRunId::new(),
+    }
+}
+
+fn rejected_busy_ack() -> ProductInboundAck {
+    ProductInboundAck::RejectedBusy {
+        accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy").expect("accepted ref"),
+        active_run_id: None,
     }
 }
 

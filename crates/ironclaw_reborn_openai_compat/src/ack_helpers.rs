@@ -24,6 +24,7 @@ pub(crate) fn internal_refs_from_ack(
             }
             ProductInboundAck::Duplicate { prior } => ack = prior,
             ProductInboundAck::DeferredBusy { .. }
+            | ProductInboundAck::RejectedBusy { .. }
             | ProductInboundAck::Rejected(_)
             | ProductInboundAck::CommandResult { .. }
             | ProductInboundAck::NoOp => return Err(OpenAiCompatHttpError::internal()),
