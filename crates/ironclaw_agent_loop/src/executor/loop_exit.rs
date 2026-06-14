@@ -9,7 +9,7 @@ use ironclaw_turns::{
 
 use crate::{
     state::{CheckpointKind, LoopExecutionState},
-    strategies::StopKind,
+    strategies::{ReplyAdmissionOutcome, StopKind},
 };
 
 use super::{
@@ -96,21 +96,50 @@ pub(super) async fn try_final_answer_nudge(
         }
     })?;
 
+    let usage = response.usage;
     match response.output {
-        ParentLoopOutput::AssistantReply(reply) if !reply.content.trim().is_empty() => {
-            let reply_ref = ctx
-                .host
-                .finalize_assistant_message(FinalizeAssistantMessage { reply })
-                .await
-                .map_err(|_| AgentLoopExecutorError::HostUnavailable {
-                    stage: HostStage::Transcript,
-                })?;
-            Ok(Some(reply_ref))
+        ParentLoopOutput::AssistantReply(reply) => {
+            // Route the nudged reply through the SAME admission policy as a
+            // normal assistant reply, rather than a bespoke `!is_empty()` check:
+            // this keeps `DefaultReplyAdmissionStrategy`'s protections (blank
+            // text, provider-transcript artifacts) as the single gate before
+            // anything is finalized into the transcript.
+            match ctx.planner.reply_admission().admit_reply(state, &reply).await {
+                ReplyAdmissionOutcome::AcceptFinal => {
+                    // Preserve the canonical assistant-reply accounting so the
+                    // diminishing-returns window sees the nudge turn's output
+                    // tokens (matches `AssistantReplyStage`).
+                    let output_tokens = usage
+                        .map(|u| u.output_tokens)
+                        .unwrap_or_else(|| estimate_output_tokens(&reply.content));
+                    let reply_ref = ctx
+                        .host
+                        .finalize_assistant_message(FinalizeAssistantMessage { reply })
+                        .await
+                        .map_err(|_| AgentLoopExecutorError::HostUnavailable {
+                            stage: HostStage::Transcript,
+                        })?;
+                    state.recent_output_token_counts.push(output_tokens);
+                    Ok(Some(reply_ref))
+                }
+                // Admission rejected it (empty / artifact) — give up; the caller
+                // falls back to its existing (failed/canned) exit.
+                ReplyAdmissionOutcome::RejectFinal { .. } => Ok(None),
+            }
         }
-        // Model ignored the no-tools instruction or returned empty — give up; the
-        // caller falls back to its existing (failed/canned) exit.
+        // Model emitted capability calls despite the tool-free surface — give up.
         _ => Ok(None),
     }
+}
+
+/// Fallback output-token estimate when the provider reports no usage, mirroring
+/// `AssistantReplyStage`'s estimate so accounting stays consistent.
+fn estimate_output_tokens(content: &str) -> u32 {
+    if content.is_empty() {
+        return 0;
+    }
+    let estimated = content.len().div_ceil(4).max(1);
+    estimated.min(u32::MAX as usize) as u32
 }
 
 const NO_PROGRESS_FALLBACK_REPLY: &str = concat!(

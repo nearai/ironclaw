@@ -120,6 +120,13 @@ impl MockHost {
         }
     }
 
+    /// Enable driver-specific nudges on the run profile (gates the final-answer
+    /// nudge at the budget / no-progress exit boundaries).
+    pub(super) fn with_driver_nudges_enabled(mut self) -> Self {
+        self.context = test_run_context_with_driver_nudges();
+        self
+    }
+
     pub(super) fn with_prompt_surface_version(
         mut self,
         version: Option<CapabilitySurfaceVersion>,
@@ -1150,6 +1157,16 @@ pub(super) fn final_staged_state_for_kind(
 }
 
 pub(super) fn test_run_context() -> LoopRunContext {
+    test_run_context_inner(false)
+}
+
+/// A run context with driver-specific nudges enabled, for exercising the
+/// gated final-answer nudge at the budget / no-progress exit boundaries.
+pub(super) fn test_run_context_with_driver_nudges() -> LoopRunContext {
+    test_run_context_inner(true)
+}
+
+fn test_run_context_inner(allow_driver_specific_nudges: bool) -> LoopRunContext {
     let scope = TurnScope::new(
         TenantId::new("tenant-executor").expect("valid"),
         None,
@@ -1185,7 +1202,7 @@ pub(super) fn test_run_context() -> LoopRunContext {
         steering_policy: SteeringPolicy {
             allow_steering: false,
             allow_interrupt: true,
-            allow_driver_specific_nudges: false,
+            allow_driver_specific_nudges,
         },
         cancellation_policy: CancellationPolicy {
             allow_cancel: true,
