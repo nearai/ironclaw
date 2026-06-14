@@ -50,7 +50,7 @@ fn render_attachment(index: usize, attachment: &AttachmentRef) -> String {
         .map(|size| format!(" size=\"{}\"", format_size(size)))
         .unwrap_or_default();
 
-    let body = body_text(attachment);
+    let body = body_text(attachment, attachment.storage_key.is_some());
     let body = match attachment.storage_key.as_deref() {
         Some(path) => format!("Saved to project file: {}\n{}", escape_xml_text(path), body),
         None => body,
@@ -63,7 +63,7 @@ fn render_attachment(index: usize, attachment: &AttachmentRef) -> String {
     )
 }
 
-fn body_text(attachment: &AttachmentRef) -> String {
+fn body_text(attachment: &AttachmentRef, has_project_path: bool) -> String {
     match attachment.kind {
         AttachmentKind::Audio => match &attachment.extracted_text {
             Some(text) => format!("Transcript: {}", escape_xml_text(text)),
@@ -73,10 +73,14 @@ fn body_text(attachment: &AttachmentRef) -> String {
             Some(text) => escape_xml_text(text),
             None => "[Document attached — text extraction unavailable]".to_string(),
         },
-        AttachmentKind::Image => {
+        // An image's pixels reach the model through the multimodal path; here it
+        // only contributes a pointer to its stored file, so the body is useful
+        // only when the file was actually landed.
+        AttachmentKind::Image if has_project_path => {
             "[Image attached — the file is saved at the project path above; read it from there to view it.]"
                 .to_string()
         }
+        AttachmentKind::Image => "[Image attached — not yet stored.]".to_string(),
     }
 }
 
@@ -166,6 +170,26 @@ mod tests {
         let out = augment_model_content("look".to_string(), &[image]);
         assert!(out.contains("type=\"image\""));
         assert!(out.contains("the file is saved at the project path above"));
+    }
+
+    #[test]
+    fn image_without_storage_key_does_not_claim_a_project_path() {
+        let image = AttachmentRef {
+            id: "att-1".to_string(),
+            kind: AttachmentKind::Image,
+            mime_type: "image/png".to_string(),
+            filename: Some("diagram.png".to_string()),
+            size_bytes: Some(4096),
+            storage_key: None,
+            extracted_text: None,
+        };
+        let out = augment_model_content("look".to_string(), &[image]);
+        assert!(out.contains("type=\"image\""));
+        // No `project_path` attr and no "saved at the project path above" claim
+        // when the image was never landed.
+        assert!(!out.contains("project_path="));
+        assert!(!out.contains("saved at the project path above"));
+        assert!(out.contains("not yet stored"));
     }
 
     #[test]

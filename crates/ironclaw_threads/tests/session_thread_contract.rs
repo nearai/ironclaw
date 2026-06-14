@@ -2520,7 +2520,7 @@ async fn attachment_extracted_text_reaches_model_visible_context() {
         .await
         .unwrap();
 
-    service
+    let accepted = service
         .accept_inbound_message(AcceptInboundMessageRequest {
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
@@ -2528,15 +2528,18 @@ async fn attachment_extracted_text_reaches_model_visible_context() {
             source_binding_id: None,
             reply_target_binding_id: None,
             external_event_id: Some("event-att-ctx".into()),
-            content: MessageContent::with_attachments("see attached", vec![sample_attachment_ref()]),
+            content: MessageContent::with_attachments(
+                "see attached",
+                vec![sample_attachment_ref()],
+            ),
         })
         .await
         .unwrap();
 
     let window = service
         .load_context_window(LoadContextWindowRequest {
-            scope,
-            thread_id: thread.thread_id,
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
             max_messages: 10,
         })
         .await
@@ -2550,7 +2553,25 @@ async fn attachment_extracted_text_reaches_model_visible_context() {
     assert!(content.contains("<attachments>"));
     assert!(content.contains("type=\"document\""));
     assert!(content.contains("quarterly numbers"));
-    assert!(content.contains("project_path=\"attachments/2026-06-09/m1-report.pdf\""));
+    assert!(content.contains("project_path=\"/workspace/attachments/2026-06-09/m1-report.pdf\""));
+
+    // The by-id projection (`load_context_messages`) renders the same
+    // <attachments> block — both context read paths fold attachment text.
+    let direct = service
+        .load_context_messages(LoadContextMessagesRequest {
+            scope,
+            thread_id: thread.thread_id,
+            message_ids: vec![accepted.message_id],
+        })
+        .await
+        .unwrap();
+    assert_eq!(direct.messages.len(), 1);
+    let direct_content = &direct.messages[0].content;
+    assert!(direct_content.contains("<attachments>"));
+    assert!(direct_content.contains("quarterly numbers"));
+    assert!(
+        direct_content.contains("project_path=\"/workspace/attachments/2026-06-09/m1-report.pdf\"")
+    );
 }
 
 fn sample_attachment_ref() -> AttachmentRef {
@@ -2560,7 +2581,10 @@ fn sample_attachment_ref() -> AttachmentRef {
         mime_type: "application/pdf".into(),
         filename: Some("report.pdf".into()),
         size_bytes: Some(2048),
-        storage_key: Some("attachments/2026-06-09/m1-report.pdf".into()),
+        // The landed scoped path, as `land_attachment` records it: rooted at the
+        // project mount alias (`/workspace`), which the agent's `file_read`
+        // resolves through — not a raw host path.
+        storage_key: Some("/workspace/attachments/2026-06-09/m1-report.pdf".into()),
         extracted_text: Some("quarterly numbers".into()),
     }
 }
