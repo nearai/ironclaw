@@ -207,6 +207,7 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     if let Some(local_runtime) = &services.local_runtime {
         api = api.with_operator_service_lifecycle_service(Arc::new(
             crate::operator_service_lifecycle::RebornLocalServiceLifecycle::new_for_operator(
+                runtime.webui_tenant_id().clone(),
                 local_runtime.owner_user_id.clone(),
             ),
         ));

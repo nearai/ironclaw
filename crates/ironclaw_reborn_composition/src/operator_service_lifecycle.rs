@@ -10,7 +10,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::UserId;
+use ironclaw_host_api::{TenantId, UserId};
 use ironclaw_product_workflow::{
     OperatorServiceLifecycleService, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
     RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServicesError,
@@ -71,8 +71,14 @@ pub(crate) struct RebornLocalServiceLifecycle {
     platform: ServicePlatform,
     home_dir: Option<PathBuf>,
     executable: Result<PathBuf, String>,
-    operator_user_id: Option<UserId>,
+    operator_identity: Option<OperatorIdentity>,
     runner: Arc<dyn ServiceCommandRunner>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OperatorIdentity {
+    tenant_id: TenantId,
+    user_id: UserId,
 }
 
 impl std::fmt::Debug for RebornLocalServiceLifecycle {
@@ -82,6 +88,7 @@ impl std::fmt::Debug for RebornLocalServiceLifecycle {
             .field("platform", &self.platform)
             .field("home_dir", &self.home_dir.is_some())
             .field("executable", &"<redacted>")
+            .field("operator_identity", &self.operator_identity.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -93,18 +100,21 @@ impl RebornLocalServiceLifecycle {
             home_dir: std::env::var_os("HOME").map(PathBuf::from),
             executable: std::env::current_exe()
                 .map_err(|error| format!("current executable path could not be resolved: {error}")),
-            operator_user_id: None,
+            operator_identity: None,
             runner: Arc::new(SystemCommandRunner),
         }
     }
 
-    pub(crate) fn new_for_operator(operator_user_id: UserId) -> Self {
+    pub(crate) fn new_for_operator(operator_tenant_id: TenantId, operator_user_id: UserId) -> Self {
         Self {
             platform: ServicePlatform::current(),
             home_dir: std::env::var_os("HOME").map(PathBuf::from),
             executable: std::env::current_exe()
                 .map_err(|error| format!("current executable path could not be resolved: {error}")),
-            operator_user_id: Some(operator_user_id),
+            operator_identity: Some(OperatorIdentity {
+                tenant_id: operator_tenant_id,
+                user_id: operator_user_id,
+            }),
             runner: Arc::new(SystemCommandRunner),
         }
     }
@@ -120,7 +130,7 @@ impl RebornLocalServiceLifecycle {
             platform,
             home_dir,
             executable: Ok(executable),
-            operator_user_id: Some(test_operator_user_id()),
+            operator_identity: Some(test_operator_identity()),
             runner,
         }
     }
@@ -136,14 +146,14 @@ impl RebornLocalServiceLifecycle {
             platform,
             home_dir,
             executable: Err(executable_error),
-            operator_user_id: Some(test_operator_user_id()),
+            operator_identity: Some(test_operator_identity()),
             runner,
         }
     }
 
     #[cfg(test)]
-    fn with_operator_user_id(mut self, operator_user_id: UserId) -> Self {
-        self.operator_user_id = Some(operator_user_id);
+    fn with_operator_identity(mut self, tenant_id: TenantId, user_id: UserId) -> Self {
+        self.operator_identity = Some(OperatorIdentity { tenant_id, user_id });
         self
     }
 
@@ -471,11 +481,9 @@ impl RebornLocalServiceLifecycle {
         &self,
         caller: &WebUiAuthenticatedCaller,
     ) -> Result<(), RebornServicesError> {
-        if self
-            .operator_user_id
-            .as_ref()
-            .is_some_and(|operator_user_id| caller.user_id == *operator_user_id)
-        {
+        if self.operator_identity.as_ref().is_some_and(|operator| {
+            caller.tenant_id == operator.tenant_id && caller.user_id == operator.user_id
+        }) {
             return Ok(());
         }
         Err(RebornServicesError {
@@ -513,7 +521,7 @@ impl OperatorServiceLifecycleService for RebornLocalServiceLifecycle {
         })
         .await
         .map_err(|error| {
-            tracing::warn!(%error, "service lifecycle task failed");
+            tracing::debug!(%error, "service lifecycle task failed");
             RebornServicesError::internal()
         })
     }
@@ -529,13 +537,17 @@ fn systemd_escape(value: &str) -> String {
 
 fn launchd_status_is_running(stdout: &str) -> bool {
     stdout.lines().any(|line| {
-        if !line.contains(LAUNCHD_LABEL) {
-            return false;
-        }
-        let Some(pid) = line.split_whitespace().next() else {
+        let mut columns = line.split_whitespace();
+        let Some(pid) = columns.next() else {
             return false;
         };
-        pid.parse::<i32>().is_ok()
+        let Some(_status) = columns.next() else {
+            return false;
+        };
+        let Some(label) = columns.next() else {
+            return false;
+        };
+        label == LAUNCHD_LABEL && pid.parse::<i32>().is_ok()
     })
 }
 
@@ -548,8 +560,11 @@ fn xml_escape(raw: &str) -> String {
 }
 
 #[cfg(test)]
-fn test_operator_user_id() -> UserId {
-    ironclaw_host_api::UserId::new("user-test").expect("test operator user")
+fn test_operator_identity() -> OperatorIdentity {
+    OperatorIdentity {
+        tenant_id: ironclaw_host_api::TenantId::new("tenant-test").expect("test operator tenant"),
+        user_id: ironclaw_host_api::UserId::new("user-test").expect("test operator user"),
+    }
 }
 
 #[cfg(test)]
@@ -869,12 +884,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn macos_status_requires_exact_launchd_label_for_running_state() {
+        let temp = TempDir::new().expect("tempdir");
+        let runner = Arc::new(RecordingRunner::new(&format!(
+            "123\t0\t{LAUNCHD_LABEL}-helper\n"
+        )));
+        let service = macos_service(&temp, runner);
+
+        let response = service
+            .control_service(
+                test_caller(),
+                RebornServiceLifecycleRequest {
+                    action: RebornServiceLifecycleAction::Status,
+                },
+            )
+            .await
+            .expect("status response");
+
+        assert_eq!(response.state, RebornServiceLifecycleState::Stopped);
+    }
+
+    #[tokio::test]
     async fn control_service_rejects_non_operator_callers_before_commands() {
         let temp = TempDir::new().expect("tempdir");
         let runner = Arc::new(RecordingRunner::new("inactive"));
         let operator_user_id =
             ironclaw_host_api::UserId::new("operator-test").expect("operator user");
-        let service = linux_service(&temp, runner.clone()).with_operator_user_id(operator_user_id);
+        let service = linux_service(&temp, runner.clone()).with_operator_identity(
+            ironclaw_host_api::TenantId::new("tenant-test").expect("operator tenant"),
+            operator_user_id,
+        );
 
         let error = service
             .control_service(
@@ -885,6 +924,29 @@ mod tests {
             )
             .await
             .expect_err("non-operator rejected");
+
+        assert_eq!(error.code, RebornServicesErrorCode::Forbidden);
+        assert!(runner.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn control_service_rejects_same_user_from_different_tenant_before_commands() {
+        let temp = TempDir::new().expect("tempdir");
+        let runner = Arc::new(RecordingRunner::new("inactive"));
+        let service = linux_service(&temp, runner.clone()).with_operator_identity(
+            ironclaw_host_api::TenantId::new("other-tenant").expect("operator tenant"),
+            ironclaw_host_api::UserId::new("user-test").expect("operator user"),
+        );
+
+        let error = service
+            .control_service(
+                test_caller(),
+                RebornServiceLifecycleRequest {
+                    action: RebornServiceLifecycleAction::Start,
+                },
+            )
+            .await
+            .expect_err("cross-tenant caller rejected");
 
         assert_eq!(error.code, RebornServicesErrorCode::Forbidden);
         assert!(runner.calls().is_empty());
