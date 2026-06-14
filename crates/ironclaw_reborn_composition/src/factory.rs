@@ -130,7 +130,8 @@ use crate::{
     available_extensions::{
         AvailableExtensionCatalog, gmail_manifest_digest, google_calendar_manifest_digest,
         google_docs_manifest_digest, google_drive_manifest_digest, google_sheets_manifest_digest,
-        google_slides_manifest_digest, notion_mcp_manifest_digest, web_access_manifest_digest,
+        google_slides_manifest_digest, notion_mcp_manifest_digest, slack_manifest_digest,
+        web_access_manifest_digest,
     },
     extension_installation_store::FilesystemExtensionInstallationStore,
     extension_lifecycle::{
@@ -2370,6 +2371,16 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
             Some(notion_mcp_manifest_digest()),
             HostTrustAssignment::first_party(),
             notion_mcp_allowed_effects(),
+            None,
+        ),
+        AdminEntry::for_local_manifest(
+            PackageId::new("slack").map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("Slack first-party package id is invalid: {error}"),
+            })?,
+            "/system/extensions/slack/manifest.toml".to_string(),
+            Some(slack_manifest_digest()),
+            HostTrustAssignment::first_party(),
+            Vec::new(),
             None,
         ),
     ]))])

@@ -27,6 +27,25 @@ test("primaryExtensionAction activates configured inactive MCP extensions", () =
   );
 });
 
+test("primaryExtensionAction leaves manifest-backed channels to channel setup flows", () => {
+  assert.equal(
+    primaryExtensionAction({
+      package_ref: { kind: "extension", id: "slack" },
+      kind: "channel",
+      activation_status: "installed",
+    }),
+    null,
+  );
+  assert.equal(
+    primaryExtensionAction({
+      package_ref: { kind: "extension", id: "telegram" },
+      kind: "wasm_channel",
+      activation_status: "installed",
+    }),
+    null,
+  );
+});
+
 test("primaryExtensionAction hides activation for active extensions", () => {
   assert.equal(
     primaryExtensionAction({

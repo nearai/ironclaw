@@ -3,7 +3,12 @@ import { useT } from "../../../lib/i18n.js";
 import { Badge } from "../../../design-system/badge.js";
 import { Button } from "../../../design-system/button.js";
 import { Icon } from "../../../design-system/icons.js";
-import { KIND_LABELS, STATE_TONES, STATE_LABELS } from "../lib/extensions-schema.js";
+import {
+  KIND_LABELS,
+  STATE_TONES,
+  STATE_LABELS,
+  isChannelExtensionKind,
+} from "../lib/extensions-schema.js";
 import { primaryExtensionAction } from "../lib/extension-actions.js";
 
 /* Card layout (Option B): self-contained bordered card. Capabilities collapse
@@ -144,7 +149,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
       run: () => onConfigure(configurePayload),
     });
   }
-  if (canManage && ext.kind === "wasm_channel" && (state === "setup_required" || state === "failed")) {
+  if (canManage && isChannelExtensionKind(ext.kind) && (state === "setup_required" || state === "failed")) {
     overflowActions.push({
       id: "setup",
       label: "Setup",
@@ -154,7 +159,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   }
   if (
     canManage &&
-    ext.kind === "wasm_channel" &&
+    isChannelExtensionKind(ext.kind) &&
     (state === "active" || state === "ready" || state === "pairing_required" || state === "pairing")
   ) {
     overflowActions.push({

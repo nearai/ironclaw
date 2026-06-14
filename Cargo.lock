@@ -5007,6 +5007,7 @@ dependencies = [
  "ironclaw_network",
  "ironclaw_outbound",
  "ironclaw_processes",
+ "ironclaw_product_adapter_registry",
  "ironclaw_product_adapters",
  "ironclaw_product_workflow",
  "ironclaw_product_workflow_storage",

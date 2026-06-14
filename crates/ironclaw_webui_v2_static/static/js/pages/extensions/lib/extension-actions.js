@@ -1,3 +1,5 @@
+import { isChannelExtensionKind } from "./extensions-schema.js";
+
 export function primaryExtensionAction(ext) {
   const state =
     ext?.onboarding_state ||
@@ -12,7 +14,7 @@ export function primaryExtensionAction(ext) {
     return "configure";
   }
 
-  if (ext.kind === "wasm_channel") {
+  if (isChannelExtensionKind(ext.kind)) {
     return null;
   }
 

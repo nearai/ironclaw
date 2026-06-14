@@ -10,10 +10,10 @@ function channelsTabSourceForTest() {
     if (line.startsWith("import ")) continue;
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { SlackBuiltInConnectAction, isSlackChannelEnabled, slackBuiltinStatus, isSlackAdminManagedAction, isSlackInboundProofCodeAction, findSlackConnectAction, findSlackConnectActions };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { ChannelsTab, SlackConnectActionSections, isSlackPackage, isSlackAdminManagedAction, isSlackInboundProofCodeAction, findSlackConnectAction, findSlackConnectActions };`;
 }
 
-function slackBuiltInConnectActionForTest(slackConnectAction, slackConnectActions) {
+function slackConnectActionSectionsForTest(slackConnectAction, slackConnectActions) {
   const context = {
     globalThis: {},
     SlackChannelPicker() {},
@@ -24,7 +24,7 @@ function slackBuiltInConnectActionForTest(slackConnectAction, slackConnectAction
   };
   vm.runInNewContext(channelsTabSourceForTest(), context);
   return {
-    rendered: context.globalThis.__testExports.SlackBuiltInConnectAction({
+    rendered: context.globalThis.__testExports.SlackConnectActionSections({
       slackConnectAction,
       slackConnectActions,
     }),
@@ -33,42 +33,56 @@ function slackBuiltInConnectActionForTest(slackConnectAction, slackConnectAction
   };
 }
 
-test("isSlackChannelEnabled covers all Slack channel ids", () => {
+function channelsTabForTest(props) {
+  const context = {
+    ExtensionCard() {},
+    PairingSection() {},
+    RegistryCard() {},
+    SlackChannelPicker() {},
+    SlackPairingSection() {},
+    StatusPill() {},
+    globalThis: {},
+    html(strings, ...values) {
+      return { strings: Array.from(strings), values };
+    },
+    useT: () => (key) => key,
+  };
+  vm.runInNewContext(channelsTabSourceForTest(), context);
+  return {
+    rendered: context.globalThis.__testExports.ChannelsTab(props),
+    RegistryCard: context.RegistryCard,
+  };
+}
+
+function renderedValueAfter(rendered, fragment) {
+  if (!rendered || typeof rendered !== "object") {
+    return undefined;
+  }
+  if (Array.isArray(rendered.strings)) {
+    if (rendered.strings.some((part) => part.includes(fragment))) {
+      return rendered;
+    }
+  }
+  if (Array.isArray(rendered.values)) {
+    for (const value of rendered.values) {
+      const found = renderedValueAfter(value, fragment);
+      if (found !== undefined) return found;
+    }
+  }
+  return undefined;
+}
+
+test("isSlackPackage recognizes the Slack extension package", () => {
   const context = { globalThis: {} };
   vm.runInNewContext(channelsTabSourceForTest(), context);
-  const { isSlackChannelEnabled } = context.globalThis.__testExports;
+  const { isSlackPackage } = context.globalThis.__testExports;
 
-  assert.equal(isSlackChannelEnabled(["slack"]), true);
-  assert.equal(isSlackChannelEnabled(["slack_v2"]), true);
-  assert.equal(isSlackChannelEnabled(["slack-v2"]), true);
-  assert.equal(isSlackChannelEnabled([]), false);
-  assert.equal(isSlackChannelEnabled(["other"]), false);
+  assert.equal(isSlackPackage({ package_ref: { id: "slack" } }), true);
+  assert.equal(isSlackPackage({ package_ref: { id: "slack_v2" } }), false);
+  assert.equal(isSlackPackage({}), false);
 });
 
-test("slackBuiltinStatus labels the Reborn admin-managed channel flow", () => {
-  const context = { globalThis: {} };
-  vm.runInNewContext(channelsTabSourceForTest(), context);
-  const { slackBuiltinStatus } = context.globalThis.__testExports;
-
-  assert.equal(JSON.stringify(slackBuiltinStatus(true, null)), JSON.stringify({
-    label: "on",
-    tone: "success",
-  }));
-  assert.equal(
-    JSON.stringify(slackBuiltinStatus(false, { strategy: "admin_managed_channels" })),
-    JSON.stringify({ label: "manage", tone: "info" }),
-  );
-  assert.equal(
-    JSON.stringify(slackBuiltinStatus(false, { strategy: "inbound_proof_code" })),
-    JSON.stringify({ label: "connect", tone: "info" }),
-  );
-  assert.equal(JSON.stringify(slackBuiltinStatus(false, null)), JSON.stringify({
-    label: "off",
-    tone: "muted",
-  }));
-});
-
-test("Slack built-in action predicates keep admin picker and proof-code pairing distinct", () => {
+test("Slack action predicates keep admin picker and proof-code pairing distinct", () => {
   const context = { globalThis: {} };
   vm.runInNewContext(channelsTabSourceForTest(), context);
   const { isSlackAdminManagedAction, isSlackInboundProofCodeAction } =
@@ -108,24 +122,48 @@ test("findSlackConnectActions keeps admin channel management and personal pairin
   assert.equal(actions[1].strategy, "inbound_proof_code");
 });
 
-test("SlackBuiltInConnectAction renders every supported Slack action", () => {
+test("SlackConnectActionSections renders every supported Slack action", () => {
   const personal = { channel: "slack", strategy: "inbound_proof_code", action: {} };
   const admin = { channel: "slack", strategy: "admin_managed_channels", action: {} };
 
-  const adminView = slackBuiltInConnectActionForTest(admin);
+  const adminView = slackConnectActionSectionsForTest(admin);
   assert.equal(adminView.rendered.values[0][0].values[0], adminView.SlackChannelPicker);
 
-  const personalView = slackBuiltInConnectActionForTest(personal);
+  const personalView = slackConnectActionSectionsForTest(personal);
   assert.equal(personalView.rendered.values[0][0].values[0], personalView.SlackPairingSection);
 
-  const combinedView = slackBuiltInConnectActionForTest(null, [admin, personal]);
+  const combinedView = slackConnectActionSectionsForTest(null, [admin, personal]);
   assert.equal(combinedView.rendered.values[0][0].values[0], combinedView.SlackChannelPicker);
   assert.equal(combinedView.rendered.values[0][1].values[0], combinedView.SlackPairingSection);
 
-  const unhandledView = slackBuiltInConnectActionForTest({
+  const unhandledView = slackConnectActionSectionsForTest({
     channel: "slack",
     strategy: "admin_managed_unknown",
     action: {},
   });
   assert.equal(unhandledView.rendered, null);
+});
+
+test("ChannelsTab renders registry cards directly without Slack connect actions", () => {
+  const view = channelsTabForTest({
+    status: { enabled_channels: [], sse_connections: 0, ws_connections: 0 },
+    channels: [],
+    connectableChannels: [{ channel: "slack", strategy: "admin_managed_channels", action: {} }],
+    channelRegistry: [{ package_ref: { id: "slack" } }],
+    isBusy: false,
+    onActivate() {},
+    onConfigure() {},
+    onInstall() {},
+    onRemove() {},
+  });
+
+  const registrySection = renderedValueAfter(view.rendered, "Available channels");
+  assert.notEqual(registrySection, undefined, "expected available channels section");
+  const registryCard = registrySection.values[0][0];
+
+  assert.equal(registryCard.values[0], view.RegistryCard);
+  assert.equal(
+    registryCard.strings.some((part) => part.includes("flex flex-col gap-3")),
+    false,
+  );
 });
