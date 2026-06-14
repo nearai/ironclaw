@@ -4373,6 +4373,7 @@ dependencies = [
 name = "ironclaw_extractors"
 version = "0.1.0"
 dependencies = [
+ "ironclaw_common",
  "pdf-extract",
  "thiserror 2.0.18",
  "zip",
