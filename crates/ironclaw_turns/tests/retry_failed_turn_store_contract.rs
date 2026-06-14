@@ -199,7 +199,16 @@ where
     let checkpoint = put_loop_checkpoint(store, &claimed, kind).await;
     let failed = fail_claimed_run(store, &claimed, Some(checkpoint.checkpoint_id)).await;
     assert_eq!(failed.status, TurnStatus::Failed);
-    assert_eq!(failed.checkpoint_id, Some(checkpoint.checkpoint_id));
+    // The explicit resume checkpoint is preserved only when it is actually
+    // resumable (BeforeModel/BeforeBlock). A non-resumable kind is filtered out
+    // and, with no other resumable checkpoint seeded, the failed run advertises
+    // no retry checkpoint — matching what retry_turn would accept.
+    let expected_checkpoint = matches!(
+        kind,
+        LoopCheckpointKind::BeforeModel | LoopCheckpointKind::BeforeBlock
+    )
+    .then_some(checkpoint.checkpoint_id);
+    assert_eq!(failed.checkpoint_id, expected_checkpoint);
     assert_eq!(
         failed.failure.as_ref().map(|failure| failure.category()),
         Some("model_error")
@@ -375,6 +384,43 @@ async fn assert_explicit_nonresumable_resume_checkpoint_is_not_retryable<S>(
             run_id: claimed.state.run_id
         }
     );
+}
+
+/// Companion to the rejection case above: when a bogus (non-resumable) explicit
+/// `resume_checkpoint_id` is supplied but a real resumable checkpoint exists,
+/// the failed transition must fall back to the latest resumable checkpoint and
+/// stay retryable. Guards the `latest_resumable_loop_checkpoint` fallback in
+/// `fail_claimed_record` — without it, retryable failed runs would silently
+/// regress to `RunNotRetryable`.
+async fn assert_invalid_explicit_checkpoint_falls_back_to_latest_resumable<S>(
+    store: &S,
+    thread: &str,
+    submit_idem: &str,
+    retry_idem: &str,
+) where
+    S: TurnStateStore + TurnRunTransitionPort + LoopCheckpointStore + ?Sized,
+{
+    let claimed = submit_and_claim(store, thread, submit_idem).await;
+    // A real resumable checkpoint plus a later non-resumable Final checkpoint.
+    let resumable = put_loop_checkpoint(store, &claimed, LoopCheckpointKind::BeforeModel).await;
+    let final_checkpoint = put_loop_checkpoint(store, &claimed, LoopCheckpointKind::Final).await;
+
+    // The runner hands back the Final (non-resumable) checkpoint as the resume
+    // id; it must be filtered out and fall back to the resumable checkpoint.
+    let failed = fail_claimed_run(store, &claimed, Some(final_checkpoint.checkpoint_id)).await;
+    assert_eq!(failed.status, TurnStatus::Failed);
+    assert_eq!(
+        failed.checkpoint_id,
+        Some(resumable.checkpoint_id),
+        "a bogus explicit checkpoint must fall back to the latest resumable checkpoint"
+    );
+
+    let retry = store
+        .retry_turn(retry_request(thread, claimed.state.run_id, retry_idem))
+        .await
+        .expect("fallback resumable checkpoint must keep the failed run retryable");
+    assert_ne!(retry.run_id, claimed.state.run_id);
+    assert_eq!(retry.status, TurnStatus::Queued);
 }
 
 async fn assert_retry_rejections_and_idempotency<S>(store: &S, prefix: &str)
@@ -760,6 +806,32 @@ async fn filesystem_explicit_nonresumable_resume_checkpoint_is_not_retryable() {
         "thread-filesystem-explicit-nonresumable",
         "idem-filesystem-explicit-nonresumable-submit",
         "idem-filesystem-explicit-nonresumable-retry",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn inmemory_invalid_explicit_checkpoint_falls_back_to_latest_resumable() {
+    let store = InMemoryTurnStateStore::default();
+    assert_invalid_explicit_checkpoint_falls_back_to_latest_resumable(
+        &store,
+        "thread-memory-invalid-explicit-fallback",
+        "idem-memory-invalid-explicit-fallback-submit",
+        "idem-memory-invalid-explicit-fallback-retry",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn filesystem_invalid_explicit_checkpoint_falls_back_to_latest_resumable() {
+    let (backend, _storage) = engine_filesystem();
+    let backend = Arc::new(backend);
+    let store = FilesystemTurnStateStore::new(scoped_turns_fs(backend));
+    assert_invalid_explicit_checkpoint_falls_back_to_latest_resumable(
+        &store,
+        "thread-filesystem-invalid-explicit-fallback",
+        "idem-filesystem-invalid-explicit-fallback-submit",
+        "idem-filesystem-invalid-explicit-fallback-retry",
     )
     .await;
 }
