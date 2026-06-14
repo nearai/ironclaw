@@ -76,7 +76,8 @@ use ironclaw_scripts::{
     ScriptExecutionResult, ScriptExecutor, ScriptRuntime, ScriptRuntimeConfig,
 };
 use ironclaw_secrets::{
-    InMemoryCredentialBroker, InMemorySecretStore, SecretMaterial, SecretStore,
+    InMemoryCredentialBroker, InMemorySecretStore, SecretLease, SecretLeaseId, SecretMaterial,
+    SecretMetadata, SecretStore, SecretStoreError,
 };
 use ironclaw_triggers::InMemoryTriggerRepository;
 use ironclaw_trust::{
@@ -7492,6 +7493,646 @@ fn submit_turn_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest
         subagent_depth: 0,
         spawn_tree_root_run_id: None,
     }
+}
+
+// ─── Fix B: credential pre-flight ordering tests ─────────────────────────────
+//
+// These tests verify that `invoke_capability` surfaces `AuthRequired` BEFORE
+// the approval gate fires when a required credential is absent. The canonical
+// set of credential requirements is derived from the capability manifest via
+// `capability_credential_requirements` — a single source of truth consumed by
+// both the pre-flight check (ordering) and the dispatch-time obligation check
+// (enforcement backstop).
+
+/// Manifest for a script capability that declares a required runtime credential.
+/// The `required = true` field (default) tells both the pre-flight check and
+/// the obligation handler that the secret must be present.
+const SCRIPT_WITH_CREDENTIAL_MANIFEST: &str = r#"
+id = "script"
+name = "Script With Credential"
+version = "0.1.0"
+description = "Script extension that requires a runtime credential"
+trust = "untrusted"
+
+[runtime]
+kind = "script"
+runner = "sandboxed_process"
+command = "echo"
+args = []
+
+[[capabilities]]
+id = "script.echo"
+description = "Echo through Script"
+effects = ["dispatch_capability", "use_secret"]
+default_permission = "allow"
+parameters_schema = { type = "object" }
+
+[[capabilities.runtime_credentials]]
+handle = "script_api_token"
+source = { type = "secret_handle" }
+audience = { scheme = "https", host_pattern = "api.example.com" }
+target = { type = "header", name = "x-api-key" }
+required = true
+"#;
+
+/// `invoke_capability` on a capability that requires a credential + requires
+/// approval must return `AuthRequired` without persisting an approval request
+/// when the credential is absent.
+///
+/// Old ordering (bug): approval gate fires, human approves, then dispatch fails
+/// with AuthRequired — burning the approval.
+/// New ordering (fix): pre-flight sees missing credential, returns AuthRequired
+/// immediately, approval gate never fires.
+#[tokio::test]
+async fn invoke_capability_missing_credential_returns_auth_before_approval() {
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    // Note: the secret "script_api_token" is deliberately NOT inserted.
+    let secret_handle = SecretHandle::new("script_api_token").unwrap();
+    let script_runtime = Arc::new(RecordingScriptExecutor::default());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_WITH_CREDENTIAL_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenSecretObligationAuthorizer {
+            handle: secret_handle,
+        }),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
+    )))
+    .with_run_state(Arc::clone(&run_state))
+    .with_approval_requests(Arc::clone(&approval_requests))
+    .with_capability_leases(Arc::clone(&capability_leases))
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_script_runtime(Arc::clone(&script_runtime));
+    let runtime = services.host_runtime_for_local_testing();
+    let context = execution_context_without_grants();
+    let scope = context.resource_scope.clone();
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "needs credential"});
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context,
+            script_capability_id(),
+            estimate,
+            input,
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::AuthRequired(auth_gate) => {
+            assert_eq!(
+                auth_gate.capability_id,
+                script_capability_id(),
+                "auth gate must reference the invoked capability"
+            );
+        }
+        other => panic!("expected AuthRequired before approval gate, got {other:?}"),
+    }
+
+    // No approval request should have been persisted — the approval gate must
+    // not have fired at all.
+    let pending = approval_requests.records_for_scope(&scope).await.unwrap();
+    assert!(
+        pending.is_empty(),
+        "approval must not be persisted when credential is absent; got {pending:?}"
+    );
+
+    // Dispatch must not have been called.
+    assert!(
+        script_runtime.recorded_mounts().is_empty(),
+        "script executor must not be reached when credential pre-flight fails"
+    );
+}
+
+/// `invoke_capability` with a credential present must proceed to the approval
+/// gate as it did before Fix B — the pre-flight must not block happy-path flows.
+#[tokio::test]
+async fn invoke_capability_present_credential_proceeds_to_approval() {
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_handle = SecretHandle::new("script_api_token").unwrap();
+    let scope_for_seeding = execution_context_without_grants().resource_scope;
+    // Seed the required credential so pre-flight passes.
+    secret_store
+        .put(
+            scope_for_seeding,
+            secret_handle.clone(),
+            SecretMaterial::from("token-value"),
+        )
+        .await
+        .unwrap();
+    let script_runtime = Arc::new(RecordingScriptExecutor::default());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_WITH_CREDENTIAL_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenSecretObligationAuthorizer {
+            handle: secret_handle,
+        }),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
+    )))
+    .with_run_state(Arc::clone(&run_state))
+    .with_approval_requests(Arc::clone(&approval_requests))
+    .with_capability_leases(Arc::clone(&capability_leases))
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_script_runtime(Arc::clone(&script_runtime));
+    let runtime = services.host_runtime_for_local_testing();
+    let context = execution_context_without_grants();
+    let scope = context.resource_scope.clone();
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "has credential"});
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context,
+            script_capability_id(),
+            estimate,
+            input,
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    // Credential is present — must reach the approval gate.
+    match outcome {
+        RuntimeCapabilityOutcome::ApprovalRequired(_) => {}
+        other => panic!("expected ApprovalRequired when credential is present, got {other:?}"),
+    }
+
+    // An approval request must have been persisted.
+    let pending = approval_requests.records_for_scope(&scope).await.unwrap();
+    assert!(
+        !pending.is_empty(),
+        "approval must be persisted when credential is present"
+    );
+}
+
+/// `invoke_capability` on a capability with NO credential requirement must be
+/// unaffected by the pre-flight change — the pre-flight is a no-op when the
+/// descriptor declares no `runtime_credentials`.
+#[tokio::test]
+async fn invoke_capability_no_credential_requirement_proceeds_normally() {
+    // Use the plain SCRIPT_MANIFEST which has no runtime_credentials.
+    let fixture = approval_resume_fixture();
+    let runtime = fixture.services.host_runtime_for_local_testing();
+    let context = execution_context_without_grants();
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "no credential needed"});
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context,
+            script_capability_id(),
+            estimate,
+            input,
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    // The `ApprovalThenGrantAuthorizer` (used by `approval_resume_fixture`)
+    // requires approval on the first call (no grants). Confirm we reach the
+    // approval gate, not a spurious AuthRequired.
+    match outcome {
+        RuntimeCapabilityOutcome::ApprovalRequired(_) => {}
+        other => panic!("expected ApprovalRequired for no-credential capability, got {other:?}"),
+    }
+}
+
+/// Regression guard for the single-source-of-truth constraint from the plan review
+/// ("do NOT create a second credential-requirements computation"):
+/// `capability_credential_requirements` must agree with what the obligation
+/// handler iterates over in `descriptor.runtime_credentials`.
+///
+/// SCOPE NOTE: this test verifies the canonical extraction function against the
+/// descriptor directly. The obligation handler (in `BuiltinObligationHandler`)
+/// iterates `runtime_credentials` through its own code path; the agreement is at
+/// the *source data* level (both read the same `required == true` entries from
+/// the same descriptor). Gate-ID identity between pre-flight and the dispatch-time
+/// backstop is confirmed by `invoke_capability_missing_credential_returns_auth_before_approval`
+/// (which verifies the pre-flight fires and no approval is persisted — the backstop
+/// never fires when pre-flight is wired, making gate-ID divergence moot in practice).
+#[tokio::test]
+async fn credential_requirements_extraction_matches_descriptor_required_credentials() {
+    // Build a registry from the credentialed manifest and extract the descriptor.
+    let registry = registry_with_manifest(SCRIPT_WITH_CREDENTIAL_MANIFEST);
+    let cap_id = script_capability_id();
+    let descriptor = registry.get_capability(&cap_id).unwrap();
+
+    // Call the canonical extraction function directly (the one pre-flight uses).
+    let (preflight_handles, preflight_reqs) =
+        ironclaw_host_runtime::capability_credential_requirements(descriptor);
+
+    // The obligation handler iterates `descriptor.runtime_credentials` filtered
+    // to `required == true` — verify `capability_credential_requirements` produces
+    // the same handles from the same source.
+    let expected_handles: Vec<SecretHandle> = descriptor
+        .runtime_credentials
+        .iter()
+        .filter(|cred| cred.required)
+        .map(|cred| cred.handle.clone())
+        .collect();
+
+    assert_eq!(
+        preflight_handles, expected_handles,
+        "capability_credential_requirements must return exactly the required handles from the descriptor"
+    );
+
+    // Confirm we see exactly one handle — the declared 'script_api_token'.
+    assert_eq!(preflight_handles.len(), 1, "expected one required handle");
+    assert_eq!(
+        preflight_handles[0].as_str(),
+        "script_api_token",
+        "required handle must be script_api_token"
+    );
+    // The manifest source is `secret_handle` (not `product_auth_account`), so
+    // `product_auth_requirement_for` returns None — credential_requirements is empty.
+    // This confirms the extraction does not fabricate OAuth requirements for plain
+    // secret-handle credentials.
+    assert!(
+        preflight_reqs.is_empty(),
+        "credential_requirements must be empty for secret_handle source (no product_auth_account)"
+    );
+}
+
+/// `spawn_capability` on a capability that requires a credential + requires
+/// approval must return `AuthRequired` without persisting an approval request
+/// when the credential is absent — mirrors the `invoke_capability` pre-flight
+/// path through the spawn dispatch lane.
+#[tokio::test]
+async fn spawn_capability_missing_credential_returns_auth_before_approval() {
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    // Note: the secret "script_api_token" is deliberately NOT inserted.
+    let secret_handle = SecretHandle::new("script_api_token").unwrap();
+    let script_runtime = Arc::new(RecordingScriptExecutor::default());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_WITH_CREDENTIAL_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenSecretObligationAuthorizer {
+            handle: secret_handle,
+        }),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
+    )))
+    .with_run_state(Arc::clone(&run_state))
+    .with_approval_requests(Arc::clone(&approval_requests))
+    .with_capability_leases(Arc::clone(&capability_leases))
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_script_runtime(Arc::clone(&script_runtime));
+    let runtime = services.host_runtime_for_local_testing();
+    let context = execution_context_without_grants();
+    let scope = context.resource_scope.clone();
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "needs credential via spawn"});
+
+    let outcome = runtime
+        .spawn_capability(RuntimeCapabilityRequest::new(
+            context,
+            script_capability_id(),
+            estimate,
+            input,
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::AuthRequired(auth_gate) => {
+            assert_eq!(
+                auth_gate.capability_id,
+                script_capability_id(),
+                "auth gate must reference the spawned capability"
+            );
+        }
+        other => panic!("expected AuthRequired before approval gate on spawn path, got {other:?}"),
+    }
+
+    // No approval request should have been persisted.
+    let pending = approval_requests.records_for_scope(&scope).await.unwrap();
+    assert!(
+        pending.is_empty(),
+        "approval must not be persisted when credential is absent on spawn path; got {pending:?}"
+    );
+
+    // Script executor must not have been reached.
+    assert!(
+        script_runtime.recorded_mounts().is_empty(),
+        "script executor must not be reached when credential pre-flight fails on spawn path"
+    );
+}
+
+/// `invoke_capability` with the secret store wired but a capability that
+/// declares zero required credentials must proceed past the pre-flight
+/// (which short-circuits at `required_secrets.is_empty()`) and reach the
+/// approval gate normally.
+#[tokio::test]
+async fn invoke_capability_no_credential_requirement_with_wired_store_proceeds_normally() {
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    // SCRIPT_MANIFEST has no runtime_credentials; wire a secret store anyway to
+    // confirm the is_empty() early-exit branch is taken, not the no-store branch.
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_handle = SecretHandle::new("any_token").unwrap();
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenSecretObligationAuthorizer {
+            handle: secret_handle,
+        }),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability],
+    )))
+    .with_run_state(Arc::clone(&run_state))
+    .with_approval_requests(Arc::clone(&approval_requests))
+    .with_capability_leases(Arc::clone(&capability_leases))
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_script_runtime(Arc::new(RecordingScriptExecutor::default()));
+    let runtime = services.host_runtime_for_local_testing();
+    let context = execution_context_without_grants();
+    let scope = context.resource_scope.clone();
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "no credential needed"});
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context,
+            script_capability_id(),
+            estimate,
+            input,
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    // With no required credentials the pre-flight exits at is_empty() and the
+    // flow reaches the approval gate (ApprovalThenSecretObligationAuthorizer
+    // requires approval when grants are empty).
+    match outcome {
+        RuntimeCapabilityOutcome::ApprovalRequired(_) => {}
+        other => panic!(
+            "expected ApprovalRequired when no credential is declared (wired store), got {other:?}"
+        ),
+    }
+
+    // The approval request must have been persisted.
+    let pending = approval_requests.records_for_scope(&scope).await.unwrap();
+    assert!(
+        !pending.is_empty(),
+        "approval must be persisted when credential pre-flight is a no-op (no required credentials)"
+    );
+}
+
+/// A secret store that always returns `Err` from `metadata()` — used to verify
+/// that a transient backend failure causes the pre-flight to skip (return None)
+/// rather than short-circuit with AuthRequired.
+struct AlwaysErrorSecretStore;
+
+#[async_trait]
+impl SecretStore for AlwaysErrorSecretStore {
+    async fn put(
+        &self,
+        _scope: ResourceScope,
+        _handle: SecretHandle,
+        _material: SecretMaterial,
+    ) -> Result<SecretMetadata, SecretStoreError> {
+        Err(SecretStoreError::StoreUnavailable {
+            reason: "simulated backend failure".to_string(),
+        })
+    }
+
+    async fn metadata(
+        &self,
+        _scope: &ResourceScope,
+        _handle: &SecretHandle,
+    ) -> Result<Option<SecretMetadata>, SecretStoreError> {
+        Err(SecretStoreError::StoreUnavailable {
+            reason: "simulated backend failure".to_string(),
+        })
+    }
+
+    async fn delete(
+        &self,
+        _scope: &ResourceScope,
+        _handle: &SecretHandle,
+    ) -> Result<bool, SecretStoreError> {
+        Err(SecretStoreError::StoreUnavailable {
+            reason: "simulated backend failure".to_string(),
+        })
+    }
+
+    async fn lease_once(
+        &self,
+        _scope: &ResourceScope,
+        _handle: &SecretHandle,
+    ) -> Result<SecretLease, SecretStoreError> {
+        Err(SecretStoreError::StoreUnavailable {
+            reason: "simulated backend failure".to_string(),
+        })
+    }
+
+    async fn consume(
+        &self,
+        _scope: &ResourceScope,
+        _lease_id: SecretLeaseId,
+    ) -> Result<SecretMaterial, SecretStoreError> {
+        Err(SecretStoreError::StoreUnavailable {
+            reason: "simulated backend failure".to_string(),
+        })
+    }
+
+    async fn revoke(
+        &self,
+        _scope: &ResourceScope,
+        _lease_id: SecretLeaseId,
+    ) -> Result<SecretLease, SecretStoreError> {
+        Err(SecretStoreError::StoreUnavailable {
+            reason: "simulated backend failure".to_string(),
+        })
+    }
+
+    async fn leases_for_scope(
+        &self,
+        _scope: &ResourceScope,
+    ) -> Result<Vec<SecretLease>, SecretStoreError> {
+        Err(SecretStoreError::StoreUnavailable {
+            reason: "simulated backend failure".to_string(),
+        })
+    }
+}
+
+/// When the secret store's `metadata()` returns `Err`, the pre-flight must be
+/// skipped entirely (FIX 1) — the flow must NOT short-circuit with `AuthRequired`
+/// as if the credential were absent. The store error must not burn a user auth
+/// interaction; the dispatch-time obligation check is the enforcement backstop.
+///
+/// In this fixture the capability does require a credential
+/// (`SCRIPT_WITH_CREDENTIAL_MANIFEST`) so the pre-flight would normally check
+/// for it. With `AlwaysErrorSecretStore` wired the check errors, pre-flight
+/// skips (returns None), and the flow reaches the approval gate.
+/// `ApprovalThenSecretObligationAuthorizer` then returns `RequireApproval`
+/// because grants are empty, so the outcome is `ApprovalRequired` — not the
+/// `AuthRequired` that the old behavior would have returned.
+///
+/// Specifically asserted: `AuthRequired` is NOT returned (pre-flight did not
+/// short-circuit), and no approval request is persisted at the PRE-FLIGHT level
+/// (the approval gate may or may not fire depending on the authorizer — here it
+/// fires and persists, confirming we reached that layer).
+#[tokio::test]
+async fn invoke_capability_secret_store_error_skips_preflight() {
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let secret_handle = SecretHandle::new("script_api_token").unwrap();
+    let script_runtime = Arc::new(RecordingScriptExecutor::default());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_WITH_CREDENTIAL_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenSecretObligationAuthorizer {
+            handle: secret_handle,
+        }),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
+    )))
+    .with_run_state(Arc::clone(&run_state))
+    .with_approval_requests(Arc::clone(&approval_requests))
+    .with_capability_leases(Arc::clone(&capability_leases))
+    // Wire the always-erroring store — pre-flight must skip on Err, not return AuthRequired.
+    .with_secret_store(Arc::new(AlwaysErrorSecretStore))
+    .with_script_runtime(Arc::clone(&script_runtime));
+    let runtime = services.host_runtime_for_local_testing();
+    let context = execution_context_without_grants();
+    let scope = context.resource_scope.clone();
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "store errors"});
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context,
+            script_capability_id(),
+            estimate,
+            input,
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    // The pre-flight must NOT have short-circuited with AuthRequired — a store
+    // error is not a missing credential.
+    assert!(
+        !matches!(outcome, RuntimeCapabilityOutcome::AuthRequired(_)),
+        "pre-flight store error must not produce AuthRequired; got {outcome:?}"
+    );
+
+    // The flow must have reached the approval gate (pre-flight skipped) and the
+    // authorizer fired RequireApproval (grants are empty), so ApprovalRequired
+    // is the expected downstream outcome.
+    match outcome {
+        RuntimeCapabilityOutcome::ApprovalRequired(_) => {}
+        other => {
+            panic!("expected ApprovalRequired after pre-flight skip (store error); got {other:?}")
+        }
+    }
+
+    // The approval request must have been persisted by the approval gate —
+    // confirming the pre-flight skip let the flow reach the authorizer.
+    let pending = approval_requests.records_for_scope(&scope).await.unwrap();
+    assert!(
+        !pending.is_empty(),
+        "approval gate must have fired after pre-flight was skipped on store error; got {pending:?}"
+    );
+
+    // Dispatch must not have been called (still blocked at approval gate).
+    assert!(
+        script_runtime.recorded_mounts().is_empty(),
+        "script executor must not be reached when blocked at approval gate"
+    );
+}
+
+/// A capability descriptor with only `required = false` credentials must
+/// produce empty `required_secrets` and `credential_requirements` from
+/// `capability_credential_requirements`.
+#[tokio::test]
+async fn credential_requirements_extraction_returns_empty_for_all_optional_credentials() {
+    // Use a manifest where the runtime credential is explicitly optional.
+    const SCRIPT_WITH_OPTIONAL_CREDENTIAL_MANIFEST: &str = r#"
+id = "script"
+name = "Script With Optional Credential"
+version = "0.1.0"
+description = "Script extension with an optional runtime credential"
+trust = "untrusted"
+
+[runtime]
+kind = "script"
+runner = "sandboxed_process"
+command = "echo"
+args = []
+
+[[capabilities]]
+id = "script.echo"
+description = "Echo through Script"
+effects = ["dispatch_capability", "use_secret"]
+default_permission = "allow"
+parameters_schema = { type = "object" }
+
+[[capabilities.runtime_credentials]]
+handle = "optional_api_token"
+source = { type = "secret_handle" }
+audience = { scheme = "https", host_pattern = "api.example.com" }
+target = { type = "header", name = "x-api-key" }
+required = false
+"#;
+
+    let registry = registry_with_manifest(SCRIPT_WITH_OPTIONAL_CREDENTIAL_MANIFEST);
+    let cap_id = script_capability_id();
+    let descriptor = registry.get_capability(&cap_id).unwrap();
+
+    let (required_secrets, credential_requirements) =
+        ironclaw_host_runtime::capability_credential_requirements(descriptor);
+
+    assert!(
+        required_secrets.is_empty(),
+        "capability with only optional credentials must produce empty required_secrets; got {required_secrets:?}"
+    );
+    assert!(
+        credential_requirements.is_empty(),
+        "capability with only optional credentials must produce empty credential_requirements; got {credential_requirements:?}"
+    );
 }
 
 const SCRIPT_MANIFEST: &str = r#"
