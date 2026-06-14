@@ -2323,7 +2323,7 @@ impl RebornServicesApi for RebornServices {
                 operator_status = Some(status);
             }
             Err(err) => {
-                tracing::warn!(
+                tracing::debug!(
                     error = ?err,
                     "Failed to retrieve operator status for diagnostics"
                 );
@@ -2338,7 +2338,7 @@ impl RebornServicesApi for RebornServices {
                         .extend(setup_response_from_llm_snapshot(snapshot, Vec::new()).diagnostics);
                 }
                 Err(err) => {
-                    tracing::warn!(
+                    tracing::debug!(
                         error = ?err,
                         "Failed to retrieve LLM config snapshot for diagnostics"
                     );
