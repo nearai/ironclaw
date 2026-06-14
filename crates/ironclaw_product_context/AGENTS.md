@@ -12,12 +12,22 @@
   call one of the two resolvers here rather than constructing `ProductTurnContext`
   inline.
 - `resolve_inbound(classification: InboundClassification, adapter, surface_type, owner)` —
-  the only place a `ScheduledTrigger` origin is minted.
+  the single intended mint point for a `ScheduledTrigger` origin.
   `InboundClassification::TrustedTrigger` is the only value that yields
   `TurnOriginKind::ScheduledTrigger`; `TrustedOther` and `Untrusted` both yield
   `TurnOriginKind::Inbound`. Callers collapse their (trust policy, adapter-kind)
   signal into one `InboundClassification` before calling — no contradictory pairs
   can reach the resolver. Untrusted callers cannot forge a trigger origin.
+- **Where the seal actually lives.** `ProductTurnContext::new` is a low-level
+  constructor in `ironclaw_turns` and is not — and cannot be — sealed to this
+  crate alone (Rust has no friend-crate visibility). The enforced trust boundary
+  is upstream: `InboundClassification::TrustedTrigger` is produced only by the
+  trusted-trigger submit seam (`ironclaw_triggers` → `ConversationTrustedTriggerSubmitter`),
+  which carries trigger-ness as a typed `TrustedInboundKind::Trigger` on the
+  trusted inbound request. Origin classification never re-derives trigger-ness
+  from the `adapter_kind` string. So a `ScheduledTrigger` origin is a structural
+  consequence of entering through that seam, not of any caller choosing the enum
+  variant.
 - `resolve_web_ui(owner)` — always yields `TurnOriginKind::WebUi` with no adapter
   or surface; used by the WebUI gateway.
 - `InboundClassification` — three-variant ingress enum (`TrustedTrigger`,

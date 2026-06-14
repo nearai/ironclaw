@@ -106,12 +106,20 @@ the generic inputs and calls the resolver:
 - `inbound_turn.rs` (product inbound): map `ProductAdapterId → RunOriginAdapter`, route kind →
   `TurnSurfaceType`; `resolve_inbound(InboundClassification::Untrusted, …)` (product inbound is
   untrusted ingress).
-- `conversations/inbound.rs`: collapse `BindingResolutionPolicy` + the trigger-adapter check into
-  `InboundClassification`, map `ConversationRouteKind → TurnSurfaceType` and
-  `AdapterKind → RunOriginAdapter`; `resolve_inbound(classification, …)`.
+- `conversations/inbound.rs`: collapse `BindingResolutionPolicy` into `InboundClassification`,
+  map `ConversationRouteKind → TurnSurfaceType` and `AdapterKind → RunOriginAdapter`;
+  `resolve_inbound(classification, …)`. `TrustedTrigger` is reached only when the trusted-trigger
+  submit seam carries `TrustedInboundKind::Trigger` on the request — trigger-ness is read from
+  that typed field, not re-derived from the adapter-kind string (Option 7, folded from #4851).
 
-The trust-gating bug becomes structurally impossible: `resolve_inbound` is the only function that
-can mint `ScheduledTrigger`, and it requires `InboundClassification::TrustedTrigger`.
+The contradictory-pair bug becomes structurally impossible: callers collapse trust + trigger
+signals into one `InboundClassification` before the resolver, so a mismatched (trust, trigger)
+pair is unrepresentable, and `ScheduledTrigger` requires `InboundClassification::TrustedTrigger`.
+`resolve_inbound` is the single *intended* mint point, but `ProductTurnContext::new` is a public
+low-level constructor in `ironclaw_turns` and is not a hard cross-crate seal (Rust has no
+friend-crate visibility). The enforced trust boundary is upstream: `TrustedTrigger` is produced
+only by the trusted-trigger submit seam carrying a typed `TrustedInboundKind::Trigger`, never by
+re-deriving trigger-ness from the adapter-kind string.
 
 ### Render
 
@@ -131,8 +139,9 @@ are sanitized at render time.
 
 ## Testing
 
-- Resolver unit tests in `ironclaw_product_context`: the trust × trigger-adapter × surface matrix,
-  including the security case (`Untrusted` + trigger adapter ⇒ `Inbound`, never `ScheduledTrigger`).
+- Resolver unit tests in `ironclaw_product_context`: the `InboundClassification` × surface matrix
+  (`TrustedTrigger` ⇒ `ScheduledTrigger`; `TrustedOther`/`Untrusted` ⇒ `Inbound`), including the
+  security case (`Untrusted` with a trigger adapter name ⇒ `Inbound`, never `ScheduledTrigger`).
 - Call-site/contract tests updated to assert the persisted `ProductTurnContext` (webui ⇒ WebUi;
   product inbound ⇒ Inbound with adapter + surface; trusted trigger ⇒ ScheduledTrigger;
   untrusted "trigger" ⇒ Inbound).

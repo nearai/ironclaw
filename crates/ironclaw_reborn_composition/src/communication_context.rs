@@ -55,6 +55,7 @@ impl CommunicationContextProvider for RuntimeCommunicationContextProvider {
         // error) simply runs to completion and its result is discarded.
         let outbound_preferences = Arc::clone(&self.outbound_preferences);
         let lifecycle_facade = self.lifecycle_facade.clone();
+        let actor_present = actor.is_some();
         let handle = tokio::spawn(async move {
             fetch_communication_context(outbound_preferences, lifecycle_facade, scope, actor).await
         });
@@ -66,9 +67,16 @@ impl CommunicationContextProvider for RuntimeCommunicationContextProvider {
                         error = %error,
                         "communication context fetch task failed; degrading advisory slice"
                     );
-                    // silent-ok: communication context is advisory; a failed background
-                    // fetch must not block loop start.
-                    None
+                    if actor_present {
+                        Some(CommunicationRuntimeContext {
+                            connected_channels: ConnectedChannelsState::Unknown,
+                            delivery_target: DeliveryTargetState::Unknown,
+                            delivery_tools_visible: false,
+                        })
+                    } else {
+                        // silent-ok: communication context is not applicable without an actor.
+                        None
+                    }
                 }
             }
         }))
@@ -657,6 +665,67 @@ mod tests {
                 next_cursor: None,
             })
         }
+    }
+
+    /// A preferences facade whose `get_outbound_preferences` panics immediately.
+    /// This causes the spawned `fetch_communication_context` task to abort with a
+    /// `JoinError`, exercising the actor-present degrade-to-unknown path in
+    /// `begin_communication_context`.
+    struct PanickingPreferencesFacade;
+
+    #[async_trait]
+    impl OutboundPreferencesProductFacade for PanickingPreferencesFacade {
+        async fn get_outbound_preferences(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+        ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+            panic!("induced panic for JoinError test")
+        }
+
+        async fn set_outbound_preferences(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _request: RebornSetOutboundPreferencesRequest,
+        ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+            Ok(RebornOutboundPreferencesResponse::default())
+        }
+
+        async fn list_outbound_delivery_targets(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+        ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
+            Ok(RebornOutboundDeliveryTargetListResponse {
+                targets: Vec::new(),
+                next_cursor: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn actor_present_join_failure_degrades_to_unknown() {
+        // When the spawned fetch task panics (JoinError) and an actor IS present,
+        // the resolved context must be Some with Unknown states — not None.
+        // None would be ambiguous with the "no actor" path and would suppress
+        // `delivery_tools_visible` stamping for a run that genuinely has an actor.
+        let provider =
+            RuntimeCommunicationContextProvider::new(Arc::new(PanickingPreferencesFacade));
+
+        let ctx = provider
+            .begin_communication_context(scope(), Some(actor()))
+            .resolve(false)
+            .await
+            .expect("actor-present join failure must return Some, not None");
+
+        assert_eq!(
+            ctx.connected_channels,
+            ConnectedChannelsState::Unknown,
+            "join failure with actor present must degrade connected_channels to Unknown"
+        );
+        assert_eq!(
+            ctx.delivery_target,
+            DeliveryTargetState::Unknown,
+            "join failure with actor present must degrade delivery_target to Unknown"
+        );
     }
 
     #[tokio::test]

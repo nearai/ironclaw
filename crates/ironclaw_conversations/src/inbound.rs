@@ -6,7 +6,7 @@ use ironclaw_safety::{
 };
 use ironclaw_triggers::{
     TriggerError, TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter,
-    TrustedTriggerSubmitRequest, is_trusted_trigger_adapter_kind,
+    TrustedTriggerSubmitRequest,
 };
 use ironclaw_turns::{
     AdmissionRejectionReason, RunOriginAdapter, SubmitTurnRequest, TurnCoordinator, TurnError,
@@ -14,7 +14,7 @@ use ironclaw_turns::{
 };
 
 use crate::trusted_trigger::{TrustedTriggerInboundFailureKind, classify_inbound_error};
-use crate::types::TrustedInboundTurnRequest;
+use crate::types::{TrustedInboundKind, TrustedInboundTurnRequest};
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
     AdapterInstallationId, AdapterKind, ConversationBindingResolution, ConversationBindingService,
@@ -61,6 +61,7 @@ where
             trusted_agent_id,
             trusted_project_id,
             trusted_owner_user_id,
+            kind,
         } = request;
         self.handle_inbound_turn_inner(
             request,
@@ -68,6 +69,7 @@ where
                 trusted_agent_id,
                 trusted_project_id,
                 trusted_owner_user_id,
+                kind,
             },
         )
         .await
@@ -93,17 +95,19 @@ where
             requested_run_profile,
         } = request;
 
-        let classification = match (
-            &binding_policy,
-            is_trusted_trigger_adapter_kind(adapter_kind.as_str()),
-        ) {
-            (BindingResolutionPolicy::Trusted { .. }, true) => {
-                ironclaw_product_context::InboundClassification::TrustedTrigger
-            }
-            (BindingResolutionPolicy::Trusted { .. }, false) => {
+        // Origin classification is derived from the typed trust policy, never
+        // re-derived from the adapter-kind string. `TrustedTrigger` is reachable
+        // only when the trusted-trigger submit seam built this request with
+        // `TrustedInboundKind::Trigger`; see `.claude/rules/types.md`.
+        let classification = match &binding_policy {
+            BindingResolutionPolicy::Trusted {
+                kind: TrustedInboundKind::Trigger,
+                ..
+            } => ironclaw_product_context::InboundClassification::TrustedTrigger,
+            BindingResolutionPolicy::Trusted { .. } => {
                 ironclaw_product_context::InboundClassification::TrustedOther
             }
-            (BindingResolutionPolicy::Untrusted, _) => {
+            BindingResolutionPolicy::Untrusted => {
                 ironclaw_product_context::InboundClassification::Untrusted
             }
         };
@@ -166,6 +170,7 @@ where
                 trusted_agent_id,
                 trusted_project_id,
                 trusted_owner_user_id,
+                kind: _,
             } => {
                 self.binding_service
                     .resolve_or_create_binding_with_trusted_scope(
@@ -398,6 +403,7 @@ fn trusted_inbound_request_from_trigger(
         fire.agent_id,
         fire.project_id,
         Some(fire.creator_user_id),
+        TrustedInboundKind::Trigger,
     ))
 }
 
@@ -408,6 +414,7 @@ enum BindingResolutionPolicy {
         trusted_agent_id: Option<ironclaw_host_api::AgentId>,
         trusted_project_id: Option<ironclaw_host_api::ProjectId>,
         trusted_owner_user_id: Option<ironclaw_host_api::UserId>,
+        kind: TrustedInboundKind,
     },
 }
 
@@ -525,7 +532,7 @@ mod tests {
         classify_trusted_trigger_inbound_error, submit_trusted_trigger_outcome,
         trusted_trigger_fire_submitter,
     };
-    use crate::types::TrustedInboundTurnRequest;
+    use crate::types::{TrustedInboundKind, TrustedInboundTurnRequest};
     use crate::{
         AcceptedInboundMessage, AdapterInstallationId, AdapterKind, ConversationBindingResolution,
         ConversationBindingService, ConversationRouteKind, ExternalActorRef,
@@ -696,6 +703,7 @@ mod tests {
             Some(agent()),
             Some(project()),
             Some(creator.clone()),
+            TrustedInboundKind::Trigger,
         );
 
         let response = facade
@@ -725,6 +733,7 @@ mod tests {
             Some(agent()),
             Some(project()),
             None,
+            TrustedInboundKind::Trigger,
         );
         facade
             .handle_inbound_turn_with_trusted_scope(first)
@@ -742,6 +751,7 @@ mod tests {
             Some(agent()),
             Some(project()),
             Some(creator),
+            TrustedInboundKind::Trigger,
         );
         let response = facade
             .handle_inbound_turn_with_trusted_scope(second)
@@ -1050,6 +1060,7 @@ mod tests {
             trusted_agent_id,
             trusted_project_id,
             None,
+            TrustedInboundKind::Trigger,
         )
     }
 
@@ -1349,6 +1360,142 @@ mod tests {
         }
     }
 
+    // --- Tests: error classification ---
+
+    #[test]
+    fn classify_trusted_trigger_inbound_error_maps_invalid_run_origin_adapter_to_submit_rejected() {
+        let error = InboundTurnError::TurnSubmissionFailed {
+            error: TurnError::InvalidRunOriginAdapter,
+        };
+        let classified = classify_trusted_trigger_inbound_error(error);
+        assert!(
+            matches!(
+                classified,
+                ironclaw_triggers::TriggerError::InvalidMaterialization { reason }
+                    if reason == "trusted trigger submit rejected"
+            ),
+            "InvalidRunOriginAdapter must be classified as SubmitRejected → InvalidMaterialization"
+        );
+    }
+
+    // --- Tests: submit-key rotation ---
+
+    #[tokio::test]
+    async fn invalid_run_origin_adapter_does_not_rotate_submit_idempotency_key() {
+        let services = InMemoryConversationServices::default();
+        services
+            .pair_external_actor(
+                tenant(),
+                trigger_adapter(),
+                trigger_installation(),
+                external_actor("alice"),
+                user("alice"),
+            )
+            .await;
+        let coordinator = Arc::new(FailingOnFirstTurnCoordinator::default());
+        let inbound =
+            InboundTurnService::new(services.clone(), services.clone(), coordinator.clone());
+        let request = trusted_inbound_request(Some(agent()), Some(project()));
+
+        // First call: coordinator returns InvalidRunOriginAdapter — inbound returns an error.
+        let err = inbound
+            .handle_inbound_turn_with_trusted_scope(request.clone())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            InboundTurnError::TurnSubmissionFailed {
+                error: TurnError::InvalidRunOriginAdapter
+            }
+        ));
+
+        // Second call: same request (same external_event_id → same accepted_message_ref).
+        // The first attempt never called mark_inbound_message_turn_submitted, so the
+        // duplicate idempotency path falls through to a fresh submit_turn call.
+        // Coordinator now succeeds and records the second key.
+        let _ = inbound
+            .handle_inbound_turn_with_trusted_scope(request)
+            .await
+            .expect("second inbound attempt succeeds");
+
+        let submissions = coordinator.submissions();
+        assert_eq!(
+            submissions.len(),
+            2,
+            "coordinator must have been called twice"
+        );
+
+        // Both calls must have received the same idempotency key: not rotating on
+        // InvalidRunOriginAdapter preserves the original key so the turn store can
+        // deduplicate duplicate retries.
+        assert_eq!(
+            submissions[0].idempotency_key, submissions[1].idempotency_key,
+            "submit key must not rotate after InvalidRunOriginAdapter — duplicate retries must share the same idempotency key"
+        );
+    }
+
+    /// A `TurnCoordinator` that returns `TurnError::InvalidRunOriginAdapter` on the
+    /// first `submit_turn` call and succeeds on all subsequent calls.
+    #[derive(Default)]
+    struct FailingOnFirstTurnCoordinator {
+        submissions: Mutex<Vec<SubmitTurnRequest>>,
+    }
+
+    impl FailingOnFirstTurnCoordinator {
+        fn submissions(&self) -> Vec<SubmitTurnRequest> {
+            self.submissions.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl TurnCoordinator for FailingOnFirstTurnCoordinator {
+        async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+            Ok(TurnRunId::new())
+        }
+
+        async fn submit_turn(
+            &self,
+            request: SubmitTurnRequest,
+        ) -> Result<SubmitTurnResponse, TurnError> {
+            let mut submissions = self.submissions.lock().unwrap();
+            submissions.push(request.clone());
+            if submissions.len() == 1 {
+                return Err(TurnError::InvalidRunOriginAdapter);
+            }
+            Ok(SubmitTurnResponse::Accepted {
+                turn_id: TurnId::new(),
+                run_id: TurnRunId::new(),
+                status: TurnStatus::Completed,
+                resolved_run_profile_id: RunProfileId::default_profile(),
+                resolved_run_profile_version: RunProfileVersion::new(1),
+                event_cursor: EventCursor(0),
+                accepted_message_ref: request.accepted_message_ref,
+                reply_target_binding_ref: request.reply_target_binding_ref,
+            })
+        }
+
+        async fn resume_turn(
+            &self,
+            _request: ResumeTurnRequest,
+        ) -> Result<ResumeTurnResponse, TurnError> {
+            unimplemented!("not used by submit-key rotation tests")
+        }
+
+        async fn cancel_run(
+            &self,
+            _request: CancelRunRequest,
+        ) -> Result<CancelRunResponse, TurnError> {
+            unimplemented!("not used by submit-key rotation tests")
+        }
+
+        async fn get_run_state(
+            &self,
+            _request: GetRunStateRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            unimplemented!("not used by submit-key rotation tests")
+        }
+    }
+
     // --- Tests: run_origin integrity ---
 
     /// A trusted inbound request whose adapter_kind is NOT a trusted-trigger
@@ -1399,6 +1546,7 @@ mod tests {
             Some(agent()),
             Some(project()),
             None,
+            TrustedInboundKind::Other,
         );
 
         inbound

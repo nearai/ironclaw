@@ -18,7 +18,7 @@
 
 - `crates/ironclaw_turns/src/origin.rs` — **rewrite**: delete `TurnRunOrigin`; add `TurnOriginKind`, `TurnSurfaceType`, `RunOriginAdapter`, `TurnOwner`, `ProductTurnContext`.
 - `crates/ironclaw_turns/src/{request.rs,status.rs,store.rs,run_profile/host.rs,memory.rs,lib.rs}` — **modify**: swap the `run_origin` field for `product_context`.
-- `crates/ironclaw_product_context/` — **create**: new crate (`Cargo.toml`, `src/lib.rs`) with `TrustLevel` + resolver.
+- `crates/ironclaw_product_context/` — **create**: new crate (`Cargo.toml`, `src/lib.rs`) with `InboundClassification` + resolver.
 - `Cargo.toml` (workspace root) — **modify**: add the new crate to members.
 - `crates/ironclaw_conversations/{Cargo.toml,src/inbound.rs}` — **modify**: depend on `product_context`; call `resolve_inbound`.
 - `crates/ironclaw_product_workflow/{Cargo.toml,src/inbound_turn.rs,src/reborn_services.rs}` — **modify**: depend on `product_context`; call resolver.
@@ -198,47 +198,44 @@ ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ```rust
 //! Single owner of turn-origin/surface/owner classification at ingress.
 
-use ironclaw_turns::{ProductTurnContext, RunOriginAdapter, TurnOriginKind, TurnOwner, TurnSurfaceType};
+use ironclaw_turns::{
+    ProductTurnContext, RunOriginAdapter, TurnOriginKind, TurnOwner, TurnSurfaceType,
+};
 
-/// Ingress trust level. Callers map their policy (e.g. `BindingResolutionPolicy`) onto this.
+/// Ingress classification. Callers collapse their (trust policy, trigger-adapter) signal
+/// into one value, so the resolver cannot receive a contradictory pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrustLevel {
-    Trusted,
+pub enum InboundClassification {
+    /// Trusted ingress whose adapter is the trusted-trigger adapter.
+    TrustedTrigger,
+    /// Trusted ingress, non-trigger adapter.
+    TrustedOther,
+    /// Untrusted ingress (adapter identity is irrelevant — never a trigger).
     Untrusted,
 }
 
 /// Resolve an inbound submission into a generic product context.
 ///
-/// `ScheduledTrigger` is minted ONLY when `trust == Trusted && is_trigger_adapter`.
-/// Any other combination is `Inbound` — an untrusted caller cannot mint a trigger origin.
+/// `ScheduledTrigger` is minted ONLY when `classification == TrustedTrigger`.
+/// Any other combination yields `Inbound` — an untrusted caller cannot mint a trigger origin.
 pub fn resolve_inbound(
-    trust: TrustLevel,
-    is_trigger_adapter: bool,
+    classification: InboundClassification,
     adapter: RunOriginAdapter,
     surface_type: Option<TurnSurfaceType>,
     owner: TurnOwner,
 ) -> ProductTurnContext {
-    let origin = if trust == TrustLevel::Trusted && is_trigger_adapter {
-        TurnOriginKind::ScheduledTrigger
-    } else {
-        TurnOriginKind::Inbound
+    let origin = match classification {
+        InboundClassification::TrustedTrigger => TurnOriginKind::ScheduledTrigger,
+        InboundClassification::TrustedOther | InboundClassification::Untrusted => {
+            TurnOriginKind::Inbound
+        }
     };
-    ProductTurnContext {
-        origin,
-        surface_type,
-        adapter: Some(adapter),
-        owner,
-    }
+    ProductTurnContext::new(origin, surface_type, Some(adapter), owner)
 }
 
 /// Resolve a WebUI submission. Always `WebUi`, no adapter/surface.
 pub fn resolve_web_ui(owner: TurnOwner) -> ProductTurnContext {
-    ProductTurnContext {
-        origin: TurnOriginKind::WebUi,
-        surface_type: None,
-        adapter: None,
-        owner,
-    }
+    ProductTurnContext::new(TurnOriginKind::WebUi, None, None, owner)
 }
 
 #[cfg(test)]
@@ -255,20 +252,20 @@ mod tests {
 
     #[test]
     fn trusted_trigger_adapter_yields_scheduled_trigger() {
-        let ctx = resolve_inbound(TrustLevel::Trusted, true, adapter(), None, owner());
+        let ctx = resolve_inbound(InboundClassification::TrustedTrigger, adapter(), None, owner());
         assert_eq!(ctx.origin, TurnOriginKind::ScheduledTrigger);
     }
 
     #[test]
     fn untrusted_trigger_adapter_yields_inbound_not_trigger() {
-        let ctx = resolve_inbound(TrustLevel::Untrusted, true, adapter(), None, owner());
+        let ctx = resolve_inbound(InboundClassification::Untrusted, adapter(), None, owner());
         assert_eq!(ctx.origin, TurnOriginKind::Inbound);
     }
 
     #[test]
     fn trusted_non_trigger_adapter_yields_inbound() {
         let a = RunOriginAdapter::new("telegram").unwrap();
-        let ctx = resolve_inbound(TrustLevel::Trusted, false, a, Some(TurnSurfaceType::Channel), owner());
+        let ctx = resolve_inbound(InboundClassification::TrustedOther, a, Some(TurnSurfaceType::Channel), owner());
         assert_eq!(ctx.origin, TurnOriginKind::Inbound);
         assert_eq!(ctx.surface_type, Some(TurnSurfaceType::Channel));
     }
@@ -385,27 +382,38 @@ impl TurnScope {
 
 Add a unit test for it in `scope.rs` (`product_owner_prefers_explicit_then_agent_then_actor`). Run `cargo test -p ironclaw_turns scope:: ` → PASS. Commit this with Task 3's crate or separately.
 
-- [ ] **Step 3: Conversations inbound** — `crates/ironclaw_conversations/src/inbound.rs`. Replace the `run_origin = if adapter_kind.is_trusted_trigger() { … }` block (~line 95) with:
+- [ ] **Step 3: Conversations inbound** — `crates/ironclaw_conversations/src/inbound.rs`. The classification is derived from the typed `BindingResolutionPolicy`, not from `adapter_kind.is_trusted_trigger()`. Near the top of `handle_inbound_turn_inner` (where `binding_policy`, `route_kind`, and `adapter_kind` are in scope), add:
 
 ```rust
-        let trust = match &binding_policy {
-            BindingResolutionPolicy::Trusted { .. } => ironclaw_product_context::TrustLevel::Trusted,
-            BindingResolutionPolicy::Untrusted => ironclaw_product_context::TrustLevel::Untrusted,
+        // Origin classification is derived from the typed trust policy, never
+        // re-derived from the adapter-kind string. `TrustedTrigger` is reachable
+        // only when the trusted-trigger submit seam built this request with
+        // `TrustedInboundKind::Trigger`; see `.claude/rules/types.md`.
+        let classification = match &binding_policy {
+            BindingResolutionPolicy::Trusted {
+                kind: TrustedInboundKind::Trigger,
+                ..
+            } => ironclaw_product_context::InboundClassification::TrustedTrigger,
+            BindingResolutionPolicy::Trusted { .. } => {
+                ironclaw_product_context::InboundClassification::TrustedOther
+            }
+            BindingResolutionPolicy::Untrusted => {
+                ironclaw_product_context::InboundClassification::Untrusted
+            }
         };
-        let surface_type = match route_kind {
+        let surface_type = match &route_kind {
             ConversationRouteKind::Direct => Some(ironclaw_turns::TurnSurfaceType::Direct),
             ConversationRouteKind::Shared => Some(ironclaw_turns::TurnSurfaceType::Channel),
         };
         let run_adapter = ironclaw_turns::RunOriginAdapter::new(adapter_kind.as_str())
-            .map_err(|e| ConversationError::InvalidRequest { reason: e.to_string() })?;
+            .map_err(|e| InboundTurnError::InvalidCanonicalRef { reason: e.to_string() })?;
 ```
 
 Then, **at the point in the function where the resolved `TurnScope` (`turn_scope`/`resolution.turn_scope`) and `actor` are both in scope** (below the binding resolution, where the `SubmitTurnRequest` is built), construct:
 
 ```rust
         let product_context = ironclaw_product_context::resolve_inbound(
-            trust,
-            adapter_kind.is_trusted_trigger(),
+            classification,
             run_adapter,
             surface_type,
             turn_scope.product_owner(&actor),
@@ -413,16 +421,16 @@ Then, **at the point in the function where the resolved `TurnScope` (`turn_scope
 ```
 
 Implementer notes:
-- First confirm the exact names: `grep -n "enum ConversationRouteKind" -A4 crates/ironclaw_conversations/src/` (variant names for the `surface_type` match) and the actual error type returned by `handle_inbound_turn_inner` (replace `ConversationError::InvalidRequest` with the real reason-carrying variant; pick the existing variant used elsewhere in this file for bad-request mapping). `AdapterKind` is bounded, so the error is unreachable in practice — still handle it, never `unwrap`.
-- `trust`, `surface_type`, and `run_adapter` are computed near the top (where `adapter_kind`/`route_kind`/`binding_policy` exist); `product_context` is assembled lower where `turn_scope` + `actor` exist. Move the pieces accordingly rather than forcing one block.
+- The `TrustedInboundKind` variant carried on `BindingResolutionPolicy::Trusted { kind }` is the typed signal from the trusted-trigger submit seam (`trusted_inbound_request_from_trigger` passes `TrustedInboundKind::Trigger`). Do not use `adapter_kind.is_trusted_trigger()` — that re-derives trigger-ness from the adapter-kind string, which the typed seam was specifically introduced to replace.
+- First confirm the exact names: `grep -n "enum ConversationRouteKind" -A4 crates/ironclaw_conversations/src/` (variant names for the `surface_type` match). `AdapterKind` is bounded, so the error is unreachable in practice — still handle it, never `unwrap`.
+- `classification`, `surface_type`, and `run_adapter` are computed near the top (where `adapter_kind`/`route_kind`/`binding_policy` exist); `product_context` is assembled lower where `turn_scope` + `actor` exist. Move the pieces accordingly rather than forcing one block.
 - Thread `product_context` to the `SubmitTurnRequest`. Rename the `submit_or_replay` / `handle_inbound_turn_inner` `run_origin: Option<…>` parameter (line ~187) to `product_context: Option<ProductTurnContext>` and pass it through.
 
 - [ ] **Step 4: Product-workflow inbound** — `crates/ironclaw_product_workflow/src/inbound_turn.rs:637`. The `AcceptedProductInboundTurn` already carries `adapter_id: ProductAdapterId`. Replace the `run_origin: Some(TurnRunOrigin::ProductInbound { adapter: … })` with:
 
 ```rust
             product_context: Some(ironclaw_product_context::resolve_inbound(
-                ironclaw_product_context::TrustLevel::Untrusted,
-                false, // product-adapter inbound is never the trusted-trigger adapter
+                ironclaw_product_context::InboundClassification::Untrusted,
                 ironclaw_turns::RunOriginAdapter::new(self.adapter_id.as_str())
                     .map_err(|e| ProductWorkflowError::Transient { reason: e.to_string() })?,
                 self.route_surface_type(), // map ResolvedBinding/route → Option<TurnSurfaceType>; if unavailable, None

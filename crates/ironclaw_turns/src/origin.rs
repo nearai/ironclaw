@@ -70,7 +70,16 @@ pub enum TurnOwner {
 /// `resolve_inbound` (for all inbound/trigger paths) and `resolve_web_ui` (for the WebUI
 /// gateway). Those resolvers call `ProductTurnContext::new` internally; callers outside
 /// that crate should not call `new` directly. `#[non_exhaustive]` blocks struct-literal
-/// construction from external crates to reinforce this boundary.
+/// construction from external crates.
+///
+/// `new` is a low-level constructor and is deliberately *not* a hard cross-crate seal —
+/// Rust has no friend-crate visibility, so a type that must live here (it is carried on
+/// `SubmitTurnRequest`/`TurnRunState`) cannot restrict construction to one other crate.
+/// The enforced trust boundary is upstream, not on this constructor: a `ScheduledTrigger`
+/// origin is only produced when ingress enters through the trusted-trigger submit seam,
+/// which carries trigger-ness as a typed value rather than re-deriving it from the
+/// adapter-kind string (see `ironclaw_conversations` `TrustedInboundKind` and
+/// `ironclaw_product_context::resolve_inbound`).
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProductTurnContext {
