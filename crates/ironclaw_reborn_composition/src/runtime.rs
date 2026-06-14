@@ -1211,6 +1211,12 @@ impl RebornRuntime {
     /// without the `root-llm-provider` feature or an LLM config is not
     /// provided), the run will fail and the returned reply will surface
     /// that failure via `status = Failed` and `text = None`.
+    ///
+    /// **WebUI-only origin contract**: this task-level send path resolves
+    /// the turn's product-context origin as WebUI chat (`resolve_web_ui`).
+    /// A non-WebUI ingress (e.g. a future channel adapter) must not reuse
+    /// this method for its submissions; it must resolve its own origin at
+    /// that ingress instead.
     pub async fn send_user_message(
         &self,
         conversation: &ConversationId,
@@ -1449,11 +1455,16 @@ impl RebornRuntime {
     }
 
     fn turn_scope_for(&self, thread_id: &ThreadId) -> TurnScope {
-        TurnScope::new(
+        // RebornRuntime is bound to a single actor user, so its turns are
+        // owned by that user (not the shared agent).  Passing the explicit
+        // owner here makes `TurnScope::product_owner` resolve to
+        // `TurnOwner::Personal` instead of `TurnOwner::SharedAgent`.
+        TurnScope::new_with_owner(
             self.thread_scope.tenant_id.clone(),
             Some(self.thread_scope.agent_id.clone()),
             self.thread_scope.project_id.clone(),
             thread_id.clone(),
+            Some(self.actor_user_id.clone()),
         )
     }
 
@@ -4381,6 +4392,79 @@ mod tests {
         assert_eq!(reply.status, TurnStatus::Completed);
         assert_eq!(reply.text.as_deref(), Some("recorded runtime reply"));
         assert_eq!(recorded_request_count(&requests), 1);
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    /// Regression guard: `send_user_message` must persist a
+    /// `TurnOwner::Personal` (the bound actor user) in `product_context`,
+    /// not a `TurnOwner::SharedAgent`.  Before the fix, `turn_scope_for`
+    /// built an ownerless scope whose `product_owner` resolved to
+    /// `SharedAgent` because `agent_id` was set and no explicit owner was
+    /// carried.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn send_user_message_persists_personal_owner_for_webui() {
+        use ironclaw_turns::TurnOwner;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let actor_owner_id = "runtime-personal-owner-user";
+        let gateway = Arc::new(RecordingGateway {
+            reply: "owner-check reply".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(actor_owner_id, root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-personal-owner-tenant".to_string(),
+            agent_id: "runtime-personal-owner-agent".to_string(),
+            source_binding_id: "runtime-personal-owner-source".to_string(),
+            reply_target_binding_id: "runtime-personal-owner-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: RUNTIME_SEND_TIMEOUT,
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            RUNTIME_SEND_TIMEOUT,
+            runtime.send_user_message(&conversation, "ping"),
+        )
+        .await
+        .expect("runtime send should finish within timeout")
+        .expect("runtime send should succeed");
+
+        assert_eq!(reply.status, TurnStatus::Completed);
+
+        // Verify the persisted product_context carries Personal{user: actor_user_id},
+        // not SharedAgent.
+        let scope = runtime.turn_scope_for(&conversation.0);
+        let run_state = runtime
+            .turn_coordinator
+            .get_run_state(GetRunStateRequest {
+                scope,
+                run_id: reply.run_id,
+            })
+            .await
+            .expect("get_run_state should succeed");
+
+        let product_context = run_state
+            .product_context
+            .expect("product_context must be set by send_user_message");
+        let expected_user_id = UserId::new(actor_owner_id).expect("actor user id should be valid");
+        assert!(
+            matches!(
+                &product_context.owner,
+                TurnOwner::Personal { user } if user == &expected_user_id
+            ),
+            "send_user_message must persist TurnOwner::Personal{{user: actor_user_id}}, \
+             got {:?}",
+            product_context.owner
+        );
 
         runtime.shutdown().await.expect("runtime shutdown");
     }

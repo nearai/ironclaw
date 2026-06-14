@@ -1278,6 +1278,72 @@ mod tests {
         assert_eq!(submission.message_id, message_id);
     }
 
+    /// A BotMention shared route must produce `TurnSurfaceType::Channel` in the
+    /// submitted `SubmitTurnRequest.product_context`. This exercises the
+    /// `ProductConversationRouteKind::Shared => TurnSurfaceType::Channel` branch
+    /// in `prepare_user_message` through the replay-with-prepared handoff path,
+    /// which is the same submission seam the full inbound-turn pipeline uses.
+    #[tokio::test]
+    async fn shared_user_message_records_channel_surface_type() {
+        let message_id = ThreadMessageId::new();
+        let prepared = PreparedUserMessage {
+            binding: ResolvedBinding {
+                tenant_id: tenant_id(),
+                actor_user_id: user_id(),
+                subject_user_id: Some(user_id()),
+                thread_id: thread_id(),
+                agent_id: Some(AgentId::new("agent:alpha").unwrap()),
+                project_id: None,
+            },
+            thread_scope: ThreadScope {
+                tenant_id: tenant_id(),
+                agent_id: AgentId::new("agent:alpha").unwrap(),
+                project_id: None,
+                owner_user_id: Some(user_id()),
+                mission_id: None,
+            },
+            source_binding_id: "src:shared".to_string(),
+            submit_idempotency_key: "turn-key-shared".to_string(),
+            adapter_id: ProductAdapterId::new("slack").unwrap(),
+            // BotMention shared route maps to Channel surface type.
+            surface_type: TurnSurfaceType::Channel,
+        };
+
+        let handoff = ProductInboundTurnHandoff::from_replay_with_prepared(
+            replay(
+                message_id,
+                MessageStatus::DeferredBusy,
+                Some("src:shared"),
+                Some("reply:shared"),
+                None,
+            ),
+            "turn-key-shared".to_string(),
+            received_at(),
+            &prepared,
+        )
+        .expect("shared route replay handoff");
+
+        let coordinator = CapturingTurnCoordinator::default();
+        let thread_service = StubSessionThreadService;
+
+        handoff
+            .submit_or_replay(&thread_service, &coordinator)
+            .await
+            .expect("submit_or_replay succeeds");
+
+        let submissions = coordinator.submissions();
+        assert_eq!(submissions.len(), 1, "one turn must be submitted");
+        let ctx = submissions[0]
+            .product_context
+            .as_ref()
+            .expect("product_context must be set");
+        assert_eq!(
+            ctx.surface_type,
+            Some(TurnSurfaceType::Channel),
+            "BotMention shared route must carry Channel surface type"
+        );
+    }
+
     fn policy_request() -> BeforeInboundPolicyRequest {
         BeforeInboundPolicyRequest {
             adapter_id: ProductAdapterId::new("test_adapter").expect("adapter"),

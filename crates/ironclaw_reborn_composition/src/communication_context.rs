@@ -58,9 +58,20 @@ impl CommunicationContextProvider for RuntimeCommunicationContextProvider {
         let handle = tokio::spawn(async move {
             fetch_communication_context(outbound_preferences, lifecycle_facade, scope, actor).await
         });
-        // `handle.await` yields `Result<Option<_>, JoinError>`; a panic in the
-        // fetch degrades to `None` rather than propagating.
-        CommunicationContextFetch::new(Box::pin(async move { handle.await.ok().flatten() }))
+        CommunicationContextFetch::new(Box::pin(async move {
+            match handle.await {
+                Ok(result) => result,
+                Err(error) => {
+                    tracing::debug!(
+                        error = %error,
+                        "communication context fetch task failed; degrading advisory slice"
+                    );
+                    // silent-ok: communication context is advisory; a failed background
+                    // fetch must not block loop start.
+                    None
+                }
+            }
+        }))
     }
 }
 
@@ -120,6 +131,7 @@ async fn fetch_communication_context(
     let (pref_result, lifecycle_result) = match combined_result {
         Ok(pair) => pair,
         Err(_) => {
+            tracing::debug!("communication context budget expired; degrading to unknown");
             // Budget expired — both are unknown.
             return Some(CommunicationRuntimeContext {
                 connected_channels: ConnectedChannelsState::Unknown,
@@ -147,7 +159,13 @@ async fn fetch_communication_context(
             }
             (None, _) => DeliveryTargetState::NoneSet,
         },
-        Err(_) => DeliveryTargetState::Unknown,
+        Err(error) => {
+            tracing::debug!(
+                error = %error,
+                "outbound preferences fetch failed; degrading delivery target to unknown"
+            );
+            DeliveryTargetState::Unknown
+        }
     };
 
     let connected_channels = match lifecycle_result {
@@ -177,7 +195,15 @@ async fn fetch_communication_context(
                 ConnectedChannelsState::Known(channels)
             }
         }
-        Some(Err(_)) | None => ConnectedChannelsState::Unknown,
+        Some(Err(error)) => {
+            tracing::debug!(
+                error = %error,
+                "lifecycle extension list fetch failed; degrading connected channels to unknown"
+            );
+            ConnectedChannelsState::Unknown
+        }
+        // None means lifecycle facade was skipped or not wired — not an error.
+        None => ConnectedChannelsState::Unknown,
     };
 
     Some(CommunicationRuntimeContext {
