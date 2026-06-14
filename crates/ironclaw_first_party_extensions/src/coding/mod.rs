@@ -319,7 +319,7 @@ mod tests {
             super::CodingCapabilityKind::WriteFile,
             &scope,
             Some(&mounts),
-            filesystem,
+            Arc::clone(&filesystem),
             &url_like_input,
         );
         let err = state
@@ -334,6 +334,28 @@ mod tests {
                 .join("workspace/http:/example.com/a.txt")
                 .exists(),
             "URL-like path must not be normalized into a writable scoped path"
+        );
+
+        let reserved_workspace_file_input = json!({
+            "path": "workspace//HEARTBEAT.md",
+            "content": "blocked"
+        });
+        let reserved_workspace_file_request = super::CodingCapabilityRequest::new(
+            super::CodingCapabilityKind::WriteFile,
+            &scope,
+            Some(&mounts),
+            filesystem,
+            &reserved_workspace_file_input,
+        );
+        let err = state
+            .dispatch(&reserved_workspace_file_request)
+            .await
+            .expect_err("empty alias segments preserve reserved workspace file guard");
+
+        assert_eq!(err.kind(), RuntimeDispatchErrorKind::InputEncode);
+        assert!(
+            !temp_root.path().join("workspace/HEARTBEAT.md").exists(),
+            "reserved workspace memory file must not be written through empty alias segments"
         );
     }
 

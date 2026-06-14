@@ -89,7 +89,14 @@ fn workspace_scoped_alias(path: &str) -> Option<String> {
     }
 
     path.strip_prefix("workspace/")
-        .map(|relative| format!("{DEFAULT_SCOPED_ROOT}/{relative}"))
+        .map(|relative| relative.trim_start_matches('/'))
+        .map(|relative| {
+            if relative.is_empty() {
+                DEFAULT_SCOPED_ROOT.to_string()
+            } else {
+                format!("{DEFAULT_SCOPED_ROOT}/{relative}")
+            }
+        })
 }
 
 fn strip_leading_current_dir_segments(mut path: &str) -> &str {
