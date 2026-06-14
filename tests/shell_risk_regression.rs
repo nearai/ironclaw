@@ -170,6 +170,78 @@ async fn pipeline_takes_max_risk() {
     );
 }
 
+#[tokio::test]
+async fn newline_chains_take_max_risk() {
+    let tool = shell_tool().await;
+    let cmd = "echo control\nrm -rf /tmp/newline-marker";
+    assert_eq!(risk(&tool, cmd), RiskLevel::High);
+    assert_eq!(approval(&tool, cmd), ApprovalRequirement::Always);
+}
+
+#[tokio::test]
+async fn transparent_shell_wrappers_reveal_high_risk_payloads() {
+    let tool = shell_tool().await;
+    let cmds = [
+        r#"/usr/bin/env bash -lc "rm -rf /tmp/env-marker""#,
+        r#"env /bin/sh -c 'chmod 777 /tmp/env-marker'"#,
+        r#"bash -lc "git reset --hard HEAD~1""#,
+        r#"bash --rcfile "echo safe" -c "rm -rf /tmp/rcfile-marker""#,
+        r#"C:\Windows\System32\bash -lc "rm -rf C:\tmp\windows-marker""#,
+    ];
+    for cmd in &cmds {
+        assert_eq!(
+            risk(&tool, cmd),
+            RiskLevel::High,
+            "command `{cmd}` should unwrap to High risk"
+        );
+        assert_eq!(
+            approval(&tool, cmd),
+            ApprovalRequirement::Always,
+            "command `{cmd}` should require per-call approval"
+        );
+    }
+}
+
+#[tokio::test]
+async fn transparent_non_shell_wrappers_reveal_high_risk_payloads() {
+    let tool = shell_tool().await;
+    let cmds = [
+        "/usr/bin/time -p rm -rf /tmp/time-marker",
+        "/usr/bin/time -o /tmp/time.log rm -rf /tmp/time-marker",
+    ];
+    for cmd in &cmds {
+        assert_eq!(risk(&tool, cmd), RiskLevel::High);
+        assert_eq!(approval(&tool, cmd), ApprovalRequirement::Always);
+    }
+}
+
+#[tokio::test]
+async fn env_wrapper_options_with_arguments_are_skipped() {
+    let tool = shell_tool().await;
+    let cmds = [
+        r#"env -u PATH sh -c "git reset --hard""#,
+        r#"env --unset PATH bash -lc "rm -rf /tmp/env-unset-marker""#,
+        r#"env --chdir /tmp sh -c "chmod 777 /tmp/env-chdir-marker""#,
+    ];
+    for cmd in &cmds {
+        assert_eq!(risk(&tool, cmd), RiskLevel::High);
+        assert_eq!(approval(&tool, cmd), ApprovalRequirement::Always);
+    }
+}
+
+#[tokio::test]
+async fn sort_compress_program_requires_always_approval() {
+    let tool = shell_tool().await;
+    let cmds = [
+        "sort --compress-program=/tmp/helper payload.txt",
+        "sort --compress-program /tmp/helper payload.txt",
+    ];
+    for cmd in &cmds {
+        assert_eq!(risk(&tool, cmd), RiskLevel::High);
+        assert_eq!(approval(&tool, cmd), ApprovalRequirement::Always);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 4. Redirect bypass regression (Low → UnlessAutoApproved, not Never)
 // ---------------------------------------------------------------------------
