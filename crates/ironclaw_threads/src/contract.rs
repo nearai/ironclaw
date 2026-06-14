@@ -457,6 +457,20 @@ pub struct LoadContextMessagesRequest {
     pub message_ids: Vec<ThreadMessageId>,
 }
 
+/// An image attachment a model-visible message carries, in a form the turn
+/// layer can turn into a multimodal content part for a vision-capable model.
+///
+/// This is a *reference*, never bytes: `storage_key` is the landed scoped path
+/// (e.g. `/workspace/attachments/...`); the turn layer reads the bytes back
+/// through the project filesystem authority only when the active model can
+/// actually accept images. The textual `<attachments>` pointer in
+/// [`ContextMessage::content`] remains the fallback for text-only models.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextImageAttachment {
+    pub mime_type: String,
+    pub storage_key: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextMessage {
     pub message_id: Option<ThreadMessageId>,
@@ -465,6 +479,9 @@ pub struct ContextMessage {
     pub kind: MessageKind,
     pub tool_result_provider_call: Option<ProviderToolCallReferenceEnvelope>,
     pub content: String,
+    /// Image attachments on this message, for the multimodal path. Empty for
+    /// summaries, tool results, and messages without landed images.
+    pub image_attachments: Vec<ContextImageAttachment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

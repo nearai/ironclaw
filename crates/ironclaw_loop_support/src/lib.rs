@@ -1682,6 +1682,7 @@ fn history_summaries_by_ref(summaries: Vec<SummaryArtifact>) -> HashMap<String, 
                 kind: MessageKind::Summary,
                 tool_result_provider_call: None,
                 content: summary.content,
+                image_attachments: Vec::new(),
             };
             message_ref_from_context(&context_message)
                 .map(|message_ref| (message_ref.as_str().to_string(), context_message))
