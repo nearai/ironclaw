@@ -106,6 +106,7 @@ async fn gateway_coalesces_late_system_messages_before_provider_call() {
         content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333333").unwrap(),
         tool_result_provider_call: None,
         tool_result_content: None,
+        image_parts: Vec::new(),
     });
 
     gateway.stream_model(request).await.unwrap();
@@ -646,6 +647,7 @@ async fn gateway_reconstructs_provider_tool_roundtrip_from_tool_result_reference
         content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333333").unwrap(),
         tool_result_provider_call: Some(provider_call),
         tool_result_content: tool_result_reference_content(&envelope),
+        image_parts: Vec::new(),
     }];
 
     gateway.stream_model(request).await.unwrap();
@@ -722,6 +724,7 @@ async fn gateway_replays_model_observation_from_tool_result_reference_before_saf
         content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333336").unwrap(),
         tool_result_provider_call: Some(provider_call),
         tool_result_content: tool_result_reference_content(&envelope),
+        image_parts: Vec::new(),
     }];
 
     gateway.stream_model(request).await.unwrap();
@@ -775,6 +778,7 @@ async fn gateway_falls_back_to_safe_summary_for_invalid_model_observation() {
         content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333338").unwrap(),
         tool_result_provider_call: Some(provider_call),
         tool_result_content: tool_result_reference_content(&envelope),
+        image_parts: Vec::new(),
     }];
 
     gateway.stream_model(request).await.unwrap();
@@ -815,6 +819,7 @@ async fn gateway_replays_resolved_tool_result_content_instead_of_summary() {
         content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333334").unwrap(),
         tool_result_provider_call: Some(provider_call),
         tool_result_content: resolved_tool_result_content(),
+        image_parts: Vec::new(),
     }];
 
     gateway.stream_model(request).await.unwrap();
@@ -845,6 +850,7 @@ async fn gateway_degrades_resolved_orphan_tool_result_to_safe_summary() {
         content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333334").unwrap(),
         tool_result_provider_call: None,
         tool_result_content: resolved_tool_result_content(),
+        image_parts: Vec::new(),
     }];
 
     gateway.stream_model(request).await.unwrap();
@@ -894,6 +900,7 @@ async fn gateway_replays_model_observation_for_orphan_tool_reference() {
         content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333337").unwrap(),
         tool_result_provider_call: None,
         tool_result_content: tool_result_reference_content(&envelope),
+        image_parts: Vec::new(),
     }];
 
     gateway.stream_model(request).await.unwrap();
@@ -930,6 +937,7 @@ async fn gateway_rejects_tool_result_without_typed_replay_content() {
         content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333335").unwrap(),
         tool_result_provider_call: None,
         tool_result_content: None,
+        image_parts: Vec::new(),
     }];
 
     let error = gateway.stream_model(request).await.unwrap_err();
@@ -990,6 +998,7 @@ async fn gateway_reconstructs_multi_tool_provider_turn_from_grouped_result_refer
             content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333333").unwrap(),
             tool_result_provider_call: Some(first_provider_call),
             tool_result_content: tool_result_reference_content(&first_envelope),
+            image_parts: Vec::new(),
         },
         HostManagedModelMessage {
             role: HostManagedModelMessageRole::ToolResult,
@@ -997,6 +1006,7 @@ async fn gateway_reconstructs_multi_tool_provider_turn_from_grouped_result_refer
             content_ref: LoopMessageRef::new("msg:44444444-4444-4444-4444-444444444444").unwrap(),
             tool_result_provider_call: Some(second_provider_call),
             tool_result_content: tool_result_reference_content(&second_envelope),
+            image_parts: Vec::new(),
         },
     ];
 
@@ -1081,6 +1091,7 @@ async fn gateway_splits_adjacent_provider_tool_results_from_different_turns() {
             content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333333").unwrap(),
             tool_result_provider_call: Some(first_provider_call),
             tool_result_content: tool_result_reference_content(&first_envelope),
+            image_parts: Vec::new(),
         },
         HostManagedModelMessage {
             role: HostManagedModelMessageRole::ToolResult,
@@ -1088,6 +1099,7 @@ async fn gateway_splits_adjacent_provider_tool_results_from_different_turns() {
             content_ref: LoopMessageRef::new("msg:44444444-4444-4444-4444-444444444444").unwrap(),
             tool_result_provider_call: Some(second_provider_call),
             tool_result_content: tool_result_reference_content(&second_envelope),
+            image_parts: Vec::new(),
         },
     ];
 
@@ -1196,6 +1208,7 @@ async fn gateway_keeps_same_turn_provider_roundtrip_when_plain_tool_result_is_in
             content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333333").unwrap(),
             tool_result_provider_call: Some(first_provider_call),
             tool_result_content: tool_result_reference_content(&first_envelope),
+            image_parts: Vec::new(),
         },
         HostManagedModelMessage {
             role: HostManagedModelMessageRole::ToolResult,
@@ -1203,6 +1216,7 @@ async fn gateway_keeps_same_turn_provider_roundtrip_when_plain_tool_result_is_in
             content_ref: LoopMessageRef::new("msg:55555555-5555-5555-5555-555555555555").unwrap(),
             tool_result_provider_call: None,
             tool_result_content: tool_result_reference_content(&plain_envelope),
+            image_parts: Vec::new(),
         },
         HostManagedModelMessage {
             role: HostManagedModelMessageRole::ToolResult,
@@ -1210,6 +1224,7 @@ async fn gateway_keeps_same_turn_provider_roundtrip_when_plain_tool_result_is_in
             content_ref: LoopMessageRef::new("msg:44444444-4444-4444-4444-444444444444").unwrap(),
             tool_result_provider_call: Some(second_provider_call),
             tool_result_content: tool_result_reference_content(&second_envelope),
+            image_parts: Vec::new(),
         },
     ];
 
@@ -1274,6 +1289,7 @@ async fn gateway_degrades_provider_tool_replay_from_different_provider_route_to_
         content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333333").unwrap(),
         tool_result_provider_call: Some(provider_call),
         tool_result_content: tool_result_reference_content(&envelope),
+        image_parts: Vec::new(),
     }];
 
     let response = gateway.stream_model(request).await.unwrap();
@@ -1321,6 +1337,7 @@ async fn gateway_degrades_resolved_provider_mismatch_to_safe_summary() {
         content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333335").unwrap(),
         tool_result_provider_call: Some(provider_call),
         tool_result_content: resolved_tool_result_content(),
+        image_parts: Vec::new(),
     }];
 
     gateway.stream_model(request).await.unwrap();
@@ -2512,6 +2529,7 @@ fn model_request(model_profile_id: ModelProfileId) -> HostManagedModelRequest {
                     .unwrap(),
                 tool_result_provider_call: None,
                 tool_result_content: None,
+                image_parts: Vec::new(),
             },
             HostManagedModelMessage {
                 role: HostManagedModelMessageRole::User,
@@ -2520,6 +2538,7 @@ fn model_request(model_profile_id: ModelProfileId) -> HostManagedModelRequest {
                     .unwrap(),
                 tool_result_provider_call: None,
                 tool_result_content: None,
+                image_parts: Vec::new(),
             },
         ],
         surface_version: None,

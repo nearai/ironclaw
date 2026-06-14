@@ -2147,6 +2147,7 @@ mod reborn_support_tests {
             tool_result_content: Some(HostManagedToolResultContent::Resolved {
                 safe_summary: ToolResultSafeSummary::new("tool completed").expect("safe summary"),
             }),
+            image_parts: Vec::new(),
         }
     }
 

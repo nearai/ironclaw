@@ -286,6 +286,7 @@ async fn context_window_cache_does_not_cross_thread_scope_boundaries() {
                     kind: MessageKind::User,
                     tool_result_provider_call: None,
                     content: "mission a transcript".to_string(),
+                    image_attachments: Vec::new(),
                 },
             ),
             (
@@ -297,6 +298,7 @@ async fn context_window_cache_does_not_cross_thread_scope_boundaries() {
                     kind: MessageKind::User,
                     tool_result_provider_call: None,
                     content: "mission b transcript".to_string(),
+                    image_attachments: Vec::new(),
                 },
             ),
         ],
@@ -3012,6 +3014,7 @@ async fn prompt_port_builds_bundle_with_tool_result_reference_context() {
         kind: MessageKind::ToolResultReference,
         tool_result_provider_call: None,
         content: "tool result content".to_string(),
+        image_attachments: Vec::new(),
     }));
     let context_port = Arc::new(ThreadBackedLoopContextPort::new(
         thread_service,
@@ -3061,6 +3064,7 @@ async fn model_port_round_trips_tool_result_reference_context_as_typed_model_inp
         kind: MessageKind::ToolResultReference,
         tool_result_provider_call: None,
         content: envelope_content.clone(),
+        image_attachments: Vec::new(),
     }));
     let context_port = ThreadBackedLoopContextPort::new(
         thread_service.clone(),
@@ -3132,6 +3136,7 @@ async fn model_port_rejects_malformed_tool_result_reference_content() {
         kind: MessageKind::ToolResultReference,
         tool_result_provider_call: None,
         content: "not a tool-result reference envelope".to_string(),
+        image_attachments: Vec::new(),
     }));
     let gateway = Arc::new(RecordingGateway::reply("model says hi"));
     let model_port = ThreadBackedLoopModelPort::new(
@@ -4083,6 +4088,7 @@ impl StaticContextThreadService {
                 kind: MessageKind::User,
                 tool_result_provider_call: None,
                 content: String::new(),
+                image_attachments: Vec::new(),
             });
         Self {
             context_message,

@@ -15,9 +15,9 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_host_api::sha256_digest_token;
 use ironclaw_llm::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider, Role,
-    ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, clean_response,
-    contains_codex_text_tool_call_syntax,
+    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ImageUrl,
+    LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+    ToolDefinition, clean_response, contains_codex_text_tool_call_syntax,
     costs::{default_cost, model_cost},
     recover_codex_text_tool_calls_from_tool_names,
 };
@@ -1177,7 +1177,28 @@ fn convert_messages(
                 converted.push(ChatMessage::system(message.content.clone()))
             }
             HostManagedModelMessageRole::User => {
-                converted.push(ChatMessage::user(message.content.clone()))
+                if message.image_parts.is_empty() {
+                    converted.push(ChatMessage::user(message.content.clone()));
+                } else {
+                    // Multimodal: the text rides in `content`; `content_parts`
+                    // carries only the image parts (the provider adapters
+                    // prepend the text). Each encoded image becomes a base64
+                    // `data:` URL the vision model can read inline.
+                    let parts = message
+                        .image_parts
+                        .iter()
+                        .map(|image| ContentPart::ImageUrl {
+                            image_url: ImageUrl {
+                                url: format!(
+                                    "data:{};base64,{}",
+                                    image.mime_type, image.data_base64
+                                ),
+                                detail: None,
+                            },
+                        })
+                        .collect();
+                    converted.push(ChatMessage::user_with_parts(message.content.clone(), parts));
+                }
             }
             HostManagedModelMessageRole::Assistant => {
                 converted.push(ChatMessage::assistant(message.content.clone()));
@@ -1538,6 +1559,7 @@ mod tests {
             .expect("valid message ref"),
             tool_result_provider_call: None,
             tool_result_content: Some(HostManagedToolResultContent::Reference { envelope }),
+            image_parts: Vec::new(),
         };
 
         let replay = tool_result_replay_message(&message).expect("replay message");
@@ -1547,5 +1569,60 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&replay.model_content).unwrap(),
             observation
         );
+    }
+
+    fn user_message_with_images(
+        content: &str,
+        image_parts: Vec<ironclaw_loop_support::HostManagedModelImagePart>,
+    ) -> HostManagedModelMessage {
+        HostManagedModelMessage {
+            role: HostManagedModelMessageRole::User,
+            content: content.to_string(),
+            content_ref: ironclaw_turns::LoopMessageRef::new(
+                "msg:11111111-1111-1111-1111-111111111111",
+            )
+            .expect("valid message ref"),
+            tool_result_provider_call: None,
+            tool_result_content: None,
+            image_parts,
+        }
+    }
+
+    #[test]
+    fn convert_messages_emits_image_url_parts_for_user_image_attachments() {
+        let message = user_message_with_images(
+            "what is in this image?",
+            vec![ironclaw_loop_support::HostManagedModelImagePart {
+                mime_type: "image/png".to_string(),
+                data_base64: "iVBORw0KGgo=".to_string(),
+            }],
+        );
+        let identity = ProviderReplayIdentity::new("openai", "gpt-4o").expect("identity");
+
+        let converted = convert_messages(vec![message], &identity).expect("convert");
+
+        assert_eq!(converted.len(), 1);
+        let chat = &converted[0];
+        assert_eq!(chat.role, Role::User);
+        // Text rides in `content`; the image rides as a `data:` ImageUrl part.
+        assert_eq!(chat.content, "what is in this image?");
+        assert_eq!(chat.content_parts.len(), 1);
+        match &chat.content_parts[0] {
+            ContentPart::ImageUrl { image_url } => {
+                assert_eq!(image_url.url, "data:image/png;base64,iVBORw0KGgo=");
+            }
+            other => panic!("expected an ImageUrl part, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn convert_messages_text_only_user_carries_no_content_parts() {
+        let message = user_message_with_images("hello", Vec::new());
+        let identity = ProviderReplayIdentity::new("openai", "gpt-4o").expect("identity");
+
+        let converted = convert_messages(vec![message], &identity).expect("convert");
+
+        assert_eq!(converted[0].content, "hello");
+        assert!(converted[0].content_parts.is_empty());
     }
 }
