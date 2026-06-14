@@ -1814,15 +1814,26 @@ async fn get_session_returns_caller_identity_and_capabilities() {
         })
         .collect();
     assert_eq!(accept, expected.accept);
-    // The registry emits explicit canonical extensions (only the supported
-    // formats), not broad `image/*` wildcards that would admit unsupported ones.
+    // The registry emits exact MIME types *and* canonical extensions (only the
+    // supported formats), never broad `image/*` wildcards that would admit
+    // unsupported ones. The MIME types keep folder navigation working in the
+    // native macOS picker — an extension-only `accept` makes a folder
+    // double-click dismiss the dialog instead of opening it.
     assert!(
         accept.iter().any(|t| t == ".png"),
         "registry-derived accept must include an image extension: {accept:?}"
     );
     assert!(
+        accept.iter().any(|t| t == "image/png"),
+        "registry-derived accept must include the exact image MIME: {accept:?}"
+    );
+    assert!(
         accept.iter().any(|t| t == ".pdf"),
         "registry-derived accept must include .pdf: {accept:?}"
+    );
+    assert!(
+        !accept.iter().any(|t| t.contains('*')),
+        "accept must not advertise wildcards: {accept:?}"
     );
     assert_eq!(body["attachments"]["max_count"], expected.max_count);
     assert_eq!(
