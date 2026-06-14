@@ -1,0 +1,17 @@
+[package]
+name = "ironclaw_product_context"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Ingress resolver — single owner of turn-origin/surface/owner classification"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[dependencies]
+ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+
+[dev-dependencies]
