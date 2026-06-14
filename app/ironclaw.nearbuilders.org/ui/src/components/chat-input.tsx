@@ -42,7 +42,7 @@ export function ChatInput({
           onChange={(e) => setValue(e.target.value)}
           placeholder={placeholder}
           onKeyDown={handleKeyDown}
-          disabled={isSending || disabled}
+          disabled={disabled}
         />
         {isSending && onStop ? (
           <Button

@@ -1,7 +1,8 @@
-import { useRef, useEffect, type ReactNode } from "react";
+import { useRef, useEffect, useState, useCallback, type ReactNode } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
-import { MessageSquare } from "lucide-react";
+import { MessageSquare, ArrowDown } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 interface ChatMessageListProps {
   children: ReactNode;
@@ -10,6 +11,8 @@ interface ChatMessageListProps {
   emptyMessage?: string;
 }
 
+const NEAR_BOTTOM_THRESHOLD = 200;
+
 export function ChatMessageList({
   children,
   loading,
@@ -17,10 +20,49 @@ export function ChatMessageList({
   emptyMessage = "No messages yet",
 }: ChatMessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const [showScrollButton, setShowScrollButton] = useState(false);
+
+  const wrapperRef = useCallback((node: HTMLDivElement | null) => {
+    if (!node) return;
+    const viewport = node.querySelector<HTMLDivElement>("[data-slot='scroll-area-viewport']");
+    if (viewport) viewportRef.current = viewport;
+  }, []);
+
+  const isNearBottom = useCallback(() => {
+    const vp = viewportRef.current;
+    if (!vp) return true;
+    return vp.scrollHeight - vp.scrollTop - vp.clientHeight < NEAR_BOTTOM_THRESHOLD;
+  }, []);
+
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
+    bottomRef.current?.scrollIntoView({ behavior });
+  }, []);
+
+  const hasMountedRef = useRef(false);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [children]);
+    if (!hasMountedRef.current) {
+      hasMountedRef.current = true;
+      scrollToBottom("instant");
+      return;
+    }
+    if (isNearBottom()) {
+      scrollToBottom("smooth");
+    }
+  }, [children, isNearBottom, scrollToBottom]);
+
+  useEffect(() => {
+    const vp = viewportRef.current;
+    if (!vp) return;
+
+    const onScroll = () => {
+      setShowScrollButton(!isNearBottom());
+    };
+
+    vp.addEventListener("scroll", onScroll, { passive: true });
+    return () => vp.removeEventListener("scroll", onScroll);
+  }, [isNearBottom]);
 
   if (loading) {
     return (
@@ -56,11 +98,24 @@ export function ChatMessageList({
   }
 
   return (
-    <ScrollArea className="flex-1">
-      <div className="mx-auto max-w-3xl space-y-4 p-4">
-        {children}
-        <div ref={bottomRef} />
-      </div>
-    </ScrollArea>
+    <div ref={wrapperRef} className="relative flex-1 overflow-hidden">
+      <ScrollArea className="h-full">
+        <div className="mx-auto max-w-3xl space-y-4 p-4">
+          {children}
+          <div ref={bottomRef} />
+        </div>
+      </ScrollArea>
+      <button
+        type="button"
+        onClick={() => scrollToBottom("smooth")}
+        className={cn(
+          "absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-1.5 rounded-full border border-border bg-background px-3 py-1.5 text-xs font-medium text-muted-foreground shadow-md transition-all duration-200 hover:bg-muted hover:text-foreground",
+          showScrollButton ? "opacity-100 translate-y-0 pointer-events-auto" : "opacity-0 translate-y-2 pointer-events-none",
+        )}
+      >
+        <ArrowDown size={12} />
+        Scroll to bottom
+      </button>
+    </div>
   );
 }

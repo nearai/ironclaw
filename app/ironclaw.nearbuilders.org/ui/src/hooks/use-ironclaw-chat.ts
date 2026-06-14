@@ -197,6 +197,7 @@ function createIronclawStream({
             threadId,
             onEvent: ({ event }) => {
               if (closed) return;
+              console.log("[createIronclawStream] SSE event", { type: event.type, cursor: (event as any).cursor });
               if (sendCursor === undefined) {
                 preSendBuffer.push(event as unknown as Record<string, unknown>);
                 return;

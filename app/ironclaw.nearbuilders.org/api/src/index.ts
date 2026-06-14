@@ -17,6 +17,15 @@ import {
 } from "./db/schema";
 import { createAuthMiddleware } from "./lib/auth";
 import type { PluginsClient } from "./lib/plugins-types.gen";
+import {
+  normalizeThread,
+  normalizeTimelinePage,
+  normalizeTimelineEntry,
+  diffMessageSets,
+  type ConversationMessage,
+  type ConversationEvent,
+  type ConversationMessagePage,
+} from "./lib/conversation";
 
 function generateId(): string {
   return `hc_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
@@ -49,12 +58,82 @@ const hStream = (
       const events = await select(ic)(input);
       for await (const event of events) {
         if (signal?.aborted) break;
+        console.log("[stream] event", { type: event.type, cursor: (event as any).cursor });
         yield event;
       }
       console.log("[stream] end");
     } catch (error) {
       console.error("[stream] error:", error);
       throw error;
+    }
+  };
+
+const hConversationStream = (
+  services: { ironclaw: (ctx: any) => Ic },
+) =>
+  async function* ({ input, signal, context }: any) {
+    const ic = services.ironclaw(context);
+    const threadId = (input as any).threadId;
+    const afterCursor = (input as any).afterCursor;
+    const knownIds = new Set<string>();
+    let snapshotYielded = false;
+
+    try {
+      const rawStream = await ic.threads.streamEvents({
+        id: threadId,
+        afterCursor,
+      });
+
+      for await (const event of (rawStream as any)) {
+        if (signal?.aborted) break;
+
+        const type = event.type as string;
+
+        if (type === "keep_alive") {
+          const ev: ConversationEvent = { type: "keep_alive", threadId };
+          yield ev;
+          continue;
+        }
+
+        if (type === "projection_snapshot" || type === "projection_update") {
+          try {
+            const rawPage = await ic.threads.getTimeline({ id: threadId, limit: 100 });
+            const page = normalizeTimelinePage(rawPage, threadId);
+
+            if (!snapshotYielded) {
+              snapshotYielded = true;
+              for (const msg of page.messages) {
+                knownIds.add(msg.id);
+              }
+              yield { type: "snapshot", threadId, messages: page.messages } satisfies ConversationEvent;
+              continue;
+            }
+
+            const added = diffMessageSets(knownIds, page.messages);
+            if (added.length > 0) {
+              for (const msg of added) {
+                knownIds.add(msg.id);
+              }
+              yield { type: "messages_changed", threadId, messages: page.messages } satisfies ConversationEvent;
+              for (const msg of added) {
+                yield { type: "message_added", threadId, message: msg } satisfies ConversationEvent;
+
+                if (msg.role === "assistant") {
+                  yield { type: "run_finished", threadId, runId: msg.runId ?? undefined } satisfies ConversationEvent;
+                }
+              }
+            }
+          } catch {
+            // if timeline refetch fails, skip this event
+          }
+        }
+      }
+    } catch (error) {
+      yield {
+        type: "error",
+        threadId,
+        error: error instanceof Error ? error.message : String(error),
+      } satisfies ConversationEvent;
     }
   };
 
@@ -580,6 +659,50 @@ export default createPlugin.withPlugins<PluginsClient>()({
             .use(ic.credentials)
             .handler(h1(services, (ic) => ic.operator.createAccessSession)),
         },
+      },
+
+      conversation: {
+        listThreads: builder.conversation.listThreads
+          .use(requireAuth)
+          .handler(async ({ context }: any) => {
+            const ic = s.ironclaw({ ...context, userId: context.userId });
+            const raw = await ic.threads.list({ limit: 50 });
+            return { data: (raw.data ?? []).map(normalizeThread) };
+          }),
+
+        getMessages: builder.conversation.getMessages
+          .use(requireAuth)
+          .handler(async ({ input, context }: any) => {
+            const ic = s.ironclaw({ ...context, userId: context.userId });
+            const raw = await ic.threads.getTimeline({
+              id: input.threadId,
+              limit: input.limit ?? 100,
+              cursor: input.cursor,
+            });
+            return normalizeTimelinePage(raw, input.threadId);
+          }),
+
+        sendMessage: builder.conversation.sendMessage
+          .use(requireAuth)
+          .handler(async ({ input, context }: any) => {
+            const ic = s.ironclaw({ ...context, userId: context.userId });
+            const raw = await ic.threads.sendMessage({
+              id: input.threadId,
+              content: input.content,
+              clientActionId: input.clientActionId,
+            });
+            return {
+              threadId: input.threadId,
+              runId: raw.runId ?? raw.activeRunId ?? "",
+              acceptedMessageRef: raw.acceptedMessageRef ?? "",
+              pendingMessageId: `pending-${crypto.randomUUID()}`,
+              submittedAt: new Date().toISOString(),
+            };
+          }),
+
+        stream: builder.conversation.stream
+          .use(requireAuth)
+          .handler(hConversationStream(s)),
       },
     };
   },

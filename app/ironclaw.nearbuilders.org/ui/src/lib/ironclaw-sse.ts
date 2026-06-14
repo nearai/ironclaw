@@ -59,7 +59,7 @@ export function openIronclawEventSource({
   onError,
 }: OpenIronclawEventSourceOptions): IronclawEventSourceHandle {
   const url = new URL(
-    `/api/threads/${encodeURIComponent(threadId)}/events`,
+    `/api/conversation/threads/${encodeURIComponent(threadId)}/events`,
     window.location.origin,
   );
   if (afterCursor) {
@@ -94,9 +94,9 @@ export function openIronclawEventSource({
       lastEventId: event.lastEventId || null,
     };
 
-    if (type === "projection_snapshot") {
+    if (type === "snapshot" || type === "projection_snapshot") {
       onSnapshot?.(frame);
-    } else if (type === "projection_update") {
+    } else if (type === "messages_changed" || type === "projection_update") {
       onUpdate?.(frame);
     }
 

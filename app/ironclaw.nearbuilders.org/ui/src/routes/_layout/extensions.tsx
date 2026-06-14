@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import {
+  Cable,
   CheckCircle,
   ExternalLink,
   Globe,
@@ -46,6 +47,10 @@ type RegistryEntry = Awaited<
 type ConnectableChannel = Awaited<
   ReturnType<ReturnType<typeof useApiClient>["ironclaw"]["channels"]["listConnectable"]>
 >["data"][number];
+
+type ExtensionSetupDetail = Awaited<
+  ReturnType<ReturnType<typeof useApiClient>["ironclaw"]["extensions"]["getSetup"]>
+>;
 
 function ExtensionSkeleton() {
   return (
@@ -264,7 +269,7 @@ function SetupDialog({
   onSave?: () => void;
 }) {
   const apiClient = useApiClient();
-  const [setupData, setSetupData] = useState<Record<string, unknown> | null>(null);
+  const [setupData, setSetupData] = useState<ExtensionSetupDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [formPayload, setFormPayload] = useState<Record<string, string>>({});
@@ -284,11 +289,11 @@ function SetupDialog({
   useEffect(() => {
     if (setupData) {
       const initial: Record<string, string> = {};
-      for (const secret of setupData.secrets ?? []) {
-        initial[secret.name ?? secret.key] = "";
+      for (const secret of setupData.secrets) {
+        initial[secret.name] = "";
       }
-      for (const field of setupData.fields ?? []) {
-        initial[field.name] = field.default ?? "";
+      for (const field of setupData.fields) {
+        initial[field.name] = "";
       }
       setFormPayload(initial);
     }
@@ -333,9 +338,9 @@ function SetupDialog({
           <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">
             {error}
           </div>
-        ) : setupData?.onboarding ? (
+        ) : setupData ? (
           <div className="space-y-4">
-            {setupData.onboarding.credentialInstructions && (
+            {setupData.onboarding?.credentialInstructions && (
               <div className="rounded-lg bg-muted p-4 space-y-2">
                 <p className="text-xs font-medium text-foreground">Instructions</p>
                 <p className="text-sm text-muted-foreground whitespace-pre-wrap">
@@ -344,7 +349,7 @@ function SetupDialog({
               </div>
             )}
 
-            {setupData.onboarding.setupUrl && (
+            {setupData.onboarding?.setupUrl && (
               <a
                 href={setupData.onboarding.setupUrl}
                 target="_blank"
@@ -356,7 +361,7 @@ function SetupDialog({
               </a>
             )}
 
-            {setupData.onboarding.credentialNextStep && (
+            {setupData.onboarding?.credentialNextStep && (
               <div className="rounded-lg border border-border bg-card p-4">
                 <p className="text-xs font-medium text-foreground mb-1.5">
                   Credential Fields
@@ -367,45 +372,42 @@ function SetupDialog({
               </div>
             )}
 
-            {(setupData.secrets?.length > 0 || setupData.fields?.length > 0) && (
+            {(setupData.secrets.length > 0 || setupData.fields.length > 0) && (
               <div className="space-y-3">
-                {setupData.secrets?.length > 0 && (
+                {setupData.secrets.length > 0 && (
                   <div className="space-y-3">
-                    {setupData.secrets.map((secret: any) => {
-                      const key = secret.name ?? secret.key;
-                      return (
-                        <div key={key} className="space-y-1.5">
-                          <Label htmlFor={key}>
-                            {secret.label ?? secret.prompt ?? key}
-                          </Label>
-                          <Input
-                            id={key}
-                            placeholder={secret.prompt ?? "Enter value"}
-                            value={formPayload[key] ?? ""}
-                            onChange={(e) =>
-                              setFormPayload((prev) => ({ ...prev, [key]: e.target.value }))
-                            }
-                            disabled={secret.provided || saving}
-                          />
-                          {secret.provided && (
-                            <p className="text-[11px] text-muted-foreground">Already provided</p>
-                          )}
-                        </div>
-                      );
-                    })}
+                    {setupData.secrets.map((secret) => (
+                      <div key={secret.name} className="space-y-1.5">
+                        <Label htmlFor={secret.name}>
+                          {secret.prompt}
+                        </Label>
+                        <Input
+                          id={secret.name}
+                          placeholder={secret.prompt}
+                          value={formPayload[secret.name] ?? ""}
+                          onChange={(e) =>
+                            setFormPayload((prev) => ({ ...prev, [secret.name]: e.target.value }))
+                          }
+                          disabled={secret.provided || saving}
+                        />
+                        {secret.provided && (
+                          <p className="text-[11px] text-muted-foreground">Already provided</p>
+                        )}
+                      </div>
+                    ))}
                   </div>
                 )}
-                {setupData.fields?.length > 0 && (
+                {setupData.fields.length > 0 && (
                   <div className="space-y-3">
-                    {setupData.fields.map((field: any) => (
+                    {setupData.fields.map((field) => (
                       <div key={field.name} className="space-y-1.5">
                         <Label htmlFor={field.name}>
-                          {field.prompt ?? field.name}
+                          {field.prompt}
                           {field.optional ? " (optional)" : ""}
                         </Label>
                         <Input
                           id={field.name}
-                          placeholder={field.placeholder ?? field.prompt ?? "Enter value"}
+                          placeholder={field.placeholder ?? field.prompt}
                           value={formPayload[field.name] ?? ""}
                           onChange={(e) =>
                             setFormPayload((prev) => ({ ...prev, [field.name]: e.target.value }))
@@ -425,7 +427,8 @@ function SetupDialog({
               </div>
             )}
           </div>
-        ) : setupData ? (
+        ) : null}
+        {setupData && !setupData.onboarding && setupData.secrets.length === 0 && setupData.fields.length === 0 ? (
           <div className="text-sm text-muted-foreground">
             <p>No additional setup required for this extension.</p>
           </div>

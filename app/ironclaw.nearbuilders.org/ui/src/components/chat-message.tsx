@@ -1,5 +1,6 @@
 import type { UIMessage } from "@tanstack/ai-react";
-import { CheckCircle2, Loader2, ShieldCheck, ShieldX, Terminal } from "lucide-react";
+import { AlertCircle, CheckCircle2, Copy, Loader2, ShieldCheck, ShieldX, Terminal } from "lucide-react";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Markdown } from "@/components/ui/markdown";
 import { cn } from "@/lib/utils";
@@ -7,6 +8,7 @@ import { cn } from "@/lib/utils";
 interface ChatMessageProps {
   message: UIMessage;
   isOptimistic?: boolean;
+  status?: string;
   onApproveTool?: (toolCallId: string, approved: boolean) => void;
 }
 
@@ -78,8 +80,16 @@ function ToolResultCard({ content, state }: { content: string | unknown[]; state
   );
 }
 
-export function ChatMessage({ message, isOptimistic, onApproveTool }: ChatMessageProps) {
+export function ChatMessage({ message, isOptimistic, status, onApproveTool }: ChatMessageProps) {
   const isUser = message.role === "user";
+  const isFailed = status === "failed";
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async (text: string) => {
+    await navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
 
   let textContent = "";
   const toolCallParts: Array<{
@@ -122,7 +132,7 @@ export function ChatMessage({ message, isOptimistic, onApproveTool }: ChatMessag
   }
 
   return (
-    <div className={cn("flex w-full", isUser ? "justify-end" : "justify-start")}>
+    <div className={cn("group flex w-full", isUser ? "justify-end" : "justify-start")}>
       <div
         className={cn(
           "max-w-[80%] min-w-0 space-y-2",
@@ -130,8 +140,15 @@ export function ChatMessage({ message, isOptimistic, onApproveTool }: ChatMessag
             ? "rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-sm text-primary-foreground"
             : "rounded-2xl rounded-bl-md bg-muted px-4 py-2.5 text-sm text-foreground",
           isOptimistic && "opacity-70",
+          isFailed && "border border-destructive/50 bg-destructive/5",
         )}
       >
+        {isFailed && (
+          <div className="flex items-center gap-1.5 text-xs text-destructive">
+            <AlertCircle size={12} />
+            <span>Failed to send</span>
+          </div>
+        )}
         {isUser ? (
           <p className="whitespace-pre-wrap break-words">{textContent}</p>
         ) : (
@@ -167,18 +184,28 @@ export function ChatMessage({ message, isOptimistic, onApproveTool }: ChatMessag
             ))}
           </>
         )}
-        <div
-          className={cn("mt-1 flex items-center gap-1.5", isUser ? "justify-end" : "justify-start")}
-        >
-          <span className="text-[10px] text-muted-foreground/60">
-            {message.createdAt
-              ? new Date(message.createdAt).toLocaleTimeString(undefined, {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                })
-              : ""}
-          </span>
-        </div>
+        {message.createdAt ? (
+          <div
+            className={cn("mt-1 flex items-center gap-1.5", isUser ? "justify-end" : "justify-start")}
+          >
+            {!isUser && textContent && (
+              <button
+                type="button"
+                onClick={() => handleCopy(textContent)}
+                className="opacity-0 group-hover:opacity-100 transition-opacity"
+                title={copied ? "Copied!" : "Copy message"}
+              >
+                <Copy size={10} className={cn("text-muted-foreground/60 hover:text-muted-foreground transition-colors", copied && "text-muted-foreground")} />
+              </button>
+            )}
+            <span className="text-[10px] text-muted-foreground/60">
+              {new Date(message.createdAt).toLocaleTimeString(undefined, {
+                hour: "2-digit",
+                minute: "2-digit",
+              })}
+            </span>
+          </div>
+        ) : null}
       </div>
     </div>
   );

@@ -1,124 +1,167 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { Loader2, MessageSquare, Plus, Terminal, Trash2, Unplug, Zap, Brain } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { MessageSquare, Plus, Terminal, Trash2, Unplug, Zap } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { type ApiClient, useApiClient } from "@/app";
+import { useApiClient } from "@/app";
 import { ChatIdentityBar } from "@/components/chat-identity-bar";
 import { ChatInput } from "@/components/chat-input";
 import { ChatMessage } from "@/components/chat-message";
 import { ChatMessageList } from "@/components/chat-message-list";
-import { ChatThreadMeta } from "@/components/chat-thread-meta";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import type { ThreadState } from "@/hooks/use-thread-state";
-import { useIronclawChat } from "@/hooks/use-ironclaw-chat";
 import { useIronclawStatus } from "@/hooks/use-ironclaw-status";
-import { useThreadState } from "@/hooks/use-thread-state";
-import type { UIMessage } from "@tanstack/ai/client";
-
-type Thread = Awaited<ReturnType<ApiClient["ironclaw"]["threads"]["list"]>>["data"][number];
+import { useConversationThreads, useConversationMessages, useSendConversationMessage, useConversationStream, type ConversationThread } from "@/hooks/use-conversation";
 
 export const Route = createFileRoute("/_layout/")({
   component: ChatPage,
 });
 
+interface ThreadMeta {
+  threadId: string;
+  title: string | null;
+  scope: { tenantId: string; agentId: string; projectId?: string };
+  createdByActorId: string;
+}
+
 function ChatArea({
   threadId,
-  apiClient,
-  initialMessages,
-  threadState,
-  threadStateError,
-  onRebuild,
+  threadMeta,
+  threadMetaError,
 }: {
   threadId: string;
-  apiClient: ApiClient;
-  initialMessages: Array<UIMessage>;
-  threadState: ThreadState | null;
-  threadStateError: string | null;
-  onRebuild: () => Promise<void>;
+  threadMeta: ThreadMeta | null;
+  threadMetaError: string | null;
 }) {
-  const { messages, sendMessage, isLoading, status, error, stop, resolveGate } = useIronclawChat(
-    threadId,
-    apiClient,
-    initialMessages,
-  );
+  const sendMessage = useSendConversationMessage(threadId);
+  const [pendingRun, setPendingRun] = useState<{ runId: string; content: string } | null>(null);
+  const knownMessageIdsRef = useRef<Set<string>>(new Set());
 
-  const [isRebuilding, setIsRebuilding] = useState(false);
-  const [threadMetaOpen, setThreadMetaOpen] = useState(false);
+  const { data, isLoading } = useConversationMessages(threadId);
 
-  const handleRebuild = useCallback(async () => {
-    setIsRebuilding(true);
-    try {
-      await onRebuild();
-    } finally {
-      setIsRebuilding(false);
-    }
-  }, [onRebuild]);
+  const allMessages = useMemo(() => {
+    return data?.pages.flatMap((p) => p.messages) ?? [];
+  }, [data]);
 
   const handleSend = useCallback(
     (content: string) => {
-      sendMessage(content);
+      if (!content.trim()) return;
+      const clientActionId = `ui-${crypto.randomUUID()}`;
+      setPendingRun({ runId: clientActionId, content });
+      sendMessage.mutate({ content, clientActionId });
     },
     [sendMessage],
   );
 
-  const handleApproveTool = useCallback(
-    (toolCallId: string, approved: boolean) => {
-      resolveGate(toolCallId, approved).catch(() => toast.error("Failed to approve tool"));
-    },
-    [resolveGate],
-  );
+  const handleRebuild = useCallback(async () => {
+    // no-op: stream subscription auto-refetches
+  }, []);
+
+  const handleToggleMeta = useCallback(() => {
+    // no-op: thread meta sheet not wired yet
+  }, []);
+
+  const userMessage = useMemo(() => {
+    if (!pendingRun) return null;
+    return {
+      id: `pending-${pendingRun.runId}`,
+      threadId,
+      role: "user" as const,
+      text: pendingRun.content,
+      createdAt: new Date().toISOString(),
+      status: "submitted" as const,
+      sequence: allMessages.length > 0 ? allMessages[allMessages.length - 1]!.sequence + 1 : 1,
+      runId: pendingRun.runId,
+    };
+  }, [pendingRun, threadId, allMessages]);
+
+  const displayMessages = useMemo(() => {
+    const msgs = [...allMessages];
+    if (userMessage && pendingRun) {
+      const alreadyShown = allMessages.some(
+        (m) => m.role === "user" && m.text === pendingRun.content,
+      );
+      if (!alreadyShown) msgs.push(userMessage);
+    }
+    return msgs;
+  }, [allMessages, userMessage, pendingRun]);
+
+  const hasNewAssistantMessage = useMemo(() => {
+    if (!pendingRun) return false;
+    return allMessages.some((m) => m.role === "assistant" && !knownMessageIdsRef.current.has(m.id));
+  }, [allMessages, pendingRun]);
+
+  const isThinking = sendMessage.isPending || (pendingRun !== null && !hasNewAssistantMessage);
+
+  useEffect(() => {
+    if (!sendMessage.isPending && pendingRun && hasNewAssistantMessage) {
+      setPendingRun(null);
+    }
+  }, [sendMessage.isPending, pendingRun, hasNewAssistantMessage]);
+
+  useEffect(() => {
+    for (const msg of allMessages) {
+      knownMessageIdsRef.current.add(msg.id);
+    }
+  }, [allMessages]);
 
   return (
     <>
       <ChatIdentityBar
-        threadState={threadState}
+        threadState={
+          threadMeta
+            ? {
+                thread: {
+                  threadId: threadMeta.threadId,
+                  title: threadMeta.title,
+                  scope: {
+                    tenantId: threadMeta.scope.tenantId,
+                    agentId: threadMeta.scope.agentId,
+                    projectId: threadMeta.scope.projectId,
+                  },
+                  createdByActorId: threadMeta.createdByActorId,
+                },
+                messages: [],
+              }
+            : null
+        }
         onRebuild={handleRebuild}
-        onToggleMeta={() => setThreadMetaOpen((prev) => !prev)}
-        isRebuilding={isRebuilding}
+        onToggleMeta={handleToggleMeta}
       />
 
       <ChatMessageList
-        loading={messages.length === 0 && !threadState}
-        empty={messages.length === 0 && !!threadState}
-        emptyMessage={
-          threadStateError ? "Failed to load thread" : "No messages yet. Send a message to start."
-        }
+        loading={isLoading}
+        empty={displayMessages.length === 0 && !isLoading}
+        emptyMessage={threadMetaError ? "Failed to load thread" : "No messages yet. Send a message to start."}
       >
-        {messages.map((message) => (
+        {displayMessages.map((message) => (
           <ChatMessage
             key={message.id}
-            message={message}
-            onApproveTool={handleApproveTool}
+            status={message.status}
+            message={{
+              id: message.id,
+              role: message.role,
+              parts: [{ type: "text" as const, content: message.text }],
+              createdAt: message.createdAt ? new Date(message.createdAt) : undefined,
+            }}
           />
         ))}
-        {isLoading && messages.length > 0 ? (
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <Brain size={14} className="animate-pulse" />
-            Thinking...
+        {isThinking ? (
+          <div className="flex items-start gap-3 px-4 py-2">
+            <div className="rounded-2xl rounded-bl-sm bg-muted px-4 py-2.5">
+              <div className="flex items-center gap-1">
+                <span className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground/40 [animation-delay:0ms]" />
+                <span className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground/40 [animation-delay:150ms]" />
+                <span className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground/40 [animation-delay:300ms]" />
+              </div>
+            </div>
           </div>
         ) : null}
       </ChatMessageList>
 
-      {error ? (
-        <div className="mx-auto max-w-3xl px-4 pb-2">
-          <p className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-            {error.message}
-          </p>
-        </div>
-      ) : null}
-
       <ChatInput
         onSend={handleSend}
-        onStop={stop}
         placeholder="Type a message..."
-        isSending={isLoading || status === "streaming" || status === "submitted"}
-      />
-
-      <ChatThreadMeta
-        open={threadMetaOpen}
-        onOpenChange={setThreadMetaOpen}
-        threadState={threadState}
+        isSending={isThinking}
       />
     </>
   );
@@ -128,45 +171,29 @@ function ChatPage() {
   const apiClient = useApiClient();
   const { status: connectionStatus } = useIronclawStatus();
 
-  const [threads, setThreads] = useState<Thread[]>([]);
-  const [threadsLoaded, setThreadsLoaded] = useState(false);
-  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
-
-  const activeThreadMeta = useMemo(() => {
-    if (!activeThreadId) return undefined;
-    return threads.find((t) => t.threadId === activeThreadId);
-  }, [activeThreadId, threads]);
-
-  const { state: threadState, loading: threadStateLoading, error: threadStateError, rebuild } = useThreadState(activeThreadId, activeThreadMeta);
-
-  const initialMessages = useMemo((): Array<UIMessage> | null => {
-    if (!threadState?.messages) return null;
-    return threadState.messages
-      .filter((m) => m.kind === "user" || m.kind === "assistant")
-      .map((m) => ({
-        id: m.messageId,
-        role: (m.kind === "user" ? "user" : "assistant") as "user" | "assistant",
-        parts: [{ type: "text" as const, content: m.content ?? "" }],
-        createdAt: m.createdAt ? new Date(m.createdAt) : undefined,
-      })) as Array<UIMessage>;
-  }, [threadState]);
-
   const isDisconnected =
     connectionStatus === "disconnected" || connectionStatus === "never-connected";
 
-  const loadThreads = useCallback(async () => {
-    try {
-      const result = await apiClient.ironclaw.threads.list({ limit: 50 });
-      setThreads(result.data);
-      setThreadsLoaded(true);
-    } catch {
-      setThreadsLoaded(true);
-    }
-  }, [apiClient]);
+  const threadsQuery = useConversationThreads();
+  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!isDisconnected) loadThreads();
-  }, [loadThreads, isDisconnected]);
+  const threads = useMemo(() => {
+    return (threadsQuery.data?.pages.flatMap((p) => p.threads) ?? []) as ConversationThread[];
+  }, [threadsQuery.data]);
+
+  const activeThreadMeta = useMemo(() => {
+    if (!activeThreadId) return null;
+    const found = threads.find((t) => t.threadId === activeThreadId);
+    if (!found) return null;
+    return {
+      threadId: found.threadId,
+      title: found.title,
+      scope: { tenantId: found.tenantId, agentId: found.agentId, projectId: found.projectId ?? undefined },
+      createdByActorId: found.createdByActorId,
+    } satisfies ThreadMeta;
+  }, [activeThreadId, threads]);
+
+  useConversationStream(activeThreadId);
 
   const openThread = useCallback(async (threadId: string) => {
     setActiveThreadId(threadId);
@@ -177,24 +204,18 @@ function ChatPage() {
       const result = await apiClient.ironclaw.threads.create({
         clientActionId: `ui-${crypto.randomUUID()}`,
       });
-      const entry: Thread = {
-        threadId: result.threadId,
-        title: result.title,
-        scope: { tenantId: "", agentId: "" },
-        createdByActorId: "",
-      };
-      setThreads((prev) => [entry, ...prev]);
-      openThread(entry.threadId);
+      threadsQuery.refetch();
+      openThread(result.threadId);
     } catch {
       toast.error("Failed to create thread");
     }
-  }, [apiClient, openThread]);
+  }, [apiClient, openThread, threadsQuery]);
 
   const deleteThread = useCallback(
     async (threadId: string) => {
       try {
         await apiClient.ironclaw.threads.delete({ id: threadId });
-        setThreads((prev) => prev.filter((t) => t.threadId !== threadId));
+        threadsQuery.refetch();
         if (activeThreadId === threadId) {
           setActiveThreadId(null);
         }
@@ -202,7 +223,7 @@ function ChatPage() {
         toast.error("Failed to delete thread");
       }
     },
-    [apiClient, activeThreadId],
+    [apiClient, activeThreadId, threadsQuery],
   );
 
   const statusDotClass =
@@ -259,7 +280,7 @@ function ChatPage() {
                   {connectionStatus === "never-connected" ? "Set up IronClaw" : "Setup guide"}
                 </Link>
               </div>
-            ) : threadsLoaded && threads.length === 0 ? (
+            ) : threadsQuery.isSuccess && threads.length === 0 ? (
               <p className="px-2 py-4 text-center text-xs text-muted-foreground">
                 No threads yet. Create one to start chatting.
               </p>
@@ -304,59 +325,48 @@ function ChatPage() {
       </div>
 
       <div className="flex flex-1 flex-col min-w-0">
-        {activeThreadId && threadStateLoading ? (
-          <div className="flex h-full items-center justify-center">
-            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-          </div>
-        ) : activeThreadId && initialMessages ? (
+        {activeThreadId ? (
           <ChatArea
             key={activeThreadId}
             threadId={activeThreadId}
-            apiClient={apiClient}
-            initialMessages={initialMessages}
-            threadState={threadState}
-            threadStateError={threadStateError}
-            onRebuild={rebuild}
+            threadMeta={activeThreadMeta}
+            threadMetaError={null}
           />
-        ) : activeThreadId && !initialMessages ? (
+        ) : isDisconnected ? (
           <div className="flex h-full items-center justify-center">
-            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+            <div className="text-center space-y-4 max-w-xs px-4">
+              <div className="flex h-14 w-14 items-center justify-center rounded-full border border-border bg-muted mx-auto">
+                <Unplug className="h-6 w-6 text-muted-foreground" />
+              </div>
+              <div className="space-y-1.5">
+                <p className="text-sm font-semibold text-foreground">
+                  {connectionStatus === "never-connected"
+                    ? "IronClaw not connected"
+                    : "Connection lost"}
+                </p>
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  {connectionStatus === "never-connected"
+                    ? "Run the IronClaw binary locally, then return here to start chatting."
+                    : "The IronClaw binary stopped responding. Check that it's still running."}
+                </p>
+              </div>
+              <Link
+                to="/ironclaw"
+                className="inline-flex items-center gap-2 rounded-full border border-primary/40 bg-primary/5 px-4 py-2 text-sm font-medium text-primary hover:bg-primary/10 transition-colors"
+              >
+                <Zap size={14} />
+                {connectionStatus === "never-connected" ? "Set up IronClaw" : "Setup guide"}
+              </Link>
+            </div>
           </div>
         ) : (
           <div className="flex h-full items-center justify-center">
-            {isDisconnected ? (
-              <div className="text-center space-y-4 max-w-xs px-4">
-                <div className="flex h-14 w-14 items-center justify-center rounded-full border border-border bg-muted mx-auto">
-                  <Unplug className="h-6 w-6 text-muted-foreground" />
-                </div>
-                <div className="space-y-1.5">
-                  <p className="text-sm font-semibold text-foreground">
-                    {connectionStatus === "never-connected"
-                      ? "IronClaw not connected"
-                      : "Connection lost"}
-                  </p>
-                  <p className="text-xs text-muted-foreground leading-relaxed">
-                    {connectionStatus === "never-connected"
-                      ? "Run the IronClaw binary locally, then return here to start chatting."
-                      : "The IronClaw binary stopped responding. Check that it's still running."}
-                  </p>
-                </div>
-                <Link
-                  to="/ironclaw"
-                  className="inline-flex items-center gap-2 rounded-full border border-primary/40 bg-primary/5 px-4 py-2 text-sm font-medium text-primary hover:bg-primary/10 transition-colors"
-                >
-                  <Zap size={14} />
-                  {connectionStatus === "never-connected" ? "Set up IronClaw" : "Setup guide"}
-                </Link>
-              </div>
-            ) : (
-              <div className="text-center">
-                <Terminal className="mx-auto h-8 w-8 text-muted-foreground" />
-                <p className="mt-2 text-sm text-muted-foreground">
-                  Select a thread or create a new one
-                </p>
-              </div>
-            )}
+            <div className="text-center">
+              <Terminal className="mx-auto h-8 w-8 text-muted-foreground" />
+              <p className="mt-2 text-sm text-muted-foreground">
+                Select a thread or create a new one
+              </p>
+            </div>
           </div>
         )}
       </div>
