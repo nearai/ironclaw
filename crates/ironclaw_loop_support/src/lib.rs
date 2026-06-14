@@ -887,6 +887,7 @@ where
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
+    attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
 }
 
 impl<S, G> ThreadBackedLoopModelPort<S, G>
@@ -915,6 +916,7 @@ where
             skill_context_source: None,
             instruction_materialization_store: None,
             identity_context_source: None,
+            attachment_read_port: None,
         }
     }
 
@@ -940,6 +942,7 @@ where
             skill_context_source: None,
             instruction_materialization_store: None,
             identity_context_source: None,
+            attachment_read_port: None,
         }
     }
 
@@ -985,6 +988,52 @@ where
     pub fn with_capability_port(mut self, capabilities: Arc<dyn LoopCapabilityPort>) -> Self {
         self.capabilities = Some(capabilities);
         self
+    }
+
+    pub fn with_attachment_read_port(mut self, port: Arc<dyn LoopAttachmentReadPort>) -> Self {
+        self.attachment_read_port = Some(port);
+        self
+    }
+
+    /// Read + base64-encode the image attachments on a model-visible message so
+    /// the gateway can attach them as multimodal parts for a vision model. Empty
+    /// when no read port is wired or the message has no images. Read failures
+    /// are logged and skipped — the image is dropped rather than failing the
+    /// turn; the textual `<attachments>` pointer remains either way.
+    async fn encode_image_parts(
+        &self,
+        attachments: &[ironclaw_threads::ContextImageAttachment],
+    ) -> Vec<HostManagedModelImagePart> {
+        if attachments.is_empty() {
+            return Vec::new();
+        }
+        let Some(port) = self.attachment_read_port.as_ref() else {
+            return Vec::new();
+        };
+        let scope = self.thread_scope.to_resource_scope();
+        let mut parts = Vec::with_capacity(attachments.len());
+        for attachment in attachments {
+            match port
+                .read_attachment_bytes(&scope, &attachment.storage_key)
+                .await
+            {
+                Ok(bytes) => {
+                    use base64::Engine;
+                    parts.push(HostManagedModelImagePart {
+                        mime_type: attachment.mime_type.clone(),
+                        data_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                    });
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        storage_key = %attachment.storage_key,
+                        %error,
+                        "skipping image attachment that could not be read for the model"
+                    );
+                }
+            }
+        }
+        parts
     }
 }
 
@@ -1159,13 +1208,14 @@ where
                     continue;
                 };
                 let tool_result_content = tool_result_content_for_context_message(&message)?;
+                let image_parts = self.encode_image_parts(&message.image_attachments).await;
                 messages.push(HostManagedModelMessage {
                     role: model_role_for_kind(message.kind),
                     content: message.content,
                     content_ref,
                     tool_result_provider_call: message.tool_result_provider_call,
                     tool_result_content,
-                    image_parts: Vec::new(),
+                    image_parts,
                 });
             }
             return Ok(messages);
@@ -1319,13 +1369,16 @@ where
                     "model message role does not match transcript message",
                 ));
             }
+            let image_parts = self
+                .encode_image_parts(&context_message.image_attachments)
+                .await;
             resolved.push(HostManagedModelMessage {
                 role: durable_role,
                 content: context_message.content.clone(),
                 content_ref: message.content_ref,
                 tool_result_provider_call: context_message.tool_result_provider_call.clone(),
                 tool_result_content: tool_result_content_for_context_message(context_message)?,
-                image_parts: Vec::new(),
+                image_parts,
             });
         }
         Ok(resolved)
@@ -1431,6 +1484,39 @@ pub type HostManagedModelRouteSnapshot = ironclaw_turns::run_profile::LoopModelR
 pub struct HostManagedModelImagePart {
     pub mime_type: String,
     pub data_base64: String,
+}
+
+/// Reads attachment bytes for the current turn so the model port can build
+/// multimodal image parts. Host composition implements this over the
+/// project-scoped workspace filesystem (the same authority that landed the
+/// attachment) and injects it into the model port. Deliberately narrow — bytes
+/// for one scoped `storage_key` — so it carries no provider/runtime authority.
+#[async_trait::async_trait]
+pub trait LoopAttachmentReadPort: Send + Sync {
+    async fn read_attachment_bytes(
+        &self,
+        scope: &ironclaw_host_api::ResourceScope,
+        storage_key: &str,
+    ) -> Result<Vec<u8>, LoopAttachmentReadError>;
+}
+
+/// Failure reading attachment bytes for the multimodal path. Non-fatal: the
+/// model port skips the image (the text `<attachments>` pointer remains).
+#[derive(Debug)]
+pub enum LoopAttachmentReadError {
+    NotFound,
+    Forbidden,
+    Backend(String),
+}
+
+impl std::fmt::Display for LoopAttachmentReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => write!(f, "attachment not found"),
+            Self::Forbidden => write!(f, "attachment read forbidden"),
+            Self::Backend(reason) => write!(f, "attachment read backend error: {reason}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
