@@ -1434,9 +1434,14 @@ async fn slack_dm_thread_auth_deny_cancels_base_dm_auth_gate_without_agent_turn(
 
 #[derive(Debug, Clone)]
 enum TurnMode {
-    Complete { assistant_text: String },
+    Complete {
+        assistant_text: String,
+    },
     Running,
     BlockApproval,
+    /// Starts as BlockedApproval; the test manually transitions to BlockedAuth
+    /// via `RecordingTurnCoordinator::transition_blocked_approval_to_blocked_auth`.
+    BlockApprovalThenAuth,
     BlockAuth,
 }
 
@@ -1576,6 +1581,38 @@ impl RecordingTurnCoordinator {
         Ok(())
     }
 
+    /// Advance the blocked run from `BlockedApproval` to `BlockedAuth`.
+    ///
+    /// Used by `slack_approval_then_auth_resume_completes_without_second_approval`
+    /// to stage the two-gate sequence without routing through
+    /// `RecordingApprovalInteractionService::resolve` (which would call
+    /// `complete_run` and skip the auth gate). Mirrors the locking and
+    /// field-update pattern of `resume_blocked_run_to_running`, but keeps
+    /// `blocked_run_id` set because the run is still blocked (now on auth).
+    async fn transition_blocked_approval_to_blocked_auth(
+        &self,
+    ) -> Result<(), ProductWorkflowError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let run_id =
+            state
+                .blocked_run_id
+                .ok_or_else(|| ProductWorkflowError::TurnResumeRejected {
+                    reason: "missing blocked run".into(),
+                })?;
+        let run = state.runs.get_mut(&run_id).ok_or_else(|| {
+            ProductWorkflowError::TurnResumeRejected {
+                reason: "missing blocked run state".into(),
+            }
+        })?;
+        run.status = TurnStatus::BlockedAuth;
+        run.gate_ref = Some(GateRef::new(AUTH_GATE).expect("auth gate ref")); // safety: static test gate ref is valid.
+        // blocked_run_id stays set — the run is still blocked, now on auth.
+        Ok(())
+    }
+
     async fn complete_active_run(&self, text: &str) -> Result<(), ProductWorkflowError> {
         let run_id =
             self.active_run_id()
@@ -1638,7 +1675,9 @@ impl TurnCoordinator for RecordingTurnCoordinator {
                 TurnStatus::Completed
             }
             TurnMode::Running => TurnStatus::Running,
-            TurnMode::BlockApproval => TurnStatus::BlockedApproval,
+            TurnMode::BlockApproval | TurnMode::BlockApprovalThenAuth => {
+                TurnStatus::BlockedApproval
+            }
             TurnMode::BlockAuth => TurnStatus::BlockedAuth,
         };
         let gate_ref = match status {
@@ -2062,6 +2101,8 @@ fn dm_message(event_id: &'static str, text: &'static str) -> &'static str {
         // Gate-fanout regression fixtures
         ("Ev-fanout-block", "needs approval fanout") => DM_FANOUT_BLOCK,
         ("Ev-fanout-approve", "approve") => DM_FANOUT_APPROVE,
+        // Approval→auth sequential gate fixture
+        ("Ev-approval-then-auth-block", "needs approval then auth") => DM_APPROVAL_THEN_AUTH_BLOCK,
         _ => panic!("unknown fixture"),
     }
 }
@@ -2518,4 +2559,202 @@ async fn auth_prompt_is_posted_exactly_once_when_auth_resolution_ack_races_live_
         messages[1]["text"], "auth completed and finished",
         "messages[1] must be the final reply"
     );
+}
+
+// ── Approval→Auth sequential gate fixture ────────────────────────────────────
+// Used by `slack_approval_then_auth_resume_completes_without_second_approval`.
+// Distinct event_id avoids idempotency-ledger collisions with all other fixtures.
+
+/// User message that triggers a `BlockApprovalThenAuth` turn.
+const DM_APPROVAL_THEN_AUTH_BLOCK: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-approval-then-auth-block",
+  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"needs approval then auth","ts":"1710000004.000001"}
+}"#;
+
+/// E2E regression: a single turn that requires approval, then auth, must deliver
+/// the final reply exactly once — with no second approval round-trip.
+///
+/// Flow:
+///   1. User DM arrives → delivery loop L1 spawns, sees `BlockedApproval`, posts
+///      the approval prompt (message 0).
+///   2. Test drives `transition_blocked_approval_to_blocked_auth()` directly to
+///      advance the run from `BlockedApproval` to `BlockedAuth` without going
+///      through `RecordingApprovalInteractionService::resolve` (which calls
+///      `complete_run` and would skip the auth gate).
+///   3. L1 sees the new `BlockedAuth` marker and posts the auth prompt (message 1).
+///      The auth prompt is added to `messages_to_delete_after_final`.
+///   4. `resume_blocked_run_to_running()` + `complete_active_run()` are called
+///      back-to-back, transitioning the run directly to `Completed`. L1 delivers
+///      the final reply (message 2) and deletes the auth prompt (delete 0).
+///      No working indicator is posted because the run is already `Completed` by
+///      the time the delivery loop next polls.
+///
+/// Assertions:
+///   - 0 approval-service requests (coordinator driven directly, not via service).
+///   - `submitted_turn_count == 1` (the turn was submitted once; no re-submission).
+///   - 3 Slack messages total: approval prompt + auth prompt + final reply.
+///   - 1 Slack delete: auth prompt via `messages_to_delete_after_final`.
+///   - Final reply text delivered exactly once.
+#[tokio::test]
+async fn slack_approval_then_auth_resume_completes_without_second_approval() {
+    let auth_provider = Arc::new(FakeAuthChallengeProvider::default());
+    let auth_challenges: Arc<dyn AuthChallengeProvider> = auth_provider.clone();
+    // Long max_wait keeps L1 alive while we drive coordinator state transitions.
+    let harness = build_harness_with_full_settings(
+        TurnMode::BlockApprovalThenAuth,
+        static_personal_actor_user_resolver(),
+        Some(auth_challenges),
+        Duration::from_secs(10),
+    )
+    .await;
+
+    // Post the inbound DM — L1 spawns, sees BlockedApproval, posts the approval prompt.
+    let first = harness.post_event(DM_APPROVAL_THEN_AUTH_BLOCK).await;
+    assert_eq!(first.status(), StatusCode::OK);
+
+    // Poll until the approval prompt appears (L1 has posted it and is looping).
+    for _ in 0..200 {
+        if harness.slack_messages().len() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let messages = harness.slack_messages();
+    assert_eq!(
+        messages.len(),
+        1,
+        "expected exactly one approval prompt; got {}: {:?}",
+        messages.len(),
+        messages
+    );
+    assert!(
+        messages[0]["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("Approval needed")),
+        "first message must be the approval prompt; got {:?}",
+        messages[0]["text"]
+    );
+
+    // Drive the coordinator directly: advance from BlockedApproval → BlockedAuth.
+    // We do NOT post an approve event here because RecordingApprovalInteractionService::resolve
+    // calls complete_run, which would skip the BlockedAuth gate entirely.
+    harness
+        .coordinator
+        .transition_blocked_approval_to_blocked_auth()
+        .await
+        .expect("transition blocked approval to blocked auth");
+
+    // Poll until the auth prompt appears (L1 saw the new BlockedAuth marker and posted it).
+    for _ in 0..200 {
+        if harness.slack_messages().len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let messages = harness.slack_messages();
+    assert_eq!(
+        messages.len(),
+        2,
+        "expected approval prompt + auth prompt; got {}: {:?}",
+        messages.len(),
+        messages
+    );
+    assert!(
+        messages[1]["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("Authentication required")),
+        "second message must be the auth prompt; got {:?}",
+        messages[1]["text"]
+    );
+
+    // Advance: BlockedAuth → Running → Completed.
+    harness
+        .coordinator
+        .resume_blocked_run_to_running()
+        .await
+        .expect("resume auth-blocked run");
+    harness
+        .coordinator
+        .complete_active_run("approved then authed and finished")
+        .await
+        .expect("complete resumed auth run");
+
+    harness.drain().await;
+
+    // ── Counts derived from deliver_final_reply loop logic ──────────────────────
+    //
+    // Messages (chat.postMessage):
+    //   [0] approval prompt  — posted when BlockedApproval seen
+    //   [1] auth prompt      — posted when BlockedAuth seen; queued in
+    //                          messages_to_delete_after_final (slack_delivery.rs ~317)
+    //   [2] final reply      — posted when Completed
+    //
+    // No working indicator: resume_blocked_run_to_running() and complete_active_run()
+    // are called back-to-back. By the time wait_for_actionable() next polls the
+    // coordinator (poll_interval = 1 ms), the run is already Completed (terminal),
+    // so the "Running with no blocked marker" branch that posts the thinking message
+    // is never reached.
+    //
+    // Deletes (chat.delete):
+    //   [0] auth prompt — deleted via messages_to_delete_after_final at final reply
+    //
+    // Approval prompt is NOT deleted (only auth prompts go into
+    // messages_to_delete_after_final; the approval prompt is a standalone gate post).
+    let messages = harness.slack_messages();
+    assert_eq!(
+        messages.len(),
+        3,
+        "expected 3 messages: approval prompt + auth prompt + final reply, got {}: {:?}",
+        messages.len(),
+        messages
+    );
+    assert!(
+        messages[0]["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("Approval needed")),
+        "messages[0] must be the approval prompt"
+    );
+    assert!(
+        messages[1]["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("Authentication required")),
+        "messages[1] must be the auth prompt"
+    );
+    assert_eq!(
+        messages[2]["text"], "approved then authed and finished",
+        "messages[2] must be the final reply, delivered exactly once"
+    );
+
+    let deletes = harness.slack_deletes();
+    assert_eq!(
+        deletes.len(),
+        1,
+        "expected 1 delete: auth prompt deleted via messages_to_delete_after_final, got {}",
+        deletes.len()
+    );
+
+    // Exactly 0 approval-service requests: we drove the coordinator directly
+    // rather than posting an approve event, so RecordingApprovalInteractionService
+    // was never called.
+    let approvals = harness.approvals.requests();
+    assert_eq!(
+        approvals.len(),
+        0,
+        "expected 0 approval-service requests (coordinator driven directly, not via service), got {}",
+        approvals.len()
+    );
+
+    // Exactly 1 turn submitted (no re-submission).
+    let submitted = harness.coordinator.submitted_turn_count();
+    assert_eq!(
+        submitted, 1,
+        "expected exactly 1 submitted turn, got {}",
+        submitted
+    );
+
+    // FakeAuthChallengeProvider must have been called exactly once (for the auth prompt).
+    auth_provider.assert_single_call();
 }
