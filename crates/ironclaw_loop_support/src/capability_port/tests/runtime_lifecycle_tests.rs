@@ -16,15 +16,15 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, HostRuntime, HostRuntimeError,
     HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeAuthGate,
-    RuntimeBlockedReason, RuntimeCapabilityCompleted, RuntimeCapabilityFailure,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
-    RuntimeCapabilityUnknown, RuntimeGateId, RuntimeProcessHandle, RuntimeResourceGate,
-    RuntimeStatusRequest, VisibleCapabilitySurface,
+    RuntimeBlockedReason, RuntimeCapabilityAuthResumeRequest, RuntimeCapabilityCompleted,
+    RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
+    RuntimeCapabilityResumeRequest, RuntimeCapabilityUnknown, RuntimeGateId, RuntimeProcessHandle,
+    RuntimeResourceGate, RuntimeStatusRequest, VisibleCapabilitySurface,
 };
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityFailureKind,
-    CapabilityInputRef, CapabilityOutcome, LoopCapabilityPort, LoopHostMilestoneSink,
-    LoopRunContext,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityAuthResume, CapabilityBatchInvocation,
+    CapabilityFailureKind, CapabilityInputRef, CapabilityOutcome, LoopCapabilityPort,
+    LoopHostMilestoneSink, LoopRunContext,
 };
 
 #[tokio::test]
@@ -342,12 +342,14 @@ async fn runtime_capability_batch_continues_after_runtime_failure_outcome() {
                     capability_id: first.capability_id,
                     input_ref: first.input_ref,
                     approval_resume: None,
+                    auth_resume: None,
                 },
                 CapabilityInvocation {
                     surface_version: second.surface_version,
                     capability_id: second.capability_id,
                     input_ref: second.input_ref,
                     approval_resume: None,
+                    auth_resume: None,
                 },
             ],
             stop_on_first_suspension: false,
@@ -788,6 +790,7 @@ async fn visible_runtime_invocation(port: &HostRuntimeLoopCapabilityPort) -> Cap
         capability_id: candidate.capability_id,
         input_ref: candidate.input_ref,
         approval_resume: None,
+        auth_resume: None,
     }
 }
 
@@ -855,6 +858,7 @@ async fn approval_resume_metadata_invokes_runtime_resume_with_original_invocatio
             )
             .expect("valid input ref"),
             approval_resume: Some(resume.clone()),
+            auth_resume: None,
         })
         .await
         .expect("approval resume dispatch succeeds");
@@ -883,6 +887,134 @@ async fn approval_resume_metadata_invokes_runtime_resume_with_original_invocatio
         resume_requests[0].input,
         serde_json::json!({ "message": "hello" })
     );
+}
+
+#[tokio::test]
+async fn auth_resume_after_approval_reuses_original_invocation_identity() {
+    let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+    let provider_id = ExtensionId::new("demo").expect("valid provider id");
+    let approval_request_id = ApprovalRequestId::new();
+    // The approval resume returns an auth gate, modeling a capability that
+    // needs a credential after its approval was granted.
+    let runtime = Arc::new(ApprovalResumeRecordingRuntime::new_with_resume_outcomes(
+        visible_capability(capability_id.clone(), provider_id.clone()),
+        approval_request_id,
+        vec![Ok(RuntimeCapabilityOutcome::AuthRequired(
+            RuntimeAuthGate {
+                gate_id: RuntimeGateId::new(),
+                capability_id: capability_id.clone(),
+                reason: RuntimeBlockedReason::AuthRequired,
+                required_secrets: Vec::new(),
+                credential_requirements: Vec::new(),
+            },
+        ))],
+    ));
+    let mut context = execution_context("thread-auth-resume-identity");
+    let run_context = loop_run_context(&context).await;
+    let loop_driver_extension =
+        loop_driver_execution_extension_id(&run_context).expect("valid extension id");
+    context.grants.grants.push(dispatch_capability_grant(
+        &capability_id,
+        &loop_driver_extension,
+    ));
+    let port = HostRuntimeLoopCapabilityPortFactory::new(
+        runtime.clone(),
+        visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
+            provider_id,
+            dispatch_trust_decision(),
+        )])),
+        Arc::new(InputRefEchoResolver),
+        Arc::new(RecordingResultWriter::default()),
+        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default()),
+    )
+    .port_for_run_context(run_context);
+
+    let first_invocation = visible_runtime_invocation(&port).await;
+    let first = port
+        .invoke_capability(first_invocation.clone())
+        .await
+        .expect("first invocation returns approval gate");
+    let CapabilityOutcome::ApprovalRequired {
+        approval_resume: Some(resume),
+        ..
+    } = first
+    else {
+        panic!("approval gate must carry resume metadata, got {first:?}");
+    };
+
+    let surface = port
+        .visible_capabilities(VisibleCapabilityRequest {})
+        .await
+        .expect("visible capabilities load");
+    let auth_blocked = port
+        .invoke_capability(CapabilityInvocation {
+            surface_version: surface.version.clone(),
+            capability_id: capability_id.clone(),
+            input_ref: first_invocation.input_ref.clone(),
+            approval_resume: Some(resume.clone()),
+            auth_resume: None,
+        })
+        .await
+        .expect("approval resume dispatch reaches the auth gate");
+    assert!(
+        matches!(auth_blocked, CapabilityOutcome::AuthRequired { .. }),
+        "approval resume must surface the credential gate, got {auth_blocked:?}"
+    );
+
+    // Re-dispatch after the auth gate the way the executor does: carrying the
+    // ORIGINAL invocation identity and the already-granted approval.
+    // Use a stable correlation_id so we can assert it arrives at the runtime.
+    let original_correlation_id = resume.correlation_id;
+    let auth_resumed = port
+        .invoke_capability(CapabilityInvocation {
+            surface_version: surface.version,
+            capability_id: capability_id.clone(),
+            input_ref: first_invocation.input_ref.clone(),
+            approval_resume: None,
+            auth_resume: Some(CapabilityAuthResume {
+                resume_token: resume.resume_token.clone(),
+                // Carry the prior approval so the port restores the original
+                // correlation identifier onto the invocation context.
+                prior_approval: Some(ironclaw_turns::run_profile::AuthResumeApprovalIdentity {
+                    approval_request_id,
+                    correlation_id: original_correlation_id,
+                }),
+            }),
+        })
+        .await
+        .expect("auth resume dispatch succeeds");
+    assert!(
+        matches!(auth_resumed, CapabilityOutcome::Completed(_)),
+        "auth resume must dispatch and complete, got {auth_resumed:?}"
+    );
+
+    // Auth re-dispatch must reuse the original invocation identifier so that
+    // fingerprinted approval leases (scoped to the original invocation) remain matchable.
+    let original_invocation_id =
+        ironclaw_host_api::InvocationId::parse(resume.resume_token.as_str())
+            .expect("resume token carries original invocation id");
+    let auth_resume_requests = runtime.auth_resume_requests();
+    assert_eq!(auth_resume_requests.len(), 1);
+    assert_eq!(
+        auth_resume_requests[0].context.invocation_id, original_invocation_id,
+        "auth re-dispatch must reuse the original invocation id"
+    );
+    assert_eq!(
+        auth_resume_requests[0].context.resource_scope.invocation_id, original_invocation_id,
+        "lease matching scope must carry the original invocation id"
+    );
+    assert_eq!(
+        auth_resume_requests[0].approval_request_id,
+        Some(approval_request_id),
+        "the granted approval must travel with the auth re-dispatch"
+    );
+    // Original correlation identifier must be restored onto the invocation context.
+    assert_eq!(
+        auth_resume_requests[0].context.correlation_id, original_correlation_id,
+        "auth re-dispatch must restore the original correlation_id"
+    );
+    assert_eq!(runtime.invoke_count(), 1, "no fresh first-call invocation");
+    assert_eq!(runtime.resume_requests().len(), 1);
 }
 
 #[tokio::test]
@@ -941,6 +1073,7 @@ async fn approval_resume_host_error_returns_failed_outcome_and_emits_failure_mil
             input_ref: CapabilityInputRef::new("input:approval-resume-host-error")
                 .expect("valid input ref"),
             approval_resume: Some(resume),
+            auth_resume: None,
         })
         .await
         .expect("approval resume host error should become a capability failure");
@@ -988,6 +1121,7 @@ struct ApprovalResumeRecordingRuntime {
     invoke_count: AtomicUsize,
     resume_requests: Mutex<Vec<RuntimeCapabilityResumeRequest>>,
     resume_outcomes: Mutex<VecDeque<Result<RuntimeCapabilityOutcome, HostRuntimeError>>>,
+    auth_resume_requests: Mutex<Vec<RuntimeCapabilityAuthResumeRequest>>,
 }
 
 impl ApprovalResumeRecordingRuntime {
@@ -1006,6 +1140,7 @@ impl ApprovalResumeRecordingRuntime {
             invoke_count: AtomicUsize::new(0),
             resume_requests: Mutex::new(Vec::new()),
             resume_outcomes: Mutex::new(VecDeque::from(resume_outcomes)),
+            auth_resume_requests: Mutex::new(Vec::new()),
         }
     }
 
@@ -1017,6 +1152,13 @@ impl ApprovalResumeRecordingRuntime {
         self.resume_requests
             .lock()
             .expect("resume requests lock")
+            .clone()
+    }
+
+    fn auth_resume_requests(&self) -> Vec<RuntimeCapabilityAuthResumeRequest> {
+        self.auth_resume_requests
+            .lock()
+            .expect("auth resume requests lock")
             .clone()
     }
 }
@@ -1057,6 +1199,24 @@ impl HostRuntime for ApprovalResumeRecordingRuntime {
             RuntimeCapabilityCompleted {
                 capability_id: request.capability_id,
                 output: serde_json::json!({"resumed": true}),
+                display_preview: None,
+                usage: ResourceUsage::default(),
+            },
+        )))
+    }
+
+    async fn auth_resume_capability(
+        &self,
+        request: RuntimeCapabilityAuthResumeRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        self.auth_resume_requests
+            .lock()
+            .expect("auth resume requests lock")
+            .push(request.clone());
+        Ok(RuntimeCapabilityOutcome::Completed(Box::new(
+            RuntimeCapabilityCompleted {
+                capability_id: request.capability_id,
+                output: serde_json::json!({"auth_resumed": true}),
                 display_preview: None,
                 usage: ResourceUsage::default(),
             },

@@ -1,3 +1,4 @@
+import { useLocation } from "react-router";
 import { React } from "../../../lib/html.js";
 import { queryOperatorLogs } from "../../../lib/api.js";
 import { normalizeOperatorLogsResponse } from "../lib/logs-data.js";
@@ -6,8 +7,32 @@ const POLL_INTERVAL_MS = 2000;
 const LOG_LIMIT = 500;
 const HIDDEN_ENTRY_ID_CAP = 2000;
 const TERMINAL_UNSUPPORTED_STATUSES = new Set([403, 404]);
+const SCOPE_QUERY_PARAMS = [
+  ["threadId", "thread_id", "logs.scope.thread"],
+  ["runId", "run_id", "logs.scope.run"],
+  ["turnId", "turn_id", "logs.scope.turn"],
+  ["toolCallId", "tool_call_id", "logs.scope.toolCall"],
+  ["toolName", "tool_name", "logs.scope.tool"],
+  ["source", "source", "logs.scope.source"],
+];
+
+export function readLogScopeFromLocation(location = globalThis.location) {
+  const params = new URLSearchParams(location?.search || "");
+  return SCOPE_QUERY_PARAMS.reduce((scope, [key, param, labelKey]) => {
+    const value = params.get(param)?.trim();
+    if (value) {
+      scope[key] = value;
+      scope.active.push({ key, param, labelKey, value });
+    } else {
+      scope[key] = null;
+    }
+    return scope;
+  }, { active: [] });
+}
 
 export function useLogs() {
+  const location = useLocation();
+  const scope = React.useMemo(() => readLogScopeFromLocation(location), [location.search]);
   const [entries, setEntries] = React.useState([]);
   const [levelFilter, setLevelFilter] = React.useState("all");
   const [targetFilter, setTargetFilter] = React.useState("");
@@ -28,6 +53,12 @@ export function useLogs() {
         limit: LOG_LIMIT,
         level: levelFilter === "all" ? null : levelFilter,
         target: targetFilter.trim() || null,
+        threadId: scope.threadId,
+        runId: scope.runId,
+        turnId: scope.turnId,
+        toolCallId: scope.toolCallId,
+        toolName: scope.toolName,
+        source: scope.source,
       });
       if (requestId !== requestIdRef.current) return;
       const hidden = hiddenEntryIdsRef.current;
@@ -49,11 +80,14 @@ export function useLogs() {
         setIsLoading(false);
       }
     }
-  }, [isUnsupported, levelFilter, targetFilter]);
+  }, [isUnsupported, levelFilter, scope, targetFilter]);
+
+  React.useEffect(() => {
+    loadLogs();
+  }, [loadLogs]);
 
   React.useEffect(() => {
     if (paused || isUnsupported) return undefined;
-    loadLogs();
     const timer = setInterval(loadLogs, POLL_INTERVAL_MS);
     return () => clearInterval(timer);
   }, [isUnsupported, loadLogs, paused]);
@@ -85,6 +119,7 @@ export function useLogs() {
     setAutoScroll,
     serverLevel: null,
     changeServerLevel: async () => {},
+    scope,
     status: error ? "error" : isLoading ? "loading" : "ready",
     isLoading,
     error,

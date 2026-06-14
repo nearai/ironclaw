@@ -47,7 +47,8 @@ impl ApprovalInteractionRejectionKind {
     pub fn workflow_rejection_kind(self) -> ProductWorkflowRejectionKind {
         match self {
             Self::MissingGate => ProductWorkflowRejectionKind::ScopeNotFound,
-            Self::AmbiguousGate | Self::StaleGate => ProductWorkflowRejectionKind::Conflict,
+            Self::AmbiguousGate => ProductWorkflowRejectionKind::Ambiguous,
+            Self::StaleGate => ProductWorkflowRejectionKind::Conflict,
             Self::CrossScopeDenied => ProductWorkflowRejectionKind::Unauthorized,
             Self::InvalidGateRef
             | Self::AlwaysAllowUnsupported
@@ -63,7 +64,7 @@ impl ApprovalInteractionRejectionKind {
         match self.workflow_rejection_kind() {
             ProductWorkflowRejectionKind::ScopeNotFound => 404,
             ProductWorkflowRejectionKind::Unauthorized => 403,
-            ProductWorkflowRejectionKind::Conflict => 409,
+            ProductWorkflowRejectionKind::Conflict | ProductWorkflowRejectionKind::Ambiguous => 409,
             ProductWorkflowRejectionKind::Unavailable => 503,
             ProductWorkflowRejectionKind::InvalidRequest => 400,
             ProductWorkflowRejectionKind::ThreadBusy

@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 #[cfg(test)]
 mod approval_test_support;
+mod attachment_landing;
 mod auth;
 #[cfg(test)]
 mod auth_dcr_tests;
@@ -211,7 +212,7 @@ pub use nearai_mcp::{
 };
 #[cfg(feature = "openai-compat-beta")]
 pub use openai_compat_serve::build_openai_compat_route_mount;
-pub use operator_logs::{capture_tracing_log, operator_log_buffer};
+pub use operator_logs::{OperatorLogLayer, capture_tracing_log, operator_log_buffer};
 pub use product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
     ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
@@ -236,6 +237,8 @@ pub use readiness::{
     RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
     RebornReadinessDiagnosticStatus, RebornReadinessState, RebornWorkerReadiness,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use runtime::RebornTurnDriveOutcome;
 pub use runtime::{
     AssistantReply, ConversationId, RebornRuntime, RebornRuntimeError, RebornSkillActivation,
     RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle, RebornSkillExecutionPlan,

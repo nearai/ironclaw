@@ -64,6 +64,17 @@ use lifecycle_owner::{LifecycleOwnerLookup, resolve_event_owner};
 /// Default per-hook wall-clock budget. Tunable per dispatcher.
 pub const DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_millis(50);
 
+/// Default cap on eligible `before_capability` hooks evaluated during one
+/// capability-boundary dispatch.
+///
+/// Install-time caps bound the number of hooks a tenant can register; this
+/// dispatch-time cap bounds the hot path when many registered hooks all match
+/// the same capability invocation.
+pub const DEFAULT_MAX_BEFORE_CAPABILITY_HOOKS_PER_DISPATCH: usize = 64;
+
+const BEFORE_CAPABILITY_DISPATCH_FANOUT_EXCEEDED_REASON: &str =
+    "before_capability dispatch fan-out budget exceeded";
+
 /// Tier-tagged trait object holding a `before_capability` hook implementation.
 /// The variants make the trust tier explicit at the registration boundary so
 /// the dispatcher routes through the correct sink trait.
@@ -194,6 +205,7 @@ pub struct HookDispatcher {
     observers: HashMap<HookId, ObserverHookImpl>,
     event_triggered: HashMap<HookId, EventTriggeredHookImpl>,
     timeout: Duration,
+    max_before_capability_hooks_per_dispatch: usize,
     milestone_sink: Option<Arc<dyn HookMilestoneSink>>,
     /// Best-effort recording sink for security-boundary decisions made by
     /// the dispatcher itself (today: hook-driven `Deny`). Distinct from
@@ -220,6 +232,8 @@ impl HookDispatcher {
             observers: HashMap::new(),
             event_triggered: HashMap::new(),
             timeout: DEFAULT_HOOK_TIMEOUT,
+            max_before_capability_hooks_per_dispatch:
+                DEFAULT_MAX_BEFORE_CAPABILITY_HOOKS_PER_DISPATCH,
             milestone_sink: None,
             audit_sink: None,
         }
@@ -227,6 +241,11 @@ impl HookDispatcher {
 
     pub(crate) fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    pub(crate) fn with_max_before_capability_hooks_per_dispatch(mut self, limit: usize) -> Self {
+        self.max_before_capability_hooks_per_dispatch = limit.max(1);
         self
     }
 
@@ -909,6 +928,7 @@ impl HookDispatcher {
         let observer_facts = Vec::new();
         let mut failures = Vec::new();
         let mut short_circuited = false;
+        let mut eligible_hooks_evaluated = 0usize;
         // Provenance tracking for the security-audit `HookDeny` event. We only
         // record a `HookDeny` when the *winning* composed decision is an
         // explicit `Deny` returned by a hook via
@@ -967,6 +987,28 @@ impl HookDispatcher {
                 }
                 continue;
             };
+
+            if eligible_hooks_evaluated >= self.max_before_capability_hooks_per_dispatch {
+                let failure = HookFailureRecord {
+                    hook_id: binding.hook_id,
+                    category: FailureCategory::Timeout,
+                    disposition: FailureCategory::Timeout
+                        .disposition_for(crate::trust::DecisionKind::Gate),
+                    reason: SanitizedReason::from_static(
+                        BEFORE_CAPABILITY_DISPATCH_FANOUT_EXCEEDED_REASON,
+                    ),
+                };
+                self.emit_failure(&failure).await;
+                failures.push(failure);
+                composed = compose_gate_decision(
+                    composed,
+                    BeforeCapabilityHookDecision::deny(SanitizedReason::from_static(
+                        BEFORE_CAPABILITY_DISPATCH_FANOUT_EXCEEDED_REASON,
+                    )),
+                );
+                break;
+            }
+            eligible_hooks_evaluated += 1;
 
             self.emit_dispatched(&binding).await;
             let result = self.run_before_capability_hook(hook, &binding, ctx).await;
@@ -1988,6 +2030,18 @@ impl HookDispatcherBuilder {
         self
     }
 
+    /// Override the maximum number of eligible `before_capability` hooks
+    /// evaluated during one capability-boundary dispatch. Defaults to
+    /// [`DEFAULT_MAX_BEFORE_CAPABILITY_HOOKS_PER_DISPATCH`]. A value of `0`
+    /// is normalized to `1` so a dispatcher with hooks never silently disables
+    /// the boundary.
+    pub fn with_max_before_capability_hooks_per_dispatch(mut self, limit: usize) -> Self {
+        self.dispatcher = self
+            .dispatcher
+            .with_max_before_capability_hooks_per_dispatch(limit);
+        self
+    }
+
     /// Attach a [`HookMilestoneSink`]. See
     /// [`HookDispatcher::with_milestone_sink`] (private) for the contract;
     /// the key benefit of routing this through the builder is that the sink
@@ -2955,6 +3009,86 @@ mod tests {
         let outcome = dispatcher.dispatch_before_capability(&ctx()).await;
         assert!(outcome.decision.permits());
         assert!(outcome.failures.is_empty());
+    }
+
+    #[tokio::test]
+    async fn before_capability_dispatch_fanout_cap_fails_closed_without_poisoning() {
+        let first_id = ext_hook_id("fanout-pass-1");
+        let second_id = ext_hook_id("fanout-pass-2");
+
+        let mut registry = HookRegistry::new();
+        for id in [first_id, second_id] {
+            registry
+                .insert(installed_binding(
+                    id,
+                    HookPointSpec::BeforeCapability,
+                    HookPhase::Policy,
+                ))
+                .expect("binding insertable");
+        }
+
+        let mut dispatcher =
+            HookDispatcher::new(registry).with_max_before_capability_hooks_per_dispatch(1);
+        dispatcher.install_before_capability(
+            first_id,
+            BeforeCapabilityHookImpl::Restricted(Box::new(PassingInstalledHook)),
+        );
+        dispatcher.install_before_capability(
+            second_id,
+            BeforeCapabilityHookImpl::Restricted(Box::new(PassingInstalledHook)),
+        );
+
+        let ordered = dispatcher.ordered_bindings(HookPointSpec::BeforeCapability);
+        assert_eq!(ordered.len(), 2);
+        let first_to_run = ordered[0].1.hook_id;
+        let over_budget = ordered[1].1.hook_id;
+
+        let (dispatcher, sink) = install_milestone_sink(dispatcher);
+        let outcome = dispatcher.dispatch_before_capability(&ctx()).await;
+
+        assert!(
+            !outcome.decision.permits(),
+            "exceeding the aggregate before_capability dispatch cap must fail closed"
+        );
+        assert_eq!(outcome.failures.len(), 1);
+        assert_eq!(outcome.failures[0].hook_id, over_budget);
+        assert_eq!(outcome.failures[0].category, FailureCategory::Timeout);
+        assert_eq!(
+            outcome.failures[0].reason.as_str(),
+            BEFORE_CAPABILITY_DISPATCH_FANOUT_EXCEEDED_REASON
+        );
+
+        let kinds = sink.kinds();
+        let dispatched: Vec<String> = kinds
+            .iter()
+            .filter_map(|kind| match kind {
+                LoopHostMilestoneKind::HookDispatched { hook_id, .. } => Some(hook_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            dispatched,
+            vec![first_to_run.to_hex()],
+            "only hooks inside the per-dispatch fan-out cap should dispatch"
+        );
+        let failed: Vec<String> = kinds
+            .iter()
+            .filter_map(|kind| match kind {
+                LoopHostMilestoneKind::HookFailed { hook_id, .. } => Some(hook_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(failed, vec![over_budget.to_hex()]);
+
+        let registry = dispatcher.registry.lock().expect("registry");
+        assert!(
+            !registry.is_poisoned(first_to_run),
+            "aggregate fan-out cap must not poison a hook that ran successfully"
+        );
+        assert!(
+            !registry.is_poisoned(over_budget),
+            "aggregate fan-out cap must not poison the first skipped hook"
+        );
     }
 
     #[tokio::test]

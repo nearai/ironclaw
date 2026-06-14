@@ -30,7 +30,7 @@
 //! - Personal scope only: route records are only written for personal-scope
 //!   triggers (the driver already fails closed to personal-only).
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Mutex;
 
 use chrono::{DateTime, Duration, Utc};
@@ -44,6 +44,13 @@ use serde::{Deserialize, Serialize};
 /// pending lifetime and the idempotent-replay window; after expiry the record
 /// is ignored on load and removed lazily (or swept opportunistically).
 pub const DELIVERED_GATE_ROUTE_TTL: Duration = Duration::hours(48);
+
+/// Maximum number of index entries examined per conversation fingerprint lookup.
+///
+/// Defends against prompt-flood accumulation: a legitimate workload has far
+/// fewer concurrent gate prompts in a single conversation than this bound.
+/// Used by both the in-memory and filesystem store implementations.
+pub(crate) const DELIVERED_GATE_ROUTE_CONVERSATION_LOOKUP_CAP: usize = 32;
 
 /// A route record mapping a delivered gate prompt back to the run and scope
 /// it was delivered for.
@@ -68,6 +75,9 @@ pub struct DeliveredGateRouteRecord {
     pub scope: TurnScope,
     /// When this record was written.
     pub recorded_at: DateTime<Utc>,
+    /// Conversation fingerprints where this gate prompt was delivered.
+    #[serde(default)]
+    pub delivered_conversation_fingerprints: Vec<String>,
 }
 
 impl DeliveredGateRouteRecord {
@@ -80,11 +90,28 @@ impl DeliveredGateRouteRecord {
 }
 
 /// Lookup key used by the routing wrapper.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct RouteKey {
     tenant_id: TenantId,
     user_id: UserId,
     gate_ref: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ConversationIndexKey {
+    tenant_id: TenantId,
+    user_id: UserId,
+    conversation_fingerprint: String,
+}
+
+impl ConversationIndexKey {
+    fn new(tenant_id: TenantId, user_id: UserId, conversation_fingerprint: String) -> Self {
+        Self {
+            tenant_id,
+            user_id,
+            conversation_fingerprint,
+        }
+    }
 }
 
 impl RouteKey {
@@ -121,6 +148,24 @@ pub trait DeliveredGateRouteStore: Send + Sync {
         gate_ref: &str,
     ) -> Result<Option<DeliveredGateRouteRecord>, String>;
 
+    /// Load all live (non-expired-at-caller-discretion) route records delivered
+    /// into an external conversation, keyed by `(tenant_id, user_id,
+    /// conversation_fingerprint)`. Returns the full set — the caller is
+    /// responsible for expiry filtering and ambiguity detection. Returns an
+    /// empty vec when no records exist for the conversation (miss → forward
+    /// unchanged).
+    ///
+    /// The `user_id` parameter scopes the lookup to a single actor's routes.
+    /// This prevents one user's lingering routes in a shared conversation from
+    /// crowding out another user's valid routes under the index cap, and
+    /// provides defense-in-depth isolation between users.
+    async fn load_delivered_gate_route_by_conversation_fingerprint(
+        &self,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+        conversation_fingerprint: &str,
+    ) -> Result<Vec<DeliveredGateRouteRecord>, String>;
+
     /// Remove the route record for `(tenant_id, user_id, gate_ref)`.
     /// Best-effort cleanup after the gate is resolved; removing a missing
     /// record is not an error. Routes for gates that are never resolved
@@ -146,9 +191,22 @@ pub trait DeliveredGateRouteStore: Send + Sync {
 }
 
 /// In-memory [`DeliveredGateRouteStore`].
+///
+/// `conversation_index` is one-to-many: a single conversation fingerprint can
+/// map to multiple route keys when a user has more than one pending gate
+/// delivered to the same external conversation. `reverse_conversation_index` tracks which
+/// conversation keys each route key owns so that removing one route touches
+/// only its own entries in the shared conversation slot.
 #[derive(Default)]
 pub struct InMemoryDeliveredGateRouteStore {
-    records: Mutex<HashMap<RouteKey, DeliveredGateRouteRecord>>,
+    state: Mutex<InMemoryDeliveredGateRouteState>,
+}
+
+#[derive(Default)]
+struct InMemoryDeliveredGateRouteState {
+    records: HashMap<RouteKey, DeliveredGateRouteRecord>,
+    conversation_index: HashMap<ConversationIndexKey, BTreeSet<RouteKey>>,
+    reverse_conversation_index: HashMap<RouteKey, Vec<ConversationIndexKey>>,
 }
 
 #[async_trait::async_trait]
@@ -162,10 +220,33 @@ impl DeliveredGateRouteStore for InMemoryDeliveredGateRouteStore {
             record.user_id.clone(),
             record.gate_ref.clone(),
         );
-        self.records
+        let conversation_keys = conversation_keys_for_record(&record);
+        let mut state = self
+            .state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(key, record);
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let InMemoryDeliveredGateRouteState {
+            records,
+            conversation_index,
+            reverse_conversation_index,
+        } = &mut *state;
+
+        // Remove this route's old conversation index entries (idempotent
+        // re-record: replace old finger- prints without touching sibling
+        // routes that share any of the same conversation slots).
+        remove_key_from_conversation_indexes(&key, conversation_index, reverse_conversation_index);
+
+        records.insert(key.clone(), record);
+        for conversation_key in conversation_keys {
+            conversation_index
+                .entry(conversation_key.clone())
+                .or_default()
+                .insert(key.clone());
+            reverse_conversation_index
+                .entry(key.clone())
+                .or_default()
+                .push(conversation_key);
+        }
         Ok(())
     }
 
@@ -177,11 +258,45 @@ impl DeliveredGateRouteStore for InMemoryDeliveredGateRouteStore {
     ) -> Result<Option<DeliveredGateRouteRecord>, String> {
         let key = RouteKey::new(tenant_id.clone(), user_id.clone(), gate_ref.to_string());
         Ok(self
-            .records
+            .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .records
             .get(&key)
             .cloned())
+    }
+
+    async fn load_delivered_gate_route_by_conversation_fingerprint(
+        &self,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+        conversation_fingerprint: &str,
+    ) -> Result<Vec<DeliveredGateRouteRecord>, String> {
+        let conversation_key = ConversationIndexKey::new(
+            tenant_id.clone(),
+            user_id.clone(),
+            conversation_fingerprint.to_string(),
+        );
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Cap the number of route keys examined per conversation to guard
+        // against prompt-flood accumulation. Legitimate concurrent gate prompts
+        // in the same conversation are far fewer than this limit.
+        let result = state
+            .conversation_index
+            .get(&conversation_key)
+            .map(|route_keys| {
+                route_keys
+                    .iter()
+                    .take(DELIVERED_GATE_ROUTE_CONVERSATION_LOOKUP_CAP)
+                    .filter_map(|rk| state.records.get(rk))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        Ok(result)
     }
 
     async fn remove_delivered_gate_route(
@@ -191,10 +306,18 @@ impl DeliveredGateRouteStore for InMemoryDeliveredGateRouteStore {
         gate_ref: &str,
     ) -> Result<(), String> {
         let key = RouteKey::new(tenant_id.clone(), user_id.clone(), gate_ref.to_string());
-        self.records
+        let mut state = self
+            .state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&key);
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let InMemoryDeliveredGateRouteState {
+            records,
+            conversation_index,
+            reverse_conversation_index,
+        } = &mut *state;
+
+        records.remove(&key);
+        remove_key_from_conversation_indexes(&key, conversation_index, reverse_conversation_index);
         Ok(())
     }
 
@@ -202,14 +325,72 @@ impl DeliveredGateRouteStore for InMemoryDeliveredGateRouteStore {
         &self,
         now: DateTime<Utc>,
     ) -> Result<usize, String> {
-        let mut records = self
-            .records
+        let mut state = self
+            .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let InMemoryDeliveredGateRouteState {
+            records,
+            conversation_index,
+            reverse_conversation_index,
+        } = &mut *state;
         let before = records.len();
-        records.retain(|_key, record| !record.is_expired(now));
+        let expired_keys: Vec<RouteKey> = records
+            .iter()
+            .filter_map(|(key, record)| record.is_expired(now).then_some(key.clone()))
+            .collect();
+        for key in &expired_keys {
+            records.remove(key);
+            remove_key_from_conversation_indexes(
+                key,
+                conversation_index,
+                reverse_conversation_index,
+            );
+        }
         Ok(before - records.len())
     }
+}
+
+/// Remove all conversation-index entries owned by `key`.
+///
+/// Removes `key` from `reverse_conversation_index`, then for each
+/// conversation slot that `key` owned, removes `key` from the
+/// `conversation_index` slot and drops the slot when it becomes empty.
+/// This is the single authoritative implementation shared by
+/// `record_delivered_gate_route` (idempotent re-record cleanup),
+/// `remove_delivered_gate_route`, and `sweep_expired_delivered_gate_routes`.
+fn remove_key_from_conversation_indexes(
+    key: &RouteKey,
+    conversation_index: &mut HashMap<ConversationIndexKey, BTreeSet<RouteKey>>,
+    reverse_conversation_index: &mut HashMap<RouteKey, Vec<ConversationIndexKey>>,
+) {
+    if let Some(old_conv_keys) = reverse_conversation_index.remove(key) {
+        for old_conv_key in old_conv_keys {
+            if let Some(slot) = conversation_index.get_mut(&old_conv_key) {
+                slot.remove(key);
+                if slot.is_empty() {
+                    conversation_index.remove(&old_conv_key);
+                }
+            }
+        }
+    }
+}
+
+fn conversation_keys_for_record(record: &DeliveredGateRouteRecord) -> Vec<ConversationIndexKey> {
+    use std::collections::HashSet;
+    let mut seen: HashSet<ConversationIndexKey> = HashSet::new();
+    let mut keys: Vec<ConversationIndexKey> = Vec::new();
+    for conversation_fingerprint in &record.delivered_conversation_fingerprints {
+        let key = ConversationIndexKey::new(
+            record.tenant_id.clone(),
+            record.user_id.clone(),
+            conversation_fingerprint.clone(),
+        );
+        if seen.insert(key.clone()) {
+            keys.push(key);
+        }
+    }
+    keys
 }
 
 #[cfg(test)]
@@ -241,7 +422,12 @@ mod tests {
             run_id: TurnRunId::new(),
             scope: scope(),
             recorded_at: Utc::now(),
+            delivered_conversation_fingerprints: Vec::new(),
         }
+    }
+
+    fn conversation_fingerprint(thread_id: &str) -> String {
+        format!("fingerprint:{thread_id}")
     }
 
     #[tokio::test]
@@ -427,5 +613,294 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(loaded.map(|r| r.run_id), Some(second.run_id));
+    }
+
+    #[tokio::test]
+    async fn in_memory_conversation_lookup_round_trips() {
+        let store = InMemoryDeliveredGateRouteStore::default();
+        let conv_a = conversation_fingerprint("thread-conv-a");
+        let conv_b = conversation_fingerprint("thread-conv-b");
+        let rec = DeliveredGateRouteRecord {
+            delivered_conversation_fingerprints: vec![conv_a.clone(), conv_b.clone()],
+            ..record("gate:conversation-round-trip")
+        };
+
+        store
+            .record_delivered_gate_route(rec.clone())
+            .await
+            .expect("write succeeds");
+
+        let loaded_a = store
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &user(), &conv_a)
+            .await
+            .expect("conversation lookup succeeds");
+        let loaded_b = store
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &user(), &conv_b)
+            .await
+            .expect("conversation lookup succeeds");
+
+        assert_eq!(loaded_a, vec![rec.clone()]);
+        assert_eq!(loaded_b, vec![rec]);
+    }
+
+    #[tokio::test]
+    async fn in_memory_conversation_lookup_returns_empty_for_unknown() {
+        let store = InMemoryDeliveredGateRouteStore::default();
+        let unknown = conversation_fingerprint("thread-unknown");
+
+        let loaded = store
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &user(), &unknown)
+            .await
+            .expect("conversation lookup succeeds");
+
+        assert!(loaded.is_empty());
+    }
+
+    #[tokio::test]
+    async fn in_memory_ttl_expiry_removes_conversation_index() {
+        let store = InMemoryDeliveredGateRouteStore::default();
+        let now = Utc::now();
+        let conv = conversation_fingerprint("thread-expired-index");
+        let rec = DeliveredGateRouteRecord {
+            recorded_at: now - Duration::hours(49),
+            delivered_conversation_fingerprints: vec![conv.clone()],
+            ..record("gate:conversation-expired")
+        };
+
+        store.record_delivered_gate_route(rec).await.unwrap();
+
+        let removed = store
+            .sweep_expired_delivered_gate_routes(now)
+            .await
+            .expect("sweep succeeds");
+        assert_eq!(removed, 1);
+
+        let loaded = store
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &user(), &conv)
+            .await
+            .expect("conversation lookup succeeds");
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn in_memory_old_record_rehydration_without_conversation_field() {
+        let rec = record("gate:old-json");
+        let json = serde_json::json!({
+            "tenant_id": rec.tenant_id,
+            "user_id": rec.user_id,
+            "gate_ref": rec.gate_ref,
+            "run_id": rec.run_id,
+            "scope": rec.scope,
+            "recorded_at": rec.recorded_at,
+        });
+
+        let rehydrated: DeliveredGateRouteRecord =
+            serde_json::from_value(json).expect("old JSON rehydrates");
+
+        assert!(rehydrated.delivered_conversation_fingerprints.is_empty());
+    }
+
+    #[tokio::test]
+    async fn in_memory_overwrite_updates_conversation_index() {
+        let store = InMemoryDeliveredGateRouteStore::default();
+        let conv_a = conversation_fingerprint("thread-overwrite-a");
+        let conv_b = conversation_fingerprint("thread-overwrite-b");
+        let first = DeliveredGateRouteRecord {
+            delivered_conversation_fingerprints: vec![conv_a.clone()],
+            ..record("gate:conversation-overwrite")
+        };
+        let second = DeliveredGateRouteRecord {
+            delivered_conversation_fingerprints: vec![conv_b.clone()],
+            run_id: TurnRunId::new(),
+            ..record("gate:conversation-overwrite")
+        };
+
+        store.record_delivered_gate_route(first).await.unwrap();
+        store
+            .record_delivered_gate_route(second.clone())
+            .await
+            .unwrap();
+
+        let loaded_a = store
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &user(), &conv_a)
+            .await
+            .expect("conversation lookup succeeds");
+        let loaded_b = store
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &user(), &conv_b)
+            .await
+            .expect("conversation lookup succeeds");
+
+        assert!(loaded_a.is_empty());
+        assert_eq!(loaded_b, vec![second]);
+    }
+
+    #[tokio::test]
+    async fn in_memory_removing_old_route_preserves_reused_conversation_index() {
+        let store = InMemoryDeliveredGateRouteStore::default();
+        let shared = conversation_fingerprint("thread-reused-index");
+        let old = DeliveredGateRouteRecord {
+            delivered_conversation_fingerprints: vec![shared.clone()],
+            ..record("gate:conversation-old")
+        };
+        let new = DeliveredGateRouteRecord {
+            delivered_conversation_fingerprints: vec![shared.clone()],
+            ..record("gate:conversation-new")
+        };
+
+        store.record_delivered_gate_route(old).await.unwrap();
+        store
+            .record_delivered_gate_route(new.clone())
+            .await
+            .unwrap();
+        store
+            .remove_delivered_gate_route(&tenant(), &user(), "gate:conversation-old")
+            .await
+            .unwrap();
+
+        let loaded = store
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &user(), &shared)
+            .await
+            .expect("conversation lookup succeeds");
+        assert_eq!(loaded, vec![new]);
+    }
+
+    #[tokio::test]
+    async fn in_memory_two_routes_same_conversation_both_retrievable() {
+        let store = InMemoryDeliveredGateRouteStore::default();
+        let shared = conversation_fingerprint("thread-shared-two-routes");
+        let route_a = DeliveredGateRouteRecord {
+            delivered_conversation_fingerprints: vec![shared.clone()],
+            ..record("gate:two-routes-a")
+        };
+        let route_b = DeliveredGateRouteRecord {
+            delivered_conversation_fingerprints: vec![shared.clone()],
+            ..record("gate:two-routes-b")
+        };
+
+        store
+            .record_delivered_gate_route(route_a.clone())
+            .await
+            .unwrap();
+        store
+            .record_delivered_gate_route(route_b.clone())
+            .await
+            .unwrap();
+
+        let mut loaded = store
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &user(), &shared)
+            .await
+            .expect("conversation lookup succeeds");
+        loaded.sort_by(|a, b| a.gate_ref.cmp(&b.gate_ref));
+        assert_eq!(loaded.len(), 2, "both routes must be retrievable");
+        assert!(loaded.iter().any(|r| r.gate_ref == "gate:two-routes-a"));
+        assert!(loaded.iter().any(|r| r.gate_ref == "gate:two-routes-b"));
+    }
+
+    #[tokio::test]
+    async fn in_memory_removing_one_route_leaves_sibling() {
+        let store = InMemoryDeliveredGateRouteStore::default();
+        let shared = conversation_fingerprint("thread-sibling");
+        let route_a = DeliveredGateRouteRecord {
+            delivered_conversation_fingerprints: vec![shared.clone()],
+            ..record("gate:sibling-a")
+        };
+        let route_b = DeliveredGateRouteRecord {
+            delivered_conversation_fingerprints: vec![shared.clone()],
+            ..record("gate:sibling-b")
+        };
+
+        store
+            .record_delivered_gate_route(route_a.clone())
+            .await
+            .unwrap();
+        store
+            .record_delivered_gate_route(route_b.clone())
+            .await
+            .unwrap();
+        store
+            .remove_delivered_gate_route(&tenant(), &user(), "gate:sibling-a")
+            .await
+            .unwrap();
+
+        let loaded = store
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &user(), &shared)
+            .await
+            .expect("conversation lookup succeeds");
+        assert_eq!(loaded, vec![route_b], "sibling route must survive removal");
+    }
+
+    #[tokio::test]
+    async fn in_memory_rerecording_one_route_does_not_disturb_sibling() {
+        let store = InMemoryDeliveredGateRouteStore::default();
+        let shared = conversation_fingerprint("thread-rerecord-sibling");
+        let route_a = DeliveredGateRouteRecord {
+            delivered_conversation_fingerprints: vec![shared.clone()],
+            ..record("gate:rerecord-a")
+        };
+        let route_b = DeliveredGateRouteRecord {
+            delivered_conversation_fingerprints: vec![shared.clone()],
+            ..record("gate:rerecord-b")
+        };
+
+        store
+            .record_delivered_gate_route(route_a.clone())
+            .await
+            .unwrap();
+        store
+            .record_delivered_gate_route(route_b.clone())
+            .await
+            .unwrap();
+
+        // Re-record route_a with the same conversation fingerprint.
+        let route_a_v2 = DeliveredGateRouteRecord {
+            run_id: TurnRunId::new(),
+            ..route_a.clone()
+        };
+        store
+            .record_delivered_gate_route(route_a_v2.clone())
+            .await
+            .unwrap();
+
+        let mut loaded = store
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &user(), &shared)
+            .await
+            .expect("conversation lookup succeeds");
+        loaded.sort_by(|a, b| a.gate_ref.cmp(&b.gate_ref));
+        assert_eq!(loaded.len(), 2, "both routes must still be present");
+        assert!(
+            loaded.iter().any(|r| r.run_id == route_a_v2.run_id),
+            "route_a must reflect its updated run_id"
+        );
+        assert!(
+            loaded.iter().any(|r| r.gate_ref == "gate:rerecord-b"),
+            "route_b sibling must be undisturbed"
+        );
+    }
+
+    #[tokio::test]
+    async fn in_memory_conv_lookup_capped_at_32_entries() {
+        // Write 33 routes for the same conversation fingerprint. The lookup cap
+        // (DELIVERED_GATE_ROUTE_CONVERSATION_LOOKUP_CAP = 32) must limit the returned set to at most 32
+        // records and must not panic.
+        let store = InMemoryDeliveredGateRouteStore::default();
+        let shared = conversation_fingerprint("thread-cap-33-entries");
+
+        for idx in 0..33u32 {
+            let rec = DeliveredGateRouteRecord {
+                delivered_conversation_fingerprints: vec![shared.clone()],
+                ..record(&format!("gate:cap-{idx:02}"))
+            };
+            store.record_delivered_gate_route(rec).await.unwrap();
+        }
+
+        let results = store
+            .load_delivered_gate_route_by_conversation_fingerprint(&tenant(), &user(), &shared)
+            .await
+            .expect("lookup must not error");
+        assert!(
+            results.len() <= 32,
+            "in-memory lookup must cap returned records at 32, got {}",
+            results.len()
+        );
     }
 }

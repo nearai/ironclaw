@@ -713,6 +713,7 @@ pub enum ProductRejectionKind {
     UnknownInstallation,
     InvalidRequest,
     PolicyDenied,
+    AmbiguousResolution,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -766,6 +767,9 @@ impl ProductRejectionKind {
                 "I couldn't read that request. Use `approve` / `deny`, optionally with `gate:<ref>`."
             }
             Self::PolicyDenied => "That request was declined by policy.",
+            Self::AmbiguousResolution => {
+                "Multiple requests are pending in this conversation. Use `approve gate:<ref>` or `deny gate:<ref>` to pick one."
+            }
         }
     }
 
@@ -779,6 +783,9 @@ impl ProductRejectionKind {
             }
             Self::InvalidRequest => {
                 "I couldn't read that request. Use `auth deny <auth-request-ref>` to decline an auth request."
+            }
+            Self::AmbiguousResolution => {
+                "Multiple auth requests are pending in this conversation. Use `auth deny <auth-request-ref>` to target a specific one."
             }
             _ => self.user_facing_hint(),
         }
@@ -1065,6 +1072,7 @@ mod tests {
             (ProductRejectionKind::UnknownInstallation, "workspace"),
             (ProductRejectionKind::InvalidRequest, "approve"),
             (ProductRejectionKind::PolicyDenied, "policy"),
+            (ProductRejectionKind::AmbiguousResolution, "approve gate:"),
         ];
         for (kind, expected_substr) in &cases {
             let hint = kind.user_facing_hint();
@@ -1112,6 +1120,13 @@ mod tests {
         assert!(
             !invalid_hint.contains("approve"),
             "InvalidRequest auth hint must not contain approval command, got: {invalid_hint}"
+        );
+
+        // AmbiguousResolution must also return auth-specific guidance, not approval text.
+        let ambiguous_hint = ProductRejectionKind::AmbiguousResolution.user_facing_auth_hint();
+        assert!(
+            ambiguous_hint.contains("auth deny"),
+            "AmbiguousResolution auth hint must reference 'auth deny', got: {ambiguous_hint}"
         );
 
         // All other kinds fall through to user_facing_hint().

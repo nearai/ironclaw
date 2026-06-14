@@ -520,3 +520,102 @@ async fn webui_projection_with_pending_preview_on_first_activity_defers_second_a
             if preview.result_ref.as_deref() == Some("result:preview-multi-second")
     ));
 }
+
+/// Regression: a still-running first activity must hold the runtime
+/// cursor at its (not-yet-existent) preview, exactly like a completed activity
+/// awaiting its preview record. Before the fix, a running activity's preview
+/// resolved to `NotApplicable`, so the drain skipped past it and delivered the
+/// second activity's payloads. When the first invocation later completed, its
+/// now-materialized preview sat behind the resume watermark and was dropped —
+/// the tool card that "stops updating". The drain must instead defer the second
+/// activity until the first completes, then deliver the first activity's preview
+/// in order.
+#[tokio::test]
+async fn webui_projection_holds_cursor_when_first_activity_is_still_running() {
+    let now = chrono::Utc::now();
+    let mut fixture = PreviewProjectionFixture::completed("running", "read_file", now);
+    // The first activity is in flight: no preview exists yet, but one will once
+    // it completes.
+    fixture.snapshot.runs[0].status = RunProjectionStatus::Running;
+    fixture.snapshot.capability_activities[0].status =
+        ironclaw_event_projections::CapabilityActivityStatus::Running;
+    let second = fixture.add_completed_activity(
+        "running-second",
+        "list_files",
+        now,
+        ironclaw_events::EventCursor::new(2),
+    );
+    fixture.record_input_for(&second, "list_files");
+    fixture.record_result_for(
+        &second,
+        "result:preview-running-second",
+        serde_json::json!({"content": "src/main.rs\nCargo.toml"}),
+    );
+
+    // Drain while the first activity is still running. The drain holds at its
+    // pending preview slot (State + the running activity card only) instead of
+    // skipping ahead to the second activity.
+    let first = runtime_payloads_for_item(
+        &fixture.scope,
+        &fixture.display_previews,
+        fixture.item_input(),
+        None,
+        0,
+        8,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(first.total, 3);
+    assert_eq!(first.payloads.len(), 2);
+    assert!(matches!(
+        first.payloads[0].payload,
+        ProductOutboundPayload::ProjectionSnapshot { .. }
+    ));
+    assert!(matches!(
+        &first.payloads[1].payload,
+        ProductOutboundPayload::CapabilityActivity(activity)
+            if activity.invocation_id == fixture.invocation_id
+    ));
+
+    // The first invocation completes and records its preview.
+    fixture.snapshot.runs[0].status = RunProjectionStatus::Completed;
+    fixture.snapshot.capability_activities[0].status =
+        ironclaw_event_projections::CapabilityActivityStatus::Completed;
+    fixture.record_input("read_file");
+    fixture.record_result(
+        "result:preview-running-first",
+        serde_json::json!({"content": "fn main() {}"}),
+    );
+
+    // Resume from the held cursor: the first activity's preview is delivered in
+    // order ahead of the deferred second activity — not dropped.
+    let resumed = runtime_payloads_for_item(
+        &fixture.scope,
+        &fixture.display_previews,
+        fixture.item_input(),
+        Some(first.item_cursor.runtime),
+        first.payloads[1].delivered,
+        8,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(resumed.total, 5);
+    assert_eq!(resumed.payloads.len(), 3);
+    assert!(matches!(
+        &resumed.payloads[0].payload,
+        ProductOutboundPayload::CapabilityDisplayPreview(preview)
+            if preview.result_ref.as_deref() == Some("result:preview-running-first")
+    ));
+    assert!(matches!(
+        &resumed.payloads[1].payload,
+        ProductOutboundPayload::CapabilityActivity(activity)
+            if activity.invocation_id == second.invocation_id
+    ));
+    assert!(matches!(
+        &resumed.payloads[2].payload,
+        ProductOutboundPayload::CapabilityDisplayPreview(preview)
+            if preview.result_ref.as_deref() == Some("result:preview-running-second")
+    ));
+}

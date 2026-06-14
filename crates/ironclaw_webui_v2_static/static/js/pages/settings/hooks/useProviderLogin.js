@@ -86,18 +86,31 @@ const NEARAI_POLL_DEADLINE_MS = 300_000;
 const CODEX_POLL_DEADLINE_MS = 900_000;
 const POLL_INTERVAL_MS = 2000;
 
-// Poll the LLM snapshot until `providerId` becomes the active provider, or the
-// deadline passes. Returns true on success.
-async function pollUntilActive(providerId, deadlineMs) {
+// Poll the LLM snapshot until `providerId` becomes the active provider, the
+// login popup is closed, or the deadline passes. When a `popup` handle is
+// given, a closed window short-circuits the wait so the UI recovers the instant
+// the user cancels instead of staying disabled until the full deadline.
+// Returns "active", "closed", or "timeout".
+async function pollUntilActive(providerId, deadlineMs, popup) {
   const deadline = Date.now() + deadlineMs;
+  // The popup can auto-close a beat before the snapshot flips active on a
+  // successful sign-in, so keep confirming activation for a short grace window
+  // after a close before concluding the user actually cancelled.
+  let graceChecksAfterClose = 2;
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
     const snapshot = await fetchLlmProviders().catch(() => null);
     if (snapshot?.active?.provider_id === providerId) {
-      return true;
+      return "active";
+    }
+    if (popup && popup.closed) {
+      if (graceChecksAfterClose <= 0) {
+        return "closed";
+      }
+      graceChecksAfterClose -= 1;
     }
   }
-  return false;
+  return "timeout";
 }
 
 // Shared NEAR AI + OpenAI Codex login flows, surface-agnostic. The onboarding
@@ -116,6 +129,18 @@ export function useProviderLogin({ onSuccess } = {}) {
   const [codexError, setCodexError] = React.useState("");
   const [codexCode, setCodexCode] = React.useState(null);
 
+  // Clear every login flow's feedback before starting a new attempt. The
+  // status surface renders the NEAR AI and Codex errors (plus the Codex device
+  // code) together, and the three NEAR AI methods share one error slot, so a
+  // failed attempt's message would otherwise linger while the user switches to
+  // a different provider/method. Resetting on every start keeps the surface
+  // scoped to the attempt in progress.
+  const resetLoginFeedback = React.useCallback(() => {
+    setNearaiError("");
+    setCodexError("");
+    setCodexCode(null);
+  }, []);
+
   const finishActive = React.useCallback(async () => {
     await queryClient.invalidateQueries({ queryKey: ["llm-providers"] });
     if (onSuccess) {
@@ -125,7 +150,7 @@ export function useProviderLogin({ onSuccess } = {}) {
 
   const startNearai = React.useCallback(
     async (provider) => {
-      setNearaiError("");
+      resetLoginFeedback();
       if (isLocalDevOrigin()) {
         setNearaiError(t("onboarding.nearaiLocalSso"));
         return;
@@ -152,11 +177,19 @@ export function useProviderLogin({ onSuccess } = {}) {
           origin: window.location.origin,
         });
         popup.location.href = authUrl;
-        if (await pollUntilActive("nearai", NEARAI_POLL_DEADLINE_MS)) {
+        const outcome = await pollUntilActive("nearai", NEARAI_POLL_DEADLINE_MS, popup);
+        if (outcome === "active") {
           await finishActive();
           return;
         }
-        setNearaiError(t("onboarding.nearaiTimeout"));
+        // Cancelled (tab closed) or never completed: close the tab if it is
+        // still open and surface a retryable error. `finally` clears the busy
+        // flag, so the buttons re-enable for an immediate retry without a
+        // page refresh.
+        popup.close();
+        setNearaiError(
+          t(outcome === "closed" ? "onboarding.nearaiFailed" : "onboarding.nearaiTimeout")
+        );
       } catch (_err) {
         popup.close();
         setNearaiError(t("onboarding.nearaiFailed"));
@@ -164,7 +197,7 @@ export function useProviderLogin({ onSuccess } = {}) {
         setNearaiBusy(false);
       }
     },
-    [finishActive, t]
+    [finishActive, resetLoginFeedback, t]
   );
 
   // NEAR wallet login can't reuse the GitHub/Google redirect: NEP-413 signing
@@ -177,7 +210,7 @@ export function useProviderLogin({ onSuccess } = {}) {
     // NEP-413 signing happens in a same-origin popup and the signed message is
     // relayed through our own backend. So it works on localhost — no local-dev
     // guard here.
-    setNearaiError("");
+    resetLoginFeedback();
     setNearaiBusy(true);
     try {
       const channelName = walletLoginChannelName();
@@ -219,28 +252,57 @@ export function useProviderLogin({ onSuccess } = {}) {
     } finally {
       setNearaiBusy(false);
     }
-  }, [finishActive, t]);
+  }, [finishActive, resetLoginFeedback, t]);
 
   const startCodex = React.useCallback(async () => {
-    setCodexError("");
-    setCodexCode(null);
+    resetLoginFeedback();
+    // Open the popup synchronously inside the click gesture: browsers only
+    // allow gesture-time opens, so opening after the awaited backend call could
+    // be blocked. Keep the handle (no `noopener`, which would null the return)
+    // so a closed tab can short-circuit the wait instead of leaving the button
+    // disabled for the full device-code deadline. Sever `opener` while the
+    // popup is still same-origin `about:blank` — setting it on the cross-origin
+    // verification page can be rejected, so nulling it before navigating is
+    // what closes the reverse-tabnabbing hole. If the popup is blocked, `popup`
+    // is null and the wait falls back to polling alone; the device code is
+    // still shown so the user can complete it elsewhere. Mirrors the NEAR AI
+    // flow above.
+    const popup = window.open("about:blank", "_blank");
+    if (popup) {
+      try {
+        popup.opener = null;
+      } catch (_e) {
+        // Ignore: some engines disallow setting opener; navigation still works.
+      }
+    }
     setCodexBusy(true);
     try {
       const { user_code: userCode, verification_uri: verificationUri } =
         await startCodexLogin();
       setCodexCode({ userCode, verificationUri });
-      window.open(verificationUri, "_blank", "noopener");
-      if (await pollUntilActive("openai_codex", CODEX_POLL_DEADLINE_MS)) {
+      if (popup) {
+        popup.location.href = verificationUri;
+      }
+      const outcome = await pollUntilActive("openai_codex", CODEX_POLL_DEADLINE_MS, popup);
+      if (outcome === "active") {
         await finishActive();
         return;
       }
-      setCodexError(t("onboarding.codexTimeout"));
+      if (popup) {
+        popup.close();
+      }
+      setCodexError(
+        t(outcome === "closed" ? "onboarding.codexFailed" : "onboarding.codexTimeout")
+      );
     } catch (_err) {
+      if (popup) {
+        popup.close();
+      }
       setCodexError(t("onboarding.codexFailed"));
     } finally {
       setCodexBusy(false);
     }
-  }, [finishActive, t]);
+  }, [finishActive, resetLoginFeedback, t]);
 
   return {
     nearaiBusy,

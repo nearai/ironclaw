@@ -34,11 +34,12 @@
 //!    into the kind-specific table (`hooks_predicate_invocations` for
 //!    counts, `hooks_predicate_values` for numeric sums — explicit typed
 //!    tables, not a generic `kind` discriminator column).
-//! 5. **Evicts** the scope's oldest-front key — the key whose oldest
-//!    retained sample (`MIN(occurred_at)`) is oldest — when the scope's
-//!    distinct-key count exceeds [`MAX_KEYS_PER_TENANT`] (the durable
-//!    analogue of the in-memory per-tenant LRU quota, which ranks buckets by
-//!    their oldest entry). Each victim's rows
+//! 5. **Evicts** the scope's oldest-front key across both typed tables — the
+//!    key whose oldest retained sample (`MIN(occurred_at)`) is oldest — when
+//!    the scope's aggregate distinct-key count exceeds
+//!    [`MAX_KEYS_PER_TENANT`] (the durable analogue of the in-memory
+//!    per-tenant LRU quota, which ranks buckets by their oldest entry). Each
+//!    victim's rows
 //!    are deleted only after acquiring that victim key's per-key advisory
 //!    lock with the NON-blocking `pg_try_advisory_xact_lock`, so eviction
 //!    obeys the same per-bucket serialization as a recorder and can never
@@ -99,16 +100,6 @@ impl RecordKind {
         match self {
             RecordKind::Invocation => INVOCATIONS_TABLE,
             RecordKind::Value => VALUES_TABLE,
-        }
-    }
-
-    /// One-byte discriminant folded into the per-scope advisory-lock key so
-    /// the invocation and value scope-quota passes lock independently (they
-    /// touch disjoint tables, so they must not serialize against each other).
-    fn lock_tag(self) -> &'static [u8] {
-        match self {
-            RecordKind::Invocation => b"i",
-            RecordKind::Value => b"v",
         }
     }
 }
@@ -344,9 +335,10 @@ impl PostgresPredicateStateBackend {
         // make the count always pre-insert. Sequential statements inside
         // the transaction DO see prior statements' writes.
         //
-        // The distinct-key count is needed independently of the returned
-        // aggregate (the value table's aggregate is a SUM, not a count), so
-        // read it explicitly to gate the quota pass.
+        // The current key's in-window count is needed independently of the
+        // returned aggregate (the value table's aggregate is a SUM, not a
+        // count), so read it explicitly to detect when this record created a
+        // brand-new bucket and should run the aggregate tenant quota pass.
         let in_window_count: i64 = tx
             .query_one(
                 &format!(
@@ -359,17 +351,15 @@ impl PostgresPredicateStateBackend {
             .map_err(map_pg)?
             .get(0);
 
-        // (5) Per-scope distinct-key LRU quota. Only scan when this key is
-        // newly material (count == 1 after insert means we may have just
-        // created the scope's Nth key). Distinct keys are counted by
-        // key_hash within the scope (one typed table per kind, so no kind
-        // filter is needed); if over quota, evict the least-recently-active
-        // key's rows entirely. Scope-LRU eviction only ever touches OTHER
-        // keys, so it cannot change this key's aggregate and does not require
-        // a re-read.
+        // (5) Per-scope aggregate distinct-key LRU quota. Only scan when this
+        // key is newly material (count == 1 after insert means we may have
+        // just created the scope's Nth key). Distinct keys are counted by
+        // key_hash within the scope across both typed tables; if over quota,
+        // evict the least-recently-active key's rows entirely. Scope-LRU
+        // eviction only ever touches OTHER keys, so it cannot change this
+        // key's aggregate and does not require a re-read.
         let evicted = if in_window_count == 1 {
-            self.enforce_scope_quota(&tx, kind, scope_ref, key_ref)
-                .await?
+            self.enforce_scope_quota(&tx, scope_ref, key_ref).await?
         } else {
             0
         };
@@ -432,7 +422,8 @@ impl PostgresPredicateStateBackend {
         }
     }
 
-    /// Enforce [`MAX_KEYS_PER_TENANT`] distinct keys per scope+kind.
+    /// Enforce [`MAX_KEYS_PER_TENANT`] distinct keys per scope across both
+    /// typed predicate tables.
     /// Returns the number of keys evicted (0 or more). Eviction drops the
     /// key whose OLDEST retained sample is oldest (`MIN(ts)` per key) —
     /// the "oldest-front" victim selection, matching the in-memory backend
@@ -441,14 +432,14 @@ impl PostgresPredicateStateBackend {
     ///
     /// # Reaper requirement — quota counts un-reaped expired rows
     ///
-    /// The `COUNT(DISTINCT key_hash) WHERE scope_hash = $1` below counts EVERY
-    /// stored row for the scope, including expired rows from OTHER keys: the
+    /// The unioned distinct-key count below counts EVERY stored row for the
+    /// scope across both tables, including expired rows from OTHER keys: the
     /// per-key window trim in `record_*` only deletes the current key's
     /// out-of-window rows, never sibling keys. So a tenant with many idle
-    /// short-window keys can read at `MAX_KEYS_PER_TENANT` and trip LRU eviction
-    /// (advancing `evictions_observed`) even though its *active* key count is
-    /// lower. The evicted keys are already expired, so gate correctness is
-    /// unaffected, but operators MUST schedule a periodic
+    /// short-window keys can read at `MAX_KEYS_PER_TENANT` and trip LRU
+    /// eviction (advancing `evictions_observed`) even though its *active* key
+    /// count is lower. The evicted keys are already expired, so gate
+    /// correctness is unaffected, but operators MUST schedule a periodic
     /// [`PredicateStateBackend::evict_older_than`] reaper to keep the quota
     /// aligned with the active key count. See
     /// `ironclaw_hooks/docs/successors/03-persistent-counter.md` (Reaper
@@ -484,11 +475,9 @@ impl PostgresPredicateStateBackend {
     async fn enforce_scope_quota(
         &self,
         tx: &deadpool_postgres::Transaction<'_>,
-        kind: RecordKind,
         scope_ref: &[u8],
         current_key: &[u8],
     ) -> Result<u64, PredicateBackendError> {
-        let table = kind.table();
         // Serialize quota enforcement within the scope. Concurrent inserts
         // of DISTINCT new keys in the same scope each reach this path with
         // `count == 1`, but under READ COMMITTED neither sees the other's
@@ -499,7 +488,7 @@ impl PostgresPredicateStateBackend {
         // space, disjoint from the per-key `(int4,int4)` lock space. Hot-path
         // same-key writes never reach here (only newly-material keys do), so
         // this does not serialize steady-state traffic.
-        let scope_lock = scope_advisory_lock_key(scope_ref, kind.lock_tag());
+        let scope_lock = scope_advisory_lock_key(scope_ref);
         tx.execute("SELECT pg_advisory_xact_lock($1)", &[&scope_lock])
             .await
             .map_err(map_pg)?;
@@ -507,9 +496,11 @@ impl PostgresPredicateStateBackend {
         let distinct: i64 = tx
             .query_one(
                 &format!(
-                    "SELECT COUNT(DISTINCT key_hash)::BIGINT
-                       FROM {table}
-                      WHERE scope_hash = $1"
+                    "SELECT COUNT(*)::BIGINT FROM (
+                         SELECT key_hash FROM {INVOCATIONS_TABLE} WHERE scope_hash = $1
+                         UNION
+                         SELECT key_hash FROM {VALUES_TABLE} WHERE scope_hash = $1
+                     ) tenant_keys"
                 ),
                 &[&scope_ref],
             )
@@ -545,15 +536,25 @@ impl PostgresPredicateStateBackend {
         let candidate_rows = tx
             .query(
                 &format!(
-                    "SELECT key_hash FROM (
-                         SELECT key_hash, MIN(occurred_at) AS oldest_ts
-                           FROM {table}
+                    "SELECT table_name, key_hash FROM (
+                         SELECT 'invocation'::TEXT AS table_name,
+                                key_hash,
+                                MIN(occurred_at) AS oldest_ts
+                           FROM {INVOCATIONS_TABLE}
                           WHERE scope_hash = $1
                             AND key_hash <> $2
                           GROUP BY key_hash
-                          ORDER BY oldest_ts ASC
-                          LIMIT $3
-                     ) victims"
+                         UNION ALL
+                         SELECT 'value'::TEXT AS table_name,
+                                key_hash,
+                                MIN(occurred_at) AS oldest_ts
+                           FROM {VALUES_TABLE}
+                          WHERE scope_hash = $1
+                            AND key_hash <> $2
+                          GROUP BY key_hash
+                     ) victims
+                     ORDER BY oldest_ts ASC, table_name ASC, key_hash ASC
+                     LIMIT $3"
                 ),
                 &[&scope_ref, &current_key, &candidate_limit],
             )
@@ -573,7 +574,13 @@ impl PostgresPredicateStateBackend {
             if evicted as usize >= to_evict {
                 break;
             }
-            let victim_key: Vec<u8> = row.get(0);
+            let victim_table_name: String = row.get(0);
+            let victim_key: Vec<u8> = row.get(1);
+            let victim_table = match victim_table_name.as_str() {
+                "invocation" => INVOCATIONS_TABLE,
+                "value" => VALUES_TABLE,
+                _ => continue,
+            };
             let lock_key = advisory_lock_key_from_bytes(&victim_key);
             let got_lock: bool = tx
                 .query_one(
@@ -589,7 +596,7 @@ impl PostgresPredicateStateBackend {
                 continue;
             }
             tx.execute(
-                &format!("DELETE FROM {table} WHERE scope_hash = $1 AND key_hash = $2"),
+                &format!("DELETE FROM {victim_table} WHERE scope_hash = $1 AND key_hash = $2"),
                 &[&scope_ref, &victim_key],
             )
             .await
@@ -703,12 +710,12 @@ fn advisory_lock_key_from_bytes(key: &[u8]) -> (i32, i32) {
 /// Derive the single-`i64` scope advisory-lock key. Uses the `(int8)`
 /// advisory space, which Postgres keeps disjoint from the `(int4,int4)`
 /// space used for per-key locks, so a key lock and a scope lock can never
-/// alias each other. Folds in the `kind` byte so the invocation and value
-/// maps lock independently.
-fn scope_advisory_lock_key(scope: &[u8], kind: &[u8]) -> i64 {
+/// alias each other. The lock is scope-wide across both predicate tables
+/// because [`MAX_KEYS_PER_TENANT`] is an aggregate per-tenant quota.
+fn scope_advisory_lock_key(scope: &[u8]) -> i64 {
     let mut hasher = blake3::Hasher::new();
     hasher.update(scope);
-    hasher.update(kind);
+    hasher.update(b"predicate-scope");
     let d = hasher.finalize();
     let bytes = d.as_bytes();
     i64::from_le_bytes([

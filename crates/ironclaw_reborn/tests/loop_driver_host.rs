@@ -213,7 +213,7 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
         })
         .await
         .unwrap();
-    assert_eq!(prompt_bundle.messages.len(), 2);
+    assert_eq!(prompt_bundle.messages.len(), 3);
     assert!(prompt_bundle.instruction_fingerprint.is_some());
 
     let model_response = host_dyn
@@ -855,10 +855,17 @@ async fn text_only_model_reply_driver_runs_prompt_model_transcript_path() {
 
     let requests = fixture.gateway.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].messages.len(), 2);
+    assert_eq!(requests[0].messages.len(), 3);
     assert!(requests[0].messages.iter().any(|message| {
         message.content == "RAW_PROMPT_TEXT_SENTINEL sk-prompt-secret /host/path tool_input"
     }));
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|message| message.content.contains("Current date/time at loop start:")),
+        "model request must contain the runtime context message stamped by the production host"
+    );
     assert_eq!(
         fixture.milestone_names(),
         vec![
@@ -870,6 +877,79 @@ async fn text_only_model_reply_driver_runs_prompt_model_transcript_path() {
     );
     assert_public_milestones_hide_raw_payloads(&fixture.milestones());
     assert_driver_public_outputs_hide_raw_payloads(&completed);
+}
+
+/// Regression guard: the runtime context ("Current date/time at loop start:")
+/// must appear exactly once in every model request, including across multiple
+/// loop spawns over the same thread (where the transcript grows but the
+/// synthetic runtime section must NOT leak into it and reappear alongside the
+/// fresh section on the next spawn).
+///
+/// There is no existing test that drives 2+ model requests through
+/// HostFixture in a single turn worker run (all existing HostFixture-based
+/// tests assert requests.len() == 1). Instead, this test uses two independent
+/// build_host()+driver.run() calls over the same fixture to simulate two
+/// successive loop spawns. Each spawn sets a fresh LoopRuntimeContext on its
+/// prompt port; after the first run the assistant reply is persisted to the
+/// thread service transcript. The second spawn therefore sees a longer
+/// transcript, and we verify the runtime context still appears exactly once
+/// (not twice, which would happen if it had been stored in the transcript).
+#[tokio::test]
+async fn text_only_model_reply_driver_embeds_runtime_context_exactly_once_per_model_request() {
+    // --- spawn 1 ---
+    let mut fixture = HostFixture::new(
+        "thread-driver-runtime-once",
+        "first message RAW_PROMPT_TEXT_SENTINEL",
+    )
+    .await;
+    let driver = TextOnlyModelReplyDriver::default();
+    assign_driver_to_fixture(&mut fixture, driver.descriptor());
+
+    let host1 = fixture.build_host().await;
+    driver
+        .run(driver_request(&fixture.context), &host1)
+        .await
+        .unwrap();
+
+    let requests_after_spawn1 = fixture.gateway.requests();
+    assert_eq!(
+        requests_after_spawn1.len(),
+        1,
+        "spawn 1 should produce exactly one gateway request"
+    );
+    let occurrences_spawn1 = requests_after_spawn1[0]
+        .messages
+        .iter()
+        .filter(|message| message.content.contains("Current date/time at loop start:"))
+        .count();
+    assert_eq!(
+        occurrences_spawn1, 1,
+        "model request for spawn 1 must embed the runtime context exactly once, found {occurrences_spawn1}"
+    );
+
+    // --- spawn 2 (same thread, transcript now has the assistant reply from
+    // spawn 1; the runtime context from spawn 1 must NOT reappear) ---
+    let host2 = fixture.build_host().await;
+    driver
+        .run(driver_request(&fixture.context), &host2)
+        .await
+        .unwrap();
+
+    let requests_after_spawn2 = fixture.gateway.requests();
+    assert_eq!(
+        requests_after_spawn2.len(),
+        2,
+        "spawn 2 should add a second gateway request (cumulative total)"
+    );
+    let occurrences_spawn2 = requests_after_spawn2[1]
+        .messages
+        .iter()
+        .filter(|message| message.content.contains("Current date/time at loop start:"))
+        .count();
+    assert_eq!(
+        occurrences_spawn2, 1,
+        "model request for spawn 2 must embed the runtime context exactly once (not accumulated from spawn 1), found {occurrences_spawn2}"
+    );
 }
 
 #[tokio::test]
@@ -2267,6 +2347,7 @@ async fn planned_host_factory_create_host_uses_profiled_capabilities() {
             capability_id: denied_id,
             input_ref: CapabilityInputRef::new("input:denied-from-planned-host").unwrap(),
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -2598,6 +2679,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
             capability_id: denied_id,
             input_ref: CapabilityInputRef::new("input:runtime-denied").unwrap(),
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -2829,6 +2911,7 @@ async fn hooks_flag_off_capability_invocation_is_unaffected() {
             capability_id: allowed_id.clone(),
             input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -2871,6 +2954,7 @@ async fn hooks_flag_on_first_party_only_does_not_change_outcome() {
             capability_id: allowed_id.clone(),
             input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -2906,6 +2990,7 @@ async fn hooks_flag_on_extension_deny_hook_denies_through_composed_runtime() {
             capability_id: allowed_id.clone(),
             input_ref: CapabilityInputRef::new("input:hooks-deny").unwrap(),
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -2941,6 +3026,7 @@ async fn hooks_are_isolated_per_tenant_runtime() {
             capability_id: allowed_id.clone(),
             input_ref: CapabilityInputRef::new("input:tenant-a").unwrap(),
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -2969,6 +3055,7 @@ async fn hooks_are_isolated_per_tenant_runtime() {
             capability_id: allowed_id.clone(),
             input_ref: input_ref_b,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -3594,7 +3681,7 @@ async fn text_only_host_prompt_accepts_empty_surface_version() {
         .await
         .unwrap();
 
-    assert_eq!(prompt_bundle.messages.len(), 2);
+    assert_eq!(prompt_bundle.messages.len(), 3);
 }
 
 #[tokio::test]
@@ -4436,7 +4523,7 @@ async fn text_only_host_skill_context_does_not_expand_capability_surface() {
         })
         .await
         .unwrap();
-    assert_eq!(prompt_bundle.messages.len(), 3);
+    assert_eq!(prompt_bundle.messages.len(), 4);
 
     let surface = host
         .visible_capabilities(VisibleCapabilityRequest)
@@ -4450,6 +4537,7 @@ async fn text_only_host_skill_context_does_not_expand_capability_surface() {
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
                 input_ref: CapabilityInputRef::new("input:opaque-tool-input").unwrap(),
                 approval_resume: None,
+                auth_resume: None,
             }],
             stop_on_first_suspension: true,
         })
@@ -4508,7 +4596,7 @@ async fn text_only_host_prompt_bundle_includes_surface_metadata_and_still_stream
 
     assert!(prompt_bundle.instruction_fingerprint.is_some());
     assert_eq!(prompt_bundle.surface_version, Some(surface.version.clone()));
-    assert_eq!(prompt_bundle.messages.len(), 3);
+    assert_eq!(prompt_bundle.messages.len(), 4);
 
     host.stream_model(LoopModelRequest {
         messages: prompt_bundle.messages,
@@ -4576,6 +4664,7 @@ async fn text_only_host_routes_capability_invocation_through_host_runtime() {
             capability_id: capability_id.clone(),
             input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -4640,6 +4729,7 @@ async fn text_only_host_profiled_capabilities_filter_surface_and_invocation() {
             capability_id: denied_id,
             input_ref: CapabilityInputRef::new("input:denied-profile").unwrap(),
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -4715,6 +4805,7 @@ async fn default_strategy_filter_all_loses_to_host_profile_filter() {
             capability_id: tool_b_id,
             input_ref: CapabilityInputRef::new("input:tool-b-denied").unwrap(),
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -4788,6 +4879,7 @@ async fn text_only_host_uses_fresh_execution_context_per_capability_invocation()
                 capability_id: capability_id.clone(),
                 input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .unwrap();
@@ -4876,6 +4968,7 @@ async fn text_only_host_rejects_outside_surface_capability_before_host_runtime()
             capability_id: hidden_id,
             input_ref: CapabilityInputRef::new("input:hidden-request").unwrap(),
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -4892,6 +4985,7 @@ async fn text_only_host_rejects_outside_surface_capability_before_host_runtime()
             capability_id: visible_id,
             input_ref: CapabilityInputRef::new("input:stale-request").unwrap(),
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap_err();
@@ -4946,6 +5040,7 @@ async fn text_only_host_sanitizes_runtime_failure_message_before_driver_output()
             capability_id,
             input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -5051,6 +5146,7 @@ async fn text_only_host_maps_runtime_suspension_and_process_outcomes() {
                 capability_id,
                 input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .unwrap(),
@@ -5136,6 +5232,7 @@ async fn text_only_host_maps_explicit_unknown_runtime_outcome_to_failure() {
             capability_id,
             input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -5204,6 +5301,7 @@ async fn text_only_host_preserves_invalid_request_and_returns_unavailable_as_fai
             capability_id: capability_id.clone(),
             input_ref: first_input,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap_err();
@@ -5213,6 +5311,7 @@ async fn text_only_host_preserves_invalid_request_and_returns_unavailable_as_fai
             capability_id,
             input_ref: second_input,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -5288,12 +5387,14 @@ async fn text_only_host_batch_stops_on_first_suspension_before_later_invocations
                     capability_id: approval_id,
                     input_ref: approval_input,
                     approval_resume: None,
+                    auth_resume: None,
                 },
                 CapabilityInvocation {
                     surface_version: surface.version,
                     capability_id: echo_id,
                     input_ref: echo_input,
                     approval_resume: None,
+                    auth_resume: None,
                 },
             ],
             stop_on_first_suspension: true,
@@ -5352,6 +5453,7 @@ async fn text_only_host_does_not_reinvoke_runtime_after_failed_outcome_retry() {
         capability_id: capability_id.clone(),
         input_ref,
         approval_resume: None,
+        auth_resume: None,
     };
 
     let first = host.invoke_capability(invocation.clone()).await.unwrap();
@@ -5474,6 +5576,7 @@ async fn text_only_host_waits_for_concurrent_duplicate_invocation_result() {
         capability_id: capability_id.clone(),
         input_ref,
         approval_resume: None,
+        auth_resume: None,
     };
 
     let (first, second) = tokio::join!(
@@ -5554,6 +5657,7 @@ async fn text_only_host_bounds_completed_dispatch_records() {
                 capability_id: capability_id.clone(),
                 input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .unwrap();
@@ -5565,6 +5669,7 @@ async fn text_only_host_bounds_completed_dispatch_records() {
             capability_id,
             input_ref: input_refs[0].clone(),
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -5667,6 +5772,7 @@ async fn text_only_host_does_not_reinvoke_runtime_after_result_write_failure_ret
         capability_id: capability_id.clone(),
         input_ref,
         approval_resume: None,
+        auth_resume: None,
     };
 
     let first = host
@@ -5735,6 +5841,7 @@ async fn text_only_host_rejects_runtime_outcome_for_different_capability() {
             capability_id: requested_id,
             input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap_err();
@@ -5805,6 +5912,7 @@ async fn text_only_host_rejects_previous_surface_after_refetch() {
             capability_id: first_id,
             input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap_err();
@@ -5829,6 +5937,7 @@ async fn text_only_host_empty_capability_surface_denies_invocation() {
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
                 input_ref: CapabilityInputRef::new("input:opaque-tool-input").unwrap(),
                 approval_resume: None,
+                auth_resume: None,
             }],
             stop_on_first_suspension: true,
         })
@@ -5846,6 +5955,7 @@ async fn text_only_host_empty_capability_surface_denies_invocation() {
             capability_id: CapabilityId::new("demo.echo").unwrap(),
             input_ref: CapabilityInputRef::new("input:opaque-tool-input").unwrap(),
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap_err();
@@ -5915,6 +6025,7 @@ async fn text_only_host_e2e_invokes_script_capability_through_real_host_runtime(
             capability_id: e2e_script_capability_id(),
             input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -5968,6 +6079,7 @@ async fn text_only_host_denies_capability_without_provider_trust_before_host_run
             capability_id,
             input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -6026,6 +6138,7 @@ async fn text_only_host_allows_retry_after_missing_capability_input_is_staged() 
         capability_id: capability_id.clone(),
         input_ref: input_ref.clone(),
         approval_resume: None,
+        auth_resume: None,
     };
 
     let missing = host
@@ -6895,6 +7008,7 @@ impl AgentLoopDriver for ScriptCapabilityFinalReplyDriver {
                 capability_id: self.capability_id.clone(),
                 input_ref: self.input_ref.clone(),
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .map_err(driver_host_error)?;
