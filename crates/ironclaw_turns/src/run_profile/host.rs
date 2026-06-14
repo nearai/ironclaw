@@ -598,6 +598,43 @@ impl LoopRunContext {
     }
 }
 
+/// Credential-free marker: types that implement this trait assert that they
+/// contain no credential material (API keys, bearer tokens, passwords, or other
+/// secrets) and are therefore safe to persist verbatim into durable storage
+/// (e.g. `subagent_gate_awaited_children.parent_run_context_json`).
+///
+/// # Invariant
+///
+/// Before adding `impl CredentialFree for T`, verify **every field** of `T`
+/// (and every nested type) against this checklist:
+///
+/// - No raw string field whose name or documentation suggests a token, key,
+///   password, or secret (`token`, `api_key`, `secret`, `password`, `bearer`,
+///   `credential`, …).
+/// - No type that wraps an OS keychain reference, an OAuth grant, or a
+///   long-lived session token.
+/// - Model-route version fields (`auth_version`, `config_version`) are safe
+///   only when validated through [`validate_model_route_component_value`],
+///   which rejects forbidden markers (see `FORBIDDEN_MODEL_ROUTE_MARKERS`).
+///
+/// # Review gate
+///
+/// Any PR that adds a field to `LoopRunContext` (or a type reachable from it)
+/// **must** re-verify this checklist and update the credential audit document
+/// at `docs/reborn/2026-06-09-wu-c2-loopruncontext-credential-audit.md`.
+pub trait CredentialFree: private_credential_free::Sealed {}
+
+mod private_credential_free {
+    pub trait Sealed {}
+}
+
+/// Safety: audited in `docs/reborn/2026-06-09-wu-c2-loopruncontext-credential-audit.md`.
+/// All fields are opaque identifiers, policy configuration, version tokens, or
+/// model-route snapshots validated to reject credential markers.  Re-audit
+/// whenever a field is added to `LoopRunContext` or any nested type.
+impl CredentialFree for LoopRunContext {}
+impl private_credential_free::Sealed for LoopRunContext {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentLoopHostErrorKind {
