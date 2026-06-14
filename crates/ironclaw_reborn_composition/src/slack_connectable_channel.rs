@@ -3,11 +3,13 @@ use std::sync::Arc;
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
     ConnectableChannelsProductFacade, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornConnectableChannelInfo, StaticConnectableChannelsProductFacade,
+    RebornChannelConnectionStatus, RebornConnectableChannelInfo,
+    RebornConnectableChannelListResponse, RebornServicesError, WebUiAuthenticatedCaller,
 };
 
 use crate::{
     RebornBuildError, RebornRuntime, RebornWebuiBundle, SlackHostBetaMounts,
+    slack_outbound_targets::SlackDeliveryConnectionProvider,
     webui::build_webui_services_with_connectable_channels,
 };
 
@@ -39,13 +41,15 @@ pub fn build_webui_services_with_slack_host_beta_mounts(
             SlackConnectableChannelVisibility::PersonalPairingAndAdminChannelManagement
         }
     };
+    let slack_delivery_connections =
+        slack_mounts.map(|mounts| Arc::clone(&mounts.delivery_connection_provider));
     let outbound_delivery_target_providers = slack_mounts
         .map(|mounts| vec![Arc::clone(&mounts.outbound_delivery_target_provider)])
         .unwrap_or_default();
     build_webui_services_with_connectable_channels(
         runtime,
         event_stream,
-        slack_connectable_channels(visibility),
+        slack_connectable_channels(visibility, slack_delivery_connections),
         outbound_delivery_target_providers,
     )
 }
@@ -59,13 +63,14 @@ fn build_webui_services_with_slack_connectable_channel(
     build_webui_services_with_connectable_channels(
         runtime,
         event_stream,
-        slack_connectable_channels(visibility),
+        slack_connectable_channels(visibility, None),
         Vec::new(),
     )
 }
 
 fn slack_connectable_channels(
     visibility: SlackConnectableChannelVisibility,
+    delivery_connections: Option<Arc<dyn SlackDeliveryConnectionProvider>>,
 ) -> Option<Arc<dyn ConnectableChannelsProductFacade>> {
     (visibility != SlackConnectableChannelVisibility::Hidden).then(|| {
         let mut channels = vec![slack_inbound_proof_code_connectable_channel()];
@@ -73,9 +78,63 @@ fn slack_connectable_channels(
         {
             channels.push(slack_admin_managed_channel_connectable_channel());
         }
-        Arc::new(StaticConnectableChannelsProductFacade::new(channels))
-            as Arc<dyn ConnectableChannelsProductFacade>
+        Arc::new(SlackConnectableChannelsProductFacade::new(
+            channels,
+            delivery_connections,
+        )) as Arc<dyn ConnectableChannelsProductFacade>
     })
+}
+
+struct SlackConnectableChannelsProductFacade {
+    channels: Arc<[RebornConnectableChannelInfo]>,
+    delivery_connections: Option<Arc<dyn SlackDeliveryConnectionProvider>>,
+}
+
+impl SlackConnectableChannelsProductFacade {
+    fn new(
+        channels: impl Into<Vec<RebornConnectableChannelInfo>>,
+        delivery_connections: Option<Arc<dyn SlackDeliveryConnectionProvider>>,
+    ) -> Self {
+        Self {
+            channels: Arc::from(channels.into()),
+            delivery_connections,
+        }
+    }
+
+    async fn has_delivery_connection(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+    ) -> Result<bool, RebornServicesError> {
+        let Some(delivery_connections) = &self.delivery_connections else {
+            return Ok(false);
+        };
+        delivery_connections.has_delivery_connection(caller).await
+    }
+}
+
+#[async_trait::async_trait]
+impl ConnectableChannelsProductFacade for SlackConnectableChannelsProductFacade {
+    async fn list_connectable_channels(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornConnectableChannelListResponse, RebornServicesError> {
+        let connected = self.has_delivery_connection(&caller).await?;
+        Ok(RebornConnectableChannelListResponse {
+            channels: self
+                .channels
+                .iter()
+                .cloned()
+                .map(|mut channel| {
+                    if connected
+                        && channel.strategy == RebornChannelConnectStrategy::InboundProofCode
+                    {
+                        channel.connection_status = RebornChannelConnectionStatus::Connected;
+                    }
+                    channel
+                })
+                .collect(),
+        })
+    }
 }
 
 fn slack_inbound_proof_code_connectable_channel() -> RebornConnectableChannelInfo {
@@ -96,6 +155,7 @@ fn slack_inbound_proof_code_connectable_channel() -> RebornConnectableChannelInf
             "slack account".to_string(),
             "slack pairing".to_string(),
         ],
+        connection_status: RebornChannelConnectionStatus::Disconnected,
     }
 }
 
@@ -114,6 +174,7 @@ fn slack_admin_managed_channel_connectable_channel() -> RebornConnectableChannel
             error_message: "Slack channel update failed.".to_string(),
         },
         command_aliases: vec![],
+        connection_status: RebornChannelConnectionStatus::Disconnected,
     }
 }
 
@@ -124,7 +185,9 @@ mod tests {
         HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
         HostManagedModelResponse,
     };
-    use ironclaw_product_workflow::WebUiAuthenticatedCaller;
+    use ironclaw_product_workflow::{
+        RebornServicesErrorCode, RebornServicesErrorKind, WebUiAuthenticatedCaller,
+    };
     use ironclaw_turns::run_profile::LoopCapabilityPort;
 
     use super::*;
@@ -270,6 +333,49 @@ mod tests {
         );
 
         runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn slack_connectable_channels_propagates_delivery_connection_error() {
+        let facade = SlackConnectableChannelsProductFacade::new(
+            vec![slack_inbound_proof_code_connectable_channel()],
+            Some(Arc::new(FailingDeliveryConnectionProvider)),
+        );
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new("slack-webui-tenant").expect("tenant"),
+            UserId::new("slack-webui-owner").expect("user"),
+            Some(AgentId::new("slack-webui-agent").expect("agent")),
+            None,
+        );
+
+        let error = facade
+            .list_connectable_channels(caller)
+            .await
+            .expect_err("delivery lookup errors should reach the WebUI facade");
+
+        assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
+        assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
+        assert_eq!(error.status_code, 503);
+        assert!(error.retryable);
+    }
+
+    struct FailingDeliveryConnectionProvider;
+
+    #[async_trait::async_trait]
+    impl SlackDeliveryConnectionProvider for FailingDeliveryConnectionProvider {
+        async fn has_delivery_connection(
+            &self,
+            _caller: &WebUiAuthenticatedCaller,
+        ) -> Result<bool, RebornServicesError> {
+            Err(RebornServicesError {
+                code: RebornServicesErrorCode::Unavailable,
+                kind: RebornServicesErrorKind::ServiceUnavailable,
+                retryable: true,
+                status_code: 503,
+                field: None,
+                validation_code: None,
+            })
+        }
     }
 
     #[derive(Debug)]

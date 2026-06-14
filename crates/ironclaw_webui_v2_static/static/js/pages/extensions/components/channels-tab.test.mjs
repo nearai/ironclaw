@@ -10,7 +10,7 @@ function channelsTabSourceForTest() {
     if (line.startsWith("import ")) continue;
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { SlackBuiltInConnectAction, isSlackChannelEnabled, slackBuiltinStatus, isSlackAdminManagedAction, isSlackInboundProofCodeAction, findSlackConnectAction, findSlackConnectActions };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { SlackBuiltInConnectAction, isSlackChannelEnabled, slackBuiltinStatus, isSlackAdminManagedAction, isSlackInboundProofCodeAction, isConnectedChannel, shouldRenderSlackPairingSection, findSlackConnectAction, findSlackConnectActions };`;
 }
 
 function slackBuiltInConnectActionForTest(slackConnectAction, slackConnectActions) {
@@ -59,6 +59,10 @@ test("slackBuiltinStatus labels the Reborn admin-managed channel flow", () => {
     JSON.stringify({ label: "manage", tone: "info" }),
   );
   assert.equal(
+    JSON.stringify(slackBuiltinStatus(false, { connection_status: "connected" })),
+    JSON.stringify({ label: "on", tone: "success" }),
+  );
+  assert.equal(
     JSON.stringify(slackBuiltinStatus(false, { strategy: "inbound_proof_code" })),
     JSON.stringify({ label: "connect", tone: "info" }),
   );
@@ -71,7 +75,12 @@ test("slackBuiltinStatus labels the Reborn admin-managed channel flow", () => {
 test("Slack built-in action predicates keep admin picker and proof-code pairing distinct", () => {
   const context = { globalThis: {} };
   vm.runInNewContext(channelsTabSourceForTest(), context);
-  const { isSlackAdminManagedAction, isSlackInboundProofCodeAction } =
+  const {
+    isSlackAdminManagedAction,
+    isSlackInboundProofCodeAction,
+    isConnectedChannel,
+    shouldRenderSlackPairingSection,
+  } =
     context.globalThis.__testExports;
 
   assert.equal(
@@ -89,6 +98,26 @@ test("Slack built-in action predicates keep admin picker and proof-code pairing 
   assert.equal(
     isSlackInboundProofCodeAction({ channel: "teams", strategy: "inbound_proof_code" }),
     false,
+  );
+  assert.equal(
+    isConnectedChannel({ channel: "slack", connection_status: "connected" }),
+    true,
+  );
+  assert.equal(
+    shouldRenderSlackPairingSection({
+      channel: "slack",
+      strategy: "inbound_proof_code",
+      connection_status: "connected",
+    }),
+    false,
+  );
+  assert.equal(
+    shouldRenderSlackPairingSection({
+      channel: "slack",
+      strategy: "inbound_proof_code",
+      connection_status: "disconnected",
+    }),
+    true,
   );
 });
 
@@ -121,6 +150,14 @@ test("SlackBuiltInConnectAction renders every supported Slack action", () => {
   const combinedView = slackBuiltInConnectActionForTest(null, [admin, personal]);
   assert.equal(combinedView.rendered.values[0][0].values[0], combinedView.SlackChannelPicker);
   assert.equal(combinedView.rendered.values[0][1].values[0], combinedView.SlackPairingSection);
+
+  const connectedView = slackBuiltInConnectActionForTest({
+    channel: "slack",
+    strategy: "inbound_proof_code",
+    connection_status: "connected",
+    action: {},
+  });
+  assert.equal(connectedView.rendered, null);
 
   const unhandledView = slackBuiltInConnectActionForTest({
     channel: "slack",

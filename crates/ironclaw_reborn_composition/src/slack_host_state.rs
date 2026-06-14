@@ -605,6 +605,39 @@ where
         .map(Some)
     }
 
+    async fn listed_channel_route_paths_for_team(
+        &self,
+        installation_id: &AdapterInstallationId,
+        team_id: &str,
+    ) -> Result<Vec<ScopedPath>, SlackChannelRouteError> {
+        let dir = Self::channel_route_team_dir_path(installation_id, team_id)
+            .map_err(map_route_fs_error)?;
+        let entries = match self.filesystem.list_dir(&self.scope, &dir).await {
+            Ok(entries) => entries,
+            Err(FilesystemError::NotFound { .. }) => return Ok(Vec::new()),
+            Err(error) => return Err(map_route_fs_error(error)),
+        };
+        let mut paths = entries
+            .into_iter()
+            .filter_map(|entry| {
+                if entry.file_type != FileType::File {
+                    return None;
+                }
+                Some(Self::listed_channel_route_path(
+                    installation_id,
+                    team_id,
+                    &entry.name,
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(map_route_fs_error)?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        paths.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        Ok(paths)
+    }
+
     fn channel_route_team_lock_key(
         installation_id: &AdapterInstallationId,
         team_id: &str,
@@ -1043,36 +1076,9 @@ where
                 next_cursor: None,
             });
         }
-        let dir = Self::channel_route_team_dir_path(installation_id, team_id)
-            .map_err(map_route_fs_error)?;
-        let entries = match self.filesystem.list_dir(&self.scope, &dir).await {
-            Ok(entries) => entries,
-            Err(FilesystemError::NotFound { .. }) => {
-                return Ok(SlackChannelRouteListPage {
-                    routes: Vec::new(),
-                    next_cursor: None,
-                });
-            }
-            Err(error) => return Err(map_route_fs_error(error)),
-        };
-        let mut paths = entries
-            .into_iter()
-            .filter_map(|entry| {
-                if entry.file_type != FileType::File {
-                    return None;
-                }
-                Some(Self::listed_channel_route_path(
-                    installation_id,
-                    team_id,
-                    &entry.name,
-                ))
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(map_route_fs_error)?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-        paths.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        let paths = self
+            .listed_channel_route_paths_for_team(installation_id, team_id)
+            .await?;
         let start = cursor.min(paths.len());
         let end = cursor.saturating_add(limit).min(paths.len());
         let reads = paths[start..end]
@@ -1196,6 +1202,45 @@ where
         let subject_user_id = UserId::new(record.subject_user_id)
             .map_err(|_| SlackChannelRouteError::StoreUnavailable)?;
         Ok(Some(subject_user_id))
+    }
+
+    async fn has_route_for_subject(
+        &self,
+        tenant_id: &TenantId,
+        installation_id: &AdapterInstallationId,
+        team_id: &str,
+        subject_user_id: &UserId,
+        page_size: usize,
+        max_total_routes: usize,
+    ) -> Result<bool, SlackChannelRouteError> {
+        if tenant_id != &self.scope.tenant_id {
+            return Ok(false);
+        }
+        if page_size == 0 || max_total_routes == 0 {
+            return Err(SlackChannelRouteError::StoreUnavailable);
+        }
+        let page_size = page_size.min(CHANNEL_ROUTE_REPLACE_LIST_LIMIT);
+        let paths = self
+            .listed_channel_route_paths_for_team(installation_id, team_id)
+            .await?;
+        let scan_len = paths.len().min(max_total_routes);
+        for chunk in paths[..scan_len].chunks(page_size) {
+            let reads = chunk
+                .iter()
+                .map(|path| async move { self.read_record::<StoredSlackChannelRoute>(path).await });
+            let records = futures::future::try_join_all(reads)
+                .await
+                .map_err(map_route_fs_error)?;
+            for (record, _) in records.into_iter().flatten() {
+                let Some(route) = stored_channel_route(record)? else {
+                    continue;
+                };
+                if route.subject_user_id == subject_user_id.as_str() {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 }
 
@@ -2728,6 +2773,7 @@ mod tests {
         personal_dm_write_barrier: Option<Arc<tokio::sync::Barrier>>,
         route_write_failures: AtomicUsize,
         lock_puts: AtomicUsize,
+        get_calls: AtomicUsize,
     }
 
     impl RouteLockTestBackend {
@@ -2739,6 +2785,7 @@ mod tests {
                 personal_dm_write_barrier: None,
                 route_write_failures: AtomicUsize::new(0),
                 lock_puts: AtomicUsize::new(0),
+                get_calls: AtomicUsize::new(0),
             }
         }
 
@@ -2750,6 +2797,7 @@ mod tests {
                 personal_dm_write_barrier: None,
                 route_write_failures: AtomicUsize::new(0),
                 lock_puts: AtomicUsize::new(0),
+                get_calls: AtomicUsize::new(0),
             }
         }
 
@@ -2761,6 +2809,7 @@ mod tests {
                 personal_dm_write_barrier: None,
                 route_write_failures: AtomicUsize::new(0),
                 lock_puts: AtomicUsize::new(0),
+                get_calls: AtomicUsize::new(0),
             }
         }
 
@@ -2772,6 +2821,7 @@ mod tests {
                 personal_dm_write_barrier: Some(Arc::new(tokio::sync::Barrier::new(2))),
                 route_write_failures: AtomicUsize::new(0),
                 lock_puts: AtomicUsize::new(0),
+                get_calls: AtomicUsize::new(0),
             }
         }
 
@@ -2781,6 +2831,10 @@ mod tests {
 
         fn lock_puts(&self) -> usize {
             self.lock_puts.load(Ordering::SeqCst)
+        }
+
+        fn get_calls(&self) -> usize {
+            self.get_calls.load(Ordering::SeqCst)
         }
     }
 
@@ -2828,6 +2882,7 @@ mod tests {
         }
 
         async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+            self.get_calls.fetch_add(1, Ordering::SeqCst);
             self.inner.get(path).await
         }
 
@@ -2906,5 +2961,114 @@ mod tests {
 
     fn user(value: &str) -> UserId {
         UserId::new(value).unwrap()
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_has_route_for_subject_finds_match_after_first_page() {
+        let root = Arc::new(RouteLockTestBackend::normal());
+        let state = state_with_backend(root.clone());
+        let tenant_id = TenantId::new("tenant-alpha").unwrap();
+        let installation_id = installation();
+        let subject = user("user:match");
+
+        for index in 0..=CHANNEL_ROUTE_REPLACE_LIST_LIMIT {
+            let channel_id = if index == CHANNEL_ROUTE_REPLACE_LIST_LIMIT {
+                "zzzz".to_string()
+            } else {
+                format!("a{index:04}")
+            };
+            let key = SlackChannelRouteKey::new(
+                tenant_id.clone(),
+                installation_id.clone(),
+                "T123".to_string(),
+                channel_id,
+            )
+            .unwrap();
+            let current_subject = if index == CHANNEL_ROUTE_REPLACE_LIST_LIMIT {
+                subject.clone()
+            } else {
+                user(&format!("user:{index}"))
+            };
+            state
+                .upsert_route_record(key, current_subject)
+                .await
+                .expect("seed route");
+        }
+
+        let has_route = state
+            .has_route_for_subject(
+                &tenant_id,
+                &installation_id,
+                "T123",
+                &subject,
+                CHANNEL_ROUTE_REPLACE_LIST_LIMIT,
+                CHANNEL_ROUTE_REPLACE_LIST_LIMIT * 2,
+            )
+            .await
+            .expect("route lookup");
+
+        assert!(
+            has_route,
+            "lookup must keep paging until it finds a route within the inventory cap"
+        );
+        assert_eq!(
+            root.get_calls(),
+            CHANNEL_ROUTE_REPLACE_LIST_LIMIT + 1,
+            "lookup should read into the second page to find the matching route"
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_has_route_for_subject_fails_closed_beyond_inventory_cap() {
+        let root = Arc::new(RouteLockTestBackend::normal());
+        let state = state_with_backend(root.clone());
+        let tenant_id = TenantId::new("tenant-alpha").unwrap();
+        let installation_id = installation();
+        let subject = user("user:match");
+
+        for index in 0..=CHANNEL_ROUTE_REPLACE_LIST_LIMIT {
+            let key = SlackChannelRouteKey::new(
+                tenant_id.clone(),
+                installation_id.clone(),
+                "T123".to_string(),
+                if index == CHANNEL_ROUTE_REPLACE_LIST_LIMIT {
+                    "zzzz".to_string()
+                } else {
+                    format!("a{index:04}")
+                },
+            )
+            .unwrap();
+            let current_subject = if index == CHANNEL_ROUTE_REPLACE_LIST_LIMIT {
+                subject.clone()
+            } else {
+                user(&format!("user:{index}"))
+            };
+            state
+                .upsert_route_record(key, current_subject)
+                .await
+                .expect("seed route");
+        }
+
+        let has_route = state
+            .has_route_for_subject(
+                &tenant_id,
+                &installation_id,
+                "T123",
+                &subject,
+                CHANNEL_ROUTE_REPLACE_LIST_LIMIT,
+                CHANNEL_ROUTE_REPLACE_LIST_LIMIT,
+            )
+            .await
+            .expect("route lookup");
+
+        assert!(
+            !has_route,
+            "lookup must fail closed once the inventory cap is reached"
+        );
+        assert_eq!(
+            root.get_calls(),
+            CHANNEL_ROUTE_REPLACE_LIST_LIMIT,
+            "lookup must stop once the inventory cap is reached"
+        );
     }
 }

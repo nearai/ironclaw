@@ -247,6 +247,54 @@ pub(crate) trait SlackChannelRouteStore: Send + Sync + std::fmt::Debug {
         }
         Ok(result)
     }
+
+    async fn has_route_for_subject(
+        &self,
+        tenant_id: &TenantId,
+        installation_id: &AdapterInstallationId,
+        team_id: &str,
+        subject_user_id: &UserId,
+        page_size: usize,
+        max_total_routes: usize,
+    ) -> Result<bool, SlackChannelRouteError> {
+        if page_size == 0 || max_total_routes == 0 {
+            return Err(SlackChannelRouteError::StoreUnavailable);
+        }
+        let page_size = page_size.clamp(1, max_total_routes);
+        let mut cursor = 0;
+        loop {
+            if cursor >= max_total_routes {
+                return Ok(false);
+            }
+            let remaining = max_total_routes - cursor;
+            let page = self
+                .list_routes(
+                    tenant_id,
+                    installation_id,
+                    team_id,
+                    cursor,
+                    page_size.min(remaining),
+                )
+                .await?;
+            if page
+                .routes
+                .iter()
+                .any(|route| route.subject_user_id == subject_user_id.as_str())
+            {
+                return Ok(true);
+            }
+            let Some(next_cursor) = page.next_cursor else {
+                return Ok(false);
+            };
+            if next_cursor <= cursor {
+                return Err(SlackChannelRouteError::StoreUnavailable);
+            }
+            if next_cursor >= max_total_routes {
+                return Ok(false);
+            }
+            cursor = next_cursor;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -368,6 +416,37 @@ impl SlackChannelRouteStore for InMemorySlackChannelRouteStore {
             .map_err(|_| SlackChannelRouteError::StoreUnavailable)?
             .get(key)
             .cloned())
+    }
+
+    async fn has_route_for_subject(
+        &self,
+        tenant_id: &TenantId,
+        installation_id: &AdapterInstallationId,
+        team_id: &str,
+        subject_user_id: &UserId,
+        page_size: usize,
+        max_total_routes: usize,
+    ) -> Result<bool, SlackChannelRouteError> {
+        if page_size == 0 || max_total_routes == 0 {
+            return Err(SlackChannelRouteError::StoreUnavailable);
+        }
+        let routes = self
+            .routes
+            .read()
+            .map_err(|_| SlackChannelRouteError::StoreUnavailable)?;
+        let mut result = routes
+            .iter()
+            .filter(|(key, _)| {
+                &key.tenant_id == tenant_id
+                    && &key.installation_id == installation_id
+                    && key.team_id == team_id
+            })
+            .collect::<Vec<_>>();
+        result.sort_by(|(left, _), (right, _)| left.channel_id.cmp(&right.channel_id));
+        Ok(result
+            .into_iter()
+            .take(max_total_routes)
+            .any(|(_key, current_subject)| current_subject == subject_user_id))
     }
 }
 
@@ -946,6 +1025,47 @@ mod tests {
                 .as_ref()
                 .map(UserId::as_str),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn in_memory_has_route_for_subject_respects_inventory_cap() {
+        let store = InMemorySlackChannelRouteStore::new();
+        let tenant_id = TenantId::new(TENANT).expect("tenant");
+        let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation");
+        let subject = UserId::new("user:target").expect("subject");
+        for (channel_id, subject_user_id) in [
+            ("C000", UserId::new("user:other").expect("other subject")),
+            ("C999", subject.clone()),
+        ] {
+            store
+                .upsert_route(
+                    SlackChannelRouteKey::new(
+                        tenant_id.clone(),
+                        installation_id.clone(),
+                        TEAM.to_string(),
+                        channel_id.to_string(),
+                    )
+                    .expect("route key"),
+                    subject_user_id,
+                )
+                .await
+                .expect("route upsert");
+        }
+
+        assert!(
+            !store
+                .has_route_for_subject(&tenant_id, &installation_id, TEAM, &subject, 500, 1)
+                .await
+                .expect("capped lookup"),
+            "lookup must not scan beyond the route cap"
+        );
+        assert!(
+            store
+                .has_route_for_subject(&tenant_id, &installation_id, TEAM, &subject, 500, 2)
+                .await
+                .expect("uncapped lookup"),
+            "lookup should find a matching subject within the route cap"
         );
     }
 

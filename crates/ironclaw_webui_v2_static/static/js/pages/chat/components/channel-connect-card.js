@@ -6,16 +6,25 @@ export function isSlackStrategy(connectAction, strategy) {
   return connectAction?.channel === "slack" && connectAction.strategy === strategy;
 }
 
+export function isConnectedChannel(connectAction) {
+  return connectAction?.connection_status === "connected";
+}
+
+export function shouldRenderSlackPairingSection(connectAction) {
+  return !isConnectedChannel(connectAction) && isSlackStrategy(connectAction, "inbound_proof_code");
+}
+
 export function ChannelConnectCard({ connectAction, onDismiss }) {
   if (!connectAction) return null;
   const channel = connectAction.channel;
+  const titleVerb = isConnectedChannel(connectAction) ? "Connected" : "Connect";
 
   return html`
     <div className="rounded-[16px] border border-white/[0.06] bg-white/[0.02] p-3">
       <div className="mb-2 flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
-            Connect ${connectAction.display_name || channel}
+            ${titleVerb} ${connectAction.display_name || channel}
           </div>
         </div>
         ${onDismiss &&
@@ -31,7 +40,13 @@ export function ChannelConnectCard({ connectAction, onDismiss }) {
         `}
       </div>
 
-      ${isSlackStrategy(connectAction, "inbound_proof_code")
+      ${isConnectedChannel(connectAction)
+        ? html`
+            <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 text-xs leading-5 text-iron-300">
+              ${connectAction.display_name || channel} is connected.
+            </div>
+          `
+        : shouldRenderSlackPairingSection(connectAction)
         ? html`<${SlackPairingSection} action=${connectAction.action} />`
         : html`
             <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 text-xs leading-5 text-iron-300">

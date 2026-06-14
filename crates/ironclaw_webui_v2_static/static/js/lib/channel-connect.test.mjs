@@ -58,6 +58,11 @@ test("resolveChannelConnectCommand only suppresses Slack channel management word
 
 test("resolveChannelConnectCommand leaves ordinary Slack prompts for the model", () => {
   assert.equal(resolveChannelConnectCommand("send a message to Slack", [slack]), null);
+  assert.equal(
+    resolveChannelConnectCommand("send me a DM in Slack if it does not return a 200", [slack]),
+    null,
+  );
+  assert.equal(resolveChannelConnectCommand("is Slack connected?", [slack]), null);
   assert.equal(resolveChannelConnectCommand("what is slack?", [slack]), null);
   assert.equal(resolveChannelConnectCommand("connect the two ideas", [slack]), null);
 });

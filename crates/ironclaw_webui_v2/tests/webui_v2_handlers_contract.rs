@@ -31,7 +31,7 @@ use ironclaw_product_workflow::{
     LlmProbeRequest, LlmProbeResult, LlmProviderView, RebornAutomationInfo,
     RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
-    RebornChannelConnectStrategy, RebornConnectableChannelInfo,
+    RebornChannelConnectStrategy, RebornChannelConnectionStatus, RebornConnectableChannelInfo,
     RebornConnectableChannelListResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
     RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
     RebornExtensionRegistryResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
@@ -607,6 +607,7 @@ impl RebornServicesApi for StubServices {
                     error_message: "Invalid or expired Slack pairing code.".to_string(),
                 },
                 command_aliases: vec!["slack".to_string()],
+                connection_status: RebornChannelConnectionStatus::Connected,
             }],
         })
     }
@@ -1760,6 +1761,7 @@ async fn list_connectable_channels_dispatches_through_facade() {
         body["channels"][0]["action"]["instructions"],
         "Message the Slack app, then enter the code here."
     );
+    assert_eq!(body["channels"][0]["connection_status"], "connected");
     assert_eq!(
         *services
             .list_connectable_channels_calls

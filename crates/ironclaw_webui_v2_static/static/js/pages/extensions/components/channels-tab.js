@@ -17,7 +17,7 @@ export function isSlackChannelEnabled(enabledChannels) {
 }
 
 export function slackBuiltinStatus(slackEnabled, connectAction) {
-  if (slackEnabled) {
+  if (slackEnabled || isConnectedChannel(connectAction)) {
     return { label: "on", tone: "success" };
   }
   if (connectAction?.strategy === "admin_managed_channels") {
@@ -34,6 +34,14 @@ export function isSlackAdminManagedAction(connectAction) {
 
 export function isSlackInboundProofCodeAction(connectAction) {
   return connectAction?.channel === "slack" && connectAction.strategy === "inbound_proof_code";
+}
+
+export function isConnectedChannel(connectAction) {
+  return connectAction?.connection_status === "connected";
+}
+
+export function shouldRenderSlackPairingSection(connectAction) {
+  return !isConnectedChannel(connectAction) && isSlackInboundProofCodeAction(connectAction);
 }
 
 export function findSlackConnectAction(connectableChannels) {
@@ -62,7 +70,7 @@ export function SlackBuiltInConnectAction({
       if (isSlackAdminManagedAction(action)) {
         return html`<${SlackChannelPicker} action=${action.action} />`;
       }
-      if (isSlackInboundProofCodeAction(action)) {
+      if (shouldRenderSlackPairingSection(action)) {
         return html`<${SlackPairingSection} action=${action.action} />`;
       }
       return null;

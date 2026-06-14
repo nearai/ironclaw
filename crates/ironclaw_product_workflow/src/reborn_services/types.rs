@@ -166,8 +166,27 @@ pub struct RebornConnectableChannelInfo {
     pub display_name: String,
     pub strategy: RebornChannelConnectStrategy,
     pub action: RebornChannelConnectAction,
+    #[serde(
+        default,
+        skip_serializing_if = "RebornChannelConnectionStatus::is_disconnected"
+    )]
+    pub connection_status: RebornChannelConnectionStatus,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub command_aliases: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornChannelConnectionStatus {
+    #[default]
+    Disconnected,
+    Connected,
+}
+
+impl RebornChannelConnectionStatus {
+    pub fn is_disconnected(&self) -> bool {
+        matches!(self, Self::Disconnected)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

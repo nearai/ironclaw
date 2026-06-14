@@ -39,10 +39,11 @@ use ironclaw_product_workflow::{
     ProductWorkflowError, RebornAutomationInfo, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornConnectableChannelInfo, RebornDeleteThreadRequest, RebornExtensionOnboardingState,
-    RebornGetRunStateRequest, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorLogsQuery, RebornOperatorSetupRequest,
-    RebornOperatorSetupStatus, RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
+    RebornChannelConnectionStatus, RebornConnectableChannelInfo, RebornDeleteThreadRequest,
+    RebornExtensionOnboardingState, RebornGetRunStateRequest, RebornLogLevel,
+    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorLogsQuery, RebornOperatorSetupRequest, RebornOperatorSetupStatus,
+    RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
@@ -4311,6 +4312,7 @@ async fn list_connectable_channels_returns_configured_action_metadata() {
                 error_message: "Invalid or expired Slack pairing code.".to_string(),
             },
             command_aliases: vec!["slack".to_string(), "slack account".to_string()],
+            connection_status: RebornChannelConnectionStatus::Connected,
         },
     ])));
 
@@ -4333,6 +4335,41 @@ async fn list_connectable_channels_returns_configured_action_metadata() {
     assert_eq!(
         channel.command_aliases,
         vec!["slack".to_string(), "slack account".to_string()]
+    );
+    assert_eq!(
+        channel.connection_status,
+        RebornChannelConnectionStatus::Connected
+    );
+}
+
+#[test]
+fn connectable_channel_connection_status_defaults_and_omits_disconnected() {
+    let value = json!({
+        "channel": "slack",
+        "display_name": "Slack",
+        "strategy": "inbound_proof_code",
+        "action": {
+            "title": "Slack account connection",
+            "instructions": "Message the Slack app, then enter the code here.",
+            "input_placeholder": "Enter Slack pairing code...",
+            "submit_label": "Connect",
+            "success_message": "Slack account connected.",
+            "error_message": "Invalid or expired Slack pairing code."
+        },
+        "command_aliases": ["slack", "slack account"]
+    });
+    let channel: RebornConnectableChannelInfo =
+        serde_json::from_value(value).expect("legacy channel json");
+
+    assert_eq!(
+        channel.connection_status,
+        RebornChannelConnectionStatus::Disconnected
+    );
+
+    let serialized = serde_json::to_value(&channel).expect("channel serializes");
+    assert!(
+        serialized.get("connection_status").is_none(),
+        "disconnected is the legacy omitted wire shape"
     );
 }
 
