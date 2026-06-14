@@ -19,7 +19,7 @@ use ironclaw_triggers::TriggerRepository;
 
 use crate::{
     RebornAutomationProductFacade, RebornBuildError, RebornProductAuthServices, RebornReadiness,
-    RebornRuntime,
+    RebornReadinessDiagnostic, RebornReadinessDiagnosticStatus, RebornRuntime,
     lifecycle::{
         RebornLocalLifecycleFacade, RebornLocalSkillManagementError, RebornLocalSkillManagementPort,
     },
@@ -566,6 +566,12 @@ fn status_response_from_readiness(readiness: &RebornReadiness) -> RebornOperator
         "extension readiness probes are not wired yet".to_string(),
         Some("use extension inventory and setup endpoints for per-extension status".to_string()),
     ));
+    checks.extend(
+        readiness
+            .diagnostics
+            .iter()
+            .map(status_check_from_readiness_diagnostic),
+    );
     let overall = if checks
         .iter()
         .any(|check| check.status == RebornOperatorStatusState::Blocked)
@@ -616,6 +622,59 @@ fn bool_check(
     )
 }
 
+fn status_check_from_readiness_diagnostic(
+    diagnostic: &RebornReadinessDiagnostic,
+) -> RebornOperatorStatusCheck {
+    let component = readiness_diagnostic_component(diagnostic);
+    let reason = readiness_diagnostic_reason(diagnostic);
+    let id = format!("readiness_{component}");
+    let status = match diagnostic.status {
+        RebornReadinessDiagnosticStatus::Blocking => RebornOperatorStatusState::Blocked,
+        RebornReadinessDiagnosticStatus::Warning | RebornReadinessDiagnosticStatus::Unknown(_) => {
+            RebornOperatorStatusState::Degraded
+        }
+        RebornReadinessDiagnosticStatus::Info => RebornOperatorStatusState::Ready,
+    };
+    let severity = match diagnostic.status {
+        RebornReadinessDiagnosticStatus::Blocking => RebornOperatorStatusSeverity::Critical,
+        RebornReadinessDiagnosticStatus::Warning | RebornReadinessDiagnosticStatus::Unknown(_) => {
+            RebornOperatorStatusSeverity::Warning
+        }
+        RebornReadinessDiagnosticStatus::Info => RebornOperatorStatusSeverity::Info,
+    };
+    let remediation = if diagnostic.blocks_production {
+        "wire the required Reborn production component before exposing live traffic"
+    } else {
+        "review the Reborn readiness report for the component owner"
+    };
+    status_check(
+        &id,
+        status,
+        severity,
+        format!(
+            "readiness diagnostic: component={component}, reason={reason}, profile={:?}",
+            diagnostic.profile
+        ),
+        Some(remediation.to_string()),
+    )
+}
+
+fn readiness_diagnostic_component(diagnostic: &RebornReadinessDiagnostic) -> String {
+    readiness_diagnostic_wire_string(&diagnostic.component)
+        .unwrap_or_else(|| "unknown_component".to_string())
+}
+
+fn readiness_diagnostic_reason(diagnostic: &RebornReadinessDiagnostic) -> String {
+    readiness_diagnostic_wire_string(&diagnostic.reason)
+        .unwrap_or_else(|| "unknown_reason".to_string())
+}
+
+fn readiness_diagnostic_wire_string(value: &impl serde::Serialize) -> Option<String> {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+}
+
 fn status_check(
     id: &str,
     status: RebornOperatorStatusState,
@@ -659,6 +718,33 @@ mod tests {
         assert_ne!(
             first.generated_at, second.generated_at,
             "status generated_at must be refreshed for each operator status request"
+        );
+    }
+
+    #[tokio::test]
+    async fn readiness_operator_status_includes_stable_readiness_diagnostics() {
+        let service = ReadinessOperatorStatusService::new(RebornReadiness::disabled());
+
+        let response = service
+            .status(caller("runtime-owner"))
+            .await
+            .expect("status response");
+
+        assert_eq!(response.overall, RebornOperatorStatusState::Blocked);
+        let readiness_check = response
+            .checks
+            .iter()
+            .find(|check| check.id == "readiness_composition_profile")
+            .expect("readiness diagnostic check");
+        assert_eq!(readiness_check.status, RebornOperatorStatusState::Blocked);
+        assert_eq!(
+            readiness_check.severity,
+            RebornOperatorStatusSeverity::Critical
+        );
+        assert!(
+            readiness_check.summary.contains("reason=disabled"),
+            "summary should use stable redacted readiness vocabulary: {}",
+            readiness_check.summary
         );
     }
 

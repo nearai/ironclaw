@@ -42,18 +42,20 @@ use ironclaw_product_workflow::{
     RebornConnectableChannelInfo, RebornDeleteThreadRequest, RebornExtensionOnboardingState,
     RebornGetRunStateRequest, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
     RebornOperatorConfigDiagnosticSeverity, RebornOperatorLogsQuery, RebornOperatorSetupRequest,
-    RebornOperatorSetupStatus, RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
-    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
-    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
-    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
-    RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServices, RebornServicesApi,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SetActiveLlmRequest,
-    StaticConnectableChannelsProductFacade, TriggerRunThreadScope, UpsertLlmProviderRequest,
+    RebornOperatorSetupStatus, RebornOperatorStatusCheck, RebornOperatorStatusResponse,
+    RebornOperatorStatusSeverity, RebornOperatorStatusState, RebornOperatorSurfaceStatus,
+    RebornOutboundDeliveryModality, RebornOutboundDeliveryTargetCapabilities,
+    RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetId,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
+    RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
+    RebornOutboundPreferencesResponse, RebornResolveGateResponse, RebornServiceLifecycleAction,
+    RebornServiceLifecycleRequest, RebornServiceLifecycleResponse, RebornServiceLifecycleState,
+    RebornServices, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest,
+    RebornSubmitTurnResponse, RebornTimelineRequest, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, SetActiveLlmRequest, StaticConnectableChannelsProductFacade,
+    StaticOperatorStatusService, TriggerRunThreadScope, UpsertLlmProviderRequest,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
     WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
@@ -6760,6 +6762,82 @@ fn services_with_setup_llm_config(
         Arc::new(FakeTurnCoordinator::default()),
     )
     .with_llm_config_service(llm_config)
+}
+
+#[tokio::test]
+async fn operator_diagnostics_aggregates_status_setup_and_config_reasons() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    llm_config.use_active_snapshot("openai", "gpt-5-mini");
+    let status_service = StaticOperatorStatusService::new(RebornOperatorStatusResponse {
+        generated_at: Utc::now(),
+        overall: RebornOperatorStatusState::Blocked,
+        checks: vec![
+            RebornOperatorStatusCheck {
+                id: "storage".to_string(),
+                status: RebornOperatorStatusState::Blocked,
+                severity: RebornOperatorStatusSeverity::Critical,
+                summary: "storage backend is unavailable".to_string(),
+                remediation: Some("repair storage configuration".to_string()),
+            },
+            RebornOperatorStatusCheck {
+                id: "provider_model".to_string(),
+                status: RebornOperatorStatusState::Ready,
+                severity: RebornOperatorStatusSeverity::Info,
+                summary: "provider and model are configured".to_string(),
+                remediation: None,
+            },
+        ],
+    });
+    let services = services_with_setup_llm_config(llm_config.clone())
+        .with_operator_status_service(Arc::new(status_service));
+
+    let response = services
+        .get_operator_diagnostics(caller())
+        .await
+        .expect("operator diagnostics");
+
+    assert_eq!(response.area.as_str(), "diagnostics");
+    assert_eq!(response.status, RebornOperatorSurfaceStatus::Unavailable);
+    assert!(response.operator_status.is_some());
+    let reason_codes = response
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.reason_code.as_str())
+        .collect::<Vec<_>>();
+    assert!(reason_codes.contains(&"operator_doctor_storage_blocked"));
+    assert!(reason_codes.contains(&"operator_setup_profile_not_wired"));
+    assert!(reason_codes.contains(&"operator_setup_webui_access_not_wired"));
+    assert!(reason_codes.contains(&"operator_config_service_not_wired"));
+    assert!(!reason_codes.contains(&"operator_doctor_provider_model_ready"));
+    let rendered = serde_json::to_string(&response).expect("serialize diagnostics");
+    assert!(!rendered.contains("sk-"));
+    assert!(!rendered.contains("/home/"));
+}
+
+#[tokio::test]
+async fn operator_diagnostics_reports_setup_service_absence_without_failing_route() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_operator_status_service(Arc::new(StaticOperatorStatusService::new(
+        RebornOperatorStatusResponse {
+            generated_at: Utc::now(),
+            overall: RebornOperatorStatusState::Ready,
+            checks: Vec::new(),
+        },
+    )));
+
+    let response = services
+        .get_operator_diagnostics(caller())
+        .await
+        .expect("operator diagnostics");
+
+    assert_eq!(response.area.as_str(), "diagnostics");
+    assert!(response.diagnostics.iter().any(|diagnostic| {
+        diagnostic.reason_code == "operator_setup_service_not_wired"
+            && diagnostic.severity == RebornOperatorConfigDiagnosticSeverity::Error
+    }));
 }
 
 #[tokio::test]
