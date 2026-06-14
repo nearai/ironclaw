@@ -194,14 +194,6 @@ export default createPlugin({
         getState: builder.threads.getState
           .use(requireAuth)
           .handler(ri((svc, input) => Effect.runPromise(svc.getThreadState(input.id)))),
-
-        chatStream: builder.threads.chatStream
-          .use(requireAuth)
-          .handler(
-            rStream((svc, input) =>
-              svc.streamAguiChat(input.id, input.content, input.clientActionId, input.messages),
-            ),
-          ),
       },
 
       automations: {

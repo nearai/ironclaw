@@ -472,11 +472,6 @@ export default createPlugin.withPlugins<PluginsClient>()({
             .use(requireAuth)
             .use(ic.credentials)
             .handler(h1(services, (ic) => ic.threads.getState)),
-
-          chatStream: builder.ironclaw.threads.chatStream
-            .use(requireAuth)
-            .use(ic.credentials)
-            .handler(hStream(services, (ic) => ic.threads.chatStream)),
         },
 
         automations: {

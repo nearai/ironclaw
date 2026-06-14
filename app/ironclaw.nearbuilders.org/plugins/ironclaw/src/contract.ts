@@ -1,4 +1,4 @@
-import { eventIterator, oc } from "every-plugin/orpc";
+import { eventIterator, oc } from "@orpc/contract";
 import { z } from "every-plugin/zod";
 
 const Errors = {
@@ -107,27 +107,6 @@ export const AcceptedResponseSchema = z.object({
   resolvedRunProfileId: z.string().optional(),
   resolvedRunProfileVersion: z.number().optional(),
   eventCursor: z.number().optional(),
-});
-
-export const AguiChunkSchema = z.object({
-  type: z.string(),
-  threadId: z.string().optional(),
-  runId: z.string().optional(),
-  messageId: z.string().optional(),
-  toolCallId: z.string().optional(),
-  toolCallName: z.string().optional(),
-  delta: z.string().optional(),
-  content: z.string().optional(),
-  result: z.any().optional(),
-  state: z.string().optional(),
-  finishReason: z.string().optional(),
-  name: z.string().optional(),
-  value: z.any().optional(),
-  input: z.any().optional(),
-  role: z.string().optional(),
-  messages: z.array(z.any()).optional(),
-  message: z.string().optional(),
-  code: z.string().optional(),
 });
 
 export const GateResolutionSchema = z.enum([
@@ -615,30 +594,6 @@ export const contract = oc.router({
       })
       .input(z.object({ id: z.string() }))
       .output(ThreadStateSchema)
-      .errors(Errors),
-
-    chatStream: oc
-      .route({
-        method: "POST",
-        path: "/threads/{id}/chat-stream",
-        summary: "Send message and stream AG-UI events for TanStack AI useChat",
-      })
-      .input(
-        z.object({
-          id: z.string(),
-          content: z.string(),
-          clientActionId: z.string().optional(),
-          messages: z
-            .array(
-              z.object({
-                role: z.string(),
-                content: z.string(),
-              }),
-            )
-            .optional(),
-        }),
-      )
-      .output(eventIterator(AguiChunkSchema))
       .errors(Errors),
   },
 

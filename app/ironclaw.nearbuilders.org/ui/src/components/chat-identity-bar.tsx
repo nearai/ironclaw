@@ -2,9 +2,7 @@ import { Link } from "@tanstack/react-router";
 import { RefreshCw, Settings } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useIronclawStatus } from "@/hooks/use-ironclaw-status";
-import type { ApiClient } from "@/app";
-
-type ThreadState = Awaited<ReturnType<ApiClient["ironclaw"]["threads"]["getState"]>>;
+import type { ThreadState } from "@/hooks/use-thread-state";
 
 interface ChatIdentityBarProps {
   threadState: ThreadState | null;

@@ -8,9 +8,7 @@ import {
 } from "@/components/ui/sheet";
 import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
-import type { ApiClient } from "@/app";
-
-type ThreadState = Awaited<ReturnType<ApiClient["ironclaw"]["threads"]["getState"]>>;
+import type { ThreadState } from "@/hooks/use-thread-state";
 
 interface ChatThreadMetaProps {
   open: boolean;
@@ -21,7 +19,8 @@ interface ChatThreadMetaProps {
 export function ChatThreadMeta({ open, onOpenChange, threadState }: ChatThreadMetaProps) {
   if (!threadState) return null;
 
-  const { thread, messages, summaryArtifacts } = threadState;
+  const { thread, messages } = threadState;
+  const summaryArtifacts = threadState.summaryArtifacts ?? [];
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -40,16 +39,16 @@ export function ChatThreadMeta({ open, onOpenChange, threadState }: ChatThreadMe
               <div className="space-y-1 rounded-lg bg-muted/50 px-3 py-2">
                 <div className="flex items-center justify-between text-xs">
                   <span className="text-muted-foreground">Tenant</span>
-                  <span className="font-medium">{thread.scope.tenantId || "-"}</span>
+                  <span className="font-medium">{thread.scope?.tenantId || "-"}</span>
                 </div>
                 <div className="flex items-center justify-between text-xs">
                   <span className="text-muted-foreground">Agent</span>
-                  <span className="font-medium">{thread.scope.agentId || "-"}</span>
+                  <span className="font-medium">{thread.scope?.agentId || "-"}</span>
                 </div>
-                {thread.scope.projectId && (
+                {thread.scope?.projectId && (
                   <div className="flex items-center justify-between text-xs">
                     <span className="text-muted-foreground">Project</span>
-                    <span className="font-medium">{thread.scope.projectId}</span>
+                    <span className="font-medium">{thread.scope?.projectId}</span>
                   </div>
                 )}
               </div>
@@ -76,21 +75,21 @@ export function ChatThreadMeta({ open, onOpenChange, threadState }: ChatThreadMe
                     Summary Artifacts
                   </h4>
                   <div className="space-y-2">
-                    {summaryArtifacts.map((artifact) => (
+                    {summaryArtifacts.map((artifact, idx) => (
                       <div
-                        key={artifact.summaryId}
+                        key={String(artifact.summaryId ?? idx)}
                         className="rounded-lg border border-border bg-card px-3 py-2"
                       >
                         <div className="flex items-center justify-between">
                           <Badge variant="secondary" className="text-[10px]">
-                            {artifact.summaryKind}
+                            {String(artifact.summaryKind ?? "")}
                           </Badge>
                           <span className="text-[10px] text-muted-foreground">
-                            seq {artifact.startSequence}-{artifact.endSequence}
+                            seq {String(artifact.startSequence ?? "")}-{String(artifact.endSequence ?? "")}
                           </span>
                         </div>
                         <p className="mt-1.5 text-xs text-foreground line-clamp-2">
-                          {artifact.content}
+                          {String(artifact.content ?? "")}
                         </p>
                       </div>
                     ))}

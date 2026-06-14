@@ -1,5 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { Loader2, MessageSquare, Plus, Terminal, Trash2, Unplug, Zap } from "lucide-react";
+import { Loader2, MessageSquare, Plus, Terminal, Trash2, Unplug, Zap, Brain } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { type ApiClient, useApiClient } from "@/app";
@@ -14,6 +14,7 @@ import type { ThreadState } from "@/hooks/use-thread-state";
 import { useIronclawChat } from "@/hooks/use-ironclaw-chat";
 import { useIronclawStatus } from "@/hooks/use-ironclaw-status";
 import { useThreadState } from "@/hooks/use-thread-state";
+import type { UIMessage } from "@tanstack/ai/client";
 
 type Thread = Awaited<ReturnType<ApiClient["ironclaw"]["threads"]["list"]>>["data"][number];
 
@@ -26,20 +27,17 @@ function ChatArea({
   apiClient,
   initialMessages,
   threadState,
+  threadStateError,
   onRebuild,
 }: {
   threadId: string;
   apiClient: ApiClient;
-  initialMessages: Array<{
-    id: string;
-    role: "user" | "assistant";
-    parts: Array<{ type: "text"; content: string }>;
-    createdAt?: Date;
-  }>;
+  initialMessages: Array<UIMessage>;
   threadState: ThreadState | null;
+  threadStateError: string | null;
   onRebuild: () => Promise<void>;
 }) {
-  const { messages, sendMessage, isLoading, addToolApprovalResponse, status } = useIronclawChat(
+  const { messages, sendMessage, isLoading, status, error, stop, resolveGate } = useIronclawChat(
     threadId,
     apiClient,
     initialMessages,
@@ -66,19 +64,9 @@ function ChatArea({
 
   const handleApproveTool = useCallback(
     (toolCallId: string, approved: boolean) => {
-      addToolApprovalResponse({ id: toolCallId, approved });
-      if (approved) {
-        apiClient.ironclaw.threads
-          .resolveGate({
-            id: threadId,
-            runId: "",
-            gateRef: toolCallId,
-            resolution: "approved",
-          })
-          .catch(() => toast.error("Failed to approve tool"));
-      }
+      resolveGate(toolCallId, approved).catch(() => toast.error("Failed to approve tool"));
     },
-    [addToolApprovalResponse, apiClient, threadId],
+    [resolveGate],
   );
 
   return (
@@ -93,7 +81,9 @@ function ChatArea({
       <ChatMessageList
         loading={messages.length === 0 && !threadState}
         empty={messages.length === 0 && !!threadState}
-        emptyMessage="No messages yet. Send a message to start."
+        emptyMessage={
+          threadStateError ? "Failed to load thread" : "No messages yet. Send a message to start."
+        }
       >
         {messages.map((message) => (
           <ChatMessage
@@ -102,10 +92,25 @@ function ChatArea({
             onApproveTool={handleApproveTool}
           />
         ))}
+        {isLoading && messages.length > 0 ? (
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <Brain size={14} className="animate-pulse" />
+            Thinking...
+          </div>
+        ) : null}
       </ChatMessageList>
+
+      {error ? (
+        <div className="mx-auto max-w-3xl px-4 pb-2">
+          <p className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+            {error.message}
+          </p>
+        </div>
+      ) : null}
 
       <ChatInput
         onSend={handleSend}
+        onStop={stop}
         placeholder="Type a message..."
         isSending={isLoading || status === "streaming" || status === "submitted"}
       />
@@ -127,18 +132,23 @@ function ChatPage() {
   const [threadsLoaded, setThreadsLoaded] = useState(false);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
 
-  const { state: threadState, loading: threadStateLoading, rebuild } = useThreadState(activeThreadId);
+  const activeThreadMeta = useMemo(() => {
+    if (!activeThreadId) return undefined;
+    return threads.find((t) => t.threadId === activeThreadId);
+  }, [activeThreadId, threads]);
 
-  const initialMessages = useMemo(() => {
+  const { state: threadState, loading: threadStateLoading, error: threadStateError, rebuild } = useThreadState(activeThreadId, activeThreadMeta);
+
+  const initialMessages = useMemo((): Array<UIMessage> | null => {
     if (!threadState?.messages) return null;
     return threadState.messages
-      .filter((m) => m.kind === "User" || m.kind === "Assistant")
+      .filter((m) => m.kind === "user" || m.kind === "assistant")
       .map((m) => ({
         id: m.messageId,
-        role: (m.role === "user" ? "user" : "assistant") as "user" | "assistant",
+        role: (m.kind === "user" ? "user" : "assistant") as "user" | "assistant",
         parts: [{ type: "text" as const, content: m.content ?? "" }],
         createdAt: m.createdAt ? new Date(m.createdAt) : undefined,
-      }));
+      })) as Array<UIMessage>;
   }, [threadState]);
 
   const isDisconnected =
@@ -305,6 +315,7 @@ function ChatPage() {
             apiClient={apiClient}
             initialMessages={initialMessages}
             threadState={threadState}
+            threadStateError={threadStateError}
             onRebuild={rebuild}
           />
         ) : activeThreadId && !initialMessages ? (

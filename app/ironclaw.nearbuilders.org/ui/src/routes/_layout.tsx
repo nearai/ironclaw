@@ -1,4 +1,5 @@
 import { createFileRoute, Link, Outlet, useRouterState } from "@tanstack/react-router";
+import { BookOpen, Bot, MessageSquare, Puzzle } from "lucide-react";
 import { getAccount, getActiveRuntime, getAppName, sessionQueryOptions } from "@/app";
 import builtOn from "@/assets/built_on.png";
 import builtOnRev from "@/assets/built_on_rev.png";
@@ -48,7 +49,13 @@ function Layout() {
   const account = getAccount(runtimeConfig);
   const isAuthenticated = !!session?.user;
   const userRole = getUserRole(isAuthenticated, session?.user?.role === "admin");
-  const visibleItems = filterSidebarByRole(pluginSidebarItems, userRole);
+  const ironclawSidebarItems: SidebarItem[] = [
+    { icon: MessageSquare, label: "chat", to: "/" as const, roleRequired: "anon" as const },
+    { icon: Bot, label: "automations", to: "/automations" as const, roleRequired: "anon" as const },
+    { icon: Puzzle, label: "extensions", to: "/extensions" as const, roleRequired: "anon" as const },
+    { icon: BookOpen, label: "skills", to: "/skills" as const, roleRequired: "anon" as const },
+  ];
+  const visibleItems = filterSidebarByRole([...pluginSidebarItems, ...ironclawSidebarItems], userRole);
   const gatewayId = runtime?.gatewayId;
   const { status: connectionStatus } = useIronclawStatus();
 
@@ -164,7 +171,7 @@ function Layout() {
                     <span>{runtime?.accountId ?? account}</span>
                     <span>/</span>
                     <span className="truncate">
-                      {pathname === "/" ? "home" : pathname.slice(1).split("/").join(" / ")}
+                      {pathname === "/" ? "chat" : pathname.slice(1).split("/").join(" / ")}
                     </span>
                   </div>
                 </div>

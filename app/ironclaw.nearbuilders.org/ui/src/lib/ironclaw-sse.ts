@@ -39,6 +39,8 @@ export interface OpenIronclawEventSourceOptions {
   threadId: string;
   afterCursor?: string;
   onEvent: (envelope: IronclawSseEnvelope) => void;
+  onSnapshot?: (data: unknown) => void;
+  onUpdate?: (data: unknown) => void;
   onOpen?: () => void;
   onError?: (status: IronclawSseStatus) => void;
 }
@@ -51,11 +53,13 @@ export function openIronclawEventSource({
   threadId,
   afterCursor,
   onEvent,
+  onSnapshot,
+  onUpdate,
   onOpen,
   onError,
 }: OpenIronclawEventSourceOptions): IronclawEventSourceHandle {
   const url = new URL(
-    `/api/ironclaw/threads/${encodeURIComponent(threadId)}/events`,
+    `/api/threads/${encodeURIComponent(threadId)}/events`,
     window.location.origin,
   );
   if (afterCursor) {
@@ -81,13 +85,22 @@ export function openIronclawEventSource({
     }
     if (!frame || typeof frame !== "object") return;
 
-    onEvent({
+    const type = (frame.type as string) || fallbackType;
+    const envelope: IronclawSseEnvelope = {
       event: {
-        type: (frame.type as string) || fallbackType,
+        type,
         ...frame,
       } as StreamEvent,
       lastEventId: event.lastEventId || null,
-    });
+    };
+
+    if (type === "projection_snapshot") {
+      onSnapshot?.(frame);
+    } else if (type === "projection_update") {
+      onUpdate?.(frame);
+    }
+
+    onEvent(envelope);
   };
 
   const handlers = new Map<string, (event: Event) => void>();

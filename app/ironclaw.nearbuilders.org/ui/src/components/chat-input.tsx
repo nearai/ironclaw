@@ -1,10 +1,11 @@
 import { type KeyboardEvent, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Send, Loader2 } from "lucide-react";
+import { Send, Square } from "lucide-react";
 
 interface ChatInputProps {
   onSend: (content: string) => void;
+  onStop?: () => void;
   disabled?: boolean;
   placeholder?: string;
   isSending?: boolean;
@@ -12,6 +13,7 @@ interface ChatInputProps {
 
 export function ChatInput({
   onSend,
+  onStop,
   disabled,
   placeholder = "Type a message...",
   isSending,
@@ -42,13 +44,24 @@ export function ChatInput({
           onKeyDown={handleKeyDown}
           disabled={isSending || disabled}
         />
-        <Button
-          size="icon"
-          onClick={handleSend}
-          disabled={!value.trim() || isSending || disabled}
-        >
-          {isSending ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
-        </Button>
+        {isSending && onStop ? (
+          <Button
+            size="icon"
+            variant="secondary"
+            onClick={onStop}
+            title="Stop generating"
+          >
+            <Square size={14} className="fill-current" />
+          </Button>
+        ) : (
+          <Button
+            size="icon"
+            onClick={handleSend}
+            disabled={!value.trim() || isSending || disabled}
+          >
+            <Send size={14} />
+          </Button>
+        )}
       </div>
     </div>
   );
