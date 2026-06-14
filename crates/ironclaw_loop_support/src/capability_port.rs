@@ -19,15 +19,15 @@ use ironclaw_process_sandbox::{SandboxProcessPlan, ValidatedSandboxProcessPlan};
 use ironclaw_turns::{
     CapabilityActivityId, LoopGateRef, LoopResultRef,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-        CapabilityBatchOutcome, CapabilityDenied, CapabilityDeniedReasonKind,
-        CapabilityDescriptorView, CapabilityFailure, CapabilityFailureKind, CapabilityInputRef,
-        CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilityResumeToken,
-        ConcurrencyHint, LoopCapabilityPort, LoopHostMilestone, LoopHostMilestoneKind,
-        LoopHostMilestoneSink, LoopProcessRef, LoopRunContext, LoopSafeSummary,
-        ProcessHandleSummary, ProviderToolCall, ProviderToolCallCapabilityIds,
-        ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
+        CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
+        CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailure,
+        CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
+        CapabilityResultMessage, CapabilityResumeToken, ConcurrencyHint, LoopCapabilityPort,
+        LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopProcessRef,
+        LoopRunContext, LoopSafeSummary, ProcessHandleSummary, ProviderToolCall,
+        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use serde_json::Value;
@@ -1309,36 +1309,67 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             &trust_decision.authority_ceiling.allowed_effects,
             self.execution_mounts_for(&request.capability_id),
         )?;
-        if let Some(resume) = request.approval_resume.as_ref() {
-            let resume_invocation_id = invocation_id_from_resume_token(&resume.resume_token)?;
-            invocation_context.invocation_id = resume_invocation_id;
-            invocation_context.correlation_id = resume.correlation_id;
-            invocation_context.resource_scope.invocation_id = resume_invocation_id;
-            invocation_context.validate().map_err(|_| {
-                AgentLoopHostError::new(
+        // Normalize the two mutually-exclusive resume fields into a single
+        // local value BEFORE touching `invocation_context`, so an illegal
+        // both-set invocation is rejected before any state mutation occurs.
+        enum ResolvedResumeMode<'a> {
+            Approval(&'a CapabilityApprovalResume),
+            Auth(&'a CapabilityAuthResume),
+            None,
+        }
+        let resume_mode = match (
+            request.approval_resume.as_ref(),
+            request.auth_resume.as_ref(),
+        ) {
+            (Some(_), Some(_)) => {
+                // Both resume modes set simultaneously is an illegal invocation:
+                // approval_resume and auth_resume are mutually exclusive paths.
+                // Fail closed — do not dispatch, and do not mutate context.
+                return Err(AgentLoopHostError::new(
                     AgentLoopHostErrorKind::InvalidInvocation,
-                    "capability approval resume context is invalid",
-                )
-            })?;
-        } else if let Some(auth_resume) = request.auth_resume.as_ref() {
-            // Reuse original invocation identifier so the fingerprinted
-            // approval lease (scoped to that identifier) can still be matched
-            // and claimed.
-            let resume_invocation_id = invocation_id_from_resume_token(&auth_resume.resume_token)?;
-            invocation_context.invocation_id = resume_invocation_id;
-            invocation_context.resource_scope.invocation_id = resume_invocation_id;
-            // Restore original correlation identifier when a prior approval is
-            // present so the same trace-correlation identifier flows through
-            // the full capability lifecycle (mirrors the approval-resume path).
-            if let Some(pa) = auth_resume.prior_approval.as_ref() {
-                invocation_context.correlation_id = pa.correlation_id;
+                    "capability invocation has both approval_resume and auth_resume set; \
+                     these resume modes are mutually exclusive",
+                ));
             }
-            invocation_context.validate().map_err(|_| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::InvalidInvocation,
-                    "capability auth resume context is invalid",
-                )
-            })?;
+            (Some(resume), _) => ResolvedResumeMode::Approval(resume),
+            (_, Some(auth_resume)) => ResolvedResumeMode::Auth(auth_resume),
+            (Option::None, Option::None) => ResolvedResumeMode::None,
+        };
+        match &resume_mode {
+            ResolvedResumeMode::Approval(resume) => {
+                let resume_invocation_id = invocation_id_from_resume_token(&resume.resume_token)?;
+                invocation_context.invocation_id = resume_invocation_id;
+                invocation_context.correlation_id = resume.correlation_id;
+                invocation_context.resource_scope.invocation_id = resume_invocation_id;
+                invocation_context.validate().map_err(|_| {
+                    AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::InvalidInvocation,
+                        "capability approval resume context is invalid",
+                    )
+                })?;
+            }
+            ResolvedResumeMode::Auth(auth_resume) => {
+                // Reuse original invocation identifier so the fingerprinted
+                // approval lease (scoped to that identifier) can still be matched
+                // and claimed.
+                let resume_invocation_id =
+                    invocation_id_from_resume_token(&auth_resume.resume_token)?;
+                invocation_context.invocation_id = resume_invocation_id;
+                invocation_context.resource_scope.invocation_id = resume_invocation_id;
+                // Restore original correlation identifier when a prior approval is
+                // present so the same trace-correlation identifier flows through
+                // the full capability lifecycle (mirrors the approval-resume path).
+                if let Some(pa) = auth_resume.prior_approval.as_ref() {
+                    invocation_context.correlation_id = pa.correlation_id;
+                }
+                invocation_context.validate().map_err(|_| {
+                    AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::InvalidInvocation,
+                        "capability auth resume context is invalid",
+                    )
+                })?;
+            }
+            ResolvedResumeMode::None => {}
         }
         let invocation_id = invocation_context.invocation_id;
         let correlation_id = invocation_context.correlation_id;
@@ -1351,25 +1382,8 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             capability_id: request.capability_id.clone(),
         })
         .await?;
-        let outcome = match (
-            request.approval_resume.as_ref(),
-            request.auth_resume.as_ref(),
-        ) {
-            (Some(_), Some(_)) => {
-                // Both resume modes set simultaneously is an illegal invocation:
-                // approval_resume and auth_resume are mutually exclusive paths.
-                // Fail closed — do not dispatch.
-                tracing::warn!(
-                    invocation_id = %invocation_id,
-                    "capability invocation rejected: approval_resume and auth_resume are both set"
-                );
-                return Err(AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::InvalidInvocation,
-                    "capability invocation has both approval_resume and auth_resume set; \
-                     these resume modes are mutually exclusive",
-                ));
-            }
-            (Some(resume), _) => {
+        let outcome = match resume_mode {
+            ResolvedResumeMode::Approval(resume) => {
                 let runtime_request = RuntimeCapabilityResumeRequest::new(
                     invocation_context,
                     resume.approval_request_id,
@@ -1381,7 +1395,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 .with_idempotency_key(idempotency_key.clone());
                 dispatch_runtime_capability_resume(self.runtime.as_ref(), runtime_request).await
             }
-            (None, Some(auth_resume)) => {
+            ResolvedResumeMode::Auth(auth_resume) => {
                 let prior_approval_id = auth_resume
                     .prior_approval
                     .as_ref()
@@ -1404,7 +1418,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 dispatch_runtime_capability_auth_resume(self.runtime.as_ref(), runtime_request)
                     .await
             }
-            (None, None) => {
+            ResolvedResumeMode::None => {
                 let runtime_request = RuntimeCapabilityRequest::new(
                     invocation_context,
                     request.capability_id,
