@@ -630,6 +630,37 @@ async fn compaction_port_accepts_terminal_cut_point_that_is_rejected_busy() {
 }
 
 #[tokio::test]
+async fn compaction_port_rejects_terminal_cut_point_that_is_capability_preview() {
+    // Regression: when drop_through_seq points directly at a CapabilityDisplayPreview
+    // message, validation must return InvalidCutPoint.  SkipEphemeral(CapabilityDisplayPreview)
+    // is NOT a legal terminal cut point — only SkipEphemeral(StableNonModelVisible) is.
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user("visible-before-preview").await;
+    fixture.append_preview().await; // seq 2 — the terminal cut point under test
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(CleanLeakScanner),
+        fixture.scope.clone(),
+    );
+
+    let error = port
+        .compact_loop_context(fixture.request(2))
+        .await
+        .expect_err("CapabilityDisplayPreview terminal cut point should return InvalidCutPoint");
+
+    assert!(
+        matches!(error, LoopCompactionError::InvalidCutPoint),
+        "expected InvalidCutPoint, got {error:?}",
+    );
+    assert!(
+        inference.last_input().is_empty(),
+        "inference must not be called when the cut point is invalid",
+    );
+}
+
+#[tokio::test]
 async fn compaction_port_defers_range_containing_deferred_busy_message() {
     // DeferredBusy is NOT terminal: legacy rows can still be submitted via the
     // inbound replay path, transitioning to Submitted and becoming model-visible.

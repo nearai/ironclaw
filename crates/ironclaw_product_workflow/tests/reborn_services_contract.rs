@@ -2062,7 +2062,7 @@ async fn busy_submit_clears_skill_activation_message() {
     );
     create_thread_for(&services, caller(), "thread-alpha").await;
 
-    let deferred = services
+    let rejected = services
         .submit_turn(
             caller(),
             serde_json::from_value::<WebUiSendMessageRequest>(json!({
@@ -2073,10 +2073,10 @@ async fn busy_submit_clears_skill_activation_message() {
             .expect("request"),
         )
         .await
-        .expect("busy submit is deferred");
+        .expect("busy submit is rejected");
 
     assert!(matches!(
-        deferred,
+        rejected,
         RebornSubmitTurnResponse::RejectedBusy {
             active_run_id: Some(id),
             ..
@@ -2089,7 +2089,7 @@ async fn busy_submit_clears_skill_activation_message() {
     assert_eq!(
         cleared.as_slice(),
         &[(recorded[0].0.clone(), recorded[0].1.clone())],
-        "deferred submissions must clear their activation input before returning"
+        "rejected submissions must clear their activation input before returning"
     );
 }
 
@@ -8512,16 +8512,18 @@ async fn rejected_busy_mark_failure_reconciles_via_replay_and_returns_rejected_b
 }
 
 // Legacy DeferredBusy mark-failure reconcile path: mark_message_rejected_busy errors
-// → replay confirms legacy DeferredBusy → no error surfaces, RejectedBusy returned
+// → replay returns legacy DeferredBusy (non-terminal) → predicate does NOT match
+// → original mark error surfaces as Unavailable, not a false-terminal RejectedBusy
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn legacy_deferred_busy_mark_failure_reconciles_via_replay() {
+async fn legacy_deferred_busy_mark_failure_surfaces_error_not_false_terminal() {
     // Arrange: coordinator returns ThreadBusy so the busy path fires; the
     // scripted thread service makes mark_message_rejected_busy fail and then
     // supplies a legacy DeferredBusy replay on the reconcile probe.
-    // reconcile_terminal_duplicate accepts DeferredBusy alongside RejectedBusy
-    // as a settled terminal state, so no error propagates to the caller.
+    // DeferredBusy is non-terminal — reconcile_terminal_duplicate must NOT
+    // accept it as settled.  The predicate now matches only RejectedBusy, so
+    // the `_ =>` arm propagates the original mark failure as an error.
     let active_run_id = TurnRunId::new();
     let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
         TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
@@ -8536,8 +8538,9 @@ async fn legacy_deferred_busy_mark_failure_reconciles_via_replay() {
     );
 
     // Act: submit a fresh turn against thread-alpha; coordinator fires ThreadBusy,
-    // mark fails, reconcile sees legacy DeferredBusy and settles.
-    let response = services
+    // mark_message_rejected_busy fails, reconcile sees legacy DeferredBusy which
+    // no longer matches → the original mark error must propagate.
+    let error = services
         .submit_turn(
             caller(),
             serde_json::from_value::<WebUiSendMessageRequest>(json!({
@@ -8548,43 +8551,26 @@ async fn legacy_deferred_busy_mark_failure_reconciles_via_replay() {
             .expect("request"),
         )
         .await
-        .expect("legacy DeferredBusy mark-failure reconcile must succeed (not error)");
+        .expect_err(
+            "legacy DeferredBusy reconcile must surface the mark failure as an error, \
+             not silently return a false-terminal RejectedBusy",
+        );
 
-    // Assert: the mark error must NOT propagate — reconcile_terminal_duplicate sees
-    // DeferredBusy (matched by the RejectedBusy|DeferredBusy arm) and returns Ok(()).
-    // The response is built from the original ThreadBusy metadata, same as the
-    // RejectedBusy reconcile path.
-    match response {
-        RebornSubmitTurnResponse::RejectedBusy {
-            active_run_id: returned_run_id,
-            status: returned_status,
-            event_cursor: returned_cursor,
-            notice,
-            ..
-        } => {
-            assert_eq!(
-                returned_run_id,
-                Some(active_run_id),
-                "legacy DeferredBusy reconcile must carry the real blocking run id from ThreadBusy"
-            );
-            assert_eq!(
-                returned_status,
-                Some(TurnStatus::Running),
-                "legacy DeferredBusy reconcile must carry the real blocking run status"
-            );
-            assert_eq!(
-                returned_cursor,
-                Some(EventCursor(3)),
-                "legacy DeferredBusy reconcile must carry the real event cursor"
-            );
-            assert!(!notice.is_empty(), "RejectedBusy must carry a notice");
-        }
-        other => {
-            panic!(
-                "legacy DeferredBusy mark-failure reconcile must return RejectedBusy (not error), got {other:?}"
-            )
-        }
-    }
+    // Assert: SessionThreadError::Backend maps to service_unavailable(true) —
+    // code=Unavailable, status_code=503, retryable=true.
+    assert_eq!(
+        error.code,
+        RebornServicesErrorCode::Unavailable,
+        "DeferredBusy reconcile miss must surface the backend mark failure (Unavailable), got {error:?}",
+    );
+    assert_eq!(
+        error.status_code, 503,
+        "DeferredBusy reconcile miss must return 503, got {error:?}",
+    );
+    assert!(
+        error.retryable,
+        "backend mark failure is retryable, got {error:?}",
+    );
 }
 
 /// Test lander that records what it was asked to land and returns a ref per

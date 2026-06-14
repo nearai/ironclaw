@@ -4,7 +4,7 @@
 //! observer runs after the workflow accepts an inbound Slack message, waits for
 //! the submitted run to finish, reads the finalized assistant reply, and sends it
 //! through the host-mediated product outbound delivery seam.
-// arch-exempt: large_file, deferred-busy hint logic stays here to share observer/test fixtures with final-reply delivery; decomposition tracked in #4818.
+// arch-exempt: large_file, busy-thread / RejectedBusy hint logic stays here to share observer/test fixtures with final-reply delivery; decomposition tracked in #4818.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
