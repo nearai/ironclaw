@@ -48,6 +48,7 @@ mod tests {
             kind: MessageKind::User,
             tool_result_provider_call: None,
             content: content.to_string(),
+            image_attachments: Vec::new(),
         }
     }
 

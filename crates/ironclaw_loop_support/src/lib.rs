@@ -1165,6 +1165,7 @@ where
                     content_ref,
                     tool_result_provider_call: message.tool_result_provider_call,
                     tool_result_content,
+                    image_parts: Vec::new(),
                 });
             }
             return Ok(messages);
@@ -1262,6 +1263,7 @@ where
                     content_ref: message.content_ref,
                     tool_result_provider_call: None,
                     tool_result_content: None,
+                    image_parts: Vec::new(),
                 });
                 continue;
             }
@@ -1284,6 +1286,7 @@ where
                     content_ref: message.content_ref,
                     tool_result_provider_call: None,
                     tool_result_content: None,
+                    image_parts: Vec::new(),
                 });
                 continue;
             }
@@ -1322,6 +1325,7 @@ where
                 content_ref: message.content_ref,
                 tool_result_provider_call: context_message.tool_result_provider_call.clone(),
                 tool_result_content: tool_result_content_for_context_message(context_message)?,
+                image_parts: Vec::new(),
             });
         }
         Ok(resolved)
@@ -1376,6 +1380,7 @@ where
                     content_ref,
                     tool_result_provider_call: None,
                     tool_result_content: None,
+                    image_parts: Vec::new(),
                 },
             );
         }
@@ -1418,6 +1423,16 @@ pub struct HostManagedModelRequest {
 /// snapshot DTO here.
 pub type HostManagedModelRouteSnapshot = ironclaw_turns::run_profile::LoopModelRouteSnapshot;
 
+/// An image attachment already read back and base64-encoded, ready to become a
+/// multimodal content part for a vision-capable model. Populated only when the
+/// resolved model accepts images (see the model-message resolution path); the
+/// model gateway turns each into a `ContentPart::ImageUrl` data URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostManagedModelImagePart {
+    pub mime_type: String,
+    pub data_base64: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostManagedModelMessage {
     pub role: HostManagedModelMessageRole,
@@ -1427,6 +1442,10 @@ pub struct HostManagedModelMessage {
     pub tool_result_provider_call: Option<ProviderToolCallReferenceEnvelope>,
     #[serde(default, skip)]
     pub tool_result_content: Option<HostManagedToolResultContent>,
+    /// Encoded image attachments for the multimodal path. Empty unless the
+    /// resolved model is vision-capable. Not serialized (transient turn data).
+    #[serde(default, skip)]
+    pub image_parts: Vec<HostManagedModelImagePart>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
