@@ -64,9 +64,9 @@ const SLACK_DELIVERY_TIMEOUT_MESSAGE: &str =
 const SLACK_DELIVERY_ERROR_MESSAGE: &str =
     "Something went wrong delivering the result here. Check the WebUI.";
 /// Posted when the blocking run is `BlockedApproval` and no gate_ref is available.
-const SLACK_DEFERRED_BUSY_APPROVAL_MESSAGE: &str = "Ironclaw is waiting on a pending approval before taking new messages — reply `approve` or `deny` (or `approve gate:<ref>`) to resume.";
+const SLACK_BUSY_APPROVAL_MESSAGE: &str = "Ironclaw is waiting on a pending approval before taking new messages — reply `approve` or `deny` (or `approve gate:<ref>`) to resume.";
 /// Posted for any other non-terminal blocking state, or when the state lookup fails.
-const SLACK_DEFERRED_BUSY_GENERIC_MESSAGE: &str = "Ironclaw is still working on a previous message and can't take this one yet — please resend it once the current task finishes.";
+const SLACK_BUSY_GENERIC_MESSAGE: &str = "Ironclaw is still working on a previous message and can't take this one yet — please resend it once the current task finishes.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BlockedActionableMarker {
@@ -1001,9 +1001,10 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
             return;
         }
         // A2b: Busy-thread hint — the user's message was silently dropped
-        // because a run is blocked on a pending gate. Post a one-shot state-aware
-        // hint so the user knows to approve/deny/wait rather than being left in
-        // silence. Same best-effort semantics as A2: post failure → debug! only.
+        // because a run is busy (pending gate or generic RejectedBusy). Post a
+        // one-shot state-aware hint so the user knows to approve/deny/wait (gate
+        // cases) or simply retry later (running-state cases) rather than being
+        // left in silence. Same best-effort semantics as A2: post failure → debug! only.
         //
         // Authorization: only post if the binding lookup succeeds, matching the
         // same guard used by `post_rejection_hint_if_authorized`.
@@ -1424,7 +1425,7 @@ async fn busy_hint_from_run_state(
                 error = %err,
                 "busy-thread hint scope derivation failed; using generic copy"
             );
-            return SLACK_DEFERRED_BUSY_GENERIC_MESSAGE.to_string();
+            return SLACK_BUSY_GENERIC_MESSAGE.to_string();
         }
     };
     match coordinator
@@ -1441,7 +1442,7 @@ async fn busy_hint_from_run_state(
                      — reply `approve {ref}` or `deny` to resume.",
                     ref = gate_ref.as_str()
                 ),
-                None => SLACK_DEFERRED_BUSY_APPROVAL_MESSAGE.to_string(),
+                None => SLACK_BUSY_APPROVAL_MESSAGE.to_string(),
             },
             TurnStatus::BlockedAuth => match state.gate_ref.as_ref() {
                 Some(gate_ref) => format!(
@@ -1453,7 +1454,7 @@ async fn busy_hint_from_run_state(
                          — complete the authentication prompt to continue."
                     .to_string(),
             },
-            _ => SLACK_DEFERRED_BUSY_GENERIC_MESSAGE.to_string(),
+            _ => SLACK_BUSY_GENERIC_MESSAGE.to_string(),
         },
         Err(err) => {
             tracing::debug!(
@@ -1461,7 +1462,7 @@ async fn busy_hint_from_run_state(
                 error = %err,
                 "busy-thread hint run-state lookup failed; using generic copy"
             );
-            SLACK_DEFERRED_BUSY_GENERIC_MESSAGE.to_string()
+            SLACK_BUSY_GENERIC_MESSAGE.to_string()
         }
     }
 }
@@ -5267,7 +5268,7 @@ mod tests {
     ///
     /// `busy_hint_from_run_state` calls `thread_scope_from_binding` which
     /// returns `Err` when `agent_id` is `None`. The code must fall back to
-    /// `SLACK_DEFERRED_BUSY_GENERIC_MESSAGE` and still post the hint.
+    /// `SLACK_BUSY_GENERIC_MESSAGE` and still post the hint.
     #[tokio::test]
     async fn deferred_busy_missing_agent_binding_posts_generic_hint() {
         let install = "test-install";
@@ -5334,7 +5335,7 @@ mod tests {
     /// Run-state lookup returns `Err` → generic copy posted.
     ///
     /// `busy_hint_from_run_state` swallows `TurnError` from
-    /// `get_run_state` and degrades to `SLACK_DEFERRED_BUSY_GENERIC_MESSAGE`.
+    /// `get_run_state` and degrades to `SLACK_BUSY_GENERIC_MESSAGE`.
     #[tokio::test]
     async fn deferred_busy_run_state_lookup_error_posts_generic_hint() {
         let install = "test-install";

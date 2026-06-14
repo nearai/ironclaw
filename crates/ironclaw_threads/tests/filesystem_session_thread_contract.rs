@@ -1291,6 +1291,72 @@ async fn filesystem_rejected_busy_cannot_be_marked_submitted_is_terminal() {
     );
 }
 
+#[tokio::test]
+async fn legacy_deferred_busy_message_round_trips_through_filesystem_store() {
+    // Regression guard for the on-disk legacy `deferred_busy` status.
+    // `DeferredBusy` is no longer written by new code but may exist in older
+    // transcripts. This test proves that a row injected with that status
+    // survives the JSON serialize → filesystem store → deserialize round-trip
+    // with the status preserved and still appears in history.
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-legacy-db", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("legacy-deferred-busy");
+
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("arrived while busy"),
+        })
+        .await
+        .unwrap();
+
+    // Inject a legacy DeferredBusy row directly — the mark_message_deferred_busy
+    // writer has been retired; this back-door preserves read/replay coverage.
+    service
+        .inject_legacy_deferred_busy_for_test(&scope, &thread.thread_id, accepted.message_id)
+        .await
+        .unwrap();
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        history.messages.len(),
+        1,
+        "legacy DeferredBusy message must appear in history"
+    );
+    assert_eq!(
+        history.messages[0].status,
+        MessageStatus::DeferredBusy,
+        "on-disk legacy deferred_busy status must round-trip without mutation"
+    );
+    assert!(
+        history.messages[0].turn_run_id.is_none(),
+        "legacy DeferredBusy message must have no turn_run_id"
+    );
+}
+
 fn scope(label: &str) -> ThreadScope {
     ThreadScope {
         tenant_id: TenantId::new(format!("tenant-{label}")).unwrap(),

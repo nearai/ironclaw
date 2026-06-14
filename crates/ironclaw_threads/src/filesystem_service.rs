@@ -614,6 +614,29 @@ where
             path.as_str()
         )))
     }
+
+    /// Force-set a persisted message's status to `DeferredBusy` and clear its
+    /// turn refs, exactly as the retired `mark_message_deferred_busy` writer
+    /// would have. Never call from production code.
+    ///
+    /// Gated behind `#[cfg(any(test, feature = "test-support"))]` so it is
+    /// absent from production builds. Integration tests in a separate
+    /// compilation unit must enable the `test-support` feature.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn inject_legacy_deferred_busy_for_test(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.apply_message_update(scope, thread_id, message_id, |message| {
+            message.status = MessageStatus::DeferredBusy;
+            message.turn_id = None;
+            message.turn_run_id = None;
+            Ok(())
+        })
+        .await
+    }
 }
 
 #[async_trait]

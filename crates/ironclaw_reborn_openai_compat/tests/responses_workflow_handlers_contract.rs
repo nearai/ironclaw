@@ -347,7 +347,7 @@ async fn responses_cancel_rejected_busy_ack_returns_429_and_does_not_read_projec
         .await
         .expect("cancel");
 
-    // RejectedBusy on cancel must surface as a retryable 429, matching the creation path.
+    // RejectedBusy on cancel must surface as a non-retryable 429 (terminal/settled outcome).
     assert_eq!(cancelled.status(), http::StatusCode::TOO_MANY_REQUESTS);
 
     // accepted_cancel_ack_from_ack errors out before read_response is called, so the

@@ -1372,8 +1372,17 @@ enum ScriptedThreadBehavior {
     BackendHistory,
     History(Box<ThreadHistory>),
     ListPages,
-    SubmittedReplay { turn_run_id: Option<String> },
+    SubmittedReplay {
+        turn_run_id: Option<String>,
+    },
     RejectedBusyReplay,
+    /// `mark_message_rejected_busy` fails; reconcile path replays the accepted
+    /// message as RejectedBusy so no error surfaces to the caller.
+    RejectedBusyMarkFails {
+        /// Message id assigned by `accept_inbound_message`, shared so that
+        /// `reconcile_terminal_duplicate` can match it against the handoff.
+        message_id: ThreadMessageId,
+    },
 }
 
 struct ScriptedThreadService {
@@ -1381,6 +1390,10 @@ struct ScriptedThreadService {
     history_requests: Mutex<Vec<ThreadHistoryRequest>>,
     list_requests: Mutex<Vec<ListThreadsForScopeRequest>>,
     list_responses: Mutex<Vec<ListThreadsForScopeResponse>>,
+    /// Tracks `replay_accepted_inbound_message` call count; used by
+    /// `RejectedBusyMarkFails` to return `None` on the first (idempotency
+    /// probe) call and `Some(RejectedBusy)` on the second (reconcile) call.
+    replay_call_count: Mutex<usize>,
 }
 
 impl ScriptedThreadService {
@@ -1390,6 +1403,7 @@ impl ScriptedThreadService {
             history_requests: Mutex::new(Vec::new()),
             list_requests: Mutex::new(Vec::new()),
             list_responses: Mutex::new(Vec::new()),
+            replay_call_count: Mutex::new(0),
         }
     }
 
@@ -1399,6 +1413,7 @@ impl ScriptedThreadService {
             history_requests: Mutex::new(Vec::new()),
             list_requests: Mutex::new(Vec::new()),
             list_responses: Mutex::new(Vec::new()),
+            replay_call_count: Mutex::new(0),
         }
     }
 
@@ -1408,6 +1423,7 @@ impl ScriptedThreadService {
             history_requests: Mutex::new(Vec::new()),
             list_requests: Mutex::new(Vec::new()),
             list_responses: Mutex::new(responses),
+            replay_call_count: Mutex::new(0),
         }
     }
 
@@ -1417,6 +1433,7 @@ impl ScriptedThreadService {
             history_requests: Mutex::new(Vec::new()),
             list_requests: Mutex::new(Vec::new()),
             list_responses: Mutex::new(Vec::new()),
+            replay_call_count: Mutex::new(0),
         }
     }
 
@@ -1426,6 +1443,25 @@ impl ScriptedThreadService {
             history_requests: Mutex::new(Vec::new()),
             list_requests: Mutex::new(Vec::new()),
             list_responses: Mutex::new(Vec::new()),
+            replay_call_count: Mutex::new(0),
+        }
+    }
+
+    /// Scripted service for the mark-failure reconcile path:
+    /// - `accept_inbound_message` accepts the message
+    /// - `mark_message_rejected_busy` returns a backend error
+    /// - `replay_accepted_inbound_message` returns `None` on the first call
+    ///   (idempotency probe) and `Some(RejectedBusy)` on the second
+    ///   (reconcile), so `reconcile_terminal_duplicate` settles without error
+    fn rejected_busy_mark_fails() -> Self {
+        Self {
+            behavior: ScriptedThreadBehavior::RejectedBusyMarkFails {
+                message_id: ThreadMessageId::new(),
+            },
+            history_requests: Mutex::new(Vec::new()),
+            list_requests: Mutex::new(Vec::new()),
+            list_responses: Mutex::new(Vec::new()),
+            replay_call_count: Mutex::new(0),
         }
     }
 
@@ -1455,7 +1491,8 @@ impl SessionThreadService for ScriptedThreadService {
             ScriptedThreadBehavior::History(history) => Ok(history.as_ref().clone()),
             ScriptedThreadBehavior::ListPages => scripted_stub_unreachable("list_thread_history"),
             ScriptedThreadBehavior::SubmittedReplay { .. }
-            | ScriptedThreadBehavior::RejectedBusyReplay => Ok(ThreadHistory {
+            | ScriptedThreadBehavior::RejectedBusyReplay
+            | ScriptedThreadBehavior::RejectedBusyMarkFails { .. } => Ok(ThreadHistory {
                 thread: SessionThreadRecord {
                     scope: request.scope,
                     thread_id: request.thread_id,
@@ -1479,9 +1516,19 @@ impl SessionThreadService for ScriptedThreadService {
 
     async fn accept_inbound_message(
         &self,
-        _request: AcceptInboundMessageRequest,
+        request: AcceptInboundMessageRequest,
     ) -> Result<AcceptedInboundMessage, SessionThreadError> {
-        scripted_stub_unreachable("accept_inbound_message")
+        match &self.behavior {
+            ScriptedThreadBehavior::RejectedBusyMarkFails { message_id } => {
+                Ok(AcceptedInboundMessage {
+                    thread_id: request.thread_id,
+                    message_id: *message_id,
+                    sequence: 1,
+                    idempotent_replay: false,
+                })
+            }
+            _ => scripted_stub_unreachable("accept_inbound_message"),
+        }
     }
 
     async fn replay_accepted_inbound_message(
@@ -1513,6 +1560,32 @@ impl SessionThreadService for ScriptedThreadService {
                 reply_target_binding_id: Some("webui-reply:replayed".to_string()),
                 turn_run_id: None,
             })),
+            ScriptedThreadBehavior::RejectedBusyMarkFails { message_id } => {
+                // replay_webui_send_message probes with two source-binding variants
+                // (main + legacy) before accepting the message, so calls 1 and 2
+                // are the initial idempotency probes — both must return None so
+                // accept_inbound_message is reached.  Call 3+ comes from
+                // reconcile_terminal_duplicate after mark_message_rejected_busy
+                // fails; return the already-settled RejectedBusy so reconciliation
+                // succeeds without propagating the mark error.
+                let mut count = self.replay_call_count.lock().expect("lock");
+                *count += 1;
+                if *count <= 2 {
+                    Ok(None)
+                } else {
+                    Ok(Some(AcceptedInboundMessageReplay {
+                        scope: request.scope,
+                        thread_id: ThreadId::new("thread-alpha").expect("valid thread"),
+                        message_id: *message_id,
+                        sequence: 1,
+                        status: MessageStatus::RejectedBusy,
+                        actor_id: Some(request.actor_id),
+                        source_binding_id: Some(request.source_binding_id),
+                        reply_target_binding_id: Some("webui-reply:replayed".to_string()),
+                        turn_run_id: None,
+                    }))
+                }
+            }
             ScriptedThreadBehavior::BackendHistory
             | ScriptedThreadBehavior::History(_)
             | ScriptedThreadBehavior::ListPages => {
@@ -1538,7 +1611,14 @@ impl SessionThreadService for ScriptedThreadService {
         _thread_id: &ThreadId,
         _message_id: ThreadMessageId,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        scripted_stub_unreachable("mark_message_rejected_busy")
+        match &self.behavior {
+            ScriptedThreadBehavior::RejectedBusyMarkFails { .. } => {
+                Err(SessionThreadError::Backend(
+                    "simulated backend failure in mark_message_rejected_busy".to_string(),
+                ))
+            }
+            _ => scripted_stub_unreachable("mark_message_rejected_busy"),
+        }
     }
 
     async fn append_assistant_draft(
@@ -8283,6 +8363,80 @@ async fn fresh_rejected_busy_returns_some_run_metadata() {
             assert!(!notice.is_empty(), "fresh RejectedBusy must carry a notice");
         }
         other => panic!("expected RejectedBusy, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mark-failure reconcile path: mark_message_rejected_busy errors → replay
+// confirms RejectedBusy → no error surfaces, RejectedBusy returned
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn rejected_busy_mark_failure_reconciles_via_replay_and_returns_rejected_busy() {
+    // Arrange: coordinator returns ThreadBusy so the busy path fires; the
+    // scripted thread service makes mark_message_rejected_busy fail and then
+    // supplies a RejectedBusy replay on the reconcile probe so
+    // reconcile_terminal_duplicate settles the race without propagating the error.
+    let active_run_id = TurnRunId::new();
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id,
+            status: TurnStatus::Running,
+            event_cursor: EventCursor(3),
+        }),
+    ));
+    let services = RebornServices::new(
+        Arc::new(ScriptedThreadService::rejected_busy_mark_fails()),
+        coordinator,
+    );
+
+    // Act: submit a fresh turn against thread-alpha (which the scripted service
+    // owns); coordinator fires ThreadBusy, mark fails, reconcile replays.
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-mark-fail-reconcile",
+                "thread_id": "thread-alpha",
+                "content": "hello mark-fail"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("mark-failure reconcile must succeed (not error)");
+
+    // Assert: the mark error must NOT propagate to the caller — reconcile_terminal_duplicate
+    // replays the accepted message, sees RejectedBusy, and returns Ok(()).
+    // The response is built from the original ThreadBusy metadata (active_run_id,
+    // status, event_cursor), proving the full path ran without dropping state.
+    match response {
+        RebornSubmitTurnResponse::RejectedBusy {
+            active_run_id: returned_run_id,
+            status: returned_status,
+            event_cursor: returned_cursor,
+            notice,
+            ..
+        } => {
+            assert_eq!(
+                returned_run_id,
+                Some(active_run_id),
+                "mark-failure reconcile must carry the real blocking run id from ThreadBusy"
+            );
+            assert_eq!(
+                returned_status,
+                Some(TurnStatus::Running),
+                "mark-failure reconcile must carry the real blocking run status"
+            );
+            assert_eq!(
+                returned_cursor,
+                Some(EventCursor(3)),
+                "mark-failure reconcile must carry the real event cursor"
+            );
+            assert!(!notice.is_empty(), "RejectedBusy must carry a notice");
+        }
+        other => {
+            panic!("mark-failure reconcile must return RejectedBusy (not error), got {other:?}")
+        }
     }
 }
 

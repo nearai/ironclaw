@@ -52,8 +52,13 @@ enum CompactionMessageDisposition {
 enum CompactionSkipReason {
     CapabilityDisplayPreview,
     /// The message has a stable terminal status that is not model-visible (e.g.
-    /// `RejectedBusy`, legacy `DeferredBusy`).  It is silently excluded from
-    /// the compacted transcript but does not block the range from completing.
+    /// `RejectedBusy`, where the user must explicitly resend and the message
+    /// will never be auto-retried).  It is silently excluded from the compacted
+    /// transcript but does not block the range from completing.
+    ///
+    /// Note: `DeferredBusy` is NOT classified here — legacy rows can still
+    /// transition to `Submitted` via the inbound replay path, so they are
+    /// deferred until they reach a stable status.
     StableNonModelVisible,
 }
 
