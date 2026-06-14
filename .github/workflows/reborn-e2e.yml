@@ -8,19 +8,20 @@ on:
         required: false
         type: string
   workflow_dispatch:
+  # Scope gating for pull_request and merge_group happens in the `changes`
+  # job below (via scripts/ci/classify-test-scope.sh) instead of workflow-level
+  # `paths:` filters: merge_group events ignore path filters entirely, and a
+  # path-filtered workflow never reports a status on non-matching PRs, which
+  # breaks required-check protection. The `reborn-e2e` roll-up job always
+  # reports, passing fast when the change is out of scope.
   pull_request:
     branches:
       - main
-    paths:
-      - "crates/ironclaw_*/**"
-      - "docs/reborn/**"
-      - "scripts/reborn-e2e-rust.sh"
-      - "tests/e2e/**"
-      - "build.rs"
-      - "providers.json"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".github/workflows/reborn-e2e.yml"
+  merge_group:
+    branches:
+      - main
+    types:
+      - checks_requested
   push:
     branches:
       - main
@@ -43,8 +44,55 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Detect Reborn E2E scope
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.non_diff.outputs.docs_only || steps.diff.outputs.docs_only }}
+      has_reborn_tests: ${{ steps.non_diff.outputs.has_reborn_tests || steps.diff.outputs.has_reborn_tests }}
+      has_e2e_harness: ${{ steps.non_diff.outputs.has_e2e_harness || steps.diff.outputs.has_e2e_harness }}
+    steps:
+      - id: non_diff
+        if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
+        run: |
+          echo "docs_only=false" >> "$GITHUB_OUTPUT"
+          echo "has_reborn_tests=true" >> "$GITHUB_OUTPUT"
+          echo "has_e2e_harness=true" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: diff
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          CHANGED_FILES="$(git diff --name-only "$BASE_SHA"..."$HEAD_SHA")"
+
+          echo "Changed files:"
+          if [ -n "$CHANGED_FILES" ]; then
+            printf '%s\n' "$CHANGED_FILES"
+          else
+            echo "<none>"
+          fi
+
+          printf '%s\n' "$CHANGED_FILES" | scripts/ci/classify-test-scope.sh >> "$GITHUB_OUTPUT"
+
+          # The gateway and WebUI v2 smoke jobs run on the Python E2E harness,
+          # so harness changes outside the reborn-specific scenario files must
+          # still trigger this workflow.
+          if printf '%s\n' "$CHANGED_FILES" | grep -q '^tests/e2e/'; then
+            echo "has_e2e_harness=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_e2e_harness=false" >> "$GITHUB_OUTPUT"
+          fi
+
   rust-reborn:
     name: Rust Reborn (${{ matrix.group }})
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true' && (needs.changes.outputs.has_reborn_tests == 'true' || needs.changes.outputs.has_e2e_harness == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 35
     strategy:
@@ -77,6 +125,8 @@ jobs:
 
   gateway-smoke:
     name: Reborn gateway smoke
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true' && (needs.changes.outputs.has_reborn_tests == 'true' || needs.changes.outputs.has_e2e_harness == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -122,6 +172,8 @@ jobs:
 
   webui-v2-smoke:
     name: Reborn WebUI v2 smoke
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true' && (needs.changes.outputs.has_reborn_tests == 'true' || needs.changes.outputs.has_e2e_harness == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -170,12 +222,28 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     needs:
+      - changes
       - rust-reborn
       - gateway-smoke
       - webui-v2-smoke
     steps:
       - name: Check Reborn E2E jobs
         run: |
+          if [[ "${{ needs.changes.result }}" != "success" ]]; then
+            echo "Scope detection failed: ${{ needs.changes.result }}"
+            exit 1
+          fi
+
+          if [[ "${{ needs.changes.outputs.docs_only }}" == "true" ]]; then
+            echo "Docs-only change detected — Reborn E2E roll-up passes fast"
+            exit 0
+          fi
+
+          if [[ "${{ needs.changes.outputs.has_reborn_tests }}" != "true" && "${{ needs.changes.outputs.has_e2e_harness }}" != "true" ]]; then
+            echo "No Reborn E2E scope detected — Reborn E2E roll-up passes fast"
+            exit 0
+          fi
+
           if [[ "${{ needs.rust-reborn.result }}" != "success" ]]; then
             echo "Rust Reborn E2E failed"
             exit 1
