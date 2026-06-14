@@ -758,6 +758,14 @@ mod tests {
             ModelToolSurface::CompactToolInfo
         );
         assert_eq!(
+            default_model_tool_surface("image_generate"),
+            ModelToolSurface::CompactToolInfo
+        );
+        assert_eq!(
+            default_model_tool_surface("image_edit"),
+            ModelToolSurface::CompactToolInfo
+        );
+        assert_eq!(
             default_model_tool_surface("notion_search"),
             ModelToolSurface::CompactToolInfo
         );

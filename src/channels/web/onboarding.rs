@@ -90,6 +90,7 @@ mod tests {
     fn classify_configure_result_treats_oauth_continuation_as_auth_required() {
         let result = ConfigureResult {
             activated: false,
+            setup_only: false,
             message: "Complete authentication to continue.".to_string(),
             auth_url: Some("https://example.test/oauth".to_string()),
             pairing_required: false,
@@ -107,6 +108,7 @@ mod tests {
     fn event_from_configure_result_emits_auth_required_for_oauth_continuation() {
         let result = ConfigureResult {
             activated: false,
+            setup_only: false,
             message: "Complete authentication to continue.".to_string(),
             auth_url: Some("https://example.test/oauth".to_string()),
             pairing_required: false,

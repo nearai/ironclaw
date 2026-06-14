@@ -676,7 +676,8 @@
   gap: var(--space-2);
 }
 
-.configure-input-row input {
+.configure-input-row input,
+.configure-input-row select {
   flex: 1;
   padding: 8px 12px;
   background: var(--bg-secondary);
@@ -687,12 +688,14 @@
   font-family: inherit;
 }
 
-.configure-input-row input:focus {
+.configure-input-row input:focus,
+.configure-input-row select:focus {
   outline: none;
   border-color: var(--accent);
 }
 
-.configure-input-row input.configure-input-invalid {
+.configure-input-row input.configure-input-invalid,
+.configure-input-row select.configure-input-invalid {
   border-color: var(--danger);
   box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.18);
 }

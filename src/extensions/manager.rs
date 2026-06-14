@@ -83,6 +83,8 @@ struct PendingAuthKey {
     name: String,
 }
 
+const WASM_CHANNEL_RUNTIME_OVERRIDES_SETTING_KEY: &str = "channels.wasm_channel_runtime_overrides";
+
 impl PendingAuthKey {
     fn new(user_id: &str, name: &str) -> Self {
         Self {
@@ -118,6 +120,10 @@ impl SecretCleanupPlan {
 
 fn oauth_refresh_secret_name(secret_name: &str) -> String {
     format!("{}_refresh_token", secret_name.to_lowercase())
+}
+
+fn wasm_channel_runtime_override_key(channel_name: &str, config_key: &str) -> String {
+    format!("{channel_name}:{config_key}")
 }
 
 fn is_reserved_wasm_runtime_config_key(key: &str) -> bool {
@@ -1153,33 +1159,27 @@ impl ExtensionManager {
         let mut overrides = HashMap::new();
 
         if let Some(store) = self.settings_store() {
-            let prefix = format!("channels.wasm_channel_runtime_overrides.{name}:");
-            match store.get_all_settings(&self.user_id).await {
-                Ok(settings) => {
-                    for (setting_key, value) in settings {
-                        let Some(config_key) = setting_key.strip_prefix(&prefix) else {
-                            continue;
-                        };
-                        let config_key = config_key.trim();
-                        if config_key.is_empty() {
-                            continue;
-                        }
-                        if is_reserved_wasm_runtime_config_key(config_key) {
-                            tracing::warn!(
-                                channel = %name,
-                                key = %config_key,
-                                "Ignoring reserved wasm runtime config override key"
-                            );
-                            continue;
-                        }
-                        overrides.insert(config_key.to_string(), value);
-                    }
+            let stored_overrides =
+                Self::load_wasm_channel_runtime_override_map_for_user(store, activation_user_id)
+                    .await?;
+            let prefix = format!("{name}:");
+            for (setting_key, value) in stored_overrides {
+                let Some(config_key) = setting_key.strip_prefix(&prefix) else {
+                    continue;
+                };
+                let config_key = config_key.trim();
+                if config_key.is_empty() {
+                    continue;
                 }
-                Err(e) => {
-                    return Err(ExtensionError::Config(format!(
-                        "Failed to load persisted runtime config overrides for channel '{name}': {e}"
-                    )));
+                if is_reserved_wasm_runtime_config_key(config_key) {
+                    tracing::warn!(
+                        channel = %name,
+                        key = %config_key,
+                        "Ignoring reserved wasm runtime config override key"
+                    );
+                    continue;
                 }
+                overrides.insert(config_key.to_string(), value);
             }
         }
 
@@ -1219,6 +1219,130 @@ impl ExtensionManager {
         }
 
         Ok(overrides)
+    }
+
+    async fn load_wasm_channel_runtime_override_map_for_user(
+        store: &dyn crate::db::SettingsStore,
+        user_id: &str,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, ExtensionError> {
+        let mut overrides = match store
+            .get_setting(user_id, WASM_CHANNEL_RUNTIME_OVERRIDES_SETTING_KEY)
+            .await
+        {
+            Ok(Some(serde_json::Value::Object(map))) => map,
+            Ok(Some(serde_json::Value::Null)) | Ok(None) => serde_json::Map::new(),
+            Ok(Some(other)) => {
+                return Err(ExtensionError::Config(format!(
+                    "Expected '{WASM_CHANNEL_RUNTIME_OVERRIDES_SETTING_KEY}' to be an object, got {other}"
+                )));
+            }
+            Err(e) => {
+                return Err(ExtensionError::Config(format!(
+                    "Failed to load persisted wasm channel runtime overrides: {e}"
+                )));
+            }
+        };
+
+        let flattened_prefix = format!("{WASM_CHANNEL_RUNTIME_OVERRIDES_SETTING_KEY}.");
+        match store.get_all_settings(user_id).await {
+            Ok(settings) => {
+                for (setting_key, value) in settings {
+                    let Some(map_key) = setting_key.strip_prefix(&flattened_prefix) else {
+                        continue;
+                    };
+                    let map_key = map_key.trim();
+                    if map_key.is_empty() {
+                        continue;
+                    }
+                    overrides.entry(map_key.to_string()).or_insert(value);
+                }
+            }
+            Err(e) => {
+                return Err(ExtensionError::Config(format!(
+                    "Failed to load flattened wasm channel runtime overrides: {e}"
+                )));
+            }
+        }
+
+        Ok(overrides)
+    }
+
+    async fn set_wasm_channel_runtime_override(
+        &self,
+        name: &str,
+        config_key: &str,
+        value: serde_json::Value,
+    ) -> Result<(), ExtensionError> {
+        if is_reserved_wasm_runtime_config_key(config_key) {
+            return Err(ExtensionError::Other(format!(
+                "Field '{}' for extension '{}' targets a reserved channel runtime key",
+                config_key, name
+            )));
+        }
+        let store = self.settings_store().ok_or_else(|| {
+            ExtensionError::Other(
+                "Settings store unavailable for channel setup field persistence".to_string(),
+            )
+        })?;
+        let mut overrides =
+            Self::load_wasm_channel_runtime_override_map_for_user(store, &self.user_id).await?;
+        let map_key = wasm_channel_runtime_override_key(name, config_key);
+        overrides.insert(map_key.clone(), value);
+        store
+            .set_setting(
+                &self.user_id,
+                WASM_CHANNEL_RUNTIME_OVERRIDES_SETTING_KEY,
+                &serde_json::Value::Object(overrides),
+            )
+            .await
+            .map_err(|e| {
+                ExtensionError::Other(format!(
+                    "Failed to set '{}' for extension '{}': {}",
+                    WASM_CHANNEL_RUNTIME_OVERRIDES_SETTING_KEY, name, e
+                ))
+            })?;
+
+        let stale_flattened_key = format!("{WASM_CHANNEL_RUNTIME_OVERRIDES_SETTING_KEY}.{map_key}");
+        let _ = store
+            .delete_setting(&self.user_id, &stale_flattened_key)
+            .await;
+        Ok(())
+    }
+
+    async fn delete_wasm_channel_runtime_override(
+        &self,
+        name: &str,
+        config_key: &str,
+    ) -> Result<(), ExtensionError> {
+        let Some(store) = self.settings_store() else {
+            return Ok(());
+        };
+        let mut overrides =
+            Self::load_wasm_channel_runtime_override_map_for_user(store, &self.user_id).await?;
+        let map_key = wasm_channel_runtime_override_key(name, config_key);
+        let removed = overrides.remove(&map_key).is_some();
+
+        let stale_flattened_key = format!("{WASM_CHANNEL_RUNTIME_OVERRIDES_SETTING_KEY}.{map_key}");
+        let _ = store
+            .delete_setting(&self.user_id, &stale_flattened_key)
+            .await;
+
+        if removed {
+            store
+                .set_setting(
+                    &self.user_id,
+                    WASM_CHANNEL_RUNTIME_OVERRIDES_SETTING_KEY,
+                    &serde_json::Value::Object(overrides),
+                )
+                .await
+                .map_err(|e| {
+                    ExtensionError::Other(format!(
+                        "Failed to clear '{}' for extension '{}': {}",
+                        WASM_CHANNEL_RUNTIME_OVERRIDES_SETTING_KEY, name, e
+                    ))
+                })?;
+        }
+        Ok(())
     }
 
     async fn load_wechat_bound_user_id(&self) -> Option<String> {
@@ -7351,6 +7475,54 @@ impl ExtensionManager {
             .await
     }
 
+    fn setup_field_visibility_value(
+        condition: &crate::tools::wasm::SetupVisibilityCondition,
+        submitted_fields: &HashMap<String, String>,
+        saved_fields: &HashMap<String, String>,
+        field_defs: &HashMap<String, crate::tools::wasm::ToolFieldSetupSchema>,
+    ) -> Option<String> {
+        submitted_fields
+            .get(&condition.name)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                saved_fields
+                    .get(&condition.name)
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            })
+            .or_else(|| {
+                field_defs
+                    .get(&condition.name)
+                    .and_then(|field| field.default.as_deref())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
+            })
+    }
+
+    fn channel_secret_required_for_configure(
+        secret: &crate::channels::wasm::SecretSetupSchema,
+        submitted_fields: &HashMap<String, String>,
+        saved_fields: &HashMap<String, String>,
+        field_defs: &HashMap<String, crate::tools::wasm::ToolFieldSetupSchema>,
+    ) -> bool {
+        if !secret.optional {
+            return true;
+        }
+
+        if !secret.required_when_visible {
+            return false;
+        }
+
+        let Some(condition) = &secret.visible_when else {
+            return false;
+        };
+
+        Self::setup_field_visibility_value(condition, submitted_fields, saved_fields, field_defs)
+            .is_some_and(|value| value == condition.value)
+    }
+
     /// Per-user variant. Used by `check_tool_auth_status` so the field's
     /// "provided" check reads settings under the requesting user instead
     /// of the manager owner.
@@ -7443,6 +7615,11 @@ impl ExtensionManager {
                 }
 
                 let mut secrets = Vec::new();
+                let mut fields = Vec::new();
+                let saved_fields = self
+                    .load_tool_setup_fields_for(name, user_id)
+                    .await
+                    .unwrap_or_default();
                 for secret in &cap_file.setup.required_secrets {
                     let provided = self
                         .secrets
@@ -7454,15 +7631,32 @@ impl ExtensionManager {
                         prompt: secret.prompt.clone(),
                         optional: secret.optional,
                         validation: secret.validation.clone(),
+                        visible_when: secret.visible_when.clone(),
+                        required_when_visible: secret.required_when_visible,
                         provided,
                         auto_generate: secret.auto_generate.is_some(),
                     });
                 }
-                // NOTE: required_fields is not yet supported for WasmChannel;
-                // only WasmTool extensions surface setup fields in the modal.
+                for field in &cap_file.setup.required_fields {
+                    let provided = self
+                        .is_tool_setup_field_provided_for(name, user_id, field, &saved_fields)
+                        .await;
+                    fields.push(crate::channels::web::types::SetupFieldInfo {
+                        name: field.name.clone(),
+                        prompt: field.prompt.clone(),
+                        optional: field.optional,
+                        provided,
+                        input_type: field.input_type,
+                        value: saved_fields
+                            .get(&field.name)
+                            .cloned()
+                            .or_else(|| field.default.clone()),
+                        options: field.options.clone(),
+                    });
+                }
                 Ok(ExtensionSetupSchema {
                     secrets,
-                    fields: Vec::new(),
+                    fields,
                     interactive_login: None,
                 })
             }
@@ -7501,6 +7695,8 @@ impl ExtensionManager {
                             prompt: secret.prompt.clone(),
                             optional: secret.optional,
                             validation: None,
+                            visible_when: secret.visible_when.clone(),
+                            required_when_visible: secret.required_when_visible,
                             provided,
                             auto_generate: false,
                         });
@@ -7516,6 +7712,11 @@ impl ExtensionManager {
                             optional: field.optional,
                             provided,
                             input_type: field.input_type,
+                            value: saved_fields
+                                .get(&field.name)
+                                .cloned()
+                                .or_else(|| field.default.clone()),
+                            options: field.options.clone(),
                         });
                     }
                 }
@@ -7557,6 +7758,8 @@ impl ExtensionManager {
                         optional: true,
                         provided: current_url.is_some(),
                         input_type: crate::tools::wasm::ToolSetupFieldInputType::Text,
+                        value: current_url,
+                        options: Vec::new(),
                     }],
                     interactive_login: None,
                 })
@@ -7827,9 +8030,10 @@ impl ExtensionManager {
                     .iter()
                     .map(|s| s.name.clone())
                     .collect();
+                let required_fields = cap_file.setup.required_fields.clone();
                 channel_secret_defs = cap_file.setup.required_secrets.clone();
                 channel_validation_endpoint = cap_file.setup.validation_endpoint.clone();
-                (names, Vec::new())
+                (names, required_fields)
             }
             ExtensionKind::WasmTool => {
                 let cap_file = self.load_tool_capabilities(&name).await.ok_or_else(|| {
@@ -7868,6 +8072,8 @@ impl ExtensionManager {
                     optional: true,
                     setting_path: Some(format!("extensions.{name}.relay_url")),
                     input_type: crate::tools::wasm::ToolSetupFieldInputType::Text,
+                    default: None,
+                    options: Vec::new(),
                 }];
                 (std::collections::HashSet::new(), relay_fields)
             }
@@ -8047,9 +8253,29 @@ impl ExtensionManager {
                         if let Some(store) = self.settings_store() {
                             let _ = store.delete_setting(&self.user_id, setting_path).await;
                         }
+                    } else if kind == ExtensionKind::WasmChannel
+                        && let Err(error) = self
+                            .delete_wasm_channel_runtime_override(&name, field_name)
+                            .await
+                    {
+                        tracing::debug!(
+                            extension = %name,
+                            field = %field_name,
+                            error = %error,
+                            "Failed to clear wasm channel runtime override"
+                        );
                     }
                 }
                 continue;
+            }
+            if let Some(def) = field_def
+                && !def.options.is_empty()
+                && !def.options.iter().any(|option| option.value == trimmed)
+            {
+                return Err(ExtensionError::Other(format!(
+                    "Invalid value '{}' for field '{}' in extension '{}'",
+                    trimmed, field_name, name
+                )));
             }
 
             stored_fields.insert(field_name.clone(), trimmed.to_string());
@@ -8076,6 +8302,13 @@ impl ExtensionManager {
                             setting_path, name, e
                         ))
                     })?;
+            } else if kind == ExtensionKind::WasmChannel {
+                self.set_wasm_channel_runtime_override(
+                    &name,
+                    field_name,
+                    serde_json::Value::String(trimmed.to_string()),
+                )
+                .await?;
             }
         }
 
@@ -8132,7 +8365,12 @@ impl ExtensionManager {
             }
 
             for secret_def in &channel_secret_defs {
-                if secret_def.optional {
+                if !Self::channel_secret_required_for_configure(
+                    secret_def,
+                    fields,
+                    &stored_fields,
+                    &setup_field_defs,
+                ) {
                     continue;
                 }
                 let submitted = secrets
@@ -8245,6 +8483,7 @@ impl ExtensionManager {
                     return Ok(ConfigureResult {
                         message,
                         activated: true,
+                        setup_only: false,
                         pairing_required: false,
                         auth_url,
                         onboarding_state: None,
@@ -8260,6 +8499,7 @@ impl ExtensionManager {
                     return Ok(ConfigureResult {
                         message: format!("Configuration saved for '{}'.", name),
                         activated: false,
+                        setup_only: true,
                         pairing_required: false,
                         auth_url: None,
                         onboarding_state: None,
@@ -8279,6 +8519,7 @@ impl ExtensionManager {
                     name
                 ),
                 activated: false,
+                setup_only: false,
                 pairing_required: false,
                 auth_url: auth_result.auth_url().map(String::from),
                 onboarding_state: None,
@@ -8296,6 +8537,7 @@ impl ExtensionManager {
                 return Ok(ConfigureResult {
                     message: format!("Configuration saved for '{}'.", name),
                     activated: false,
+                    setup_only: true,
                     pairing_required: false,
                     auth_url: None,
                     onboarding_state: None,
@@ -8352,6 +8594,7 @@ impl ExtensionManager {
                 Ok(ConfigureResult {
                     message,
                     activated: true,
+                    setup_only: false,
                     pairing_required: needs_pairing,
                     auth_url: None,
                     onboarding_state: if needs_pairing {
@@ -8389,6 +8632,7 @@ impl ExtensionManager {
                         name, e
                     ),
                     activated: false,
+                    setup_only: false,
                     pairing_required: false,
                     auth_url: None,
                     onboarding_state: None,
@@ -10424,6 +10668,8 @@ mod tests {
             optional: false,
             input_type: crate::tools::wasm::ToolSetupFieldInputType::Text,
             setting_path: Some("nearai.session_token".to_string()),
+            default: None,
+            options: Vec::new(),
         };
 
         let provided = mgr
@@ -10542,6 +10788,320 @@ mod tests {
                 .await
                 .expect("secret existence check"),
             "validation failure must not persist the submitted token"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wasm_channel_setup_fields_expose_and_persist_runtime_override() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let channels_dir = write_test_channel(
+            dir.path(),
+            "feishu",
+            r#"{
+                "version": "0.1.0",
+                "wit_version": "0.3.0",
+                "type": "channel",
+                "name": "feishu",
+                "setup": {
+                    "required_fields": [
+                        {
+                            "name": "connection_mode",
+                            "prompt": "Message receiving mode",
+                            "optional": true,
+                            "input_type": "select",
+                            "default": "websocket",
+                            "options": [
+                                { "value": "websocket", "label": "Long connection" },
+                                { "value": "webhook", "label": "Webhook" }
+                            ]
+                        }
+                    ]
+                }
+            }"#,
+        );
+        let tools_dir = dir.path().join("tools");
+        let mgr =
+            make_test_manager_with_dirs(None, tools_dir, channels_dir, Some(Arc::clone(&store)));
+
+        let setup = mgr
+            .get_setup_schema("feishu", "test")
+            .await
+            .expect("load setup schema");
+        assert_eq!(setup.fields.len(), 1);
+        assert_eq!(setup.fields[0].name, "connection_mode");
+        assert_eq!(
+            setup.fields[0].input_type,
+            crate::tools::wasm::ToolSetupFieldInputType::Select
+        );
+        assert_eq!(setup.fields[0].value.as_deref(), Some("websocket"));
+        assert_eq!(setup.fields[0].options.len(), 2);
+
+        let fields = std::collections::HashMap::from([(
+            "connection_mode".to_string(),
+            "webhook".to_string(),
+        )]);
+        let result = mgr
+            .configure("feishu", &std::collections::HashMap::new(), &fields, "test")
+            .await
+            .expect("save channel setup field");
+        assert!(
+            !result.activated,
+            "test channel has no runtime and should not activate"
+        );
+
+        let saved_overrides = store
+            .get_setting("test", super::WASM_CHANNEL_RUNTIME_OVERRIDES_SETTING_KEY)
+            .await
+            .expect("get channel runtime overrides")
+            .expect("runtime overrides should be persisted");
+        assert_eq!(
+            saved_overrides.get("feishu:connection_mode"),
+            Some(&serde_json::json!("webhook"))
+        );
+        assert_eq!(
+            store
+                .get_setting(
+                    "test",
+                    "channels.wasm_channel_runtime_overrides.feishu:connection_mode"
+                )
+                .await
+                .expect("get stale flattened runtime override"),
+            None
+        );
+
+        let runtime_overrides = mgr
+            .load_channel_runtime_config_overrides("feishu", "test")
+            .await
+            .expect("load runtime overrides");
+        assert_eq!(
+            runtime_overrides.get("connection_mode"),
+            Some(&serde_json::json!("webhook"))
+        );
+
+        let setup = mgr
+            .get_setup_schema("feishu", "test")
+            .await
+            .expect("reload setup schema");
+        assert!(setup.fields[0].provided);
+        assert_eq!(setup.fields[0].value.as_deref(), Some("webhook"));
+    }
+
+    #[tokio::test]
+    async fn test_load_channel_runtime_config_overrides_uses_activation_user_id() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        let mgr =
+            make_test_manager_with_dirs(None, tools_dir, channels_dir, Some(Arc::clone(&store)));
+        store
+            .set_setting(
+                "delegated",
+                super::WASM_CHANNEL_RUNTIME_OVERRIDES_SETTING_KEY,
+                &serde_json::json!({
+                    "feishu:connection_mode": "webhook"
+                }),
+            )
+            .await
+            .expect("persist delegated runtime override");
+
+        let runtime_overrides = mgr
+            .load_channel_runtime_config_overrides("feishu", "delegated")
+            .await
+            .expect("load delegated runtime overrides");
+
+        assert_eq!(
+            runtime_overrides.get("connection_mode"),
+            Some(&serde_json::json!("webhook"))
+        );
+        assert!(
+            mgr.load_channel_runtime_config_overrides("feishu", "test")
+                .await
+                .expect("load owner runtime overrides")
+                .is_empty(),
+            "owner scoped overrides should not leak into delegated activation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wasm_channel_setup_schema_exposes_secret_visibility_conditions() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let channels_dir = write_test_channel(
+            dir.path(),
+            "feishu",
+            r#"{
+                "version": "0.1.0",
+                "wit_version": "0.3.0",
+                "type": "channel",
+                "name": "feishu",
+                "setup": {
+                    "required_secrets": [
+                        {
+                            "name": "feishu_verification_token",
+                            "prompt": "Verification token",
+                            "optional": true,
+                            "visible_when": { "name": "connection_mode", "value": "webhook" },
+                            "required_when_visible": true
+                        }
+                    ],
+                    "required_fields": [
+                        {
+                            "name": "connection_mode",
+                            "prompt": "Message receiving mode",
+                            "optional": true,
+                            "input_type": "select",
+                            "options": [
+                                { "value": "websocket" },
+                                { "value": "webhook" }
+                            ]
+                        }
+                    ]
+                }
+            }"#,
+        );
+        let tools_dir = dir.path().join("tools");
+        let mgr =
+            make_test_manager_with_dirs(None, tools_dir, channels_dir, Some(Arc::clone(&store)));
+
+        let setup = mgr
+            .get_setup_schema("feishu", "test")
+            .await
+            .expect("load setup schema");
+
+        assert_eq!(setup.secrets.len(), 1);
+        assert!(setup.secrets[0].optional);
+        assert!(setup.secrets[0].required_when_visible);
+        assert_eq!(
+            setup.secrets[0]
+                .visible_when
+                .as_ref()
+                .map(|condition| (condition.name.as_str(), condition.value.as_str())),
+            Some(("connection_mode", "webhook"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_configure_rejects_missing_required_when_visible_channel_secret() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let channels_dir = write_test_channel(
+            dir.path(),
+            "feishu",
+            r#"{
+                "version": "0.1.0",
+                "wit_version": "0.3.0",
+                "type": "channel",
+                "name": "feishu",
+                "setup": {
+                    "required_secrets": [
+                        {
+                            "name": "feishu_verification_token",
+                            "prompt": "Verification token",
+                            "optional": true,
+                            "visible_when": { "name": "connection_mode", "value": "webhook" },
+                            "required_when_visible": true
+                        }
+                    ],
+                    "required_fields": [
+                        {
+                            "name": "connection_mode",
+                            "prompt": "Message receiving mode",
+                            "optional": true,
+                            "input_type": "select",
+                            "default": "websocket",
+                            "options": [
+                                { "value": "websocket" },
+                                { "value": "webhook" }
+                            ]
+                        }
+                    ]
+                }
+            }"#,
+        );
+        let tools_dir = dir.path().join("tools");
+        let mgr =
+            make_test_manager_with_dirs(None, tools_dir, channels_dir, Some(Arc::clone(&store)));
+        let fields = std::collections::HashMap::from([(
+            "connection_mode".to_string(),
+            "webhook".to_string(),
+        )]);
+
+        let result = mgr
+            .configure("feishu", &std::collections::HashMap::new(), &fields, "test")
+            .await;
+
+        assert!(
+            matches!(result, Err(ExtensionError::ValidationFailed(ref message)) if message.contains("feishu_verification_token")),
+            "webhook mode should require the visible verification token: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_configure_wasm_channel_setup_field_rejects_unknown_option() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let channels_dir = write_test_channel(
+            dir.path(),
+            "feishu",
+            r#"{
+                "version": "0.1.0",
+                "wit_version": "0.3.0",
+                "type": "channel",
+                "name": "feishu",
+                "setup": {
+                    "required_fields": [
+                        {
+                            "name": "connection_mode",
+                            "prompt": "Message receiving mode",
+                            "optional": true,
+                            "input_type": "select",
+                            "options": [
+                                { "value": "websocket" },
+                                { "value": "webhook" }
+                            ]
+                        }
+                    ]
+                }
+            }"#,
+        );
+        let tools_dir = dir.path().join("tools");
+        let mgr =
+            make_test_manager_with_dirs(None, tools_dir, channels_dir, Some(Arc::clone(&store)));
+        let fields = std::collections::HashMap::from([(
+            "connection_mode".to_string(),
+            "polling".to_string(),
+        )]);
+
+        let err = match mgr
+            .configure("feishu", &std::collections::HashMap::new(), &fields, "test")
+            .await
+        {
+            Ok(_) => panic!("unknown select option should fail"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains("Invalid value"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            store
+                .get_setting("test", super::WASM_CHANNEL_RUNTIME_OVERRIDES_SETTING_KEY)
+                .await
+                .expect("get channel runtime overrides"),
+            None
+        );
+        assert_eq!(
+            store
+                .get_setting(
+                    "test",
+                    "channels.wasm_channel_runtime_overrides.feishu:connection_mode"
+                )
+                .await
+                .expect("get channel runtime override"),
+            None
         );
     }
 

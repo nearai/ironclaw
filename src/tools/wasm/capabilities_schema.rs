@@ -766,6 +766,18 @@ pub struct ToolSecretSetupSchema {
     /// If true, the user may skip this secret.
     #[serde(default)]
     pub optional: bool,
+    /// Optional condition controlling when the setup UI should display it.
+    #[serde(default)]
+    pub visible_when: Option<SetupVisibilityCondition>,
+    /// If true, this secret is required whenever `visible_when` matches.
+    #[serde(default)]
+    pub required_when_visible: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SetupVisibilityCondition {
+    pub name: String,
+    pub value: String,
 }
 
 /// A non-secret field required during tool setup.
@@ -790,6 +802,23 @@ pub struct ToolFieldSetupSchema {
     /// `selected_model`.
     #[serde(default)]
     pub setting_path: Option<String>,
+    /// Optional default value used by setup UIs before the user saves.
+    #[serde(default)]
+    pub default: Option<String>,
+    /// Optional fixed value set. When present, setup UIs should render a
+    /// bounded selector and the host rejects submitted values outside it.
+    #[serde(default)]
+    pub options: Vec<ToolSetupFieldOption>,
+}
+
+/// A single selectable setup field option.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolSetupFieldOption {
+    /// Submitted value.
+    pub value: String,
+    /// User-facing label. Defaults to `value` if omitted.
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 /// Input widget type for a setup field.
@@ -799,6 +828,7 @@ pub enum ToolSetupFieldInputType {
     #[default]
     Text,
     Password,
+    Select,
 }
 
 fn default_tool_setup_field_input_type() -> ToolSetupFieldInputType {
@@ -1313,8 +1343,13 @@ mod tests {
                     {
                         "name": "selected_model",
                         "prompt": "Model Name",
-                        "input_type": "text",
-                        "setting_path": "selected_model"
+                        "input_type": "select",
+                        "setting_path": "selected_model",
+                        "default": "gpt-5",
+                        "options": [
+                            { "value": "gpt-5", "label": "GPT-5" },
+                            { "value": "gpt-5-mini" }
+                        ]
                     }
                 ]
             }
@@ -1339,6 +1374,19 @@ mod tests {
             crate::tools::wasm::capabilities_schema::ToolSetupFieldInputType::Text
         );
         assert_eq!(setup.required_fields[1].name, "selected_model");
+        assert_eq!(
+            setup.required_fields[1].input_type,
+            crate::tools::wasm::capabilities_schema::ToolSetupFieldInputType::Select
+        );
+        assert_eq!(setup.required_fields[1].default.as_deref(), Some("gpt-5"));
+        assert_eq!(setup.required_fields[1].options.len(), 2);
+        assert_eq!(
+            setup.required_fields[1].options[0],
+            crate::tools::wasm::capabilities_schema::ToolSetupFieldOption {
+                value: "gpt-5".to_string(),
+                label: Some("GPT-5".to_string()),
+            }
+        );
     }
 
     #[test]

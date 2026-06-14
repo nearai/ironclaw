@@ -16,7 +16,7 @@ use crate::runtime::messaging::ThreadOutcome;
 use crate::traits::store::Store;
 use crate::types::conversation::{ConversationEntry, ConversationId, ConversationSurface};
 use crate::types::error::EngineError;
-use crate::types::message::ThreadMessage;
+use crate::types::message::{MessageContentPart, ThreadMessage};
 use crate::types::project::ProjectId;
 use crate::types::thread::{ThreadConfig, ThreadId, ThreadState, ThreadType};
 
@@ -24,6 +24,17 @@ use crate::types::thread::{ThreadConfig, ThreadId, ThreadState, ThreadType};
 enum ActiveForeground {
     Running(ThreadId),
     Resumable(ThreadId),
+}
+
+fn user_message_with_content_parts(
+    content: &str,
+    content_parts: Vec<MessageContentPart>,
+) -> ThreadMessage {
+    if content_parts.is_empty() {
+        ThreadMessage::user(content)
+    } else {
+        ThreadMessage::user_with_content_parts(content, content_parts)
+    }
 }
 
 /// Manages conversation surfaces and routes messages to threads.
@@ -220,6 +231,33 @@ impl ConversationManager {
         user_timezone: Option<&str>,
         extra_initial_metadata: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> Result<ThreadId, EngineError> {
+        self.handle_user_message_with_content_parts(
+            conversation_id,
+            content,
+            Vec::new(),
+            project_id,
+            user_id,
+            thread_config,
+            user_timezone,
+            extra_initial_metadata,
+        )
+        .await
+    }
+
+    /// Like [`Self::handle_user_message`], but carries transient multimodal
+    /// parts for the current user turn into the engine's LLM request.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn handle_user_message_with_content_parts(
+        &self,
+        conversation_id: ConversationId,
+        content: &str,
+        content_parts: Vec<MessageContentPart>,
+        project_id: ProjectId,
+        user_id: &str,
+        thread_config: ThreadConfig,
+        user_timezone: Option<&str>,
+        extra_initial_metadata: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<ThreadId, EngineError> {
         let conv_arc = self.get_conversation_lock(conversation_id).await?;
         let mut conv = conv_arc.lock().await;
 
@@ -255,7 +293,11 @@ impl ConversationManager {
                 // Updating the persisted record here would not affect the live
                 // step. Rare in practice; defer to a follow-up if needed.
                 self.thread_manager
-                    .inject_message(thread_id, user_id, ThreadMessage::user(content))
+                    .inject_message(
+                        thread_id,
+                        user_id,
+                        user_message_with_content_parts(content, content_parts),
+                    )
                     .await?;
                 thread_id
             }
@@ -287,7 +329,7 @@ impl ConversationManager {
                     .resume_thread(
                         thread_id,
                         user_id,
-                        Some(ThreadMessage::user(content)),
+                        Some(user_message_with_content_parts(content, content_parts)),
                         None,
                         None,
                     )
@@ -353,7 +395,7 @@ impl ConversationManager {
                 // the initial user turn); `title` is the short sidebar label.
                 let title = crate::types::thread::Thread::derive_title_from_message(content);
                 self.thread_manager
-                    .spawn_thread_with_history(
+                    .spawn_thread_with_history_and_content_parts(
                         content, // use message as goal
                         title,
                         ThreadType::Foreground,
@@ -363,6 +405,7 @@ impl ConversationManager {
                         user_id,
                         history,
                         initial_metadata,
+                        content_parts,
                     )
                     .await?
             }
@@ -624,7 +667,7 @@ mod tests {
     use crate::types::conversation::{ConversationId, ConversationSurface, EntrySender};
     use crate::types::event::ThreadEvent;
     use crate::types::memory::{DocId, MemoryDoc};
-    use crate::types::message::MessageRole;
+    use crate::types::message::{MessageContentPart, MessageImageUrl, MessageRole};
     use crate::types::project::Project;
     use crate::types::step::{ActionResult, LlmResponse, Step, TokenUsage};
     use crate::types::thread::ThreadState;
@@ -655,6 +698,30 @@ mod tests {
         }
         fn model_name(&self) -> &str {
             "mock"
+        }
+    }
+
+    struct CapturingLlm {
+        seen_messages: Mutex<Vec<Vec<ThreadMessage>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmBackend for CapturingLlm {
+        async fn complete(
+            &self,
+            messages: &[ThreadMessage],
+            _: &[ActionDef],
+            _: &LlmCallConfig,
+        ) -> Result<LlmOutput, EngineError> {
+            self.seen_messages.lock().unwrap().push(messages.to_vec());
+            Ok(LlmOutput {
+                response: LlmResponse::Text("saw it".into()),
+                usage: TokenUsage::default(),
+            })
+        }
+
+        fn model_name(&self) -> &str {
+            "capturing"
         }
     }
 
@@ -917,6 +984,67 @@ mod tests {
         // Wait for thread to complete
         let outcome = tm.join_thread(tid).await.unwrap();
         assert!(matches!(outcome, ThreadOutcome::Completed { .. }));
+    }
+
+    #[tokio::test]
+    async fn handle_user_message_with_content_parts_preserves_parts_on_spawn() {
+        let store = Arc::new(MockStore::new());
+        let llm = Arc::new(CapturingLlm {
+            seen_messages: Mutex::new(Vec::new()),
+        });
+        let tm = Arc::new(ThreadManager::new(
+            llm.clone(),
+            Arc::new(MockEffects),
+            store.clone(),
+            Arc::new(CapabilityRegistry::new()),
+            Arc::new(LeaseManager::new()),
+            Arc::new(PolicyEngine::new()),
+        ));
+        let cm = ConversationManager::new(Arc::clone(&tm), store);
+        let conv_id = cm
+            .get_or_create_conversation("feishu", "user1")
+            .await
+            .unwrap();
+        let project = ProjectId::new();
+        let image_url = "data:image/png;base64,iVBORw0KGgo=".to_string();
+
+        let tid = cm
+            .handle_user_message_with_content_parts(
+                conv_id,
+                "what is this?",
+                vec![MessageContentPart::ImageUrl {
+                    image_url: MessageImageUrl {
+                        url: image_url.clone(),
+                        detail: Some("auto".to_string()),
+                    },
+                }],
+                project,
+                "user1",
+                ThreadConfig::default(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let outcome = tm.join_thread(tid).await.unwrap();
+        assert!(matches!(outcome, ThreadOutcome::Completed { .. }));
+
+        let seen = llm.seen_messages.lock().unwrap();
+        let user_message = seen
+            .iter()
+            .flat_map(|messages| messages.iter())
+            .find(|message| message.content == "what is this?")
+            .expect("LLM should receive the user message");
+        assert_eq!(
+            user_message.content_parts,
+            vec![MessageContentPart::ImageUrl {
+                image_url: MessageImageUrl {
+                    url: image_url,
+                    detail: Some("auto".to_string()),
+                },
+            }]
+        );
     }
 
     #[tokio::test]

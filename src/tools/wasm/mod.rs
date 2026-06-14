@@ -146,5 +146,6 @@ pub use loader::{
 // Capabilities schema (for parsing *.capabilities.json files)
 pub use capabilities_schema::{
     AuthCapabilitySchema, CapabilitiesFile, OAuthConfigSchema, RateLimitSchema,
-    ToolFieldSetupSchema, ToolSetupFieldInputType, ToolSetupSchema, ValidationEndpointSchema,
+    SetupVisibilityCondition, ToolFieldSetupSchema, ToolSetupFieldInputType, ToolSetupFieldOption,
+    ToolSetupSchema, ValidationEndpointSchema,
 };

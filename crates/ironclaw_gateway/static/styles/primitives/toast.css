@@ -48,6 +48,10 @@
   border-left: 3px solid var(--success);
 }
 
+.toast-warning {
+  border-left: 3px solid var(--warning);
+}
+
 .toast-error {
   border-left: 3px solid var(--danger);
 }
@@ -67,5 +71,5 @@
 }
 
 .toast-success .toast-countdown { background: var(--success); }
+.toast-warning .toast-countdown { background: var(--warning); }
 .toast-error .toast-countdown { background: var(--danger); }
-

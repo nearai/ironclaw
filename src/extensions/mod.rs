@@ -622,6 +622,8 @@ pub struct ConfigureResult {
     pub message: String,
     /// Whether the extension was successfully activated after configuration.
     pub activated: bool,
+    /// Whether setup fields were persisted without activating the extension.
+    pub setup_only: bool,
     /// Whether the channel still needs a pairing approval step before it is usable.
     pub pairing_required: bool,
     /// OAuth authorization URL (if OAuth flow was started).

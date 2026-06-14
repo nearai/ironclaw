@@ -8,6 +8,7 @@ function showToast(message, type) {
   icon.className = 'toast-icon';
   if (type === 'success') icon.textContent = '\u2713';
   else if (type === 'error') icon.textContent = '\u2717';
+  else if (type === 'warning') icon.textContent = '!';
   else icon.textContent = '\u2139';
   toast.appendChild(icon);
 
@@ -617,4 +618,3 @@ document.getElementById('settings-search-input').addEventListener('input', funct
 function apiFetchVoid(path, options) {
   return apiFetch(path, options).then(function() {});
 }
-

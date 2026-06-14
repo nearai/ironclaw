@@ -695,6 +695,7 @@ pub(crate) async fn extensions_setup_submit_handler(
                 ActionResponse::fail(result.message.clone())
             };
             resp.activated = Some(result.activated);
+            resp.setup_only = result.setup_only.then_some(true);
             resp.auth_url = result.auth_url.clone();
             resp.onboarding_state = result.onboarding_state;
             resp.onboarding = result.onboarding.clone();

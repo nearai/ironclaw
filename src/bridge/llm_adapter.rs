@@ -12,8 +12,8 @@ use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 
 use ironclaw_llm::{
-    ChatMessage, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolDefinition,
-    clean_response, recover_tool_calls_from_content, sanitize_tool_messages,
+    ChatMessage, ContentPart, ImageUrl, LlmProvider, Role, ToolCall, ToolCompletionRequest,
+    ToolDefinition, clean_response, recover_tool_calls_from_content, sanitize_tool_messages,
 };
 
 const EMPTY_CLEANED_RESPONSE_FALLBACK: &str = "I'm not sure how to respond to that.";
@@ -411,7 +411,11 @@ fn thread_msg_to_chat(msg: &ThreadMessage) -> ChatMessage {
     let mut chat = ChatMessage {
         role,
         content: msg.content.clone(),
-        content_parts: Vec::new(),
+        content_parts: msg
+            .content_parts
+            .iter()
+            .map(engine_content_part_to_llm)
+            .collect(),
         tool_call_id: msg.action_call_id.clone(),
         name: msg.action_name.clone(),
         tool_calls: None,
@@ -436,6 +440,20 @@ fn thread_msg_to_chat(msg: &ThreadMessage) -> ChatMessage {
     }
 
     chat
+}
+
+fn engine_content_part_to_llm(part: &ironclaw_engine::MessageContentPart) -> ContentPart {
+    match part {
+        ironclaw_engine::MessageContentPart::Text { text } => {
+            ContentPart::Text { text: text.clone() }
+        }
+        ironclaw_engine::MessageContentPart::ImageUrl { image_url } => ContentPart::ImageUrl {
+            image_url: ImageUrl {
+                url: image_url.url.clone(),
+                detail: image_url.detail.clone(),
+            },
+        },
+    }
 }
 
 fn action_def_to_tool_def(action: &ActionDef) -> ToolDefinition {
@@ -638,7 +656,10 @@ mod tests {
     use async_trait::async_trait;
     use rust_decimal::Decimal;
 
-    use ironclaw_engine::{ActionCall, ActionDef, EffectType, LlmResponse, ThreadMessage};
+    use ironclaw_engine::{
+        ActionCall, ActionDef, EffectType, LlmResponse, MessageContentPart, MessageImageUrl,
+        ThreadMessage,
+    };
 
     use crate::error::LlmError;
     use ironclaw_llm::ToolCompletionResponse;
@@ -1510,6 +1531,33 @@ And also check the token price:\n\
                 "tool_call {id} has no matching Tool message after sanitize — \
                  LLM API would reject with 'No tool output found'"
             );
+        }
+    }
+
+    #[test]
+    fn thread_msg_to_chat_preserves_image_content_parts() {
+        let image_url = "data:image/png;base64,iVBORw0KGgo=".to_string();
+        let msg = ThreadMessage::user_with_content_parts(
+            "describe this",
+            vec![MessageContentPart::ImageUrl {
+                image_url: MessageImageUrl {
+                    url: image_url.clone(),
+                    detail: Some("auto".to_string()),
+                },
+            }],
+        );
+
+        let chat = thread_msg_to_chat(&msg);
+
+        assert_eq!(chat.role, Role::User);
+        assert_eq!(chat.content, "describe this");
+        assert_eq!(chat.content_parts.len(), 1);
+        match &chat.content_parts[0] {
+            ContentPart::ImageUrl { image_url: sent } => {
+                assert_eq!(sent.url, image_url);
+                assert_eq!(sent.detail.as_deref(), Some("auto"));
+            }
+            other => panic!("expected image_url content part, got {other:?}"),
         }
     }
 

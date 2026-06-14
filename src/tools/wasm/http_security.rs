@@ -9,6 +9,12 @@ pub(crate) struct ValidatedHttpTarget {
     pin_host_resolution: bool,
 }
 
+impl ValidatedHttpTarget {
+    pub(crate) fn resolved_addrs(&self) -> &[SocketAddr] {
+        &self.resolved_addrs
+    }
+}
+
 /// Build a reqwest client builder with the WASM SSRF redirect policy applied.
 ///
 /// Redirects are disabled so callers must explicitly validate each hop instead

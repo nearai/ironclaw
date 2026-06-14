@@ -498,6 +498,11 @@ function submitInlineChannelSetup(name, fields, container) {
     body: { secrets, fields: {} },
   }).then((res) => {
     if (!res.success) {
+      if (isSavedConfigurationResponse(res)) {
+        showToast(res.message || 'Configuration saved', 'warning');
+        refreshCurrentSettingsTab();
+        return;
+      }
       showToast(res.message || 'Configuration failed', 'error');
       buttons.forEach((btn) => { btn.disabled = false; });
       return;
@@ -618,6 +623,10 @@ function setupFieldLabel(item) {
   return translateOrFallback('setup.secret.' + item.name, fallback || item.name);
 }
 
+function isSavedConfigurationResponse(res) {
+  return !!res && res.setup_only === true;
+}
+
 function updateConfigureModalI18n(root) {
   const scope = root || document;
   scope.querySelectorAll('[data-configure-label-name]').forEach(function(label) {
@@ -669,7 +678,7 @@ function createConfigureField(item, kind, optionalGroup) {
   labelText.setAttribute('data-configure-label-prompt', item.prompt || item.name);
   labelText.textContent = setupFieldLabel(item);
   label.appendChild(labelText);
-  if (item.optional && !optionalGroup) {
+  if (item.optional && !item.required_when_visible && !optionalGroup) {
     const opt = document.createElement('span');
     opt.className = 'field-optional';
     opt.textContent = I18n.t('config.optional');
@@ -680,19 +689,38 @@ function createConfigureField(item, kind, optionalGroup) {
   const inputRow = document.createElement('div');
   inputRow.className = 'configure-input-row';
 
-  const input = document.createElement('input');
-  input.type = kind === 'field' && item.input_type !== 'password' ? 'text' : 'password';
+  const hasOptions = Array.isArray(item.options) && item.options.length > 0;
+  const input = hasOptions
+    ? document.createElement('select')
+    : document.createElement('input');
   input.name = item.name;
-  const placeholderKey = item.provided
-    ? 'config.alreadySet'
-    : item.optional
-      ? 'config.optionalPlaceholder'
-      : 'config.requiredPlaceholder';
-  input.setAttribute('data-configure-placeholder', placeholderKey);
-  input.placeholder = I18n.t(placeholderKey);
-  // Do not copy extension-provided regexes into HTML pattern. Browser regex
-  // engines can backtrack catastrophically; server-side validation is the
-  // security boundary for manifest-provided secret.validation patterns.
+  if (input.tagName === 'SELECT') {
+    input.className = 'configure-select';
+    const selectedValue = item.value == null ? '' : String(item.value);
+    (item.options || []).forEach(function(option) {
+      const opt = document.createElement('option');
+      opt.value = String(option.value || '');
+      opt.textContent = option.label || option.value || '';
+      if (opt.value === selectedValue) opt.selected = true;
+      input.appendChild(opt);
+    });
+    if (!selectedValue && input.options.length > 0) {
+      input.options[0].selected = true;
+    }
+  } else {
+    input.type = kind === 'field' && item.input_type !== 'password' ? 'text' : 'password';
+    input.value = item.value || '';
+    const placeholderKey = item.provided
+      ? 'config.alreadySet'
+      : item.optional
+        ? 'config.optionalPlaceholder'
+        : 'config.requiredPlaceholder';
+    input.setAttribute('data-configure-placeholder', placeholderKey);
+    input.placeholder = I18n.t(placeholderKey);
+    // Do not copy extension-provided regexes into HTML pattern. Browser regex
+    // engines can backtrack catastrophically; server-side validation is the
+    // security boundary for manifest-provided secret.validation patterns.
+  }
   inputRow.appendChild(input);
 
   if (item.provided) {
@@ -717,11 +745,15 @@ function createConfigureField(item, kind, optionalGroup) {
     field: {
       kind: kind,
       name: item.name,
+      node: field,
       input: input,
       optional: !!item.optional,
       provided: !!item.provided,
       autoGenerate: !!item.auto_generate,
-      prompt: item.prompt || item.name
+      prompt: item.prompt || item.name,
+      visibleWhen: item.visible_when || null,
+      requiredWhenVisible: !!item.required_when_visible,
+      hidden: false
     }
   };
 }
@@ -738,6 +770,34 @@ function appendConfigureFieldGroup(form, fields, items, kind, optionalGroup) {
     form.appendChild(built.node);
     fields.push(built.field);
   }
+}
+
+function applyConfigureFieldConditions(fields) {
+  for (const field of fields) {
+    if (!field.visibleWhen) continue;
+    const controller = fields.find(function(candidate) {
+      return candidate.name === field.visibleWhen.name;
+    });
+    const visible = !!controller && controller.input.value === field.visibleWhen.value;
+    field.hidden = !visible;
+    field.node.hidden = !visible;
+    field.input.disabled = !visible;
+    field.input.classList.remove('configure-input-invalid');
+  }
+}
+
+function wireConfigureFieldConditions(fields) {
+  const controllers = new Set();
+  for (const field of fields) {
+    if (field.visibleWhen) controllers.add(field.visibleWhen.name);
+  }
+  fields.forEach(function(field) {
+    if (!controllers.has(field.name)) return;
+    field.input.addEventListener('change', function() {
+      applyConfigureFieldConditions(fields);
+    });
+  });
+  applyConfigureFieldConditions(fields);
 }
 
 window.addEventListener('ironclaw:language-changed', function() {
@@ -797,10 +857,17 @@ function renderConfigureModal(name, secrets, setupFields, interactiveLogin, onbo
   form.className = 'configure-form';
 
   const fields = [];
-  const requiredSecrets = secrets.filter((secret) => !secret.optional);
-  const optionalSecrets = secrets.filter((secret) => secret.optional);
-  const requiredSetupFields = setupFields.filter((field) => !field.optional);
-  const optionalSetupFields = setupFields.filter((field) => field.optional);
+  const requiredSecrets = [];
+  const optionalSecrets = [];
+  secrets.forEach(function(secret) {
+    if (secret.optional && !secret.required_when_visible) {
+      optionalSecrets.push(secret);
+    } else {
+      requiredSecrets.push(secret);
+    }
+  });
+  const requiredSetupFields = setupFields.filter((field) => !field.optional || field.required_when_visible);
+  const optionalSetupFields = setupFields.filter((field) => field.optional && !field.required_when_visible);
 
   appendConfigureFieldGroup(form, fields, requiredSecrets, 'secret', false);
   appendConfigureFieldGroup(form, fields, requiredSetupFields, 'field', false);
@@ -822,6 +889,7 @@ function renderConfigureModal(name, secrets, setupFields, interactiveLogin, onbo
     optionalDetails.appendChild(optionalBody);
     form.appendChild(optionalDetails);
   }
+  wireConfigureFieldConditions(fields);
 
   if (fields.length > 0) {
     modal.appendChild(form);
@@ -1120,8 +1188,10 @@ function submitConfigureModal(name, fields, options) {
 
   for (const f of fields) {
     f.input.classList.remove('configure-input-invalid');
+    if (f.hidden) continue;
     const value = f.input.value.trim();
-    const missingRequired = !f.optional && !f.provided && !f.autoGenerate && !value;
+    const required = f.requiredWhenVisible || !f.optional;
+    const missingRequired = required && !f.provided && !f.autoGenerate && !value;
     if (missingRequired) {
       const message = I18n.t('config.requiredFieldMissing', { name: setupFieldLabel(f) });
       f.input.classList.add('configure-input-invalid');
@@ -1143,6 +1213,7 @@ function submitConfigureModal(name, fields, options) {
   }
 
   for (const f of fields) {
+    if (f.hidden) continue;
     const value = f.input.value.trim();
     if (!value) {
       continue;
@@ -1189,6 +1260,11 @@ function submitConfigureModal(name, fields, options) {
         }
         // For non-OAuth success: the server always broadcasts onboarding_state SSE,
         // which will show the toast and refresh extensions — no need to do it here too.
+      } else if (isSavedConfigurationResponse(res)) {
+        if (overlay) overlay.removeAttribute('data-auth-flow');
+        closeConfigureModal();
+        showToast(res.message || 'Configuration saved', 'warning');
+        refreshCurrentSettingsTab();
       } else {
         // Keep modal open so the user can correct their input and retry.
         btns.forEach(function(b) { b.disabled = false; });

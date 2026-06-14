@@ -3,11 +3,11 @@
   "wit_version": "0.3.0",
   "type": "channel",
   "name": "feishu",
-  "description": "Feishu/Lark Bot channel for receiving and responding to Feishu messages via Event Subscription webhooks",
+  "description": "Feishu/Lark Bot channel for receiving and responding to Feishu messages via Event Subscription websocket or webhooks",
   "auth": {
     "secret_name": "feishu_app_id",
     "display_name": "Feishu / Lark",
-    "instructions": "Create a bot at https://open.feishu.cn/app (Feishu) or https://open.larksuite.com/app (Lark). You need the App ID and App Secret. Note: IronClaw supports Event Subscription webhook delivery, but not Feishu's long-connection websocket mode.",
+    "instructions": "Create a bot at https://open.feishu.cn/app (Feishu) or https://open.larksuite.com/app (Lark). You need the App ID and App Secret. In Event Subscription, choose long connection websocket mode and subscribe to im.message.receive_v1. Grant the app permissions required by the message types and features you enable, then publish or update the app for the permission changes to take effect.",
     "setup_url": "https://open.feishu.cn/app",
     "token_hint": "App ID looks like cli_XXXX, App Secret is a long alphanumeric string",
     "env_var": "FEISHU_APP_ID"
@@ -16,7 +16,7 @@
     "required_secrets": [
       {
         "name": "feishu_app_id",
-        "prompt": "Enter your Feishu/Lark App ID (from https://open.feishu.cn/app). Use webhook-based Event Subscription, not long-connection websocket mode.",
+        "prompt": "Enter your Feishu/Lark App ID (from https://open.feishu.cn/app or https://open.larksuite.com/app).",
         "optional": false
       },
       {
@@ -26,8 +26,10 @@
       },
       {
         "name": "feishu_verification_token",
-        "prompt": "Enter your Feishu/Lark Verification Token (from Event Subscription webhook settings)",
-        "optional": false
+        "prompt": "Enter your Feishu/Lark Verification Token (optional for websocket mode; required only if you choose webhook delivery)",
+        "optional": true,
+        "visible_when": { "name": "connection_mode", "value": "webhook" },
+        "required_when_visible": true
       }
     ],
     "secret_config_mappings": [
@@ -35,13 +37,28 @@
       { "config_key": "app_secret", "secret_name": "feishu_app_secret" },
       { "config_key": "verification_token", "secret_name": "feishu_verification_token" }
     ],
+    "required_fields": [
+      {
+        "name": "connection_mode",
+        "prompt": "Message receiving mode",
+        "optional": true,
+        "input_type": "select",
+        "default": "websocket",
+        "options": [
+          { "value": "websocket", "label": "Long connection (recommended)" },
+          { "value": "webhook", "label": "Webhook fallback" }
+        ]
+      }
+    ],
     "setup_url": "https://open.feishu.cn/app"
   },
   "capabilities": {
     "http": {
       "allowlist": [
         { "host": "open.feishu.cn", "path_prefix": "/open-apis/" },
-        { "host": "open.larksuite.com", "path_prefix": "/open-apis/" }
+        { "host": "open.larksuite.com", "path_prefix": "/open-apis/" },
+        { "host": "open.feishu.cn", "path_prefix": "/callback/ws/endpoint", "methods": ["POST"] },
+        { "host": "open.larksuite.com", "path_prefix": "/callback/ws/endpoint", "methods": ["POST"] }
       ],
       "credentials": {
         "feishu_bearer": {
@@ -55,12 +72,28 @@
         "requests_per_hour": 2000
       }
     },
+    "websocket": {
+      "url": "https://open.feishu.cn",
+      "allowed_base_urls": [
+        "https://open.feishu.cn",
+        "https://open.larksuite.com"
+      ],
+      "allowed_connect_hosts": [
+        "*.feishu.cn",
+        "*.larksuite.com"
+      ],
+      "connect_on_start": true,
+      "protocol": "feishu_event",
+      "app_id_secret_name": "feishu_app_id",
+      "app_secret_name": "feishu_app_secret",
+      "base_url_workspace_path": "api_base"
+    },
     "secrets": {
       "allowed_names": ["feishu_*"]
     },
     "channel": {
       "allowed_paths": ["/webhook/feishu"],
-      "allow_polling": false,
+      "allow_polling": true,
       "workspace_prefix": "channels/feishu/",
       "emit_rate_limit": {
         "messages_per_minute": 100,
@@ -77,6 +110,7 @@
     "app_id": null,
     "app_secret": null,
     "verification_token": null,
+    "connection_mode": "websocket",
     "api_base": "https://open.feishu.cn",
     "owner_id": null,
     "dm_policy": "pairing",

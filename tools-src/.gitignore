@@ -1,2 +1,3 @@
 Cargo.lock
+!telegram/Cargo.lock
 target/
