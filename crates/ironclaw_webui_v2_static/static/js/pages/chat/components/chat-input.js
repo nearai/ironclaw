@@ -170,7 +170,13 @@ export function ChatInput({
   );
 
   const removeAttachment = React.useCallback((id) => {
-    setAttachments((prev) => prev.filter((att) => att.id !== id));
+    setAttachments((prev) => {
+      const next = prev.filter((att) => att.id !== id);
+      // Keep the ref in lockstep so a same-tick add validates against the
+      // post-removal set, not a stale snapshot (the effect sync is async).
+      attachmentsRef.current = next;
+      return next;
+    });
     setAttachmentError("");
   }, []);
 
@@ -198,6 +204,7 @@ export function ChatInput({
       await onSend(text.trim(), { attachments });
       setText("");
       setAttachments([]);
+      attachmentsRef.current = [];
       setAttachmentError("");
       cancelPendingDraft();
       clearDraft(draftKey);
@@ -272,10 +279,15 @@ export function ChatInput({
     [addFiles]
   );
 
-  const onDragOver = React.useCallback((e) => {
-    e.preventDefault();
-    setDragOver(true);
-  }, []);
+  const onDragOver = React.useCallback(
+    (e) => {
+      e.preventDefault();
+      // `addFiles` no-ops while disabled, so don't tease the drop overlay then.
+      if (disabled) return;
+      setDragOver(true);
+    },
+    [disabled]
+  );
   const onDragLeave = React.useCallback((e) => {
     if (e.currentTarget.contains(e.relatedTarget)) return;
     setDragOver(false);

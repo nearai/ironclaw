@@ -30,6 +30,15 @@ mod tests {
         std::str::from_utf8(lookup(path).expect("asset exists").bytes).expect("asset is utf-8")
     }
 
+    /// Read a source file straight from `static/` on disk. Used for fixtures
+    /// that are deliberately *not* embedded/served — e.g. `*.test.mjs` Node
+    /// unit tests — so a caller-level JS regression can still assert their
+    /// content without shipping them to clients.
+    fn source_text(path: &str) -> String {
+        let full = format!("{}/static/{path}", env!("CARGO_MANIFEST_DIR"));
+        std::fs::read_to_string(&full).unwrap_or_else(|e| panic!("read {full}: {e}"))
+    }
+
     #[test]
     fn lookup_returns_none_for_unknown_path() {
         // Direct coverage of the `None` arm. The router-level tests
@@ -132,13 +141,13 @@ mod tests {
                 .contains("return ref.startsWith(\"msg:\") ? ref.slice(\"msg:\".length) : null;")
         );
 
-        let regression = asset_text("js/pages/chat/lib/useChat-send.test.mjs");
+        let regression = source_text("js/pages/chat/lib/useChat-send.test.mjs");
         assert!(regression.contains("useChat.send: accepted ref reconciles"));
         assert!(regression.contains("accepted_message_ref: \"msg:message-1\""));
         assert!(regression.contains("await loadHistory();"));
         assert!(regression.contains("[\"msg-message-1\"]"));
 
-        let pending_regression = asset_text("js/pages/chat/lib/pending-messages.test.mjs");
+        let pending_regression = source_text("js/pages/chat/lib/pending-messages.test.mjs");
         assert!(pending_regression.contains(
             "recordAcceptedMessageRef: null and non-msg refs leave pending record unchanged"
         ));
@@ -172,7 +181,7 @@ mod tests {
         assert!(channels_tab.contains("slackConnectActions"));
         assert!(channels_tab.contains("action=${action.action}"));
 
-        let regression = asset_text("js/pages/chat/lib/useChat-send.test.mjs");
+        let regression = source_text("js/pages/chat/lib/useChat-send.test.mjs");
         assert!(regression.contains("channel connect requests return an action"));
         assert!(regression.contains("without submitting a prompt"));
         assert!(regression.contains("unmatched channel connect requests submit the prompt"));

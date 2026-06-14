@@ -35,7 +35,10 @@ const ATTACHMENT_FILENAME_MAX_BYTES: usize = 256;
 /// sole authority on what is accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebUiAttachmentCapabilities {
-    /// HTML file-input `accept` tokens, e.g. `["image/*", "audio/*", ".pdf"]`.
+    /// HTML file-input `accept` tokens from the shared registry: exact MIME
+    /// types plus extensions, e.g. `["image/png", ".png", "application/pdf",
+    /// ".pdf"]` — never `image/*` wildcards (which would advertise unsupported
+    /// formats, and which break folder navigation in the native macOS picker).
     pub accept: Vec<String>,
     /// Maximum number of attachments per message.
     pub max_count: usize,
