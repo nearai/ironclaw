@@ -7,7 +7,10 @@ export type ScenarioName =
   | "stream-gate"
   | "stream-failed"
   | "stream-cancelled"
-  | "stream-drop-once";
+  | "stream-drop-once"
+  | "stream-auth-required"
+  | "stream-projection"
+  | "stream-capability";
 
 export interface SessionData {
   tenantId: string;
@@ -49,10 +52,31 @@ export interface RebornMockState {
   nextSeq: number;
   automations: Array<{ id: string; name?: string; status?: string; isActive: boolean }>;
   outboundPrefs: { finalReplyTarget?: { targetId: string; channel: string; displayName: string } };
-  outboundTargets: Array<{ target: { targetId: string; channel: string; displayName: string }; capabilities: { finalReplies: boolean; gatePrompts: boolean; authPrompts: boolean } }>;
-  extensions: Array<{ packageRef: { kind: string; id: string }; displayName: string; kind: string; description: string; active: boolean }>;
-  extensionRegistry: Array<{ packageRef: { kind: string; id: string }; displayName: string; kind: string; description: string; installed: boolean }>;
-  skills: Array<{ name: string; description: string; version: string; trust: string; source: string }>;
+  outboundTargets: Array<{
+    target: { targetId: string; channel: string; displayName: string };
+    capabilities: { finalReplies: boolean; gatePrompts: boolean; authPrompts: boolean };
+  }>;
+  extensions: Array<{
+    packageRef: { kind: string; id: string };
+    displayName: string;
+    kind: string;
+    description: string;
+    active: boolean;
+  }>;
+  extensionRegistry: Array<{
+    packageRef: { kind: string; id: string };
+    displayName: string;
+    kind: string;
+    description: string;
+    installed: boolean;
+  }>;
+  skills: Array<{
+    name: string;
+    description: string;
+    version: string;
+    trust: string;
+    source: string;
+  }>;
   connectableChannels: Array<{ channel: string; displayName: string; strategy: string }>;
   authProviders: Array<{ id: string; name: string; type: string }>;
   sseHandler: SSECallback | null;

@@ -389,6 +389,7 @@ export function setupApiRoutes(
   }
 
   for (const [pluginKey, plugin] of Object.entries(plugins.plugins)) {
+    if (pluginKey === "ironclaw") continue;
     registerPublicRpcRouter(`/api/rpc/${pluginKey}`, plugin.router);
   }
 

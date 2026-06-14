@@ -114,8 +114,14 @@ struct TwoUserAuthenticator {
 impl WebuiAuthenticator for TwoUserAuthenticator {
     async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
         match token {
-            t if t == OWNER_TOKEN => Some(WebuiAuthentication::user(self.owner_user_id.clone())),
-            t if t == OTHER_TOKEN => Some(WebuiAuthentication::user(self.other_user_id.clone())),
+            t if t == OWNER_TOKEN => Some(WebuiAuthentication::user(
+                TenantId::new(TENANT).expect("tenant"),
+                self.owner_user_id.clone(),
+            )),
+            t if t == OTHER_TOKEN => Some(WebuiAuthentication::user(
+                TenantId::new(TENANT).expect("tenant"),
+                self.other_user_id.clone(),
+            )),
             _ => None,
         }
     }

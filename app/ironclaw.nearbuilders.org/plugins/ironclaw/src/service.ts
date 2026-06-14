@@ -1,14 +1,43 @@
+import { EventSource as NodeEventSource } from "eventsource";
 import { Effect } from "every-plugin/effect";
 import type { z } from "every-plugin/zod";
+
+function onEvent(
+  es: NodeEventSource,
+  type: string,
+  handler: (e: MessageEvent) => void,
+): void {
+  es.addEventListener(type, handler);
+}
+
+function offEvent(
+  es: NodeEventSource,
+  type: string,
+  handler: (e: MessageEvent) => void,
+): void {
+  es.removeEventListener(type, handler);
+}
 import type {
-  SessionSchema, ThreadListSchema, ThreadCreateSchema,
-  TimelineSchema, TimelineEntrySchema, ThreadSchema,
-  AcceptedResponseSchema, ChatEventSchema,
-  OutboundPreferencesSchema, OutboundTargetSchema,
-  AutomationSchema, ExtensionSchema, ExtensionRegistryEntrySchema,
-  ExtensionSetupDetailSchema, ExtensionActionResponseSchema,
-  SkillSchema, SkillSearchResponseSchema, SkillContentResponseSchema,
-  SkillActionResponseSchema, ConnectableChannelSchema,
+  AcceptedResponseSchema,
+  AutomationSchema,
+  ChatEventSchema,
+  ConnectableChannelSchema,
+  ExtensionActionResponseSchema,
+  ExtensionRegistryEntrySchema,
+  ExtensionSchema,
+  ExtensionSetupDetailSchema,
+  OutboundPreferencesSchema,
+  OutboundTargetSchema,
+  SessionSchema,
+  SkillActionResponseSchema,
+  SkillContentResponseSchema,
+  SkillSchema,
+  SkillSearchResponseSchema,
+  ThreadCreateSchema,
+  ThreadListSchema,
+  ThreadSchema,
+  TimelineEntrySchema,
+  TimelineSchema,
 } from "./contract";
 
 type Session = z.infer<typeof SessionSchema>;
@@ -40,10 +69,13 @@ export class IronclawUpstreamError extends Error {
 
   constructor(status: number, method: string, path: string, body: string) {
     let parsed: Record<string, unknown> | null = null;
-    try { parsed = JSON.parse(body); } catch {}
-    const msg = parsed && typeof parsed.message === "string"
-      ? parsed.message
-      : `Ironclaw API error ${status}`;
+    try {
+      parsed = JSON.parse(body);
+    } catch {}
+    const msg =
+      parsed && typeof parsed.message === "string"
+        ? parsed.message
+        : `Ironclaw API error ${status}`;
     super(msg);
     this.name = "IronclawUpstreamError";
     this.status = status;
@@ -87,7 +119,7 @@ function mapThreadEntry(m: any): z.infer<typeof TimelineEntrySchema> {
     content: m.content ?? undefined,
     redactionRef: m.redaction_ref ?? undefined,
     role,
-    createdAt: undefined,
+    createdAt: m.created_at ?? undefined,
   };
 }
 
@@ -104,11 +136,13 @@ function mapThreadRecord(t: any): z.infer<typeof ThreadSchema> {
     createdByActorId: t.created_by_actor_id,
     title: t.title ?? undefined,
     metadataJson: t.metadata_json ?? undefined,
-    goal: t.goal ? {
-      statement: t.goal.statement,
-      refinedAtSequence: t.goal.refined_at_sequence,
-      refinementCount: t.goal.refinement_count,
-    } : undefined,
+    goal: t.goal
+      ? {
+          statement: t.goal.statement,
+          refinedAtSequence: t.goal.refined_at_sequence,
+          refinementCount: t.goal.refinement_count,
+        }
+      : undefined,
   };
 }
 
@@ -191,7 +225,9 @@ export class IronclawService {
       },
       catch: (error: unknown) => {
         if (error instanceof IronclawUpstreamError) return error;
-        return new Error(`Ironclaw health check failed: ${error instanceof Error ? error.message : String(error)}`);
+        return new Error(
+          `Ironclaw health check failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
       },
     });
   }
@@ -210,7 +246,9 @@ export class IronclawService {
       },
       catch: (error: unknown) => {
         if (error instanceof IronclawUpstreamError) return error;
-        return new Error(`Failed to get session: ${error instanceof Error ? error.message : String(error)}`);
+        return new Error(
+          `Failed to get session: ${error instanceof Error ? error.message : String(error)}`,
+        );
       },
     });
   }
@@ -234,7 +272,9 @@ export class IronclawService {
       },
       catch: (error: unknown) => {
         if (error instanceof IronclawUpstreamError) return error;
-        return new Error(`Failed to list threads: ${error instanceof Error ? error.message : String(error)}`);
+        return new Error(
+          `Failed to list threads: ${error instanceof Error ? error.message : String(error)}`,
+        );
       },
     });
   }
@@ -250,7 +290,9 @@ export class IronclawService {
       },
       catch: (error: unknown) => {
         if (error instanceof IronclawUpstreamError) return error;
-        return new Error(`Failed to create thread: ${error instanceof Error ? error.message : String(error)}`);
+        return new Error(
+          `Failed to create thread: ${error instanceof Error ? error.message : String(error)}`,
+        );
       },
     });
   }
@@ -259,11 +301,17 @@ export class IronclawService {
     return Effect.tryPromise({
       try: () => this.request<void>("DELETE", `/api/webchat/v2/threads/${encodeURIComponent(id)}`),
       catch: (error: unknown) =>
-        new Error(`Failed to delete thread: ${error instanceof Error ? error.message : String(error)}`),
+        new Error(
+          `Failed to delete thread: ${error instanceof Error ? error.message : String(error)}`,
+        ),
     });
   }
 
-  sendMessage(id: string, content: string, clientActionId?: string): Effect.Effect<AcceptedResponse, Error> {
+  sendMessage(
+    id: string,
+    content: string,
+    clientActionId?: string,
+  ): Effect.Effect<AcceptedResponse, Error> {
     return Effect.tryPromise({
       try: async () => {
         const raw: any = await this.request(
@@ -302,7 +350,9 @@ export class IronclawService {
       },
       catch: (error: unknown) => {
         if (error instanceof IronclawUpstreamError) return error;
-        return new Error(`Failed to send message: ${error instanceof Error ? error.message : String(error)}`);
+        return new Error(
+          `Failed to send message: ${error instanceof Error ? error.message : String(error)}`,
+        );
       },
     });
   }
@@ -310,10 +360,15 @@ export class IronclawService {
   getTimeline(id: string, limit?: number, cursor?: string): Effect.Effect<Timeline, Error> {
     return Effect.tryPromise({
       try: async () => {
-        const raw: any = await this.request("GET", `/api/webchat/v2/threads/${encodeURIComponent(id)}/timeline`, undefined, {
-          limit: limit?.toString(),
-          cursor,
-        });
+        const raw: any = await this.request(
+          "GET",
+          `/api/webchat/v2/threads/${encodeURIComponent(id)}/timeline`,
+          undefined,
+          {
+            limit: limit?.toString(),
+            cursor,
+          },
+        );
         const messages = (raw.messages ?? []).map(mapThreadEntry);
         return {
           data: messages,
@@ -326,12 +381,26 @@ export class IronclawService {
       },
       catch: (error: unknown) => {
         if (error instanceof IronclawUpstreamError) return error;
-        return new Error(`Failed to get timeline: ${error instanceof Error ? error.message : String(error)}`);
+        return new Error(
+          `Failed to get timeline: ${error instanceof Error ? error.message : String(error)}`,
+        );
       },
     });
   }
 
-  cancelRun(id: string, runId: string): Effect.Effect<{ success: boolean; runId: string; status: string; eventCursor: number; alreadyTerminal: boolean }, Error> {
+  cancelRun(
+    id: string,
+    runId: string,
+  ): Effect.Effect<
+    {
+      success: boolean;
+      runId: string;
+      status: string;
+      eventCursor: number;
+      alreadyTerminal: boolean;
+    },
+    Error
+  > {
     return Effect.tryPromise({
       try: async () => {
         const raw: any = await this.request(
@@ -347,11 +416,19 @@ export class IronclawService {
         };
       },
       catch: (error: unknown) =>
-        new Error(`Failed to cancel run: ${error instanceof Error ? error.message : String(error)}`),
+        new Error(
+          `Failed to cancel run: ${error instanceof Error ? error.message : String(error)}`,
+        ),
     });
   }
 
-  resolveGate(id: string, runId: string, gateRef: string, resolution: string, always?: boolean): Effect.Effect<void, Error> {
+  resolveGate(
+    id: string,
+    runId: string,
+    gateRef: string,
+    resolution: string,
+    always?: boolean,
+  ): Effect.Effect<void, Error> {
     return Effect.tryPromise({
       try: () => {
         const body: Record<string, unknown> = { resolution };
@@ -363,7 +440,9 @@ export class IronclawService {
         );
       },
       catch: (error: unknown) =>
-        new Error(`Failed to resolve gate: ${error instanceof Error ? error.message : String(error)}`),
+        new Error(
+          `Failed to resolve gate: ${error instanceof Error ? error.message : String(error)}`,
+        ),
     });
   }
 
@@ -374,10 +453,19 @@ export class IronclawService {
       let cursor = afterCursor;
 
       const eventTypes = [
-        "accepted", "running", "capability_progress", "capability_activity",
-        "capability_display_preview", "gate", "auth_required",
-        "final_reply", "cancelled", "failed",
-        "projection_snapshot", "projection_update", "keep_alive",
+        "accepted",
+        "running",
+        "capability_progress",
+        "capability_activity",
+        "capability_display_preview",
+        "gate",
+        "auth_required",
+        "final_reply",
+        "cancelled",
+        "failed",
+        "projection_snapshot",
+        "projection_update",
+        "keep_alive",
       ];
 
       const transformEvent = (raw: any): ChatEvent => {
@@ -424,14 +512,16 @@ export class IronclawService {
             headline: raw.prompt.headline,
             body: raw.prompt.body,
             allowAlways: raw.prompt.allow_always ?? undefined,
-            approvalContext: raw.prompt.approval_context ? {
-              toolName: raw.prompt.approval_context.tool_name,
-              action: raw.prompt.approval_context.action,
-              scope: raw.prompt.approval_context.scope,
-              reason: raw.prompt.approval_context.reason ?? undefined,
-              destination: raw.prompt.approval_context.destination ?? undefined,
-              details: raw.prompt.approval_context.details ?? undefined,
-            } : undefined,
+            approvalContext: raw.prompt.approval_context
+              ? {
+                  toolName: raw.prompt.approval_context.tool_name,
+                  action: raw.prompt.approval_context.action,
+                  scope: raw.prompt.approval_context.scope,
+                  reason: raw.prompt.approval_context.reason ?? undefined,
+                  destination: raw.prompt.approval_context.destination ?? undefined,
+                  details: raw.prompt.approval_context.details ?? undefined,
+                }
+              : undefined,
           };
         }
         if (raw.auth_prompt) {
@@ -468,7 +558,7 @@ export class IronclawService {
 
       while (true) {
         const url = `${baseUrl}/api/webchat/v2/threads/${encodeURIComponent(id)}/events?token=${encodeURIComponent(token)}${cursor ? `&after_cursor=${encodeURIComponent(cursor)}` : ""}`;
-        const es = new EventSource(url);
+        const es = new NodeEventSource(url);
 
         let sessionEnded = false;
         let pendingResolve: ((value: ChatEvent | null) => void) | null = null;
@@ -492,13 +582,15 @@ export class IronclawService {
               const event = transformEvent(raw);
               if (event.cursor) cursor = event.cursor;
               push(event);
-            } catch { /* skip parse errors */ }
+            } catch {
+              /* skip parse errors */
+            }
           };
-          es.addEventListener(type, handlers[type]);
+          onEvent(es, type, handlers[type]!);
         }
 
         es.onerror = () => {
-          if (es.readyState === EventSource.CLOSED) {
+          if (es.readyState === NodeEventSource.CLOSED) {
             sessionEnded = true;
             if (pendingResolve) {
               const r = pendingResolve;
@@ -524,7 +616,7 @@ export class IronclawService {
           es.onerror = null;
           es.close();
           for (const type of eventTypes) {
-            es.removeEventListener(type, handlers[type]);
+            offEvent(es, type, handlers[type]!);
           }
         }
       }
@@ -566,7 +658,9 @@ export class IronclawService {
         return { data: automations };
       },
       catch: (error: unknown) =>
-        new Error(`Failed to list automations: ${error instanceof Error ? error.message : String(error)}`),
+        new Error(
+          `Failed to list automations: ${error instanceof Error ? error.message : String(error)}`,
+        ),
     });
   }
 
@@ -575,18 +669,22 @@ export class IronclawService {
       try: async () => {
         const raw: any = await this.request("GET", "/api/webchat/v2/outbound/preferences");
         return {
-          finalReplyTarget: raw.final_reply_target ? {
-            targetId: raw.final_reply_target.target_id,
-            channel: raw.final_reply_target.channel,
-            displayName: raw.final_reply_target.display_name,
-            description: raw.final_reply_target.description ?? undefined,
-          } : undefined,
+          finalReplyTarget: raw.final_reply_target
+            ? {
+                targetId: raw.final_reply_target.target_id,
+                channel: raw.final_reply_target.channel,
+                displayName: raw.final_reply_target.display_name,
+                description: raw.final_reply_target.description ?? undefined,
+              }
+            : undefined,
           status: raw.final_reply_target_status ?? undefined,
           modality: raw.default_modality ?? undefined,
         } as OutboundPreferences;
       },
       catch: (error: unknown) =>
-        new Error(`Failed to get preferences: ${error instanceof Error ? error.message : String(error)}`),
+        new Error(
+          `Failed to get preferences: ${error instanceof Error ? error.message : String(error)}`,
+        ),
     });
   }
 
@@ -600,11 +698,16 @@ export class IronclawService {
         await this.request<void>("POST", "/api/webchat/v2/outbound/preferences", body);
       },
       catch: (error: unknown) =>
-        new Error(`Failed to set preferences: ${error instanceof Error ? error.message : String(error)}`),
+        new Error(
+          `Failed to set preferences: ${error instanceof Error ? error.message : String(error)}`,
+        ),
     });
   }
 
-  listOutboundTargets(): Effect.Effect<{ data: z.infer<typeof OutboundTargetSchema>[]; nextCursor?: string | null }, Error> {
+  listOutboundTargets(): Effect.Effect<
+    { data: z.infer<typeof OutboundTargetSchema>[]; nextCursor?: string | null },
+    Error
+  > {
     return Effect.tryPromise({
       try: async () => {
         const raw: any = await this.request("GET", "/api/webchat/v2/outbound/targets");
@@ -624,7 +727,9 @@ export class IronclawService {
         return { data: targets, nextCursor: raw.next_cursor ?? null };
       },
       catch: (error: unknown) =>
-        new Error(`Failed to list targets: ${error instanceof Error ? error.message : String(error)}`),
+        new Error(
+          `Failed to list targets: ${error instanceof Error ? error.message : String(error)}`,
+        ),
     });
   }
 
@@ -646,16 +751,20 @@ export class IronclawService {
           activationError: e.activation_error ?? undefined,
           version: e.version ?? undefined,
           onboardingState: e.onboarding_state ?? undefined,
-          onboarding: e.onboarding ? {
-            credentialInstructions: e.onboarding.credential_instructions ?? undefined,
-            setupUrl: e.onboarding.setup_url ?? undefined,
-            credentialNextStep: e.onboarding.credential_next_step ?? undefined,
-          } : undefined,
+          onboarding: e.onboarding
+            ? {
+                credentialInstructions: e.onboarding.credential_instructions ?? undefined,
+                setupUrl: e.onboarding.setup_url ?? undefined,
+                credentialNextStep: e.onboarding.credential_next_step ?? undefined,
+              }
+            : undefined,
         }));
         return { data: extensions };
       },
       catch: (error: unknown) =>
-        new Error(`Failed to list extensions: ${error instanceof Error ? error.message : String(error)}`),
+        new Error(
+          `Failed to list extensions: ${error instanceof Error ? error.message : String(error)}`,
+        ),
     });
   }
 
@@ -675,62 +784,98 @@ export class IronclawService {
         return { data: entries };
       },
       catch: (error: unknown) =>
-        new Error(`Failed to list extension registry: ${error instanceof Error ? error.message : String(error)}`),
+        new Error(
+          `Failed to list extension registry: ${error instanceof Error ? error.message : String(error)}`,
+        ),
     });
   }
 
-  installExtension(packageRef: { kind: string; id: string }): Effect.Effect<ExtensionActionResponse, Error> {
+  installExtension(packageRef: {
+    kind: string;
+    id: string;
+  }): Effect.Effect<ExtensionActionResponse, Error> {
     return Effect.tryPromise({
       try: async () => {
-        const raw: any = await this.request("POST", "/api/webchat/v2/extensions/install", { package_ref: packageRef });
+        const raw: any = await this.request("POST", "/api/webchat/v2/extensions/install", {
+          package_ref: packageRef,
+        });
         return transformKeys(raw) as ExtensionActionResponse;
       },
       catch: (error: unknown) =>
-        new Error(`Failed to install extension: ${error instanceof Error ? error.message : String(error)}`),
+        new Error(
+          `Failed to install extension: ${error instanceof Error ? error.message : String(error)}`,
+        ),
     });
   }
 
   activateExtension(name: string): Effect.Effect<ExtensionActionResponse, Error> {
     return Effect.tryPromise({
       try: async () => {
-        const raw: any = await this.request("POST", `/api/webchat/v2/extensions/${encodeURIComponent(name)}/activate`);
+        const raw: any = await this.request(
+          "POST",
+          `/api/webchat/v2/extensions/${encodeURIComponent(name)}/activate`,
+        );
         return transformKeys(raw) as ExtensionActionResponse;
       },
       catch: (error: unknown) =>
-        new Error(`Failed to activate extension: ${error instanceof Error ? error.message : String(error)}`),
+        new Error(
+          `Failed to activate extension: ${error instanceof Error ? error.message : String(error)}`,
+        ),
     });
   }
 
   removeExtension(name: string): Effect.Effect<ExtensionActionResponse, Error> {
     return Effect.tryPromise({
       try: async () => {
-        const raw: any = await this.request("POST", `/api/webchat/v2/extensions/${encodeURIComponent(name)}/remove`);
+        const raw: any = await this.request(
+          "POST",
+          `/api/webchat/v2/extensions/${encodeURIComponent(name)}/remove`,
+        );
         return transformKeys(raw) as ExtensionActionResponse;
       },
       catch: (error: unknown) =>
-        new Error(`Failed to remove extension: ${error instanceof Error ? error.message : String(error)}`),
+        new Error(
+          `Failed to remove extension: ${error instanceof Error ? error.message : String(error)}`,
+        ),
     });
   }
 
-  getExtensionSetup(name: string): Effect.Effect<z.infer<typeof ExtensionSetupDetailSchema>, Error> {
+  getExtensionSetup(
+    name: string,
+  ): Effect.Effect<z.infer<typeof ExtensionSetupDetailSchema>, Error> {
     return Effect.tryPromise({
       try: async () => {
-        const raw: any = await this.request("GET", `/api/webchat/v2/extensions/${encodeURIComponent(name)}/setup`);
+        const raw: any = await this.request(
+          "GET",
+          `/api/webchat/v2/extensions/${encodeURIComponent(name)}/setup`,
+        );
         return transformKeys(raw);
       },
       catch: (error: unknown) =>
-        new Error(`Failed to get extension setup: ${error instanceof Error ? error.message : String(error)}`),
+        new Error(
+          `Failed to get extension setup: ${error instanceof Error ? error.message : String(error)}`,
+        ),
     });
   }
 
-  setupExtension(name: string, action: string, payload?: Record<string, unknown>): Effect.Effect<{ success: boolean; message?: string }, Error> {
+  setupExtension(
+    name: string,
+    action: string,
+    payload?: Record<string, unknown>,
+  ): Effect.Effect<{ success: boolean; message?: string }, Error> {
     return Effect.tryPromise({
       try: async () => {
-        const raw: any = await this.request("POST", `/api/webchat/v2/extensions/${encodeURIComponent(name)}/setup`, { action, payload });
+        const raw: any = await this.request(
+          "POST",
+          `/api/webchat/v2/extensions/${encodeURIComponent(name)}/setup`,
+          { action, payload },
+        );
         return { success: raw.success ?? false, message: raw.message ?? undefined };
       },
       catch: (error: unknown) =>
-        new Error(`Failed to setup extension: ${error instanceof Error ? error.message : String(error)}`),
+        new Error(
+          `Failed to setup extension: ${error instanceof Error ? error.message : String(error)}`,
+        ),
     });
   }
 
@@ -742,7 +887,9 @@ export class IronclawService {
         return { data: skills, count: raw.count ?? skills.length };
       },
       catch: (error: unknown) =>
-        new Error(`Failed to list skills: ${error instanceof Error ? error.message : String(error)}`),
+        new Error(
+          `Failed to list skills: ${error instanceof Error ? error.message : String(error)}`,
+        ),
     });
   }
 
@@ -759,25 +906,35 @@ export class IronclawService {
         } as SkillSearchResponse;
       },
       catch: (error: unknown) =>
-        new Error(`Failed to search skills: ${error instanceof Error ? error.message : String(error)}`),
+        new Error(
+          `Failed to search skills: ${error instanceof Error ? error.message : String(error)}`,
+        ),
     });
   }
 
   installSkill(name: string, content?: string): Effect.Effect<SkillActionResponse, Error> {
     return Effect.tryPromise({
       try: async () => {
-        const raw: any = await this.request("POST", "/api/webchat/v2/skills/install", { name, content });
+        const raw: any = await this.request("POST", "/api/webchat/v2/skills/install", {
+          name,
+          content,
+        });
         return { success: raw.success ?? false, message: raw.message ?? "" } as SkillActionResponse;
       },
       catch: (error: unknown) =>
-        new Error(`Failed to install skill: ${error instanceof Error ? error.message : String(error)}`),
+        new Error(
+          `Failed to install skill: ${error instanceof Error ? error.message : String(error)}`,
+        ),
     });
   }
 
   getSkill(name: string): Effect.Effect<SkillContentResponse, Error> {
     return Effect.tryPromise({
       try: async () => {
-        const raw: any = await this.request("GET", `/api/webchat/v2/skills/${encodeURIComponent(name)}`);
+        const raw: any = await this.request(
+          "GET",
+          `/api/webchat/v2/skills/${encodeURIComponent(name)}`,
+        );
         return { name: raw.name, content: raw.content } as SkillContentResponse;
       },
       catch: (error: unknown) =>
@@ -788,22 +945,33 @@ export class IronclawService {
   updateSkill(name: string, content: string): Effect.Effect<SkillActionResponse, Error> {
     return Effect.tryPromise({
       try: async () => {
-        const raw: any = await this.request("PUT", `/api/webchat/v2/skills/${encodeURIComponent(name)}`, { content });
+        const raw: any = await this.request(
+          "PUT",
+          `/api/webchat/v2/skills/${encodeURIComponent(name)}`,
+          { content },
+        );
         return { success: raw.success ?? false, message: raw.message ?? "" } as SkillActionResponse;
       },
       catch: (error: unknown) =>
-        new Error(`Failed to update skill: ${error instanceof Error ? error.message : String(error)}`),
+        new Error(
+          `Failed to update skill: ${error instanceof Error ? error.message : String(error)}`,
+        ),
     });
   }
 
   removeSkill(name: string): Effect.Effect<SkillActionResponse, Error> {
     return Effect.tryPromise({
       try: async () => {
-        const raw: any = await this.request("DELETE", `/api/webchat/v2/skills/${encodeURIComponent(name)}`);
+        const raw: any = await this.request(
+          "DELETE",
+          `/api/webchat/v2/skills/${encodeURIComponent(name)}`,
+        );
         return { success: raw.success ?? false, message: raw.message ?? "" } as SkillActionResponse;
       },
       catch: (error: unknown) =>
-        new Error(`Failed to remove skill: ${error instanceof Error ? error.message : String(error)}`),
+        new Error(
+          `Failed to remove skill: ${error instanceof Error ? error.message : String(error)}`,
+        ),
     });
   }
 
@@ -828,23 +996,35 @@ export class IronclawService {
         return { data: channels };
       },
       catch: (error: unknown) =>
-        new Error(`Failed to list connectable channels: ${error instanceof Error ? error.message : String(error)}`),
+        new Error(
+          `Failed to list connectable channels: ${error instanceof Error ? error.message : String(error)}`,
+        ),
     });
   }
 
-  listAuthProviders(): Effect.Effect<{ data: Array<{ id: string; name: string; type: string }> }, Error> {
+  listAuthProviders(): Effect.Effect<
+    { data: Array<{ id: string; name: string; type: string }> },
+    Error
+  > {
     return Effect.tryPromise({
       try: () => this.request("GET", "/auth/providers"),
       catch: (error: unknown) =>
-        new Error(`Failed to list providers: ${error instanceof Error ? error.message : String(error)}`),
+        new Error(
+          `Failed to list providers: ${error instanceof Error ? error.message : String(error)}`,
+        ),
     });
   }
 
   exchangeLoginTicket(loginTicket: string): Effect.Effect<{ token: string }, Error> {
     return Effect.tryPromise({
-      try: () => this.request<{ token: string }>("POST", "/auth/session/exchange", { login_ticket: loginTicket }),
+      try: () =>
+        this.request<{ token: string }>("POST", "/auth/session/exchange", {
+          login_ticket: loginTicket,
+        }),
       catch: (error: unknown) =>
-        new Error(`Failed to exchange ticket: ${error instanceof Error ? error.message : String(error)}`),
+        new Error(
+          `Failed to exchange ticket: ${error instanceof Error ? error.message : String(error)}`,
+        ),
     });
   }
 

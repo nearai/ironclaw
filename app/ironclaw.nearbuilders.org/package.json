@@ -60,7 +60,8 @@
       "zephyr-rspack-plugin": "^1.1.1",
       "zephyr-rsbuild-plugin": "^1.1.1",
       "@tanstack/intent": "^0.0.40",
-      "@opentelemetry/api": "^1.9.0"
+      "@opentelemetry/api": "^1.9.0",
+      "eventsource": "^4.1.0"
     }
   },
   "scripts": {

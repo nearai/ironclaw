@@ -33,10 +33,17 @@ const h1 = (services: { ironclaw: (ctx: any) => Ic }, select: (ic: Ic) => (input
 const hStream = (services: { ironclaw: (ctx: any) => Ic }, select: (ic: Ic) => (input: any) => any) =>
   async function* ({ input, signal, context }: any) {
     const ic = services.ironclaw(context);
-    const events = select(ic)(input);
-    for await (const event of events) {
-      if (signal?.aborted) break;
-      yield event;
+    console.log("[stream] start", { input });
+    try {
+      const events = await select(ic)(input);
+      for await (const event of events) {
+        if (signal?.aborted) break;
+        yield event;
+      }
+      console.log("[stream] end");
+    } catch (error) {
+      console.error("[stream] error:", error);
+      throw error;
     }
   };
 

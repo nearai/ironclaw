@@ -37,7 +37,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use hmac::{Hmac, Mac};
-use ironclaw_host_api::{TenantId, UserId};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_reborn_composition::{WebuiAuthentication, WebuiAuthenticator};
 use parking_lot::RwLock;
 use secrecy::{ExposeSecret, SecretString};
@@ -206,6 +206,10 @@ struct TokenPayload {
     sid: String,
     tenant: String,
     user: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    project: Option<String>,
     iat: i64,
     exp: i64,
 }
@@ -217,6 +221,8 @@ impl SessionStore for SignedTokenSessionStore {
         tenant_id: TenantId,
         user_id: UserId,
         lifetime: ChronoDuration,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
     ) -> Result<SecretString, SessionStoreError> {
         // A non-positive lifetime would mint a token whose `exp <= iat`;
         // `lookup` then rejects it immediately, so the caller would get
@@ -234,6 +240,8 @@ impl SessionStore for SignedTokenSessionStore {
             sid: Uuid::new_v4().to_string(),
             tenant: tenant_id.as_str().to_string(),
             user: user_id.as_str().to_string(),
+            agent: agent_id.as_ref().map(|a| a.as_str().to_string()),
+            project: project_id.as_ref().map(|p| p.as_str().to_string()),
             iat: now.timestamp(),
             exp: expires_at.timestamp(),
         };
@@ -273,6 +281,16 @@ impl SessionStore for SignedTokenSessionStore {
         }
         let user_id = UserId::new(&payload.user)
             .map_err(|err| SessionStoreError::Backend(format!("token user: {err}")))?;
+        let agent_id = payload
+            .agent
+            .map(|a| AgentId::new(&a))
+            .transpose()
+            .map_err(|err| SessionStoreError::Backend(format!("token agent: {err}")))?;
+        let project_id = payload
+            .project
+            .map(|p| ProjectId::new(&p))
+            .transpose()
+            .map_err(|err| SessionStoreError::Backend(format!("token project: {err}")))?;
         let created_at = DateTime::<Utc>::from_timestamp(payload.iat, 0)
             .ok_or_else(|| SessionStoreError::Backend("token iat out of range".into()))?;
         let expires_at = DateTime::<Utc>::from_timestamp(payload.exp, 0)
@@ -281,6 +299,8 @@ impl SessionStore for SignedTokenSessionStore {
             session_id: SessionId::new(payload.sid),
             tenant_id,
             user_id,
+            agent_id,
+            project_id,
             created_at,
             expires_at,
         }))
@@ -389,6 +409,8 @@ mod tests {
                 tenant(),
                 UserId::new("operator").expect("user"),
                 ChronoDuration::hours(1),
+                None,
+                None,
             )
             .await
             .expect("create");
@@ -409,6 +431,8 @@ mod tests {
                 tenant(),
                 UserId::new("operator").expect("user"),
                 ChronoDuration::hours(1),
+                None,
+                None,
             )
             .await
             .expect("create");
@@ -441,6 +465,8 @@ mod tests {
                 tenant_a.clone(),
                 UserId::new("alice").expect("user"),
                 ChronoDuration::hours(1),
+                None,
+                None,
             )
             .await
             .expect("create");
@@ -484,6 +510,8 @@ mod tests {
                 tenant(),
                 UserId::new("operator").expect("user"),
                 ChronoDuration::hours(1),
+                None,
+                None,
             )
             .await
             .expect("create");
@@ -502,7 +530,7 @@ mod tests {
         let store = signed_store("operator-secret");
         for lifetime in [ChronoDuration::zero(), ChronoDuration::seconds(-1)] {
             let err = store
-                .create_session(tenant(), UserId::new("operator").expect("user"), lifetime)
+                .create_session(tenant(), UserId::new("operator").expect("user"), lifetime, None, None)
                 .await
                 .expect_err("a non-positive lifetime must error, not mint a dead token");
             assert!(matches!(err, SessionStoreError::Backend(_)));
@@ -517,6 +545,8 @@ mod tests {
                 tenant(),
                 UserId::new("operator").expect("user"),
                 ChronoDuration::MAX,
+                None,
+                None,
             )
             .await
             .expect_err("a lifetime that overflows the expiry instant must error");
@@ -581,10 +611,11 @@ mod tests {
         async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
             if token == self.token {
                 let user = UserId::new(self.user).expect("valid user id");
+                let tenant = tenant();
                 Some(if self.operator {
-                    WebuiAuthentication::operator(user)
+                    WebuiAuthentication::operator(tenant, user)
                 } else {
-                    WebuiAuthentication::user(user)
+                    WebuiAuthentication::user(tenant, user)
                 })
             } else {
                 None

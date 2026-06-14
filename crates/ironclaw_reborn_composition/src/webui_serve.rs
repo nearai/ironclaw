@@ -49,9 +49,12 @@ use ironclaw_auth::GoogleOAuthRouteConfig;
 use ironclaw_host_api::ingress::IngressRouteDescriptor;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_webui_v2::{
-    DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2RouteOptions, WebUiV2State,
+    DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2RouteOptions, WebUiV2State,
     is_webui_v2_operator_webui_config_route_id, webui_v2_router_with_options,
 };
+// Re-exported so the ingress crate can name the type without a direct
+// dependency on ironclaw_webui_v2.
+pub use ironclaw_webui_v2::WebUiV2Capabilities;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{AllowHeaders, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
@@ -143,25 +146,40 @@ pub trait WebuiAuthenticator: Send + Sync + 'static {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebuiAuthentication {
+    pub tenant_id: TenantId,
     pub user_id: UserId,
+    pub agent_id: Option<AgentId>,
+    pub project_id: Option<ProjectId>,
     pub capabilities: WebUiV2Capabilities,
 }
 
 impl WebuiAuthentication {
-    pub fn new(user_id: UserId, capabilities: WebUiV2Capabilities) -> Self {
+    pub fn new(
+        tenant_id: TenantId,
+        user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        capabilities: WebUiV2Capabilities,
+    ) -> Self {
         Self {
+            tenant_id,
             user_id,
+            agent_id,
+            project_id,
             capabilities,
         }
     }
 
-    pub fn user(user_id: UserId) -> Self {
-        Self::new(user_id, WebUiV2Capabilities::default())
+    pub fn user(tenant_id: TenantId, user_id: UserId) -> Self {
+        Self::new(tenant_id, user_id, None, None, WebUiV2Capabilities::default())
     }
 
-    pub fn operator(user_id: UserId) -> Self {
+    pub fn operator(tenant_id: TenantId, user_id: UserId) -> Self {
         Self::new(
+            tenant_id,
             user_id,
+            None,
+            None,
             WebUiV2Capabilities {
                 operator_webui_config: true,
             },
@@ -667,7 +685,6 @@ pub fn webui_v2_app_with_lifecycle(
     );
     let operator_routes = build_operator_webui_config_route_state(&operator_descriptors);
     let auth_state = AuthLayerState {
-        tenant_id: config.tenant_id.clone(),
         default_agent_id: config.default_agent_id.clone(),
         default_project_id: config.default_project_id.clone(),
         authenticator: config.authenticator.clone(),
@@ -841,7 +858,6 @@ async fn reborn_health_handler() -> Json<RebornHealthResponse> {
 
 #[derive(Clone)]
 struct AuthLayerState {
-    tenant_id: TenantId,
     default_agent_id: Option<AgentId>,
     default_project_id: Option<ProjectId>,
     authenticator: Arc<dyn WebuiAuthenticator>,
@@ -877,34 +893,35 @@ async fn authenticate_request(
         return forbidden();
     }
 
-    // Stamp the trusted agent/project from host installation config
-    // onto every authenticated caller. The downstream facade builds
-    // `ThreadScope` from `caller.agent_id` and 400s if it's missing,
-    // so a binary that fails to thread agent_id through here would
-    // authenticate users only to reject every v2 mutation/read. The
-    // browser body cannot influence either of these identifiers — by
+    // Use the authenticated session's tenant/agent/project scope,
+    // falling back to host installation config defaults. The downstream
+    // facade builds `ThreadScope` from `caller.agent_id` and 400s if
+    // it's missing, so the fallback ensures env-bearer (operator)
+    // callers and legacy single-tenant configurations keep working
+    // without requiring every authenticator to supply agent/project.
+    // The browser body cannot influence any of these identifiers — by
     // contract `WebuiServeConfig` is host-owned.
     #[cfg(feature = "openai-compat-beta")]
     let openai_user_id = auth.user_id.clone();
     let caller = WebUiAuthenticatedCaller::new(
-        state.tenant_id.clone(),
+        auth.tenant_id.clone(),
         auth.user_id,
-        state.default_agent_id.clone(),
-        state.default_project_id.clone(),
+        auth.agent_id.clone().or(state.default_agent_id.clone()),
+        auth.project_id.clone().or(state.default_project_id.clone()),
     );
     request.extensions_mut().insert(caller);
     request.extensions_mut().insert(auth.capabilities);
     #[cfg(feature = "openai-compat-beta")]
     {
         let scope = ironclaw_reborn_openai_compat::OpenAiCompatActorScope::new(
-            state.tenant_id.clone(),
+            auth.tenant_id.clone(),
             openai_user_id.clone(),
-            state.default_agent_id.clone(),
-            state.default_project_id.clone(),
+            auth.agent_id.clone().or(state.default_agent_id.clone()),
+            auth.project_id.clone().or(state.default_project_id.clone()),
         );
         let auth_evidence = ironclaw_product_adapters::mark_bearer_token_verified_for_tenant(
             openai_user_id.as_str(),
-            state.tenant_id.clone(),
+            auth.tenant_id.clone(),
         );
         let caller = match ironclaw_reborn_openai_compat::OpenAiCompatAuthenticatedCaller::new(
             scope,

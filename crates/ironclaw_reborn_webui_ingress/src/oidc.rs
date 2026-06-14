@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::UserId;
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_reborn_composition::{WebuiAuthentication, WebuiAuthenticator};
 use jsonwebtoken::{Algorithm, DecodingKey, TokenData, Validation, decode, decode_header};
 use parking_lot::RwLock;
@@ -218,6 +218,11 @@ pub struct OidcAuthenticator {
     /// stampede the JWKS endpoint.
     refresh_lock: Arc<tokio::sync::Mutex<()>>,
     claim_to_user_id: ClaimToUserIdFn,
+    /// Host-installation tenant id — stamped onto every authenticated
+    /// caller resolved from this OIDC identity.
+    tenant_id: TenantId,
+    agent_id: Option<AgentId>,
+    project_id: Option<ProjectId>,
 }
 
 impl std::fmt::Debug for OidcAuthenticator {
@@ -234,6 +239,20 @@ impl OidcAuthenticator {
     pub fn new(
         config: OidcAuthenticatorConfig,
         claim_to_user_id: ClaimToUserIdFn,
+    ) -> Result<Self, OidcAuthenticatorError> {
+        Self::new_with_scope(config, claim_to_user_id, None, None, None)
+    }
+
+    /// Construct an OIDC authenticator with explicit tenant/agent/project
+    /// scope. When tenant/agent/project are `None`, the
+    /// `authenticate_request` middleware stamps the fallback host-config
+    /// values.
+    pub fn new_with_scope(
+        config: OidcAuthenticatorConfig,
+        claim_to_user_id: ClaimToUserIdFn,
+        tenant_id: Option<TenantId>,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
     ) -> Result<Self, OidcAuthenticatorError> {
         // Reject non-HTTPS JWKS URLs at construction so a misconfigured
         // deployment can't accidentally trust an attacker-replaceable
@@ -255,6 +274,10 @@ impl OidcAuthenticator {
             cache: Arc::new(RwLock::new(JwksCache::default())),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             claim_to_user_id,
+            tenant_id: tenant_id
+                .unwrap_or_else(|| TenantId::new("__unset__").expect("__unset__ is a valid TenantId")),
+            agent_id,
+            project_id,
         })
     }
 
@@ -689,7 +712,15 @@ impl WebuiAuthenticator for OidcAuthenticator {
         {
             return None;
         }
-        (self.claim_to_user_id)(&claims).map(WebuiAuthentication::user)
+        (self.claim_to_user_id)(&claims).map(|user_id| {
+            WebuiAuthentication::new(
+                self.tenant_id.clone(),
+                user_id,
+                self.agent_id.clone(),
+                self.project_id.clone(),
+                Default::default(),
+            )
+        })
     }
 }
 

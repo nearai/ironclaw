@@ -68,6 +68,7 @@ impl WebuiAuthenticator for OnlyValidToken {
     async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
         if token == VALID_TOKEN {
             Some(WebuiAuthentication::operator(
+                TenantId::new(TENANT).expect("tenant"),
                 UserId::new(USER).expect("user id"),
             ))
         } else {
@@ -87,6 +88,7 @@ impl WebuiAuthenticator for MultiUserToken {
     async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
         if token == VALID_TOKEN {
             Some(WebuiAuthentication::user(
+                TenantId::new(TENANT).expect("tenant"),
                 UserId::new(USER).expect("user id"),
             ))
         } else {
@@ -1940,9 +1942,13 @@ async fn rate_limit_is_independent_per_caller() {
         async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
             match token {
                 "tok-alice" => Some(WebuiAuthentication::user(
+                    TenantId::new("tenant-alpha").expect("tenant"),
                     UserId::new("alice").expect("user"),
                 )),
-                "tok-bob" => Some(WebuiAuthentication::user(UserId::new("bob").expect("user"))),
+                "tok-bob" => Some(WebuiAuthentication::user(
+                    TenantId::new("tenant-alpha").expect("tenant"),
+                    UserId::new("bob").expect("user"),
+                )),
                 _ => None,
             }
         }

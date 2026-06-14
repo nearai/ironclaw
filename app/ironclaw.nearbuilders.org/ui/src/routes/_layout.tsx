@@ -68,21 +68,19 @@ function Layout() {
                     to="/"
                     preload="intent"
                     aria-label={`${appName} home`}
-                    className="mb-3 flex items-center justify-center w-10 h-10 border-2 border-outset border-border-strong bg-card shadow-sm transition-shadow duration-200 hover:shadow-md"
+                    className="mb-3 flex items-center justify-center w-10 h-10"
                   >
-                    <svg
-                      viewBox="0 0 24 24"
-                      fill="currentColor"
-                      className="w-5 h-5 text-foreground"
-                      aria-label={`${appName} logo`}
-                    >
-                      <title>{appName}</title>
-                      <circle cx="12" cy="12" r="10" />
-                    </svg>
+                    <img
+                      src="/logo.png"
+                      alt={`${appName} logo`}
+                      className="w-full h-full object-contain"
+                    />
                   </Link>
                 </TooltipTrigger>
                 <TooltipContent side="right">{appName}</TooltipContent>
               </Tooltip>
+
+              <div className="w-8 h-px bg-border/20 my-1" />
 
               {visibleItems.map((item) => {
                 const Icon = item.icon;
@@ -145,19 +143,15 @@ function Layout() {
                 <div className="flex items-center gap-2 text-xs text-muted-foreground font-mono min-w-0">
                   <Link
                     aria-label={`${appName} home`}
-                    className="sm:hidden flex items-center justify-center w-8 h-8 border-2 border-outset border-border-strong bg-card shadow-sm transition-shadow duration-200 hover:shadow-md"
+                    className="sm:hidden flex items-center justify-center w-8 h-8"
                     to="/"
                     preload="intent"
                   >
-                    <svg
-                      viewBox="0 0 24 24"
-                      fill="currentColor"
-                      className="w-4 h-4 text-foreground"
-                      aria-label={`${appName} logo`}
-                    >
-                      <title>{appName}</title>
-                      <circle cx="12" cy="12" r="10" />
-                    </svg>
+                    <img
+                      src="/logo.png"
+                      alt={`${appName} logo`}
+                      className="w-full h-full object-contain"
+                    />
                   </Link>
 
                   <div className="hidden sm:flex items-center gap-2">

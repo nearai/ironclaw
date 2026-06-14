@@ -18,7 +18,8 @@
   },
   "dependencies": {
     "@orpc/contract": "catalog:",
-    "@orpc/server": "catalog:"
+    "@orpc/server": "catalog:",
+    "eventsource": "catalog:"
   },
   "devDependencies": {
     "@effect/language-service": "^0.85.1",

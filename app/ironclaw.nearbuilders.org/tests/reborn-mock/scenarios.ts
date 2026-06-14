@@ -25,9 +25,7 @@ function buildHealthyChat(threadId: string, baseState: RebornMockState): RebornM
       messages: [TIMELINE_MSG],
     },
   ];
-  state.automations = [
-    { id: "auto-001", name: "Daily Summary", status: "active", isActive: true },
-  ];
+  state.automations = [{ id: "auto-001", name: "Daily Summary", status: "active", isActive: true }];
   state.outboundPrefs = {
     finalReplyTarget: {
       targetId: "target-001",
@@ -67,14 +65,16 @@ function buildHealthyChat(threadId: string, baseState: RebornMockState): RebornM
     },
   ];
   state.skills = [
-    { name: "hackathon-guide", description: "Hackathon participation guide", version: "1.0.0", trust: "sandboxed", source: "local" },
+    {
+      name: "hackathon-guide",
+      description: "Hackathon participation guide",
+      version: "1.0.0",
+      trust: "sandboxed",
+      source: "local",
+    },
   ];
-  state.connectableChannels = [
-    { channel: "slack", displayName: "Slack", strategy: "oauth" },
-  ];
-  state.authProviders = [
-    { id: "near", name: "NEAR", type: "wallet" },
-  ];
+  state.connectableChannels = [{ channel: "slack", displayName: "Slack", strategy: "oauth" }];
+  state.authProviders = [{ id: "near", name: "NEAR", type: "wallet" }];
   return state;
 }
 
@@ -101,13 +101,33 @@ export function applyScenario(baseState: RebornMockState, name: ScenarioName): R
         write("accepted", {
           cursor: 1,
           type: "accepted",
-          ack: { outcome: "submitted", thread_id: THREAD_ID, run_id: "run-001", accepted_message_ref: "msg-002", status: "running", turn_id: "turn-001", event_cursor: 1 },
+          ack: {
+            outcome: "submitted",
+            thread_id: THREAD_ID,
+            run_id: "run-001",
+            accepted_message_ref: "msg-002",
+            status: "running",
+            turn_id: "turn-001",
+            event_cursor: 1,
+          },
         });
-        write("running", { cursor: 2, type: "running", progress: { kind: "reasoning", turn_run_id: "run-001", generated_at: new Date().toISOString() } });
+        write("running", {
+          cursor: 2,
+          type: "running",
+          progress: {
+            kind: "reasoning",
+            turn_run_id: "run-001",
+            generated_at: new Date().toISOString(),
+          },
+        });
         write("final_reply", {
           cursor: 3,
           type: "final_reply",
-          reply: { text: "Here is my final answer! I've analyzed your request.", turn_run_id: "run-001", generated_at: new Date().toISOString() },
+          reply: {
+            text: "Here is my final answer! I've analyzed your request.",
+            turn_run_id: "run-001",
+            generated_at: new Date().toISOString(),
+          },
         });
       };
       return s;
@@ -119,7 +139,15 @@ export function applyScenario(baseState: RebornMockState, name: ScenarioName): R
         write("accepted", {
           cursor: 1,
           type: "accepted",
-          ack: { outcome: "submitted", thread_id: THREAD_ID, run_id: "run-002", accepted_message_ref: "msg-003", status: "running", turn_id: "turn-002", event_cursor: 1 },
+          ack: {
+            outcome: "submitted",
+            thread_id: THREAD_ID,
+            run_id: "run-002",
+            accepted_message_ref: "msg-003",
+            status: "running",
+            turn_id: "turn-002",
+            event_cursor: 1,
+          },
         });
         write("gate", {
           cursor: 2,
@@ -139,7 +167,19 @@ export function applyScenario(baseState: RebornMockState, name: ScenarioName): R
     case "stream-failed": {
       const s = buildHealthyChat(THREAD_ID, state);
       s.sseHandler = async (write) => {
-        write("accepted", { cursor: 1, type: "accepted", ack: { outcome: "submitted", thread_id: THREAD_ID, run_id: "run-003", accepted_message_ref: "msg-004", status: "running", turn_id: "turn-003", event_cursor: 1 } });
+        write("accepted", {
+          cursor: 1,
+          type: "accepted",
+          ack: {
+            outcome: "submitted",
+            thread_id: THREAD_ID,
+            run_id: "run-003",
+            accepted_message_ref: "msg-004",
+            status: "running",
+            turn_id: "turn-003",
+            event_cursor: 1,
+          },
+        });
         write("failed", {
           cursor: 2,
           type: "failed",
@@ -162,11 +202,185 @@ export function applyScenario(baseState: RebornMockState, name: ScenarioName): R
     case "stream-cancelled": {
       const s = buildHealthyChat(THREAD_ID, state);
       s.sseHandler = async (write) => {
-        write("accepted", { cursor: 1, type: "accepted", ack: { outcome: "submitted", thread_id: THREAD_ID, run_id: "run-004", accepted_message_ref: "msg-005", status: "running", turn_id: "turn-004", event_cursor: 1 } });
+        write("accepted", {
+          cursor: 1,
+          type: "accepted",
+          ack: {
+            outcome: "submitted",
+            thread_id: THREAD_ID,
+            run_id: "run-004",
+            accepted_message_ref: "msg-005",
+            status: "running",
+            turn_id: "turn-004",
+            event_cursor: 1,
+          },
+        });
         write("cancelled", {
           cursor: 2,
           type: "cancelled",
-          response: { run_id: "run-004", status: "cancelled", event_cursor: 2, already_terminal: false },
+          response: {
+            run_id: "run-004",
+            status: "cancelled",
+            event_cursor: 2,
+            already_terminal: false,
+          },
+        });
+      };
+      return s;
+    }
+
+    case "stream-auth-required": {
+      const s = buildHealthyChat(THREAD_ID, state);
+      s.sseHandler = async (write) => {
+        write("accepted", {
+          cursor: 1,
+          type: "accepted",
+          ack: {
+            outcome: "submitted",
+            thread_id: THREAD_ID,
+            run_id: "run-006",
+            accepted_message_ref: "msg-007",
+            status: "running",
+            turn_id: "turn-006",
+            event_cursor: 1,
+          },
+        });
+        write("auth_required", {
+          cursor: 2,
+          type: "auth_required",
+          auth_prompt: {
+            turn_run_id: "run-006",
+            auth_request_ref: "auth-001",
+            headline: "Authentication required",
+            body: "The agent needs to authenticate with an external service.",
+            provider: "oauth2",
+            account_label: "example@test.com",
+            authorization_url: "https://test.com/auth",
+          },
+        });
+      };
+      return s;
+    }
+
+    case "stream-projection": {
+      const s = buildHealthyChat(THREAD_ID, state);
+      s.sseHandler = async (write) => {
+        write("accepted", {
+          cursor: 1,
+          type: "accepted",
+          ack: {
+            outcome: "submitted",
+            thread_id: THREAD_ID,
+            run_id: "run-007",
+            accepted_message_ref: "msg-008",
+            status: "running",
+            turn_id: "turn-007",
+            event_cursor: 1,
+          },
+        });
+        write("running", {
+          cursor: 2,
+          type: "running",
+          progress: {
+            kind: "reasoning",
+            turn_run_id: "run-007",
+            generated_at: new Date().toISOString(),
+          },
+        });
+        write("projection_snapshot", {
+          cursor: 3,
+          type: "projection_snapshot",
+          state: {
+            thread_id: THREAD_ID,
+            items: [{ id: "item-1", label: "Research phase", status: "in_progress" }],
+          },
+        });
+        write("projection_update", {
+          cursor: 4,
+          type: "projection_update",
+          state: {
+            thread_id: THREAD_ID,
+            items: [
+              { id: "item-1", label: "Research phase", status: "completed" },
+              { id: "item-2", label: "Implementation", status: "in_progress" },
+            ],
+          },
+        });
+        write("final_reply", {
+          cursor: 5,
+          type: "final_reply",
+          reply: {
+            text: "Projection-complete reply.",
+            turn_run_id: "run-007",
+            generated_at: new Date().toISOString(),
+          },
+        });
+      };
+      return s;
+    }
+
+    case "stream-capability": {
+      const s = buildHealthyChat(THREAD_ID, state);
+      s.sseHandler = async (write) => {
+        write("accepted", {
+          cursor: 1,
+          type: "accepted",
+          ack: {
+            outcome: "submitted",
+            thread_id: THREAD_ID,
+            run_id: "run-008",
+            accepted_message_ref: "msg-009",
+            status: "running",
+            turn_id: "turn-008",
+            event_cursor: 1,
+          },
+        });
+        write("running", {
+          cursor: 2,
+          type: "running",
+          progress: {
+            kind: "reasoning",
+            turn_run_id: "run-008",
+            generated_at: new Date().toISOString(),
+          },
+        });
+        write("capability_activity", {
+          cursor: 3,
+          type: "capability_activity",
+          activity: {
+            invocation_id: "inv-001",
+            turn_run_id: "run-008",
+            capability_id: "search-web",
+            status: "running",
+            provider: "web",
+            updated_at: new Date().toISOString(),
+          },
+        });
+        write("capability_display_preview", {
+          cursor: 4,
+          type: "capability_display_preview",
+          preview: {
+            invocation_id: "inv-001",
+            turn_run_id: "run-008",
+            capability_id: "search-web",
+            status: "completed",
+            title: "Search results for query",
+            subtitle: "3 results found",
+            output_summary: "Found relevant information",
+            output_kind: "markdown",
+            output_bytes: 1024,
+            truncated: false,
+            updated_at: new Date().toISOString(),
+          },
+        });
+        write("final_reply", {
+          cursor: 5,
+          type: "final_reply",
+          reply: {
+            text: "Capability-complete reply.",
+            turn_run_id: "run-008",
+            generated_at: new Date().toISOString(),
+          },
         });
       };
       return s;
@@ -176,12 +390,36 @@ export function applyScenario(baseState: RebornMockState, name: ScenarioName): R
       const s = buildHealthyChat(THREAD_ID, state);
       s.dropCount = 0;
       s.sseHandler = async (write) => {
-        write("accepted", { cursor: 1, type: "accepted", ack: { outcome: "submitted", thread_id: THREAD_ID, run_id: "run-005", accepted_message_ref: "msg-006", status: "running", turn_id: "turn-005", event_cursor: 1 } });
-        write("running", { cursor: 2, type: "running", progress: { kind: "reasoning", turn_run_id: "run-005", generated_at: new Date().toISOString() } });
+        write("accepted", {
+          cursor: 1,
+          type: "accepted",
+          ack: {
+            outcome: "submitted",
+            thread_id: THREAD_ID,
+            run_id: "run-005",
+            accepted_message_ref: "msg-006",
+            status: "running",
+            turn_id: "turn-005",
+            event_cursor: 1,
+          },
+        });
+        write("running", {
+          cursor: 2,
+          type: "running",
+          progress: {
+            kind: "reasoning",
+            turn_run_id: "run-005",
+            generated_at: new Date().toISOString(),
+          },
+        });
         write("final_reply", {
           cursor: 3,
           type: "final_reply",
-          reply: { text: "Final answer after reconnection.", turn_run_id: "run-005", generated_at: new Date().toISOString() },
+          reply: {
+            text: "Final answer after reconnection.",
+            turn_run_id: "run-005",
+            generated_at: new Date().toISOString(),
+          },
         });
       };
       return s;

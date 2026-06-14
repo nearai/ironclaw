@@ -131,10 +131,6 @@ impl ServeCommand {
         // value is consumed here.
         let token_byte_len = token_value.len();
         let session_signing_secret = SecretString::from(token_value.clone());
-        let env_authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(EnvBearerAuthenticator::new(
-            SecretString::from(token_value),
-            user_id.clone(),
-        )?);
 
         // Resolve trusted host-installation default agent/project from
         // `[identity]`. The v2 facade builds `ThreadScope` from
@@ -167,6 +163,14 @@ impl ServeCommand {
             .map(ProjectId::new)
             .transpose()
             .map_err(|err| anyhow!("[identity].default_project is invalid: {err}"))?;
+
+        let env_authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(EnvBearerAuthenticator::new(
+            SecretString::from(token_value),
+            tenant_id.clone(),
+            user_id.clone(),
+            Some(default_agent_id.clone()),
+            default_project_id.clone(),
+        )?);
         if let Some(project_id) = default_project_id.clone() {
             runtime_input = runtime_input.with_default_project_id(project_id);
         }

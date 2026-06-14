@@ -839,6 +839,7 @@ mod tests {
         async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
             if token == "operator-token" {
                 Some(WebuiAuthentication::operator(
+                    TenantId::new(TENANT).expect("tenant"),
                     UserId::new(USER).expect("user"),
                 ))
             } else {
@@ -857,7 +858,10 @@ mod tests {
     impl WebuiAuthenticator for MultiUserTokenAuthenticator {
         async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
             if token == "operator-token" {
-                Some(WebuiAuthentication::user(UserId::new(USER).expect("user")))
+                Some(WebuiAuthentication::user(
+                    TenantId::new(TENANT).expect("tenant"),
+                    UserId::new(USER).expect("user"),
+                ))
             } else {
                 None
             }
