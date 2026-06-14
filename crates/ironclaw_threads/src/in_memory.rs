@@ -146,6 +146,8 @@ impl SessionThreadService for InMemorySessionThreadService {
         let message_id = ThreadMessageId::new();
         let sequence = thread.next_sequence;
         thread.next_sequence += 1;
+        let (content_text, attachments) = request.content.into_parts();
+        crate::contract::validate_attachment_refs(&attachments)?;
         thread.messages.push(ThreadMessageRecord {
             message_id,
             thread_id: request.thread_id.clone(),
@@ -159,7 +161,8 @@ impl SessionThreadService for InMemorySessionThreadService {
             turn_run_id: None,
             tool_result_ref: None,
             tool_result_provider_call: None,
-            content: Some(request.content.into_text()),
+            content: Some(content_text),
+            attachments,
             redaction_ref: None,
         });
 
@@ -276,6 +279,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             tool_result_ref: None,
             tool_result_provider_call: None,
             content: Some(request.content.into_text()),
+            attachments: Vec::new(),
             redaction_ref: None,
         };
         thread.next_sequence += 1;
@@ -356,6 +360,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             tool_result_ref: Some(envelope.result_ref),
             tool_result_provider_call: provider_call,
             content: Some(content),
+            attachments: Vec::new(),
             redaction_ref: None,
         };
         thread.next_sequence += 1;
@@ -403,6 +408,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             tool_result_ref: request.preview.result_ref.clone(),
             tool_result_provider_call: None,
             content: Some(content),
+            attachments: Vec::new(),
             redaction_ref: None,
         };
         thread.next_sequence += 1;
@@ -459,6 +465,10 @@ impl SessionThreadService for InMemorySessionThreadService {
         )?;
         ensure_draft(message)?;
         message.content = Some(request.content.into_text());
+        // Keep content and attachments in lockstep (as redaction does): an
+        // assistant draft carries no attachments, so a content update must not
+        // leave stale refs behind if a future draft path ever sets them.
+        message.attachments = Vec::new();
         Ok(message.clone())
     }
 
@@ -474,6 +484,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         ensure_draft(message)?;
         message.status = MessageStatus::Finalized;
         message.content = Some(content.into_text());
+        message.attachments = Vec::new();
         Ok(message.clone())
     }
 
@@ -490,6 +501,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         )?;
         message.status = MessageStatus::Redacted;
         message.content = None;
+        message.attachments = Vec::new();
         message.tool_result_provider_call = None;
         message.redaction_ref = Some(request.redaction_ref);
         Ok(message.clone())
@@ -980,6 +992,11 @@ fn history_messages(thread: &StoredThread) -> Vec<ThreadMessageRecord> {
     thread.messages.iter().map(history_message).collect()
 }
 
+// Deny-by-default projection: every field is listed deliberately so a newly
+// added sensitive field does NOT auto-flow into persisted history. Do not
+// collapse to `..message.clone()` — `tool_result_provider_call` is dropped
+// here precisely because raw runtime/tool payloads must never surface as
+// ordinary transcript content (see crate guardrails).
 fn history_message(message: &ThreadMessageRecord) -> ThreadMessageRecord {
     ThreadMessageRecord {
         message_id: message.message_id,
@@ -995,6 +1012,7 @@ fn history_message(message: &ThreadMessageRecord) -> ThreadMessageRecord {
         tool_result_ref: message.tool_result_ref.clone(),
         tool_result_provider_call: None,
         content: message.content.clone(),
+        attachments: message.attachments.clone(),
         redaction_ref: message.redaction_ref.clone(),
     }
 }
