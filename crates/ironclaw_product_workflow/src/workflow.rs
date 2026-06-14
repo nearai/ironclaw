@@ -27,11 +27,12 @@ use crate::action::{ActionDispatchKind, ActionFingerprintKey, SourceBindingKey};
 use crate::approval_interaction::{
     ApprovalInteractionDecision, ApprovalInteractionRejectionKind, ApprovalInteractionService,
     ListPendingApprovalsRequest, RejectingApprovalInteractionService,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse, is_approval_gate_ref,
 };
 use crate::auth_interaction::{
     AuthInteractionDecision, AuthInteractionRejectionKind, AuthInteractionService,
     RejectingAuthInteractionService, ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
+    is_auth_gate_ref,
 };
 use crate::binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
@@ -465,6 +466,18 @@ async fn load_delivered_routes_for_envelope(
     binding: &ResolvedBinding,
     delivered_gate_routes: &dyn ironclaw_outbound::DeliveredGateRouteStore,
     expected_gate_ref: Option<&str>,
+    // Applied only on bare lookups (`expected_gate_ref == None`): only routes
+    // whose `gate_ref` satisfies this predicate are considered live. This
+    // separates approval routes (`is_approval_gate_ref`) from auth routes
+    // (`is_auth_gate_ref`) so that a lingering gate of the other kind recorded
+    // in the same conversation bucket cannot make a bare lookup ambiguous.
+    // For exact-ref lookups (`expected_gate_ref == Some(_)`) this predicate is
+    // NOT applied: the exact match is authoritative, and the kind filter can
+    // only total-drop a validly named generic/legacy gate — it can never
+    // disambiguate.  The predicate receives the raw stored gate string directly
+    // — no `GateRef::new` wrap — so routes whose stored string fails validation
+    // are not silently dropped before the predicate runs.
+    gate_kind_filter: fn(&str) -> bool,
 ) -> DeliveredRouteOutcome {
     let conversation_ref = match delivered_route_conversation_ref(envelope) {
         Ok(conversation_ref) => conversation_ref,
@@ -495,8 +508,9 @@ async fn load_delivered_routes_for_envelope(
             return DeliveredRouteOutcome::Miss;
         }
     };
-    // Filter: non-expired, tenant+actor match, and (if explicit ref supplied)
-    // gate_ref match.
+    // Filter: non-expired, tenant+actor match, then either exact-ref match
+    // (when the caller names a specific gate) or gate-kind filter (for bare
+    // lookups only — see gate_kind_filter parameter comment above).
     let live: Vec<ironclaw_outbound::DeliveredGateRouteRecord> = all_routes
         .into_iter()
         .filter(|r| {
@@ -519,9 +533,19 @@ async fn load_delivered_routes_for_envelope(
             if r.tenant_id != binding.tenant_id || r.user_id != binding.actor_user_id {
                 return false;
             }
-            if let Some(expected) = expected_gate_ref
-                && r.gate_ref != expected
-            {
+            if let Some(expected) = expected_gate_ref {
+                // Exact ref named: the named ref is authoritative and the downstream
+                // interaction service decides resolvability. Do NOT apply the gate-kind
+                // filter here — for an exact-ref lookup every surviving route shares the
+                // same gate_ref string, so the kind filter can only total-drop a validly
+                // named generic/legacy gate, never disambiguate.
+                if r.gate_ref != expected {
+                    return false;
+                }
+            } else if !gate_kind_filter(&r.gate_ref) {
+                // Bare lookup: use the kind filter so a lingering gate of the other kind
+                // (e.g. an auth gate when resolving a bare "approve") cannot inflate the
+                // live-route count and trigger a spurious ambiguity.
                 return false;
             }
             true
@@ -566,6 +590,7 @@ async fn select_delivered_gate_route(
     binding_service: &dyn ConversationBindingService,
     delivered_gate_routes: &dyn ironclaw_outbound::DeliveredGateRouteStore,
     expected_gate_ref: Option<&str>,
+    gate_kind_filter: fn(&str) -> bool,
     pre_resolved_binding: Option<&ResolvedBinding>,
     ambiguity_error: impl Fn() -> ProductWorkflowError,
 ) -> Option<Result<SelectedDeliveredRoute, ProductWorkflowError>> {
@@ -588,6 +613,7 @@ async fn select_delivered_gate_route(
         binding,
         delivered_gate_routes,
         expected_gate_ref,
+        gate_kind_filter,
     )
     .await
     {
@@ -618,6 +644,10 @@ async fn resolve_via_delivered_approval_route(
         binding_service,
         delivered_gate_routes,
         expected_gate_ref,
+        // Bare approve must only match approval gates; a lingering auth gate
+        // recorded in the same conversation bucket must not count toward the
+        // ambiguity check or be forwarded to the approval service.
+        is_approval_gate_ref,
         pre_resolved_binding,
         || ProductWorkflowError::ApprovalInteractionRejected {
             kind: ApprovalInteractionRejectionKind::AmbiguousGate,
@@ -691,6 +721,10 @@ async fn resolve_via_delivered_auth_route(
         binding_service,
         delivered_gate_routes,
         expected_gate_ref,
+        // Bare "auth deny" must only match auth gates; a lingering approval
+        // gate recorded in the same conversation bucket must not count toward
+        // the ambiguity check or be forwarded to the auth service.
+        is_auth_gate_ref,
         pre_resolved_binding,
         || ProductWorkflowError::AuthInteractionRejected {
             kind: AuthInteractionRejectionKind::AmbiguousAuth,

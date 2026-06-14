@@ -141,7 +141,7 @@ function MessageBubbleImpl({ message, onRetry }) {
         `}
         <div
           className=${[
-            "text-sm leading-6",
+            "text-base leading-7",
             ROLE_STYLES[role] || ROLE_STYLES.assistant,
             isOptimistic ? "opacity-70" : "",
           ].join(" ")}

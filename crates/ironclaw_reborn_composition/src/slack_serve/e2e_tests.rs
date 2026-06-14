@@ -84,8 +84,8 @@ const CHANNEL: &str = "D123";
 const SLACK_SIGNATURE_HEADER: &str = "X-Slack-Signature";
 const SLACK_TIMESTAMP_HEADER: &str = "X-Slack-Request-Timestamp";
 const SECRET: &str = "topsecret";
-const GATE: &str = "gate:approve-slack";
-const GATE_B: &str = "gate:approve-slack-b";
+const GATE: &str = "gate:approval-00000000-0000-0000-0000-000000000001";
+const GATE_B: &str = "gate:approval-00000000-0000-0000-0000-000000000002";
 const AUTH_GATE: &str = "gate:auth-slack";
 
 struct Harness {
@@ -821,6 +821,101 @@ async fn bare_approve_with_two_live_routes_fails_closed_ambiguous() {
             .is_some_and(|t| t.contains("approve gate:<ref>")),
         "hint must prompt user to pick one gate ref; got: {:?}",
         messages[1]["text"]
+    );
+}
+
+/// Bare `approve` in the DM with ONE approval gate AND one stale/uncompleted
+/// auth gate both delivered to the same DM resolves the approval gate —
+/// NOT AmbiguousGate.
+///
+/// Scenario: a run first triggered an auth gate (e.g. OAuth not yet completed,
+/// still live in the store) and later a second run triggered an approval gate,
+/// both delivered to the same DM.  The user sends a bare "approve".
+/// `list_pending` returns [] (ForeignScopeApprovalService).  The workflow falls
+/// back to the conversation-fingerprint index and finds TWO records.  Before
+/// this fix, both records counted toward `live.len()` → `Ambiguous` → error.
+/// After this fix, the approval-path gate-kind filter drops the auth record,
+/// leaving exactly one approval record → `Single` → resolved successfully.
+///
+/// This test would fail on the pre-fix code path: the auth-gate record would
+/// inflate `live.len()` to 2 and trigger `AmbiguousGate`.
+#[tokio::test]
+async fn bare_approve_with_one_approval_and_one_stale_auth_gate_resolves_approval() {
+    let (harness, inner_approvals) = build_harness_for_delivered_route_tests().await;
+
+    // Submit a turn so the DM conversation binding is created.
+    let block_response = harness.post_event(DM_BLOCK).await;
+    assert_eq!(block_response.status(), StatusCode::OK);
+    harness.drain().await;
+    let blocked_run_id = harness
+        .coordinator
+        .blocked_run_id()
+        .expect("run must be blocked after DM_BLOCK"); // safety: E2E test assertion.
+
+    let fingerprint = dm_conversation_fingerprint();
+
+    // Seed the approval-gate route record (the "real" pending gate the user
+    // wants to resolve).
+    harness
+        .route_store
+        .record_delivered_gate_route(ironclaw_outbound::DeliveredGateRouteRecord {
+            tenant_id: TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
+            user_id: UserId::new(USER).expect("user"), // safety: static test user id is valid.
+            gate_ref: GATE.to_string(), // gate:approval-... prefix — is_approval_gate_ref → true
+            run_id: blocked_run_id,
+            scope: foreign_run_scope(),
+            recorded_at: chrono::Utc::now(),
+            delivered_conversation_fingerprints: vec![fingerprint.clone()],
+        })
+        .await
+        .expect("approval route record write"); // safety: in-memory store should not fail.
+
+    // Seed a stale/uncompleted auth-gate route record in the SAME conversation.
+    // This simulates a lingering `gate:auth-*` record that was never completed
+    // (e.g. the user dismissed the OAuth flow without finishing it).  Because
+    // the 48h TTL has not elapsed it is still "live" and would previously
+    // contaminate the approval bare-resolve lookup.
+    harness
+        .route_store
+        .record_delivered_gate_route(ironclaw_outbound::DeliveredGateRouteRecord {
+            tenant_id: TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
+            user_id: UserId::new(USER).expect("user"), // safety: static test user id is valid.
+            gate_ref: AUTH_GATE.to_string(), // gate:auth-... prefix — is_auth_gate_ref → true
+            run_id: ironclaw_turns::TurnRunId::new(),
+            scope: foreign_run_scope(),
+            recorded_at: chrono::Utc::now(),
+            delivered_conversation_fingerprints: vec![fingerprint],
+        })
+        .await
+        .expect("auth route record write"); // safety: in-memory store should not fail.
+
+    // Post a bare "approve".  Two records exist in the conversation bucket but
+    // only the approval-gate record passes the gate-kind filter, so the workflow
+    // should resolve Single → forward exactly one approval resolve request.
+    let approve_response = harness.post_event(DM_APPROVE).await;
+    assert_eq!(approve_response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let requests = inner_approvals.requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "exactly one approval resolve must be forwarded — auth gate must be filtered out; got {} request(s)",
+        requests.len()
+    );
+    assert_eq!(
+        requests[0].run_id_hint,
+        Some(blocked_run_id),
+        "run_id_hint must come from the approval route record"
+    );
+    assert_eq!(
+        requests[0].gate_ref.as_str(),
+        GATE,
+        "resolved gate_ref must be the approval gate"
+    );
+    assert_eq!(
+        requests[0].decision,
+        ApprovalInteractionDecision::ApproveOnce
     );
 }
 
@@ -1957,7 +2052,9 @@ fn dm_message(event_id: &'static str, text: &'static str) -> &'static str {
         ("Ev-approval", "needs approval") => DM_APPROVAL,
         ("Ev-block", "needs approval") => DM_BLOCK,
         ("Ev-approve", "approve") => DM_APPROVE,
-        ("Ev-approve-explicit", "approve gate:approve-slack") => DM_APPROVE_EXPLICIT_GATE,
+        ("Ev-approve-explicit", "approve gate:approval-00000000-0000-0000-0000-000000000001") => {
+            DM_APPROVE_EXPLICIT_GATE
+        }
         ("Ev-forged", "hello") => DM_FORGED,
         ("Ev-identity", "hello") => DM_IDENTITY,
         ("Ev-auth", "needs auth") => DM_AUTH,
@@ -2099,8 +2196,8 @@ const DM_THREAD_AUTH_CANCEL: &str = r#"{
   "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"`auth deny gate:auth-slack`","ts":"1710000001.123457","thread_ts":"1710000001.123456"}
 }"#;
 
-/// Explicit gate-ref approve in the DM: `approve gate:approve-slack`.
-/// The gate ref token after "approve " is `gate:approve-slack` (= GATE).
+/// Explicit gate-ref approve in the DM: `approve gate:approval-00000000-0000-0000-0000-000000000001`.
+/// The gate ref token after "approve " is GATE (a valid `gate:approval-` prefixed ref).
 /// Used by the delivered-gate-route test that verifies explicit gate ref resolves
 /// directly (binding found → no cross-scope rewrite).
 const DM_APPROVE_EXPLICIT_GATE: &str = r#"{
@@ -2108,7 +2205,7 @@ const DM_APPROVE_EXPLICIT_GATE: &str = r#"{
   "team_id":"T-A",
   "api_app_id":"A-slack",
   "event_id":"Ev-approve-explicit",
-  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"approve gate:approve-slack","ts":"1710000000.000005"}
+  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"approve gate:approval-00000000-0000-0000-0000-000000000001","ts":"1710000000.000005"}
 }"#;
 
 // ── Gate-fanout regression fixtures ──────────────────────────────────────────

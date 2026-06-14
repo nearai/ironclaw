@@ -566,6 +566,49 @@ impl ironclaw_outbound::DeliveredGateRouteStore for FailingRouteStore {
     }
 }
 
+/// A binding service that returns `BindingRequired` for the first
+/// `fail_count` calls and then returns the default `FakeConversationBindingService`
+/// binding. Used to drive the auth BindingRequired delivered-route fallback
+/// while allowing `delivered_route_base_binding` (a subsequent call) to succeed.
+struct BindingRequiredThenSucceedingService {
+    fail_count: usize,
+    call_count: AtomicUsize,
+    inner: FakeConversationBindingService,
+}
+
+impl BindingRequiredThenSucceedingService {
+    fn new(fail_count: usize) -> Self {
+        Self {
+            fail_count,
+            call_count: AtomicUsize::new(0),
+            inner: FakeConversationBindingService::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl ConversationBindingService for BindingRequiredThenSucceedingService {
+    async fn resolve_binding(
+        &self,
+        request: ResolveBindingRequest,
+    ) -> Result<ResolvedBinding, ProductWorkflowError> {
+        self.lookup_binding(request).await
+    }
+
+    async fn lookup_binding(
+        &self,
+        request: ResolveBindingRequest,
+    ) -> Result<ResolvedBinding, ProductWorkflowError> {
+        let n = self.call_count.fetch_add(1, Ordering::SeqCst);
+        if n < self.fail_count {
+            return Err(ProductWorkflowError::BindingRequired {
+                reason: format!("injected failure #{n}"),
+            });
+        }
+        self.inner.lookup_binding(request).await
+    }
+}
+
 #[test]
 fn action_fingerprint_retains_typed_identifiers() {
     let adapter_id = ProductAdapterId::new("test_adapter").expect("valid");
@@ -2050,6 +2093,201 @@ async fn auth_two_live_routes_same_conversation_rejects_ambiguous() {
     );
 }
 
+/// A bare auth-deny arrives in a conversation that has a stale APPROVAL gate
+/// route stored under the same conversation fingerprint.  The auth-kind filter
+/// (`is_auth_gate_ref`) must drop the approval route so it neither:
+///  (a) inflates the live-route count and produces a spurious `AmbiguousAuth` error, nor
+///  (b) forwards the approval route's `run_id` as a `run_id_hint` to the auth service.
+///
+/// This is the symmetric counterpart of `scoped_approval_two_live_routes_same_conversation_rejects_ambiguous`
+/// (which verifies the opposite direction: a lingering auth route does not pollute a bare "approve").
+///
+/// Both stored routes carry valid gate ref strings. The assertion is that the
+/// auth-kind filter (`is_auth_gate_ref`) drops the stale approval route by
+/// prefix — not by GateRef validation — leaving only the live auth route to be
+/// forwarded to the auth interaction service.
+#[tokio::test]
+async fn bare_auth_deny_with_stale_approval_route_selects_auth_route_not_approval() {
+    let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
+        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+    // Store a live APPROVAL-prefixed route in the same conversation bucket.
+    let stale_approval_gate =
+        approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
+    let (stale_run_id, _stale_scope) = record_conversation_route_for_gate_ref(
+        route_store.as_ref(),
+        stale_approval_gate.as_str(),
+        Utc::now(),
+    )
+    .await;
+
+    // The auth deny uses a different, auth-prefixed gate_ref — the one that
+    // was actually delivered with the auth prompt.
+    let auth_gate_ref = GateRef::new("gate:auth-deny-with-stale-approval").expect("auth gate ref");
+    let auth_service = Arc::new(MissingAuthThenRecordingAuthService::default());
+    let workflow = DefaultProductWorkflow::new(
+        Arc::new(FakeInboundTurnService::new()),
+        Arc::new(FakeIdempotencyLedger::new()),
+        Arc::new(FakeConversationBindingService::new()),
+    )
+    .with_auth_interaction_service(auth_service.clone())
+    .with_delivered_gate_routes(route_store);
+
+    // The auth deny must not succeed (the auth route was never stored), but
+    // the key assertion is that the stale approval route is not forwarded to
+    // the auth service as a run_id_hint.
+    let err = workflow
+        .accept_inbound(auth_thread_reply_envelope(
+            "bare-auth-deny-stale-approval",
+            auth_gate_ref.as_str(),
+        ))
+        .await
+        .expect_err("auth gate not stored — must fall through to MissingAuth rejection");
+
+    // MissingAuth (404) — the auth route was never stored, so after the kind
+    // filter drops the stale approval route the lookup is a Miss and the
+    // workflow falls back to the normal auth-service path with no run_id_hint.
+    assert!(
+        matches!(
+            err,
+            ProductAdapterError::WorkflowRejected {
+                kind: ProductWorkflowRejectionKind::ScopeNotFound,
+                status_code: 404,
+                ..
+            }
+        ),
+        "expected ScopeNotFound/404 (MissingAuth fallthrough), got: {err:?}"
+    );
+
+    // The auth service receives exactly one call:
+    //  • The initial direct-binding attempt, which returns `MissingAuth`.
+    //    After that, the delivered-route fallback runs: the kind filter drops
+    //    the stale approval route (wrong prefix), leaving a Miss.  A Miss means
+    //    the fallback returns `None`, so the workflow re-surfaces the original
+    //    `MissingAuth` error — no second service call is made.
+    let resolutions = auth_service.resolutions();
+    assert_eq!(
+        resolutions.len(),
+        1,
+        "auth service must receive exactly one call (direct attempt; fallback Miss suppresses second), got: {resolutions:?}"
+    );
+    // The single call must not carry the stale approval route's run_id.
+    assert_ne!(
+        resolutions[0].run_id_hint,
+        Some(stale_run_id),
+        "stale approval route's run_id must never reach the auth service"
+    );
+    assert_eq!(
+        resolutions[0].run_id_hint, None,
+        "no auth delivered route matched — run_id_hint must be None"
+    );
+    assert_eq!(
+        resolutions[0].gate_ref, auth_gate_ref,
+        "auth service must receive the auth gate_ref, not the stale approval gate_ref"
+    );
+}
+
+/// An exact-named generic/legacy gate ref (one whose stored string does NOT
+/// start with `"gate:auth"` / `"gate:hook-auth-"`) must be FORWARDED to the
+/// auth interaction service on the delivered-route fallback path, not silently
+/// dropped by the gate-kind filter.
+///
+/// Regression test for the ordering bug: the old code applied
+/// `gate_kind_filter` before the `expected_gate_ref` exact-match check, so an
+/// explicitly-named generic gate (e.g. `"gate:approve-slack"` for the auth
+/// side, any string without the auth prefix) was dropped by `is_auth_gate_ref`
+/// returning `false` before the exact-match could select it.  For an
+/// exact-ref lookup the kind filter can never disambiguate (all surviving
+/// routes share the same gate_ref string); it can only total-drop a validly
+/// named route — which is exactly the wrong outcome.
+///
+/// After the fix: `gate_kind_filter` is skipped entirely when
+/// `expected_gate_ref` is `Some(_)`.  The exact match is authoritative, and
+/// the route is selected and forwarded to the interaction service.
+///
+/// We exercise the auth-resolution path here because it has a convenient
+/// `MissingAuth` fallback that triggers `resolve_via_delivered_auth_route`
+/// even when the initial binding lookup succeeds: the first auth-service call
+/// returns `MissingAuth`, then the workflow enters the delivered-route fallback
+/// with `expected_gate_ref = Some(payload.auth_request_ref)`.  The approval
+/// side's equivalent fallback only triggers on `BindingRequired`, which
+/// requires a more complex binding-service setup.
+#[tokio::test]
+async fn exact_named_generic_approval_gate_is_forwarded_not_dropped_by_kind_filter() {
+    // Use a gate_ref that does NOT match any auth prefix ("gate:auth",
+    // "gate:auth-", "gate:hook-auth-"), so is_auth_gate_ref returns false —
+    // the old code would have dropped this route; the fixed code must not.
+    let generic_gate_ref = "gate:approve-slack";
+    let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
+        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+    let (run_id, route_scope) =
+        record_conversation_route_for_gate_ref(route_store.as_ref(), generic_gate_ref, Utc::now())
+            .await;
+    // MissingAuthThenRecordingAuthService: on the first call (run_id_hint=None)
+    // returns MissingAuth, which triggers the delivered-route fallback.  On
+    // the second call (run_id_hint=Some) it returns Canceled (Deny path), which
+    // maps to Accepted.
+    let auth_service = Arc::new(MissingAuthThenRecordingAuthService::default());
+    let workflow = DefaultProductWorkflow::new(
+        Arc::new(FakeInboundTurnService::new()),
+        Arc::new(FakeIdempotencyLedger::new()),
+        Arc::new(FakeConversationBindingService::new()),
+    )
+    .with_auth_interaction_service(auth_service.clone())
+    .with_delivered_gate_routes(route_store);
+
+    // Drive the AuthResolution path: FakeConversationBindingService returns a
+    // binding, so the direct auth-service call fires first with run_id_hint=None
+    // → MissingAuth → triggers resolve_via_delivered_auth_route with
+    // expected_gate_ref = Some("gate:approve-slack").  The kind filter must NOT
+    // drop the stored route (even though is_auth_gate_ref returns false for it).
+    let ack = workflow
+        .accept_inbound(auth_thread_reply_envelope(
+            "generic-gate-forwarded-not-dropped",
+            generic_gate_ref,
+        ))
+        .await
+        .expect("generic gate named explicitly must be forwarded via delivered-route, not dropped by kind filter");
+
+    // The route must be selected and the auth interaction service called a
+    // second time with the run_id_hint from the stored delivered route.
+    assert!(
+        matches!(ack, ProductInboundAck::Accepted { submitted_run_id, .. } if submitted_run_id == run_id),
+        "expected Accepted with run_id from the generic gate route, got: {ack:?}"
+    );
+    let resolutions = auth_service.resolutions();
+    assert_eq!(
+        resolutions.len(),
+        2,
+        "auth service must receive two calls: initial MissingAuth + delivered-route forwarding, got: {resolutions:?}"
+    );
+    // First call: direct path, no run_id_hint — this returns MissingAuth.
+    assert_eq!(
+        resolutions[0].run_id_hint, None,
+        "first call must be the direct path with no run_id_hint"
+    );
+    assert_eq!(
+        resolutions[0].gate_ref.as_str(),
+        generic_gate_ref,
+        "first call must carry the generic gate_ref"
+    );
+    // Second call: delivered-route path — must carry the run_id_hint and
+    // gate_ref from the stored route.
+    assert_eq!(
+        resolutions[1].run_id_hint,
+        Some(run_id),
+        "second call must carry the run_id_hint from the stored delivered route"
+    );
+    assert_eq!(
+        resolutions[1].gate_ref.as_str(),
+        generic_gate_ref,
+        "second call must carry the generic gate_ref string unchanged"
+    );
+    assert_eq!(
+        resolutions[1].scope.thread_id, route_scope.thread_id,
+        "second call must carry the scope from the stored delivered route"
+    );
+}
+
 /// Explicit auth with a gate_ref that matches no stored delivered route must
 /// fall through to the interaction service with the original gate_ref.
 #[tokio::test]
@@ -2091,6 +2329,169 @@ async fn explicit_auth_gate_ref_mismatch_leaves_original_rejection() {
     assert_eq!(
         resolutions[0].run_id_hint, None,
         "no run_id_hint when route missed"
+    );
+}
+
+/// A stored delivered-route whose raw gate_ref string passes the approval-kind
+/// prefix predicate (`is_approval_gate_ref`: `starts_with("gate:approval-")`)
+/// but is too long to pass `GateRef::new` (> 256 bytes) must be SELECTED by
+/// the kind filter — not silently dropped — and then surface an
+/// `InvalidGateRef` rejection rather than a silent Miss or BindingRequired.
+///
+/// This verifies the `InvalidGateRef` branch in
+/// `resolve_via_delivered_approval_route` that was previously unreachable
+/// because the old `fn(&GateRef) -> bool` filter pre-validated the stored
+/// string with `GateRef::new`, silently dropping any route that failed
+/// construction before the predicate could run.  The new `fn(&str) -> bool`
+/// predicate receives the raw stored string directly, so an
+/// oversized-but-prefixed string is selected and surfaces the error.
+///
+/// The invalid string used here is `"gate:approval-" + "a" * 243` = 257 bytes:
+///  - passes `is_approval_gate_ref` (starts with `"gate:approval-"`)
+///  - passes `validate_token_string` used by adapter payloads (max 512 bytes)
+///  - fails `GateRef::new` (`validate_ref` cap is 256 bytes)
+#[tokio::test]
+async fn bare_approve_with_invalid_stored_approval_route_rejects_invalid_gate_ref() {
+    // "gate:approval-" = 14 bytes; 14 + 243 = 257 bytes → fails GateRef::new.
+    let invalid_gate_ref_str = format!("gate:approval-{}", "a".repeat(243));
+    assert_eq!(invalid_gate_ref_str.len(), 257);
+    // Confirm predicate accepts but GateRef::new rejects.
+    assert!(
+        ironclaw_product_workflow::is_approval_gate_ref(&invalid_gate_ref_str),
+        "test string must pass is_approval_gate_ref"
+    );
+    assert!(
+        ironclaw_turns::GateRef::new(invalid_gate_ref_str.as_str()).is_err(),
+        "test string must fail GateRef::new"
+    );
+
+    let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
+        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+    record_conversation_route_for_gate_ref(route_store.as_ref(), &invalid_gate_ref_str, Utc::now())
+        .await;
+
+    // with_pending(Vec::new()) → list_pending returns [] → MissingGate
+    // fallback fires → resolve_via_delivered_approval_route(None, …) →
+    // kind filter runs → route is selected → GateRef::new fails → InvalidGateRef.
+    let approval_service = Arc::new(RecordingApprovalInteractionService::with_pending(Vec::new()));
+    let workflow = DefaultProductWorkflow::new(
+        Arc::new(FakeInboundTurnService::new()),
+        Arc::new(FakeIdempotencyLedger::new()),
+        Arc::new(FakeConversationBindingService::new()),
+    )
+    .with_approval_interaction_service(approval_service.clone())
+    .with_delivered_gate_routes(route_store);
+
+    let err = workflow
+        .accept_inbound(scoped_approval_thread_reply_envelope(
+            "bare-approve-invalid-stored-gate-ref",
+        ))
+        .await
+        .expect_err("invalid stored gate_ref must surface InvalidGateRef, not a silent Miss");
+
+    assert!(
+        matches!(
+            err,
+            ProductAdapterError::WorkflowRejected {
+                kind: ProductWorkflowRejectionKind::InvalidRequest,
+                status_code: 400,
+                retryable: false,
+                ..
+            }
+        ),
+        "expected InvalidGateRef → InvalidRequest/400, got: {err:?}"
+    );
+    // The approval service must NOT be called — the error comes from
+    // GateRef reconstruction in the delivered-route path, before the
+    // interaction service is reached.
+    assert!(
+        approval_service.resolutions().is_empty(),
+        "approval service must not be called when GateRef reconstruction fails"
+    );
+}
+
+/// A stored delivered-route whose raw gate_ref string passes the auth-kind
+/// prefix predicate (`is_auth_gate_ref`: `starts_with("gate:auth-")`) but is
+/// too long to pass `GateRef::new` (> 256 bytes) must be SELECTED by the
+/// exact-ref match in the BindingRequired delivered-route fallback — and then
+/// surface an `InvalidGateRef` rejection rather than a silent Miss.
+///
+/// This verifies the `InvalidGateRef` branch in
+/// `resolve_via_delivered_auth_route`.  The BindingRequired fallback path is
+/// used because it fires BEFORE `dispatch_auth_resolution` calls
+/// `GateRef::new` on the payload string (line ~1135), allowing the oversized
+/// invalid gate_ref to reach the delivered-route selection code.  The
+/// BindingRequired path calls `resolve_via_delivered_auth_route` with
+/// `expected_gate_ref = Some(payload.auth_request_ref)`, so the oversized
+/// stored string is selected via exact-ref match; the kind filter is not used.
+///
+/// The invalid string used here is `"gate:auth-" + "a" * 247` = 257 bytes:
+///  - passes `is_auth_gate_ref` (starts with `"gate:auth-"`)
+///  - passes `validate_token_string` used by adapter payloads (max 512 bytes)
+///  - fails `GateRef::new` (`validate_ref` cap is 256 bytes)
+#[tokio::test]
+async fn bare_auth_deny_with_invalid_stored_auth_route_rejects_invalid_gate_ref() {
+    // "gate:auth-" = 10 bytes; 10 + 247 = 257 bytes → fails GateRef::new.
+    let invalid_gate_ref_str = format!("gate:auth-{}", "a".repeat(247));
+    assert_eq!(invalid_gate_ref_str.len(), 257);
+    // Confirm predicate accepts but GateRef::new rejects.
+    assert!(
+        ironclaw_product_workflow::is_auth_gate_ref(&invalid_gate_ref_str),
+        "test string must pass is_auth_gate_ref"
+    );
+    assert!(
+        ironclaw_turns::GateRef::new(invalid_gate_ref_str.as_str()).is_err(),
+        "test string must fail GateRef::new"
+    );
+
+    let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
+        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+    record_conversation_route_for_gate_ref(route_store.as_ref(), &invalid_gate_ref_str, Utc::now())
+        .await;
+
+    // BindingRequiredThenSucceedingService(fail_count=2): the first two
+    // lookup_binding calls (topic-specific + base fallback) both return
+    // BindingRequired, so lookup_interaction_binding returns BindingRequired.
+    // The third call (delivered_route_base_binding inside the fallback) succeeds,
+    // so the delivered-route lookup can resolve actor identity.
+    //
+    // BindingRequired fallback → resolve_via_delivered_auth_route with
+    // expected_gate_ref=Some(invalid_gate_ref_str) → exact-ref match selects
+    // the stored route → GateRef::new on the stored gate_ref fails → InvalidGateRef.
+    let auth_service = Arc::new(MissingAuthThenRecordingAuthService::default());
+    let workflow = DefaultProductWorkflow::new(
+        Arc::new(FakeInboundTurnService::new()),
+        Arc::new(FakeIdempotencyLedger::new()),
+        Arc::new(BindingRequiredThenSucceedingService::new(2)),
+    )
+    .with_auth_interaction_service(auth_service.clone())
+    .with_delivered_gate_routes(route_store);
+
+    let err = workflow
+        .accept_inbound(auth_thread_reply_envelope(
+            "bare-auth-invalid-stored-gate-ref",
+            &invalid_gate_ref_str,
+        ))
+        .await
+        .expect_err("invalid stored gate_ref must surface InvalidGateRef, not BindingRequired");
+
+    assert!(
+        matches!(
+            err,
+            ProductAdapterError::WorkflowRejected {
+                kind: ProductWorkflowRejectionKind::InvalidRequest,
+                status_code: 400,
+                retryable: false,
+                ..
+            }
+        ),
+        "expected InvalidGateRef → InvalidRequest/400, got: {err:?}"
+    );
+    // The BindingRequired fallback fires BEFORE the auth interaction service
+    // is consulted — service must not be called at all.
+    assert!(
+        auth_service.resolutions().is_empty(),
+        "auth service must not be called when GateRef reconstruction fails in the BindingRequired fallback"
     );
 }
 

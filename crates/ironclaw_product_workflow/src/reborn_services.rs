@@ -593,8 +593,8 @@ impl GateResolutionRoute {
 
     fn from_gate_shape(gate_ref: &GateRef, resolution: &WebUiGateResolution) -> Self {
         match (
-            is_approval_gate_ref(gate_ref),
-            is_auth_gate_ref(gate_ref),
+            is_approval_gate_ref(gate_ref.as_str()),
+            is_auth_gate_ref(gate_ref.as_str()),
             matches!(resolution, WebUiGateResolution::CredentialProvided { .. }),
         ) {
             (true, _, _) => Self::Approval,
