@@ -132,7 +132,7 @@ cron = "0.13"
 jsonschema = { version = "0.45", default-features = false }
 
 # Shared types
-ironclaw_common = { path = "crates/ironclaw_common", version = "0.4.2" }
+ironclaw_common = { path = "crates/ironclaw_common", version = "0.5.0" }
 ironclaw_extractors = { path = "crates/ironclaw_extractors", version = "0.1.0" }
 ironclaw_host_api = { path = "crates/ironclaw_host_api", version = "0.1.0" }
 ironclaw_loop_support = { path = "crates/ironclaw_loop_support", version = "0.1.0" }
@@ -148,8 +148,8 @@ ironclaw_llm = { path = "crates/ironclaw_llm", version = "0.1.0" }
 ironclaw_embeddings = { path = "crates/ironclaw_embeddings", version = "0.1.0" }
 ironclaw_oauth = { path = "crates/ironclaw_oauth", version = "0.1.0" }
 ironclaw_reborn_traces = { path = "crates/ironclaw_reborn_traces", version = "0.1.0" }
-ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.2.2" }
-ironclaw_skills = { path = "crates/ironclaw_skills", version = "0.3.0" }
+ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.2.3" }
+ironclaw_skills = { path = "crates/ironclaw_skills", version = "0.4.0" }
 ironclaw_tui = { path = "crates/ironclaw_tui", optional = true, version = "0.1.0" }
 regex = "1"
 aho-corasick = "1"

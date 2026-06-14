@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/nearai/ironclaw/compare/ironclaw_skills-v0.3.0...ironclaw_skills-v0.4.0) - 2026-06-14
+
+### Other
+
+- [codex] Add user-scoped skills settings UI ([#4527](https://github.com/nearai/ironclaw/pull/4527))
+- *(agents)* reconcile crate AGENTS.md maps with current Reborn code ([#4302](https://github.com/nearai/ironclaw/pull/4302))
+- [codex] Normalize synthesized skill install names
+- [codex] fix reborn skill install replay ([#4385](https://github.com/nearai/ironclaw/pull/4385))
+- [codex] Add config for regex skill activation ([#4144](https://github.com/nearai/ironclaw/pull/4144))
+- Accept named plain Markdown skill installs ([#4138](https://github.com/nearai/ironclaw/pull/4138))
+- Wire Reborn CLI skills list ([#4095](https://github.com/nearai/ironclaw/pull/4095))
+- Wire Reborn extension lifecycle registry ([#4066](https://github.com/nearai/ironclaw/pull/4066))
+- [codex] Realign Reborn lifecycle UX contracts ([#4012](https://github.com/nearai/ironclaw/pull/4012))
+- [codex] Add URL installs for Reborn skills ([#4062](https://github.com/nearai/ironclaw/pull/4062))
+- Add debug tracing for Reborn capability dispatch ([#3986](https://github.com/nearai/ironclaw/pull/3986))
+- [codex] Add Reborn skill management tools ([#3935](https://github.com/nearai/ironclaw/pull/3935))
+- [codex] Add Reborn skill activation selector ([#3861](https://github.com/nearai/ironclaw/pull/3861))
+- *(crates)* seal internal modules across service crates
+- *(reborn)* add crate agent maps ([#3308](https://github.com/nearai/ironclaw/pull/3308))
+
 ## [0.3.0](https://github.com/nearai/ironclaw/compare/ironclaw_skills-v0.2.0...ironclaw_skills-v0.3.0) - 2026-04-29
 
 ### Added
