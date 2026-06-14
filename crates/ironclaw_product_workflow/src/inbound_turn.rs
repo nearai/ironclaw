@@ -800,7 +800,7 @@ fn segment(name: &str, value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::future::pending;
+    use std::{future::pending, sync::Mutex};
 
     use async_trait::async_trait;
     use chrono::TimeZone;
@@ -809,12 +809,293 @@ mod tests {
         AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ProductAdapterId,
         ProductTriggerReason, UserMessagePayload,
     };
-    use ironclaw_threads::ThreadScope;
-    use ironclaw_turns::TurnSurfaceType;
+    use ironclaw_threads::{
+        AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
+        AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
+        AppendToolResultReferenceRequest, ContextMessages, ContextWindow,
+        CreateSummaryArtifactRequest, EnsureThreadRequest, ListThreadsForScopeRequest,
+        ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
+        MessageContent, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
+        SessionThreadError, SessionThreadRecord, SummaryArtifact, ThreadHistory,
+        ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
+        UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
+    };
+    use ironclaw_turns::{
+        CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest,
+        ResumeTurnResponse, RunProfileId, RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse,
+        TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState, TurnScope,
+        TurnStatus, TurnSurfaceType, events::EventCursor,
+    };
 
     use crate::action::SourceBindingKey;
 
     use super::*;
+
+    // --- Minimal stubs for submit path tests ---
+
+    #[derive(Default)]
+    struct CapturingTurnCoordinator {
+        submissions: Mutex<Vec<SubmitTurnRequest>>,
+    }
+
+    impl CapturingTurnCoordinator {
+        fn submissions(&self) -> Vec<SubmitTurnRequest> {
+            self.submissions.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl TurnCoordinator for CapturingTurnCoordinator {
+        async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+            Ok(TurnRunId::new())
+        }
+
+        async fn submit_turn(
+            &self,
+            request: SubmitTurnRequest,
+        ) -> Result<SubmitTurnResponse, TurnError> {
+            let run_id = TurnRunId::new();
+            let message_ref = request.accepted_message_ref.clone();
+            let reply_ref = request.reply_target_binding_ref.clone();
+            self.submissions.lock().unwrap().push(request);
+            Ok(SubmitTurnResponse::Accepted {
+                turn_id: TurnId::new(),
+                run_id,
+                status: TurnStatus::Completed,
+                resolved_run_profile_id: RunProfileId::default_profile(),
+                resolved_run_profile_version: RunProfileVersion::new(1),
+                event_cursor: EventCursor(0),
+                accepted_message_ref: message_ref,
+                reply_target_binding_ref: reply_ref,
+            })
+        }
+
+        async fn resume_turn(
+            &self,
+            _request: ResumeTurnRequest,
+        ) -> Result<ResumeTurnResponse, TurnError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn cancel_run(
+            &self,
+            _request: CancelRunRequest,
+        ) -> Result<CancelRunResponse, TurnError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn get_run_state(
+            &self,
+            _request: GetRunStateRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            unimplemented!("not used in submit path tests")
+        }
+    }
+
+    struct StubSessionThreadService;
+
+    #[async_trait]
+    impl ironclaw_threads::SessionThreadService for StubSessionThreadService {
+        async fn ensure_thread(
+            &self,
+            _request: EnsureThreadRequest,
+        ) -> Result<SessionThreadRecord, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn accept_inbound_message(
+            &self,
+            _request: AcceptInboundMessageRequest,
+        ) -> Result<AcceptedInboundMessage, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn replay_accepted_inbound_message(
+            &self,
+            _request: ReplayAcceptedInboundMessageRequest,
+        ) -> Result<Option<AcceptedInboundMessageReplay>, SessionThreadError> {
+            Ok(None)
+        }
+
+        async fn mark_message_submitted(
+            &self,
+            _scope: &ThreadScope,
+            _thread_id: &ironclaw_host_api::ThreadId,
+            _message_id: ThreadMessageId,
+            _turn_id: String,
+            _turn_run_id: String,
+        ) -> Result<ThreadMessageRecord, SessionThreadError> {
+            Ok(stub_message_record(_message_id))
+        }
+
+        async fn mark_message_deferred_busy(
+            &self,
+            _scope: &ThreadScope,
+            _thread_id: &ironclaw_host_api::ThreadId,
+            _message_id: ThreadMessageId,
+        ) -> Result<ThreadMessageRecord, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn append_assistant_draft(
+            &self,
+            _request: AppendAssistantDraftRequest,
+        ) -> Result<ThreadMessageRecord, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn append_tool_result_reference(
+            &self,
+            _request: AppendToolResultReferenceRequest,
+        ) -> Result<ThreadMessageRecord, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn append_capability_display_preview(
+            &self,
+            _request: AppendCapabilityDisplayPreviewRequest,
+        ) -> Result<ThreadMessageRecord, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn update_tool_result_reference(
+            &self,
+            _request: UpdateToolResultReferenceRequest,
+        ) -> Result<ThreadMessageRecord, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn update_assistant_draft(
+            &self,
+            _request: UpdateAssistantDraftRequest,
+        ) -> Result<ThreadMessageRecord, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn finalize_assistant_message(
+            &self,
+            _scope: &ThreadScope,
+            _thread_id: &ironclaw_host_api::ThreadId,
+            _message_id: ThreadMessageId,
+            _content: MessageContent,
+        ) -> Result<ThreadMessageRecord, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn redact_message(
+            &self,
+            _request: RedactMessageRequest,
+        ) -> Result<ThreadMessageRecord, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn load_context_window(
+            &self,
+            _request: LoadContextWindowRequest,
+        ) -> Result<ContextWindow, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn load_context_messages(
+            &self,
+            _request: LoadContextMessagesRequest,
+        ) -> Result<ContextMessages, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn list_thread_history(
+            &self,
+            _request: ThreadHistoryRequest,
+        ) -> Result<ThreadHistory, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn create_summary_artifact(
+            &self,
+            _request: CreateSummaryArtifactRequest,
+        ) -> Result<SummaryArtifact, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn list_threads_for_scope(
+            &self,
+            _request: ListThreadsForScopeRequest,
+        ) -> Result<ListThreadsForScopeResponse, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+    }
+
+    fn stub_message_record(message_id: ThreadMessageId) -> ThreadMessageRecord {
+        ThreadMessageRecord {
+            message_id,
+            thread_id: thread_id(),
+            sequence: 1,
+            kind: ironclaw_threads::MessageKind::User,
+            status: ironclaw_threads::MessageStatus::Submitted,
+            actor_id: None,
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            turn_id: None,
+            turn_run_id: None,
+            tool_result_ref: None,
+            tool_result_provider_call: None,
+            content: None,
+            redaction_ref: None,
+        }
+    }
+
+    /// The legacy `from_replay` path hard-codes `TurnSurfaceType::Direct` and injects the
+    /// adapter id. This test drives the handoff through `submit_or_replay` and asserts
+    /// that the submitted `SubmitTurnRequest.product_context` carries `Direct` surface and
+    /// the adapter from the replay call.
+    #[tokio::test]
+    async fn replay_submit_carries_direct_surface_type_and_adapter_id() {
+        let adapter_id = ProductAdapterId::new("telegram").unwrap();
+        let message_id = ThreadMessageId::new();
+        let handoff = ProductInboundTurnHandoff::from_replay(
+            replay(
+                message_id,
+                MessageStatus::DeferredBusy,
+                Some("src:replay"),
+                Some("reply:replay"),
+                None,
+            ),
+            "turn-key-replay".to_string(),
+            received_at(),
+            adapter_id.clone(),
+        )
+        .expect("replay handoff");
+
+        let coordinator = CapturingTurnCoordinator::default();
+        let thread_service = StubSessionThreadService;
+
+        handoff
+            .submit_or_replay(&thread_service, &coordinator)
+            .await
+            .expect("submit_or_replay succeeds");
+
+        let submissions = coordinator.submissions();
+        assert_eq!(submissions.len(), 1, "one turn must be submitted");
+        let ctx = submissions[0]
+            .product_context
+            .as_ref()
+            .expect("product_context must be set");
+        assert_eq!(
+            ctx.surface_type,
+            Some(TurnSurfaceType::Direct),
+            "replay path must carry Direct surface type"
+        );
+        assert_eq!(
+            ctx.adapter.as_ref().map(|a| a.as_str()),
+            Some(adapter_id.as_str()),
+            "replay path must carry the adapter id"
+        );
+        assert_eq!(
+            ctx.origin,
+            TurnOriginKind::Inbound,
+            "replay path must record Inbound origin (Untrusted classification)"
+        );
+    }
 
     struct PendingBeforeInboundPolicy;
 

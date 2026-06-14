@@ -1,4 +1,3 @@
-use ironclaw_triggers::TRIGGER_TRUSTED_ADAPTER_KIND;
 use serde::{Deserialize, Serialize};
 
 use crate::InboundTurnError;
@@ -40,13 +39,6 @@ macro_rules! bounded_string_id {
 }
 
 bounded_string_id!(AdapterKind, "adapter_kind");
-
-impl AdapterKind {
-    /// Returns `true` when this adapter kind is the trusted-trigger adapter.
-    pub fn is_trusted_trigger(&self) -> bool {
-        self.0 == TRIGGER_TRUSTED_ADAPTER_KIND
-    }
-}
 
 bounded_string_id!(AdapterInstallationId, "adapter_installation_id");
 bounded_string_id!(ExternalEventId, "external_event_id");

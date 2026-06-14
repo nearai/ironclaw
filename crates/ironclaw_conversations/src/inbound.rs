@@ -6,7 +6,7 @@ use ironclaw_safety::{
 };
 use ironclaw_triggers::{
     TriggerError, TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter,
-    TrustedTriggerSubmitRequest,
+    TrustedTriggerSubmitRequest, is_trusted_trigger_adapter_kind,
 };
 use ironclaw_turns::{
     AdmissionRejectionReason, RunOriginAdapter, SubmitTurnRequest, TurnCoordinator, TurnError,
@@ -93,7 +93,10 @@ where
             requested_run_profile,
         } = request;
 
-        let classification = match (&binding_policy, adapter_kind.is_trusted_trigger()) {
+        let classification = match (
+            &binding_policy,
+            is_trusted_trigger_adapter_kind(adapter_kind.as_str()),
+        ) {
             (BindingResolutionPolicy::Trusted { .. }, true) => {
                 ironclaw_product_context::InboundClassification::TrustedTrigger
             }
@@ -515,6 +518,7 @@ mod tests {
         ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef,
         SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnCapacityResource, TurnCoordinator,
         TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+        TurnSurfaceType,
     };
 
     use super::{
@@ -1408,6 +1412,70 @@ mod tests {
                 .map(|a| a.as_str()),
             Some("trigger"),
             "untrusted adapter_kind='trigger' must carry adapter name 'trigger'"
+        );
+    }
+
+    /// An untrusted inbound request with a Shared route kind must record
+    /// `surface_type == Some(TurnSurfaceType::Channel)` on the submitted product context.
+    #[tokio::test]
+    async fn shared_route_kind_records_channel_surface_type() {
+        let slack = AdapterKind::new("slack").unwrap();
+        let slack_install = AdapterInstallationId::new("slack-install").unwrap();
+        let slack_actor = ExternalActorRef::new("slack", "user-alice").unwrap();
+        let services = InMemoryConversationServices::default();
+        services
+            .pair_external_actor(
+                tenant(),
+                slack.clone(),
+                slack_install.clone(),
+                slack_actor.clone(),
+                user("alice"),
+            )
+            .await;
+        let coordinator = Arc::new(RecordingTurnCoordinator::default());
+        let inbound =
+            InboundTurnService::new(services.clone(), services.clone(), coordinator.clone());
+
+        let request = InboundTurnRequest {
+            tenant_id: tenant(),
+            adapter_kind: slack,
+            adapter_installation_id: slack_install,
+            external_actor_ref: slack_actor,
+            external_conversation_ref: ExternalConversationRef::new(
+                None,
+                "slack-channel-conv",
+                Some("slack-channel-thread"),
+                None,
+            )
+            .unwrap(),
+            external_event_id: ExternalEventId::new("slack-channel-event-1").unwrap(),
+            route_kind: ConversationRouteKind::Shared,
+            content_ref: InboundMessageContentRef::new("content:slack-channel-1").unwrap(),
+            requested_agent_id: None,
+            requested_project_id: None,
+            received_at: Utc.with_ymd_and_hms(2026, 6, 13, 10, 0, 0).unwrap(),
+            requested_run_profile: None,
+        };
+
+        inbound
+            .handle_inbound_turn(request)
+            .await
+            .expect("shared-route inbound succeeds");
+
+        let submissions = coordinator.submissions();
+        assert_eq!(submissions.len(), 1);
+        assert_eq!(
+            submissions[0].product_context.as_ref().map(|c| c.origin),
+            Some(TurnOriginKind::Inbound),
+            "shared-route inbound must record Inbound origin"
+        );
+        assert_eq!(
+            submissions[0]
+                .product_context
+                .as_ref()
+                .and_then(|c| c.surface_type),
+            Some(TurnSurfaceType::Channel),
+            "Shared route kind must record Channel surface type"
         );
     }
 

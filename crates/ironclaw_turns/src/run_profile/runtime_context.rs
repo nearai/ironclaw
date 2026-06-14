@@ -18,8 +18,9 @@ pub struct LoopRuntimeContext {
     /// Invalid IANA names are rejected at the producer boundary — the type system
     /// guarantees that any `Some` value is a well-formed, parseable timezone.
     pub user_timezone: Option<Tz>,
-    /// Channel, delivery, and run-origin state for this loop execution.
-    /// `None` means the communication slice was not populated for this run; the rendered prompt carries only the time line.
+    /// Channel and delivery-target state for this loop execution.
+    /// `None` means no communication (channel/delivery) slice was populated for this run;
+    /// `product_context`, when present, still renders the run-origin line independently.
     pub communication: Option<CommunicationRuntimeContext>,
     /// Per-turn run-origin context (origin kind, surface, adapter, owner).
     /// Rendered directly from here rather than routed through the communication provider.
@@ -98,7 +99,10 @@ impl LoopRuntimeContext {
                     "Connected channels: none.".to_string()
                 }
                 ConnectedChannelsState::Known(channels) => {
-                    let joined = channels
+                    const MAX_RENDERED_CHANNELS: usize = 20;
+                    let render_count = channels.len().min(MAX_RENDERED_CHANNELS);
+                    let remainder = channels.len().saturating_sub(MAX_RENDERED_CHANNELS);
+                    let mut joined = channels[..render_count]
                         .iter()
                         .map(|ch| {
                             let auth = if ch.authenticated {
@@ -114,6 +118,9 @@ impl LoopRuntimeContext {
                         })
                         .collect::<Vec<_>>()
                         .join(", ");
+                    if remainder > 0 {
+                        joined.push_str(&format!(" (+{remainder} more)"));
+                    }
                     format!("Connected channels: {joined}.")
                 }
             };
@@ -252,11 +259,12 @@ fn model_safe_label(value: &str, placeholder: &str) -> String {
     }
 }
 
-/// Provider of model-visible communication state for a single loop execution.
+/// Provider of live channel, delivery-target, and tool-visibility state for a single loop execution.
 ///
-/// Implementations load channel, delivery, and run-origin state from backend
-/// services. Return `None` only when the communication slice is unavailable for
-/// this run (e.g. no actor is present); map backend failures into
+/// Implementations supply connected-channel and delivery-target state from backend
+/// services. Run origin is rendered from `LoopRuntimeContext.product_context`, not
+/// from this provider. Return `None` only when the communication slice is unavailable
+/// for this run (e.g. no actor is present); map backend failures into
 /// `ConnectedChannelsState::Unknown` or `DeliveryTargetState::Unknown` rather
 /// than leaking errors or fabricating definitive empty states.
 #[async_trait::async_trait]
@@ -910,6 +918,46 @@ mod tests {
         assert!(
             !text.contains("Outbound delivery"),
             "no delivery line when communication is None: {text}"
+        );
+    }
+
+    #[test]
+    fn renders_capped_channel_list_when_many() {
+        let channels: Vec<ConnectedChannelSummary> = (0..25)
+            .map(|i| ConnectedChannelSummary {
+                name: format!("channel{i}"),
+                authenticated: true,
+                active: true,
+            })
+            .collect();
+        let ctx = LoopRuntimeContext {
+            loop_started_at_utc: stamp(),
+            user_timezone: None,
+            communication: Some(CommunicationRuntimeContext {
+                connected_channels: ConnectedChannelsState::Known(channels),
+                delivery_target: DeliveryTargetState::Unknown,
+                delivery_tools_visible: false,
+            }),
+            product_context: None,
+        };
+        let text = ctx.render_model_content();
+        assert!(
+            text.contains("(+5 more)"),
+            "overflow suffix must appear when more than 20 channels: {text}"
+        );
+        assert!(
+            text.contains("channel0"),
+            "first channel must appear: {text}"
+        );
+        assert!(
+            !text.contains("channel20"),
+            "21st channel must be truncated: {text}"
+        );
+        // Sanity-check the rendered slice stays well within a sane byte budget.
+        assert!(
+            text.len() < 4096,
+            "rendered channel list must stay within sane prompt byte budget: {} bytes",
+            text.len()
         );
     }
 }
