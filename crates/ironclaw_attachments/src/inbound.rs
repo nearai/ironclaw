@@ -70,6 +70,16 @@ where
             filename,
             bytes,
         } = attachment;
+        // Reject over-limit uploads before the (potentially expensive) document
+        // extraction below. `land_attachment` enforces the same bound as the
+        // canonical gate, but checking here avoids parsing bytes that are about
+        // to be thrown away.
+        if bytes.len() > max_bytes {
+            return Err(AttachmentLandingError::TooLarge {
+                size: bytes.len(),
+                max: max_bytes,
+            });
+        }
         let size_bytes = bytes.len() as u64;
         // Derive kind and fallback extension from the MIME type so a ref's
         // `kind` is always consistent with its `mime_type`.
@@ -114,8 +124,10 @@ where
     Ok(refs)
 }
 
-/// Maximum characters of extracted document text retained on a reference
-/// (~25K tokens). Mirrors the v1 document-extraction cap.
+/// Maximum characters of extracted document *content* retained on a reference
+/// (~25K tokens). Mirrors the v1 document-extraction cap. When truncation
+/// occurs a short `[... truncated ...]` marker is appended, so the stored
+/// `extracted_text` may exceed this by the marker's fixed length.
 const MAX_EXTRACTED_TEXT_CHARS: usize = 100_000;
 
 /// Run the type-aware text extractor over a document attachment's bytes and
@@ -124,7 +136,17 @@ const MAX_EXTRACTED_TEXT_CHARS: usize = 100_000;
 /// Returns `None` when extraction yields nothing or fails — the attachment is
 /// still landed and referenced, the model just won't have its text.
 fn extract_document_text(bytes: &[u8], mime: &str, filename: Option<&str>) -> Option<String> {
-    let text = ironclaw_extractors::extract_text(bytes, mime, filename).ok()?;
+    let text = match ironclaw_extractors::extract_text(bytes, mime, filename) {
+        Ok(text) => text,
+        Err(error) => {
+            // Extraction failure is non-fatal — the attachment is still landed
+            // and referenced, the model just won't have its text. Log it so an
+            // unsupported-format/corrupt-file case is observable (debug, not
+            // warn: this runs in library context that may back the REPL/TUI).
+            tracing::debug!(mime, filename, %error, "document text extraction failed");
+            return None;
+        }
+    };
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return None;
@@ -424,7 +446,12 @@ mod tests {
             DEFAULT_PROJECT_MOUNT_ALIAS,
             "2026-06-09",
             "msg1",
-            vec![inbound("att-0", "text/csv", "data.csv", b"name,score\nalice,9")],
+            vec![inbound(
+                "att-0",
+                "text/csv",
+                "data.csv",
+                b"name,score\nalice,9",
+            )],
             DEFAULT_MAX_ATTACHMENT_BYTES,
         )
         .await
@@ -445,7 +472,12 @@ mod tests {
             DEFAULT_PROJECT_MOUNT_ALIAS,
             "2026-06-09",
             "msg1",
-            vec![inbound("att-0", "image/png", "x.png", &[0x89, 0x50, 0x4E, 0x47])],
+            vec![inbound(
+                "att-0",
+                "image/png",
+                "x.png",
+                &[0x89, 0x50, 0x4E, 0x47],
+            )],
             DEFAULT_MAX_ATTACHMENT_BYTES,
         )
         .await

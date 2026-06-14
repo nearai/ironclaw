@@ -578,8 +578,11 @@ fn try_extract_by_extension(data: &[u8], filename: Option<&str>) -> Option<Strin
 /// Marker appended to extracted text that was truncated for length.
 pub const TRUNCATION_MARKER: &str = "\n[... truncated, document too long ...]";
 
-/// Truncate `text` to at most `max_chars` characters on a UTF-8 character
-/// boundary, appending [`TRUNCATION_MARKER`] when truncation occurred.
+/// Truncate `text`'s content to at most `max_chars` characters on a UTF-8
+/// character boundary. When truncation occurs, [`TRUNCATION_MARKER`] is appended
+/// to signal it — so the returned string is at most `max_chars` characters of
+/// content **plus** the fixed-length marker, i.e. it can exceed `max_chars` by
+/// the marker's length. Text already within the limit is returned unchanged.
 ///
 /// Consumers cap extracted text before handing it to the model; this is the
 /// canonical, char-boundary-safe truncation (`char_indices`, never byte

@@ -4143,6 +4143,7 @@ dependencies = [
  "ironclaw_host_api",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
