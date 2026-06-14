@@ -8,8 +8,11 @@ import { useAttachmentConfig } from "../hooks/useAttachmentConfig.js";
 import {
   NEW_DRAFT_KEY,
   clearDraft,
+  clearStagedAttachments,
   getDraft,
+  getStagedAttachments,
   setDraft,
+  setStagedAttachments,
 } from "../lib/draft-store.js";
 
 export function ChatInput({
@@ -28,7 +31,9 @@ export function ChatInput({
   const isHero = variant === "hero";
   const limits = useAttachmentConfig();
   const [text, setText] = React.useState(() => getDraft(draftKey));
-  const [attachments, setAttachments] = React.useState([]);
+  const [attachments, setAttachments] = React.useState(() =>
+    getStagedAttachments(draftKey)
+  );
   const [attachmentError, setAttachmentError] = React.useState("");
   const [isSending, setIsSending] = React.useState(false);
   const [isCancelling, setIsCancelling] = React.useState(false);
@@ -97,6 +102,22 @@ export function ChatInput({
     // or the composer unmounts, so a debounced draft is never lost.
     return () => flushDraft();
   }, [draftKey, flushDraft]);
+
+  // Keep the in-memory staged-attachment store in sync so files survive
+  // navigating away from (and back to) this composer, the same way the text
+  // draft does. On a conversation switch, *re-read* the new key's files and
+  // skip persisting this render — `attachments` still belongs to the previous
+  // key, so persisting it here would leak the previous conversation's files
+  // into the new one.
+  const stagedDraftKeyRef = React.useRef(draftKey);
+  React.useEffect(() => {
+    if (stagedDraftKeyRef.current !== draftKey) {
+      stagedDraftKeyRef.current = draftKey;
+      setAttachments(getStagedAttachments(draftKey));
+      return;
+    }
+    setStagedAttachments(draftKey, attachments);
+  }, [draftKey, attachments]);
 
   React.useEffect(() => {
     if (!initialText) return;
@@ -180,6 +201,7 @@ export function ChatInput({
       setAttachmentError("");
       cancelPendingDraft();
       clearDraft(draftKey);
+      clearStagedAttachments(draftKey);
       if (textareaRef.current) textareaRef.current.style.height = "auto";
     } catch {
       // The failed optimistic message renders retry details in the thread.

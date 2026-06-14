@@ -79,6 +79,29 @@ mod tests {
     }
 
     #[test]
+    fn chat_input_persists_staged_attachments_across_navigation() {
+        // The composer keeps a text draft across navigation; staged attachments
+        // must follow a parallel per-key store so they are not silently dropped
+        // when the composer unmounts and remounts (e.g. leaving the new-chat
+        // screen and returning). The store is in-memory because the files carry
+        // base64 bytes that would blow localStorage's quota.
+        let store = asset_text("js/pages/chat/lib/draft-store.js");
+        assert!(store.contains("export function getStagedAttachments"));
+        assert!(store.contains("export function setStagedAttachments"));
+        assert!(store.contains("export function clearStagedAttachments"));
+        // Sign-out drops the in-memory staged files too, so they can't resurface
+        // for the next user on the same browser.
+        assert!(store.contains("stagedAttachments.clear()"));
+
+        let input = asset_text("js/pages/chat/components/chat-input.js");
+        // Initialized from the store (not a bare `[]`), persisted on change, and
+        // cleared on a successful send.
+        assert!(input.contains("getStagedAttachments(draftKey)"));
+        assert!(input.contains("setStagedAttachments(draftKey"));
+        assert!(input.contains("clearStagedAttachments(draftKey)"));
+    }
+
+    #[test]
     fn chat_cancelled_gate_resolution_exits_processing_state() {
         let use_chat = asset_text("js/pages/chat/hooks/useChat.js");
         assert!(
