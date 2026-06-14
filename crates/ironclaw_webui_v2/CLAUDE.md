@@ -121,9 +121,10 @@ unsupported-config reason codes currently include
 `operator_config_not_wired`, and `operator_config_unknown_key`.
 `POST /api/webchat/v2/operator/setup` uses the typed LLM config service
 for provider/model setup. Profile selection and WebUI access inputs are
-validated through the same operator setup facade; unchanged redacted tokens
-are treated as no-ops, and actual profile/token mutations fail closed until
-an owning persistence service is wired. Token values are never echoed.
+validated through the same operator setup facade; unchanged masked tokens
+(not modified by the user) are treated as no-ops, and actual profile/token
+mutations fail closed until an owning persistence service is wired. Token
+values are never echoed.
 
 ### List-threads
 
