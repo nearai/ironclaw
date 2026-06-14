@@ -1050,4 +1050,34 @@ mod tests {
     fn thread_id() -> ThreadId {
         ThreadId::new("thread:alpha").unwrap()
     }
+
+    #[test]
+    fn rejected_busy_replay_with_invalid_turn_run_id_fails_loudly() {
+        let message_id = ThreadMessageId::new();
+        let result = ProductInboundTurnHandoff::from_replay(
+            replay(
+                message_id,
+                MessageStatus::RejectedBusy,
+                Some("src:alpha"),
+                Some("reply:alpha"),
+                Some("not-a-uuid".to_string()),
+            ),
+            "turn-key".to_string(),
+            received_at(),
+        );
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected Err for malformed turn_run_id, got Ok"),
+        };
+
+        match err {
+            ProductWorkflowError::TurnSubmissionRejected { reason } => {
+                assert!(
+                    reason.contains("invalid rejected busy turn_run_id"),
+                    "expected reason to contain 'invalid rejected busy turn_run_id', got: {reason}"
+                );
+            }
+            other => panic!("expected TurnSubmissionRejected, got: {other:?}"),
+        }
+    }
 }

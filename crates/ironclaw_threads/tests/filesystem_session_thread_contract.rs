@@ -1216,6 +1216,68 @@ async fn filesystem_rejected_busy_rejects_already_submitted_user_message() {
     );
 }
 
+#[tokio::test]
+async fn filesystem_rejected_busy_message_can_be_marked_submitted() {
+    // A RejectedBusy user message must be eligible for Submitted when the user
+    // resends — mirrors the in-memory contract test but exercises the
+    // FilesystemSessionThreadService persistence path.
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-rb-to-submitted", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("rb-to-submitted");
+
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("resend after busy"),
+        })
+        .await
+        .unwrap();
+
+    // Drive the message into RejectedBusy.
+    service
+        .mark_message_rejected_busy(&scope, &thread.thread_id, accepted.message_id)
+        .await
+        .unwrap();
+
+    // User resends — mark_message_submitted must succeed from RejectedBusy.
+    let result = service
+        .mark_message_submitted(
+            &scope,
+            &thread.thread_id,
+            accepted.message_id,
+            "turn-id-resend".into(),
+            "run-id-resend".into(),
+        )
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "mark_message_submitted must succeed for a RejectedBusy user message (user resend path), got {result:?}"
+    );
+    assert_eq!(
+        result.unwrap().status,
+        MessageStatus::Submitted,
+        "final status must be Submitted after the RejectedBusy → Submitted transition"
+    );
+}
+
 fn scope(label: &str) -> ThreadScope {
     ThreadScope {
         tenant_id: TenantId::new(format!("tenant-{label}")).unwrap(),

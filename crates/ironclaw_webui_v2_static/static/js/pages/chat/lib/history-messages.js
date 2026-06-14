@@ -36,13 +36,20 @@ export function messagesFromTimeline(records, pendingMessages = []) {
     if (seen.has(id)) continue;
     seen.add(id);
     const role = roleForRecord(record);
+    const isBusyRejected =
+      role === "user" &&
+      (record.status === "rejected_busy" || record.status === "deferred_busy");
     messages.push({
       id,
       role,
       content: record.content || "",
       timestamp: timestampForRecord(record),
       kind: record.kind,
-      status: record.status,
+      status: isBusyRejected ? "error" : record.status,
+      ...(isBusyRejected && {
+        error:
+          "This message wasn't sent because Ironclaw was busy. Resend it to try again.",
+      }),
       isFinalReply: isFinalAssistantRecord(record),
       sequence: record.sequence,
       turnRunId: record.turn_run_id || null,

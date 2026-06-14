@@ -5828,3 +5828,56 @@ async fn ledger_transient_failure_surfaces_retryable_error() {
         .expect_err("should fail");
     assert!(err.is_retryable());
 }
+
+#[tokio::test]
+async fn rejected_busy_with_no_active_run_id_is_settled_and_duplicate_on_transport_retry() {
+    // RejectedBusy(active_run_id: None) — the no-run case — should settle durably on the first
+    // call and return a Duplicate of the prior RejectedBusy ack on a transport retry, without
+    // re-invoking the inbound turn service.
+    let (workflow, inbound, ledger) = build_workflow();
+    let accepted_message_ref = AcceptedMessageRef::new("msg:busy-no-run").expect("valid msg ref");
+    inbound.program_outcome(InboundTurnOutcome::RejectedBusy {
+        accepted_message_ref: accepted_message_ref.clone(),
+        active_run_id: None,
+        binding: fake_binding(),
+    });
+    let envelope = sample_envelope("busy-no-run");
+
+    let first = workflow
+        .accept_inbound(envelope.clone())
+        .await
+        .expect("first busy ack");
+    assert!(
+        matches!(first, ProductInboundAck::RejectedBusy { .. }),
+        "expected RejectedBusy on first call, got: {first:?}"
+    );
+    // Durable/settled: the action must appear in the ledger.
+    assert_eq!(ledger.settled_count(), 1, "first call must settle the ack");
+    assert_eq!(ledger.in_flight_count(), 0, "no in-flight after settlement");
+    // The settled action must have a dispatch_kind derived from the payload.
+    let actions = ledger.settled_actions();
+    assert_eq!(actions.len(), 1);
+    assert!(
+        matches!(
+            actions[0].dispatch_kind,
+            Some(ActionDispatchKind::UserMessageTurn { .. })
+        ),
+        "settled dispatch_kind should be UserMessageTurn (derived from payload), got: {:?}",
+        actions[0].dispatch_kind
+    );
+
+    // Transport retry — same envelope — must return Duplicate without re-invoking inbound.
+    let second = workflow
+        .accept_inbound(envelope)
+        .await
+        .expect("transport retry after settled RejectedBusy(None)");
+    assert!(
+        matches!(
+            second,
+            ProductInboundAck::Duplicate { ref prior } if matches!(**prior, ProductInboundAck::RejectedBusy { .. })
+        ),
+        "transport retry must return Duplicate of the prior RejectedBusy ack, got: {second:?}"
+    );
+    assert_eq!(inbound.attempt_count(), 1, "inbound must not be re-invoked");
+    assert_eq!(ledger.settled_count(), 1, "settled count must not increase");
+}

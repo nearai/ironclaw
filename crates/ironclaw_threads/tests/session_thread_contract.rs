@@ -993,6 +993,64 @@ async fn rejected_busy_rejects_already_finalized_user_message() {
 }
 
 #[tokio::test]
+async fn rejected_busy_message_can_be_marked_submitted() {
+    // A message that was RejectedBusy (user arrived while thread was busy) must
+    // be eligible for the Submitted transition when the user resends — i.e.
+    // ensure_user_accepted must admit RejectedBusy, and mark_message_submitted
+    // must succeed, landing in Submitted.
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("a"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("resend after busy"),
+        })
+        .await
+        .unwrap();
+
+    // Drive the message into RejectedBusy.
+    service
+        .mark_message_rejected_busy(&scope("a"), &thread.thread_id, accepted.message_id)
+        .await
+        .unwrap();
+
+    // Now the user resends — mark_message_submitted must succeed from RejectedBusy.
+    let result = service
+        .mark_message_submitted(
+            &scope("a"),
+            &thread.thread_id,
+            accepted.message_id,
+            "turn-id-resend".into(),
+            "run-id-resend".into(),
+        )
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "mark_message_submitted must succeed for a RejectedBusy user message (user resend path), got {result:?}"
+    );
+    assert_eq!(
+        result.unwrap().status,
+        MessageStatus::Submitted,
+        "final status must be Submitted after the RejectedBusy → Submitted transition"
+    );
+}
+
+#[tokio::test]
 async fn assistant_streaming_updates_one_draft_and_finalizes_one_canonical_message() {
     let service = InMemorySessionThreadService::default();
     let thread = service

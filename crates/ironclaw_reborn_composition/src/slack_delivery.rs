@@ -131,7 +131,7 @@ pub struct SlackFinalReplyDeliveryObserver {
     services: SlackFinalReplyDeliveryServices,
     settings: SlackFinalReplyDeliverySettings,
     delivery_permits: Arc<Semaphore>,
-    /// Per-observer throttle: at most one deferred-busy hint per
+    /// Per-observer throttle: at most one busy-thread hint per
     /// (conversation fingerprint, active_run_id) pair.
     /// Caps Slack API usage per blocked run; bounded FIFO eviction keeps memory O(1);
     /// a false-negative after eviction just means one extra hint, harmless.
@@ -966,7 +966,7 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
         {
             return;
         }
-        // A2b: DeferredBusy feedback — the user's message was silently dropped
+        // A2b: Busy-thread hint — the user's message was silently dropped
         // because a run is blocked on a pending gate. Post a one-shot state-aware
         // hint so the user knows to approve/deny/wait rather than being left in
         // silence. Same best-effort semantics as A2: post failure → debug! only.
@@ -979,7 +979,7 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
         // bounds the lifetime of this entire post-ACK task. A detached spawn would
         // escape `drain_immediate_ack_tasks` shutdown/drain without adding any
         // backpressure benefit.
-        if let Some(active_run_id) = deferred_busy_user_message_run_id(&envelope, &ack) {
+        if let Some(active_run_id) = busy_hint_user_message_run_id(&envelope, &ack) {
             // Throttle: at most one hint per (conversation, active_run_id) pair.
             // Check before the coordinator call to avoid a round-trip on repeats.
             let conv_key = envelope
@@ -1006,7 +1006,7 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
             if already_seen {
                 tracing::debug!(
                     target = "ironclaw::reborn::slack_delivery",
-                    "deferred-busy hint suppressed: already posted for this (conversation, run_id) pair"
+                    "busy-thread hint suppressed: already posted for this (conversation, run_id) pair"
                 );
                 return;
             }
@@ -1023,14 +1023,14 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
                     tracing::debug!(
                         target = "ironclaw::reborn::slack_delivery",
                         error = %error,
-                        "skipped deferred-busy hint because the originating conversation was not authorized"
+                        "skipped busy-thread hint because the originating conversation was not authorized"
                     );
                     return;
                 }
             };
             // Derive the scope for the active run state lookup.
             // Falls back to generic copy on any failure — never skips the hint.
-            let hint = deferred_busy_hint_from_run_state(
+            let hint = busy_hint_from_run_state(
                 self.services.turn_coordinator.as_ref(),
                 &binding,
                 active_run_id,
@@ -1046,7 +1046,7 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
                 tracing::debug!(
                     target = "ironclaw::reborn::slack_delivery",
                     error = %post_err,
-                    "failed to post deferred-busy hint to Slack (best-effort)"
+                    "failed to post busy-thread hint to Slack (best-effort)"
                 );
             }
             return;
@@ -1258,7 +1258,7 @@ fn rejection_hint_for_resolution(
 }
 
 /// Returns `Some(active_run_id)` when the ack + payload combination should trigger
-/// the deferred-busy hint flow: a `DeferredBusy` or `RejectedBusy` ack on a
+/// the busy-thread hint flow: a `DeferredBusy` (legacy) or `RejectedBusy` ack on a
 /// `UserMessage` payload.
 ///
 /// `RejectedBusy { active_run_id: Some(run_id) }` carries a live blocking run whose
@@ -1271,7 +1271,7 @@ fn rejection_hint_for_resolution(
 /// `DeferredBusy`, never `Duplicate{DeferredBusy}`; suppressing all `Duplicate`
 /// matches the invariant in `rejection_hint_for_resolution`) and for all non-user-
 /// message payloads (resolution/control payloads must stay silent).
-fn deferred_busy_user_message_run_id(
+fn busy_hint_user_message_run_id(
     envelope: &ProductInboundEnvelope,
     ack: &ProductInboundAck,
 ) -> Option<TurnRunId> {
@@ -1299,8 +1299,8 @@ fn deferred_busy_user_message_run_id(
     }
 }
 
-/// Looks up the blocking run's state and returns the appropriate deferred-busy
-/// hint copy.
+/// Looks up the blocking run's state and returns the appropriate busy-thread hint
+/// copy.
 ///
 /// - `BlockedApproval` with `Some(gate_ref)` → approval wording with concrete `approve {ref}` command
 /// - `BlockedApproval` with `None` gate_ref  → approval wording without a specific gate command
@@ -1309,7 +1309,7 @@ fn deferred_busy_user_message_run_id(
 /// - anything else / lookup failure           → generic wording
 ///
 /// Never returns an error — lookup failures degrade to the generic copy.
-async fn deferred_busy_hint_from_run_state(
+async fn busy_hint_from_run_state(
     coordinator: &dyn TurnCoordinator,
     binding: &ResolvedBinding,
     active_run_id: TurnRunId,
@@ -1323,7 +1323,7 @@ async fn deferred_busy_hint_from_run_state(
             tracing::debug!(
                 target = "ironclaw::reborn::slack_delivery",
                 error = %err,
-                "deferred-busy scope derivation failed; using generic copy"
+                "busy-thread hint scope derivation failed; using generic copy"
             );
             return SLACK_DEFERRED_BUSY_GENERIC_MESSAGE.to_string();
         }
@@ -1360,7 +1360,7 @@ async fn deferred_busy_hint_from_run_state(
             tracing::debug!(
                 target = "ironclaw::reborn::slack_delivery",
                 error = %err,
-                "deferred-busy run-state lookup failed; using generic copy"
+                "busy-thread hint run-state lookup failed; using generic copy"
             );
             SLACK_DEFERRED_BUSY_GENERIC_MESSAGE.to_string()
         }
@@ -4956,7 +4956,7 @@ mod tests {
     /// Binding service that always returns a binding with `agent_id = None`.
     ///
     /// Used to exercise the scope-derivation fallback in
-    /// `deferred_busy_hint_from_run_state`: when `thread_scope_from_binding` fails
+    /// `busy_hint_from_run_state`: when `thread_scope_from_binding` fails
     /// because `agent_id` is missing, the hint must still be posted using the
     /// generic copy rather than being silently dropped.
     struct NoAgentConversationBindingService;
@@ -5039,7 +5039,7 @@ mod tests {
 
     /// Binding with no `agent_id` → scope derivation fails → generic copy posted.
     ///
-    /// `deferred_busy_hint_from_run_state` calls `thread_scope_from_binding` which
+    /// `busy_hint_from_run_state` calls `thread_scope_from_binding` which
     /// returns `Err` when `agent_id` is `None`. The code must fall back to
     /// `SLACK_DEFERRED_BUSY_GENERIC_MESSAGE` and still post the hint.
     #[tokio::test]
@@ -5107,7 +5107,7 @@ mod tests {
 
     /// Run-state lookup returns `Err` → generic copy posted.
     ///
-    /// `deferred_busy_hint_from_run_state` swallows `TurnError` from
+    /// `busy_hint_from_run_state` swallows `TurnError` from
     /// `get_run_state` and degrades to `SLACK_DEFERRED_BUSY_GENERIC_MESSAGE`.
     #[tokio::test]
     async fn deferred_busy_run_state_lookup_error_posts_generic_hint() {

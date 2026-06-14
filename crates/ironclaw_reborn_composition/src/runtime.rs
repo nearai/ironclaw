@@ -6841,6 +6841,11 @@ mod tests {
     ///      as `RejectedBusy`; response carries a non-empty `notice`.
     ///  Cancel A → B stays `RejectedBusy` (no auto-resubmission).
     ///  C – submitted after A is cancelled; thread is free → `Submitted`.
+    ///
+    /// arch-note: lives in runtime.rs (adds ~200 lines to an already >3000-line file) because
+    /// it requires `build_reborn_runtime` + full turn-runner control that only the runtime test
+    /// harness provides; moving it would require duplicating that harness. Decomposition of
+    /// runtime.rs is tracked in plan #4471.
     #[tokio::test]
     async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
         let root = tempfile::tempdir().expect("tempdir");

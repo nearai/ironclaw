@@ -1241,6 +1241,14 @@ async fn send_message_rejected_busy_wire_shape() {
         !body["active_run_id"].is_null(),
         "fresh RejectedBusy wire must include active_run_id when Some"
     );
+    assert!(
+        !body["status"].is_null(),
+        "fresh RejectedBusy wire must include status when Some"
+    );
+    assert!(
+        !body["event_cursor"].is_null(),
+        "fresh RejectedBusy wire must include event_cursor when Some"
+    );
 }
 
 // Replay-path variant: run metadata is None — wire must omit active_run_id, status,

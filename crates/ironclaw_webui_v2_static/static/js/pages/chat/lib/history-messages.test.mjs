@@ -109,6 +109,48 @@ test("messagesFromTimeline: equal pending text without timeline id is preserved"
   );
 });
 
+test("messagesFromTimeline: rejected_busy user record maps to error status with durable resend copy", () => {
+  const messages = messagesFromTimeline([
+    {
+      message_id: "msg-rb",
+      kind: "user",
+      content: "do something",
+      sequence: 1,
+      status: "rejected_busy",
+    },
+  ]);
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].id, "msg-msg-rb");
+  assert.equal(messages[0].role, "user");
+  assert.equal(messages[0].status, "error");
+  assert.equal(
+    messages[0].error,
+    "This message wasn't sent because Ironclaw was busy. Resend it to try again.",
+  );
+});
+
+test("messagesFromTimeline: deferred_busy user record maps to error status with durable resend copy", () => {
+  const messages = messagesFromTimeline([
+    {
+      message_id: "msg-db",
+      kind: "user",
+      content: "do something else",
+      sequence: 1,
+      status: "deferred_busy",
+    },
+  ]);
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].id, "msg-msg-db");
+  assert.equal(messages[0].role, "user");
+  assert.equal(messages[0].status, "error");
+  assert.equal(
+    messages[0].error,
+    "This message wasn't sent because Ironclaw was busy. Resend it to try again.",
+  );
+});
+
 test("messagesFromTimeline: finalized assistant records are marked as final replies", () => {
   const messages = messagesFromTimeline([
     {
