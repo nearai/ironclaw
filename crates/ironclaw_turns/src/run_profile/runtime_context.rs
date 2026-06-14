@@ -179,6 +179,13 @@ impl LoopRuntimeContext {
                 };
                 parts.push(origin_line);
 
+                // The no-delivery warning is emitted only when the delivery state is
+                // *known* to be NoneSet, which requires the communication slice. When
+                // `communication` is absent (origin-only branch below) the delivery
+                // state is unknown, so no warning is rendered — asserting "result will
+                // not be delivered" without knowing the target would be incorrect. In
+                // production, triggered runs carry the communication slice, so this
+                // branch is the one that fires.
                 if matches!(ctx.origin, TurnOriginKind::ScheduledTrigger)
                     && matches!(comm.delivery_target, DeliveryTargetState::NoneSet)
                 {
@@ -198,7 +205,11 @@ impl LoopRuntimeContext {
                 }
             }
         } else if let Some(ctx) = &self.product_context {
-            // No communication provider, but origin is available — render origin only.
+            // No communication slice, but origin is available — render the origin line
+            // only. The scheduled-trigger no-delivery warning is intentionally NOT
+            // rendered here: without the communication slice the delivery state is
+            // unknown, and a target may well be configured, so claiming "result will
+            // not be delivered" would be wrong.
             let origin_line = match ctx.origin {
                 TurnOriginKind::WebUi => {
                     "Run origin: WebUI chat; replies render in this chat.".to_string()
