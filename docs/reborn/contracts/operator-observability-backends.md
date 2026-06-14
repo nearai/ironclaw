@@ -56,10 +56,14 @@ Required behavior:
 - Commands must not shell out through untrusted input.
 - Responses include stable state, message, and diagnostics without raw command output.
 
-Initial backend options:
+Initial backend:
 
-- Systemd service manager implementation behind an allowlisted unit name.
-- Local development no-op/status implementation that reports unsupported instead of pretending success.
+- Local composition wires an allowlisted launchd/systemd user-service manager for
+  the fixed `com.ironclaw.reborn` / `ironclaw-reborn.service` unit.
+- Unsupported OS targets return `unsupported` with remediation instead of
+  pretending success.
+- The backend returns stable typed state only; raw command output and host paths
+  are not surfaced to the browser.
 
 ## Test requirements
 

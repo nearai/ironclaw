@@ -392,6 +392,7 @@ pub struct RebornLocalDevApprovalTestParts {
 }
 
 pub(crate) struct RebornLocalRuntimeServices {
+    pub(crate) owner_user_id: UserId,
     pub(crate) approval_requests: Arc<LocalDevApprovalRequestStore>,
     pub(crate) capability_leases: Arc<LocalDevCapabilityLeaseStore>,
     // Used in approval_test_support (cfg(test) only); suppress the dead-code
@@ -1269,9 +1270,10 @@ fn build_local_dev_store_graph(
     #[cfg(feature = "slack-v2-host-beta")]
     let host_state_filesystem = local_dev_slack_host_state_filesystem(Arc::clone(&filesystem));
     let skill_management =
-        build_local_skill_management_port(owner_user_id, Arc::clone(&filesystem))?;
+        build_local_skill_management_port(owner_user_id.clone(), Arc::clone(&filesystem))?;
     let outbound_stores = local_dev_outbound_store(Arc::clone(&filesystem));
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
+        owner_user_id: owner_user_id.clone(),
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
         capability_policy: Arc::clone(&capability_policy),
@@ -1389,11 +1391,12 @@ fn build_local_dev_store_graph(
     #[cfg(all(feature = "postgres", feature = "slack-v2-host-beta"))]
     let host_state_filesystem = local_dev_slack_host_state_filesystem(Arc::clone(&filesystem));
     let skill_management =
-        build_local_skill_management_port(owner_user_id, Arc::clone(&filesystem))?;
+        build_local_skill_management_port(owner_user_id.clone(), Arc::clone(&filesystem))?;
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let trigger_conversation_services = local_dev_trigger_conversation_services();
     let outbound_stores = local_dev_outbound_store(Arc::clone(&filesystem));
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
+        owner_user_id: owner_user_id.clone(),
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
         capability_policy: Arc::clone(&capability_policy),
@@ -3312,6 +3315,7 @@ mod tests {
             )
             .expect("mount failing backend");
         Arc::new(RebornLocalRuntimeServices {
+            owner_user_id: base_runtime.owner_user_id.clone(),
             approval_requests: Arc::clone(&base_runtime.approval_requests),
             capability_leases: Arc::clone(&base_runtime.capability_leases),
             capability_policy: Arc::clone(&base_runtime.capability_policy),
