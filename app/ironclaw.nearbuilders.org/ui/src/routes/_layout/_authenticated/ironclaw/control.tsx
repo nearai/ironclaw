@@ -1,26 +1,16 @@
-import { createFileRoute, redirect } from "@tanstack/react-router";
+import { createFileRoute } from "@tanstack/react-router";
 import { Cable, Cog, Globe, Loader2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { useApiClient, sessionQueryOptions } from "@/app";
+import { useApiClient } from "@/app";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
 type Tab = "outbound" | "automations" | "extensions";
 
-export const Route = createFileRoute("/_layout/settings")({
-  beforeLoad: async ({ context, location }) => {
-    const { queryClient, authClient, session } = context;
-    const current = await queryClient.ensureQueryData(
-      sessionQueryOptions(authClient, session),
-    );
-    if (!current?.user) {
-      throw redirect({ to: "/login", search: { redirect: location.pathname } });
-    }
-    return { session: current };
-  },
-  component: SettingsPage,
+export const Route = createFileRoute("/_layout/_authenticated/ironclaw/control")({
+  component: IronclawControlPage,
 });
 
 const tabs: { id: Tab; label: string; icon: typeof Cog }[] = [
@@ -54,7 +44,7 @@ function TabNav({ active, onSelect }: { active: Tab; onSelect: (t: Tab) => void 
   );
 }
 
-function SettingsPage() {
+function IronclawControlPage() {
   const apiClient = useApiClient();
   const [activeTab, setActiveTab] = useState<Tab>("outbound");
 

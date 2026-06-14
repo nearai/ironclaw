@@ -300,7 +300,7 @@ export default createPlugin.withPlugins<PluginsClient>()({
             h1(services, ic => ic.threads.list),
           ),
           create: builder.ironclaw.threads.create.use(requireAuth).use(ic.credentials).handler(
-            h0(services, ic => ic.threads.create),
+            h1(services, ic => ic.threads.create),
           ),
           delete: builder.ironclaw.threads.delete.use(requireAuth).use(ic.credentials).handler(
             h1(services, ic => ic.threads.delete),

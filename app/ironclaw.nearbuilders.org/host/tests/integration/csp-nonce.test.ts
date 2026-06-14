@@ -44,7 +44,7 @@ describe("CSP Nonce Regression Tests", () => {
   describe("SSR renders script tags with nonce when cspNonce is provided", () => {
     it("includes nonce attribute on <script> tags in SSR output", { timeout: 6000 }, async () => {
       const testNonce = "regression-test-nonce-abc123";
-      const request = new Request("http://localhost/");
+      const request = new Request("http://localhost/skill");
 
       const renderOptions: RenderOptionsWithApi<ApiClient> = {
         runtimeConfig: buildTestClientRuntimeConfig(config),
@@ -72,7 +72,7 @@ describe("CSP Nonce Regression Tests", () => {
 
     it("includes nonce attribute on <style> tags in SSR output", { timeout: 6000 }, async () => {
       const testNonce = "regression-test-nonce-style-456";
-      const request = new Request("http://localhost/");
+      const request = new Request("http://localhost/skill");
 
       const renderOptions: RenderOptionsWithApi<ApiClient> = {
         runtimeConfig: buildTestClientRuntimeConfig(config),
@@ -100,7 +100,7 @@ describe("CSP Nonce Regression Tests", () => {
 
     it("bootstraps the nonce on window for hydration", { timeout: 6000 }, async () => {
       const testNonce = "regression-test-runtime-nonce-789";
-      const request = new Request("http://localhost/");
+      const request = new Request("http://localhost/skill");
 
       const renderOptions: RenderOptionsWithApi<ApiClient> = {
         runtimeConfig: buildTestClientRuntimeConfig(config),
@@ -121,7 +121,7 @@ describe("CSP Nonce Regression Tests", () => {
     it("does not include nonce attributes when cspNonce is omitted", {
       timeout: 6000,
     }, async () => {
-      const request = new Request("http://localhost/");
+      const request = new Request("http://localhost/skill");
 
       const renderOptions: RenderOptionsWithApi<ApiClient> = {
         runtimeConfig: buildTestClientRuntimeConfig(config),

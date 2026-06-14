@@ -31,6 +31,29 @@ type ConnectableChannel = z.infer<typeof ConnectableChannelSchema>;
 const BODY_METHODS = new Set(["POST", "PUT", "PATCH"]);
 const REQUEST_TIMEOUT_MS = 30_000;
 
+export class IronclawUpstreamError extends Error {
+  readonly status: number;
+  readonly method: string;
+  readonly path: string;
+  readonly upstreamBody: string;
+  readonly upstreamJson: Record<string, unknown> | null;
+
+  constructor(status: number, method: string, path: string, body: string) {
+    let parsed: Record<string, unknown> | null = null;
+    try { parsed = JSON.parse(body); } catch {}
+    const msg = parsed && typeof parsed.message === "string"
+      ? parsed.message
+      : `Ironclaw API error ${status}`;
+    super(msg);
+    this.name = "IronclawUpstreamError";
+    this.status = status;
+    this.method = method;
+    this.path = path;
+    this.upstreamBody = body;
+    this.upstreamJson = parsed;
+  }
+}
+
 function snakeToCamel(str: string): string {
   return str.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
 }
@@ -151,7 +174,7 @@ export class IronclawService {
 
       if (!response.ok) {
         const errorBody = await response.text().catch(() => "");
-        throw new Error(`Ironclaw API error ${response.status}: ${errorBody}`);
+        throw new IronclawUpstreamError(response.status, method, path, errorBody);
       }
 
       return response.json();
@@ -166,8 +189,10 @@ export class IronclawService {
         await this.request("GET", "/api/webchat/v2/session");
         return { status: "ok" as const, timestamp: new Date().toISOString() };
       },
-      catch: (error: unknown) =>
-        new Error(`Ironclaw health check failed: ${error instanceof Error ? error.message : String(error)}`),
+      catch: (error: unknown) => {
+        if (error instanceof IronclawUpstreamError) return error;
+        return new Error(`Ironclaw health check failed: ${error instanceof Error ? error.message : String(error)}`);
+      },
     });
   }
 
@@ -183,8 +208,10 @@ export class IronclawService {
           },
         } as Session;
       },
-      catch: (error: unknown) =>
-        new Error(`Failed to get session: ${error instanceof Error ? error.message : String(error)}`),
+      catch: (error: unknown) => {
+        if (error instanceof IronclawUpstreamError) return error;
+        return new Error(`Failed to get session: ${error instanceof Error ? error.message : String(error)}`);
+      },
     });
   }
 
@@ -205,20 +232,26 @@ export class IronclawService {
           },
         } as ThreadList;
       },
-      catch: (error: unknown) =>
-        new Error(`Failed to list threads: ${error instanceof Error ? error.message : String(error)}`),
+      catch: (error: unknown) => {
+        if (error instanceof IronclawUpstreamError) return error;
+        return new Error(`Failed to list threads: ${error instanceof Error ? error.message : String(error)}`);
+      },
     });
   }
 
-  createThread(): Effect.Effect<ThreadCreate, Error> {
+  createThread(clientActionId?: string): Effect.Effect<ThreadCreate, Error> {
     return Effect.tryPromise({
       try: async () => {
-        const raw: any = await this.request("POST", "/api/webchat/v2/threads");
+        const raw: any = await this.request("POST", "/api/webchat/v2/threads", {
+          client_action_id: clientActionId ?? crypto.randomUUID(),
+        });
         const t = raw.thread ?? raw;
         return { threadId: t.thread_id, title: t.title ?? undefined } as ThreadCreate;
       },
-      catch: (error: unknown) =>
-        new Error(`Failed to create thread: ${error instanceof Error ? error.message : String(error)}`),
+      catch: (error: unknown) => {
+        if (error instanceof IronclawUpstreamError) return error;
+        return new Error(`Failed to create thread: ${error instanceof Error ? error.message : String(error)}`);
+      },
     });
   }
 
@@ -267,8 +300,10 @@ export class IronclawService {
           eventCursor: raw.event_cursor,
         } as AcceptedResponse;
       },
-      catch: (error: unknown) =>
-        new Error(`Failed to send message: ${error instanceof Error ? error.message : String(error)}`),
+      catch: (error: unknown) => {
+        if (error instanceof IronclawUpstreamError) return error;
+        return new Error(`Failed to send message: ${error instanceof Error ? error.message : String(error)}`);
+      },
     });
   }
 
@@ -289,8 +324,10 @@ export class IronclawService {
           },
         } as Timeline;
       },
-      catch: (error: unknown) =>
-        new Error(`Failed to get timeline: ${error instanceof Error ? error.message : String(error)}`),
+      catch: (error: unknown) => {
+        if (error instanceof IronclawUpstreamError) return error;
+        return new Error(`Failed to get timeline: ${error instanceof Error ? error.message : String(error)}`);
+      },
     });
   }
 
@@ -331,28 +368,17 @@ export class IronclawService {
   }
 
   streamEvents(id: string, afterCursor?: string): AsyncGenerator<ChatEvent> {
-    const url = `${this.baseUrl}/api/webchat/v2/threads/${encodeURIComponent(id)}/events?token=${encodeURIComponent(this.token)}${afterCursor ? `&after_cursor=${encodeURIComponent(afterCursor)}` : ""}`;
-
+    const baseUrl = this.baseUrl;
+    const token = this.token;
     const generator: AsyncGenerator<ChatEvent> = (async function* () {
-      const es = new EventSource(url);
+      let cursor = afterCursor;
+
       const eventTypes = [
         "accepted", "running", "capability_progress", "capability_activity",
         "capability_display_preview", "gate", "auth_required",
         "final_reply", "cancelled", "failed",
         "projection_snapshot", "projection_update", "keep_alive",
       ];
-
-      const pending: ChatEvent[] = [];
-      let resolve: ((value: IteratorResult<ChatEvent>) => void) | null = null;
-
-      const push = (event: ChatEvent) => {
-        if (resolve) {
-          resolve({ value: event, done: false });
-          resolve = null;
-        } else {
-          pending.push(event);
-        }
-      };
 
       const transformEvent = (raw: any): ChatEvent => {
         const base: any = {
@@ -440,45 +466,66 @@ export class IronclawService {
         return base as ChatEvent;
       };
 
-      const handlers: Record<string, (e: MessageEvent) => void> = {};
-      for (const type of eventTypes) {
-        handlers[type] = (e: MessageEvent) => {
-          try {
-            const raw = JSON.parse(e.data);
-            const event = transformEvent(raw);
-            push(event);
-          } catch { /* skip parse errors */ }
-        };
-        es.addEventListener(type, handlers[type]);
-      }
+      while (true) {
+        const url = `${baseUrl}/api/webchat/v2/threads/${encodeURIComponent(id)}/events?token=${encodeURIComponent(token)}${cursor ? `&after_cursor=${encodeURIComponent(cursor)}` : ""}`;
+        const es = new EventSource(url);
 
-      es.onerror = () => {
-        if (es.readyState === EventSource.CLOSED) {
-          es.close();
-          if (resolve) {
-            resolve({ value: undefined as unknown as ChatEvent, done: true });
-            resolve = null;
-          }
-        }
-      };
+        let sessionEnded = false;
+        let pendingResolve: ((value: ChatEvent | null) => void) | null = null;
+        const eventQueue: ChatEvent[] = [];
 
-      try {
-        while (true) {
-          if (pending.length > 0) {
-            yield pending.shift()!;
+        const push = (event: ChatEvent) => {
+          if (pendingResolve) {
+            const r = pendingResolve;
+            pendingResolve = null;
+            r(event);
           } else {
-            yield await new Promise<ChatEvent>((res, rej) => {
-              resolve = (result) => {
-                if (result.done) rej(new Error("Stream ended"));
-                else res(result.value);
-              };
-            });
+            eventQueue.push(event);
           }
-        }
-      } finally {
-        es.close();
+        };
+
+        const handlers: Record<string, (e: MessageEvent) => void> = {};
         for (const type of eventTypes) {
-          es.removeEventListener(type, handlers[type]);
+          handlers[type] = (e: MessageEvent) => {
+            try {
+              const raw = JSON.parse(e.data);
+              const event = transformEvent(raw);
+              if (event.cursor) cursor = event.cursor;
+              push(event);
+            } catch { /* skip parse errors */ }
+          };
+          es.addEventListener(type, handlers[type]);
+        }
+
+        es.onerror = () => {
+          if (es.readyState === EventSource.CLOSED) {
+            sessionEnded = true;
+            if (pendingResolve) {
+              const r = pendingResolve;
+              pendingResolve = null;
+              r(null);
+            }
+          }
+        };
+
+        try {
+          while (!sessionEnded) {
+            if (eventQueue.length > 0) {
+              yield eventQueue.shift()!;
+            } else {
+              const event = await new Promise<ChatEvent | null>((res) => {
+                pendingResolve = res;
+              });
+              if (event === null) break;
+              yield event;
+            }
+          }
+        } finally {
+          es.onerror = null;
+          es.close();
+          for (const type of eventTypes) {
+            es.removeEventListener(type, handlers[type]);
+          }
         }
       }
     })();

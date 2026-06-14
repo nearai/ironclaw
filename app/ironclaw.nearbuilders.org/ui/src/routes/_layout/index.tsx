@@ -1,8 +1,8 @@
-import { createFileRoute, Link, redirect } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { Loader2, MessageSquare, Plus, Send, Terminal, Trash2, Unplug, Zap } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { useApiClient, sessionQueryOptions } from "@/app";
+import { useApiClient } from "@/app";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -29,16 +29,6 @@ type ChatMessage = {
 };
 
 export const Route = createFileRoute("/_layout/")({
-  beforeLoad: async ({ context, location }) => {
-    const { queryClient, authClient, session } = context;
-    const current = await queryClient.ensureQueryData(
-      sessionQueryOptions(authClient, session),
-    );
-    if (!current?.user) {
-      throw redirect({ to: "/login", search: { redirect: location.pathname } });
-    }
-    return { session: current };
-  },
   component: ChatPage,
 });
 
@@ -53,7 +43,7 @@ function ChatPage() {
   const [isSending, setIsSending] = useState(false);
   const [streamingEvent, setStreamingEvent] = useState<StreamEvent | null>(null);
   const [currentRunId, setCurrentRunId] = useState<string | null>(null);
-  const [sseError, setSseError] = useState(false);
+  const [sseError, setSseError] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const streamCleanupRef = useRef<() => void>(null);
 
@@ -88,7 +78,7 @@ function ChatPage() {
     setActiveThreadId(threadId);
     setStreamingEvent(null);
     setCurrentRunId(null);
-    setSseError(false);
+    setSseError(null);
 
     try {
       const timeline = await apiClient.ironclaw.threads.getTimeline({ id: threadId, limit: 100 });
@@ -109,7 +99,7 @@ function ChatPage() {
         streamCleanupRef.current = () => { eventStream.return?.(); };
 
         for await (const data of eventStream) {
-          setSseError(false);
+          setSseError(null);
           setStreamingEvent(data);
 
           if (data.type === "accepted" && data.ack?.runId) {
@@ -137,8 +127,13 @@ function ChatPage() {
             setCurrentRunId(null);
           }
         }
-      } catch {
-        setSseError(true);
+      } catch (err) {
+        console.warn("SSE stream error:", err);
+        setSseError(
+          err instanceof TypeError
+            ? "Failed to connect to event stream"
+            : "Event stream disconnected"
+        );
       }
     })();
   }, [apiClient]);
@@ -155,14 +150,15 @@ function ChatPage() {
 
   const createThread = useCallback(async () => {
     try {
-      const thread = await apiClient.ironclaw.threads.create();
+      const thread = await apiClient.ironclaw.threads.create({
+        clientActionId: `ui-${crypto.randomUUID()}`,
+      });
       setThreads((prev) => [thread, ...prev]);
-      setActiveThreadId(thread.threadId);
-      setMessages((prev) => new Map(prev).set(thread.threadId, []));
+      openThread(thread.threadId);
     } catch {
       toast.error("Failed to create thread");
     }
-  }, [apiClient]);
+  }, [apiClient, openThread]);
 
   const deleteThread = useCallback(
     async (threadId: string) => {
@@ -200,7 +196,10 @@ function ChatPage() {
     });
 
     try {
-      await apiClient.ironclaw.threads.sendMessage({ id: activeThreadId, content });
+      const accepted = await apiClient.ironclaw.threads.sendMessage({ id: activeThreadId, content });
+      if (accepted.runId) {
+        setCurrentRunId(accepted.runId);
+      }
     } catch {
       toast.error("Failed to send message");
     } finally {
@@ -358,8 +357,8 @@ function ChatPage() {
                 )}
                 {sseError && (
                   <div className="flex items-center gap-2 rounded-lg border border-[color:var(--chart-3)]/30 bg-[color:var(--chart-3)]/5 px-4 py-3 text-xs text-[color:var(--chart-3)]">
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                    Reconnecting to event stream...
+                    <Unplug className="h-3 w-3" />
+                    {sseError}
                   </div>
                 )}
                 <div ref={messagesEndRef} />

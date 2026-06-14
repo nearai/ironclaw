@@ -116,7 +116,7 @@ function updateBosConfig(field: "production" | "ssr", url: string, integrity?: s
 
 function createClientConfig() {
   const plugins = [
-    pluginReact(),
+    pluginReact({ fastRefresh: false }),
     pluginModuleFederation({
       name: normalizedName,
       filename: "remoteEntry.js",
@@ -209,7 +209,7 @@ function createClientConfig() {
 }
 
 function createServerConfig() {
-  const plugins = [pluginReact()];
+  const plugins = [pluginReact({ fastRefresh: false })];
 
   plugins.push({
     name: "restore-manifest-public-path",

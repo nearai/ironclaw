@@ -4,11 +4,11 @@ import { ORPCError } from "every-plugin/orpc";
 import { z } from "every-plugin/zod";
 
 import { contract } from "./contract";
-import { IronclawService } from "./service";
+import { IronclawService, IronclawUpstreamError } from "./service";
 
 const PLACEHOLDER_RE = /^\{\{[A-Z0-9_]+\}\}$/;
 
-function isConfigured(value: string | undefined): boolean {
+function isConfigured(value: string | undefined): value is string {
   if (!value || value.length === 0) return false;
   if (PLACEHOLDER_RE.test(value)) return false;
   return true;
@@ -71,19 +71,59 @@ export default createPlugin({
       return next({ context: { ...context, userId: context.userId } });
     });
 
+    const toOrpcError = (error: unknown): never => {
+      if (error instanceof IronclawUpstreamError) {
+        const code: any = (
+          { 400: "BAD_REQUEST", 401: "UNAUTHORIZED", 403: "FORBIDDEN",
+            404: "NOT_FOUND", 409: "CONFLICT", 412: "PRECONDITION_FAILED" }
+        )[error.status] ?? "GATEWAY_ERROR";
+        throw new ORPCError(code, {
+          message: error.message,
+          data: {
+            upstreamStatus: error.status,
+            upstreamPath: error.path,
+            upstreamMethod: error.method,
+            upstreamBody: error.upstreamBody,
+          },
+        });
+      }
+      if (error && typeof error === "object" && "code" in error) {
+        throw error;
+      }
+      throw new ORPCError("GATEWAY_ERROR", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    };
+
     const r = (fn: (svc: IronclawService, ctx: any) => any) =>
-      async ({ context: ctx }: any) => fn(resolveService(ctx), ctx);
+      async ({ context: ctx }: any) => {
+        try {
+          return await fn(resolveService(ctx), ctx);
+        } catch (error) {
+          toOrpcError(error);
+        }
+      };
 
     const ri = (fn: (svc: IronclawService, input: any, ctx: any) => any) =>
-      async ({ input, context: ctx }: any) => fn(resolveService(ctx), input, ctx);
+      async ({ input, context: ctx }: any) => {
+        try {
+          return await fn(resolveService(ctx), input, ctx);
+        } catch (error) {
+          toOrpcError(error);
+        }
+      };
 
     const rStream = (fn: (svc: IronclawService, input: any, ctx: any) => any) =>
       async function* ({ input, signal, context: ctx }: any) {
         const svc = resolveService(ctx);
         const gen = fn(svc, input, ctx);
-        for await (const event of gen) {
-          if (signal?.aborted) break;
-          yield event;
+        try {
+          for await (const event of gen) {
+            if (signal?.aborted) break;
+            yield event;
+          }
+        } catch (error) {
+          toOrpcError(error);
         }
       };
 
@@ -100,7 +140,7 @@ export default createPlugin({
         ),
 
         create: builder.threads.create.use(requireAuth).handler(
-          r((svc) => Effect.runPromise(svc.createThread())),
+          ri((svc, input) => Effect.runPromise(svc.createThread(input.clientActionId))),
         ),
 
         delete: builder.threads.delete.use(requireAuth).handler(

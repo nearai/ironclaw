@@ -433,6 +433,9 @@ export const contract = oc.router({
 
     create: oc
       .route({ method: "POST", path: "/threads", summary: "Create a new thread" })
+      .input(z.object({
+        clientActionId: z.string().optional(),
+      }))
       .output(ThreadCreateSchema)
       .errors(Errors),
 

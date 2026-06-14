@@ -180,7 +180,7 @@ function updateBosConfig(url: string, integrity?: string) {
   }
 }
 
-const plugins = [pluginReact()];
+const plugins = [pluginReact({ fastRefresh: false })];
 
 if (shouldDeploy) {
   plugins.push(

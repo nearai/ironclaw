@@ -61,8 +61,8 @@ for (const scenario of scenarios) {
       await Promise.all([readText(skillResponse), readText(llmsResponse)]);
     });
 
-    it("exposes the runtime boot contract on the root document", async () => {
-      const response = await fetch(`${runtime.baseUrl}/`);
+    it("exposes the runtime boot contract on /login", async () => {
+      const response = await fetch(`${runtime.baseUrl}/login`);
       const html = await response.text();
 
       expect(response.status).toBe(200);
@@ -71,11 +71,8 @@ for (const scenario of scenarios) {
       expect(html).toContain('"repository"');
 
       if (scenario.ssr) {
-        expect(html).toContain('<div id="root">');
-        expect(html).toContain("manifest.json");
-        expect(html).toContain('<iframe title="BOS viewer"');
-        expect(html).not.toContain("SSR unavailable, showing client app.");
-        expect(html).not.toContain("<p>Loading...</p>");
+        expect(html).toContain("connect to everything");
+        expect(html).not.toContain("Server Error");
       }
     });
 

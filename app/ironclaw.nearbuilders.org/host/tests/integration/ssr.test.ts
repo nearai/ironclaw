@@ -42,10 +42,10 @@ describe("SSR Stream Lifecycle", () => {
   });
 
   describe("Stream Completion", () => {
-    it("completes stream for root route without timeout", async () => {
+    it("completes stream for /skill route without timeout", async () => {
       const startTime = Date.now();
 
-      const head = await routerModule.getRouteHead("/", buildTestRouteHeadContext(config));
+      const head = await routerModule.getRouteHead("/skill", buildTestRouteHeadContext(config));
 
       const elapsed = Date.now() - startTime;
 
@@ -57,7 +57,7 @@ describe("SSR Stream Lifecycle", () => {
 
   describe("SSR Configuration", () => {
     it("renders layout route metadata", async () => {
-      const head = await routerModule.getRouteHead("/", buildTestRouteHeadContext(config));
+      const head = await routerModule.getRouteHead("/skill", buildTestRouteHeadContext(config));
 
       const titleMeta = head.meta.find((m) => m && typeof m === "object" && "title" in m);
       expect(titleMeta).toBeDefined();
@@ -67,8 +67,8 @@ describe("SSR Stream Lifecycle", () => {
   describe("SSR Routes", () => {
     const STREAM_TIMEOUT = 5000;
 
-    it("renders root route with full SSR", { timeout: 6000 }, async () => {
-      const request = new Request("http://localhost/");
+    it("renders /skill with full SSR", { timeout: 6000 }, async () => {
+      const request = new Request("http://localhost/skill");
       const startTime = Date.now();
 
       const result = await routerModule.renderToStream(
@@ -83,15 +83,15 @@ describe("SSR Stream Lifecycle", () => {
       expect(result.statusCode).toBe(200);
       expect(html).toContain("<!DOCTYPE html>");
       expect(html).toContain("</html>");
-      expect(html).toContain(config.account);
+      expect(html).toContain("Setup Skill");
     });
   });
 
   describe("Full Stream Rendering", () => {
     const STREAM_TIMEOUT = 5000;
 
-    it("completes full stream render for root route", { timeout: 6000 }, async () => {
-      const request = new Request("http://localhost/");
+    it("completes full stream render for /skill", { timeout: 6000 }, async () => {
+      const request = new Request("http://localhost/skill");
       const startTime = Date.now();
 
       const result = await routerModule.renderToStream(
@@ -106,6 +106,7 @@ describe("SSR Stream Lifecycle", () => {
       expect(result.statusCode).toBe(200);
       expect(html).toContain("<!DOCTYPE html>");
       expect(html).toContain("</html>");
+      expect(html).toContain("Setup Skill");
     });
   });
 });

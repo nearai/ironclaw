@@ -550,7 +550,9 @@ export declare const contract: {
                 message: string;
             };
         }>>, Record<never, never>>;
-        create: import("@orpc/contract").ContractProcedure<import("@orpc/contract").Schema<unknown, unknown>, z.ZodObject<{
+        create: import("@orpc/contract").ContractProcedure<z.ZodObject<{
+            clientActionId: z.ZodOptional<z.ZodString>;
+        }, z.core.$strip>, z.ZodObject<{
             threadId: z.ZodString;
             title: z.ZodOptional<z.ZodString>;
         }, z.core.$strip>, import("@orpc/contract").MergedErrorMap<Record<never, never>, import("@orpc/contract").MergedErrorMap<Record<never, never>, {
