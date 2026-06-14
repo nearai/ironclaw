@@ -116,15 +116,15 @@ fn redact_shell_command_for_display(cmd: &str) -> String {
             Regex::new(
                 r#"(?i)(-H|--header|-u|--user|--token|--api-?key|--password|--auth|--bearer)(\s+|=)(["'])[^"']*(["'])"#,
             )
-            .expect("hardcoded shell redaction regex is valid"),
+            .expect("hardcoded shell redaction regex is valid"), // safety: static regex literal is covered by redaction tests.
             Regex::new(
                 r#"(?i)(-H|--header|-u|--user|--token|--api-?key|--password|--auth|--bearer)(\s+|=)([^\s"'][^\s]*)"#,
             )
-            .expect("hardcoded shell redaction regex is valid"),
+            .expect("hardcoded shell redaction regex is valid"), // safety: static regex literal is covered by redaction tests.
             Regex::new(r#"(?i)(Authorization|X-Api-Key|X-Auth-Token|Bearer)\s*:\s*[^\s"']+"#)
-                .expect("hardcoded shell redaction regex is valid"),
+                .expect("hardcoded shell redaction regex is valid"), // safety: static regex literal is covered by redaction tests.
             Regex::new(r#"([a-zA-Z][a-zA-Z0-9+.\-]*://[^\s"'?#]*)\?[^\s"']*"#)
-                .expect("hardcoded shell redaction regex is valid"),
+                .expect("hardcoded shell redaction regex is valid"), // safety: static regex literal is covered by redaction tests.
         ]
     });
     let mut out = patterns[0]
