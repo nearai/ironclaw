@@ -206,10 +206,10 @@ pub async fn record_qa_phrase(fixture_name: &str, phrase: &str) {
             // agent routed to the gate, which is exactly what the contract for
             // those phrases pins. The trace is flushed up to the gate.
             println!(
-                "recorded QA trace {} (paused at gate: status {:?}, gate_ref {:?}, partial reply: {})",
+                "recorded QA trace {} (paused at gate: status {:?}, gate_ref {}, partial reply: {})",
                 fixture_path.display(),
                 status,
-                gate_ref.as_ref().map(|gate| gate.as_str()),
+                gate_ref.as_str(),
                 partial_text.as_deref().unwrap_or("<none>")
             );
         }

@@ -300,12 +300,14 @@ struct SubmittedTurn {
 pub enum RebornTurnDriveOutcome {
     /// The run reached a terminal status without pausing on a gate.
     Terminal(AssistantReply),
-    /// The run parked on a gate (auth/approval/resource/dependent-run) and is
-    /// awaiting resolution through the facade.
+    /// The run parked on a user-resolvable gate (auth/approval/resource) and is
+    /// awaiting resolution through the facade. `gate_ref` is required: the
+    /// blocked-reason contract carries a `GateRef` for every such block, so its
+    /// absence is an invariant violation, not a valid recorder outcome.
     BlockedOnGate {
         run_id: TurnRunId,
         status: TurnStatus,
-        gate_ref: Option<ironclaw_turns::GateRef>,
+        gate_ref: ironclaw_turns::GateRef,
         partial_text: Option<String>,
     },
 }
@@ -1606,9 +1608,11 @@ impl RebornRuntime {
     }
 
     /// Like [`Self::wait_for_terminal`], but also returns when the run parks on
-    /// a `Blocked*` gate (auth/approval/resource/dependent-run) instead of
-    /// polling until those non-terminal states either resolve or hit
-    /// `RunTimeout`. The returned state carries the `Blocked*` status and
+    /// a user-resolvable gate (auth/approval/resource) instead of polling until
+    /// those non-terminal states either resolve or hit `RunTimeout`.
+    /// `BlockedDependentRun` is deliberately excluded — it is an internal wait
+    /// on a child run, not facade-resolvable, so it keeps polling. The returned
+    /// state carries the `Blocked*` status and
     /// `gate_ref`; the caller decides whether to resolve (through the WebUI
     /// facade) or stop. Test/recording-support only.
     #[cfg(any(test, feature = "test-support"))]
@@ -1738,10 +1742,21 @@ impl RebornRuntime {
                     text: assistant_text,
                 }))
             } else {
+                // `wait_for_terminal_or_gate` only returns terminal or a
+                // user-resolvable gate (auth/approval/resource). The
+                // blocked-reason contract guarantees a `gate_ref` for those, so
+                // a missing one is an invariant violation — surface it as an
+                // error rather than letting it look like a valid outcome.
+                let gate_ref = state.gate_ref.clone().ok_or_else(|| {
+                    RebornRuntimeError::TurnSubmission(format!(
+                        "run parked on {:?} without a gate ref",
+                        state.status
+                    ))
+                })?;
                 Ok(RebornTurnDriveOutcome::BlockedOnGate {
                     run_id: submitted.run_id,
                     status: state.status,
-                    gate_ref: state.gate_ref.clone(),
+                    gate_ref,
                     partial_text: assistant_text,
                 })
             }
