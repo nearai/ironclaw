@@ -6,6 +6,7 @@ use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityDispatchRequest, CapabilityDispatchResult,
     CapabilityDispatcher, CapabilityGrantId, CapabilityId, Decision, DenyReason, ExecutionContext,
     InvocationFingerprint, InvocationId, Obligation, ProcessId, ResourceEstimate, ResourceScope,
+    shell_command_display_text,
 };
 use ironclaw_processes::{ProcessManager, ProcessStart};
 use ironclaw_run_state::{
@@ -314,6 +315,11 @@ where
                 request: mut approval,
             } => {
                 let approval_request_id = approval.id;
+                add_capability_input_display_hint(
+                    &mut approval.reason,
+                    &request.capability_id,
+                    &request.input,
+                );
                 debug!(
                     approval_request_id = %approval_request_id,
                     "capability authorization requires approval"
@@ -2104,6 +2110,31 @@ where
                 "obligation abort failed after downstream side-effect failure",
             );
         }
+    }
+}
+
+fn add_capability_input_display_hint(
+    reason: &mut String,
+    capability_id: &CapabilityId,
+    input: &serde_json::Value,
+) {
+    if capability_id.as_str() != "builtin.shell" {
+        return;
+    }
+    let Some(command) = input
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .map(shell_command_display_text)
+    else {
+        return;
+    };
+    if command.text.is_empty() {
+        return;
+    }
+    reason.push_str("\n\nCommand:\n");
+    reason.push_str(&command.text);
+    if command.truncated {
+        reason.push_str("\n[truncated]");
     }
 }
 

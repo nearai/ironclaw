@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use ironclaw_event_projections::{CapabilityActivityProjection, CapabilityActivityStatus};
 use ironclaw_host_api::{
     CapabilityDisplayOutputPreview, CapabilityDisplayText, CapabilityId, InvocationId,
-    truncate_capability_display_text,
+    shell_command_display_text, truncate_capability_display_text,
 };
 use ironclaw_product_adapters::{
     CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
@@ -396,6 +396,19 @@ fn output_preview_from_display(value: &CapabilityDisplayOutputPreview) -> Output
 }
 
 fn input_summary(capability_id: &str, value: &serde_json::Value) -> Option<CapabilityDisplayText> {
+    if (capability_id == "shell"
+        || capability_id == "builtin.shell"
+        || capability_id.ends_with(".shell"))
+        && let Some(command) = value.get("command").and_then(serde_json::Value::as_str)
+    {
+        let command = shell_command_display_text(command);
+        let mut summary = bounded_display_text(
+            &format!("command: {}", command.text),
+            CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+        );
+        summary.truncated |= command.truncated;
+        return Some(summary);
+    }
     if (capability_id == "read_file"
         || capability_id == "builtin.read_file"
         || capability_id.ends_with(".read_file"))

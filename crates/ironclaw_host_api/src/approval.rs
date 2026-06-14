@@ -9,10 +9,12 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::sync::OnceLock;
 
 use crate::{
-    Action, ApprovalRequestId, CapabilityId, CorrelationId, HostApiError, NetworkTargetPattern,
-    Principal, ResourceEstimate, ResourceScope, ScopedPath, Timestamp,
+    Action, ApprovalRequestId, CapabilityDisplayText, CapabilityId, CorrelationId, HostApiError,
+    NetworkTargetPattern, Principal, ResourceEstimate, ResourceScope, ScopedPath, Timestamp,
+    truncate_capability_display_text,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -86,6 +88,7 @@ impl InvocationFingerprint {
 }
 
 const MAX_CANONICAL_JSON_DEPTH: usize = 64;
+pub const SHELL_COMMAND_DISPLAY_MAX_BYTES: usize = 2 * 1024;
 
 /// Canonicalize JSON values with recursively sorted object keys.
 ///
@@ -95,6 +98,176 @@ const MAX_CANONICAL_JSON_DEPTH: usize = 64;
 /// returned unchanged. Deeply nested inputs fail closed.
 pub fn canonical_json_v1(value: &serde_json::Value) -> Result<serde_json::Value, HostApiError> {
     canonical_json_at_depth(value, 0)
+}
+
+pub fn shell_command_display_text(command: &str) -> CapabilityDisplayText {
+    let sanitized = redact_shell_command_for_display(command);
+    truncate_capability_display_text(&sanitized, SHELL_COMMAND_DISPLAY_MAX_BYTES)
+}
+
+fn redact_shell_command_for_display(cmd: &str) -> String {
+    use regex::Regex;
+
+    static PATTERNS: OnceLock<[Regex; 4]> = OnceLock::new();
+    let patterns = PATTERNS.get_or_init(|| {
+        // The patterns are hardcoded literals; a panic here would be a
+        // developer error caught by the unit test below.
+        [
+            Regex::new(
+                r#"(?i)(-H|--header|-u|--user|--token|--api-?key|--password|--auth|--bearer)(\s+|=)(["'])[^"']*(["'])"#,
+            )
+            .expect("hardcoded shell redaction regex is valid"),
+            Regex::new(
+                r#"(?i)(-H|--header|-u|--user|--token|--api-?key|--password|--auth|--bearer)(\s+|=)([^\s"'][^\s]*)"#,
+            )
+            .expect("hardcoded shell redaction regex is valid"),
+            Regex::new(r#"(?i)(Authorization|X-Api-Key|X-Auth-Token|Bearer)\s*:\s*[^\s"']+"#)
+                .expect("hardcoded shell redaction regex is valid"),
+            Regex::new(r#"([a-zA-Z][a-zA-Z0-9+.\-]*://[^\s"'?#]*)\?[^\s"']*"#)
+                .expect("hardcoded shell redaction regex is valid"),
+        ]
+    });
+    let mut out = patterns[0]
+        .replace_all(cmd, "$1$2$3<REDACTED>$4")
+        .into_owned();
+    out = patterns[1].replace_all(&out, "$1$2<REDACTED>").into_owned();
+    out = patterns[2].replace_all(&out, "$1: <REDACTED>").into_owned();
+    out = patterns[3].replace_all(&out, "$1?...").into_owned();
+    sanitize_shell_display_text(&out)
+}
+
+fn sanitize_shell_display_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut redact_next_value = false;
+    for token in text.split_inclusive(char::is_whitespace) {
+        let trimmed = token.trim_end();
+        if trimmed.is_empty() {
+            push_safe_text(&mut out, token);
+            continue;
+        }
+        let suffix = &token[trimmed.len()..];
+        let redact_current =
+            redact_next_value || is_secret_like(trimmed) || is_unsafe_path_like(trimmed);
+        if redact_current {
+            out.push_str("[redacted]");
+            push_safe_text(&mut out, suffix);
+        } else {
+            push_safe_text(&mut out, token);
+        }
+        redact_next_value = credential_key_expects_value(trimmed) && !suffix.is_empty();
+    }
+    out
+}
+
+fn push_safe_text(out: &mut String, text: &str) {
+    out.extend(
+        text.chars().filter(|character| {
+            *character == '\n' || *character == '\t' || !character.is_control()
+        }),
+    );
+}
+
+fn is_secret_like(token: &str) -> bool {
+    let trimmed = token.trim_matches(token_boundary_punctuation);
+    let lower = trimmed.to_ascii_lowercase();
+    lower.starts_with("sk-")
+        || lower.starts_with("ghp_")
+        || lower.starts_with("gho_")
+        || lower.starts_with("ghu_")
+        || lower.starts_with("ghs_")
+        || lower.starts_with("xoxb-")
+        || lower.starts_with("xoxa-")
+        || lower.starts_with("xoxp-")
+        || looks_like_aws_access_key(trimmed)
+        || looks_like_jwt(trimmed)
+        || lower.contains("api_key=")
+        || lower.contains("api_key:")
+        || lower.contains("apikey=")
+        || lower.contains("apikey:")
+        || lower.contains("access_token=")
+        || lower.contains("access_token:")
+        || lower.contains("secret=")
+        || lower.contains("secret:")
+        || lower.contains("password=")
+        || lower.contains("password:")
+        || lower.contains("token=")
+        || lower.contains("token:")
+}
+
+fn is_unsafe_path_like(token: &str) -> bool {
+    let token = token.trim_matches(token_boundary_punctuation);
+    token.to_ascii_lowercase().starts_with("file:/")
+        || token_contains_absolute_posix_path(token)
+        || token.starts_with("\\\\")
+        || token.contains("\\\\")
+        || token.get(1..3) == Some(":\\")
+}
+
+fn credential_key_expects_value(token: &str) -> bool {
+    let lower = token
+        .trim_matches(non_credential_boundary_punctuation)
+        .to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "api_key:"
+            | "api_key="
+            | "apikey:"
+            | "apikey="
+            | "access_token:"
+            | "access_token="
+            | "secret:"
+            | "secret="
+            | "password:"
+            | "password="
+            | "token:"
+            | "token="
+    )
+}
+
+fn non_credential_boundary_punctuation(character: char) -> bool {
+    matches!(
+        character,
+        '"' | '\'' | '`' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}'
+    )
+}
+
+fn looks_like_aws_access_key(token: &str) -> bool {
+    (token.starts_with("AKIA") || token.starts_with("ASIA"))
+        && token.len() >= 16
+        && token
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+}
+
+fn looks_like_jwt(token: &str) -> bool {
+    token.starts_with("eyJ")
+        && token.matches('.').count() >= 2
+        && token.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+}
+
+fn token_contains_absolute_posix_path(token: &str) -> bool {
+    let mut previous = None;
+    let mut characters = token.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '/'
+            && previous.is_none_or(token_boundary_punctuation)
+            && !matches!(previous, Some('/'))
+            && !matches!(characters.peek(), Some('/'))
+        {
+            return true;
+        }
+        previous = Some(character);
+    }
+    false
+}
+
+fn token_boundary_punctuation(character: char) -> bool {
+    matches!(
+        character,
+        '"' | '\'' | '`' | ',' | ';' | ':' | '=' | '(' | ')' | '[' | ']' | '{' | '}'
+    )
 }
 
 /// Return a stable `sha256:<lower-hex>` digest token for already-canonical bytes.
@@ -174,4 +347,36 @@ pub enum FileActionKind {
     List,
     Write,
     Delete,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_command_display_text_redacts_auth_and_url_query() {
+        let display = shell_command_display_text(
+            "curl -H 'Authorization: Bearer sk-secret' https://example.test/path?token=secret && echo ok",
+        );
+
+        assert!(display.text.contains("curl -H '<REDACTED>'"));
+        assert!(display.text.contains("https://example.test/path?..."));
+        assert!(display.text.contains("echo ok"));
+        assert!(!display.text.contains("sk-secret"));
+        assert!(!display.text.contains("token=secret"));
+    }
+
+    #[test]
+    fn shell_command_display_text_redacts_bare_secrets_and_host_paths() {
+        let display = shell_command_display_text(
+            "cat /home/alice/.ssh/id_rsa && echo sk-secret && token: ghp_secret",
+        );
+
+        assert!(display.text.contains("cat [redacted]"));
+        assert!(display.text.contains("echo [redacted]"));
+        assert!(display.text.contains("token: [redacted]"));
+        assert!(!display.text.contains("/home/alice"));
+        assert!(!display.text.contains("sk-secret"));
+        assert!(!display.text.contains("ghp_secret"));
+    }
 }

@@ -4534,6 +4534,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "regex",
  "rust_decimal",
  "rust_decimal_macros",
  "serde",

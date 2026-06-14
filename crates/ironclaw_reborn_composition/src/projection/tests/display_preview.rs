@@ -218,6 +218,56 @@ async fn capability_display_preview_store_redacts_unsafe_paths_and_secrets() {
 }
 
 #[tokio::test]
+async fn capability_display_preview_store_summarizes_shell_command_safely() {
+    let run_id = TurnRunId::new();
+    let capability = CapabilityId::new("builtin.shell").unwrap();
+    let input_ref = preview_input_ref("shell-preview-input");
+    let store = CapabilityDisplayPreviewStore::default();
+    store.record_input(
+        &run_id.to_string(),
+        &input_ref,
+        "builtin.shell",
+        &serde_json::json!({
+            "command": "pwd && curl -H 'Authorization: Bearer sk-secret' https://example.test/path?token=secret"
+        }),
+    );
+    store.record_result(CapabilityDisplayPreviewResult {
+        run_id: &run_id.to_string(),
+        input_ref: &input_ref,
+        invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
+        capability_id: &capability,
+        result_ref: "result:shell-preview",
+        output: &serde_json::json!({"output": "ok"}),
+        output_bytes: 2,
+    });
+    let preview = store
+        .preview(&CapabilityActivityProjection {
+            invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
+            run_id: Some(InvocationId::from_uuid(run_id.as_uuid())),
+            capability_id: capability,
+            thread_id: Some(ThreadId::new("webui-shell-preview-thread").unwrap()),
+            status: ironclaw_event_projections::CapabilityActivityStatus::Completed,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: Some(2),
+            error_kind: None,
+            last_cursor: ironclaw_events::EventCursor::new(1),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    let input_summary = preview.input_summary.as_deref().unwrap();
+    assert!(input_summary.contains("command: pwd && curl"));
+    assert!(input_summary.contains("-H '<REDACTED>'"));
+    assert!(input_summary.contains("https://example.test/path?..."));
+    assert!(!input_summary.contains("sk-secret"));
+    assert!(!input_summary.contains("token=secret"));
+}
+
+#[tokio::test]
 async fn capability_display_preview_store_admits_workspace_and_project_scoped_path_subtitles() {
     // /workspace/ and /project/ prefixed paths should appear as workspace-relative subtitles;
     // other absolute paths (e.g. /etc/passwd) must be dropped for safety.
