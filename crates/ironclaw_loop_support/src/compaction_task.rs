@@ -323,8 +323,14 @@ where
             // A stable-non-model-visible terminal (e.g. RejectedBusy) is a legal
             // cut point: it is excluded from the compacted output (same as the
             // in-range SkipEphemeral branch below) and compaction proceeds normally.
-            CompactionMessageDisposition::SkipEphemeral(_) => {}
+            // Only StableNonModelVisible qualifies — other ephemeral skips (e.g.
+            // CapabilityDisplayPreview) are not valid terminals and fall through
+            // to InvalidCutPoint below.
+            CompactionMessageDisposition::SkipEphemeral(
+                CompactionSkipReason::StableNonModelVisible,
+            ) => {}
             CompactionMessageDisposition::Include
+            | CompactionMessageDisposition::SkipEphemeral(_)
             | CompactionMessageDisposition::RejectInvalid(_) => {
                 return Err(CompactionError::InvalidCutPoint);
             }
