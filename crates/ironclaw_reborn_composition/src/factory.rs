@@ -58,6 +58,11 @@ use ironclaw_host_runtime::{
     builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_host_runtime::{
+    builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
+    builtin_first_party_package_for_process_backend,
+};
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_loop_support::FilesystemCheckpointStateStore;
 use ironclaw_outbound::CommunicationPreferenceRepository;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -2244,6 +2249,25 @@ pub(crate) fn builtin_extension_registry() -> Result<ExtensionRegistry, RebornBu
     Ok(registry)
 }
 
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn production_builtin_extension_registry(
+    process_backend: ProcessBackendKind,
+) -> Result<ExtensionRegistry, RebornBuildError> {
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(
+            builtin_first_party_package_for_process_backend(process_backend).map_err(|error| {
+                RebornBuildError::InvalidConfig {
+                    reason: format!("built-in first-party package is invalid: {error}"),
+                }
+            })?,
+        )
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("built-in first-party registry is invalid: {error}"),
+        })?;
+    Ok(registry)
+}
+
 fn builtin_first_party_registry_with_trigger_create_hook(
     trigger_repository: Arc<dyn TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
@@ -2252,6 +2276,22 @@ fn builtin_first_party_registry_with_trigger_create_hook(
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("built-in first-party handlers are invalid: {error}"),
         })
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn production_first_party_registry_with_trigger_create_hook(
+    trigger_repository: Arc<dyn TriggerRepository>,
+    trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    process_backend: ProcessBackendKind,
+) -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
+    builtin_first_party_handlers_with_trigger_create_hook_for_process_backend(
+        trigger_repository,
+        trigger_create_hook,
+        process_backend,
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("built-in first-party handlers are invalid: {error}"),
+    })
 }
 
 fn local_dev_builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
@@ -2890,7 +2930,9 @@ where
     let trigger_create_hook = Arc::new(ScopedFilesystemTriggerCreatorPairingHook::new(Arc::clone(
         &stores.scoped_filesystem,
     )));
-    let extension_registry = Arc::new(builtin_extension_registry()?);
+    let process_backend = production_wiring.runtime_policy.process_backend;
+    let extension_registry = production_builtin_extension_registry(process_backend)?;
+    let extension_registry = Arc::new(extension_registry);
     let BudgetSinks {
         budget_event_sink,
         broadcast_budget_event_sink,
@@ -2936,9 +2978,10 @@ where
         audit_log,
     });
     let production_runtime = production_runtime_services(production_runtime_graph);
-    let mut first_party_registry = builtin_first_party_registry_with_trigger_create_hook(
+    let mut first_party_registry = production_first_party_registry_with_trigger_create_hook(
         trigger_repository,
         trigger_create_hook,
+        process_backend,
     )?;
     let product_auth_filesystem = Arc::clone(&stores.scoped_filesystem);
     let services = HostRuntimeServices::new(
