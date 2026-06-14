@@ -921,6 +921,7 @@ registerPack("ja", {
   "extensions.moreActions": "その他のアクション",
   "extensions.kind.wasm_tool": "WASM ツール",
   "extensions.kind.wasm_channel": "チャネル",
+  "extensions.kind.channel": "チャネル",
   "extensions.kind.mcp_server": "MCP サーバー",
   "extensions.kind.first_party": "ファーストパーティ",
   "extensions.kind.system": "システム",

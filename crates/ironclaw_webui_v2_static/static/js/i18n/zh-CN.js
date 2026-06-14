@@ -921,6 +921,7 @@ registerPack("zh-CN", {
   "extensions.moreActions": "更多操作",
   "extensions.kind.wasm_tool": "WASM 工具",
   "extensions.kind.wasm_channel": "通道",
+  "extensions.kind.channel": "通道",
   "extensions.kind.mcp_server": "MCP 协议服务",
   "extensions.kind.first_party": "第一方系统",
   "extensions.kind.system": "系统级别",

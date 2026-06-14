@@ -140,7 +140,7 @@ mod tests {
         assert!(picker.contains("saveSlackAllowedChannels(channels)"));
 
         let channels_tab = asset_text("js/pages/extensions/components/channels-tab.js");
-        assert!(channels_tab.contains("slackBuiltinStatus"));
+        assert!(channels_tab.contains("showLegacySlackConnectActions"));
         assert!(channels_tab.contains("admin_managed_channels"));
         assert!(channels_tab.contains("inbound_proof_code"));
         assert!(channels_tab.contains("SlackChannelPicker"));

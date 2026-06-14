@@ -921,6 +921,7 @@ registerPack("fr", {
   "extensions.moreActions": "Plus d'actions",
   "extensions.kind.wasm_tool": "Outil WASM",
   "extensions.kind.wasm_channel": "Canal",
+  "extensions.kind.channel": "Canal",
   "extensions.kind.mcp_server": "Serveur MCP",
   "extensions.kind.first_party": "Première partie",
   "extensions.kind.system": "Système",

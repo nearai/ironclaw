@@ -921,6 +921,7 @@ registerPack("uk", {
   "extensions.moreActions": "Більше дій",
   "extensions.kind.wasm_tool": "Інструмент WASM",
   "extensions.kind.wasm_channel": "Канал",
+  "extensions.kind.channel": "Канал",
   "extensions.kind.mcp_server": "Сервер MCP",
   "extensions.kind.first_party": "Основний",
   "extensions.kind.system": "Система",

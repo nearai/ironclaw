@@ -921,6 +921,7 @@ registerPack("hi", {
   "extensions.moreActions": "अधिक क्रियाएं",
   "extensions.kind.wasm_tool": "WASM टूल",
   "extensions.kind.wasm_channel": "चैनल",
+  "extensions.kind.channel": "चैनल",
   "extensions.kind.mcp_server": "MCP सर्वर",
   "extensions.kind.first_party": "प्रथम-पक्ष",
   "extensions.kind.system": "सिस्टम",

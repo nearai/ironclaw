@@ -921,6 +921,7 @@ registerPack("ko", {
   "extensions.moreActions": "추가 작업",
   "extensions.kind.wasm_tool": "WASM 도구",
   "extensions.kind.wasm_channel": "채널",
+  "extensions.kind.channel": "채널",
   "extensions.kind.mcp_server": "MCP 서버",
   "extensions.kind.first_party": "자사",
   "extensions.kind.system": "시스템",
