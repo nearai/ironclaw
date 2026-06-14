@@ -112,7 +112,7 @@ fn expected_table() -> Vec<Expected> {
             listener_class: ListenerClass::LocalGateway,
             auth_schemes: &[IngressAuthScheme::BearerToken],
             scope_source: IngressScopeSource::AuthenticatedCaller,
-            body_limit: body_limit_kib(1024),
+            body_limit: body_limit_kib(14 * 1024),
             rate_limit_max: 60,
             rate_limit_window_seconds: 60,
             rate_limit_scope: RateLimitScope::PerCaller,

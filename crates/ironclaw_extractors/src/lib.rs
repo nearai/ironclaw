@@ -1,4 +1,12 @@
-//! Format-specific text extraction routines.
+//! Type-aware text extraction: turn a file's bytes into plain text by format.
+//!
+//! [`extract_text`] is the single entry point — give it the bytes, a MIME type,
+//! and an optional filename and it dispatches to the right format extractor
+//! (PDF, OOXML word/slide/sheet, legacy Office, RTF, UTF-8 text/code). It is a
+//! pure function with no I/O and no knowledge of where the bytes came from, so
+//! it can be used for chat attachments, agent file reads, or any other file
+//! consumption path. ZIP-based formats are decompression-bomb safe (per-entry
+//! and cumulative caps).
 
 use std::io::Read;
 
@@ -25,9 +33,13 @@ enum ExtractionError {
 
 /// Extract text from document bytes based on MIME type and optional filename.
 pub fn extract_text(data: &[u8], mime: &str, filename: Option<&str>) -> Result<String, String> {
-    let base_mime = mime.split(';').next().unwrap_or(mime).trim();
+    // Normalize through the workspace's single MIME normalizer (strip params,
+    // trim, lowercase) so callers can hand us a raw header value like
+    // `Application/PDF; charset=binary` and still dispatch to the right
+    // extractor — the format match below is over lowercase canonical types.
+    let base_mime = ironclaw_common::normalize_mime_type(mime);
 
-    match base_mime {
+    match base_mime.as_str() {
         // PDF
         "application/pdf" => extract_pdf(data),
 
@@ -590,6 +602,21 @@ mod tests {
         let result = extract_utf8(data).unwrap();
         assert!(result.contains("hello"));
         assert!(result.contains("world"));
+    }
+
+    #[test]
+    fn extract_text_normalizes_mime_case_and_params() {
+        // The format match is over lowercase canonical types; a raw header value
+        // with casing and/or parameters must still dispatch to the right
+        // extractor via the shared normalizer rather than fall through to
+        // "unsupported".
+        let data = b"hello world";
+        let canonical = extract_text(data, "text/plain", None).unwrap();
+        assert_eq!(
+            extract_text(data, "Text/Plain; charset=UTF-8", None).unwrap(),
+            canonical
+        );
+        assert_eq!(extract_text(data, "TEXT/PLAIN", None).unwrap(), canonical);
     }
 
     #[test]

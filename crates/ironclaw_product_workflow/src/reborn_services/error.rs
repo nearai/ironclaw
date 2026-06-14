@@ -91,6 +91,14 @@ impl RebornServicesError {
         Self::from_status(RebornServicesErrorCode::Internal, 500, false)
     }
 
+    /// Sanitized internal (500) error for host-composition adapters that
+    /// implement workflow ports from outside this crate. The struct fields are
+    /// public, but new construction sites should route through one constructor
+    /// rather than hand-rolling the status/kind pairing.
+    pub fn internal() -> Self {
+        Self::from_status(RebornServicesErrorCode::Internal, 500, false)
+    }
+
     pub(super) fn service_unavailable(retryable: bool) -> Self {
         Self::from_status_kind(
             RebornServicesErrorCode::Unavailable,

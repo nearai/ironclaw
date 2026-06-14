@@ -1079,6 +1079,19 @@ impl RebornRuntime {
         self.skill_activation_source.clone()
     }
 
+    /// Project-scoped workspace filesystem the agent's file tools resolve
+    /// through. Used to land inbound attachment bytes at paths the agent can
+    /// later read back. `None` when no local runtime is composed.
+    pub(crate) fn webui_workspace_filesystem(
+        &self,
+    ) -> Option<Arc<ironclaw_filesystem::ScopedFilesystem<crate::factory::LocalDevRootFilesystem>>>
+    {
+        self.services
+            .local_runtime
+            .as_ref()
+            .map(|rt| Arc::clone(&rt.workspace_filesystem))
+    }
+
     /// Test-only handle on the resource governor backing the budget
     /// accountant. Exposed under `test-support` so integration tests can
     /// assert ledger state after a `send_user_message` round-trip.
@@ -5519,6 +5532,7 @@ mod tests {
                     client_action_id: Some("send-webui-stream-message".to_string()),
                     thread_id: Some(created.thread.thread_id.to_string()),
                     content: Some("hello webui stream".to_string()),
+                    attachments: Vec::new(),
                 },
             )
             .await
@@ -6559,6 +6573,7 @@ mod tests {
                     client_action_id: Some("send-webui-skill-message".to_string()),
                     thread_id: Some(created.thread.thread_id.to_string()),
                     content: Some("$webui-helper please help".to_string()),
+                    attachments: Vec::new(),
                 },
             )
             .await

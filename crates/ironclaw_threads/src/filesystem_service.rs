@@ -748,6 +748,12 @@ where
             .reserve_sequence(&request.scope, &request.thread_id)
             .await?;
         let message_id = ThreadMessageId::new();
+        // Borrow `request` for the idempotency key before moving `content` out,
+        // so the content (now carrying attachment refs) is consumed by move
+        // rather than deep-cloned on this per-message hot path.
+        let idempotency_key = InboundIdempotencyKey::from_request(&request);
+        let (content_text, attachments) = request.content.into_parts();
+        crate::contract::validate_attachment_refs(&attachments)?;
         let message = ThreadMessageRecord {
             message_id,
             thread_id: request.thread_id.clone(),
@@ -761,13 +767,14 @@ where
             turn_run_id: None,
             tool_result_ref: None,
             tool_result_provider_call: None,
-            content: Some(request.content.clone().into_text()),
+            content: Some(content_text),
+            attachments,
             redaction_ref: None,
         };
         self.write_new_message(&request.scope, &request.thread_id, &message, "message")
             .await?;
 
-        if let Some(idempotency_key) = InboundIdempotencyKey::from_request(&request) {
+        if let Some(idempotency_key) = idempotency_key {
             let idem_record = InboundIdempotencyRecord {
                 scope: idempotency_key.scope.clone(),
                 source_binding_id: idempotency_key.source_binding_id.clone(),
@@ -923,6 +930,7 @@ where
             tool_result_ref: None,
             tool_result_provider_call: None,
             content: Some(request.content.into_text()),
+            attachments: Vec::new(),
             redaction_ref: None,
         };
         self.write_new_message(
@@ -1032,6 +1040,7 @@ where
             tool_result_ref: Some(envelope.result_ref),
             tool_result_provider_call: provider_call,
             content: Some(content),
+            attachments: Vec::new(),
             redaction_ref: None,
         };
         self.write_new_message(
@@ -1088,6 +1097,7 @@ where
             tool_result_ref: request.preview.result_ref.clone(),
             tool_result_provider_call: None,
             content: Some(content),
+            attachments: Vec::new(),
             redaction_ref: None,
         };
         let path = message_record_path(&request.scope, &request.thread_id, message.message_id)?;
@@ -1191,6 +1201,9 @@ where
             |message| {
                 ensure_draft(message)?;
                 message.content = Some(request.content.clone().into_text());
+                // Keep content and attachments in lockstep (as redaction does):
+                // a content update must not leave stale attachment refs behind.
+                message.attachments = Vec::new();
                 Ok(())
             },
         )
@@ -1213,6 +1226,7 @@ where
             ensure_draft(message)?;
             message.status = MessageStatus::Finalized;
             message.content = Some(content.clone().into_text());
+            message.attachments = Vec::new();
             Ok(())
         })
         .await
@@ -1234,6 +1248,7 @@ where
             |message| {
                 message.status = MessageStatus::Redacted;
                 message.content = None;
+                message.attachments = Vec::new();
                 message.tool_result_provider_call = None;
                 message.redaction_ref = Some(request.redaction_ref.clone());
                 Ok(())
@@ -1989,6 +2004,11 @@ fn history_messages(messages: &[ThreadMessageRecord]) -> Vec<ThreadMessageRecord
     messages.iter().map(history_message).collect()
 }
 
+// Deny-by-default projection: every field is listed deliberately so a newly
+// added sensitive field does NOT auto-flow into persisted history. Do not
+// collapse to `..message.clone()` — `tool_result_provider_call` is dropped
+// here precisely because raw runtime/tool payloads must never surface as
+// ordinary transcript content (see crate guardrails).
 fn history_message(message: &ThreadMessageRecord) -> ThreadMessageRecord {
     ThreadMessageRecord {
         message_id: message.message_id,
@@ -2004,6 +2024,7 @@ fn history_message(message: &ThreadMessageRecord) -> ThreadMessageRecord {
         tool_result_ref: message.tool_result_ref.clone(),
         tool_result_provider_call: None,
         content: message.content.clone(),
+        attachments: message.attachments.clone(),
         redaction_ref: message.redaction_ref.clone(),
     }
 }

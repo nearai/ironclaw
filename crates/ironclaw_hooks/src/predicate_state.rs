@@ -501,7 +501,7 @@ pub struct InMemoryPredicateStateBackend {
 /// in-memory backend's memory footprint against threat-model finding **D5**.
 pub const MAX_HISTORY_KEYS: usize = 8_192;
 
-/// Per-tenant ceiling on distinct keys held in either history map.
+/// Per-tenant ceiling on distinct keys held across both history maps.
 /// Defends against the cross-tenant LRU-reset attack (henrypark133 MED
 /// on PR #3635 5-19 review): without a per-tenant quota, a noisy tenant
 /// can grow its key footprint to evict a quiet tenant's bucket, which
@@ -596,26 +596,33 @@ impl PredicateStateBackend for InMemoryPredicateStateBackend {
         // (henrypark133 must-fix #2 on PR #3635). A poisoning thread has
         // already aborted; refusing service indefinitely is worse than
         // proceeding with possibly-incomplete state.
-        let mut history = match self.invocation_history.lock() {
+        let mut invocation_history = match self.invocation_history.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if !history.contains_key(key) {
+        let mut value_history = match self.value_history.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if !invocation_history.contains_key(key) {
             // Per-tenant quota: if this tenant already holds the cap,
-            // evict their oldest-front bucket FIRST (not a global LRU
-            // pass) so noisy tenants can't push quiet tenants out.
-            // henrypark133 MED on PR #3635 5-19 review.
-            let tenant_count = history
-                .keys()
-                .filter(|k| k.tenant_id == key.tenant_id)
-                .count();
+            // counting BOTH history maps, evict their oldest-front bucket
+            // FIRST (not a global LRU pass) so noisy tenants can't push quiet
+            // tenants out.
+            let tenant_count = tenant_invocation_key_count(&invocation_history, &key.tenant_id)
+                + tenant_value_key_count(&value_history, &key.tenant_id);
             if tenant_count >= MAX_KEYS_PER_TENANT {
-                evict_lru_invocation_for_tenant(&mut history, &key.tenant_id, &self.evictions);
-            } else if history.len() >= MAX_HISTORY_KEYS {
-                evict_lru_invocation(&mut history, &self.evictions);
+                evict_lru_for_tenant(
+                    &mut invocation_history,
+                    &mut value_history,
+                    &key.tenant_id,
+                    &self.evictions,
+                );
+            } else if invocation_history.len() >= MAX_HISTORY_KEYS {
+                evict_lru_invocation(&mut invocation_history, &self.evictions);
             }
         }
-        let bucket = history.entry(key.clone()).or_default();
+        let bucket = invocation_history.entry(key.clone()).or_default();
         // Trim entries outside the window using a wall-clock cutoff. With
         // the `DateTime<Utc>` clock, `window_cutoff` computes `now - window`
         // via saturating `chrono` arithmetic, so the `Instant::checked_sub`
@@ -651,7 +658,7 @@ impl PredicateStateBackend for InMemoryPredicateStateBackend {
                 // Drop the bucket if the trim above emptied it, so an
                 // overflow-on-a-stale-key doesn't leave a zombie bucket.
                 if bucket.entries.is_empty() {
-                    history.remove(key);
+                    invocation_history.remove(key);
                 }
                 return Err(PredicateBackendError::WindowOverflow {
                     key: format!("{}/{}", key.tenant_id.as_str(), key.capability),
@@ -666,7 +673,7 @@ impl PredicateStateBackend for InMemoryPredicateStateBackend {
         // removed every entry AND `duplicate` was true (so we didn't add
         // a new one).
         if bucket.entries.is_empty() {
-            history.remove(key);
+            invocation_history.remove(key);
         }
         Ok(count)
     }
@@ -679,22 +686,29 @@ impl PredicateStateBackend for InMemoryPredicateStateBackend {
         value: Decimal,
         window: Duration,
     ) -> Result<Decimal, PredicateBackendError> {
-        let mut history = match self.value_history.lock() {
+        let mut invocation_history = match self.invocation_history.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if !history.contains_key(key) {
-            let tenant_count = history
-                .keys()
-                .filter(|k| k.tenant_id == key.tenant_id)
-                .count();
+        let mut value_history = match self.value_history.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if !value_history.contains_key(key) {
+            let tenant_count = tenant_invocation_key_count(&invocation_history, &key.tenant_id)
+                + tenant_value_key_count(&value_history, &key.tenant_id);
             if tenant_count >= MAX_KEYS_PER_TENANT {
-                evict_lru_value_for_tenant(&mut history, &key.tenant_id, &self.evictions);
-            } else if history.len() >= MAX_HISTORY_KEYS {
-                evict_lru_value(&mut history, &self.evictions);
+                evict_lru_for_tenant(
+                    &mut invocation_history,
+                    &mut value_history,
+                    &key.tenant_id,
+                    &self.evictions,
+                );
+            } else if value_history.len() >= MAX_HISTORY_KEYS {
+                evict_lru_value(&mut value_history, &self.evictions);
             }
         }
-        let bucket = history.entry(key.clone()).or_default();
+        let bucket = value_history.entry(key.clone()).or_default();
         // Wall-clock cutoff trim — see `record_invocation` for why the
         // `DateTime<Utc>` clock removes the Bug 2 underflow hazard.
         let cutoff = window_cutoff(now, window);
@@ -716,7 +730,7 @@ impl PredicateStateBackend for InMemoryPredicateStateBackend {
             // reject so the evaluator can deny.
             if bucket.entries.len() >= MAX_SAMPLES_PER_KEY {
                 if bucket.entries.is_empty() {
-                    history.remove(key);
+                    value_history.remove(key);
                 }
                 return Err(PredicateBackendError::WindowOverflow {
                     key: format!(
@@ -736,7 +750,7 @@ impl PredicateStateBackend for InMemoryPredicateStateBackend {
         // the potential empty-bucket removal below.
         let sum = bucket.running_sum;
         if bucket.entries.is_empty() {
-            history.remove(key);
+            value_history.remove(key);
         }
         Ok(sum)
     }
@@ -828,31 +842,76 @@ fn evict_lru_invocation(
     }
 }
 
-/// Tenant-scoped variant: evict the oldest-front bucket BELONGING TO
-/// `tenant_id`. Used when a single tenant hits [`MAX_KEYS_PER_TENANT`]
-/// so the eviction stays within that tenant's footprint and cannot
-/// reach into another tenant's buckets (henrypark133 MED on PR #3635
-/// 5-19 review).
-fn evict_lru_invocation_for_tenant(
+fn tenant_invocation_key_count(
+    history: &HashMap<InvocationKey, InvocationBucket>,
+    tenant_id: &TenantId,
+) -> usize {
+    history
+        .keys()
+        .filter(|key| key.tenant_id == *tenant_id)
+        .count()
+}
+
+fn tenant_value_key_count(history: &HashMap<ValueKey, ValueBucket>, tenant_id: &TenantId) -> usize {
+    history
+        .keys()
+        .filter(|key| key.tenant_id == *tenant_id)
+        .count()
+}
+
+fn lru_invocation_candidate_for_tenant(
+    history: &HashMap<InvocationKey, InvocationBucket>,
+    tenant_id: &TenantId,
+) -> Option<(InvocationKey, Option<DateTime<Utc>>)> {
+    history
+        .iter()
+        .filter(|(key, _)| key.tenant_id == *tenant_id)
+        .map(|(key, bucket)| (key.clone(), bucket.entries.front().map(|(ts, _)| *ts)))
+        .min_by_key(|(_, oldest)| *oldest)
+}
+
+fn lru_value_candidate_for_tenant(
+    history: &HashMap<ValueKey, ValueBucket>,
+    tenant_id: &TenantId,
+) -> Option<(ValueKey, Option<DateTime<Utc>>)> {
+    history
+        .iter()
+        .filter(|(key, _)| key.tenant_id == *tenant_id)
+        .map(|(key, bucket)| (key.clone(), bucket.entries.front().map(|(ts, _, _)| *ts)))
+        .min_by_key(|(_, oldest)| *oldest)
+}
+
+/// Tenant-scoped aggregate variant: evict the oldest-front bucket BELONGING TO
+/// `tenant_id` across BOTH history maps. Used when a single tenant hits
+/// [`MAX_KEYS_PER_TENANT`] so the eviction stays within that tenant's combined
+/// footprint and cannot reach into another tenant's buckets.
+fn evict_lru_for_tenant(
     history: &mut HashMap<InvocationKey, InvocationBucket>,
+    value_history: &mut HashMap<ValueKey, ValueBucket>,
     tenant_id: &TenantId,
     evictions: &AtomicU64,
 ) {
-    let empty_victim = history
-        .iter()
-        .find(|(k, v)| k.tenant_id == *tenant_id && v.entries.is_empty())
-        .map(|(k, _)| k.clone());
-    let victim = empty_victim.or_else(|| {
-        history
-            .iter()
-            .filter(|(k, _)| k.tenant_id == *tenant_id)
-            .filter_map(|(k, v)| v.entries.front().map(|(ts, _)| (k.clone(), *ts)))
-            .min_by_key(|(_, ts)| *ts)
-            .map(|(k, _)| k)
-    });
-    if let Some(k) = victim {
-        history.remove(&k);
-        evictions.fetch_add(1, AtomicOrdering::Relaxed);
+    let invocation_victim = lru_invocation_candidate_for_tenant(history, tenant_id);
+    let value_victim = lru_value_candidate_for_tenant(value_history, tenant_id);
+
+    match (invocation_victim, value_victim) {
+        (Some((invocation_key, invocation_ts)), Some((value_key, value_ts))) => {
+            if invocation_ts <= value_ts {
+                history.remove(&invocation_key);
+            } else {
+                value_history.remove(&value_key);
+            }
+            evictions.fetch_add(1, AtomicOrdering::Relaxed);
+        }
+        (Some((invocation_key, _)), None) => {
+            history.remove(&invocation_key);
+            evictions.fetch_add(1, AtomicOrdering::Relaxed);
+        }
+        (None, Some((value_key, _))) => {
+            value_history.remove(&value_key);
+            evictions.fetch_add(1, AtomicOrdering::Relaxed);
+        }
+        (None, None) => {}
     }
 }
 
@@ -864,31 +923,6 @@ fn evict_lru_value(history: &mut HashMap<ValueKey, ValueBucket>, evictions: &Ato
     let victim = empty_victim.or_else(|| {
         history
             .iter()
-            .filter_map(|(k, v)| v.entries.front().map(|(ts, _, _)| (k.clone(), *ts)))
-            .min_by_key(|(_, ts)| *ts)
-            .map(|(k, _)| k)
-    });
-    if let Some(k) = victim {
-        history.remove(&k);
-        evictions.fetch_add(1, AtomicOrdering::Relaxed);
-    }
-}
-
-/// Tenant-scoped variant for the value-sum map. Same rationale as
-/// [`evict_lru_invocation_for_tenant`].
-fn evict_lru_value_for_tenant(
-    history: &mut HashMap<ValueKey, ValueBucket>,
-    tenant_id: &TenantId,
-    evictions: &AtomicU64,
-) {
-    let empty_victim = history
-        .iter()
-        .find(|(k, v)| k.tenant_id == *tenant_id && v.entries.is_empty())
-        .map(|(k, _)| k.clone());
-    let victim = empty_victim.or_else(|| {
-        history
-            .iter()
-            .filter(|(k, _)| k.tenant_id == *tenant_id)
             .filter_map(|(k, v)| v.entries.front().map(|(ts, _, _)| (k.clone(), *ts)))
             .min_by_key(|(_, ts)| *ts)
             .map(|(k, _)| k)
@@ -1197,6 +1231,48 @@ pub mod contract {
         );
     }
 
+    /// Contract: [`MAX_KEYS_PER_TENANT`] is a tenant-wide aggregate quota
+    /// across invocation and value histories, not one independent quota per
+    /// map. Filling a tenant to the cap with invocation keys, then adding a
+    /// value key for the same tenant, must evict one of that tenant's existing
+    /// keys and advance the eviction counter.
+    pub async fn tenant_key_quota_spans_invocation_and_value_maps<B, F>(factory: F)
+    where
+        B: PredicateStateBackend,
+        F: Fn() -> B,
+    {
+        let backend = factory();
+        let tenant = "alpha";
+        let window = Duration::from_secs(86_400);
+        for i in 0..MAX_KEYS_PER_TENANT {
+            let key = inv_key(tenant, &format!("cap.inv.{i}"));
+            backend
+                .record_invocation(&key, &ev(&format!("inv-{i}")), at(i as i64), window)
+                .await
+                .expect("invocation insert under tenant cap succeeds");
+        }
+        let before_evictions = backend.evictions_observed();
+
+        let value_key = val_key(tenant, "cap.value", "amount");
+        let sum = backend
+            .record_value(
+                &value_key,
+                &ev("value-over-cap"),
+                at(MAX_KEYS_PER_TENANT as i64 + 1),
+                Decimal::from(1),
+                window,
+            )
+            .await
+            .expect("value insert should evict within the same tenant, not fail");
+
+        assert_eq!(sum, Decimal::from(1));
+        assert!(
+            backend.evictions_observed() > before_evictions,
+            "adding a value key when invocation keys already fill the tenant \
+             quota must trigger aggregate per-tenant eviction"
+        );
+    }
+
     /// Contract: the per-key sample cap is FAIL CLOSED. Filling a single
     /// key past [`MAX_SAMPLES_PER_KEY`] with distinct in-window event ids
     /// must return [`PredicateBackendError::WindowOverflow`] rather than
@@ -1413,6 +1489,7 @@ pub mod contract {
             $emit!([$($ctx)*] duplicate_event_id_is_noop_for_values);
             $emit!([$($ctx)*] invocation_retains_entry_at_exact_window_cutoff);
             $emit!([$($ctx)*] event_id_dedup_isolated_across_maps);
+            $emit!([$($ctx)*] tenant_key_quota_spans_invocation_and_value_maps);
             $emit!([$($ctx)*] record_invocation_overflow_is_fail_closed);
             $emit!([$($ctx)*] evict_older_than_reaps_strictly_older_rows);
             $emit!([$($ctx)*] evict_older_than_retains_entry_at_exact_cutoff);

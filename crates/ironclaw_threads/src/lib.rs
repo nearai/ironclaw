@@ -47,6 +47,11 @@ pub use contract::{
 pub use error::SessionThreadError;
 pub use identifiers::{SummaryArtifactId, ThreadMessageId};
 pub use in_memory::InMemorySessionThreadService;
+// The attachment vocabulary lives in `ironclaw_common` (next to `AttachmentKind`
+// and `IncomingAttachment`); re-exposed here so transcript-contract consumers
+// reach `AttachmentRef` through this crate without a direct `ironclaw_common`
+// dependency.
+pub use ironclaw_common::{AttachmentKind, AttachmentRef};
 pub use service::SessionThreadService;
 pub use tool_result_reference::{
     ProviderToolCallReferenceEnvelope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
