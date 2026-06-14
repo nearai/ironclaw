@@ -186,6 +186,15 @@ fn bound_safe_summary(summary: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
+    use ironclaw_host_api::{
+        HostPath, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
+        UserId, VirtualPath,
+    };
+    use serde_json::json;
+
     #[test]
     fn coding_tools_do_not_select_runtime_backends() {
         let sources = [
@@ -213,5 +222,102 @@ mod tests {
         let input = "x".repeat(512);
 
         assert_eq!(super::bound_safe_summary(input.clone()), input);
+    }
+
+    #[tokio::test]
+    async fn coding_file_tools_treat_bare_workspace_prefix_as_scoped_alias() {
+        let temp_root = tempfile::TempDir::new().expect("temp root");
+        let mut local_filesystem = LocalFilesystem::new();
+        local_filesystem
+            .mount_local(
+                VirtualPath::new("/projects").expect("virtual path"),
+                HostPath::from_path_buf(temp_root.path().to_path_buf()),
+            )
+            .expect("projects mount");
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(local_filesystem);
+        let mounts = workspace_mounts();
+        let scope = ResourceScope::local_default(
+            UserId::new("workspace-alias-user").expect("user id"),
+            InvocationId::new(),
+        )
+        .expect("resource scope");
+        let state = super::CodingCapabilityState::default();
+
+        let write_input = json!({
+            "path": "workspace/demo/a.txt",
+            "content": "hello"
+        });
+        let write_request = super::CodingCapabilityRequest::new(
+            super::CodingCapabilityKind::WriteFile,
+            &scope,
+            Some(&mounts),
+            Arc::clone(&filesystem),
+            &write_input,
+        );
+        let write_output = state.dispatch(&write_request).await.expect("write file");
+
+        assert_eq!(
+            write_output.output["path"].as_str(),
+            Some("/workspace/demo/a.txt")
+        );
+        let write_preview = write_output
+            .display_preview
+            .as_ref()
+            .expect("write preview");
+        assert_eq!(
+            write_preview.subtitle.as_deref(),
+            Some("/workspace/demo/a.txt")
+        );
+        assert!(
+            write_preview
+                .output_preview
+                .contains("--- a/workspace/demo/a.txt\n+++ b/workspace/demo/a.txt"),
+            "preview should use normalized path, got: {}",
+            write_preview.output_preview
+        );
+        assert_eq!(
+            filesystem
+                .read_file(
+                    &VirtualPath::new("/projects/workspace/demo/a.txt").expect("virtual path")
+                )
+                .await
+                .expect("normalized write path exists"),
+            b"hello".to_vec()
+        );
+        assert!(temp_root.path().join("workspace/demo/a.txt").exists());
+        assert!(
+            !temp_root
+                .path()
+                .join("workspace/workspace/demo/a.txt")
+                .exists()
+        );
+
+        let read_input = json!({ "path": "workspace/demo/a.txt" });
+        let read_request = super::CodingCapabilityRequest::new(
+            super::CodingCapabilityKind::ReadFile,
+            &scope,
+            Some(&mounts),
+            filesystem,
+            &read_input,
+        );
+        let read_output = state.dispatch(&read_request).await.expect("read file");
+
+        assert_eq!(
+            read_output.output["path"].as_str(),
+            Some("/workspace/demo/a.txt")
+        );
+        assert_eq!(
+            read_output.output["content"].as_str(),
+            Some("     1│ hello")
+        );
+    }
+
+    fn workspace_mounts() -> MountView {
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").expect("mount alias"),
+            VirtualPath::new("/projects/workspace").expect("virtual path"),
+            MountPermissions::read_write(),
+        )])
+        .expect("mount view")
     }
 }

@@ -1,3 +1,5 @@
+use std::path::{Component, Path};
+
 use ironclaw_filesystem::{FileStat, FilesystemError, FilesystemOperation};
 use ironclaw_host_api::{RuntimeDispatchErrorKind, ScopedPath, VirtualPath};
 use ironclaw_safety::sensitive_paths::is_sensitive_path_str;
@@ -74,9 +76,38 @@ fn scoped_path_input(path: &str) -> String {
         DEFAULT_SCOPED_ROOT.to_string()
     } else if path.starts_with('/') {
         path.to_string()
+    } else if let Some(scoped_workspace_path) = workspace_scoped_alias(path) {
+        scoped_workspace_path
     } else {
-        format!("{}/{}", DEFAULT_SCOPED_ROOT, path.trim_start_matches("./"))
+        let relative = path.trim_start_matches("./");
+        format!("{DEFAULT_SCOPED_ROOT}/{relative}")
     }
+}
+
+fn workspace_scoped_alias(path: &str) -> Option<String> {
+    let mut components = Path::new(path).components().peekable();
+    while matches!(components.peek(), Some(Component::CurDir)) {
+        components.next();
+    }
+
+    match components.next()? {
+        Component::Normal(segment) if segment == "workspace" => {}
+        _ => return None,
+    }
+
+    let mut scoped_path = DEFAULT_SCOPED_ROOT.to_string();
+    for component in components {
+        match component {
+            Component::Normal(segment) => {
+                scoped_path.push('/');
+                scoped_path.push_str(segment.to_str()?);
+            }
+            Component::CurDir => {}
+            Component::ParentDir => scoped_path.push_str("/.."),
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(scoped_path)
 }
 
 pub(super) fn operation_allowed(
