@@ -21,6 +21,8 @@ sha2 = "0.10"
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 zeroize = "1"
+regex = "1"
+urlencoding = "2"
 
 [dev-dependencies]
 rust_decimal_macros = "1"

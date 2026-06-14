@@ -4534,6 +4534,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "regex",
  "rust_decimal",
  "rust_decimal_macros",
  "serde",
@@ -4541,6 +4542,7 @@ dependencies = [
  "sha2 0.10.9",
  "static_assertions",
  "thiserror 2.0.18",
+ "urlencoding",
  "uuid",
  "zeroize",
 ]
