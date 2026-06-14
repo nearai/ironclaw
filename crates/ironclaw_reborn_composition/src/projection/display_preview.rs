@@ -4,7 +4,8 @@ use async_trait::async_trait;
 use ironclaw_event_projections::{CapabilityActivityProjection, CapabilityActivityStatus};
 use ironclaw_host_api::{
     CapabilityDisplayOutputPreview, CapabilityDisplayText, CapabilityId, InvocationId,
-    shell_command_display_text, truncate_capability_display_text,
+    sanitize_text as host_sanitize_text, sanitize_url_for_display, shell_command_display_text,
+    truncate_capability_display_text,
 };
 use ironclaw_product_adapters::{
     CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
@@ -677,27 +678,7 @@ fn safe_url_display(url: &str) -> CapabilityDisplayText {
 }
 
 fn strip_url_sensitive_parts(url: &str) -> String {
-    let Some(scheme_end) = url.find("://") else {
-        return sanitize_text(url);
-    };
-    let (scheme, rest) = url.split_at(scheme_end + 3);
-    let rest = match rest.find(['?', '#']) {
-        Some(index) => {
-            let marker = &rest[index..=index];
-            let replacement = if marker == "?" { "?..." } else { "#..." };
-            format!("{}{}", &rest[..index], replacement)
-        }
-        None => rest.to_string(),
-    };
-    let (authority, path_and_rest) = match rest.find('/') {
-        Some(index) => rest.split_at(index),
-        None => (rest.as_str(), ""),
-    };
-    let authority = authority
-        .rfind('@')
-        .map(|index| &authority[index + 1..])
-        .unwrap_or(authority);
-    sanitize_text(&format!("{scheme}{authority}{path_and_rest}"))
+    sanitize_url_for_display(url)
 }
 
 fn safe_capability_title(capability_id: &str) -> &str {
@@ -870,135 +851,5 @@ fn truncate_bytes(text: &str, max_bytes: usize) -> CapabilityDisplayText {
 }
 
 pub(crate) fn sanitize_text(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut redact_next_value = false;
-    for token in text.split_inclusive(char::is_whitespace) {
-        let trimmed = token.trim_end();
-        if trimmed.is_empty() {
-            push_safe_text(&mut out, token);
-            continue;
-        }
-        let suffix = &token[trimmed.len()..];
-        let redact_current =
-            redact_next_value || is_secret_like(trimmed) || is_unsafe_path_like(trimmed);
-        if redact_current {
-            out.push_str("[redacted]");
-            push_safe_text(&mut out, suffix);
-        } else {
-            push_safe_text(&mut out, token);
-        }
-        redact_next_value = credential_key_expects_value(trimmed) && !suffix.is_empty();
-    }
-    out
-}
-
-fn push_safe_text(out: &mut String, text: &str) {
-    out.extend(
-        text.chars().filter(|character| {
-            *character == '\n' || *character == '\t' || !character.is_control()
-        }),
-    );
-}
-
-fn is_secret_like(token: &str) -> bool {
-    let trimmed = token.trim_matches(token_boundary_punctuation);
-    let lower = trimmed.to_ascii_lowercase();
-    lower.starts_with("sk-")
-        || lower.starts_with("ghp_")
-        || lower.starts_with("gho_")
-        || lower.starts_with("ghu_")
-        || lower.starts_with("ghs_")
-        || lower.starts_with("xoxb-")
-        || lower.starts_with("xoxa-")
-        || lower.starts_with("xoxp-")
-        || looks_like_aws_access_key(trimmed)
-        || looks_like_jwt(trimmed)
-        || lower.contains("api_key=")
-        || lower.contains("api_key:")
-        || lower.contains("apikey=")
-        || lower.contains("apikey:")
-        || lower.contains("access_token=")
-        || lower.contains("access_token:")
-        || lower.contains("secret=")
-        || lower.contains("secret:")
-        || lower.contains("password=")
-        || lower.contains("password:")
-        || lower.contains("token=")
-        || lower.contains("token:")
-}
-
-fn is_unsafe_path_like(token: &str) -> bool {
-    let token = token.trim_matches(token_boundary_punctuation);
-    token.to_ascii_lowercase().starts_with("file:/")
-        || token_contains_absolute_posix_path(token)
-        || token.starts_with("\\\\")
-        || token.contains("\\\\")
-        || token.get(1..3) == Some(":\\")
-}
-
-fn credential_key_expects_value(token: &str) -> bool {
-    let lower = token
-        .trim_matches(non_credential_boundary_punctuation)
-        .to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "api_key:"
-            | "api_key="
-            | "apikey:"
-            | "apikey="
-            | "access_token:"
-            | "access_token="
-            | "secret:"
-            | "secret="
-            | "password:"
-            | "password="
-            | "token:"
-            | "token="
-    )
-}
-
-fn non_credential_boundary_punctuation(character: char) -> bool {
-    matches!(
-        character,
-        '"' | '\'' | '`' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}'
-    )
-}
-
-fn looks_like_aws_access_key(token: &str) -> bool {
-    (token.starts_with("AKIA") || token.starts_with("ASIA"))
-        && token.len() >= 16
-        && token
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric())
-}
-
-fn looks_like_jwt(token: &str) -> bool {
-    token.starts_with("eyJ")
-        && token.matches('.').count() >= 2
-        && token.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
-        })
-}
-
-fn token_contains_absolute_posix_path(token: &str) -> bool {
-    let mut previous = None;
-    let mut characters = token.chars().peekable();
-    while let Some(character) = characters.next() {
-        if character == '/'
-            && previous.is_none_or(token_boundary_punctuation)
-            && !matches!(previous, Some('/'))
-            && !matches!(characters.peek(), Some('/'))
-        {
-            return true;
-        }
-        previous = Some(character);
-    }
-    false
-}
-
-fn token_boundary_punctuation(character: char) -> bool {
-    matches!(
-        character,
-        '"' | '\'' | '`' | ',' | ';' | ':' | '=' | '(' | ')' | '[' | ']' | '{' | '}'
-    )
+    host_sanitize_text(text)
 }

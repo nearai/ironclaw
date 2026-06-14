@@ -301,7 +301,7 @@ async fn capability_display_preview_store_summarizes_shell_command_safely() {
 
     let input_summary = preview.input_summary.as_deref().unwrap();
     assert!(input_summary.contains("command: pwd && curl"));
-    assert!(input_summary.contains("-H '<REDACTED>'"));
+    assert!(input_summary.contains("-H 'Authorization: <REDACTED>'"));
     assert!(input_summary.contains("https://example.test/path?..."));
     assert!(!input_summary.contains("sk-secret"));
     assert!(!input_summary.contains("token=secret"));
@@ -314,7 +314,7 @@ async fn capability_display_preview_store_summarizes_http_inputs_safely() {
         "builtin.http.save",
         serde_json::json!({
             "method": "post",
-            "url": "https://user:secret@example.test/path?token=secret#frag",
+            "url": "https://user:secret@example.test/reset/sk-secret?token=secret#frag",
             "save_to": "/workspace/tmp/result.json",
             "headers": {
                 "Authorization": "Bearer sk-secret"
@@ -328,11 +328,12 @@ async fn capability_display_preview_store_summarizes_http_inputs_safely() {
 
     let input_summary = preview.input_summary.as_deref().unwrap();
     assert!(input_summary.contains("method: POST"));
-    assert!(input_summary.contains("url: https://example.test/path?..."));
+    assert!(input_summary.contains("url: https://example.test/reset/[redacted]?..."));
     assert!(input_summary.contains("save_to: tmp/result.json"));
     assert!(input_summary.contains("response_body_limit: 4096"));
     assert!(input_summary.contains("timeout_ms: 5000"));
     assert!(!input_summary.contains("user:secret"));
+    assert!(!input_summary.contains("sk-secret"));
     assert!(!input_summary.contains("token=secret"));
     assert!(!input_summary.contains("Authorization"));
     assert!(!input_summary.contains("secret request body"));

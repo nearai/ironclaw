@@ -140,7 +140,12 @@ output_schema_ref = "schemas/shell.output.v1.json"
         .unwrap()
         .unwrap();
     assert!(approval.request.reason.contains("Command:\npwd && curl"));
-    assert!(approval.request.reason.contains("-H '<REDACTED>'"));
+    assert!(
+        approval
+            .request
+            .reason
+            .contains("-H 'Authorization: <REDACTED>'")
+    );
     assert!(
         approval
             .request

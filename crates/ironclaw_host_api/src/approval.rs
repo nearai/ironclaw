@@ -114,16 +114,18 @@ fn redact_shell_command_for_display(cmd: &str) -> String {
         // developer error caught by the unit test below.
         [
             Regex::new(
-                r#"(?i)(-H|--header|-u|--user|--token|--api-?key|--password|--auth|--bearer)(\s+|=)(["'])[^"']*(["'])"#,
+                r#"(?i)(-u|--user|--token|--api-?key|--password|--auth|--bearer)(\s+|=)(["'])[^"']*(["'])"#,
             )
             .expect("hardcoded shell redaction regex is valid"), // safety: static regex literal is covered by redaction tests.
             Regex::new(
-                r#"(?i)(-H|--header|-u|--user|--token|--api-?key|--password|--auth|--bearer)(\s+|=)([^\s"'][^\s]*)"#,
+                r#"(?i)(-u|--user|--token|--api-?key|--password|--auth|--bearer)(\s+|=)([^\s"'][^\s]*)"#,
             )
             .expect("hardcoded shell redaction regex is valid"), // safety: static regex literal is covered by redaction tests.
-            Regex::new(r#"(?i)(Authorization|X-Api-Key|X-Auth-Token|Bearer)\s*:\s*[^\s"']+"#)
+            Regex::new(
+                r#"(?i)(Authorization|X-Api-Key|X-Auth-Token|Bearer)\s*:\s*(?:[a-zA-Z]+\s+[^\s"']+|[^\s"']+)"#,
+            )
                 .expect("hardcoded shell redaction regex is valid"), // safety: static regex literal is covered by redaction tests.
-            Regex::new(r#"([a-zA-Z][a-zA-Z0-9+.\-]*://[^\s"'?#]*)\?[^\s"']*"#)
+            Regex::new(r#"[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s"']+"#)
                 .expect("hardcoded shell redaction regex is valid"), // safety: static regex literal is covered by redaction tests.
         ]
     });
@@ -132,11 +134,15 @@ fn redact_shell_command_for_display(cmd: &str) -> String {
         .into_owned();
     out = patterns[1].replace_all(&out, "$1$2<REDACTED>").into_owned();
     out = patterns[2].replace_all(&out, "$1: <REDACTED>").into_owned();
-    out = patterns[3].replace_all(&out, "$1?...").into_owned();
-    sanitize_shell_display_text(&out)
+    out = patterns[3]
+        .replace_all(&out, |captures: &regex::Captures<'_>| {
+            sanitize_url_for_display(&captures[0])
+        })
+        .into_owned();
+    sanitize_text(&out)
 }
 
-fn sanitize_shell_display_text(text: &str) -> String {
+pub fn sanitize_text(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut redact_next_value = false;
     for token in text.split_inclusive(char::is_whitespace) {
@@ -146,6 +152,12 @@ fn sanitize_shell_display_text(text: &str) -> String {
             continue;
         }
         let suffix = &token[trimmed.len()..];
+        if is_url_like(trimmed) {
+            out.push_str(&sanitize_url_for_display(trimmed));
+            push_safe_text(&mut out, suffix);
+            redact_next_value = false;
+            continue;
+        }
         let redact_current =
             redact_next_value || is_secret_like(trimmed) || is_unsafe_path_like(trimmed);
         if redact_current {
@@ -159,12 +171,91 @@ fn sanitize_shell_display_text(text: &str) -> String {
     out
 }
 
+fn is_url_like(token: &str) -> bool {
+    let Some(scheme_end) = token.find("://") else {
+        return false;
+    };
+    let scheme = &token[..scheme_end];
+    let Some(first) = scheme.chars().next() else {
+        return false;
+    };
+    !scheme.eq_ignore_ascii_case("file")
+        && first.is_ascii_alphabetic()
+        && scheme.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '+' | '.' | '-')
+        })
+}
+
+pub fn sanitize_url_for_display(url: &str) -> String {
+    let Some(scheme_end) = url.find("://") else {
+        return sanitize_text(url);
+    };
+    let (scheme, rest) = url.split_at(scheme_end + 3);
+    let (rest, suffix) = match rest.find(['?', '#']) {
+        Some(index) => {
+            let marker = &rest[index..=index];
+            let replacement = if marker == "?" { "?..." } else { "#..." };
+            (&rest[..index], replacement)
+        }
+        None => (rest, ""),
+    };
+    let (authority, path) = match rest.find('/') {
+        Some(index) => rest.split_at(index),
+        None => (rest, ""),
+    };
+    let authority = authority
+        .rfind('@')
+        .map(|index| &authority[index + 1..])
+        .unwrap_or(authority);
+    let path = redact_secret_url_path_segments(path);
+    strip_unsupported_control_chars(&format!("{scheme}{authority}{path}{suffix}"))
+}
+
+fn redact_secret_url_path_segments(path: &str) -> String {
+    if path.is_empty() {
+        return String::new();
+    }
+    path.split('/')
+        .enumerate()
+        .map(|(index, segment)| {
+            if index == 0 {
+                String::new()
+            } else if is_secret_url_path_segment(segment) {
+                "[redacted]".to_string()
+            } else {
+                segment.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn is_secret_url_path_segment(segment: &str) -> bool {
+    let segment = segment.trim_matches(token_boundary_punctuation);
+    let lower = segment.to_ascii_lowercase();
+    is_secret_like(segment)
+        || lower.starts_with("secret")
+        || lower.starts_with("token")
+        || lower.starts_with("api-key")
+        || lower.starts_with("apikey")
+        || lower.starts_with("api_key")
+        || lower.starts_with("password")
+        || lower.starts_with("credential")
+        || lower.starts_with("bearer")
+}
+
 fn push_safe_text(out: &mut String, text: &str) {
     out.extend(
         text.chars().filter(|character| {
             *character == '\n' || *character == '\t' || !character.is_control()
         }),
     );
+}
+
+fn strip_unsupported_control_chars(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    push_safe_text(&mut out, text);
+    out
 }
 
 fn is_secret_like(token: &str) -> bool {
@@ -359,7 +450,7 @@ mod tests {
             "curl -H 'Authorization: Bearer sk-secret' https://example.test/path?token=secret && echo ok",
         );
 
-        assert!(display.text.contains("curl -H '<REDACTED>'"));
+        assert!(display.text.contains("curl -H 'Authorization: <REDACTED>'"));
         assert!(display.text.contains("https://example.test/path?..."));
         assert!(display.text.contains("echo ok"));
         assert!(!display.text.contains("sk-secret"));
@@ -378,5 +469,32 @@ mod tests {
         assert!(!display.text.contains("/home/alice"));
         assert!(!display.text.contains("sk-secret"));
         assert!(!display.text.contains("ghp_secret"));
+    }
+
+    #[test]
+    fn shell_command_display_text_redacts_secret_url_path_segments() {
+        let display = shell_command_display_text(
+            "curl https://example.test/reset/sk-secret/token123?debug=true",
+        );
+
+        assert!(
+            display
+                .text
+                .contains("https://example.test/reset/[redacted]/[redacted]?...")
+        );
+        assert!(!display.text.contains("sk-secret"));
+        assert!(!display.text.contains("token123"));
+        assert!(!display.text.contains("debug=true"));
+    }
+
+    #[test]
+    fn shell_command_display_text_keeps_benign_headers_visible() {
+        let display = shell_command_display_text(
+            "curl -H 'Accept: application/json' -H 'Authorization: Bearer sk-secret' https://example.test",
+        );
+
+        assert!(display.text.contains("-H 'Accept: application/json'"));
+        assert!(display.text.contains("-H 'Authorization: <REDACTED>'"));
+        assert!(!display.text.contains("sk-secret"));
     }
 }

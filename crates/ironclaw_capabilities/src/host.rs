@@ -1531,6 +1531,11 @@ where
             Decision::RequireApproval {
                 request: mut approval,
             } => {
+                add_capability_input_display_hint(
+                    &mut approval.reason,
+                    &request.capability_id,
+                    &request.input,
+                );
                 if let Err(error) = validate_approval_request_matches_invocation(
                     &approval,
                     &request.context,
@@ -2118,7 +2123,11 @@ fn add_capability_input_display_hint(
     capability_id: &CapabilityId,
     input: &serde_json::Value,
 ) {
-    if capability_id.as_str() != "builtin.shell" {
+    let capability_id = capability_id.as_str();
+    if capability_id != "shell"
+        && capability_id != "builtin.shell"
+        && !capability_id.ends_with(".shell")
+    {
         return;
     }
     let Some(command) = input
