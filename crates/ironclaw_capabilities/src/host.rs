@@ -1028,6 +1028,7 @@ where
                     Err(error) => {
                         if claim_error_may_be_concurrent_resume(&error) {
                             warn!(
+                                lease_id = %claimed_lease.grant.id,
                                 invocation_id = %invocation_id,
                                 capability_id = %capability_id,
                                 error_kind = capability_lease_error_kind(&error),
@@ -1864,30 +1865,16 @@ where
                 // Non-terminal auth bounce: revert Dispatching → Claimed so the next
                 // auth_resume_json call can find and reuse the lease.
                 if let Some((capability_leases, ref claimed)) = claimed_lease {
-                    if is_block_auth_transition(&error) {
-                        if let Err(abort_error) = capability_leases
-                            .abort_dispatch_claimed(&scope, claimed.grant.id)
-                            .await
-                        {
-                            warn!(
-                                lease_id = %claimed.grant.id,
-                                invocation_id = %invocation_id,
-                                capability_id = %capability_id,
-                                abort_error_kind = capability_lease_error_kind(&abort_error),
-                                "capability lease abort-dispatch failed after non-terminal auth bounce; lease may remain Dispatching",
-                            );
-                        }
-                    } else if let Err(revoke_error) =
-                        capability_leases.revoke(&scope, claimed.grant.id).await
-                    {
-                        warn!(
-                            lease_id = %claimed.grant.id,
-                            invocation_id = %invocation_id,
-                            capability_id = %capability_id,
-                            revoke_error_kind = capability_lease_error_kind(&revoke_error),
-                            "capability lease revoke failed after obligation failure; lease may remain claimed",
-                        );
-                    }
+                    cleanup_claimed_lease_after_resume_error(
+                        capability_leases,
+                        &scope,
+                        claimed.grant.id,
+                        invocation_id,
+                        &capability_id,
+                        &error,
+                        "obligation failure",
+                    )
+                    .await;
                 }
                 return Err(error);
             }
@@ -1927,30 +1914,16 @@ where
                 // Non-terminal auth bounce: revert Dispatching → Claimed so the next
                 // auth_resume_json call can find and reuse the lease.
                 if let Some((capability_leases, ref claimed)) = claimed_lease {
-                    if is_block_auth_transition(&invocation_error) {
-                        if let Err(abort_error) = capability_leases
-                            .abort_dispatch_claimed(&scope, claimed.grant.id)
-                            .await
-                        {
-                            warn!(
-                                lease_id = %claimed.grant.id,
-                                invocation_id = %invocation_id,
-                                capability_id = %capability_id,
-                                abort_error_kind = capability_lease_error_kind(&abort_error),
-                                "capability lease abort-dispatch failed after non-terminal auth bounce; lease may remain Dispatching",
-                            );
-                        }
-                    } else if let Err(revoke_error) =
-                        capability_leases.revoke(&scope, claimed.grant.id).await
-                    {
-                        warn!(
-                            lease_id = %claimed.grant.id,
-                            invocation_id = %invocation_id,
-                            capability_id = %capability_id,
-                            revoke_error_kind = capability_lease_error_kind(&revoke_error),
-                            "capability lease revoke failed after dispatch failure; lease may remain claimed",
-                        );
-                    }
+                    cleanup_claimed_lease_after_resume_error(
+                        capability_leases,
+                        &scope,
+                        claimed.grant.id,
+                        invocation_id,
+                        &capability_id,
+                        &invocation_error,
+                        "dispatch failure",
+                    )
+                    .await;
                 }
                 return Err(invocation_error);
             }
@@ -2131,6 +2104,52 @@ where
                 "obligation abort failed after downstream side-effect failure",
             );
         }
+    }
+}
+
+/// Cleans up a claimed lease after a resume-path error using best-effort
+/// abort-or-revoke semantics.
+///
+/// - If `error` is a `BlockAuth` (non-terminal auth gate), aborts the
+///   `Dispatching` lease back to `Claimed` so the next `auth_resume_json`
+///   call can reuse it without a new human approval.
+/// - Otherwise revokes the lease terminally.
+///
+/// Both operations are best-effort: failures are logged as warnings and do
+/// not propagate — the caller should already be returning an error.
+///
+/// `revoke_context` names the failure site ("obligation failure" or
+/// "dispatch failure") and is included in the revoke warn message.
+async fn cleanup_claimed_lease_after_resume_error(
+    capability_leases: &dyn CapabilityLeaseStore,
+    scope: &ResourceScope,
+    claimed_grant_id: CapabilityGrantId,
+    invocation_id: InvocationId,
+    capability_id: &CapabilityId,
+    error: &CapabilityInvocationError,
+    revoke_context: &str,
+) {
+    if is_block_auth_transition(error) {
+        if let Err(abort_error) = capability_leases
+            .abort_dispatch_claimed(scope, claimed_grant_id)
+            .await
+        {
+            warn!(
+                lease_id = %claimed_grant_id,
+                invocation_id = %invocation_id,
+                capability_id = %capability_id,
+                abort_error_kind = capability_lease_error_kind(&abort_error),
+                "capability lease abort-dispatch failed after non-terminal auth bounce; lease may remain Dispatching",
+            );
+        }
+    } else if let Err(revoke_error) = capability_leases.revoke(scope, claimed_grant_id).await {
+        warn!(
+            lease_id = %claimed_grant_id,
+            invocation_id = %invocation_id,
+            capability_id = %capability_id,
+            revoke_error_kind = capability_lease_error_kind(&revoke_error),
+            "capability lease revoke failed after {revoke_context}; lease may remain claimed",
+        );
     }
 }
 

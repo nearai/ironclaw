@@ -411,17 +411,7 @@ impl CapabilityLeaseStore for InMemoryCapabilityLeaseStore {
         let lease = leases
             .get_mut(&CapabilityLeaseKey::new(scope, lease_id))
             .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
-        if lease.status != CapabilityLeaseStatus::Claimed {
-            return Err(CapabilityLeaseError::InactiveLease {
-                lease_id,
-                status: lease.status,
-            });
-        }
-        if lease.invocation_fingerprint.as_ref() != Some(invocation_fingerprint) {
-            return Err(CapabilityLeaseError::FingerprintMismatch { lease_id });
-        }
-        ensure_not_expired_or_exhausted(lease)?;
-        lease.status = CapabilityLeaseStatus::Dispatching;
+        apply_begin_dispatch_claimed_transition(lease, invocation_fingerprint)?;
         Ok(lease.clone())
     }
 
@@ -434,20 +424,7 @@ impl CapabilityLeaseStore for InMemoryCapabilityLeaseStore {
         let lease = leases
             .get_mut(&CapabilityLeaseKey::new(scope, lease_id))
             .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
-        match lease.status {
-            CapabilityLeaseStatus::Dispatching => {
-                lease.status = CapabilityLeaseStatus::Claimed;
-            }
-            CapabilityLeaseStatus::Claimed => {
-                // Already Claimed — no-op.
-            }
-            _ => {
-                return Err(CapabilityLeaseError::InactiveLease {
-                    lease_id,
-                    status: lease.status,
-                });
-            }
-        }
+        apply_abort_dispatch_claimed_transition(lease)?;
         Ok(lease.clone())
     }
 
@@ -933,18 +910,7 @@ where
         let _guard = lock.lock().await;
         let fingerprint = invocation_fingerprint.clone();
         self.update_lease_cas(scope, lease_id, |lease| {
-            if lease.status != CapabilityLeaseStatus::Claimed {
-                return Err(CapabilityLeaseError::InactiveLease {
-                    lease_id,
-                    status: lease.status,
-                });
-            }
-            if lease.invocation_fingerprint.as_ref() != Some(&fingerprint) {
-                return Err(CapabilityLeaseError::FingerprintMismatch { lease_id });
-            }
-            ensure_not_expired_or_exhausted(lease)?;
-            lease.status = CapabilityLeaseStatus::Dispatching;
-            Ok(())
+            apply_begin_dispatch_claimed_transition(lease, &fingerprint)
         })
         .await
     }
@@ -956,16 +922,8 @@ where
     ) -> Result<CapabilityLease, CapabilityLeaseError> {
         let lock = self.mutation_lock(scope);
         let _guard = lock.lock().await;
-        self.update_lease_cas(scope, lease_id, |lease| match lease.status {
-            CapabilityLeaseStatus::Dispatching => {
-                lease.status = CapabilityLeaseStatus::Claimed;
-                Ok(())
-            }
-            CapabilityLeaseStatus::Claimed => Ok(()),
-            _ => Err(CapabilityLeaseError::InactiveLease {
-                lease_id,
-                status: lease.status,
-            }),
+        self.update_lease_cas(scope, lease_id, |lease| {
+            apply_abort_dispatch_claimed_transition(lease)
         })
         .await
     }
@@ -1615,6 +1573,67 @@ pub(crate) fn ensure_consumable(lease: &CapabilityLease) -> Result<(), Capabilit
     }
 
     ensure_not_expired_or_exhausted(lease)
+}
+
+/// Applies the `begin_dispatch_claimed` state-transition rule to a lease in
+/// place.
+///
+/// Requires `Claimed` status, a matching invocation fingerprint, and that the
+/// lease is neither expired nor exhausted; on success sets status to
+/// `Dispatching`.
+///
+/// Both [`InMemoryCapabilityLeaseStore`] and [`FilesystemCapabilityLeaseStore`]
+/// delegate to this function so the transition predicate has a single source of
+/// truth. Each store handles its own persistence / compare-and-swap mechanics
+/// around the call.
+pub(crate) fn apply_begin_dispatch_claimed_transition(
+    lease: &mut CapabilityLease,
+    invocation_fingerprint: &InvocationFingerprint,
+) -> Result<(), CapabilityLeaseError> {
+    let lease_id = lease.grant.id;
+    if lease.status != CapabilityLeaseStatus::Claimed {
+        return Err(CapabilityLeaseError::InactiveLease {
+            lease_id,
+            status: lease.status,
+        });
+    }
+    if lease.invocation_fingerprint.as_ref() != Some(invocation_fingerprint) {
+        return Err(CapabilityLeaseError::FingerprintMismatch { lease_id });
+    }
+    ensure_not_expired_or_exhausted(lease)?;
+    lease.status = CapabilityLeaseStatus::Dispatching;
+    Ok(())
+}
+
+/// Applies the `abort_dispatch_claimed` state-transition rule to a lease in
+/// place.
+///
+/// `Dispatching → Claimed`; no-op if already `Claimed`; returns
+/// `InactiveLease` for any other status.
+///
+/// Both [`InMemoryCapabilityLeaseStore`] and [`FilesystemCapabilityLeaseStore`]
+/// delegate to this function so the transition predicate has a single source of
+/// truth. Each store handles its own persistence / compare-and-swap mechanics
+/// around the call.
+pub(crate) fn apply_abort_dispatch_claimed_transition(
+    lease: &mut CapabilityLease,
+) -> Result<(), CapabilityLeaseError> {
+    let lease_id = lease.grant.id;
+    match lease.status {
+        CapabilityLeaseStatus::Dispatching => {
+            lease.status = CapabilityLeaseStatus::Claimed;
+        }
+        CapabilityLeaseStatus::Claimed => {
+            // Already Claimed — no-op.
+        }
+        _ => {
+            return Err(CapabilityLeaseError::InactiveLease {
+                lease_id,
+                status: lease.status,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn ensure_not_expired_or_exhausted(lease: &CapabilityLease) -> Result<(), CapabilityLeaseError> {
