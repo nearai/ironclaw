@@ -670,7 +670,10 @@ mod tests {
                 is_ext || is_exact_mime,
                 "accept token must be an extension or exact MIME, not {t:?}: {tokens:?}"
             );
-            assert!(!t.contains('*'), "accept tokens must not be wildcards: {t:?}");
+            assert!(
+                !t.contains('*'),
+                "accept tokens must not be wildcards: {t:?}"
+            );
         }
 
         // No duplicate tokens.
