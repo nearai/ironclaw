@@ -4228,6 +4228,7 @@ dependencies = [
  "chrono",
  "ironclaw_filesystem",
  "ironclaw_host_api",
+ "ironclaw_product_context",
  "ironclaw_safety",
  "ironclaw_triggers",
  "ironclaw_turns",
@@ -4831,6 +4832,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_product_context"
+version = "0.1.0"
+dependencies = [
+ "ironclaw_host_api",
+ "ironclaw_turns",
+]
+
+[[package]]
 name = "ironclaw_product_workflow"
 version = "0.1.0"
 dependencies = [
@@ -4851,6 +4860,7 @@ dependencies = [
  "ironclaw_loop_support",
  "ironclaw_outbound",
  "ironclaw_product_adapters",
+ "ironclaw_product_context",
  "ironclaw_product_workflow",
  "ironclaw_reborn",
  "ironclaw_reborn_composition",
@@ -5008,6 +5018,7 @@ dependencies = [
  "ironclaw_outbound",
  "ironclaw_processes",
  "ironclaw_product_adapters",
+ "ironclaw_product_context",
  "ironclaw_product_workflow",
  "ironclaw_product_workflow_storage",
  "ironclaw_reborn",

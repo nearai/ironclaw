@@ -17,20 +17,21 @@ use ironclaw_turns::{
     InMemoryRunProfileResolver, InMemoryTurnEventSink, InMemoryTurnStateStore,
     InMemoryTurnStateStoreLimits, LifecyclePublicationErrorPort, LifecyclePublishingTurnStateStore,
     LoopBlockedKind, LoopCheckpointStateRef, LoopExitMapping, LoopGateRef, LoopResultRef,
-    ReplyTargetBindingRef, ResolvedRunProfile, ResumeTurnRequest, RunProfileId, RunProfileRequest,
-    RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
-    SanitizedCancelReason, SanitizedFailure, SourceBindingRef, StaticTurnAdmissionLimitProvider,
-    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
-    TurnAdmissionAxisKind, TurnAdmissionBucketKind, TurnAdmissionBucketScope,
-    TurnAdmissionCapacityDenial, TurnAdmissionClass, TurnAdmissionPolicy, TurnCapacityResource,
-    TurnCheckpointId, TurnCommittedEventObserver, TurnCoordinator, TurnError, TurnErrorCategory,
-    TurnEventKind, TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
+    ProductTurnContext, ReplyTargetBindingRef, ResolvedRunProfile, ResumeTurnRequest,
+    RunOriginAdapter, RunProfileId, RunProfileRequest, RunProfileResolutionError,
+    RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion, SanitizedCancelReason,
+    SanitizedFailure, SourceBindingRef, StaticTurnAdmissionLimitProvider, SubmitChildRunRequest,
+    SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor, TurnAdmissionAxisKind,
+    TurnAdmissionBucketKind, TurnAdmissionBucketScope, TurnAdmissionCapacityDenial,
+    TurnAdmissionClass, TurnAdmissionPolicy, TurnCapacityResource, TurnCheckpointId,
+    TurnCommittedEventObserver, TurnCoordinator, TurnError, TurnErrorCategory, TurnEventKind,
+    TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
     TurnEventProjectionService, TurnEventSink, TurnIdempotencyErrorReplay,
     TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyRecord,
     TurnIdempotencyReplay, TurnLeaseToken, TurnLifecycleEvent, TurnLifecycleEventBus,
-    TurnLockVersion, TurnRunId, TurnRunProfile, TurnRunState, TurnRunWake, TurnRunWakeNotifier,
-    TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnSpawnTreePort, TurnSpawnTreeStateStore,
-    TurnStateStore, TurnStatus,
+    TurnLockVersion, TurnOriginKind, TurnOwner, TurnRunId, TurnRunProfile, TurnRunState,
+    TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnRunnerId, TurnScope,
+    TurnSpawnTreePort, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus, TurnSurfaceType,
     events::EventCursor,
     run_profile::{CapabilityOutcome, LoopGateKind, LoopModelRouteSnapshot},
     runner::{
@@ -6201,6 +6202,7 @@ fn submit_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest {
         parent_run_id: None,
         subagent_depth: 0,
         spawn_tree_root_run_id: None,
+        product_context: None,
     }
 }
 
@@ -6592,6 +6594,7 @@ impl TurnRunTransitionPort for AtomicLoopExitPort {
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
+            product_context: None,
         })
     }
 }
@@ -7175,6 +7178,55 @@ async fn cancel_on_legacy_recovery_required_run_reports_already_terminal() {
     assert!(
         cancel_response.already_terminal,
         "cancel on a terminal RecoveryRequired-turned-Failed run should report already_terminal"
+    );
+}
+
+// Regression: child run must inherit parent's product_context verbatim.
+// submit_child_turn copies parent.product_context → child RunRecord at line 1044 of memory.rs;
+// if that assignment were dropped the child record would silently carry None and no existing
+// lineage/reservation assertion would catch it.
+#[tokio::test]
+async fn submit_child_run_inherits_parent_product_context() {
+    let (coordinator, store) = coordinator();
+
+    let product_context = ProductTurnContext::new(
+        TurnOriginKind::Inbound,
+        Some(TurnSurfaceType::Channel),
+        Some(RunOriginAdapter::new("telegram").unwrap()),
+        TurnOwner::Personal {
+            user: UserId::new("user-ctx-inherit").unwrap(),
+        },
+    );
+
+    let mut parent_request = submit_request("thread-ctx-parent", "idem-ctx-parent");
+    parent_request.product_context = Some(product_context.clone());
+    let parent = accepted_run_id(&coordinator.submit_turn(parent_request).await.unwrap());
+
+    let child_id = coordinator
+        .prepare_turn(scope("thread-ctx-child"))
+        .await
+        .unwrap();
+    coordinator
+        .submit_child_run(child_run_request(
+            scope("thread-ctx-parent"),
+            parent,
+            "thread-ctx-child",
+            child_id,
+            "idem-ctx-child",
+            2,
+        ))
+        .await
+        .unwrap();
+
+    let child_record = store
+        .get_run_record(&scope("thread-ctx-child"), child_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        child_record.product_context,
+        Some(product_context),
+        "child run record must carry the parent's product_context verbatim"
     );
 }
 

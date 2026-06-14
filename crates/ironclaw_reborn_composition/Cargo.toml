@@ -137,6 +137,7 @@ ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_triggers = { path = "../ironclaw_triggers" }
 ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_turns = { path = "../ironclaw_turns" }
+ironclaw_product_context = { path = "../ironclaw_product_context", version = "0.1.0" }
 # WebUI v2 route surface — feature-gated; only used by `webui_serve`.
 ironclaw_webui_v2 = { path = "../ironclaw_webui_v2", optional = true }
 # WebUI v2 static SPA bundle — feature-gated; mounted under `/v2`.

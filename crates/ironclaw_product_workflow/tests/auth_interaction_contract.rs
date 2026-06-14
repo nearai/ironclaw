@@ -317,6 +317,7 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(47),
+            product_context: None,
         })
     }
 }
