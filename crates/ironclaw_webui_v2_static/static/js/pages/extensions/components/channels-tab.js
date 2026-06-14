@@ -71,8 +71,12 @@ export function ChannelsTab({
   isBusy,
 }) {
   const t = useT();
+  const installedChannels = channels || [];
   const enabledChannels = status.enabled_channels || [];
   const slackConnectActions = findSlackConnectActions(connectableChannels);
+  const hasInstalledSlackPackage = installedChannels.some(isSlackPackage);
+  const showLegacySlackConnectActions =
+    slackConnectActions.length > 0 && !hasInstalledSlackPackage;
 
   return html`
     <div className="space-y-5">
@@ -109,9 +113,24 @@ export function ChannelsTab({
           enabled=${enabledChannels.includes("repl")}
           detail="ironclaw run --repl"
         />
+        ${showLegacySlackConnectActions &&
+        html`
+          <${BuiltinRow}
+            name=${t("channels.slack") || "Slack"}
+            description=${t("channels.slackDesc") || "Tenant app channel for DMs and app mentions"}
+            enabled=${false}
+            statusLabel="legacy"
+            statusTone="muted"
+            detail=${t("channels.slackDetail") || "Tenant Slack app install"}
+          >
+            <${SlackConnectActionSections}
+              slackConnectActions=${slackConnectActions}
+            />
+          </${BuiltinRow}>
+        `}
       </div>
 
-      ${channels.length > 0 &&
+      ${installedChannels.length > 0 &&
       html`
         <div className="v2-panel rounded-[18px] p-5 sm:p-6">
           <h3
@@ -120,7 +139,7 @@ export function ChannelsTab({
             ${t("channels.messaging")}
           </h3>
           <div className="grid grid-cols-1 gap-4">
-            ${channels.map(
+            ${installedChannels.map(
               (ch) => html`
                 <div key=${packageId(ch)} className="flex flex-col gap-3">
                   <${ExtensionCard}

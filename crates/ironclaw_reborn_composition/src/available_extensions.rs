@@ -1,13 +1,11 @@
 use ironclaw_extensions::{
-    CapabilityDeclV2, CapabilityVisibility, ExtensionAssetPath, ExtensionManifest,
-    ExtensionManifestRecord, ExtensionPackage, ExtensionRuntime, HostApiContractRegistry,
-    ManifestSource,
+    CapabilityDeclV2, CapabilityVisibility, ExtensionAssetPath, ExtensionManifestRecord,
+    ExtensionPackage, ExtensionRuntime, ManifestSource,
 };
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_first_party_extensions::is_gsuite_extension_id;
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, HostPortCatalog, RuntimeCredentialAccountProviderId, VirtualPath,
-    sha256_digest_token,
+    CapabilityId, ExtensionId, RuntimeCredentialAccountProviderId, VirtualPath, sha256_digest_token,
 };
 use ironclaw_product_adapter_registry::product_adapter_sections;
 use ironclaw_product_adapters::ProductSurfaceKind;
@@ -576,55 +574,41 @@ fn bundled_extension_package(
                 reason: format!("host API contracts rejected bundled {label} extension: {error}"),
             }
         })?;
-    let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
+    let record = ExtensionManifestRecord::from_toml_with_contracts(
         manifest_toml,
         ManifestSource::HostBundled,
         &host_ports,
+        None,
         &contracts,
     )
     .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
         reason: format!("bundled {label} extension manifest is invalid: {error}"),
     })?;
-    let surface_kinds = surface_kinds_from_manifest_toml(
-        manifest_toml,
-        ManifestSource::HostBundled,
-        &host_ports,
-        &contracts,
-        label,
+    let surface_kinds = surface_kinds_from_manifest_record(&record, label)?;
+    let manifest = record.manifest().clone().try_into().map_err(|error| {
+        ProductWorkflowError::InvalidBindingRequest {
+            reason: format!("bundled {label} extension manifest is invalid: {error}"),
+        }
+    })?;
+    let package = ExtensionPackage::from_manifest_toml(manifest, root, record.raw_toml()).map_err(
+        |error| ProductWorkflowError::InvalidBindingRequest {
+            reason: format!("bundled {label} extension package is invalid: {error}"),
+        },
     )?;
-    let package =
-        ExtensionPackage::from_manifest_toml(manifest, root, manifest_toml).map_err(|error| {
-            ProductWorkflowError::InvalidBindingRequest {
-                reason: format!("bundled {label} extension package is invalid: {error}"),
-            }
-        })?;
     Ok(AvailableExtensionPackage {
         package_ref,
-        manifest_toml: manifest_toml.to_string(),
+        manifest_toml: record.raw_toml().to_string(),
         package,
         surface_kinds,
         assets,
     })
 }
 
-fn surface_kinds_from_manifest_toml(
-    manifest_toml: &str,
-    source: ManifestSource,
-    host_ports: &HostPortCatalog,
-    contracts: &HostApiContractRegistry,
+fn surface_kinds_from_manifest_record(
+    record: &ExtensionManifestRecord,
     label: &str,
 ) -> Result<Vec<LifecycleExtensionSurfaceKind>, ProductWorkflowError> {
-    let record = ExtensionManifestRecord::from_toml_with_contracts(
-        manifest_toml,
-        source,
-        host_ports,
-        None,
-        contracts,
-    )
-    .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
-        reason: format!("{label} extension manifest is invalid: {error}"),
-    })?;
-    let adapters = product_adapter_sections(&record).map_err(|error| {
+    let adapters = product_adapter_sections(record).map_err(|error| {
         ProductWorkflowError::InvalidBindingRequest {
             reason: format!("{label} ProductAdapter manifest projection is invalid: {error}"),
         }
@@ -1443,25 +1427,25 @@ where
                 reason: format!("available extension manifest is not UTF-8: {error}"),
             }
         })?;
-        let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
-            &manifest_toml,
+        let record = ExtensionManifestRecord::from_toml_with_contracts(
+            manifest_toml,
             ManifestSource::HostBundled,
             &host_ports,
+            None,
             &contracts,
         )
         .map_err(map_binding_error)?;
-        let surface_kinds = surface_kinds_from_manifest_toml(
-            &manifest_toml,
-            ManifestSource::HostBundled,
-            &host_ports,
-            &contracts,
-            entry.name.as_str(),
-        )?;
-        let package = ExtensionPackage::from_manifest_toml(manifest, entry.path, &manifest_toml)
+        let surface_kinds = surface_kinds_from_manifest_record(&record, entry.name.as_str())?;
+        let manifest = record
+            .manifest()
+            .clone()
+            .try_into()
+            .map_err(map_binding_error)?;
+        let package = ExtensionPackage::from_manifest_toml(manifest, entry.path, record.raw_toml())
             .map_err(map_binding_error)?;
         let mut assets = vec![AvailableExtensionAsset {
             path: "manifest.toml".to_string(),
-            content: AvailableExtensionAssetContent::Bytes(manifest_toml.as_bytes().to_vec()),
+            content: AvailableExtensionAssetContent::Bytes(record.raw_toml().as_bytes().to_vec()),
         }];
         if let ExtensionRuntime::Wasm { module } = &package.manifest.runtime {
             let module_path = module
@@ -1477,7 +1461,7 @@ where
                 LifecyclePackageKind::Extension,
                 package.id.as_str(),
             )?,
-            manifest_toml,
+            manifest_toml: record.raw_toml().to_string(),
             package,
             surface_kinds,
             assets,
@@ -1489,7 +1473,7 @@ where
 fn reserved_host_bundled_extension_id(extension_id: &ExtensionId) -> bool {
     matches!(
         extension_id.as_str(),
-        "github" | "notion" | "web-access" | "nearai"
+        "github" | "notion" | "web-access" | "nearai" | "slack"
     ) || is_gsuite_extension_id(extension_id)
 }
 
@@ -1855,7 +1839,7 @@ mod tests {
         assert_eq!(package.package.manifest.capabilities.len(), 0);
         assert!(package.package.manifest.host_apis.iter().any(|host_api| {
             host_api.id.as_str() == "ironclaw.product_adapter/v1"
-                && host_api.section.as_str() == "product_adapter.host_beta"
+                && host_api.section.as_str() == "product_adapter.inbound"
         }));
 
         let summary = package.summary();
@@ -2104,6 +2088,12 @@ handle = "web_token"
         )
         .await
         .unwrap();
+        fs.write_file(
+            &VirtualPath::new("/system/extensions/slack/manifest.toml").unwrap(),
+            b"not parsed because slack is host-bundled",
+        )
+        .await
+        .unwrap();
 
         let catalog = AvailableExtensionCatalog::from_filesystem_root(
             &fs,
@@ -2113,6 +2103,7 @@ handle = "web_token"
         .unwrap();
 
         assert_eq!(catalog.search("").count(), 0);
+        assert_eq!(catalog.search("slack").count(), 0);
     }
 
     #[derive(Default)]

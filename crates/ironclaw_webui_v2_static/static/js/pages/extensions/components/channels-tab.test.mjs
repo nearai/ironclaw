@@ -51,6 +51,9 @@ function channelsTabForTest(props) {
   return {
     rendered: context.globalThis.__testExports.ChannelsTab(props),
     RegistryCard: context.RegistryCard,
+    SlackConnectActionSections: context.globalThis.__testExports.SlackConnectActionSections,
+    SlackChannelPicker: context.SlackChannelPicker,
+    SlackPairingSection: context.SlackPairingSection,
   };
 }
 
@@ -67,6 +70,71 @@ function renderedValueAfter(rendered, fragment) {
     for (const value of rendered.values) {
       const found = renderedValueAfter(value, fragment);
       if (found !== undefined) return found;
+    }
+  }
+  return undefined;
+}
+
+function renderedContainsComponent(rendered, component) {
+  if (!rendered || typeof rendered !== "object") {
+    return rendered === component;
+  }
+  if (Array.isArray(rendered)) {
+    return rendered.some((value) => renderedContainsComponent(value, component));
+  }
+  if (Array.isArray(rendered.values)) {
+    return rendered.values.some((value) => renderedContainsComponent(value, component));
+  }
+  return false;
+}
+
+function renderedContainsSlackActionPair(rendered) {
+  if (!rendered || typeof rendered !== "object") {
+    return false;
+  }
+  if (Array.isArray(rendered)) {
+    return rendered.some((value) => renderedContainsSlackActionPair(value));
+  }
+  if (Array.isArray(rendered.values)) {
+    for (const value of rendered.values) {
+      if (
+        Array.isArray(value) &&
+        value.length === 2 &&
+        value.every(
+          (action) =>
+            action?.channel === "slack" &&
+            (action.strategy === "admin_managed_channels" ||
+              action.strategy === "inbound_proof_code"),
+        )
+      ) {
+        return true;
+      }
+      if (renderedContainsSlackActionPair(value)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function renderedNodeContainingComponent(rendered, component) {
+  if (!rendered || typeof rendered !== "object") {
+    return undefined;
+  }
+  if (Array.isArray(rendered)) {
+    for (const value of rendered) {
+      const found = renderedNodeContainingComponent(value, component);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+  if (Array.isArray(rendered.values)) {
+    for (const value of rendered.values) {
+      const found = renderedNodeContainingComponent(value, component);
+      if (found !== undefined) return found;
+    }
+    if (renderedContainsComponent(rendered.values, component)) {
+      return rendered;
     }
   }
   return undefined;
@@ -144,11 +212,14 @@ test("SlackConnectActionSections renders every supported Slack action", () => {
   assert.equal(unhandledView.rendered, null);
 });
 
-test("ChannelsTab renders registry cards directly without Slack connect actions", () => {
+test("ChannelsTab keeps Slack controls in the legacy builtin location when Slack is not installed", () => {
   const view = channelsTabForTest({
     status: { enabled_channels: [], sse_connections: 0, ws_connections: 0 },
     channels: [],
-    connectableChannels: [{ channel: "slack", strategy: "admin_managed_channels", action: {} }],
+    connectableChannels: [
+      { channel: "slack", strategy: "admin_managed_channels", action: {} },
+      { channel: "slack", strategy: "inbound_proof_code", action: {} },
+    ],
     channelRegistry: [{ package_ref: { id: "slack" } }],
     isBusy: false,
     onActivate() {},
@@ -157,13 +228,50 @@ test("ChannelsTab renders registry cards directly without Slack connect actions"
     onRemove() {},
   });
 
+  const builtinSlackSection = renderedNodeContainingComponent(
+    view.rendered,
+    view.SlackConnectActionSections,
+  );
+  assert.notEqual(builtinSlackSection, undefined, "expected legacy Slack section");
+  assert.equal(renderedContainsComponent(builtinSlackSection, view.SlackConnectActionSections), true);
+  assert.equal(renderedContainsSlackActionPair(builtinSlackSection), true);
+
   const registrySection = renderedValueAfter(view.rendered, "Available channels");
   assert.notEqual(registrySection, undefined, "expected available channels section");
   const registryCard = registrySection.values[0][0];
 
   assert.equal(registryCard.values[0], view.RegistryCard);
   assert.equal(
-    registryCard.strings.some((part) => part.includes("flex flex-col gap-3")),
+    renderedContainsComponent(registryCard, view.SlackConnectActionSections),
     false,
   );
+  assert.equal(
+    renderedContainsSlackActionPair(registryCard),
+    false,
+  );
+});
+
+test("ChannelsTab renders Slack connect controls under the installed Slack card", () => {
+  const view = channelsTabForTest({
+    status: { enabled_channels: [], sse_connections: 0, ws_connections: 0 },
+    channels: [{ package_ref: { id: "slack" }, kind: "channel", activation_status: "installed" }],
+    connectableChannels: [
+      { channel: "slack", strategy: "admin_managed_channels", action: {} },
+      { channel: "slack", strategy: "inbound_proof_code", action: {} },
+    ],
+    channelRegistry: [],
+    isBusy: false,
+    onActivate() {},
+    onConfigure() {},
+    onInstall() {},
+    onRemove() {},
+  });
+
+  const installedCard = renderedNodeContainingComponent(
+    view.rendered,
+    view.SlackConnectActionSections,
+  );
+  assert.notEqual(installedCard, undefined, "expected installed Slack card wrapper");
+
+  assert.equal(renderedContainsSlackActionPair(installedCard), true);
 });

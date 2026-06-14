@@ -11,17 +11,17 @@ service = "slack_v2_host_beta"
 
 [[host_api]]
 id = "ironclaw.product_adapter/v1"
-section = "product_adapter.host_beta"
+section = "product_adapter.inbound"
 
-[product_adapter.host_beta]
+[product_adapter.inbound]
 surface_kind = "external_channel"
 
-[product_adapter.host_beta.auth]
+[product_adapter.inbound.auth]
 kind = "request_signature"
 header_name = "X-Slack-Signature"
 timestamp_header_name = "X-Slack-Request-Timestamp"
 
-[product_adapter.host_beta.capabilities]
+[product_adapter.inbound.capabilities]
 flags = [
   "inbound_messages",
   "inbound_attachments",
@@ -29,9 +29,9 @@ flags = [
   "delivery_status_reporting",
 ]
 
-[[product_adapter.host_beta.required_credentials]]
+[[product_adapter.inbound.required_credentials]]
 handle = "slack_bot_token"
 
-[[product_adapter.host_beta.egress]]
+[[product_adapter.inbound.egress]]
 host = "slack.com"
 credential_handle = "slack_bot_token"

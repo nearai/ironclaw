@@ -233,7 +233,8 @@ mod tests {
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
     use ironclaw_product_workflow::{
         LifecycleExtensionRuntimeKind, LifecycleExtensionSource, LifecycleExtensionSummary,
-        LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
+        LifecycleExtensionSurfaceKind, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
+        LifecyclePackageRef,
         LifecyclePhase, LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
         LifecycleProductPayload, LifecycleProductResponse, OutboundPreferencesProductFacade,
         ProductWorkflowError, RebornOutboundDeliveryTargetId,
@@ -447,6 +448,7 @@ mod tests {
                 description: "channel extension".to_string(),
                 source: LifecycleExtensionSource::HostBundled,
                 runtime_kind: LifecycleExtensionRuntimeKind::FirstParty,
+                surface_kinds: vec![LifecycleExtensionSurfaceKind::ExternalChannel],
                 visible_capability_ids: Vec::new(),
                 visible_read_only_capability_ids: Vec::new(),
                 credential_requirements: Vec::new(),
@@ -466,6 +468,7 @@ mod tests {
                 description: "tool extension".to_string(),
                 source: LifecycleExtensionSource::HostBundled,
                 runtime_kind: LifecycleExtensionRuntimeKind::WasmTool,
+                surface_kinds: Vec::new(),
                 visible_capability_ids: Vec::new(),
                 visible_read_only_capability_ids: Vec::new(),
                 credential_requirements: Vec::new(),

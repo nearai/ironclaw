@@ -544,6 +544,76 @@ mod tests {
         assert_eq!(extension.kind, "channel");
     }
 
+    #[tokio::test]
+    async fn list_extension_registry_projects_external_channel_kind_and_installed_status_from_webui_caller()
+     {
+        let caller = caller();
+        let installed_summary = {
+            let mut summary = summary_with_onboarding_for("installed-fixture");
+            summary.runtime_kind = LifecycleExtensionRuntimeKind::FirstParty;
+            summary.surface_kinds = vec![LifecycleExtensionSurfaceKind::ExternalChannel];
+            summary
+        };
+        let registry_installed_summary = installed_summary.clone();
+        let registry_uninstalled_summary = {
+            let mut summary = summary_with_onboarding_for("uninstalled-fixture");
+            summary.runtime_kind = LifecycleExtensionRuntimeKind::FirstParty;
+            summary.surface_kinds = vec![LifecycleExtensionSurfaceKind::ExternalChannel];
+            summary
+        };
+        let facade = RegistryListingFacade {
+            installed: LifecycleInstalledExtensionSummary {
+                summary: installed_summary,
+                phase: LifecyclePhase::Active,
+            },
+            registry: vec![registry_installed_summary, registry_uninstalled_summary],
+            calls: Mutex::new(Vec::new()),
+        };
+
+        let response = list_extension_registry(&facade, caller.clone())
+            .await
+            .expect("registry response");
+
+        assert_eq!(response.entries.len(), 2);
+
+        let installed_entry = response
+            .entries
+            .iter()
+            .find(|entry| entry.package_ref.id.as_str() == "installed-fixture")
+            .expect("installed entry");
+        assert_eq!(installed_entry.kind, "channel");
+        assert!(installed_entry.installed);
+
+        let uninstalled_entry = response
+            .entries
+            .iter()
+            .find(|entry| entry.package_ref.id.as_str() == "uninstalled-fixture")
+            .expect("uninstalled entry");
+        assert_eq!(uninstalled_entry.kind, "channel");
+        assert!(!uninstalled_entry.installed);
+
+        let calls = facade.calls.lock().expect("lock");
+        assert_eq!(calls.len(), 2);
+        for (context, action) in calls.iter() {
+            match action {
+                LifecycleProductAction::ExtensionList => {}
+                LifecycleProductAction::ExtensionSearch { query } => {
+                    assert!(query.is_empty(), "registry search uses the empty query");
+                }
+                other => panic!("unexpected lifecycle action: {other:?}"),
+            }
+            match context {
+                LifecycleProductContext::Surface(surface) => {
+                    assert_eq!(surface.tenant_id, caller.tenant_id);
+                    assert_eq!(surface.user_id, caller.user_id);
+                    assert_eq!(surface.agent_id, caller.agent_id);
+                    assert_eq!(surface.project_id, caller.project_id);
+                }
+                other => panic!("unexpected lifecycle context: {other:?}"),
+            }
+        }
+    }
+
     #[derive(Default)]
     struct RecordingCredentials {
         status_requests: Mutex<Vec<ExtensionCredentialStatusRequest>>,
@@ -683,6 +753,60 @@ mod tests {
             _package_ref: LifecyclePackageRef,
         ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
             panic!("list_extensions should execute the list action, not project one package")
+        }
+    }
+
+    struct RegistryListingFacade {
+        installed: LifecycleInstalledExtensionSummary,
+        registry: Vec<LifecycleExtensionSummary>,
+        calls: Mutex<Vec<(LifecycleProductContext, LifecycleProductAction)>>,
+    }
+
+    #[async_trait]
+    impl LifecycleProductFacade for RegistryListingFacade {
+        async fn execute(
+            &self,
+            context: LifecycleProductContext,
+            action: LifecycleProductAction,
+        ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+            self.calls
+                .lock()
+                .expect("lock")
+                .push((context.clone(), action.clone()));
+            match action {
+                LifecycleProductAction::ExtensionList => Ok(LifecycleProductResponse {
+                    package_ref: None,
+                    phase: self.installed.phase,
+                    blockers: Vec::new(),
+                    message: None,
+                    payload: Some(LifecycleProductPayload::ExtensionList {
+                        extensions: vec![self.installed.clone()],
+                        count: 1,
+                    }),
+                }),
+                LifecycleProductAction::ExtensionSearch { query } => {
+                    assert!(query.is_empty(), "registry search uses the empty query");
+                    Ok(LifecycleProductResponse {
+                        package_ref: None,
+                        phase: LifecyclePhase::Active,
+                        blockers: Vec::new(),
+                        message: None,
+                        payload: Some(LifecycleProductPayload::ExtensionSearch {
+                            extensions: self.registry.clone(),
+                            count: self.registry.len(),
+                        }),
+                    })
+                }
+                other => panic!("unexpected lifecycle action: {other:?}"),
+            }
+        }
+
+        async fn project_package(
+            &self,
+            _context: LifecycleProductContext,
+            _package_ref: LifecyclePackageRef,
+        ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+            panic!("list_extension_registry should not project one package")
         }
     }
 
