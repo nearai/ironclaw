@@ -820,6 +820,20 @@ where
             });
         }
 
+        // Check that the capability still exists before acquiring or mutating any
+        // approval lease.  Moving this check above the lease-acquisition block
+        // ensures an unknown capability returns `UnknownCapability` without
+        // touching the lease at all — preventing a one-shot lease from being
+        // permanently stranded in `Claimed`/`Dispatching` when the capability
+        // was unregistered between the original invocation and this resume.
+        let Some(descriptor) = self.registry.get_capability(&request.capability_id) else {
+            fail_run_if_configured(Some(run_state), &scope, invocation_id, "UnknownCapability")
+                .await;
+            return Err(CapabilityInvocationError::UnknownCapability {
+                capability: request.capability_id,
+            });
+        };
+
         // When the invocation previously passed an approval gate, validate and
         // claim the fingerprinted approval lease so the existing approval
         // carries through without requiring a second human approval.
@@ -1049,14 +1063,6 @@ where
             (ctx, Some((capability_leases, claimed)))
         } else {
             (request.context.clone(), None)
-        };
-
-        let Some(descriptor) = self.registry.get_capability(&request.capability_id) else {
-            fail_run_if_configured(Some(run_state), &scope, invocation_id, "UnknownCapability")
-                .await;
-            return Err(CapabilityInvocationError::UnknownCapability {
-                capability: request.capability_id,
-            });
         };
 
         self.dispatch_resumed_capability(ResumedDispatchParams {

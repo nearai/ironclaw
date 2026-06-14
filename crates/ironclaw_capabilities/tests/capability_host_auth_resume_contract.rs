@@ -1,8 +1,9 @@
 // Contract tests for `CapabilityHost::auth_resume_json`.
 //
 // Covers: lease survival across auth-gate re-dispatch, concurrent-claim race
-// handling, terminal vs non-terminal bounce lease disposition, and approval
-// fingerprint validation.
+// handling, terminal vs non-terminal bounce lease disposition, approval
+// fingerprint validation, and capability-existence check ordering vs lease
+// acquisition (unknown-capability must not strand leases).
 use ironclaw_approvals::*;
 use ironclaw_authorization::*;
 use ironclaw_capabilities::*;
@@ -2729,5 +2730,312 @@ async fn concurrent_auth_resume_fresh_active_lease_loser_does_not_double_dispatc
         run_final.status,
         RunStatus::Completed,
         "run must remain Completed after loser A's concurrent Lease error"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// UnknownCapability must not strand the approval lease
+//
+// BUG (ordering hole): In the pre-fix code, `auth_resume_json` acquires and
+// transitions the approval lease (Active→Claimed→Dispatching or
+// Claimed→Dispatching) BEFORE it checks whether the capability still exists
+// in the registry via `self.registry.get_capability(...)`.  If the capability
+// is gone (unregistered between the original invocation and the resume), the
+// `UnknownCapability` early-return fires AFTER the lease was already mutated,
+// leaving a one-shot approval lease permanently stranded in Claimed/Dispatching.
+//
+// FIX (reorder): Move `self.registry.get_capability(...)` to BEFORE the
+// approval-lease acquisition block so that an unknown capability returns
+// `UnknownCapability` WITHOUT ever touching the lease.
+//
+// This test covers TWO sub-cases:
+//   (a) Active-lease path — the approval was just issued; lease is Active.
+//       Pre-fix: lease is left Claimed (after claim()) or Dispatching (after
+//       begin_dispatch_claimed()).
+//       Post-fix: lease remains Active (untouched).
+//   (b) Claimed-lease path (reuse) — resume_json previously bounced at auth;
+//       lease is Claimed.
+//       Pre-fix: lease is left Dispatching (after begin_dispatch_claimed()).
+//       Post-fix: lease remains Claimed (untouched).
+//
+// For each sub-case we assert:
+//   1. auth_resume_json returns Err(UnknownCapability).
+//   2. The approval lease is NOT in Claimed or Dispatching state — i.e. it is
+//      still in whatever state it was seeded in (Active or Claimed).
+//   3. No dispatch was attempted.
+// ---------------------------------------------------------------------------
+
+// Sub-case (a): Active lease — registry missing capability
+#[tokio::test]
+async fn auth_resume_json_unknown_capability_does_not_strand_active_approval_lease() {
+    // Use a registry that does NOT contain the echo.say capability — simulates
+    // a capability that was unregistered between the original invocation and
+    // the auth resume.
+    let empty_registry = ironclaw_extensions::ExtensionRegistry::new();
+    let authorizer = GrantAuthorizer::new();
+    let dispatcher = RecordingDispatcher::default();
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let leases = InMemoryCapabilityLeaseStore::new();
+
+    // Seed the run in BlockedAuth state (as it would be after a prior auth gate).
+    let context = execution_context(CapabilitySet {
+        grants: vec![dispatch_grant()],
+    });
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "unknown capability lease strand test"});
+
+    run_state
+        .start(RunStart {
+            invocation_id,
+            scope: scope.clone(),
+            capability_id: capability_id(),
+        })
+        .await
+        .unwrap();
+    run_state
+        .block_auth(&scope, invocation_id, "AuthRequired".to_string())
+        .await
+        .unwrap();
+
+    // Issue an Active approval lease for this invocation (fingerprinted to the
+    // exact estimate + input we will pass to auth_resume_json).
+    let invocation_fingerprint =
+        InvocationFingerprint::for_dispatch(&scope, &capability_id(), &estimate, &input).unwrap();
+    let lease = CapabilityLease {
+        grant: CapabilityGrant {
+            id: CapabilityGrantId::new(),
+            capability: capability_id(),
+            grantee: Principal::Extension(ExtensionId::new("caller").unwrap()),
+            issued_by: Principal::HostRuntime,
+            constraints: GrantConstraints {
+                allowed_effects: vec![EffectKind::DispatchCapability],
+                mounts: MountView::default(),
+                network: NetworkPolicy::default(),
+                secrets: vec![],
+                resource_ceiling: None,
+                expires_at: None,
+                max_invocations: Some(1),
+            },
+        },
+        scope: scope.clone(),
+        invocation_fingerprint: Some(invocation_fingerprint.clone()),
+        status: CapabilityLeaseStatus::Active,
+    };
+    let issued_lease = leases.issue(lease).await.unwrap();
+    let lease_id = issued_lease.grant.id;
+
+    // Seed the approval as Approved in the store so the approval-validation
+    // path passes before reaching the lease-acquisition block.
+    // requested_by must match Principal::Extension(context.extension_id) per
+    // validate_approval_request_matches_invocation.
+    let approval_id = ApprovalRequestId::new();
+    approval_requests
+        .save_pending(
+            scope.clone(),
+            ApprovalRequest {
+                id: approval_id,
+                correlation_id: context.correlation_id,
+                requested_by: Principal::Extension(context.extension_id.clone()),
+                action: Box::new(Action::Dispatch {
+                    capability: capability_id(),
+                    estimated_resources: estimate.clone(),
+                }),
+                invocation_fingerprint: Some(invocation_fingerprint),
+                reason: "approved".to_string(),
+                reusable_scope: None,
+            },
+        )
+        .await
+        .unwrap();
+    approval_requests
+        .approve(&scope, approval_id)
+        .await
+        .unwrap();
+
+    // Host is wired with the EMPTY registry (capability not registered).
+    let host = CapabilityHost::new(&empty_registry, &dispatcher, &authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+
+    let err = host
+        .auth_resume_json(CapabilityAuthResumeRequest {
+            context,
+            capability_id: capability_id(),
+            estimate,
+            input,
+            trust_decision: trust_decision(),
+            approval_request_id: Some(approval_id),
+        })
+        .await
+        .unwrap_err();
+
+    // 1. Must return UnknownCapability.
+    assert!(
+        matches!(err, CapabilityInvocationError::UnknownCapability { .. }),
+        "expected UnknownCapability when capability is not registered, got {err:?}"
+    );
+
+    // 2. Lease must NOT be stranded in Claimed or Dispatching.
+    //    Post-fix: still Active (untouched because the check fires first).
+    //    Pre-fix: Claimed or Dispatching (lease was mutated before the check).
+    let lease_after = leases.get(&scope, lease_id).await.unwrap();
+    assert_eq!(
+        lease_after.status,
+        CapabilityLeaseStatus::Active,
+        "lease must remain Active when auth_resume_json returns UnknownCapability \
+         (pre-fix: lease was left Claimed/Dispatching because the capability check \
+         came AFTER the lease acquisition block)"
+    );
+
+    // 3. No dispatch must have been attempted.
+    assert_eq!(
+        dispatcher.dispatch_count(),
+        0,
+        "dispatch must not fire when capability is unknown"
+    );
+}
+
+// Sub-case (b): Claimed lease (reuse path) — registry missing capability
+#[tokio::test]
+async fn auth_resume_json_unknown_capability_does_not_strand_claimed_approval_lease() {
+    // Same setup as sub-case (a) except the lease starts in the Claimed state
+    // (as it would be after a prior resume_json auth bounce left it Claimed).
+    let empty_registry = ironclaw_extensions::ExtensionRegistry::new();
+    let authorizer = GrantAuthorizer::new();
+    let dispatcher = RecordingDispatcher::default();
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let leases = InMemoryCapabilityLeaseStore::new();
+
+    let context = execution_context(CapabilitySet {
+        grants: vec![dispatch_grant()],
+    });
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "claimed lease strand test"});
+
+    run_state
+        .start(RunStart {
+            invocation_id,
+            scope: scope.clone(),
+            capability_id: capability_id(),
+        })
+        .await
+        .unwrap();
+    run_state
+        .block_auth(&scope, invocation_id, "AuthRequired".to_string())
+        .await
+        .unwrap();
+
+    let invocation_fingerprint =
+        InvocationFingerprint::for_dispatch(&scope, &capability_id(), &estimate, &input).unwrap();
+
+    // Issue the lease as Active then immediately claim it to put it in the
+    // Claimed state (mimicking what resume_json leaves behind).
+    let lease = CapabilityLease {
+        grant: CapabilityGrant {
+            id: CapabilityGrantId::new(),
+            capability: capability_id(),
+            grantee: Principal::Extension(ExtensionId::new("caller").unwrap()),
+            issued_by: Principal::HostRuntime,
+            constraints: GrantConstraints {
+                allowed_effects: vec![EffectKind::DispatchCapability],
+                mounts: MountView::default(),
+                network: NetworkPolicy::default(),
+                secrets: vec![],
+                resource_ceiling: None,
+                expires_at: None,
+                max_invocations: Some(1),
+            },
+        },
+        scope: scope.clone(),
+        invocation_fingerprint: Some(invocation_fingerprint.clone()),
+        status: CapabilityLeaseStatus::Active,
+    };
+    let issued_lease = leases.issue(lease).await.unwrap();
+    let lease_id = issued_lease.grant.id;
+    // Advance to Claimed (simulating resume_json having claimed it before
+    // the auth bounce occurred).
+    leases
+        .claim(&scope, lease_id, &invocation_fingerprint)
+        .await
+        .unwrap();
+
+    // Verify precondition: lease is Claimed.
+    assert_eq!(
+        leases.get(&scope, lease_id).await.unwrap().status,
+        CapabilityLeaseStatus::Claimed,
+        "precondition: lease must be Claimed before calling auth_resume_json"
+    );
+
+    let approval_id = ApprovalRequestId::new();
+    approval_requests
+        .save_pending(
+            scope.clone(),
+            ApprovalRequest {
+                id: approval_id,
+                correlation_id: context.correlation_id,
+                requested_by: Principal::Extension(context.extension_id.clone()),
+                action: Box::new(Action::Dispatch {
+                    capability: capability_id(),
+                    estimated_resources: estimate.clone(),
+                }),
+                invocation_fingerprint: Some(invocation_fingerprint),
+                reason: "approved".to_string(),
+                reusable_scope: None,
+            },
+        )
+        .await
+        .unwrap();
+    approval_requests
+        .approve(&scope, approval_id)
+        .await
+        .unwrap();
+
+    let host = CapabilityHost::new(&empty_registry, &dispatcher, &authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+
+    let err = host
+        .auth_resume_json(CapabilityAuthResumeRequest {
+            context,
+            capability_id: capability_id(),
+            estimate,
+            input,
+            trust_decision: trust_decision(),
+            approval_request_id: Some(approval_id),
+        })
+        .await
+        .unwrap_err();
+
+    // 1. Must return UnknownCapability.
+    assert!(
+        matches!(err, CapabilityInvocationError::UnknownCapability { .. }),
+        "expected UnknownCapability when capability is not registered, got {err:?}"
+    );
+
+    // 2. Lease must NOT be stranded in Dispatching.
+    //    Post-fix: still Claimed (untouched because the check fires first).
+    //    Pre-fix: Dispatching (begin_dispatch_claimed was called before the check).
+    let lease_after = leases.get(&scope, lease_id).await.unwrap();
+    assert_eq!(
+        lease_after.status,
+        CapabilityLeaseStatus::Claimed,
+        "lease must remain Claimed when auth_resume_json returns UnknownCapability \
+         (pre-fix: lease was left Dispatching because begin_dispatch_claimed ran \
+         before the capability existence check)"
+    );
+
+    // 3. No dispatch.
+    assert_eq!(
+        dispatcher.dispatch_count(),
+        0,
+        "dispatch must not fire when capability is unknown"
     );
 }
