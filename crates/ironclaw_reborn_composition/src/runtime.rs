@@ -3315,6 +3315,7 @@ mod tests {
     use crate::webui::build_webui_services;
     use crate::{
         RebornCompositionProfile, RebornReadiness, RebornReadinessState, RebornRuntimeError,
+        extension_lifecycle::ExtensionActivationMode,
     };
 
     use super::{
@@ -3365,6 +3366,11 @@ mod tests {
     struct ToolCallingGateway {
         calls: StdMutex<usize>,
         stream_model_calls: StdMutex<usize>,
+        requests: StdMutex<Vec<HostManagedModelRequest>>,
+    }
+
+    #[derive(Debug, Default)]
+    struct AuthGateToolCallingGateway {
         requests: StdMutex<Vec<HostManagedModelRequest>>,
     }
 
@@ -3518,6 +3524,60 @@ mod tests {
                     id: "call-1".to_string(),
                     name: echo_tool.name,
                     arguments: serde_json::json!({"message": "hello from tool"}),
+                    response_reasoning: None,
+                    reasoning: None,
+                    signature: None,
+                })
+                .await
+                .map_err(model_capability_error)?;
+            Ok(HostManagedModelResponse::capability_calls(
+                vec![candidate],
+                "",
+            ))
+        }
+    }
+
+    #[async_trait]
+    impl HostManagedModelGateway for AuthGateToolCallingGateway {
+        async fn stream_model(
+            &self,
+            request: HostManagedModelRequest,
+        ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+            self.requests
+                .lock()
+                .expect("auth-gate gateway requests lock poisoned")
+                .push(request);
+            Err(HostManagedModelError::safe(
+                HostManagedModelErrorKind::InvalidRequest,
+                "expected capability-aware model path",
+            ))
+        }
+
+        async fn stream_model_with_capabilities(
+            &self,
+            request: HostManagedModelRequest,
+            capabilities: Arc<dyn LoopCapabilityPort>,
+        ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+            self.requests
+                .lock()
+                .expect("auth-gate gateway requests lock poisoned")
+                .push(request);
+            let notion_search_id =
+                CapabilityId::new("notion.notion-search").expect("notion search id");
+            let notion_tool = capabilities
+                .tool_definitions()
+                .map_err(model_capability_error)?
+                .into_iter()
+                .find(|definition| definition.capability_id == notion_search_id)
+                .expect("activated Notion capability should be visible");
+            let candidate = capabilities
+                .register_provider_tool_call(ProviderToolCall {
+                    provider_id: "test-provider".to_string(),
+                    provider_model_id: "test-model".to_string(),
+                    turn_id: Some("provider-turn-auth-gate".to_string()),
+                    id: "call-auth-gate".to_string(),
+                    name: notion_tool.name,
+                    arguments: serde_json::json!({ "query": "project notes" }),
                     response_reasoning: None,
                     reasoning: None,
                     signature: None,
@@ -4614,6 +4674,102 @@ mod tests {
         assert_eq!(reply.status, TurnStatus::Completed);
         assert_eq!(reply.text.as_deref(), Some("recorded runtime reply"));
         assert_eq!(recorded_request_count(&requests), 1);
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn send_user_message_until_gate_returns_blocked_on_auth_gate() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let host_home = root.path().join("host-home");
+        std::fs::create_dir_all(&host_home).expect("host home");
+        let gateway = Arc::new(AuthGateToolCallingGateway::default());
+        let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev_with_profile(
+                RebornCompositionProfile::LocalDevYolo,
+                "runtime-auth-gate-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(
+                crate::local_dev_yolo_runtime_policy(true).expect("local-yolo policy resolves"),
+            )
+            .with_local_dev_confirmed_host_home_root(host_home),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-auth-gate-tenant".to_string(),
+            agent_id: "runtime-auth-gate-agent".to_string(),
+            source_binding_id: "runtime-auth-gate-source".to_string(),
+            reply_target_binding_id: "runtime-auth-gate-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(10),
+        })
+        .with_model_gateway_override(gateway_for_runtime);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let local_runtime = runtime
+            .services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime services");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management");
+        let notion_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion")
+            .expect("valid notion ref");
+        extension_management
+            .install(notion_ref.clone())
+            .await
+            .expect("install Notion MCP");
+        extension_management
+            .activate_with_prechecked_credentials_for_test(
+                notion_ref,
+                ExtensionActivationMode::Static,
+            )
+            .await
+            .expect("activate Notion MCP");
+
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let outcome = tokio::time::timeout(
+            RUNTIME_SEND_TIMEOUT,
+            runtime.send_user_message_until_gate(&conversation, "search Notion"),
+        )
+        .await
+        .expect("gate-aware send should return before timeout")
+        .expect("gate-aware send should succeed");
+
+        let (run_id, gate_ref) = match outcome {
+            super::RebornTurnDriveOutcome::BlockedOnGate {
+                run_id,
+                status,
+                gate_ref,
+                ..
+            } => {
+                assert_eq!(status, TurnStatus::BlockedAuth);
+                assert!(
+                    gate_ref.as_str().starts_with("gate:auth-"),
+                    "auth gate ref should carry the auth prefix, got {}",
+                    gate_ref.as_str()
+                );
+                (run_id, gate_ref)
+            }
+            super::RebornTurnDriveOutcome::Terminal(reply) => {
+                panic!("auth-gated turn should pause before terminal reply, got {reply:?}");
+            }
+        };
+        let state = runtime
+            .turn_coordinator
+            .get_run_state(GetRunStateRequest {
+                scope: runtime.turn_scope_for(&conversation.0),
+                run_id,
+            })
+            .await
+            .expect("blocked run state");
+        assert_eq!(state.status, TurnStatus::BlockedAuth);
+        assert_eq!(state.gate_ref.as_ref(), Some(&gate_ref));
 
         runtime.shutdown().await.expect("runtime shutdown");
     }
