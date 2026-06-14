@@ -1394,10 +1394,11 @@ enum ScriptedThreadBehavior {
         message_id: ThreadMessageId,
     },
     /// `mark_message_rejected_busy` fails; reconcile path replays the accepted
-    /// message as legacy DeferredBusy so no error surfaces to the caller.
-    /// DeferredBusy is also accepted as a settled terminal state by
-    /// `reconcile_terminal_duplicate`, so the outcome is identical to
-    /// `RejectedBusyMarkFails`.
+    /// message as legacy DeferredBusy.  Unlike `RejectedBusyMarkFails`,
+    /// `DeferredBusy` is non-terminal: `reconcile_terminal_duplicate` accepts
+    /// only `RejectedBusy` as settled, so this replay does NOT satisfy
+    /// reconciliation.  The original mark failure surfaces as a retryable error
+    /// (Unavailable / 503) rather than a false-terminal RejectedBusy.
     DeferredBusyMarkFails {
         /// Message id assigned by `accept_inbound_message`, shared so that
         /// `reconcile_terminal_duplicate` can match it against the handoff.
@@ -1485,13 +1486,15 @@ impl ScriptedThreadService {
         }
     }
 
-    /// Scripted service for the legacy DeferredBusy mark-failure reconcile path:
+    /// Scripted service for the legacy DeferredBusy mark-failure path:
     /// - `accept_inbound_message` accepts the message
     /// - `mark_message_rejected_busy` returns a backend error
-    /// - `replay_accepted_inbound_message` returns `None` on the first call
-    ///   (idempotency probe) and `Some(DeferredBusy)` on the second (reconcile),
-    ///   so `reconcile_terminal_duplicate` settles without error (DeferredBusy is
-    ///   accepted alongside RejectedBusy as a settled terminal state)
+    /// - `replay_accepted_inbound_message` returns `None` on the first two
+    ///   calls (idempotency probes) and `Some(DeferredBusy)` on the reconcile
+    ///   probe.  `DeferredBusy` is non-terminal: `reconcile_terminal_duplicate`
+    ///   no longer accepts it as settled (only `RejectedBusy` qualifies), so the
+    ///   mark failure propagates as a retryable Unavailable error rather than
+    ///   silently producing a false-terminal RejectedBusy.
     fn deferred_busy_mark_fails() -> Self {
         Self {
             behavior: ScriptedThreadBehavior::DeferredBusyMarkFails {
@@ -1630,9 +1633,10 @@ impl SessionThreadService for ScriptedThreadService {
             ScriptedThreadBehavior::DeferredBusyMarkFails { message_id } => {
                 // Same two-phase probe as RejectedBusyMarkFails: calls 1 and 2 are
                 // the initial idempotency probes and must return None.  Call 3+
-                // comes from reconcile_terminal_duplicate; return legacy DeferredBusy
-                // so the branch's `MessageStatus::RejectedBusy | MessageStatus::DeferredBusy`
-                // arm matches and reconciliation settles without error.
+                // comes from reconcile_terminal_duplicate; return legacy DeferredBusy.
+                // DeferredBusy is non-terminal — reconcile_terminal_duplicate accepts
+                // only RejectedBusy as settled, so this replay does NOT satisfy
+                // reconciliation.  The original mark failure surfaces as an error.
                 let mut count = self.replay_call_count.lock().expect("lock");
                 *count += 1;
                 if *count <= 2 {
