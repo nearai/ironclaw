@@ -1383,6 +1383,13 @@ pub struct CapabilityInvocation {
     pub input_ref: CapabilityInputRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_resume: Option<CapabilityApprovalResume>,
+    /// Set when the invocation was previously auth-blocked and the auth
+    /// gate has now been resolved. Carries the original `invocation_id`
+    /// (as a resume token) so re-dispatch reuses it rather than minting a
+    /// new one, preserving any prior approval lease whose scope embeds
+    /// that id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_resume: Option<CapabilityAuthResume>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -1430,6 +1437,43 @@ pub struct CapabilityApprovalResume {
     pub input_ref: CapabilityInputRef,
     pub input: serde_json::Value,
     pub estimate: ResourceEstimate,
+}
+
+/// Prior-approval identity carried through an auth-gate resume.
+///
+/// Both fields are semantically all-or-none: the pair is present only when
+/// the invocation previously passed a one-shot approval gate.  Modelling
+/// them as a single optional struct makes the compile-time invariant explicit —
+/// `approval_request_id` and `correlation_id` cannot be independently absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthResumeApprovalIdentity {
+    /// Identifies the prior approval request so the host can locate and
+    /// claim the matching fingerprinted lease without requiring a second
+    /// human approval for the same action.
+    pub approval_request_id: ApprovalRequestId,
+    /// Original correlation identifier from the prior approval gate.
+    /// Restored onto the invocation context so the same trace-correlation
+    /// identifier flows through the full capability lifecycle.
+    pub correlation_id: CorrelationId,
+}
+
+/// Auth-gate resume identity.
+///
+/// Carries the original invocation identifier (encoded as a resume token) so
+/// that re-dispatch after credential completion reuses the same invocation
+/// rather than minting a fresh one.  When the prior invocation also passed
+/// an approval gate, `prior_approval` carries the approval identity so the
+/// host can claim the matching fingerprinted lease without requiring a second
+/// human approval.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityAuthResume {
+    /// Encodes the original invocation identifier; the host decodes it via
+    /// `invocation_id_from_resume_token` to set `context.invocation_id`.
+    pub resume_token: CapabilityResumeToken,
+    /// Present when the invocation previously passed a one-shot approval gate.
+    /// The two sub-fields are always set together; see [`AuthResumeApprovalIdentity`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prior_approval: Option<AuthResumeApprovalIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

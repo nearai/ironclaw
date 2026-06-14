@@ -1,14 +1,11 @@
 //! Document text extraction pipeline.
 //!
 //! Provides a [`DocumentExtractionMiddleware`] that detects document attachments
-//! on incoming messages and extracts text content so the LLM can reason about them.
-//!
-//! Supported formats:
-//! - **PDF** — via `pdf-extract`
-//! - **Office XML** (DOCX, PPTX, XLSX) — ZIP + XML text extraction
-//! - **Plain text** (TXT, CSV, JSON, XML, Markdown, code) — UTF-8 decode
-
-mod extractors;
+//! on incoming messages and runs them through the channel-agnostic
+//! [`ironclaw_extractors`] crate so the LLM can reason about their text content.
+//! This middleware owns the v1 `IncomingMessage` plumbing (size caps, truncation,
+//! inline-data/SSRF policy); the format-specific byte→text extraction itself
+//! lives in `ironclaw_extractors::extract_text`.
 
 use crate::channels::{AttachmentKind, IncomingMessage};
 
@@ -96,7 +93,7 @@ impl DocumentExtractionMiddleware {
 
             let mime = &attachment.mime_type;
             let filename = attachment.filename.as_deref();
-            match extractors::extract_text(&data, mime, filename) {
+            match ironclaw_extractors::extract_text(&data, mime, filename) {
                 Ok(text) => {
                     // Truncate at a char boundary to avoid panicking on multi-byte UTF-8
                     let text = if text.len() > MAX_EXTRACTED_TEXT_LEN {

@@ -4,6 +4,7 @@
 //! into canonical Reborn commands without depending on WebUI route handlers,
 //! product adapters, protocol auth evidence, WASM, or adapter registries.
 
+use ironclaw_attachments::InboundAttachment;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
     CancelRunRequest, GateRef, IdempotencyKey, SanitizedCancelReason, TurnActor, TurnRunId,
@@ -16,6 +17,13 @@ const CLIENT_ACTION_ID_MAX_BYTES: usize = 256;
 const USER_MESSAGE_TEXT_MAX_BYTES: usize = 64 * 1024;
 const GATE_REF_MAX_BYTES: usize = 256;
 const CREDENTIAL_REF_MAX_BYTES: usize = 512;
+/// Inline-attachment budgets, mirroring the v1 web gateway: at most
+/// `MAX_INLINE_ATTACHMENTS` files, `MAX_INLINE_ATTACHMENT_BYTES` decoded bytes
+/// per file, and `MAX_INLINE_TOTAL_ATTACHMENT_BYTES` decoded bytes total.
+const MAX_INLINE_ATTACHMENTS: usize = 10;
+const MAX_INLINE_ATTACHMENT_BYTES: usize = 5 * 1024 * 1024;
+const MAX_INLINE_TOTAL_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+const ATTACHMENT_FILENAME_MAX_BYTES: usize = 256;
 
 /// Authenticated WebUI caller after route auth has already completed.
 ///
@@ -70,6 +78,20 @@ pub struct WebUiCreateThreadRequest {
     pub requested_thread_id: Option<String>,
 }
 
+/// One inline attachment in a browser send-message body.
+///
+/// `data_base64` is the base64-encoded file bytes; `mime_type` is validated
+/// against the shared attachment format registry. This is the only place raw
+/// upload bytes enter the workflow — they are decoded, budgeted, and landed in
+/// storage, never carried on the (serializable) inbound command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WebUiInboundAttachment {
+    pub mime_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    pub data_base64: String,
+}
+
 /// Browser body for WebUI send-message mutation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WebUiSendMessageRequest {
@@ -79,6 +101,90 @@ pub struct WebUiSendMessageRequest {
     pub thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<WebUiInboundAttachment>,
+}
+
+impl WebUiSendMessageRequest {
+    /// Validate and decode the inline attachments into bytes-bearing
+    /// [`InboundAttachment`]s ready for landing.
+    ///
+    /// Enforces the per-file / per-message / count budgets and rejects
+    /// unsupported MIME types (per the shared format registry) and malformed
+    /// base64 with a stable validation error. Kept separate from
+    /// [`Self::into_command`] so the serializable command never carries raw
+    /// bytes.
+    pub fn decode_attachments(
+        &self,
+    ) -> Result<Vec<InboundAttachment>, WebUiInboundValidationError> {
+        use base64::Engine;
+
+        if self.attachments.len() > MAX_INLINE_ATTACHMENTS {
+            return Err(WebUiInboundValidationError::new(
+                "attachments",
+                WebUiInboundValidationCode::TooLong,
+            ));
+        }
+
+        let mut decoded = Vec::with_capacity(self.attachments.len());
+        let mut total_bytes = 0usize;
+        for (index, attachment) in self.attachments.iter().enumerate() {
+            let mime = ironclaw_common::normalize_mime_type(&attachment.mime_type);
+            if !ironclaw_common::is_supported_mime(&mime) {
+                return Err(WebUiInboundValidationError::new(
+                    "attachments.mime_type",
+                    WebUiInboundValidationCode::InvalidValue,
+                ));
+            }
+
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(attachment.data_base64.as_bytes())
+                .map_err(|_| {
+                    WebUiInboundValidationError::new(
+                        "attachments.data_base64",
+                        WebUiInboundValidationCode::InvalidValue,
+                    )
+                })?;
+            if bytes.len() > MAX_INLINE_ATTACHMENT_BYTES {
+                return Err(WebUiInboundValidationError::new(
+                    "attachments",
+                    WebUiInboundValidationCode::TooLong,
+                ));
+            }
+            total_bytes = total_bytes.saturating_add(bytes.len());
+            if total_bytes > MAX_INLINE_TOTAL_ATTACHMENT_BYTES {
+                return Err(WebUiInboundValidationError::new(
+                    "attachments",
+                    WebUiInboundValidationCode::TooLong,
+                ));
+            }
+
+            let filename = attachment
+                .filename
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty());
+            if let Some(name) = filename
+                && name.len() > ATTACHMENT_FILENAME_MAX_BYTES
+            {
+                return Err(WebUiInboundValidationError::new(
+                    "attachments.filename",
+                    WebUiInboundValidationCode::TooLong,
+                ));
+            }
+
+            // `kind` and the fallback filename extension are derived from
+            // `mime_type` inside the landing bridge, so the DTO carries only the
+            // raw upload fields here.
+            decoded.push(InboundAttachment {
+                id: format!("webui-attachment-{index}"),
+                mime_type: mime,
+                filename: filename.map(str::to_string),
+                bytes,
+            });
+        }
+        Ok(decoded)
+    }
 }
 
 /// Browser body for WebUI cancel-run mutation.

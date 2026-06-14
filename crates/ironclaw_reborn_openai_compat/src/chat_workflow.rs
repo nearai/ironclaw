@@ -9,6 +9,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::ack_helpers::internal_refs_from_ack;
+use crate::content_parts::{
+    content_array_item_text, non_text_part_marker, sanitize_product_text_fragment,
+};
+use crate::error::product_rejection_to_openai_error;
 use crate::identity::{
     OPENAI_COMPAT_ACTOR_KIND, OPENAI_COMPAT_ADAPTER_ID, OPENAI_COMPAT_INSTALLATION_ID,
 };
@@ -33,9 +37,8 @@ use ironclaw_product_adapters::{
     AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ExternalEventId,
     ParsedProductInbound, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
     ProductInboundPayload, ProductProjectionReadInput, ProductProjectionSubject,
-    ProductProjectionSubscribeInput, ProductRejection, ProductRejectionKind, ProductTriggerReason,
-    ProductWorkflow, ProductWorkflowRejectionKind, ProjectionReadRequest, ProtocolAuthEvidence,
-    TrustedInboundContext, UserMessagePayload,
+    ProductProjectionSubscribeInput, ProductRejection, ProductTriggerReason, ProductWorkflow,
+    ProjectionReadRequest, ProtocolAuthEvidence, TrustedInboundContext, UserMessagePayload,
 };
 
 const DEFAULT_CHAT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -617,32 +620,7 @@ fn accepted_ack_from_ack(
 }
 
 fn error_from_rejection(rejection: ProductRejection) -> OpenAiCompatHttpError {
-    match rejection.kind {
-        ProductRejectionKind::BindingRequired => {
-            OpenAiCompatHttpError::not_found(Some("messages".to_string()))
-        }
-        ProductRejectionKind::AccessDenied => OpenAiCompatHttpError::from_workflow_rejection(
-            ProductWorkflowRejectionKind::Unauthorized,
-            403,
-            false,
-            None,
-        ),
-        ProductRejectionKind::UnknownInstallation => OpenAiCompatHttpError::from_kind(
-            503,
-            true,
-            crate::OpenAiCompatErrorKind::ServiceUnavailable,
-            None,
-        ),
-        ProductRejectionKind::InvalidRequest => {
-            OpenAiCompatHttpError::invalid_request(Some("messages".to_string()))
-        }
-        ProductRejectionKind::PolicyDenied => OpenAiCompatHttpError::from_workflow_rejection(
-            ProductWorkflowRejectionKind::Unauthorized,
-            403,
-            false,
-            None,
-        ),
-    }
+    product_rejection_to_openai_error(&rejection, Some("messages"))
 }
 
 pub(crate) fn parse_chat_request(
@@ -717,22 +695,13 @@ fn content_value_to_text(content: Option<&serde_json::Value>) -> String {
             .filter_map(content_array_item_text)
             .collect::<Vec<_>>()
             .join(" "),
-        Some(value) if !value.is_null() => "[non_text_content]".to_string(),
+        // A bare object-form part (non-standard, but tolerated): run it through
+        // the same per-part logic so a typed part gets its specific marker (or
+        // text) instead of discarding the type for the generic marker.
+        Some(value @ serde_json::Value::Object(_)) => {
+            content_array_item_text(value).unwrap_or_else(|| non_text_part_marker(None).to_string())
+        }
+        Some(value) if !value.is_null() => non_text_part_marker(None).to_string(),
         _ => String::new(),
     }
-}
-
-fn content_array_item_text(value: &serde_json::Value) -> Option<String> {
-    let object = value.as_object()?;
-    match object.get("type").and_then(serde_json::Value::as_str) {
-        Some("text" | "input_text" | "output_text") => object
-            .get("text")
-            .and_then(serde_json::Value::as_str)
-            .map(sanitize_product_text_fragment),
-        _ => Some("[non_text_content]".to_string()),
-    }
-}
-
-fn sanitize_product_text_fragment(value: &str) -> String {
-    value.replace(['\n', '\r', '\u{2028}', '\u{2029}'], " ")
 }

@@ -425,6 +425,11 @@ async fn chat_completion_binding_required_rejection_returns_404() {
         .expect("response");
 
     assert_eq!(response.status(), http::StatusCode::NOT_FOUND);
+    let body = json_body(response).await;
+    assert_eq!(
+        body["error"]["param"], "messages",
+        "BindingRequired on chat must carry param=messages"
+    );
     assert_eq!(workflow.seen_count(), 1);
 }
 
@@ -502,6 +507,11 @@ async fn chat_completion_invalid_request_rejection_returns_400() {
         .expect("response");
 
     assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert_eq!(
+        body["error"]["param"], "messages",
+        "InvalidRequest on chat must carry param=messages"
+    );
     assert_eq!(workflow.seen_count(), 1);
 }
 
@@ -527,6 +537,38 @@ async fn chat_completion_policy_denied_rejection_returns_403() {
         .expect("response");
 
     assert_eq!(response.status(), http::StatusCode::FORBIDDEN);
+    assert_eq!(workflow.seen_count(), 1);
+}
+
+#[tokio::test]
+async fn chat_completion_ambiguous_resolution_rejection_returns_409() {
+    // ProductInboundAck::Rejected with AmbiguousResolution must map to HTTP
+    // 409 Conflict with an "conflict" error code — not to a 4xx like
+    // AccessDenied (403) or a 5xx. This test exercises the handler-level
+    // mapping to catch any layer between error_from_rejection() and the
+    // axum response that could accidentally suppress or remap the code.
+    let workflow = Arc::new(FixedAckWorkflow::new(rejected_ack(
+        ProductRejectionKind::AmbiguousResolution,
+    )));
+    let router = test_router_with_workflow(
+        workflow.clone(),
+        Arc::new(StaticChatProjectionReader::text("unused")),
+    );
+
+    let response = router
+        .oneshot(chat_request(
+            json!({
+                "model": "gpt-reborn",
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            None,
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::CONFLICT);
+    let body = json_body(response).await;
+    assert_eq!(body["error"]["code"], "conflict");
     assert_eq!(workflow.seen_count(), 1);
 }
 

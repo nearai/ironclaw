@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId};
@@ -524,40 +527,114 @@ async fn gateway_rejects_unknown_provider_tool_call_before_registration() {
 }
 
 #[tokio::test]
-async fn gateway_rejects_invalid_provider_tool_batch_before_any_registration() {
-    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![
-        ToolCall {
-            id: "call_1".to_string(),
-            name: "demo__echo".to_string(),
-            arguments: serde_json::json!({"message":"one"}),
-            reasoning: None,
-            signature: None,
-            arguments_parse_error: None,
+async fn gateway_repairs_oversized_provider_tool_arguments_before_registration() {
+    let oversized_message = "x".repeat(20 * 1024);
+    let provider = Arc::new(ToolAwareProvider::tool_response_sequence(vec![
+        ToolCompletionResponse {
+            content: None,
+            tool_calls: vec![
+                ToolCall {
+                    id: "call_1".to_string(),
+                    name: "demo__echo".to_string(),
+                    arguments: serde_json::json!({"message":"one"}),
+                    reasoning: Some("valid call reasoning".to_string()),
+                    signature: None,
+                    arguments_parse_error: None,
+                },
+                ToolCall {
+                    id: "call_2".to_string(),
+                    name: "demo__echo".to_string(),
+                    arguments: serde_json::json!({"message": oversized_message}),
+                    reasoning: Some("oversized call reasoning".to_string()),
+                    signature: None,
+                    arguments_parse_error: None,
+                },
+            ],
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason: FinishReason::ToolUse,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            reasoning: Some("response reasoning".to_string()),
         },
-        ToolCall {
-            id: "call_2".to_string(),
-            name: "demo__echo".to_string(),
-            arguments: serde_json::json!({"message":"x".repeat(20 * 1024)}),
+        ToolCompletionResponse {
+            content: Some("Finished after repair.".to_string()),
+            tool_calls: Vec::new(),
+            input_tokens: 2,
+            output_tokens: 2,
+            finish_reason: FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
             reasoning: None,
-            signature: None,
-            arguments_parse_error: None,
         },
     ]));
     let gateway = LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
-        provider,
+        provider.clone(),
         LlmModelProfilePolicy::new()
             .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
     );
     let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
 
-    let error = gateway
+    let response = gateway
         .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
         .await
-        .unwrap_err();
+        .unwrap();
 
-    assert_eq!(error.kind, HostManagedModelErrorKind::InvalidOutput);
+    let usage = response
+        .usage
+        .expect("repaired response reports accumulated provider usage");
+    assert_eq!(usage.input_tokens, 3);
+    assert_eq!(usage.output_tokens, 3);
+
+    let ParentLoopOutput::AssistantReply(reply) = response.output else {
+        panic!("expected repaired assistant reply");
+    };
+    assert_eq!(reply.content, "Finished after repair.");
     assert!(capabilities.registered.lock().unwrap().is_empty());
+
+    let tool_requests = provider.tool_requests.lock().unwrap();
+    assert_eq!(tool_requests.len(), 2);
+    let repair_messages = &tool_requests[1].messages;
+    let repair_assistant = repair_messages
+        .iter()
+        .find(|message| message.role == Role::Assistant && message.tool_calls.is_some())
+        .expect("repair request includes assistant tool call replay");
+    let repair_tool_calls = repair_assistant
+        .tool_calls
+        .as_ref()
+        .expect("tool calls replayed");
+    assert_eq!(repair_tool_calls.len(), 2);
+    assert_eq!(
+        repair_tool_calls[0].arguments,
+        serde_json::json!({"message":"one"})
+    );
+    assert_eq!(
+        repair_tool_calls[1].arguments,
+        serde_json::json!({
+            "error": "arguments omitted because they exceeded the host provider-tool limit"
+        })
+    );
+    assert_eq!(
+        repair_tool_calls[0].reasoning.as_deref(),
+        Some("valid call reasoning")
+    );
+    assert_eq!(
+        repair_tool_calls[1].reasoning.as_deref(),
+        Some("oversized call reasoning")
+    );
+    let repair_tool_result = repair_messages
+        .iter()
+        .find(|message| {
+            message.role == Role::Tool && message.tool_call_id.as_deref() == Some("call_2")
+        })
+        .expect("repair request includes rejected tool result");
+    assert!(
+        repair_tool_result
+            .content
+            .contains("provider tool arguments exceed 16384 bytes")
+    );
+    assert!(!repair_tool_result.content.contains("xxxxx"));
 }
 
 #[tokio::test]
@@ -2753,7 +2830,7 @@ struct ToolAwareProvider {
     complete_requests: Mutex<Vec<CompletionRequest>>,
     tool_requests: Mutex<Vec<ToolCompletionRequest>>,
     plain_response: Mutex<Option<CompletionResponse>>,
-    tool_response: Mutex<Option<ToolCompletionResponse>>,
+    tool_responses: Mutex<VecDeque<ToolCompletionResponse>>,
 }
 
 impl ToolAwareProvider {
@@ -2770,7 +2847,7 @@ impl ToolAwareProvider {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })),
-            tool_response: Mutex::new(None),
+            tool_responses: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -2801,11 +2878,15 @@ impl ToolAwareProvider {
     }
 
     fn tool_response(response: ToolCompletionResponse) -> Self {
+        Self::tool_response_sequence(vec![response])
+    }
+
+    fn tool_response_sequence(responses: Vec<ToolCompletionResponse>) -> Self {
         Self {
             complete_requests: Mutex::new(Vec::new()),
             tool_requests: Mutex::new(Vec::new()),
             plain_response: Mutex::new(None),
-            tool_response: Mutex::new(Some(response)),
+            tool_responses: Mutex::new(responses.into()),
         }
     }
 }
@@ -2836,10 +2917,10 @@ impl LlmProvider for ToolAwareProvider {
     ) -> Result<ToolCompletionResponse, LlmError> {
         self.tool_requests.lock().unwrap().push(request);
         Ok(self
-            .tool_response
+            .tool_responses
             .lock()
             .unwrap()
-            .take()
+            .pop_front()
             .expect("tool response configured"))
     }
 }
