@@ -4804,6 +4804,90 @@ mod tests {
         runtime.shutdown().await.expect("runtime shutdown");
     }
 
+    /// Regression guard: `send_user_message` resolves product context via
+    /// `resolve_web_ui`, which sets `TurnOriginKind::WebUi`.  The runtime
+    /// context section rendered into the model request must therefore contain
+    /// the WebUI origin line produced by
+    /// `LoopRuntimeContext::render_model_content`.  Previously, only the
+    /// persisted `product_context` owner was asserted; this test closes the
+    /// gap by asserting the *rendered* origin appears in the captured model
+    /// request.
+    #[tokio::test]
+    async fn send_user_message_renders_webui_origin_in_model_request() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let gateway = Arc::new(RecordingGateway {
+            reply: "webui-origin-check reply".to_string(),
+            requests: Arc::clone(&requests),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-webui-origin-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-webui-origin-tenant".to_string(),
+            agent_id: "runtime-webui-origin-agent".to_string(),
+            source_binding_id: "runtime-webui-origin-source".to_string(),
+            reply_target_binding_id: "runtime-webui-origin-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: RUNTIME_SEND_TIMEOUT,
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            RUNTIME_SEND_TIMEOUT,
+            runtime.send_user_message(&conversation, "ping"),
+        )
+        .await
+        .expect("runtime send should finish within timeout")
+        .expect("runtime send should succeed");
+
+        assert_eq!(reply.status, TurnStatus::Completed);
+
+        // The runtime-context system message carries the rendered
+        // `LoopRuntimeContext` — its content_ref uses the "runtime" section
+        // prefix stamped by `push_runtime_context`.
+        let runtime_context_content = {
+            let requests = requests
+                .lock()
+                .expect("recording gateway requests lock poisoned");
+            requests[0]
+                .messages
+                .iter()
+                .find(|message| {
+                    message.role == HostManagedModelMessageRole::System
+                        && message
+                            .content_ref
+                            .as_str()
+                            .starts_with("msg:runtime.loop-start.")
+                })
+                .expect(
+                    "model request must include a runtime-context system message \
+                     (content_ref starts with msg:runtime.loop-start.)",
+                )
+                .content
+                .clone()
+        };
+
+        // Exact string produced by LoopRuntimeContext::render_model_content
+        // for TurnOriginKind::WebUi (runtime_context.rs line 225).
+        assert!(
+            runtime_context_content
+                .contains("Run origin: WebUI chat; replies render in this chat."),
+            "runtime-context system message must contain the WebUI origin line, \
+             got: {runtime_context_content:?}"
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
     #[tokio::test]
     async fn send_user_message_until_gate_returns_blocked_on_auth_gate() {
         let root = tempfile::tempdir().expect("tempdir");

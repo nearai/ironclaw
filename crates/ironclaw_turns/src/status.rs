@@ -387,7 +387,8 @@ pub enum TurnError {
     InvalidTransition { from: TurnStatus, to: TurnStatus },
     #[error("turn run lease mismatch")]
     LeaseMismatch,
-    #[error("invalid run-origin adapter: must be 1..=256 bytes")]
+    // Keep the byte limit in sync with `origin::MAX_RUN_ORIGIN_ADAPTER_BYTES`.
+    #[error("invalid run-origin adapter: must be 1..=512 bytes")]
     InvalidRunOriginAdapter,
 }
 
