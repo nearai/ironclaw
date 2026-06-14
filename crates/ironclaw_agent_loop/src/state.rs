@@ -66,7 +66,6 @@ pub struct LoopExecutionState {
     /// below `min_delta_tokens` → `StopKind::NoProgressDetected`
     /// (#3841 follow-up F1).
     pub recent_output_token_counts: BoundedRing<u32, 8>,
-
     // strategy slots — one per strategy that mutates state.
     pub context_state: ContextStrategyState,
     pub capability_state: CapabilityStrategyState,

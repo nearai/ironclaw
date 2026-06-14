@@ -123,11 +123,37 @@ pub trait TriggerFireAccessChecker: Send + Sync {
 }
 
 #[cfg(feature = "root-llm-provider")]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ResolvedRebornLlm {
     provider_id: String,
     model: String,
     pub(crate) config: ironclaw_llm::LlmConfig,
+    /// Optional decorator applied to the provider the gateway builds from
+    /// `config`. `config` is always the construction source (so it stays the
+    /// single source of truth for `provider_id`/`model` and budget cost-table
+    /// derivation); the factory only *wraps* the built provider — e.g. a
+    /// benchmark harness layering token/reasoning instrumentation over it.
+    /// When `None` the gateway uses the config-built provider as-is.
+    pub(crate) provider_factory: Option<RebornProviderFactory>,
+}
+
+/// Decorator over the config-built LLM provider. See
+/// [`ResolvedRebornLlm::with_provider_factory`].
+#[cfg(feature = "root-llm-provider")]
+pub type RebornProviderFactory = Arc<
+    dyn Fn(Arc<dyn ironclaw_llm::LlmProvider>) -> Arc<dyn ironclaw_llm::LlmProvider> + Send + Sync,
+>;
+
+// `LlmProvider` is not `Debug`, so derive can't see through `provider_override`.
+#[cfg(feature = "root-llm-provider")]
+impl std::fmt::Debug for ResolvedRebornLlm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedRebornLlm")
+            .field("provider_id", &self.provider_id)
+            .field("model", &self.model)
+            .field("provider_factory", &self.provider_factory.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 #[cfg(feature = "root-llm-provider")]
@@ -145,7 +171,24 @@ impl ResolvedRebornLlm {
             provider_id: config.active_provider_id(),
             model: config.active_model_name(),
             config,
+            provider_factory: None,
         }
+    }
+
+    /// Wrap the config-built provider with `factory` before the gateway drives
+    /// it — e.g. to layer token/reasoning/cost instrumentation over the real
+    /// provider.
+    ///
+    /// This is the instrumentation seam (feature-gated on `root-llm-provider`).
+    /// The composition still constructs the provider from `config` and hands it
+    /// to the factory, so `config` remains the single source of truth and the
+    /// raw `ironclaw_llm::LlmProvider` substrate handle is never accepted
+    /// wholesale through the facade — the caller only supplies a decorator over
+    /// a provider the composition built. `build_llm_gateway` applies the factory
+    /// and never re-exposes the provider.
+    pub fn with_provider_factory(mut self, factory: RebornProviderFactory) -> Self {
+        self.provider_factory = Some(factory);
+        self
     }
 }
 
@@ -282,6 +325,10 @@ pub struct RebornRuntimeInput {
     /// supply their own observer (SSE projection, WS fan-out,
     /// telemetry export) here.
     pub budget_event_observer: Option<Arc<dyn crate::BudgetEventObserver>>,
+    /// Observer that receives each capability/tool invocation + result during a
+    /// run, so a downstream caller can reconstruct the full step-by-step
+    /// trajectory (the sealed runtime otherwise exposes only the final reply).
+    pub trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) model_gateway_override: Option<Arc<dyn HostManagedModelGateway>>,
     /// Cost table to pair with the model-gateway override. Without this,
@@ -316,6 +363,7 @@ impl RebornRuntimeInput {
             hooks: HooksActivationConfig::default(),
             budget_defaults: None,
             budget_event_observer: None,
+            trajectory_observer: None,
             #[cfg(any(test, feature = "test-support"))]
             model_gateway_override: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -344,6 +392,42 @@ impl RebornRuntimeInput {
         observer: Arc<dyn crate::BudgetEventObserver>,
     ) -> Self {
         self.budget_event_observer = Some(observer);
+        self
+    }
+
+    /// Install a trajectory observer that receives each capability/tool call +
+    /// result during a run (for downstream step-by-step trajectory capture).
+    ///
+    /// The observer receives a **bounded safe preview** of arguments/results
+    /// (long strings truncated, large arrays capped — see
+    /// [`crate::trajectory_observer`]), keeping a downstream logs/UI/telemetry
+    /// sink within the same boundary the model-visible display path enforces.
+    /// A consumer that needs the unbounded raw payloads (and owns its own
+    /// redaction/access control) must opt in via
+    /// [`Self::with_raw_trajectory_observer`].
+    pub fn with_trajectory_observer(
+        mut self,
+        observer: Arc<dyn crate::RebornTrajectoryObserver>,
+    ) -> Self {
+        self.trajectory_observer =
+            Some(crate::trajectory_observer::SafePreviewTrajectoryObserver::wrap(observer));
+        self
+    }
+
+    /// Install a trajectory observer that receives the **raw, unbounded**
+    /// capability arguments and results — no safe-preview truncation.
+    ///
+    /// Capability results can contain file contents, command output, or
+    /// credentials, so this bypasses the truncation boundary that
+    /// [`Self::with_trajectory_observer`] applies by default. Use it only for a
+    /// trusted, in-process consumer that needs the verbatim trajectory (e.g. a
+    /// benchmark harness rendering exact tool I/O) and owns its own redaction
+    /// and access control for whatever sink it projects to.
+    pub fn with_raw_trajectory_observer(
+        mut self,
+        observer: Arc<dyn crate::RebornTrajectoryObserver>,
+    ) -> Self {
+        self.trajectory_observer = Some(observer);
         self
     }
 

@@ -2011,6 +2011,7 @@ pub async fn build_reborn_runtime(
         hooks: hooks_config,
         budget_defaults,
         budget_event_observer,
+        trajectory_observer,
         #[cfg(any(test, feature = "test-support"))]
         model_gateway_override,
         #[cfg(any(test, feature = "test-support"))]
@@ -2351,6 +2352,7 @@ pub async fn build_reborn_runtime(
             model_gateway,
             milestone_sink.clone(),
             skill_activation_source.clone(),
+            trajectory_observer,
         )
         .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
         (
@@ -3009,9 +3011,16 @@ pub(crate) struct RebornLlmReloadParts {
 #[cfg(feature = "root-llm-provider")]
 async fn build_llm_gateway(llm: ResolvedRebornLlm) -> Result<LlmGatewayBundle, RebornRuntimeError> {
     let session = ironclaw_llm::create_session_manager(llm.config.session.clone()).await;
-    let raw = ironclaw_llm::build_static_provider_chain(&llm.config, Arc::clone(&session))
+    // Config is always the construction source. A caller-supplied factory (e.g.
+    // an instrumentation wrapper) then decorates the built provider; without one
+    // the config-built provider is driven as-is.
+    let built = ironclaw_llm::build_static_provider_chain(&llm.config, Arc::clone(&session))
         .await
         .map_err(|error| RebornRuntimeError::LlmProvider(error.to_string()))?;
+    let raw = match llm.provider_factory.clone() {
+        Some(factory) => factory(built),
+        None => built,
+    };
     wrap_swappable_gateway(raw, session)
 }
 
@@ -3550,6 +3559,72 @@ mod tests {
         }
     }
 
+    /// A long echo argument (well over the safe-preview 512-byte string cap) so
+    /// the default-observer test can prove the payload is truncated before the
+    /// observer sees it.
+    const LARGE_ECHO_MESSAGE: &str = "PAYLOAD0123456789ABCDEF_";
+
+    #[derive(Debug, Default)]
+    struct LargeEchoToolCallingGateway {
+        calls: StdMutex<usize>,
+    }
+
+    #[async_trait]
+    impl HostManagedModelGateway for LargeEchoToolCallingGateway {
+        async fn stream_model(
+            &self,
+            _request: HostManagedModelRequest,
+        ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+            Err(HostManagedModelError::safe(
+                HostManagedModelErrorKind::InvalidRequest,
+                "expected capability-aware model path",
+            ))
+        }
+
+        async fn stream_model_with_capabilities(
+            &self,
+            _request: HostManagedModelRequest,
+            capabilities: Arc<dyn LoopCapabilityPort>,
+        ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+            let call_index = {
+                let mut calls = self.calls.lock().expect("large echo gateway lock poisoned");
+                let call_index = *calls;
+                *calls += 1;
+                call_index
+            };
+            if call_index > 0 {
+                return Ok(HostManagedModelResponse::assistant_reply("tool ok"));
+            }
+            let echo_id = CapabilityId::new("builtin.echo").expect("echo id");
+            let echo_tool = capabilities
+                .tool_definitions()
+                .map_err(model_capability_error)?
+                .into_iter()
+                .find(|definition| definition.capability_id == echo_id)
+                .expect("echo provider tool definition");
+            // ~2.4 KB message: far over the 512-byte string preview cap.
+            let big_message = LARGE_ECHO_MESSAGE.repeat(100);
+            let candidate = capabilities
+                .register_provider_tool_call(ProviderToolCall {
+                    provider_id: "test-provider".to_string(),
+                    provider_model_id: "test-model".to_string(),
+                    turn_id: Some("provider-turn-1".to_string()),
+                    id: "call-1".to_string(),
+                    name: echo_tool.name,
+                    arguments: serde_json::json!({ "message": big_message }),
+                    response_reasoning: None,
+                    reasoning: None,
+                    signature: None,
+                })
+                .await
+                .map_err(model_capability_error)?;
+            Ok(HostManagedModelResponse::capability_calls(
+                vec![candidate],
+                "",
+            ))
+        }
+    }
+
     #[async_trait]
     impl HostManagedModelGateway for AuthGateToolCallingGateway {
         async fn stream_model(
@@ -4023,6 +4098,137 @@ mod tests {
             .expect("chat request should be captured")
             .expect("auth header should be sent by capture server");
         assert_eq!(auth_header, "Bearer sess_reborn_env_token");
+    }
+
+    /// Counts how many times the runtime drives this provider and answers with a
+    /// fixed sentinel, so a test can prove an injected provider — not one built
+    /// from config — is the one the gateway actually calls.
+    #[cfg(feature = "root-llm-provider")]
+    struct CountingOverrideProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    #[async_trait::async_trait]
+    impl ironclaw_llm::LlmProvider for CountingOverrideProvider {
+        fn model_name(&self) -> &str {
+            "mock-override-model"
+        }
+
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: ironclaw_llm::CompletionRequest,
+        ) -> Result<ironclaw_llm::CompletionResponse, ironclaw_llm::LlmError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ironclaw_llm::CompletionResponse {
+                content: "override-driven".to_string(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
+                reasoning: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ironclaw_llm::ToolCompletionRequest,
+        ) -> Result<ironclaw_llm::ToolCompletionResponse, ironclaw_llm::LlmError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ironclaw_llm::ToolCompletionResponse {
+                content: Some("override-driven".to_string()),
+                tool_calls: Vec::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                reasoning: None,
+            })
+        }
+    }
+
+    /// The LLM-provider-instrumentation seam: when a caller installs a factory
+    /// via `ResolvedRebornLlm::with_provider_factory` (how the bench wraps an
+    /// instrumented provider to capture reasoning / tokens / cost / system-prompt
+    /// / tool definitions), the gateway must drive the factory's output. Here the
+    /// factory ignores the config-built provider and returns a counting mock, so
+    /// if the factory were not applied the gateway would drive the config-built
+    /// provider (dead endpoint) instead of returning the mock's sentinel.
+    #[cfg(feature = "root-llm-provider")]
+    #[tokio::test]
+    async fn build_llm_gateway_applies_provider_factory() {
+        let session_dir = tempfile::tempdir().expect("session tempdir");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mock: Arc<dyn ironclaw_llm::LlmProvider> = Arc::new(CountingOverrideProvider {
+            calls: Arc::clone(&calls),
+        });
+
+        let config = ironclaw_llm::LlmConfig {
+            backend: "nearai".to_string(),
+            session: ironclaw_llm::SessionConfig {
+                auth_base_url: "http://127.0.0.1:1".to_string(),
+                session_path: session_dir.path().join("session.json"),
+            },
+            nearai: ironclaw_llm::NearAiConfig {
+                model: "config-model-should-not-be-used".to_string(),
+                cheap_model: None,
+                base_url: "http://127.0.0.1:1".to_string(),
+                api_key: None,
+                fallback_model: None,
+                max_retries: 0,
+                circuit_breaker_threshold: None,
+                circuit_breaker_recovery_secs: 30,
+                response_cache_enabled: false,
+                response_cache_ttl_secs: 3600,
+                response_cache_max_entries: 1000,
+                failover_cooldown_secs: 300,
+                failover_cooldown_threshold: 3,
+                smart_routing_cascade: false,
+            },
+            provider: None,
+            bedrock: None,
+            gemini_oauth: None,
+            openai_codex: None,
+            request_timeout_secs: 5,
+            cheap_model: None,
+            smart_routing_cascade: false,
+            max_retries: 0,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+        };
+
+        let factory_mock = Arc::clone(&mock);
+        let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config)
+            .with_provider_factory(Arc::new(move |_built| Arc::clone(&factory_mock)));
+        let bundle = super::build_llm_gateway(llm)
+            .await
+            .expect("gateway builds with the provider factory");
+
+        let response = bundle
+            .gateway
+            .stream_model(nearai_gateway_test_request())
+            .await
+            .expect("gateway drives the factory-produced provider");
+
+        assert_eq!(
+            response.safe_text_deltas,
+            vec!["override-driven".to_string()],
+            "gateway must return the factory provider's response, not the config-built one"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the override provider should be invoked exactly once"
+        );
     }
 
     #[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
@@ -5089,6 +5295,179 @@ mod tests {
         );
 
         runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    /// Records both trajectory callbacks so the e2e test can assert the
+    /// observer fires through a real `build_reborn_runtime` turn — driving the
+    /// input hook (`HostRuntimeLoopCapabilityPort`) and the result hook
+    /// (`LocalDevCapabilityIo::write_capability_result`) on the actual dispatch
+    /// path, not a direct helper call.
+    #[derive(Debug, Default)]
+    struct RecordingTrajectoryObserver {
+        inputs: StdMutex<Vec<(String, String, serde_json::Value)>>,
+        results: StdMutex<Vec<(String, String, serde_json::Value)>>,
+    }
+
+    impl crate::RebornTrajectoryObserver for RecordingTrajectoryObserver {
+        fn on_capability_input(
+            &self,
+            call_id: &str,
+            capability_id: &str,
+            arguments: &serde_json::Value,
+        ) {
+            self.inputs.lock().expect("inputs lock").push((
+                call_id.to_string(),
+                capability_id.to_string(),
+                arguments.clone(),
+            ));
+        }
+
+        fn on_capability_result(
+            &self,
+            call_id: &str,
+            capability_id: &str,
+            output: &serde_json::Value,
+        ) {
+            self.results.lock().expect("results lock").push((
+                call_id.to_string(),
+                capability_id.to_string(),
+                output.clone(),
+            ));
+        }
+    }
+
+    /// End-to-end guard for the #4588 trajectory observer seam: a real runtime
+    /// turn that dispatches the `builtin.echo` capability must fire BOTH the
+    /// input and result callbacks installed via
+    /// `RebornRuntimeInput::with_raw_trajectory_observer`. This drives the
+    /// result hook on the genuine dispatch path (the prior direct-call unit
+    /// test was dropped as false confidence — it stayed green even when
+    /// end-to-end dispatch was broken).
+    #[tokio::test]
+    async fn local_dev_runtime_forwards_tool_call_trajectory_to_raw_observer() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(ToolCallingGateway::default());
+        let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
+        let observer = Arc::new(RecordingTrajectoryObserver::default());
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-trajectory-owner", root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-trajectory-tenant".to_string(),
+            agent_id: "runtime-trajectory-agent".to_string(),
+            source_binding_id: "runtime-trajectory-source".to_string(),
+            reply_target_binding_id: "runtime-trajectory-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        // Raw (not safe-preview) so we can assert verbatim arguments + output.
+        .with_raw_trajectory_observer(observer.clone())
+        .with_model_gateway_override(gateway_for_runtime);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            RUNTIME_SEND_TIMEOUT,
+            runtime.send_user_message(&conversation, "use echo tool"),
+        )
+        .await
+        .expect("runtime send should finish")
+        .expect("runtime send should succeed");
+        assert_eq!(reply.status, TurnStatus::Completed);
+        // Shut down before inspecting the recorded callbacks so the std-Mutex
+        // guards are never held across an `.await` (clippy::await_holding_lock).
+        runtime.shutdown().await.expect("runtime shutdown");
+
+        let echo_id = CapabilityId::new("builtin.echo").unwrap();
+
+        let inputs = observer.inputs.lock().expect("inputs lock");
+        assert_eq!(inputs.len(), 1, "exactly one capability input observed");
+        let (input_call_id, input_capability, arguments) = &inputs[0];
+        assert!(!input_call_id.is_empty(), "input call_id should be present");
+        assert_eq!(input_capability, echo_id.as_str());
+        assert_eq!(
+            arguments,
+            &serde_json::json!({"message": "hello from tool"}),
+            "observer should receive the raw model-emitted tool arguments"
+        );
+
+        let results = observer.results.lock().expect("results lock");
+        assert_eq!(results.len(), 1, "exactly one capability result observed");
+        let (result_call_id, result_capability, output) = &results[0];
+        assert_eq!(result_capability, echo_id.as_str());
+        assert_eq!(
+            result_call_id, input_call_id,
+            "result and input callbacks correlate by call_id"
+        );
+        assert!(
+            output.to_string().contains("hello from tool"),
+            "observer should receive the staged capability output, got {output}"
+        );
+    }
+
+    /// Caller-level guard for the **default** (safe-preview) observer path:
+    /// installing via the public `with_trajectory_observer` and driving a real
+    /// turn with a large tool payload must deliver a *bounded* preview to the
+    /// observer — proving truncation is wired between dispatch and the observer,
+    /// not just unit-tested on the helper in isolation.
+    #[tokio::test]
+    async fn local_dev_runtime_safe_preview_observer_receives_bounded_payload() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(LargeEchoToolCallingGateway::default());
+        let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
+        let observer = Arc::new(RecordingTrajectoryObserver::default());
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-preview-owner", root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-preview-tenant".to_string(),
+            agent_id: "runtime-preview-agent".to_string(),
+            source_binding_id: "runtime-preview-source".to_string(),
+            reply_target_binding_id: "runtime-preview-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        // Default path → safe-preview truncation applied before the observer.
+        .with_trajectory_observer(observer.clone())
+        .with_model_gateway_override(gateway_for_runtime);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            RUNTIME_SEND_TIMEOUT,
+            runtime.send_user_message(&conversation, "echo a big payload"),
+        )
+        .await
+        .expect("runtime send should finish")
+        .expect("runtime send should succeed");
+        assert_eq!(reply.status, TurnStatus::Completed);
+        // Shut down before inspecting the recorded callbacks so the std-Mutex
+        // guards are never held across an `.await` (clippy::await_holding_lock).
+        runtime.shutdown().await.expect("runtime shutdown");
+
+        let original_len = LARGE_ECHO_MESSAGE.repeat(100).len();
+
+        let inputs = observer.inputs.lock().expect("inputs lock");
+        assert_eq!(inputs.len(), 1, "exactly one capability input observed");
+        let observed_message = inputs[0].2["message"].as_str().expect("message string");
+        assert!(
+            observed_message.len() < original_len && observed_message.contains("[truncated"),
+            "observer should receive a truncated preview of the large argument, got {} bytes",
+            observed_message.len()
+        );
+
+        let results = observer.results.lock().expect("results lock");
+        assert_eq!(results.len(), 1, "exactly one capability result observed");
+        assert!(
+            results[0].2.to_string().contains("[truncated"),
+            "observer should receive a truncated preview of the large result"
+        );
     }
 
     #[tokio::test]
