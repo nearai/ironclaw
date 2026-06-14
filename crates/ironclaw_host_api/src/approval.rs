@@ -239,7 +239,10 @@ fn is_secret_url_path_segment(segment: &str) -> bool {
         return false;
     };
     decoded.as_ref() != segment
-        && is_secret_url_path_segment_value(decoded.trim_matches(token_boundary_punctuation))
+        && decoded
+            .trim_matches(token_boundary_punctuation)
+            .split('/')
+            .any(is_secret_url_path_segment_value)
 }
 
 fn is_secret_url_path_segment_value(segment: &str) -> bool {
@@ -511,6 +514,22 @@ mod tests {
         );
         assert!(!display.text.contains("sk%2Dsecret"));
         assert!(!display.text.contains("token%31%32%33"));
+        assert!(!display.text.contains("debug=true"));
+    }
+
+    #[test]
+    fn shell_command_display_text_redacts_percent_encoded_secret_url_path_separators() {
+        let display = shell_command_display_text(
+            "curl https://example.test/reset%2Fsk-secret/public?debug=true",
+        );
+
+        assert!(
+            display
+                .text
+                .contains("https://example.test/[redacted]/public?...")
+        );
+        assert!(!display.text.contains("reset%2Fsk-secret"));
+        assert!(!display.text.contains("sk-secret"));
         assert!(!display.text.contains("debug=true"));
     }
 
