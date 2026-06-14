@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust, tokio, serde, cargo workspace. Spec: `docs/superpowers/specs/2026-06-13-product-context-factory-design.md`.
 
-**Working dir:** `/Users/henry/worktrees/ironclaw/context-slice-4828`, branch `context-slice-4828`.
+**Working dir:** repo root (worktree on branch `context-slice-4828`).
 
 **Conventions:** No `.unwrap()`/`.expect()` in production code (tests fine). No edits under `assets/prompts/`. Run `cargo fmt` before each commit. The repo gate is `cargo clippy --all --benches --tests --examples --all-features` (zero warnings) + `cargo test`.
 
@@ -530,7 +530,7 @@ Expected: zero matches. Fix any stragglers (replace with `product_context`).
 
 - [ ] **Step 2: fmt + clippy**
 
-Run: `cd /Users/henry/worktrees/ironclaw/context-slice-4828 && cargo fmt && cargo clippy --all --benches --tests --examples --all-features 2>&1 | grep -cE "^warning:|^error"`
+Run from the repo root: `cargo fmt && cargo clippy --all --benches --tests --examples --all-features 2>&1 | grep -cE "^warning:|^error"`
 Expected: `0`.
 
 - [ ] **Step 3: Full test gate**

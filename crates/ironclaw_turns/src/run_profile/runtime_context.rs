@@ -926,7 +926,7 @@ mod tests {
 
     #[test]
     fn web_ui_chat_with_none_set_delivery_and_tools_visible_does_not_render_warning() {
-        // Only ScheduledTrigger triggers the warning, not WebUiChat.
+        // Only ScheduledTrigger triggers the warning, not WebUi.
         let ctx = LoopRuntimeContext {
             loop_started_at_utc: stamp(),
             user_timezone: None,
@@ -947,7 +947,7 @@ mod tests {
         let text = ctx.render_model_content();
         assert!(
             !text.contains("Warning: no delivery target is set"),
-            "warning must not fire for WebUiChat: {text}"
+            "warning must not fire for WebUi: {text}"
         );
     }
 

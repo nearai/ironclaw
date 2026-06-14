@@ -60,16 +60,15 @@ ironclaw_turns (bottom; persisted, generic data only)
   // Serialize/Deserialize; carried via #[serde(default)] optional field on the structs below.
 
 ironclaw_product_context (NEW; resolver, no I/O)
-  enum TrustLevel { Trusted, Untrusted }               // input-only, not persisted
+  enum InboundClassification { TrustedTrigger, TrustedOther, Untrusted }  // input-only, not persisted
   fn resolve_inbound(
-      trust: TrustLevel,
-      is_trigger_adapter: bool,                        // call site decides; resolver stays triggers-agnostic
+      classification: InboundClassification,           // call site collapses trust + trigger-adapter into one value
       adapter: RunOriginAdapter,
       surface_type: Option<TurnSurfaceType>,
       owner: TurnOwner,
   ) -> ProductTurnContext
   fn resolve_web_ui(owner: TurnOwner) -> ProductTurnContext
-  // The ONE rule: origin == ScheduledTrigger iff (trust == Trusted && is_trigger_adapter);
+  // The ONE rule: origin == ScheduledTrigger iff classification == TrustedTrigger;
   // otherwise Inbound. resolve_web_ui always yields WebUi.
   // deps: ironclaw_turns, ironclaw_host_api
 ```
@@ -80,7 +79,7 @@ which those crates already depend on.
 
 The "trusted-trigger adapter" identity constant (`TRIGGER_TRUSTED_ADAPTER_KIND`, owned by
 `ironclaw_triggers`) is compared at the `conversations` call site (which already depends on
-`ironclaw_triggers`) to produce the `is_trigger_adapter: bool` the resolver consumes, so the
+`ironclaw_triggers`) to decide whether the inbound is `InboundClassification::TrustedTrigger`, so the
 resolver itself depends on neither `ironclaw_triggers` nor any rich adapter type.
 
 ### Data flow
@@ -105,13 +104,14 @@ the generic inputs and calls the resolver:
 
 - `reborn_services.rs` (webui) and `runtime.rs` (local-dev webui): `resolve_web_ui(owner)`.
 - `inbound_turn.rs` (product inbound): map `ProductAdapterId → RunOriginAdapter`, route kind →
-  `TurnSurfaceType`; `resolve_inbound(Untrusted, …)` (product inbound is untrusted ingress).
-- `conversations/inbound.rs`: map `BindingResolutionPolicy → TrustLevel`,
-  `ConversationRouteKind → TurnSurfaceType`, `AdapterKind → RunOriginAdapter` and the
-  trigger-adapter check; `resolve_inbound(trust, …)`.
+  `TurnSurfaceType`; `resolve_inbound(InboundClassification::Untrusted, …)` (product inbound is
+  untrusted ingress).
+- `conversations/inbound.rs`: collapse `BindingResolutionPolicy` + the trigger-adapter check into
+  `InboundClassification`, map `ConversationRouteKind → TurnSurfaceType` and
+  `AdapterKind → RunOriginAdapter`; `resolve_inbound(classification, …)`.
 
 The trust-gating bug becomes structurally impossible: `resolve_inbound` is the only function that
-can mint `ScheduledTrigger`, and it requires `TrustLevel::Trusted`.
+can mint `ScheduledTrigger`, and it requires `InboundClassification::TrustedTrigger`.
 
 ### Render
 
