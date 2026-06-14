@@ -220,12 +220,22 @@ pub enum RebornSubmitTurnResponse {
         resolved_run_profile_version: u64,
         event_cursor: EventCursor,
     },
-    DeferredBusy {
+    RejectedBusy {
         thread_id: ThreadId,
         accepted_message_ref: AcceptedMessageRef,
-        active_run_id: TurnRunId,
-        status: TurnStatus,
-        event_cursor: EventCursor,
+        /// The run that was blocking at the time of rejection.
+        ///
+        /// `Some` on a fresh `ThreadBusy` rejection (the run is known and
+        /// still queryable). `None` on an idempotent replay where the original
+        /// blocking run may have already terminated and its id cannot be
+        /// recovered from the stored message record.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_run_id: Option<TurnRunId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<TurnStatus>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_cursor: Option<EventCursor>,
+        notice: String,
     },
     AlreadySubmitted {
         thread_id: ThreadId,

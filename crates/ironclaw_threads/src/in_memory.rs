@@ -237,7 +237,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         Ok(message.clone())
     }
 
-    async fn mark_message_deferred_busy(
+    async fn mark_message_rejected_busy(
         &self,
         scope: &ThreadScope,
         thread_id: &ThreadId,
@@ -245,8 +245,8 @@ impl SessionThreadService for InMemorySessionThreadService {
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         let mut state = self.state.lock().await;
         let message = get_message_mut(&mut state, scope, thread_id, message_id)?;
-        ensure_user_accepted(message, "mark_message_deferred_busy")?;
-        message.status = MessageStatus::DeferredBusy;
+        ensure_user_accepted(message, "mark_message_rejected_busy")?;
+        message.status = MessageStatus::RejectedBusy;
         message.turn_id = None;
         message.turn_run_id = None;
         Ok(message.clone())
@@ -796,6 +796,31 @@ impl SessionThreadService for InMemorySessionThreadService {
                 })?;
         thread.record.goal = Some(request.goal.clone());
         Ok(request.goal)
+    }
+}
+
+impl InMemorySessionThreadService {
+    /// Test-only back-door: force a message's status to `DeferredBusy` so
+    /// that legacy-row read/replay tests can construct pre-existing
+    /// `DeferredBusy` rows without going through the now-retired
+    /// `mark_message_deferred_busy` writer.  Never call from production code.
+    ///
+    /// Gated behind `#[cfg(any(test, feature = "test-support"))]` so it is
+    /// absent from production builds. Integration tests in a separate
+    /// compilation unit must enable the `test-support` feature.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn inject_legacy_deferred_busy_for_test(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let mut state = self.state.lock().await;
+        let message = get_message_mut(&mut state, scope, thread_id, message_id)?;
+        message.status = MessageStatus::DeferredBusy;
+        message.turn_id = None;
+        message.turn_run_id = None;
+        Ok(message.clone())
     }
 }
 

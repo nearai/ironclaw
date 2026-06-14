@@ -874,7 +874,7 @@ where
         .await
     }
 
-    async fn mark_message_deferred_busy(
+    async fn mark_message_rejected_busy(
         &self,
         scope: &ThreadScope,
         thread_id: &ThreadId,
@@ -886,8 +886,8 @@ where
                 thread_id: thread_id.clone(),
             })?;
         self.apply_message_update(scope, thread_id, message_id, |message| {
-            ensure_user_accepted(message, "mark_message_deferred_busy")?;
-            message.status = MessageStatus::DeferredBusy;
+            ensure_user_accepted(message, "mark_message_rejected_busy")?;
+            message.status = MessageStatus::RejectedBusy;
             message.turn_id = None;
             message.turn_run_id = None;
             Ok(())

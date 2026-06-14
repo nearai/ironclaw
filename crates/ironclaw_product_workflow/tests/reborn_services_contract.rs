@@ -1285,13 +1285,13 @@ impl SessionThreadService for ScopeMismatchThreadStub {
         panic!("ScopeMismatchThreadStub::mark_message_submitted should not be reached")
     }
 
-    async fn mark_message_deferred_busy(
+    async fn mark_message_rejected_busy(
         &self,
         _scope: &ThreadScope,
         _thread_id: &ThreadId,
         _message_id: ThreadMessageId,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        panic!("ScopeMismatchThreadStub::mark_message_deferred_busy should not be reached")
+        panic!("ScopeMismatchThreadStub::mark_message_rejected_busy should not be reached")
     }
 
     async fn append_assistant_draft(
@@ -1373,6 +1373,7 @@ enum ScriptedThreadBehavior {
     History(Box<ThreadHistory>),
     ListPages,
     SubmittedReplay { turn_run_id: Option<String> },
+    RejectedBusyReplay,
 }
 
 struct ScriptedThreadService {
@@ -1419,6 +1420,15 @@ impl ScriptedThreadService {
         }
     }
 
+    fn rejected_busy_replay() -> Self {
+        Self {
+            behavior: ScriptedThreadBehavior::RejectedBusyReplay,
+            history_requests: Mutex::new(Vec::new()),
+            list_requests: Mutex::new(Vec::new()),
+            list_responses: Mutex::new(Vec::new()),
+        }
+    }
+
     fn history_requests(&self) -> Vec<ThreadHistoryRequest> {
         self.history_requests.lock().expect("lock").clone()
     }
@@ -1444,7 +1454,8 @@ impl SessionThreadService for ScriptedThreadService {
             )),
             ScriptedThreadBehavior::History(history) => Ok(history.as_ref().clone()),
             ScriptedThreadBehavior::ListPages => scripted_stub_unreachable("list_thread_history"),
-            ScriptedThreadBehavior::SubmittedReplay { .. } => Ok(ThreadHistory {
+            ScriptedThreadBehavior::SubmittedReplay { .. }
+            | ScriptedThreadBehavior::RejectedBusyReplay => Ok(ThreadHistory {
                 thread: SessionThreadRecord {
                     scope: request.scope,
                     thread_id: request.thread_id,
@@ -1491,6 +1502,17 @@ impl SessionThreadService for ScriptedThreadService {
                     turn_run_id: turn_run_id.clone(),
                 }))
             }
+            ScriptedThreadBehavior::RejectedBusyReplay => Ok(Some(AcceptedInboundMessageReplay {
+                scope: request.scope,
+                thread_id: ThreadId::new("thread-alpha").expect("valid thread"),
+                message_id: ThreadMessageId::new(),
+                sequence: 1,
+                status: MessageStatus::RejectedBusy,
+                actor_id: Some(request.actor_id),
+                source_binding_id: Some(request.source_binding_id),
+                reply_target_binding_id: Some("webui-reply:replayed".to_string()),
+                turn_run_id: None,
+            })),
             ScriptedThreadBehavior::BackendHistory
             | ScriptedThreadBehavior::History(_)
             | ScriptedThreadBehavior::ListPages => {
@@ -1510,13 +1532,13 @@ impl SessionThreadService for ScriptedThreadService {
         scripted_stub_unreachable("mark_message_submitted")
     }
 
-    async fn mark_message_deferred_busy(
+    async fn mark_message_rejected_busy(
         &self,
         _scope: &ThreadScope,
         _thread_id: &ThreadId,
         _message_id: ThreadMessageId,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        scripted_stub_unreachable("mark_message_deferred_busy")
+        scripted_stub_unreachable("mark_message_rejected_busy")
     }
 
     async fn append_assistant_draft(
@@ -1904,8 +1926,8 @@ async fn busy_submit_clears_skill_activation_message() {
 
     assert!(matches!(
         deferred,
-        RebornSubmitTurnResponse::DeferredBusy {
-            active_run_id: id,
+        RebornSubmitTurnResponse::RejectedBusy {
+            active_run_id: Some(id),
             ..
         } if id == active_run_id
     ));
@@ -2425,14 +2447,14 @@ async fn concurrent_duplicate_submit_creates_one_message_and_replays_outcome() {
     let first_run_id = match &first {
         RebornSubmitTurnResponse::Submitted { run_id, .. }
         | RebornSubmitTurnResponse::AlreadySubmitted { run_id, .. } => *run_id,
-        RebornSubmitTurnResponse::DeferredBusy { .. } => {
+        RebornSubmitTurnResponse::RejectedBusy { .. } => {
             panic!("duplicate submit must not defer while deduping")
         }
     };
     let second_run_id = match &second {
         RebornSubmitTurnResponse::Submitted { run_id, .. }
         | RebornSubmitTurnResponse::AlreadySubmitted { run_id, .. } => *run_id,
-        RebornSubmitTurnResponse::DeferredBusy { .. } => {
+        RebornSubmitTurnResponse::RejectedBusy { .. } => {
             panic!("duplicate submit must not defer while deduping")
         }
     };
@@ -5627,14 +5649,14 @@ impl SessionThreadService for FirstMissBackendErrorThreadService {
         panic!("FirstMissBackendErrorThreadService::mark_message_submitted should not be reached")
     }
 
-    async fn mark_message_deferred_busy(
+    async fn mark_message_rejected_busy(
         &self,
         _scope: &ThreadScope,
         _thread_id: &ThreadId,
         _message_id: ThreadMessageId,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         panic!(
-            "FirstMissBackendErrorThreadService::mark_message_deferred_busy should not be reached"
+            "FirstMissBackendErrorThreadService::mark_message_rejected_busy should not be reached"
         )
     }
 
@@ -7974,6 +7996,294 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
         vec![second_visible_thread_id],
     );
     assert_eq!(second_page.next_cursor, None);
+}
+
+// ---------------------------------------------------------------------------
+// Notice-text mapping: rejected_busy_notice maps TurnStatus to the right copy
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn rejected_busy_notice_blocked_approval_contains_approval_copy() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id: TurnRunId::new(),
+            status: TurnStatus::BlockedApproval,
+            event_cursor: EventCursor(5),
+        }),
+    ));
+    let services = RebornServices::new(threads, coordinator);
+    create_thread_for(&services, caller(), "thread-notice").await;
+
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-notice-approval",
+                "thread_id": "thread-notice",
+                "content": "hello"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("busy submit succeeds with RejectedBusy");
+
+    match response {
+        RebornSubmitTurnResponse::RejectedBusy {
+            status: Some(status),
+            notice,
+            ..
+        } => {
+            assert_eq!(status, TurnStatus::BlockedApproval);
+            assert_eq!(
+                notice,
+                "An approval gate is open on this thread — resolve it (approve or deny) before continuing, then resend your message."
+            );
+        }
+        other => panic!("expected RejectedBusy, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn rejected_busy_notice_blocked_auth_contains_auth_copy() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id: TurnRunId::new(),
+            status: TurnStatus::BlockedAuth,
+            event_cursor: EventCursor(5),
+        }),
+    ));
+    let services = RebornServices::new(threads, coordinator);
+    create_thread_for(&services, caller(), "thread-notice").await;
+
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-notice-auth",
+                "thread_id": "thread-notice",
+                "content": "hello"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("busy submit succeeds with RejectedBusy");
+
+    match response {
+        RebornSubmitTurnResponse::RejectedBusy {
+            status: Some(status),
+            notice,
+            ..
+        } => {
+            assert_eq!(status, TurnStatus::BlockedAuth);
+            assert_eq!(
+                notice,
+                "An authentication gate is open on this thread — complete authentication before continuing, then resend your message."
+            );
+        }
+        other => panic!("expected RejectedBusy, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn rejected_busy_notice_generic_status_contains_generic_copy() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id: TurnRunId::new(),
+            status: TurnStatus::Running,
+            event_cursor: EventCursor(5),
+        }),
+    ));
+    let services = RebornServices::new(threads, coordinator);
+    create_thread_for(&services, caller(), "thread-notice").await;
+
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-notice-generic",
+                "thread_id": "thread-notice",
+                "content": "hello"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("busy submit succeeds with RejectedBusy");
+
+    match response {
+        RebornSubmitTurnResponse::RejectedBusy {
+            status: Some(status),
+            notice,
+            ..
+        } => {
+            assert_eq!(status, TurnStatus::Running);
+            assert_eq!(
+                notice,
+                "Ironclaw is still working on a previous message — resend yours once the current task finishes."
+            );
+        }
+        other => panic!("expected RejectedBusy, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Replay regression: a replayed RejectedBusy must return RejectedBusy again,
+// never submit a new run (contract from PR #4838)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn replayed_rejected_busy_returns_rejected_busy_without_new_submission() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    // ScriptedThreadService pre-seeds the message as RejectedBusy — simulates
+    // the client retrying after the original rejection response was lost.
+    let services = RebornServices::new(
+        Arc::new(ScriptedThreadService::rejected_busy_replay()),
+        coordinator.clone(),
+    );
+
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-replay-rejected-busy",
+                "thread_id": "thread-alpha",
+                "content": "hello from webui"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("replayed RejectedBusy must succeed (not error)");
+
+    assert!(
+        matches!(response, RebornSubmitTurnResponse::RejectedBusy { .. }),
+        "replay of RejectedBusy must return RejectedBusy, got {response:?}"
+    );
+    assert_eq!(
+        coordinator.submission_count(),
+        0,
+        "a replayed RejectedBusy must not produce a new turn submission"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Option<> run-metadata contract: replay path yields None; fresh path yields Some
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn replayed_rejected_busy_returns_none_run_metadata() {
+    // Replay: the original blocking run is gone — run metadata must be None,
+    // not a fabricated run-id or status that the client cannot query.
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(ScriptedThreadService::rejected_busy_replay()),
+        coordinator.clone(),
+    );
+
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-replay-none-metadata",
+                "thread_id": "thread-alpha",
+                "content": "replay with none metadata"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("replayed RejectedBusy must succeed");
+
+    match response {
+        RebornSubmitTurnResponse::RejectedBusy {
+            active_run_id,
+            status,
+            event_cursor,
+            notice,
+            ..
+        } => {
+            assert!(
+                active_run_id.is_none(),
+                "replayed RejectedBusy must not fabricate active_run_id, got {active_run_id:?}"
+            );
+            assert!(
+                status.is_none(),
+                "replayed RejectedBusy must not fabricate status, got {status:?}"
+            );
+            assert!(
+                event_cursor.is_none(),
+                "replayed RejectedBusy must not fabricate event_cursor, got {event_cursor:?}"
+            );
+            assert!(
+                !notice.is_empty(),
+                "replayed RejectedBusy must carry a notice"
+            );
+        }
+        other => panic!("expected RejectedBusy, got {other:?}"),
+    }
+    assert_eq!(
+        coordinator.submission_count(),
+        0,
+        "replay must not produce a new turn submission"
+    );
+}
+
+#[tokio::test]
+async fn fresh_rejected_busy_returns_some_run_metadata() {
+    // Fresh ThreadBusy: the blocking run is live — run metadata must be Some
+    // with the real values so the client can poll the existing run.
+    let active_run_id = TurnRunId::new();
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id,
+            status: TurnStatus::Running,
+            event_cursor: EventCursor(7),
+        }),
+    ));
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let services = RebornServices::new(threads, coordinator.clone());
+    create_thread_for(&services, caller(), "thread-busy-fresh").await;
+
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-fresh-busy-metadata",
+                "thread_id": "thread-busy-fresh",
+                "content": "hello busy"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("fresh RejectedBusy must succeed");
+
+    match response {
+        RebornSubmitTurnResponse::RejectedBusy {
+            active_run_id: returned_run_id,
+            status: returned_status,
+            event_cursor: returned_cursor,
+            notice,
+            ..
+        } => {
+            assert_eq!(
+                returned_run_id,
+                Some(active_run_id),
+                "fresh RejectedBusy must carry the real blocking run id"
+            );
+            assert_eq!(
+                returned_status,
+                Some(TurnStatus::Running),
+                "fresh RejectedBusy must carry the real blocking run status"
+            );
+            assert_eq!(
+                returned_cursor,
+                Some(EventCursor(7)),
+                "fresh RejectedBusy must carry the real event cursor"
+            );
+            assert!(!notice.is_empty(), "fresh RejectedBusy must carry a notice");
+        }
+        other => panic!("expected RejectedBusy, got {other:?}"),
+    }
 }
 
 /// Test lander that records what it was asked to land and returns a ref per

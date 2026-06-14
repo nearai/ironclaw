@@ -603,7 +603,7 @@ fn accepted_ack_from_ack(
         match ack {
             ProductInboundAck::Accepted { .. } => return Ok(ack),
             ProductInboundAck::Duplicate { prior } => ack = *prior,
-            ProductInboundAck::DeferredBusy { .. } => {
+            ProductInboundAck::DeferredBusy { .. } | ProductInboundAck::RejectedBusy { .. } => {
                 return Err(OpenAiCompatHttpError::from_kind(
                     429,
                     true,

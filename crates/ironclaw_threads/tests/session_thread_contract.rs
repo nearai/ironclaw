@@ -846,8 +846,10 @@ async fn busy_message_is_visible_deferred_and_not_tied_to_a_run() {
         .await
         .unwrap();
 
+    // Inject a legacy DeferredBusy row directly — the mark_message_deferred_busy
+    // writer has been retired; this back-door preserves read/replay coverage.
     service
-        .mark_message_deferred_busy(&scope("a"), &thread.thread_id, accepted.message_id)
+        .inject_legacy_deferred_busy_for_test(&scope("a"), &thread.thread_id, accepted.message_id)
         .await
         .unwrap();
 
@@ -863,7 +865,49 @@ async fn busy_message_is_visible_deferred_and_not_tied_to_a_run() {
 }
 
 #[tokio::test]
-async fn deferred_busy_rejects_non_user_and_non_accepted_messages() {
+async fn rejected_busy_marks_message_with_rejected_status() {
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("a"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("arrived while busy"),
+        })
+        .await
+        .unwrap();
+
+    service
+        .mark_message_rejected_busy(&scope("a"), &thread.thread_id, accepted.message_id)
+        .await
+        .unwrap();
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.messages[0].status, MessageStatus::RejectedBusy);
+    assert!(history.messages[0].turn_run_id.is_none());
+}
+
+#[tokio::test]
+async fn rejected_busy_rejects_non_user_message() {
     let service = InMemorySessionThreadService::default();
     let thread = service
         .ensure_thread(EnsureThreadRequest {
@@ -886,10 +930,136 @@ async fn deferred_busy_rejects_non_user_and_non_accepted_messages() {
         .unwrap();
 
     let result = service
-        .mark_message_deferred_busy(&scope("a"), &thread.thread_id, draft.message_id)
+        .mark_message_rejected_busy(&scope("a"), &thread.thread_id, draft.message_id)
         .await;
 
-    assert!(result.is_err());
+    assert!(
+        matches!(
+            result,
+            Err(SessionThreadError::InvalidMessageTransition { .. })
+        ),
+        "mark_message_rejected_busy must fail with InvalidMessageTransition on a non-user (assistant draft) message, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn rejected_busy_rejects_already_finalized_user_message() {
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("a"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    // Accept and then submit the message so it is in Submitted state (finalized).
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("already submitted"),
+        })
+        .await
+        .unwrap();
+    service
+        .mark_message_submitted(
+            &scope("a"),
+            &thread.thread_id,
+            accepted.message_id,
+            "turn-id-x".into(),
+            "run-id-x".into(),
+        )
+        .await
+        .unwrap();
+
+    let result = service
+        .mark_message_rejected_busy(&scope("a"), &thread.thread_id, accepted.message_id)
+        .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(SessionThreadError::InvalidMessageTransition { .. })
+        ),
+        "mark_message_rejected_busy must fail with InvalidMessageTransition on an already-finalized (Submitted) user message, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn rejected_busy_cannot_be_marked_submitted_is_terminal() {
+    // RejectedBusy is a durable terminal state — the stored row must never
+    // transition to Submitted.  ensure_user_accepted no longer admits
+    // RejectedBusy, so mark_message_submitted must return
+    // InvalidMessageTransition and the status must remain RejectedBusy.
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("a"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("resend after busy"),
+        })
+        .await
+        .unwrap();
+
+    // Drive the message into RejectedBusy.
+    service
+        .mark_message_rejected_busy(&scope("a"), &thread.thread_id, accepted.message_id)
+        .await
+        .unwrap();
+
+    // Attempting to submit the rejected row must fail — RejectedBusy is terminal.
+    let result = service
+        .mark_message_submitted(
+            &scope("a"),
+            &thread.thread_id,
+            accepted.message_id,
+            "turn-id-resend".into(),
+            "run-id-resend".into(),
+        )
+        .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(SessionThreadError::InvalidMessageTransition { .. })
+        ),
+        "mark_message_submitted must fail with InvalidMessageTransition on a RejectedBusy message (terminal state), got {result:?}"
+    );
+
+    // Status must remain RejectedBusy — the row is unchanged.
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        history.messages[0].status,
+        MessageStatus::RejectedBusy,
+        "status must remain RejectedBusy after the failed Submitted transition"
+    );
 }
 
 #[tokio::test]

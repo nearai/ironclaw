@@ -1442,7 +1442,7 @@ mod tests {
             ))
         }
 
-        async fn mark_message_deferred_busy(
+        async fn mark_message_rejected_busy(
             &self,
             _scope: &ThreadScope,
             _thread_id: &ThreadId,

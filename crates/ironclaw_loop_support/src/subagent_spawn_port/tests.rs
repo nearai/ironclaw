@@ -695,14 +695,14 @@ impl SessionThreadService for FailingMarkThreadService {
         ))
     }
 
-    async fn mark_message_deferred_busy(
+    async fn mark_message_rejected_busy(
         &self,
         scope: &ThreadScope,
         thread_id: &ThreadId,
         message_id: ThreadMessageId,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         self.inner
-            .mark_message_deferred_busy(scope, thread_id, message_id)
+            .mark_message_rejected_busy(scope, thread_id, message_id)
             .await
     }
 

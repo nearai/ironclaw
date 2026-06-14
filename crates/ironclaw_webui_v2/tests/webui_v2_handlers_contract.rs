@@ -253,6 +253,9 @@ struct StubServices {
     /// branches, or empty drains in a deterministic order.
     next_stream_events: Mutex<VecDeque<Result<RebornStreamEventsResponse, RebornServicesError>>>,
     stream_events_notify: Arc<Notify>,
+    /// Queued response for the next `submit_turn` call. When `Some`, the value
+    /// is taken and returned instead of the default `Submitted` response.
+    next_submit_response: Mutex<Option<RebornSubmitTurnResponse>>,
 }
 
 impl StubServices {
@@ -306,6 +309,10 @@ impl StubServices {
     fn stream_events_signal(&self) -> Arc<Notify> {
         self.stream_events_notify.clone()
     }
+
+    fn set_next_submit_response(&self, response: RebornSubmitTurnResponse) {
+        *self.next_submit_response.lock().expect("lock") = Some(response);
+    }
 }
 
 #[async_trait]
@@ -352,6 +359,9 @@ impl RebornServicesApi for StubServices {
             .lock()
             .expect("lock")
             .push(request.clone());
+        if let Some(next) = self.next_submit_response.lock().expect("lock").take() {
+            return Ok(next);
+        }
         Ok(RebornSubmitTurnResponse::Submitted {
             thread_id: ironclaw_host_api::ThreadId::new(
                 request.thread_id.clone().unwrap_or_default(),
@@ -1179,6 +1189,120 @@ async fn send_message_path_overrides_body_thread_id() {
         calls[0].thread_id.as_deref(),
         Some("thread-from-path"),
         "path segment must win over body field"
+    );
+}
+
+// Regression: RejectedBusy must round-trip as {"outcome":"rejected_busy","notice":"..."} on the
+// POST /messages wire. Per `.claude/rules/testing.md` "Test Through the Caller", the serde tag
+// sits between the axum handler and the browser — only a caller-level test catches a missing
+// variant or a broken tag.
+//
+// Fresh-path variant: run metadata is Some — wire must include active_run_id, status,
+// event_cursor fields so the client can poll the blocking run.
+#[tokio::test]
+async fn send_message_rejected_busy_wire_shape() {
+    let services = Arc::new(StubServices::default());
+    services.set_next_submit_response(RebornSubmitTurnResponse::RejectedBusy {
+        thread_id: ThreadId::new("thread-alpha").expect("thread id"),
+        accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("msg:fake").expect("ref"),
+        active_run_id: Some(TurnRunId::new()),
+        status: Some(TurnStatus::BlockedApproval),
+        event_cursor: Some(EventCursor(1)),
+        notice: "An approval gate is open on this thread — resolve it (approve or deny) before continuing, then resend your message.".to_string(),
+    });
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/threads/thread-alpha/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"content":"hello"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(
+        body["outcome"], "rejected_busy",
+        "RejectedBusy must serialize with outcome tag 'rejected_busy'"
+    );
+    assert!(
+        body["notice"]
+            .as_str()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
+        "RejectedBusy must include a non-empty 'notice' field"
+    );
+    assert!(
+        !body["active_run_id"].is_null(),
+        "fresh RejectedBusy wire must include active_run_id when Some"
+    );
+    assert!(
+        !body["status"].is_null(),
+        "fresh RejectedBusy wire must include status when Some"
+    );
+    assert!(
+        !body["event_cursor"].is_null(),
+        "fresh RejectedBusy wire must include event_cursor when Some"
+    );
+}
+
+// Replay-path variant: run metadata is None — wire must omit active_run_id, status,
+// event_cursor so the client receives no fabricated run reference it cannot query.
+#[tokio::test]
+async fn send_message_rejected_busy_replay_wire_shape_omits_run_fields() {
+    let services = Arc::new(StubServices::default());
+    services.set_next_submit_response(RebornSubmitTurnResponse::RejectedBusy {
+        thread_id: ThreadId::new("thread-alpha").expect("thread id"),
+        accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("msg:fake").expect("ref"),
+        active_run_id: None,
+        status: None,
+        event_cursor: None,
+        notice: "Ironclaw is still working on a previous message — resend yours once the current task finishes.".to_string(),
+    });
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/threads/thread-alpha/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"content":"hello"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(
+        body["outcome"], "rejected_busy",
+        "replay RejectedBusy must still serialize with outcome tag 'rejected_busy'"
+    );
+    assert!(
+        body["notice"]
+            .as_str()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
+        "replay RejectedBusy must include a non-empty 'notice' field"
+    );
+    assert!(
+        body.get("active_run_id").is_none() || body["active_run_id"].is_null(),
+        "replay RejectedBusy wire must omit active_run_id when None, got {:?}",
+        body.get("active_run_id")
+    );
+    assert!(
+        body.get("status").is_none() || body["status"].is_null(),
+        "replay RejectedBusy wire must omit status when None"
+    );
+    assert!(
+        body.get("event_cursor").is_none() || body["event_cursor"].is_null(),
+        "replay RejectedBusy wire must omit event_cursor when None"
     );
 }
 
