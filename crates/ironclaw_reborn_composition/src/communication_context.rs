@@ -1,9 +1,9 @@
 use std::{sync::Arc, time::Duration};
 
 use ironclaw_product_workflow::{
-    LifecyclePhase, LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-    LifecycleProductPayload, LifecycleProductSurfaceContext, OutboundPreferencesProductFacade,
-    RebornOutboundDeliveryTargetStatus, WebUiAuthenticatedCaller,
+    LifecycleExtensionSurfaceKind, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
+    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductSurfaceContext,
+    OutboundPreferencesProductFacade, RebornOutboundDeliveryTargetStatus, WebUiAuthenticatedCaller,
 };
 use ironclaw_turns::{
     run_profile::{
@@ -210,19 +210,22 @@ async fn fetch_communication_context(
 
 /// Whether channel-surface classification is available.
 ///
-/// Flips to `true` when #4778's `ProductAdapter` surface projection merges and
-/// `extension_is_channel_surface` becomes a real predicate rather than a stub.
-const CHANNEL_CLASSIFICATION_AVAILABLE: bool = false;
+/// `true` since #4778's `ProductAdapter` surface projection landed, exposing
+/// `surface_kinds` on the lifecycle summary so channel extensions can be
+/// distinguished from tool extensions.
+const CHANNEL_CLASSIFICATION_AVAILABLE: bool = true;
 
 /// Whether a lifecycle extension exposes a channel surface (e.g. Slack).
 ///
-/// Pre-#4778 the lifecycle summary has no surface-kind field, so no extension
-/// qualifies; once #4778's `ProductAdapter` surface projection merges, this
-/// becomes a check on the projected surface kinds.
+/// Checks the projected `surface_kinds` for `ExternalChannel`, the surface kind
+/// that maps to a connected chat channel.
 fn extension_is_channel_surface(
-    _extension: &ironclaw_product_workflow::LifecycleInstalledExtensionSummary,
+    extension: &ironclaw_product_workflow::LifecycleInstalledExtensionSummary,
 ) -> bool {
-    false
+    extension
+        .summary
+        .surface_kinds
+        .contains(&LifecycleExtensionSurfaceKind::ExternalChannel)
 }
 
 #[cfg(test)]
@@ -562,10 +565,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn classification_unavailable_returns_unknown_for_empty_extension_list() {
-        // While CHANNEL_CLASSIFICATION_AVAILABLE is false the lifecycle fetch is
-        // skipped entirely; connected_channels must be Unknown regardless of what
-        // the facade would return (never false-certainty Known([])).
+    async fn empty_extension_list_returns_known_no_channels() {
+        // Classification is available, so an empty extension list is genuine
+        // certainty: no channels connected → Known([]), not Unknown.
         let provider = RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesFacade))
             .with_lifecycle_facade(Arc::new(EmptyLifecycleFacade));
         let ctx = provider
@@ -575,18 +577,15 @@ mod tests {
             .expect("context");
         assert_eq!(
             ctx.connected_channels,
-            ConnectedChannelsState::Unknown,
-            "classification unavailable → lifecycle skipped → Unknown"
+            ConnectedChannelsState::Known(Vec::new()),
+            "classification available + empty list → Known([])"
         );
     }
 
     #[tokio::test]
-    async fn classification_unavailable_returns_unknown_for_non_channel_extensions() {
-        // While CHANNEL_CLASSIFICATION_AVAILABLE is false the lifecycle fetch is
-        // skipped entirely, so connected_channels is Unknown regardless of the
-        // extension list the facade would have returned.
-        // When #4778 merges, flip CHANNEL_CLASSIFICATION_AVAILABLE to true and
-        // grow a positive case here.
+    async fn channel_extensions_are_classified_as_connected_channels() {
+        // Only active channel-surface extensions count: telegram (active channel)
+        // is included; github (non-channel) and slack (inactive channel) are not.
         let provider = RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesFacade))
             .with_lifecycle_facade(Arc::new(ChannelListLifecycleFacade {
                 extensions: vec![
@@ -600,10 +599,16 @@ mod tests {
             .resolve(false)
             .await
             .expect("context");
+        let names: Vec<String> = match ctx.connected_channels {
+            ConnectedChannelsState::Known(channels) => {
+                channels.into_iter().map(|c| c.name).collect()
+            }
+            other => panic!("expected Known channels, got {other:?}"),
+        };
         assert_eq!(
-            ctx.connected_channels,
-            ConnectedChannelsState::Unknown,
-            "classification unavailable → Unknown, not Known([])"
+            names,
+            vec!["telegram".to_string()],
+            "only active channel-surface extensions are reported as connected"
         );
     }
 
