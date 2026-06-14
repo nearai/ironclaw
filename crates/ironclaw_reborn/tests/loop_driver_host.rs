@@ -112,21 +112,22 @@ use ironclaw_turns::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
         BatchPolicyKind, CapabilityDeniedReasonKind, CapabilityDescriptorView,
         CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-        CapabilitySurfaceVersion, CommunicationContextProvider, CommunicationRuntimeContext,
-        CompactionInitiator, ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState,
-        FinalizeAssistantMessage, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
-        LoopCancelReasonKind, LoopCancellationPort, LoopCapabilityPort, LoopCheckpointKind,
-        LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError,
-        LoopCompactionMode, LoopCompactionOutcome, LoopCompactionPort, LoopCompactionRequest,
-        LoopContextRequest, LoopDriverId, LoopDriverNoteKind, LoopGateKind, LoopHostMilestone,
-        LoopHostMilestoneKind, LoopInlineMessage, LoopInlineMessageRole, LoopInput,
-        LoopInputAckToken, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
-        LoopModelBudgetAccountant, LoopModelGatewayError, LoopModelPort, LoopModelRequest,
-        LoopModelRouteSnapshot, LoopProgressEvent, LoopPromptBundleRequest, LoopPromptPort,
-        LoopRunContext, LoopSafeSummary, ModelWorkKind, ModelWorkOutcome, ModelWorkRequest,
-        NoOpBudgetAccountant, NoOpPolicyGuard, ParentLoopOutput, PersonalContextPolicy, PromptMode,
-        SkillVisibility, StageCheckpointPayloadRequest, SystemInferenceTaskId,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        CapabilitySurfaceVersion, CommunicationContextFetch, CommunicationContextProvider,
+        CommunicationRuntimeContext, CompactionInitiator, ConnectedChannelSummary,
+        ConnectedChannelsState, DeliveryTargetState, FinalizeAssistantMessage,
+        InMemoryLoopHostMilestoneSink, InstructionSafetyContext, LoopCancelReasonKind,
+        LoopCancellationPort, LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort,
+        LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError, LoopCompactionMode,
+        LoopCompactionOutcome, LoopCompactionPort, LoopCompactionRequest, LoopContextRequest,
+        LoopDriverId, LoopDriverNoteKind, LoopGateKind, LoopHostMilestone, LoopHostMilestoneKind,
+        LoopInlineMessage, LoopInlineMessageRole, LoopInput, LoopInputAckToken, LoopInputCursor,
+        LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant, LoopModelGatewayError,
+        LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopProgressEvent,
+        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopSafeSummary, ModelWorkKind,
+        ModelWorkOutcome, ModelWorkRequest, NoOpBudgetAccountant, NoOpPolicyGuard,
+        ParentLoopOutput, PersonalContextPolicy, PromptMode, SkillVisibility,
+        StageCheckpointPayloadRequest, SystemInferenceTaskId, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
     runner::{ClaimRunRequest, ClaimedTurnRun, TurnRunTransitionPort},
 };
@@ -976,23 +977,25 @@ async fn text_only_model_reply_driver_embeds_runtime_context_exactly_once_per_mo
 
 struct StubCommunicationContextProvider;
 
-#[async_trait]
 impl CommunicationContextProvider for StubCommunicationContextProvider {
-    async fn communication_context(
+    fn begin_communication_context(
         &self,
-        _scope: &TurnScope,
-        _actor: Option<&TurnActor>,
-        _delivery_tools_visible: bool,
-    ) -> Option<CommunicationRuntimeContext> {
-        Some(CommunicationRuntimeContext {
-            connected_channels: ConnectedChannelsState::Known(vec![ConnectedChannelSummary {
-                name: "test-channel".to_string(),
-                authenticated: true,
-                active: true,
-            }]),
-            delivery_target: DeliveryTargetState::NoneSet,
-            delivery_tools_visible: false,
-        })
+        _scope: TurnScope,
+        _actor: Option<TurnActor>,
+    ) -> CommunicationContextFetch {
+        // `delivery_tools_visible` is a placeholder; the host stamps the real
+        // surface-derived value in `CommunicationContextFetch::resolve`.
+        CommunicationContextFetch::new(Box::pin(async {
+            Some(CommunicationRuntimeContext {
+                connected_channels: ConnectedChannelsState::Known(vec![ConnectedChannelSummary {
+                    name: "test-channel".to_string(),
+                    authenticated: true,
+                    active: true,
+                }]),
+                delivery_target: DeliveryTargetState::NoneSet,
+                delivery_tools_visible: false,
+            })
+        }))
     }
 }
 
@@ -1032,10 +1035,11 @@ async fn text_only_host_factory_with_communication_context_provider_injects_comm
     );
 }
 
-// Provider that forwards all arguments from communication_context() to internal
-// state so callers can assert what the host passed.
+// Provider that records what the host passed to `begin_communication_context`
+// so callers can assert the scope/actor the host handed in. `delivery_tools_visible`
+// is no longer a provider input — the host stamps it in `resolve` after the
+// capability surface is known — so it is asserted via rendered output, not here.
 struct RecordingCommunicationContextProvider {
-    recorded_delivery_tools_visible: Mutex<Option<bool>>,
     recorded_thread_id: Mutex<Option<ThreadId>>,
     recorded_actor_present: Mutex<Option<bool>>,
 }
@@ -1043,14 +1047,9 @@ struct RecordingCommunicationContextProvider {
 impl RecordingCommunicationContextProvider {
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            recorded_delivery_tools_visible: Mutex::new(None),
             recorded_thread_id: Mutex::new(None),
             recorded_actor_present: Mutex::new(None),
         })
-    }
-
-    fn delivery_tools_visible(&self) -> Option<bool> {
-        *self.recorded_delivery_tools_visible.lock().unwrap()
     }
 
     #[allow(dead_code)]
@@ -1064,33 +1063,48 @@ impl RecordingCommunicationContextProvider {
     }
 }
 
-#[async_trait]
 impl CommunicationContextProvider for RecordingCommunicationContextProvider {
-    async fn communication_context(
+    fn begin_communication_context(
         &self,
-        scope: &TurnScope,
-        actor: Option<&TurnActor>,
-        delivery_tools_visible: bool,
-    ) -> Option<CommunicationRuntimeContext> {
-        *self.recorded_delivery_tools_visible.lock().unwrap() = Some(delivery_tools_visible);
+        scope: TurnScope,
+        actor: Option<TurnActor>,
+    ) -> CommunicationContextFetch {
         *self.recorded_thread_id.lock().unwrap() = Some(scope.thread_id.clone());
         *self.recorded_actor_present.lock().unwrap() = Some(actor.is_some());
-        Some(CommunicationRuntimeContext {
-            connected_channels: ConnectedChannelsState::Unknown,
-            delivery_target: DeliveryTargetState::NoneSet,
-            delivery_tools_visible,
-        })
+        // Placeholder flag; the host stamps the surface-derived value in `resolve`.
+        CommunicationContextFetch::new(Box::pin(async {
+            Some(CommunicationRuntimeContext {
+                connected_channels: ConnectedChannelsState::Unknown,
+                delivery_target: DeliveryTargetState::NoneSet,
+                delivery_tools_visible: false,
+            })
+        }))
     }
 }
 
 // f-test-5: when the visible surface includes builtin.outbound_delivery_target_set,
-// the host passes delivery_tools_visible=true to the communication context provider.
+// the host derives delivery_tools_visible=true and stamps it onto the resolved
+// communication context. Asserted end-to-end via the rendered ScheduledTrigger +
+// NoneSet warning, whose tool-hint sentence only appears when the flag is true.
 #[tokio::test]
-async fn communication_context_provider_receives_delivery_tools_visible_true_when_capability_in_surface()
- {
+async fn delivery_tools_visible_from_surface_renders_tool_hint_warning() {
     let mut fixture = HostFixture::new("thread-comm-delivery-visible", "hello delivery").await;
     let driver = TextOnlyModelReplyDriver::default();
     assign_driver_to_fixture(&mut fixture, driver.descriptor());
+
+    // ScheduledTrigger + NoneSet is the render path gated on delivery_tools_visible.
+    let loop_run_context =
+        fixture
+            .context
+            .clone()
+            .with_product_context(ironclaw_turns::ProductTurnContext::new(
+                ironclaw_turns::TurnOriginKind::ScheduledTrigger,
+                None,
+                None,
+                ironclaw_turns::TurnOwner::Personal {
+                    user: UserId::new("user-comm-delivery-visible").unwrap(),
+                },
+            ));
 
     let delivery_id = CapabilityId::new("builtin.outbound_delivery_target_set").unwrap();
     let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
@@ -1099,7 +1113,7 @@ async fn communication_context_provider_receives_delivery_tools_visible_true_whe
     let io = Arc::new(InMemoryCapabilityIo::default());
     let capability_port = HostRuntimeLoopCapabilityPort::new(
         runtime.clone(),
-        fixture.context.clone(),
+        loop_run_context.clone(),
         host_runtime_visible_request(&fixture, ["builtin"]),
         io.clone(),
         io,
@@ -1118,7 +1132,7 @@ async fn communication_context_provider_receives_delivery_tools_visible_true_whe
         .build_text_only_host_with_profiled_capabilities(
             RebornLoopDriverHostRequest {
                 claimed_run: fixture.claimed.clone(),
-                loop_run_context: fixture.context.clone(),
+                loop_run_context: loop_run_context.clone(),
             },
             Arc::new(capability_port),
             surface_resolver,
@@ -1127,14 +1141,16 @@ async fn communication_context_provider_receives_delivery_tools_visible_true_whe
         .unwrap();
 
     driver
-        .run(driver_request(&fixture.context), &host)
+        .run(driver_request(&loop_run_context), &host)
         .await
         .unwrap();
 
-    assert_eq!(
-        recording_provider.delivery_tools_visible(),
-        Some(true),
-        "host must pass delivery_tools_visible=true when builtin.outbound_delivery_target_set is in surface"
+    let requests = fixture.gateway.requests();
+    assert!(
+        requests[0].messages.iter().any(|message| message
+            .content
+            .contains("Set one with builtin__outbound_delivery_target_set.")),
+        "delivery_tools_visible=true (capability in surface) must render the tool-hint warning variant"
     );
 }
 

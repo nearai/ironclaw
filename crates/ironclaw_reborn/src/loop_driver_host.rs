@@ -1367,6 +1367,22 @@ where
 
         let max_messages = self.config.max_messages.max(1);
         let run_context = self.attach_model_route_snapshot(request.loop_run_context)?;
+
+        // Kick off the advisory communication-context fetch immediately so its
+        // latency + timeout budget overlaps the gate/dispatcher construction and
+        // capability-surface computation below, rather than blocking prompt
+        // construction. Joined (and stamped with `delivery_tools_visible`) at the
+        // prompt-build site once the surface is known.
+        let communication_fetch = self
+            .communication_context_provider
+            .as_ref()
+            .map(|provider| {
+                provider.begin_communication_context(
+                    run_context.scope.clone(),
+                    run_context.actor().cloned(),
+                )
+            });
+
         let context_window_cache = Arc::new(ThreadContextWindowCache::default());
         let mut context_adapter = ThreadBackedLoopContextPort::new(
             Arc::clone(&self.thread_service),
@@ -1509,16 +1525,11 @@ where
             .descriptors
             .iter()
             .any(|d| d.capability_id.as_str() == "builtin.outbound_delivery_target_set");
-        let communication = match &self.communication_context_provider {
-            Some(provider) => {
-                provider
-                    .communication_context(
-                        &run_context.scope,
-                        run_context.actor(),
-                        delivery_tools_visible,
-                    )
-                    .await
-            }
+        // Join the fetch started at loop entry and stamp the surface-derived
+        // `delivery_tools_visible` flag. In the common case the fetch has already
+        // resolved during the work above, so this adds no critical-path latency.
+        let communication = match communication_fetch {
+            Some(fetch) => fetch.resolve(delivery_tools_visible).await,
             None => None,
         };
         let prompt_authority = LoopPromptBundleAuthority::shared();

@@ -256,22 +256,76 @@ fn model_safe_label(value: &str, placeholder: &str) -> String {
     }
 }
 
+/// Boxed, already-running future yielding the advisory communication context.
+///
+/// The `delivery_tools_visible` field of the yielded context is a placeholder;
+/// the real, surface-derived value is stamped by [`CommunicationContextFetch::resolve`].
+pub type CommunicationContextFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Option<CommunicationRuntimeContext>> + Send>,
+>;
+
+/// In-flight advisory communication-context fetch.
+///
+/// Returned by [`CommunicationContextProvider::begin_communication_context`] so the
+/// backend lookups run *concurrently* with loop-start work (gate/dispatcher
+/// construction, capability-surface computation) instead of blocking prompt
+/// construction. The caller joins it via [`CommunicationContextFetch::resolve`]
+/// once the capability surface — and therefore `delivery_tools_visible` — is known.
+pub struct CommunicationContextFetch {
+    inner: CommunicationContextFuture,
+}
+
+impl CommunicationContextFetch {
+    /// Wrap an already-running fetch future.
+    ///
+    /// The future MUST already be making progress concurrently (e.g. backed by a
+    /// spawned task). A future that only begins work when first polled in
+    /// [`resolve`](Self::resolve) would reintroduce the serial cost this type
+    /// exists to avoid.
+    pub fn new(inner: CommunicationContextFuture) -> Self {
+        Self { inner }
+    }
+
+    /// Join the in-flight fetch and stamp the surface-derived visibility flag.
+    ///
+    /// Returns `None` when the slice is unavailable for this run.
+    pub async fn resolve(
+        self,
+        delivery_tools_visible: bool,
+    ) -> Option<CommunicationRuntimeContext> {
+        self.inner.await.map(|mut ctx| {
+            ctx.delivery_tools_visible = delivery_tools_visible;
+            ctx
+        })
+    }
+}
+
 /// Provider of live channel, delivery-target, and tool-visibility state for a single loop execution.
 ///
 /// Implementations supply connected-channel and delivery-target state from backend
 /// services. Run origin is rendered from `LoopRuntimeContext.product_context`, not
-/// from this provider. Return `None` only when the communication slice is unavailable
-/// for this run (e.g. no actor is present); map backend failures into
-/// `ConnectedChannelsState::Unknown` or `DeliveryTargetState::Unknown` rather
-/// than leaking errors or fabricating definitive empty states.
-#[async_trait::async_trait]
+/// from this provider. The yielded context's `connected_channels`/`delivery_target`
+/// must map backend failures into `ConnectedChannelsState::Unknown` /
+/// `DeliveryTargetState::Unknown` rather than leaking errors or fabricating
+/// definitive empty states; yield `None` only when the slice is unavailable for
+/// this run (e.g. no actor is present).
+///
+/// The slice is advisory and must never block loop start: `begin_communication_context`
+/// returns immediately with a handle whose underlying fetch is *already running*
+/// concurrently, so its latency and timeout budget overlap loop-start work rather
+/// than sitting serially on the critical path.
 pub trait CommunicationContextProvider: Send + Sync {
-    async fn communication_context(
+    /// Begin resolving the advisory communication slice, returning a handle the
+    /// caller awaits later (via [`CommunicationContextFetch::resolve`]) once
+    /// `delivery_tools_visible` is known from the capability surface.
+    ///
+    /// Implementations MUST start driving the fetch concurrently before
+    /// returning so its cost overlaps loop-start work.
+    fn begin_communication_context(
         &self,
-        scope: &crate::scope::TurnScope,
-        actor: Option<&crate::scope::TurnActor>,
-        delivery_tools_visible: bool,
-    ) -> Option<CommunicationRuntimeContext>;
+        scope: crate::scope::TurnScope,
+        actor: Option<crate::scope::TurnActor>,
+    ) -> CommunicationContextFetch;
 }
 
 #[cfg(test)]

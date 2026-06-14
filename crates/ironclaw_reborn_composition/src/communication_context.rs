@@ -1,6 +1,5 @@
 use std::{sync::Arc, time::Duration};
 
-use async_trait::async_trait;
 use ironclaw_product_workflow::{
     LifecyclePhase, LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
     LifecycleProductPayload, LifecycleProductSurfaceContext, OutboundPreferencesProductFacade,
@@ -8,8 +7,9 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_turns::{
     run_profile::{
-        CommunicationContextProvider, CommunicationRuntimeContext, ConnectedChannelSummary,
-        ConnectedChannelsState, DeliveryTargetState, DeliveryTargetSummary,
+        CommunicationContextFetch, CommunicationContextProvider, CommunicationRuntimeContext,
+        ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState,
+        DeliveryTargetSummary,
     },
     scope::{TurnActor, TurnScope},
 };
@@ -43,130 +43,148 @@ impl RuntimeCommunicationContextProvider {
     }
 }
 
-#[async_trait]
 impl CommunicationContextProvider for RuntimeCommunicationContextProvider {
-    async fn communication_context(
+    fn begin_communication_context(
         &self,
-        scope: &TurnScope,
-        actor: Option<&TurnActor>,
-        delivery_tools_visible: bool,
-    ) -> Option<CommunicationRuntimeContext> {
-        let actor = actor?;
-        let caller = WebUiAuthenticatedCaller::new(
-            scope.tenant_id.clone(),
-            actor.user_id.clone(),
-            scope.agent_id.clone(),
-            scope.project_id.clone(),
-        );
-
-        let preferences_fut = self
-            .outbound_preferences
-            .get_outbound_preferences(caller.clone());
-
-        // Lifecycle fetch is only meaningful when classification is available.
-        // Skip the ExtensionList call entirely when the predicate is a stub so
-        // the 500 ms timeout budget is not consumed by a discarded result.
-        let lifecycle_fut = async {
-            if CHANNEL_CLASSIFICATION_AVAILABLE {
-                let lifecycle_context = self.lifecycle_facade.as_deref().map(|_| {
-                    LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
-                        tenant_id: caller.tenant_id.clone(),
-                        user_id: caller.user_id.clone(),
-                        agent_id: caller.agent_id.clone(),
-                        project_id: caller.project_id.clone(),
-                    })
-                });
-                match (&self.lifecycle_facade, lifecycle_context) {
-                    (Some(facade), Some(ctx)) => Some(
-                        facade
-                            .execute(ctx, LifecycleProductAction::ExtensionList)
-                            .await,
-                    ),
-                    _ => None,
-                }
-            } else {
-                None
-            }
-        };
-
-        // Outbound-preferences fetch runs under a 500 ms budget.  Lifecycle
-        // runs concurrently only when CHANNEL_CLASSIFICATION_AVAILABLE is true.
-        let combined_result = timeout(OUTBOUND_PREFERENCES_TIMEOUT, async {
-            join!(preferences_fut, lifecycle_fut)
-        })
-        .await;
-
-        let (pref_result, lifecycle_result) = match combined_result {
-            Ok(pair) => pair,
-            Err(_) => {
-                // Budget expired — both are unknown.
-                return Some(CommunicationRuntimeContext {
-                    connected_channels: ConnectedChannelsState::Unknown,
-                    delivery_target: DeliveryTargetState::Unknown,
-                    delivery_tools_visible,
-                });
-            }
-        };
-
-        let delivery_target = match pref_result {
-            Ok(response) => match (
-                response.final_reply_target,
-                response.final_reply_target_status,
-            ) {
-                (Some(target), _) => DeliveryTargetState::Set(DeliveryTargetSummary {
-                    display_name: target.display_name.as_str().to_string(),
-                    channel: target.channel.as_str().to_string(),
-                }),
-                // A target is stored but the resolving registry in this
-                // composition cannot produce its summary (e.g. no delivery
-                // target providers wired). Never report "none set" here — a
-                // preference exists and triggered delivery will use it.
-                (None, RebornOutboundDeliveryTargetStatus::Unavailable) => {
-                    DeliveryTargetState::SetUnresolved
-                }
-                (None, _) => DeliveryTargetState::NoneSet,
-            },
-            Err(_) => DeliveryTargetState::Unknown,
-        };
-
-        let connected_channels = match lifecycle_result {
-            Some(Ok(response)) => {
-                if !CHANNEL_CLASSIFICATION_AVAILABLE {
-                    // Channel-surface classification is a stub until #4778's
-                    // ProductAdapter surface projection lands. Returning Known([])
-                    // would be false certainty ("none connected") when the predicate
-                    // cannot yet distinguish channel extensions from tool extensions.
-                    ConnectedChannelsState::Unknown
-                } else {
-                    let extensions = match response.payload {
-                        Some(LifecycleProductPayload::ExtensionList { extensions, .. }) => {
-                            extensions
-                        }
-                        _ => Vec::new(),
-                    };
-                    let channels: Vec<ConnectedChannelSummary> = extensions
-                        .into_iter()
-                        .filter(|ext| {
-                            extension_is_channel_surface(ext) && ext.phase == LifecyclePhase::Active
-                        })
-                        .map(|ext| ConnectedChannelSummary {
-                            name: ext.summary.name.clone(),
-                            authenticated: true,
-                            active: true,
-                        })
-                        .collect();
-                    ConnectedChannelsState::Known(channels)
-                }
-            }
-            Some(Err(_)) | None => ConnectedChannelsState::Unknown,
-        };
-
-        Some(CommunicationRuntimeContext {
-            connected_channels,
-            delivery_target,
-            delivery_tools_visible,
-        })
+        scope: TurnScope,
+        actor: Option<TurnActor>,
+    ) -> CommunicationContextFetch {
+        // Clone the facade handles into the spawned task so the backend lookups
+        // run concurrently with loop-start work; the caller joins the result
+        // later via `resolve`. A detached task (handle dropped on early caller
+        // error) simply runs to completion and its result is discarded.
+        let outbound_preferences = Arc::clone(&self.outbound_preferences);
+        let lifecycle_facade = self.lifecycle_facade.clone();
+        let handle = tokio::spawn(async move {
+            fetch_communication_context(outbound_preferences, lifecycle_facade, scope, actor).await
+        });
+        // `handle.await` yields `Result<Option<_>, JoinError>`; a panic in the
+        // fetch degrades to `None` rather than propagating.
+        CommunicationContextFetch::new(Box::pin(async move { handle.await.ok().flatten() }))
     }
+}
+
+/// Resolve the advisory communication slice from backend facades under a single
+/// shared timeout budget. The returned context's `delivery_tools_visible` is a
+/// placeholder (`false`); the real, surface-derived value is stamped by
+/// `CommunicationContextFetch::resolve`.
+async fn fetch_communication_context(
+    outbound_preferences: Arc<dyn OutboundPreferencesProductFacade>,
+    lifecycle_facade: Option<Arc<dyn LifecycleProductFacade>>,
+    scope: TurnScope,
+    actor: Option<TurnActor>,
+) -> Option<CommunicationRuntimeContext> {
+    let actor = actor?;
+    let caller = WebUiAuthenticatedCaller::new(
+        scope.tenant_id.clone(),
+        actor.user_id.clone(),
+        scope.agent_id.clone(),
+        scope.project_id.clone(),
+    );
+
+    let preferences_fut = outbound_preferences.get_outbound_preferences(caller.clone());
+
+    // Lifecycle fetch is only meaningful when classification is available.
+    // Skip the ExtensionList call entirely when the predicate is a stub so
+    // the 500 ms timeout budget is not consumed by a discarded result.
+    let lifecycle_fut = async {
+        if CHANNEL_CLASSIFICATION_AVAILABLE {
+            let lifecycle_context = lifecycle_facade.as_deref().map(|_| {
+                LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
+                    tenant_id: caller.tenant_id.clone(),
+                    user_id: caller.user_id.clone(),
+                    agent_id: caller.agent_id.clone(),
+                    project_id: caller.project_id.clone(),
+                })
+            });
+            match (&lifecycle_facade, lifecycle_context) {
+                (Some(facade), Some(ctx)) => Some(
+                    facade
+                        .execute(ctx, LifecycleProductAction::ExtensionList)
+                        .await,
+                ),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    };
+
+    // Outbound-preferences fetch runs under a 500 ms budget.  Lifecycle
+    // runs concurrently only when CHANNEL_CLASSIFICATION_AVAILABLE is true.
+    let combined_result = timeout(OUTBOUND_PREFERENCES_TIMEOUT, async {
+        join!(preferences_fut, lifecycle_fut)
+    })
+    .await;
+
+    let (pref_result, lifecycle_result) = match combined_result {
+        Ok(pair) => pair,
+        Err(_) => {
+            // Budget expired — both are unknown.
+            return Some(CommunicationRuntimeContext {
+                connected_channels: ConnectedChannelsState::Unknown,
+                delivery_target: DeliveryTargetState::Unknown,
+                delivery_tools_visible: false,
+            });
+        }
+    };
+
+    let delivery_target = match pref_result {
+        Ok(response) => match (
+            response.final_reply_target,
+            response.final_reply_target_status,
+        ) {
+            (Some(target), _) => DeliveryTargetState::Set(DeliveryTargetSummary {
+                display_name: target.display_name.as_str().to_string(),
+                channel: target.channel.as_str().to_string(),
+            }),
+            // A target is stored but the resolving registry in this
+            // composition cannot produce its summary (e.g. no delivery
+            // target providers wired). Never report "none set" here — a
+            // preference exists and triggered delivery will use it.
+            (None, RebornOutboundDeliveryTargetStatus::Unavailable) => {
+                DeliveryTargetState::SetUnresolved
+            }
+            (None, _) => DeliveryTargetState::NoneSet,
+        },
+        Err(_) => DeliveryTargetState::Unknown,
+    };
+
+    let connected_channels = match lifecycle_result {
+        Some(Ok(response)) => {
+            if !CHANNEL_CLASSIFICATION_AVAILABLE {
+                // Channel-surface classification is a stub until #4778's
+                // ProductAdapter surface projection lands. Returning Known([])
+                // would be false certainty ("none connected") when the predicate
+                // cannot yet distinguish channel extensions from tool extensions.
+                ConnectedChannelsState::Unknown
+            } else {
+                let extensions = match response.payload {
+                    Some(LifecycleProductPayload::ExtensionList { extensions, .. }) => extensions,
+                    _ => Vec::new(),
+                };
+                let channels: Vec<ConnectedChannelSummary> = extensions
+                    .into_iter()
+                    .filter(|ext| {
+                        extension_is_channel_surface(ext) && ext.phase == LifecyclePhase::Active
+                    })
+                    .map(|ext| ConnectedChannelSummary {
+                        name: ext.summary.name.clone(),
+                        authenticated: true,
+                        active: true,
+                    })
+                    .collect();
+                ConnectedChannelsState::Known(channels)
+            }
+        }
+        Some(Err(_)) | None => ConnectedChannelsState::Unknown,
+    };
+
+    Some(CommunicationRuntimeContext {
+        connected_channels,
+        delivery_target,
+        delivery_tools_visible: false,
+    })
 }
 
 /// Whether channel-surface classification is available.
@@ -447,7 +465,10 @@ mod tests {
     #[tokio::test]
     async fn actor_none_returns_none() {
         let provider = RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesFacade));
-        let result = provider.communication_context(&scope(), None, false).await;
+        let result = provider
+            .begin_communication_context(scope(), None)
+            .resolve(false)
+            .await;
         assert!(result.is_none(), "actor None must return None");
     }
 
@@ -457,7 +478,8 @@ mod tests {
     async fn none_configured_maps_to_none_set() {
         let provider = RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesFacade));
         let ctx = provider
-            .communication_context(&scope(), Some(&actor()), false)
+            .begin_communication_context(scope(), Some(actor()))
+            .resolve(false)
             .await
             .expect("context");
         assert_eq!(ctx.delivery_target, DeliveryTargetState::NoneSet);
@@ -468,7 +490,8 @@ mod tests {
         let provider =
             RuntimeCommunicationContextProvider::new(Arc::new(UnavailablePreferencesFacade));
         let ctx = provider
-            .communication_context(&scope(), Some(&actor()), false)
+            .begin_communication_context(scope(), Some(actor()))
+            .resolve(false)
             .await
             .expect("context");
         assert_eq!(ctx.delivery_target, DeliveryTargetState::SetUnresolved);
@@ -479,7 +502,8 @@ mod tests {
         let provider =
             RuntimeCommunicationContextProvider::new(Arc::new(TargetSetPreferencesFacade));
         let ctx = provider
-            .communication_context(&scope(), Some(&actor()), false)
+            .begin_communication_context(scope(), Some(actor()))
+            .resolve(false)
             .await
             .expect("context");
         assert!(
@@ -493,7 +517,8 @@ mod tests {
     async fn preferences_error_maps_to_unknown() {
         let provider = RuntimeCommunicationContextProvider::new(Arc::new(ErrorPreferencesFacade));
         let ctx = provider
-            .communication_context(&scope(), Some(&actor()), false)
+            .begin_communication_context(scope(), Some(actor()))
+            .resolve(false)
             .await
             .expect("context");
         assert_eq!(ctx.delivery_target, DeliveryTargetState::Unknown);
@@ -505,7 +530,8 @@ mod tests {
     async fn no_lifecycle_facade_returns_unknown_channels() {
         let provider = RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesFacade));
         let ctx = provider
-            .communication_context(&scope(), Some(&actor()), false)
+            .begin_communication_context(scope(), Some(actor()))
+            .resolve(false)
             .await
             .expect("context");
         assert_eq!(ctx.connected_channels, ConnectedChannelsState::Unknown);
@@ -519,7 +545,8 @@ mod tests {
         let provider = RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesFacade))
             .with_lifecycle_facade(Arc::new(EmptyLifecycleFacade));
         let ctx = provider
-            .communication_context(&scope(), Some(&actor()), false)
+            .begin_communication_context(scope(), Some(actor()))
+            .resolve(false)
             .await
             .expect("context");
         assert_eq!(
@@ -545,7 +572,8 @@ mod tests {
                 ],
             }));
         let ctx = provider
-            .communication_context(&scope(), Some(&actor()), false)
+            .begin_communication_context(scope(), Some(actor()))
+            .resolve(false)
             .await
             .expect("context");
         assert_eq!(
@@ -560,7 +588,8 @@ mod tests {
         let provider = RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesFacade))
             .with_lifecycle_facade(Arc::new(ErrorLifecycleFacade));
         let ctx = provider
-            .communication_context(&scope(), Some(&actor()), false)
+            .begin_communication_context(scope(), Some(actor()))
+            .resolve(false)
             .await
             .expect("context");
         assert_eq!(ctx.connected_channels, ConnectedChannelsState::Unknown);
@@ -613,7 +642,8 @@ mod tests {
         let provider = RuntimeCommunicationContextProvider::new(Arc::new(HangingPreferencesFacade));
 
         let ctx = provider
-            .communication_context(&scope(), Some(&actor()), false)
+            .begin_communication_context(scope(), Some(actor()))
+            .resolve(false)
             .await
             .expect("communication_context must return Some even on timeout");
 
