@@ -42,9 +42,10 @@ pub use driver::{
 };
 pub use host::{
     AgentLoopDriverHost, AgentLoopHost, AgentLoopHostError, AgentLoopHostErrorKind,
-    AgentLoopHostErrorReasonKind, AppendCapabilityResultRef, AssistantReply, BatchPolicyKind,
-    BeginAssistantDraft, CapabilityApprovalResume, CapabilityBatchInvocation,
-    CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDenied, CapabilityDeniedReasonKind,
+    AgentLoopHostErrorReasonKind, AppendCapabilityResultRef, AssistantReply,
+    AuthResumeApprovalIdentity, BatchPolicyKind, BeginAssistantDraft, CapabilityApprovalResume,
+    CapabilityAuthResume, CapabilityBatchInvocation, CapabilityBatchOutcome,
+    CapabilityCallCandidate, CapabilityDenied, CapabilityDeniedReasonKind,
     CapabilityDeniedReasonKindValue, CapabilityDescriptorView, CapabilityFailure,
     CapabilityFailureKind, CapabilityFailureKindValue, CapabilityInputRef, CapabilityInvocation,
     CapabilityOutcome, CapabilityProgress, CapabilityResultMessage, CapabilityResumeToken,

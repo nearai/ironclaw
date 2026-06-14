@@ -1044,6 +1044,7 @@ mod tests {
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("skill activation invokes");
@@ -1317,6 +1318,7 @@ mod tests {
                     .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
                 input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("read_file invocation"); // safety: test-only assertion in #[cfg(test)] module.
@@ -1349,6 +1351,7 @@ mod tests {
                     .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
                 input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("raw workspace read_file invocation"); // safety: test-only assertion in #[cfg(test)] module.
@@ -1430,6 +1433,7 @@ mod tests {
                     .expect("skill_install capability id"), // safety: built-in capability id is a valid literal.
                 input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("skill_install invocation"); // safety: test-only assertion in #[cfg(test)] module.
@@ -1570,6 +1574,7 @@ mod tests {
                     .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
                 input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("raw workspace read_file invocation"); // safety: test-only assertion in #[cfg(test)] module.
@@ -1890,12 +1895,14 @@ mod tests {
                         capability_id: candidate1.capability_id,
                         input_ref: candidate1.input_ref,
                         approval_resume: None,
+                        auth_resume: None,
                     },
                     ironclaw_turns::run_profile::CapabilityInvocation {
                         surface_version: candidate2.surface_version,
                         capability_id: candidate2.capability_id,
                         input_ref: candidate2.input_ref,
                         approval_resume: None,
+                        auth_resume: None,
                     },
                 ],
                 stop_on_first_suspension: false,
@@ -1968,6 +1975,7 @@ mod tests {
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("gmail provider tool call invokes");

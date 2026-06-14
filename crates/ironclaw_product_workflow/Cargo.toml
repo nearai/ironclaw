@@ -19,9 +19,11 @@ test-support = ["ironclaw_product_adapters/test-support"]
 
 [dependencies]
 async-trait = "0.1"
+base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
 ironclaw_common = { path = "../ironclaw_common", version = "0.4.1" }
+ironclaw_attachments = { path = "../ironclaw_attachments", version = "0.1.0" }
 ironclaw_approvals = { path = "../ironclaw_approvals", version = "0.1.0" }
 ironclaw_authorization = { path = "../ironclaw_authorization", version = "0.1.0" }
 ironclaw_auth = { path = "../ironclaw_auth", version = "0.1.0" }

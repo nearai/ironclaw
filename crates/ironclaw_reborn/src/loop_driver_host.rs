@@ -2310,6 +2310,7 @@ mod hook_resolver_adapter_tests {
             capability_id: CapabilityId::new("cap.test").expect("capability id literal valid"),
             input_ref: CapabilityInputRef::new(input_ref).expect("input ref literal valid"),
             approval_resume: None,
+            auth_resume: None,
         }
     }
 

@@ -1181,6 +1181,7 @@ fn invocation(
         input_ref: CapabilityInputRef::new(format!("input:{capability_id}"))
             .expect("input ref literal is valid"),
         approval_resume: None,
+        auth_resume: None,
     }
 }
 

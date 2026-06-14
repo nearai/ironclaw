@@ -14,6 +14,8 @@ mod ack_helpers;
 mod chat;
 #[cfg(feature = "openai-compat-beta")]
 mod chat_workflow;
+#[cfg(feature = "openai-compat-beta")]
+mod content_parts;
 mod descriptors;
 mod error;
 #[cfg(feature = "openai-compat-beta")]
