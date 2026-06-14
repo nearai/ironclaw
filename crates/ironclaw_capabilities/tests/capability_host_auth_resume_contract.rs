@@ -2400,3 +2400,334 @@ async fn auth_resume_json_authorization_require_approval_revokes_dispatching_lea
          (pre-fix: lease was left stuck in Dispatching)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Concurrent auth-resume: FRESH Active-lease path — two concurrent callers
+// where the lease starts ACTIVE.
+//
+// PRE-FIX BUG: The fresh branch called claim() (Active→Claimed) but left the
+// lease Claimed during dispatch.  A concurrent caller that arrived after
+// claim() but before dispatch could find the Claimed lease via the REUSE
+// branch, call begin_dispatch_claimed (Claimed→Dispatching), and also dispatch
+// — double execution.
+//
+// POST-FIX: The fresh branch immediately calls begin_dispatch_claimed after
+// claim() (Active→Claimed→Dispatching).  A concurrent caller that arrives in
+// the window between claim() and begin_dispatch_claimed:
+//   - matching_approval_lease → None (lease is Claimed, not Active)
+//   - matching_claimed_approval_lease_for_auth_resume → Some(Claimed)
+//   - begin_dispatch_claimed → Err(InactiveLease{Dispatching}) because the
+//     fresh-path winner already advanced it
+//   - claim_error_may_be_concurrent_resume → true → warn, no fail_run
+//   - returns Err(Lease(InactiveLease{Dispatching}))
+// Only ONE dispatch is recorded.
+//
+// Race choreography:
+//   1. invoke → approve → block_auth directly (lease stays Active).
+//   2. Spawn task A (fresh path). A calls claim() — a GatedLeaseStore holds A
+//      INSIDE claim() after the CAS so the lease is Claimed while A is parked.
+//   3. Main task runs B while A is parked: B takes the REUSE path
+//      (matching_approval_lease → None, lease Claimed) → begin_dispatch_claimed
+//      → Dispatching → B dispatches → Ok (B is WINNER).
+//   4. Release A from the gate. A exits claim() and:
+//      PRE-FIX:  A has no begin_dispatch_claimed call; A's
+//                dispatch_resumed_capability receives AlreadyClaimed(Claimed
+//                snapshot) and dispatches → dispatch_count == 2 (RED).
+//      POST-FIX: A calls begin_dispatch_claimed → sees Dispatching →
+//                Err(InactiveLease{Dispatching}) → no fail_run →
+//                A returns Err(Lease(...)) → dispatch_count == 1 (GREEN).
+//
+// Assertions (post-fix / green):
+//   - B (winner): Ok, lease Consumed after B's dispatch.
+//   - A (loser): Err(Lease(_)), run stays Completed (B finished it), A did
+//     not additionally fail the run.
+//   - dispatch_count == 1.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn concurrent_auth_resume_fresh_active_lease_loser_does_not_double_dispatch() {
+    use async_trait::async_trait;
+    use std::sync::Arc as StdArc;
+    use tokio::sync::Notify;
+
+    // ── GatedLeaseStore ──────────────────────────────────────────────────────
+    // After the first armed claim() CAS (Active→Claimed) succeeds in the inner
+    // store, suspends the caller until `claim_release` is notified.  Any other
+    // caller that runs `matching_approval_lease` during this window finds None
+    // (lease is Claimed, not Active) and falls into the REUSE branch.
+    struct GatedLeaseStore {
+        inner: InMemoryCapabilityLeaseStore,
+        claim_entered: StdArc<Notify>,
+        claim_release: StdArc<Notify>,
+        armed: std::sync::atomic::AtomicBool,
+    }
+
+    impl GatedLeaseStore {
+        fn new(claim_entered: StdArc<Notify>, claim_release: StdArc<Notify>) -> Self {
+            Self {
+                inner: InMemoryCapabilityLeaseStore::new(),
+                claim_entered,
+                claim_release,
+                armed: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+
+        fn arm(&self) {
+            self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl CapabilityLeaseStore for GatedLeaseStore {
+        async fn issue(
+            &self,
+            lease: CapabilityLease,
+        ) -> Result<CapabilityLease, CapabilityLeaseError> {
+            self.inner.issue(lease).await
+        }
+
+        async fn revoke(
+            &self,
+            scope: &ResourceScope,
+            lease_id: CapabilityGrantId,
+        ) -> Result<CapabilityLease, CapabilityLeaseError> {
+            self.inner.revoke(scope, lease_id).await
+        }
+
+        async fn get(
+            &self,
+            scope: &ResourceScope,
+            lease_id: CapabilityGrantId,
+        ) -> Option<CapabilityLease> {
+            self.inner.get(scope, lease_id).await
+        }
+
+        async fn claim(
+            &self,
+            scope: &ResourceScope,
+            lease_id: CapabilityGrantId,
+            invocation_fingerprint: &InvocationFingerprint,
+        ) -> Result<CapabilityLease, CapabilityLeaseError> {
+            let result = self
+                .inner
+                .claim(scope, lease_id, invocation_fingerprint)
+                .await;
+            // Fire the gate on the first armed successful claim: lease is now
+            // Claimed in the store but the caller hasn't returned from claim()
+            // yet (and therefore hasn't called begin_dispatch_claimed).
+            if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) && result.is_ok() {
+                self.claim_entered.notify_one();
+                self.claim_release.notified().await;
+            }
+            result
+        }
+
+        async fn consume(
+            &self,
+            scope: &ResourceScope,
+            lease_id: CapabilityGrantId,
+        ) -> Result<CapabilityLease, CapabilityLeaseError> {
+            self.inner.consume(scope, lease_id).await
+        }
+
+        async fn begin_dispatch_claimed(
+            &self,
+            scope: &ResourceScope,
+            lease_id: CapabilityGrantId,
+            invocation_fingerprint: &InvocationFingerprint,
+        ) -> Result<CapabilityLease, CapabilityLeaseError> {
+            self.inner
+                .begin_dispatch_claimed(scope, lease_id, invocation_fingerprint)
+                .await
+        }
+
+        async fn abort_dispatch_claimed(
+            &self,
+            scope: &ResourceScope,
+            lease_id: CapabilityGrantId,
+        ) -> Result<CapabilityLease, CapabilityLeaseError> {
+            self.inner.abort_dispatch_claimed(scope, lease_id).await
+        }
+
+        async fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease> {
+            self.inner.leases_for_scope(scope).await
+        }
+
+        async fn active_leases_for_context(
+            &self,
+            context: &ExecutionContext,
+        ) -> Vec<CapabilityLease> {
+            self.inner.active_leases_for_context(context).await
+        }
+    }
+
+    let claim_entered = StdArc::new(Notify::new());
+    let claim_release = StdArc::new(Notify::new());
+
+    let registry = StdArc::new(registry_with_echo_capability());
+    let dispatcher = StdArc::new(RecordingDispatcher::default());
+    let run_state = StdArc::new(InMemoryRunStateStore::new());
+    let approval_requests = StdArc::new(InMemoryApprovalRequestStore::new());
+    let leases = StdArc::new(GatedLeaseStore::new(
+        StdArc::clone(&claim_entered),
+        StdArc::clone(&claim_release),
+    ));
+
+    // ── Phase 1: invoke → BlockedApproval ──────────────────────────────────
+    let block_host = CapabilityHost::new(&registry, &*dispatcher, &ApprovalAuthorizer)
+        .with_run_state(&*run_state)
+        .with_approval_requests(&*approval_requests);
+    let original_context = execution_context(CapabilitySet::default());
+    let scope = original_context.resource_scope.clone();
+    let invocation_id = original_context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "fresh active lease concurrent race"});
+
+    block_host
+        .invoke_json(CapabilityInvocationRequest {
+            context: original_context.clone(),
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+
+    let approval_id = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .approval_request_id
+        .unwrap();
+
+    // ── Phase 2: approve → Active lease ─────────────────────────────────────
+    let issued = ApprovalResolver::new(&*approval_requests, &*leases)
+        .approve_dispatch(&scope, approval_id, dispatch_lease_approval())
+        .await
+        .unwrap();
+    let lease_id = issued.grant.id;
+
+    // ── Phase 3: block at auth directly (lease stays Active) ─────────────────
+    run_state
+        .block_auth(&scope, invocation_id, "AuthRequired".to_string())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        leases.inner.get(&scope, lease_id).await.unwrap().status,
+        CapabilityLeaseStatus::Active,
+        "pre-condition: lease must be Active before the concurrent race"
+    );
+
+    // ── Phase 4: arm gate and spawn task A (FRESH Active path) ───────────────
+    // A will be suspended inside claim() once the CAS succeeds.
+    leases.arm();
+
+    let mut task_a_context = original_context.clone();
+    task_a_context.grants = CapabilitySet {
+        grants: vec![dispatch_grant()],
+    };
+    let task_a_registry = StdArc::clone(&registry);
+    let task_a_dispatcher = StdArc::clone(&dispatcher);
+    let task_a_run_state = StdArc::clone(&run_state);
+    let task_a_approval_requests = StdArc::clone(&approval_requests);
+    let task_a_leases = StdArc::clone(&leases);
+    let task_a_authorizer = GrantAuthorizer::new();
+    let task_a_estimate = estimate.clone();
+    let task_a_input = input.clone();
+
+    let task_a = tokio::spawn(async move {
+        let host = CapabilityHost::new(&task_a_registry, &*task_a_dispatcher, &task_a_authorizer)
+            .with_run_state(&*task_a_run_state)
+            .with_approval_requests(&*task_a_approval_requests)
+            .with_capability_leases(&*task_a_leases);
+        host.auth_resume_json(CapabilityAuthResumeRequest {
+            context: task_a_context,
+            capability_id: capability_id(),
+            estimate: task_a_estimate,
+            input: task_a_input,
+            trust_decision: trust_decision(),
+            approval_request_id: Some(approval_id),
+        })
+        .await
+    });
+
+    // Wait until A has claimed (Active→Claimed) and is parked inside claim().
+    claim_entered.notified().await;
+
+    // ── Phase 5: run B (REUSE path) while A is parked ────────────────────────
+    // B: matching_approval_lease → None (lease is Claimed) →
+    //    matching_claimed_approval_lease_for_auth_resume → Some(Claimed) →
+    //    begin_dispatch_claimed (Claimed→Dispatching) → dispatch → Ok.
+    // B is the WINNER.
+    let mut winner_context = original_context.clone();
+    winner_context.grants = CapabilitySet {
+        grants: vec![dispatch_grant()],
+    };
+    let winner_result = CapabilityHost::new(&registry, &*dispatcher, &GrantAuthorizer::new())
+        .with_run_state(&*run_state)
+        .with_approval_requests(&*approval_requests)
+        .with_capability_leases(&*leases)
+        .auth_resume_json(CapabilityAuthResumeRequest {
+            context: winner_context,
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+            approval_request_id: Some(approval_id),
+        })
+        .await;
+
+    winner_result.unwrap_or_else(|e| panic!("concurrent winner (B) must succeed, got {e:?}"));
+
+    // Winner B has dispatched and consumed the lease.
+    assert_eq!(
+        leases.inner.get(&scope, lease_id).await.unwrap().status,
+        CapabilityLeaseStatus::Consumed,
+        "lease must be Consumed after winner B dispatched"
+    );
+    assert_eq!(
+        dispatcher.dispatch_count(),
+        1,
+        "exactly one dispatch after winner B — before releasing A"
+    );
+
+    // ── Phase 6: release A from the gate ─────────────────────────────────────
+    // POST-FIX: A calls begin_dispatch_claimed immediately after claim()
+    //   returns.  The lease is now Dispatching (winner advanced it) or already
+    //   Consumed.  Both statuses are InactiveLease variants that
+    //   claim_error_may_be_concurrent_resume recognises → warn, no fail_run,
+    //   return Err(Lease(...)).
+    // PRE-FIX: A has no begin_dispatch_claimed in the preamble; A enters
+    //   dispatch_resumed_capability with AlreadyClaimed(Claimed-snapshot) and
+    //   dispatches → dispatch_count == 2 (RED).
+    claim_release.notify_one();
+    let loser_result = task_a.await.expect("task_a must not panic");
+
+    // ── Assertions (post-fix / green) ────────────────────────────────────────
+    // A must return Err(Lease(_)) — the concurrent fresh-path loser.
+    let loser_err = loser_result.unwrap_err();
+    assert!(
+        matches!(loser_err, CapabilityInvocationError::Lease(_)),
+        "fresh-path concurrent loser (A) must return a Lease error, got {loser_err:?} \
+         (pre-fix: A would have returned Ok and dispatched again)"
+    );
+
+    // A must NOT have dispatched.
+    assert_eq!(
+        dispatcher.dispatch_count(),
+        1,
+        "exactly one dispatch must be recorded — A must not have dispatched \
+         (pre-fix: dispatch_count would be 2)"
+    );
+
+    // Run must be Completed (B finished it; A did not additionally fail it).
+    let run_final = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(
+        run_final.status,
+        RunStatus::Completed,
+        "run must remain Completed after loser A's concurrent Lease error"
+    );
+}

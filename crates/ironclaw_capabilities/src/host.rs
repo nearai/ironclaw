@@ -916,20 +916,62 @@ where
             .await;
 
             let claimed = if let Some(lease) = active_lease {
-                // Fresh Active lease: claim it now.
-                match capability_leases
-                    .claim(&scope, lease.grant.id, &invocation_fingerprint)
+                // Fresh Active lease: claim it (Active→Claimed), then immediately
+                // advance it to Dispatching via begin_dispatch_claimed.  This
+                // ensures the in-flight single-winner fence covers the fresh path
+                // just as it covers the reuse (already-Claimed) path below.
+                // Without the second step a concurrent auth_resume_json that misses
+                // the Active lease would find the Claimed lease in the reuse branch
+                // and successfully call begin_dispatch_claimed itself — double-firing.
+                let lease_id = lease.grant.id;
+                let claimed = match capability_leases
+                    .claim(&scope, lease_id, &invocation_fingerprint)
                     .await
                 {
                     Ok(claimed) => claimed,
                     Err(error) => {
                         if claim_error_may_be_concurrent_resume(&error) {
                             warn!(
-                                lease_id = %lease.grant.id,
+                                lease_id = %lease_id,
                                 invocation_id = %invocation_id,
                                 capability_id = %capability_id,
                                 error_kind = capability_lease_error_kind(&error),
                                 "approval lease claim lost to a concurrent auth-resume; leaving run state unchanged",
+                            );
+                        } else {
+                            fail_run_if_configured(
+                                Some(run_state),
+                                &scope,
+                                invocation_id,
+                                "ApprovalLeaseClaim",
+                            )
+                            .await;
+                        }
+                        return Err(CapabilityInvocationError::Lease(Box::new(error)));
+                    }
+                };
+                // Advance Claimed→Dispatching so the fence is set before dispatch.
+                match capability_leases
+                    .begin_dispatch_claimed(&scope, claimed.grant.id, &invocation_fingerprint)
+                    .await
+                {
+                    Ok(dispatching_lease) => {
+                        debug!(
+                            lease_id = %dispatching_lease.grant.id,
+                            invocation_id = %invocation_id,
+                            capability_id = %capability_id,
+                            "auth_resume fresh path advanced lease to Dispatching"
+                        );
+                        dispatching_lease
+                    }
+                    Err(error) => {
+                        if claim_error_may_be_concurrent_resume(&error) {
+                            warn!(
+                                lease_id = %claimed.grant.id,
+                                invocation_id = %invocation_id,
+                                capability_id = %capability_id,
+                                error_kind = capability_lease_error_kind(&error),
+                                "approval lease reuse lost to a concurrent auth-resume; leaving run state unchanged",
                             );
                         } else {
                             fail_run_if_configured(
