@@ -886,6 +886,10 @@ impl RebornRuntime {
         &self.services
     }
 
+    pub(crate) fn webui_tenant_id(&self) -> &TenantId {
+        &self.thread_scope.tenant_id
+    }
+
     #[cfg(test)]
     #[allow(
         dead_code,
