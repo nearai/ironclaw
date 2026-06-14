@@ -949,6 +949,7 @@ fn context_messages_with_summary_replacements(thread: &StoredThread) -> Vec<Cont
                 kind: MessageKind::Summary,
                 tool_result_provider_call: None,
                 content: summary.content.clone(),
+                image_attachments: Vec::new(),
             });
             emitted_summaries.insert(summary.summary_id);
             skip_through = summary.end_sequence;
@@ -963,6 +964,9 @@ fn context_messages_with_summary_replacements(thread: &StoredThread) -> Vec<Cont
                 tool_result_provider_call: message.tool_result_provider_call.clone(),
                 content: crate::attachment_context::augment_model_content(
                     content,
+                    &message.attachments,
+                ),
+                image_attachments: crate::attachment_context::model_image_attachments(
                     &message.attachments,
                 ),
             });
@@ -993,6 +997,9 @@ fn context_messages_by_id(
                 tool_result_provider_call: message.tool_result_provider_call.clone(),
                 content: crate::attachment_context::augment_model_content(
                     message.content.clone()?,
+                    &message.attachments,
+                ),
+                image_attachments: crate::attachment_context::model_image_attachments(
                     &message.attachments,
                 ),
             })
