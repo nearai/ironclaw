@@ -2403,6 +2403,405 @@ async fn auth_resume_json_authorization_require_approval_revokes_dispatching_lea
 }
 
 // ---------------------------------------------------------------------------
+// TEST JYSbO: auth_resume_json returns ResumeStoreMissing { store: "run_state" }
+// when the host is built WITHOUT a run_state store.
+//
+// The very first thing auth_resume_json does (host.rs ~778) is unwrap
+// `self.run_state` via ok_or_else.  A host wired without `.with_run_state()`
+// must surface ResumeStoreMissing immediately — before any dispatch or
+// run-state transition.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn auth_resume_json_returns_store_missing_when_run_state_absent() {
+    let registry = registry_with_echo_capability();
+    let authorizer = GrantAuthorizer::new();
+    let dispatcher = RecordingDispatcher::default();
+
+    // Host has NO run_state store — only the bare minimum.
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer);
+    // Do NOT call .with_run_state(...).
+
+    let err = host
+        .auth_resume_json(CapabilityAuthResumeRequest {
+            context: execution_context(CapabilitySet {
+                grants: vec![dispatch_grant()],
+            }),
+            capability_id: capability_id(),
+            estimate: ResourceEstimate::default(),
+            input: serde_json::json!({"message": "no run_state store"}),
+            trust_decision: trust_decision(),
+            approval_request_id: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            CapabilityInvocationError::ResumeStoreMissing { store, .. }
+            if store == "run_state"
+        ),
+        "expected ResumeStoreMissing {{ store: \"run_state\" }}, got {err:?}"
+    );
+    assert_eq!(
+        dispatcher.dispatch_count(),
+        0,
+        "dispatch must not fire when run_state store is absent"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// TEST JYSbP: auth_resume_json maps a missing run record to
+// RunState(UnknownInvocation) when the store is wired but has no record for
+// the invocation.
+//
+// host.rs ~795: run_state.get(...).await?.ok_or(RunStateError::UnknownInvocation)
+// A run_state store that is present but empty must surface UnknownInvocation
+// wrapped in CapabilityInvocationError::RunState — no dispatch, no run
+// transition.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn auth_resume_json_unknown_invocation_when_run_record_missing() {
+    let registry = registry_with_echo_capability();
+    let authorizer = GrantAuthorizer::new();
+    let dispatcher = RecordingDispatcher::default();
+    let run_state = InMemoryRunStateStore::new();
+    // No run record seeded — the store is empty.
+
+    let context = execution_context(CapabilitySet {
+        grants: vec![dispatch_grant()],
+    });
+
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
+
+    let err = host
+        .auth_resume_json(CapabilityAuthResumeRequest {
+            context,
+            capability_id: capability_id(),
+            estimate: ResourceEstimate::default(),
+            input: serde_json::json!({"message": "no run record seeded"}),
+            trust_decision: trust_decision(),
+            approval_request_id: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            CapabilityInvocationError::RunState(ref e)
+            if matches!(e.as_ref(), RunStateError::UnknownInvocation { .. })
+        ),
+        "expected RunState(UnknownInvocation), got {err:?}"
+    );
+    assert_eq!(
+        dispatcher.dispatch_count(),
+        0,
+        "dispatch must not fire when no run record exists"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// TEST JYSbQ: validate_approval_request_matches_invocation mismatch branches
+//
+// auth_resume_json calls validate_approval_request_matches_invocation (host.rs
+// ~894) before the fingerprint check.  The validator checks three axes:
+//   1. action — capability + estimate in the approval's Action::Dispatch
+//   2. correlation_id — must match context.correlation_id
+//   3. requested_by — must equal Principal::Extension(context.extension_id)
+//
+// Each axis below seeds an Approved approval with EXACTLY ONE field mismatched,
+// then calls auth_resume_json and asserts:
+//   (a) the specific ApprovalRequestMismatch { field } variant is returned
+//   (b) no dispatch fires
+//   (c) the run is Failed (fail_run_if_configured is called for all mismatches)
+// ---------------------------------------------------------------------------
+
+/// Helper: seed a run record in BlockedAuth and build a host wired with all
+/// necessary stores for the approval-validation path.
+async fn setup_blocked_auth_run_with_stores(
+    run_state: &InMemoryRunStateStore,
+    approval_requests: &InMemoryApprovalRequestStore,
+    leases: &InMemoryCapabilityLeaseStore,
+    context: &ExecutionContext,
+) {
+    let scope = &context.resource_scope;
+    let invocation_id = context.invocation_id;
+    run_state
+        .start(RunStart {
+            invocation_id,
+            scope: scope.clone(),
+            capability_id: capability_id(),
+        })
+        .await
+        .unwrap();
+    run_state
+        .block_auth(scope, invocation_id, "AuthRequired".to_string())
+        .await
+        .unwrap();
+    let _ = leases; // consumed by the caller via .with_capability_leases
+    let _ = approval_requests; // consumed by the caller via .with_approval_requests
+}
+
+#[tokio::test]
+async fn auth_resume_json_approval_request_mismatch_action() {
+    // Approval references a DIFFERENT capability than the one being invoked.
+    let registry = registry_with_echo_capability();
+    let authorizer = GrantAuthorizer::new();
+    let dispatcher = RecordingDispatcher::default();
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let leases = InMemoryCapabilityLeaseStore::new();
+
+    let context = execution_context(CapabilitySet {
+        grants: vec![dispatch_grant()],
+    });
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    setup_blocked_auth_run_with_stores(&run_state, &approval_requests, &leases, &context).await;
+
+    // Approval action references a different capability (action mismatch).
+    let different_capability = CapabilityId::new("other.tool").unwrap();
+    let approval_id = ApprovalRequestId::new();
+    approval_requests
+        .save_pending(
+            scope.clone(),
+            ApprovalRequest {
+                id: approval_id,
+                correlation_id: context.correlation_id,
+                requested_by: Principal::Extension(ExtensionId::new("caller").unwrap()),
+                action: Box::new(Action::Dispatch {
+                    capability: different_capability,
+                    estimated_resources: ResourceEstimate::default(),
+                }),
+                invocation_fingerprint: None,
+                reason: "action mismatch test".to_string(),
+                reusable_scope: None,
+            },
+        )
+        .await
+        .unwrap();
+    approval_requests
+        .approve(&scope, approval_id)
+        .await
+        .unwrap();
+
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+
+    let err = host
+        .auth_resume_json(CapabilityAuthResumeRequest {
+            context,
+            capability_id: capability_id(),
+            estimate: ResourceEstimate::default(),
+            input: serde_json::json!({"message": "action mismatch"}),
+            trust_decision: trust_decision(),
+            approval_request_id: Some(approval_id),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            CapabilityInvocationError::ApprovalRequestMismatch {
+                field: "action",
+                ..
+            }
+        ),
+        "expected ApprovalRequestMismatch {{ field: \"action\" }}, got {err:?}"
+    );
+    assert_eq!(
+        dispatcher.dispatch_count(),
+        0,
+        "dispatch must not fire on action mismatch"
+    );
+    // fail_run_if_configured is called on all ApprovalRequestMismatch paths.
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(
+        run.status,
+        RunStatus::Failed,
+        "run must be Failed after action mismatch"
+    );
+}
+
+#[tokio::test]
+async fn auth_resume_json_approval_request_mismatch_correlation_id() {
+    // Approval has a DIFFERENT correlation_id than the current invocation context.
+    let registry = registry_with_echo_capability();
+    let authorizer = GrantAuthorizer::new();
+    let dispatcher = RecordingDispatcher::default();
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let leases = InMemoryCapabilityLeaseStore::new();
+
+    let context = execution_context(CapabilitySet {
+        grants: vec![dispatch_grant()],
+    });
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    setup_blocked_auth_run_with_stores(&run_state, &approval_requests, &leases, &context).await;
+
+    // Use a freshly-generated correlation_id so it cannot match context.correlation_id.
+    let different_correlation_id = CorrelationId::new();
+    assert_ne!(
+        different_correlation_id, context.correlation_id,
+        "pre-condition: fresh CorrelationId must differ from the context one"
+    );
+
+    let approval_id = ApprovalRequestId::new();
+    approval_requests
+        .save_pending(
+            scope.clone(),
+            ApprovalRequest {
+                id: approval_id,
+                correlation_id: different_correlation_id,
+                requested_by: Principal::Extension(ExtensionId::new("caller").unwrap()),
+                action: Box::new(Action::Dispatch {
+                    capability: capability_id(),
+                    estimated_resources: ResourceEstimate::default(),
+                }),
+                invocation_fingerprint: None,
+                reason: "correlation_id mismatch test".to_string(),
+                reusable_scope: None,
+            },
+        )
+        .await
+        .unwrap();
+    approval_requests
+        .approve(&scope, approval_id)
+        .await
+        .unwrap();
+
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+
+    let err = host
+        .auth_resume_json(CapabilityAuthResumeRequest {
+            context,
+            capability_id: capability_id(),
+            estimate: ResourceEstimate::default(),
+            input: serde_json::json!({"message": "correlation_id mismatch"}),
+            trust_decision: trust_decision(),
+            approval_request_id: Some(approval_id),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            CapabilityInvocationError::ApprovalRequestMismatch {
+                field: "correlation_id",
+                ..
+            }
+        ),
+        "expected ApprovalRequestMismatch {{ field: \"correlation_id\" }}, got {err:?}"
+    );
+    assert_eq!(
+        dispatcher.dispatch_count(),
+        0,
+        "dispatch must not fire on correlation_id mismatch"
+    );
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(
+        run.status,
+        RunStatus::Failed,
+        "run must be Failed after correlation_id mismatch"
+    );
+}
+
+#[tokio::test]
+async fn auth_resume_json_approval_request_mismatch_requested_by() {
+    // Approval was requested_by Principal::HostRuntime, but the validator
+    // expects Principal::Extension(context.extension_id) — so requested_by
+    // must mismatch.
+    let registry = registry_with_echo_capability();
+    let authorizer = GrantAuthorizer::new();
+    let dispatcher = RecordingDispatcher::default();
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let leases = InMemoryCapabilityLeaseStore::new();
+
+    let context = execution_context(CapabilitySet {
+        grants: vec![dispatch_grant()],
+    });
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    setup_blocked_auth_run_with_stores(&run_state, &approval_requests, &leases, &context).await;
+
+    // Use HostRuntime as requested_by; validator expects Extension("caller").
+    let approval_id = ApprovalRequestId::new();
+    approval_requests
+        .save_pending(
+            scope.clone(),
+            ApprovalRequest {
+                id: approval_id,
+                correlation_id: context.correlation_id,
+                requested_by: Principal::HostRuntime,
+                action: Box::new(Action::Dispatch {
+                    capability: capability_id(),
+                    estimated_resources: ResourceEstimate::default(),
+                }),
+                invocation_fingerprint: None,
+                reason: "requested_by mismatch test".to_string(),
+                reusable_scope: None,
+            },
+        )
+        .await
+        .unwrap();
+    approval_requests
+        .approve(&scope, approval_id)
+        .await
+        .unwrap();
+
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+
+    let err = host
+        .auth_resume_json(CapabilityAuthResumeRequest {
+            context,
+            capability_id: capability_id(),
+            estimate: ResourceEstimate::default(),
+            input: serde_json::json!({"message": "requested_by mismatch"}),
+            trust_decision: trust_decision(),
+            approval_request_id: Some(approval_id),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            CapabilityInvocationError::ApprovalRequestMismatch {
+                field: "requested_by",
+                ..
+            }
+        ),
+        "expected ApprovalRequestMismatch {{ field: \"requested_by\" }}, got {err:?}"
+    );
+    assert_eq!(
+        dispatcher.dispatch_count(),
+        0,
+        "dispatch must not fire on requested_by mismatch"
+    );
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(
+        run.status,
+        RunStatus::Failed,
+        "run must be Failed after requested_by mismatch"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Concurrent auth-resume: FRESH Active-lease path — two concurrent callers
 // where the lease starts ACTIVE.
 //
