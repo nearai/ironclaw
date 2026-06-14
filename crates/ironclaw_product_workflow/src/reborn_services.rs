@@ -906,8 +906,9 @@ fn operator_doctor_status_diagnostic(
         owning_area: RebornOperatorArea::Status,
         remediation: check
             .remediation
-            .clone()
-            .unwrap_or_else(|| "inspect the corresponding operator status check".to_string()),
+            .as_deref()
+            .unwrap_or("inspect the corresponding operator status check")
+            .to_string(),
     })
 }
 
@@ -2321,7 +2322,13 @@ impl RebornServicesApi for RebornServices {
                 );
                 operator_status = Some(status);
             }
-            Err(_) => diagnostics.push(operator_doctor_status_unavailable_diagnostic()),
+            Err(err) => {
+                tracing::warn!(
+                    error = ?err,
+                    "Failed to retrieve operator status for diagnostics"
+                );
+                diagnostics.push(operator_doctor_status_unavailable_diagnostic());
+            }
         }
 
         if let Some(llm_config) = &self.llm_config {
@@ -2330,10 +2337,16 @@ impl RebornServicesApi for RebornServices {
                     diagnostics
                         .extend(setup_response_from_llm_snapshot(snapshot, Vec::new()).diagnostics);
                 }
-                Err(_) => diagnostics.push(operator_doctor_setup_unavailable_diagnostic(
-                    "operator_setup_snapshot_unavailable",
-                    "Operator setup state could not be inspected.",
-                )),
+                Err(err) => {
+                    tracing::warn!(
+                        error = ?err,
+                        "Failed to retrieve LLM config snapshot for diagnostics"
+                    );
+                    diagnostics.push(operator_doctor_setup_unavailable_diagnostic(
+                        "operator_setup_snapshot_unavailable",
+                        "Operator setup state could not be inspected.",
+                    ));
+                }
             }
         } else {
             diagnostics.push(operator_doctor_setup_unavailable_diagnostic(
