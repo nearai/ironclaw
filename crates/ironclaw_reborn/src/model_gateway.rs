@@ -20,6 +20,7 @@ use ironclaw_llm::{
     ToolDefinition, clean_response, contains_codex_text_tool_call_syntax,
     costs::{default_cost, model_cost},
     recover_codex_text_tool_calls_from_tool_names,
+    vision_models::is_vision_model,
 };
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
@@ -1290,7 +1291,12 @@ fn convert_messages(
                 converted.push(ChatMessage::system(message.content.clone()))
             }
             HostManagedModelMessageRole::User => {
-                if message.image_parts.is_empty() {
+                // Attach images only for a vision-capable model. A text-only
+                // model can't accept image parts (it would error or ignore
+                // them), so it keeps just the text — the durable transcript
+                // still carries the `<attachments>` pointer for those models.
+                let vision = is_vision_model(&replay_identity.provider_model_id);
+                if message.image_parts.is_empty() || !vision {
                     converted.push(ChatMessage::user(message.content.clone()));
                 } else {
                     // Multimodal: the text rides in `content`; `content_parts`
@@ -1737,5 +1743,29 @@ mod tests {
 
         assert_eq!(converted[0].content, "hello");
         assert!(converted[0].content_parts.is_empty());
+    }
+
+    #[test]
+    fn convert_messages_drops_image_parts_for_non_vision_model() {
+        // Even with encoded image parts present, a text-only model must not
+        // receive image content (it would error or ignore it); it keeps the
+        // text and relies on the transcript's `<attachments>` pointer.
+        let message = user_message_with_images(
+            "what is in this image?",
+            vec![ironclaw_loop_support::HostManagedModelImagePart {
+                mime_type: "image/png".to_string(),
+                data_base64: "iVBORw0KGgo=".to_string(),
+            }],
+        );
+        let identity =
+            ProviderReplayIdentity::new("mistral", "mistral-7b-instruct").expect("identity");
+
+        let converted = convert_messages(vec![message], &identity).expect("convert");
+
+        assert_eq!(converted[0].content, "what is in this image?");
+        assert!(
+            converted[0].content_parts.is_empty(),
+            "a non-vision model must not receive image parts"
+        );
     }
 }
