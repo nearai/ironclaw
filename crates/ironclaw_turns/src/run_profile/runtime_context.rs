@@ -192,6 +192,17 @@ impl LoopRuntimeContext {
             // rendered here: without the communication slice the delivery state is
             // unknown, and a target may well be configured, so claiming "result will
             // not be delivered" would be wrong.
+            //
+            // Production triggered runs are expected to always carry a communication
+            // slice, so a `ScheduledTrigger` reaching this branch means the
+            // no-delivery safety warning is being silently skipped — an invariant
+            // breach worth surfacing for observability without altering output.
+            if matches!(ctx.origin, TurnOriginKind::ScheduledTrigger) {
+                tracing::debug!(
+                    "scheduled-trigger run rendered runtime context with no communication slice; \
+                     no-delivery safety warning skipped (delivery state unknown)"
+                );
+            }
             parts.push(render_origin_line(ctx));
         }
 
