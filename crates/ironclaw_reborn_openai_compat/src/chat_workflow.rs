@@ -695,6 +695,12 @@ fn content_value_to_text(content: Option<&serde_json::Value>) -> String {
             .filter_map(content_array_item_text)
             .collect::<Vec<_>>()
             .join(" "),
+        // A bare object-form part (non-standard, but tolerated): run it through
+        // the same per-part logic so a typed part gets its specific marker (or
+        // text) instead of discarding the type for the generic marker.
+        Some(value @ serde_json::Value::Object(_)) => {
+            content_array_item_text(value).unwrap_or_else(|| non_text_part_marker(None).to_string())
+        }
         Some(value) if !value.is_null() => non_text_part_marker(None).to_string(),
         _ => String::new(),
     }

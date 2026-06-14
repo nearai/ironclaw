@@ -33,13 +33,18 @@ pub(crate) fn non_text_part_marker(part_type: Option<&str>) -> &'static str {
 /// only when the item is not an object at all.
 pub(crate) fn content_array_item_text(value: &serde_json::Value) -> Option<String> {
     let object = value.as_object()?;
-    match object.get("type").and_then(serde_json::Value::as_str) {
+    let text = match object.get("type").and_then(serde_json::Value::as_str) {
         Some("text" | "input_text" | "output_text") => object
             .get("text")
             .and_then(serde_json::Value::as_str)
-            .map(sanitize_product_text_fragment),
-        other => Some(non_text_part_marker(other).to_string()),
-    }
+            .map(sanitize_product_text_fragment)
+            // A text-typed part whose `text` is missing or non-string is
+            // malformed; emit a bounded marker rather than silently dropping it
+            // (the part still happened, the model should see that).
+            .unwrap_or_else(|| non_text_part_marker(None).to_string()),
+        other => non_text_part_marker(other).to_string(),
+    };
+    Some(text)
 }
 
 #[cfg(test)]
@@ -101,5 +106,22 @@ mod tests {
     fn non_object_items_are_dropped() {
         assert!(content_array_item_text(&json!("bare string")).is_none());
         assert!(content_array_item_text(&json!(42)).is_none());
+    }
+
+    #[test]
+    fn malformed_text_part_emits_a_marker_instead_of_dropping() {
+        // A text-typed part whose `text` is missing or non-string must not
+        // silently vanish through the downstream filter_map — it renders a
+        // bounded marker so the model sees that a part was present.
+        let missing = json!({ "type": "text" });
+        assert_eq!(
+            content_array_item_text(&missing).as_deref(),
+            Some("[unsupported content omitted]")
+        );
+        let non_string = json!({ "type": "input_text", "text": { "nested": true } });
+        assert_eq!(
+            content_array_item_text(&non_string).as_deref(),
+            Some("[unsupported content omitted]")
+        );
     }
 }
