@@ -190,9 +190,13 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         services.readiness.clone(),
     )));
     api = api.with_operator_logs_service(crate::operator_log_buffer());
-    api = api.with_operator_service_lifecycle_service(Arc::new(
-        crate::RebornLocalServiceLifecycle::new(),
-    ));
+    if let Some(local_runtime) = &services.local_runtime {
+        api = api.with_operator_service_lifecycle_service(Arc::new(
+            crate::operator_service_lifecycle::RebornLocalServiceLifecycle::new_for_operator(
+                local_runtime.owner_user_id.clone(),
+            ),
+        ));
+    }
 
     // Compose the operator LLM-config settings service when the runtime was
     // assembled with a boot config. The secret store stays private to this
