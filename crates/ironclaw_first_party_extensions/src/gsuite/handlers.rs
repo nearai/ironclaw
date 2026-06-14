@@ -7,6 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use chrono::{SecondsFormat, Utc};
 use futures_util::FutureExt as _;
 use ironclaw_auth::{
     CredentialAccountRecordSource, CredentialAccountService, CredentialRecoveryKind,
@@ -629,10 +630,25 @@ impl GmailMessagePath {
 fn calendar_list_events_request(
     input: &Value,
 ) -> Result<(NetworkMethod, String, Vec<u8>), GsuiteDispatchError> {
-    let input = CalendarEventsQuery::parse(input)?;
+    let mut input = CalendarEventsQuery::parse(input)?;
+    // Default the lower time bound to "now" so a bare "list events" returns
+    // upcoming events rather than the calendar's oldest history. Callers that
+    // want past events pass an explicit `time_min`.
+    //
+    // Skip the default on a paginated continuation: the Calendar API requires the
+    // query parameters to stay identical across a `pageToken` sequence, so
+    // injecting a fresh `now()` next to a `page_token` would change `timeMin`
+    // between pages and break pagination. The token already carries the original
+    // window, so omitting `timeMin` on continuations is correct.
+    if input.time_min.is_none() && input.page_token.is_none() {
+        input.time_min = Some(now_rfc3339());
+    }
     Ok((
         NetworkMethod::Get,
-        calendar_events_url(&input, None),
+        // `singleEvents=true` expands recurring events into their individual
+        // instances; `orderBy=startTime` then returns them chronologically
+        // (the API only allows that ordering when `singleEvents` is set).
+        calendar_events_url(&input, Some("singleEvents=true&orderBy=startTime")),
         Vec::new(),
     ))
 }
@@ -880,6 +896,12 @@ fn add_network_usage(error: GsuiteDispatchError, network_egress_bytes: u64) -> G
         .network_egress_bytes
         .saturating_add(network_egress_bytes);
     error.with_usage(usage)
+}
+
+/// Current UTC time as a second-precision RFC3339 timestamp
+/// (e.g. `2026-06-09T14:00:00Z`), suitable for the Calendar API `timeMin`.
+fn now_rfc3339() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
 fn calendar_events_url(input: &CalendarEventsQuery, extra_query: Option<&str>) -> String {
@@ -1381,6 +1403,71 @@ mod tests {
         assert!(required_array(&input, "array").is_ok());
         assert!(required_array(&input, "object").is_err());
         assert!(json_body(&input).is_ok());
+    }
+
+    #[test]
+    fn calendar_list_events_defaults_time_min_and_orders() {
+        // No `time_min`: the request defaults it to now and asks the API to
+        // expand recurring events and order chronologically, so the result is
+        // upcoming events rather than the calendar's oldest history.
+        let (method, url, _) =
+            calendar_list_events_request(&json!({ "calendar_id": "primary" })).unwrap();
+        assert_eq!(method, NetworkMethod::Get);
+        assert!(url.contains("timeMin="), "missing defaulted timeMin: {url}");
+        assert!(
+            url.contains("singleEvents=true"),
+            "missing singleEvents: {url}"
+        );
+        assert!(url.contains("orderBy=startTime"), "missing orderBy: {url}");
+
+        // An explicit `time_min` is preserved, so history queries still work.
+        let (_, url, _) = calendar_list_events_request(
+            &json!({ "calendar_id": "primary", "time_min": "2020-01-01T00:00:00Z" }),
+        )
+        .unwrap();
+        assert!(
+            url.contains("timeMin=2020-01-01T00%3A00%3A00Z"),
+            "explicit time_min not preserved: {url}"
+        );
+        assert!(
+            url.contains("singleEvents=true"),
+            "missing singleEvents: {url}"
+        );
+        assert!(url.contains("orderBy=startTime"), "missing orderBy: {url}");
+    }
+
+    #[test]
+    fn calendar_list_events_skips_time_min_default_on_pagination() {
+        // R8: on a paginated continuation the Calendar API requires the query
+        // params to stay identical across the pageToken sequence. A `page_token`
+        // with no `time_min` must NOT get a fresh `now()` injected — that would
+        // change `timeMin` between pages and break pagination. The token already
+        // carries the original window.
+        let (_, url, _) = calendar_list_events_request(
+            &json!({ "calendar_id": "primary", "page_token": "CONTINUATION" }),
+        )
+        .unwrap();
+        assert!(
+            url.contains("pageToken=CONTINUATION"),
+            "missing pageToken: {url}"
+        );
+        assert!(
+            !url.contains("timeMin="),
+            "timeMin must not be injected on a paginated continuation: {url}"
+        );
+
+        // An explicit `time_min` alongside a `page_token` is still preserved.
+        let (_, url, _) = calendar_list_events_request(&json!({
+            "calendar_id": "primary",
+            "page_token": "CONTINUATION",
+            "time_min": "2026-06-01T00:00:00Z",
+        }))
+        .unwrap();
+        assert!(url.contains("pageToken=CONTINUATION"));
+        assert!(
+            url.contains("timeMin=2026-06-01T00%3A00%3A00Z"),
+            "explicit time_min must be preserved even when paginating: {url}"
+        );
     }
 
     #[test]
