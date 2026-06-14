@@ -10,6 +10,8 @@
 
 use ironclaw_common::{AttachmentKind, AttachmentRef};
 
+use crate::contract::ContextImageAttachment;
+
 /// Append a rendered `<attachments>` block to `content` when `attachments` is
 /// non-empty; otherwise return `content` unchanged.
 pub(crate) fn augment_model_content(content: String, attachments: &[AttachmentRef]) -> String {
@@ -17,6 +19,29 @@ pub(crate) fn augment_model_content(content: String, attachments: &[AttachmentRe
         Some(block) => format!("{content}\n\n{block}"),
         None => content,
     }
+}
+
+/// The image attachments a vision-capable model could view as multimodal parts:
+/// `kind == Image` with a landed `storage_key`. Only the reference is carried —
+/// the bytes are read later (and only for a vision model), so a text-only model
+/// pays nothing here. The textual pointer from [`augment_model_content`] stays
+/// as the fallback either way.
+pub(crate) fn model_image_attachments(
+    attachments: &[AttachmentRef],
+) -> Vec<ContextImageAttachment> {
+    attachments
+        .iter()
+        .filter(|attachment| attachment.kind == AttachmentKind::Image)
+        .filter_map(|attachment| {
+            attachment
+                .storage_key
+                .as_ref()
+                .map(|storage_key| ContextImageAttachment {
+                    mime_type: attachment.mime_type.clone(),
+                    storage_key: storage_key.clone(),
+                })
+        })
+        .collect()
 }
 
 fn render_attachments_block(attachments: &[AttachmentRef]) -> Option<String> {

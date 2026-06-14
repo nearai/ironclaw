@@ -2067,6 +2067,7 @@ mod tests {
                 content_ref: LoopMessageRef::new("msg:missing-typed-content").expect("content ref"),
                 tool_result_provider_call: None,
                 tool_result_content: None,
+                image_parts: Vec::new(),
             }],
             surface_version: None,
             resolved_model_route: None,
