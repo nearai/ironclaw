@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::sync::{Arc, LazyLock, Mutex};
 
@@ -8,7 +9,7 @@ use ironclaw_product_workflow::{
     RebornLogQueryResponse, RebornServicesError, WebUiAuthenticatedCaller,
     normalize_operator_log_context_value,
 };
-use ironclaw_safety::LeakDetector;
+use ironclaw_safety::{LeakDetector, sensitive_paths::is_sensitive_path_str};
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Record};
 use tracing::{Event, Id};
@@ -274,6 +275,7 @@ impl OperatorLogBuffer {
             .leak_detector
             .scan_and_clean(&message)
             .unwrap_or_else(|_| "[log message redacted: contained blocked secret]".to_string());
+        let message = redact_sensitive_log_paths(&message);
         let message = truncate_utf8_with_suffix(&message, MAX_LOG_MESSAGE_BYTES);
         let correlation = self.correlation_from_fields(fields);
         let Ok(mut state) = self.state.lock() else {
@@ -361,6 +363,7 @@ impl OperatorLogBuffer {
             .clamp(1, self.capacity);
         let request = self.normalize_query_request(request);
         let before_id = request.cursor.as_deref().and_then(parse_before_cursor);
+        let after_id = request.cursor.as_deref().and_then(parse_after_cursor);
         let target_filter = request.target.as_ref().map(|target| target.to_lowercase());
         let Ok(state) = self.state.lock() else {
             return RebornLogQueryResponse {
@@ -368,46 +371,116 @@ impl OperatorLogBuffer {
                 entries: Vec::new(),
                 next_cursor: None,
                 tail_supported: true,
-                follow_supported: false,
+                follow_supported: true,
             };
         };
 
         let mut selected = Vec::with_capacity(limit.min(self.capacity));
         let mut selected_bytes = 0usize;
         let mut next_cursor = None;
-        for entry in state.entries.iter().rev() {
-            if before_id.is_some_and(|id| entry.id >= id) {
-                continue;
-            }
-            if request.level.is_some_and(|level| entry.level != level) {
-                continue;
-            }
-            if let Some(target) = target_filter.as_ref()
-                && !entry.target.to_lowercase().contains(target.as_str())
-            {
-                continue;
-            }
-            if !entry.matches_query(&request) {
-                continue;
-            }
 
-            if selected.len() >= limit {
-                next_cursor = selected
-                    .last()
-                    .map(|entry: &StoredLogEntry| format!("before:{}", entry.id));
-                break;
+        if request.follow {
+            let start_after_id = after_id.unwrap_or_else(|| state.next_id.saturating_sub(1));
+            for entry in state.entries.iter() {
+                if entry.id <= start_after_id {
+                    continue;
+                }
+                if request.level.is_some_and(|level| entry.level != level) {
+                    continue;
+                }
+                if let Some(target) = target_filter.as_ref()
+                    && !entry.target.to_lowercase().contains(target.as_str())
+                {
+                    continue;
+                }
+                if !entry.matches_query(&request) {
+                    continue;
+                }
+
+                if selected.len() >= limit {
+                    break;
+                }
+                let entry_bytes = response_entry_bytes(entry);
+                if !selected.is_empty()
+                    && selected_bytes.saturating_add(entry_bytes) > MAX_LOG_RESPONSE_BYTES
+                {
+                    break;
+                }
+                selected_bytes = selected_bytes.saturating_add(entry_bytes);
+                selected.push(entry.clone());
             }
-            let entry_bytes = response_entry_bytes(entry);
-            if !selected.is_empty()
-                && selected_bytes.saturating_add(entry_bytes) > MAX_LOG_RESPONSE_BYTES
-            {
-                next_cursor = selected
-                    .last()
-                    .map(|entry: &StoredLogEntry| format!("before:{}", entry.id));
-                break;
+            let cursor_id = selected
+                .last()
+                .map(|entry| entry.id)
+                .unwrap_or(start_after_id);
+            next_cursor = Some(after_cursor(cursor_id));
+        } else if request.tail {
+            for entry in state.entries.iter().rev() {
+                if request.level.is_some_and(|level| entry.level != level) {
+                    continue;
+                }
+                if let Some(target) = target_filter.as_ref()
+                    && !entry.target.to_lowercase().contains(target.as_str())
+                {
+                    continue;
+                }
+                if !entry.matches_query(&request) {
+                    continue;
+                }
+
+                if selected.len() >= limit {
+                    break;
+                }
+                let entry_bytes = response_entry_bytes(entry);
+                if !selected.is_empty()
+                    && selected_bytes.saturating_add(entry_bytes) > MAX_LOG_RESPONSE_BYTES
+                {
+                    break;
+                }
+                selected_bytes = selected_bytes.saturating_add(entry_bytes);
+                selected.push(entry.clone());
             }
-            selected_bytes = selected_bytes.saturating_add(entry_bytes);
-            selected.push(entry.clone());
+            selected.reverse();
+            let cursor_id = selected
+                .last()
+                .map(|entry| entry.id)
+                .unwrap_or_else(|| state.next_id.saturating_sub(1));
+            next_cursor = Some(after_cursor(cursor_id));
+        } else {
+            for entry in state.entries.iter().rev() {
+                if before_id.is_some_and(|id| entry.id >= id) {
+                    continue;
+                }
+                if request.level.is_some_and(|level| entry.level != level) {
+                    continue;
+                }
+                if let Some(target) = target_filter.as_ref()
+                    && !entry.target.to_lowercase().contains(target.as_str())
+                {
+                    continue;
+                }
+                if !entry.matches_query(&request) {
+                    continue;
+                }
+
+                if selected.len() >= limit {
+                    next_cursor = selected
+                        .last()
+                        .map(|entry: &StoredLogEntry| format!("before:{}", entry.id));
+                    break;
+                }
+                let entry_bytes = response_entry_bytes(entry);
+                if !selected.is_empty()
+                    && selected_bytes.saturating_add(entry_bytes) > MAX_LOG_RESPONSE_BYTES
+                {
+                    next_cursor = selected
+                        .last()
+                        .map(|entry: &StoredLogEntry| format!("before:{}", entry.id));
+                    break;
+                }
+                selected_bytes = selected_bytes.saturating_add(entry_bytes);
+                selected.push(entry.clone());
+            }
         }
 
         RebornLogQueryResponse {
@@ -415,7 +488,7 @@ impl OperatorLogBuffer {
             entries: selected.into_iter().map(RebornLogEntry::from).collect(),
             next_cursor,
             tail_supported: true,
-            follow_supported: false,
+            follow_supported: true,
         }
     }
 }
@@ -510,6 +583,77 @@ fn parse_before_cursor(cursor: &str) -> Option<u64> {
     cursor
         .strip_prefix("before:")
         .and_then(|value| value.parse::<u64>().ok())
+}
+
+fn parse_after_cursor(cursor: &str) -> Option<u64> {
+    cursor
+        .strip_prefix("after:")
+        .and_then(|value| value.parse::<u64>().ok())
+}
+
+fn after_cursor(id: u64) -> String {
+    format!("after:{id}")
+}
+
+fn redact_sensitive_log_paths(value: &str) -> String {
+    let mut redacted = String::with_capacity(value.len());
+    for segment in value.split_inclusive(char::is_whitespace) {
+        let token = segment.trim_end_matches(char::is_whitespace);
+        let whitespace = &segment[token.len()..];
+        redacted.push_str(&redact_sensitive_log_path_token(token));
+        redacted.push_str(whitespace);
+    }
+    redacted
+}
+
+fn redact_sensitive_log_path_token(token: &str) -> Cow<'_, str> {
+    let mut cursor = 0usize;
+    let mut redacted = String::new();
+    let mut last_copied = 0usize;
+    let mut changed = false;
+
+    while let Some(offset) = token[cursor..].find('/') {
+        let start = cursor + offset;
+        let end = sensitive_path_candidate_end(token, start);
+        if start < end && is_sensitive_path_str(&token[start..end]) {
+            if !changed {
+                redacted = String::with_capacity(token.len());
+                changed = true;
+            }
+            redacted.push_str(&token[last_copied..start]);
+            redacted.push_str("[REDACTED_PATH]");
+            last_copied = end;
+            cursor = end;
+        } else {
+            cursor = token[start..]
+                .chars()
+                .next()
+                .map_or(token.len(), |character| start + character.len_utf8());
+        }
+    }
+
+    if changed {
+        redacted.push_str(&token[last_copied..]);
+        Cow::Owned(redacted)
+    } else {
+        Cow::Borrowed(token)
+    }
+}
+
+fn sensitive_path_candidate_end(token: &str, start: usize) -> usize {
+    token[start..]
+        .char_indices()
+        .find_map(|(offset, character)| {
+            if matches!(
+                character,
+                '"' | '\'' | '`' | ',' | ';' | ':' | ')' | '(' | ']' | '[' | '{' | '}'
+            ) {
+                Some(start + offset)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(token.len())
 }
 
 fn truncate_utf8_with_suffix(value: &str, max_bytes: usize) -> String {
@@ -959,6 +1103,122 @@ mod tests {
             response.entries[0].message,
             "[log message redacted: contained blocked secret]"
         );
+    }
+
+    #[test]
+    fn record_redacts_sensitive_host_paths() {
+        let buffer = OperatorLogBuffer::new(10);
+        buffer.record(
+            RebornLogLevel::Warn,
+            "ironclaw::test",
+            "failed to read /home/user/.config/gh/hosts.yml, retrying".to_string(),
+        );
+
+        let response = buffer.query(RebornLogQueryRequest {
+            limit: Some(1),
+            ..RebornLogQueryRequest::default()
+        });
+
+        assert_eq!(
+            response.entries[0].message,
+            "failed to read [REDACTED_PATH], retrying"
+        );
+    }
+
+    #[test]
+    fn record_redacts_sensitive_host_paths_embedded_after_prefixes() {
+        let buffer = OperatorLogBuffer::new(10);
+        buffer.record(
+            RebornLogLevel::Warn,
+            "ironclaw::test",
+            "path=/home/user/.config/gh/hosts.yml json={\"path\":\"/home/user/.ssh/id_ed25519\"}"
+                .to_string(),
+        );
+
+        let response = buffer.query(RebornLogQueryRequest {
+            limit: Some(1),
+            ..RebornLogQueryRequest::default()
+        });
+
+        assert_eq!(
+            response.entries[0].message,
+            "path=[REDACTED_PATH] json={\"path\":\"[REDACTED_PATH]\"}"
+        );
+    }
+
+    #[test]
+    fn tail_returns_latest_entries_chronologically_with_follow_cursor() {
+        let buffer = OperatorLogBuffer::new(10);
+        for index in 0..4 {
+            buffer.record(
+                RebornLogLevel::Info,
+                "ironclaw::test",
+                format!("message {index}"),
+            );
+        }
+
+        let response = buffer.query(RebornLogQueryRequest {
+            limit: Some(2),
+            tail: true,
+            ..RebornLogQueryRequest::default()
+        });
+
+        assert_eq!(
+            response
+                .entries
+                .iter()
+                .map(|entry| entry.message.as_str())
+                .collect::<Vec<_>>(),
+            vec!["message 2", "message 3"]
+        );
+        assert!(response.tail_supported);
+        assert!(response.follow_supported);
+        assert_eq!(response.next_cursor.as_deref(), Some("after:4"));
+    }
+
+    #[test]
+    fn follow_returns_entries_after_cursor_chronologically() {
+        let buffer = OperatorLogBuffer::new(10);
+        for index in 0..3 {
+            buffer.record(
+                RebornLogLevel::Info,
+                "ironclaw::test",
+                format!("message {index}"),
+            );
+        }
+        let tail = buffer.query(RebornLogQueryRequest {
+            limit: Some(2),
+            tail: true,
+            ..RebornLogQueryRequest::default()
+        });
+        let cursor = tail.next_cursor.expect("follow cursor");
+        buffer.record(
+            RebornLogLevel::Warn,
+            "ironclaw::test",
+            "message 3".to_string(),
+        );
+        buffer.record(
+            RebornLogLevel::Warn,
+            "ironclaw::test",
+            "message 4".to_string(),
+        );
+
+        let response = buffer.query(RebornLogQueryRequest {
+            limit: Some(10),
+            cursor: Some(cursor),
+            follow: true,
+            ..RebornLogQueryRequest::default()
+        });
+
+        assert_eq!(
+            response
+                .entries
+                .iter()
+                .map(|entry| entry.message.as_str())
+                .collect::<Vec<_>>(),
+            vec!["message 3", "message 4"]
+        );
+        assert_eq!(response.next_cursor.as_deref(), Some("after:5"));
     }
 
     #[test]

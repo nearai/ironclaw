@@ -220,6 +220,8 @@ export function queryOperatorLogs({
   toolCallId,
   toolName,
   source,
+  tail,
+  follow,
 } = {}) {
   const url = new URL(`${V2_BASE}/operator/logs`, window.location.origin);
   if (limit != null) url.searchParams.set("limit", String(limit));
@@ -232,6 +234,8 @@ export function queryOperatorLogs({
   if (toolCallId) url.searchParams.set("tool_call_id", toolCallId);
   if (toolName) url.searchParams.set("tool_name", toolName);
   if (source) url.searchParams.set("source", source);
+  if (tail) url.searchParams.set("tail", "true");
+  if (follow) url.searchParams.set("follow", "true");
   return apiFetch(url.pathname + url.search);
 }
 

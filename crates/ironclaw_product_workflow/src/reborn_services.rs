@@ -2313,6 +2313,15 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         query: RebornOperatorLogsQuery,
     ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        if query.tail && query.follow {
+            return Err(RebornServicesError::validation(
+                WebUiInboundValidationError::new(
+                    "follow",
+                    WebUiInboundValidationCode::InvalidValue,
+                ),
+            ));
+        }
+
         let request = bounded_operator_logs_query(query);
         let logs = self.operator_logs.query_logs(caller, request).await?;
         Ok(RebornOperatorCommandPlaneResponse {
@@ -3931,7 +3940,8 @@ fn bounded_operator_logs_query(query: RebornOperatorLogsQuery) -> RebornLogQuery
         tool_call_id: bounded_operator_logs_context_string(query.tool_call_id),
         tool_name: bounded_operator_logs_context_string(query.tool_name),
         source: bounded_operator_logs_context_string(query.source),
-        tail: false,
+        tail: query.tail,
+        follow: query.follow,
     }
 }
 
