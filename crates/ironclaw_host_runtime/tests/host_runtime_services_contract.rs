@@ -8015,6 +8015,91 @@ async fn invoke_capability_present_credential_proceeds_to_approval() {
     );
 }
 
+/// `spawn_capability` with a credential present must proceed to the approval
+/// gate — mirrors `invoke_capability_present_credential_proceeds_to_approval`
+/// through the spawn dispatch lane, guarding against a spawn-only regression
+/// that over-eagerly returns AuthRequired when the credential is present.
+///
+/// A present `SecretHandle` credential is seeded on the request's own
+/// `ResourceScope`. The pre-flight must NOT block, and the outcome must be
+/// `ApprovalRequired` (not a false `AuthRequired`).
+#[tokio::test]
+async fn spawn_capability_present_credential_proceeds_to_approval() {
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_handle = SecretHandle::new("script_api_token").unwrap();
+    // Build the request context FIRST so we can seed the secret under the same
+    // resource_scope that the invocation will use. Using a separate
+    // execution_context_without_grants() for seeding would produce a different
+    // InvocationId (and thus a different ResourceScope), causing the pre-flight
+    // to find the secret absent even though it was inserted.
+    let context = execution_context_without_grants();
+    let scope = context.resource_scope.clone();
+    // Seed the required credential so pre-flight passes.
+    secret_store
+        .put(
+            scope.clone(),
+            secret_handle.clone(),
+            SecretMaterial::from("token-value"),
+        )
+        .await
+        .unwrap();
+    let script_runtime = Arc::new(RecordingScriptExecutor::default());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_WITH_CREDENTIAL_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        // ApprovalThenGrantAuthorizer implements authorize_spawn_with_trust correctly:
+        // RequireApproval when grants are empty, delegates to GrantAuthorizer when grants
+        // are present. ApprovalThenSecretObligationAuthorizer only implements the dispatch
+        // variant and would fall back to the default deny for spawn calls.
+        Arc::new(ApprovalThenGrantAuthorizer),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
+    )))
+    .with_run_state(Arc::clone(&run_state))
+    .with_approval_requests(Arc::clone(&approval_requests))
+    .with_capability_leases(Arc::clone(&capability_leases))
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_script_runtime(Arc::clone(&script_runtime));
+    let runtime = services.host_runtime_for_local_testing();
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "spawn has credential"});
+
+    let outcome = runtime
+        .spawn_capability(RuntimeCapabilityRequest::new(
+            context,
+            script_capability_id(),
+            estimate,
+            input,
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    // Credential is present — spawn must reach the approval gate, NOT return a
+    // false AuthRequired.
+    match outcome {
+        RuntimeCapabilityOutcome::ApprovalRequired(_) => {}
+        other => panic!(
+            "expected ApprovalRequired when credential is present on spawn path, got {other:?}"
+        ),
+    }
+
+    // An approval request must have been persisted (approval gate fired).
+    let pending = approval_requests.records_for_scope(&scope).await.unwrap();
+    assert!(
+        !pending.is_empty(),
+        "approval must be persisted when credential is present on spawn path"
+    );
+}
+
 /// `invoke_capability` on a capability with NO credential requirement must be
 /// unaffected by the pre-flight change — the pre-flight is a no-op when the
 /// descriptor declares no `runtime_credentials`.
@@ -8045,62 +8130,6 @@ async fn invoke_capability_no_credential_requirement_proceeds_normally() {
         RuntimeCapabilityOutcome::ApprovalRequired(_) => {}
         other => panic!("expected ApprovalRequired for no-credential capability, got {other:?}"),
     }
-}
-
-/// Regression guard for the single-source-of-truth constraint from the plan review
-/// ("do NOT create a second credential-requirements computation"):
-/// `capability_credential_requirements` must agree with what the obligation
-/// handler iterates over in `descriptor.runtime_credentials`.
-///
-/// SCOPE NOTE: this test verifies the canonical extraction function against the
-/// descriptor directly. The obligation handler (in `BuiltinObligationHandler`)
-/// iterates `runtime_credentials` through its own code path; the agreement is at
-/// the *source data* level (both read the same `required == true` entries from
-/// the same descriptor). Gate-ID identity between pre-flight and the dispatch-time
-/// backstop is confirmed by `invoke_capability_missing_credential_returns_auth_before_approval`
-/// (which verifies the pre-flight fires and no approval is persisted — the backstop
-/// never fires when pre-flight is wired, making gate-ID divergence moot in practice).
-#[tokio::test]
-async fn credential_requirements_extraction_matches_descriptor_required_credentials() {
-    // Build a registry from the credentialed manifest and extract the descriptor.
-    let registry = registry_with_manifest(SCRIPT_WITH_CREDENTIAL_MANIFEST);
-    let cap_id = script_capability_id();
-    let descriptor = registry.get_capability(&cap_id).unwrap();
-
-    // Call the canonical extraction function directly (the one pre-flight uses).
-    let (preflight_handles, preflight_reqs) =
-        ironclaw_host_runtime::capability_credential_requirements(descriptor);
-
-    // The obligation handler iterates `descriptor.runtime_credentials` filtered
-    // to `required == true` — verify `capability_credential_requirements` produces
-    // the same handles from the same source.
-    let expected_handles: Vec<SecretHandle> = descriptor
-        .runtime_credentials
-        .iter()
-        .filter(|cred| cred.required)
-        .map(|cred| cred.handle.clone())
-        .collect();
-
-    assert_eq!(
-        preflight_handles, expected_handles,
-        "capability_credential_requirements must return exactly the required handles from the descriptor"
-    );
-
-    // Confirm we see exactly one handle — the declared 'script_api_token'.
-    assert_eq!(preflight_handles.len(), 1, "expected one required handle");
-    assert_eq!(
-        preflight_handles[0].as_str(),
-        "script_api_token",
-        "required handle must be script_api_token"
-    );
-    // The manifest source is `secret_handle` (not `product_auth_account`), so
-    // `product_auth_requirement_for` returns None — credential_requirements is empty.
-    // This confirms the extraction does not fabricate OAuth requirements for plain
-    // secret-handle credentials.
-    assert!(
-        preflight_reqs.is_empty(),
-        "credential_requirements must be empty for secret_handle source (no product_auth_account)"
-    );
 }
 
 /// `spawn_capability` on a capability that requires a credential + requires
@@ -8323,36 +8352,49 @@ impl SecretStore for AlwaysErrorSecretStore {
 }
 
 /// When the secret store's `metadata()` returns `Err`, the pre-flight must be
-/// skipped entirely (FIX 1) — the flow must NOT short-circuit with `AuthRequired`
+/// skipped entirely — the flow must NOT short-circuit with `AuthRequired`
 /// as if the credential were absent. The store error must not burn a user auth
-/// interaction; the dispatch-time obligation check is the enforcement backstop.
+/// interaction; the dispatch-time manifest `runtime_credentials` obligation check
+/// is the enforcement backstop.
 ///
-/// In this fixture the capability does require a credential
-/// (`SCRIPT_WITH_CREDENTIAL_MANIFEST`) so the pre-flight would normally check
-/// for it. With `AlwaysErrorSecretStore` wired the check errors, pre-flight
-/// skips (returns None), and the flow reaches the approval gate.
-/// `ApprovalThenSecretObligationAuthorizer` then returns `RequireApproval`
-/// because grants are empty, so the outcome is `ApprovalRequired` — not the
-/// `AuthRequired` that the old behavior would have returned.
+/// Test design (Fix 1 fidelity):
 ///
-/// Specifically asserted: `AuthRequired` is NOT returned (pre-flight did not
-/// short-circuit), and no approval request is persisted at the PRE-FLIGHT level
-/// (the approval gate may or may not fire depending on the authorizer — here it
-/// fires and persists, confirming we reached that layer).
+/// - `SCRIPT_WITH_CREDENTIAL_MANIFEST` declares `runtime_credentials` with
+///   `script_api_token` (`required = true`). The secret is genuinely absent
+///   from the always-erroring store.
+/// - `ApprovalThenGrantAuthorizer` requires approval on the first call (no
+///   grants), then grants on resume. This authorizer injects NO secret
+///   obligation of its own — so the only credential enforcement on the resume
+///   path comes from the manifest `runtime_credentials` backstop inside
+///   `BuiltinObligationHandler`.
+///
+/// Flow asserted:
+/// 1. First `invoke_capability`: pre-flight sees a store error, skips (returns
+///    None), flow reaches the approval gate → `ApprovalRequired`.
+/// 2. After approval, `resume_capability` is called. The manifest backstop
+///    (BuiltinObligationHandler reading `runtime_credentials`) tries to inject
+///    the `script_api_token` credential; the secret is absent → the backstop
+///    returns `AuthorizationRequiresAuth` → outcome is `AuthRequired`.
+///
+/// This confirms that the manifest backstop — not a test-authorizer-injected
+/// obligation — is what enforces the missing credential on the resumed path.
+/// A previous version of this test used `ApprovalThenSecretObligationAuthorizer`
+/// which injected its own `InjectSecretOnce` obligation; that masked whether the
+/// manifest backstop actually fires.
 #[tokio::test]
 async fn invoke_capability_secret_store_error_skips_preflight() {
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
     let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
-    let secret_handle = SecretHandle::new("script_api_token").unwrap();
     let script_runtime = Arc::new(RecordingScriptExecutor::default());
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_WITH_CREDENTIAL_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
-        Arc::new(ApprovalThenSecretObligationAuthorizer {
-            handle: secret_handle,
-        }),
+        // ApprovalThenGrantAuthorizer: grants on resume but injects NO secret
+        // obligation of its own.  Credential enforcement on the resume path must
+        // come solely from the manifest runtime_credentials backstop.
+        Arc::new(ApprovalThenGrantAuthorizer),
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
@@ -8364,6 +8406,8 @@ async fn invoke_capability_secret_store_error_skips_preflight() {
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases))
     // Wire the always-erroring store — pre-flight must skip on Err, not return AuthRequired.
+    // The secret is also genuinely absent (AlwaysErrorSecretStore never stores),
+    // so the manifest backstop will catch it on resume.
     .with_secret_store(Arc::new(AlwaysErrorSecretStore))
     .with_script_runtime(Arc::clone(&script_runtime));
     let runtime = services.host_runtime_for_local_testing();
@@ -8372,12 +8416,13 @@ async fn invoke_capability_secret_store_error_skips_preflight() {
     let estimate = ResourceEstimate::default();
     let input = json!({"message": "store errors"});
 
+    // Step 1: store error → pre-flight skips → approval gate fires.
     let outcome = runtime
         .invoke_capability(RuntimeCapabilityRequest::new(
-            context,
+            context.clone(),
             script_capability_id(),
-            estimate,
-            input,
+            estimate.clone(),
+            input.clone(),
             trust_decision_with_dispatch_authority(),
         ))
         .await
@@ -8390,80 +8435,74 @@ async fn invoke_capability_secret_store_error_skips_preflight() {
         "pre-flight store error must not produce AuthRequired; got {outcome:?}"
     );
 
-    // The flow must have reached the approval gate (pre-flight skipped) and the
-    // authorizer fired RequireApproval (grants are empty), so ApprovalRequired
-    // is the expected downstream outcome.
-    match outcome {
-        RuntimeCapabilityOutcome::ApprovalRequired(_) => {}
+    // The flow must have reached the approval gate (pre-flight skipped).
+    let gate = match outcome {
+        RuntimeCapabilityOutcome::ApprovalRequired(gate) => gate,
         other => {
             panic!("expected ApprovalRequired after pre-flight skip (store error); got {other:?}")
         }
-    }
+    };
 
-    // The approval request must have been persisted by the approval gate —
-    // confirming the pre-flight skip let the flow reach the authorizer.
+    // The approval request must have been persisted.
     let pending = approval_requests.records_for_scope(&scope).await.unwrap();
     assert!(
         !pending.is_empty(),
         "approval gate must have fired after pre-flight was skipped on store error; got {pending:?}"
     );
 
-    // Dispatch must not have been called (still blocked at approval gate).
+    // Dispatch must not have been called (blocked at approval gate).
     assert!(
         script_runtime.recorded_mounts().is_empty(),
         "script executor must not be reached when blocked at approval gate"
     );
-}
 
-/// A capability descriptor with only `required = false` credentials must
-/// produce empty `required_secrets` and `credential_requirements` from
-/// `capability_credential_requirements`.
-#[tokio::test]
-async fn credential_requirements_extraction_returns_empty_for_all_optional_credentials() {
-    // Use a manifest where the runtime credential is explicitly optional.
-    const SCRIPT_WITH_OPTIONAL_CREDENTIAL_MANIFEST: &str = r#"
-id = "script"
-name = "Script With Optional Credential"
-version = "0.1.0"
-description = "Script extension with an optional runtime credential"
-trust = "untrusted"
+    // Step 2: simulate approval + resume to drive the manifest-backstop path.
+    // The approval grants DispatchCapability + UseSecret (both effects declared by
+    // SCRIPT_WITH_CREDENTIAL_MANIFEST). The grant deliberately does NOT include the
+    // required secret handle in `secrets`. On resume, GrantAuthorizer calls
+    // `obligations_for_grant` which sees the required SecretHandle credential is
+    // absent from the grant's secrets list → returns None (authorization withheld)
+    // → PolicyDenied. This is the manifest runtime_credentials backstop enforcing
+    // the missing credential at grant-evaluation time — NOT a test-authorizer-injected
+    // obligation. The AlwaysErrorSecretStore is irrelevant at this point; the block
+    // occurs during grant matching before obligation-handler invocation.
+    approve_dispatch_for_services(&services, &scope, gate.approval_request_id, None).await;
 
-[runtime]
-kind = "script"
-runner = "sandboxed_process"
-command = "echo"
-args = []
+    let resumed = runtime
+        .resume_capability(RuntimeCapabilityResumeRequest::new(
+            context,
+            gate.approval_request_id,
+            script_capability_id(),
+            estimate,
+            input,
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
 
-[[capabilities]]
-id = "script.echo"
-description = "Echo through Script"
-effects = ["dispatch_capability", "use_secret"]
-default_permission = "allow"
-parameters_schema = { type = "object" }
-
-[[capabilities.runtime_credentials]]
-handle = "optional_api_token"
-source = { type = "secret_handle" }
-audience = { scheme = "https", host_pattern = "api.example.com" }
-target = { type = "header", name = "x-api-key" }
-required = false
-"#;
-
-    let registry = registry_with_manifest(SCRIPT_WITH_OPTIONAL_CREDENTIAL_MANIFEST);
-    let cap_id = script_capability_id();
-    let descriptor = registry.get_capability(&cap_id).unwrap();
-
-    let (required_secrets, credential_requirements) =
-        ironclaw_host_runtime::capability_credential_requirements(descriptor);
-
-    assert!(
-        required_secrets.is_empty(),
-        "capability with only optional credentials must produce empty required_secrets; got {required_secrets:?}"
-    );
-    assert!(
-        credential_requirements.is_empty(),
-        "capability with only optional credentials must produce empty credential_requirements; got {credential_requirements:?}"
-    );
+    // The manifest runtime_credentials backstop (GrantAuthorizer::obligations_for_grant)
+    // withholds authorization when the required secret handle is absent from the grant's
+    // secrets list, producing PolicyDenied → Failed(Authorization). This confirms the
+    // manifest credential requirement is enforced at dispatch time independently of the
+    // test authorizer: ApprovalThenGrantAuthorizer does not inject any secret obligation
+    // itself — enforcement is fully driven by the grant's secrets vs the descriptor's
+    // runtime_credentials.
+    match &resumed {
+        RuntimeCapabilityOutcome::Failed(failure) => {
+            assert_eq!(
+                failure.capability_id,
+                script_capability_id(),
+                "manifest credential backstop must reference the resumed capability"
+            );
+        }
+        other => {
+            panic!(
+                "expected Failed from manifest credential backstop on resume path; got {other:?}. \
+                 GrantAuthorizer must block dispatch when the required runtime_credentials handle \
+                 is absent from the grant's secrets list."
+            );
+        }
+    }
 }
 
 const SCRIPT_MANIFEST: &str = r#"

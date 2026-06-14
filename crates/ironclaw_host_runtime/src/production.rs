@@ -322,10 +322,17 @@ impl DefaultHostRuntime {
     ///
     /// The dispatch-time obligation check remains the enforcement backstop
     /// regardless of whether this store is set.
+    ///
+    /// Production code must use `HostRuntimeServices::build_host_runtime()` which
+    /// wires the secret store automatically. This setter is `pub(crate)` to prevent
+    /// a second public seam for secret-store configuration on the production facade.
     // arch-exempt: optional_arc, genuinely optional — minimal/test graphs that
     // never need pre-flight skip this; production wires it from HostRuntimeServices,
     // plan #4539 (Fix B)
-    pub fn with_credential_preflight_store(mut self, secret_store: Arc<dyn SecretStore>) -> Self {
+    pub(crate) fn with_credential_preflight_store(
+        mut self,
+        secret_store: Arc<dyn SecretStore>,
+    ) -> Self {
         self.credential_preflight_store = Some(secret_store);
         self
     }
@@ -1805,7 +1812,7 @@ fn completed_outcome_from(
 /// `secret_store.metadata`), so including their slot handle here would produce
 /// a false-positive `AuthRequired` for capabilities whose product-auth account
 /// is already connected.
-pub fn capability_credential_requirements(
+pub(crate) fn capability_credential_requirements(
     descriptor: &ironclaw_host_api::CapabilityDescriptor,
 ) -> (
     Vec<SecretHandle>,
@@ -2123,7 +2130,9 @@ mod tests {
 
     use super::*;
     use ironclaw_capabilities::CapabilityInvocationError;
-    use ironclaw_extensions::{ExtensionManifest, ManifestSource};
+    use ironclaw_extensions::{
+        ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
+    };
     use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
     use ironclaw_host_api::{
         CapabilityId, DispatchFailureKind, ExtensionId, HostPortCatalog, PackageSource,
@@ -2530,6 +2539,157 @@ output_schema_ref = "schemas/test.output.json"
                 "{kind:?}"
             );
         }
+    }
+
+    // ─── capability_credential_requirements unit tests ──────────────────────────
+    //
+    // These were previously integration tests in host_runtime_services_contract.rs
+    // that called the function via `ironclaw_host_runtime::capability_credential_requirements`.
+    // They are kept here as unit tests because the function is now `pub(crate)`,
+    // making it invisible to external test binaries. Coverage is equivalent.
+
+    fn build_descriptor_for_manifest(
+        manifest_toml: &str,
+    ) -> ironclaw_host_api::CapabilityDescriptor {
+        let manifest = ExtensionManifest::parse(
+            manifest_toml,
+            ManifestSource::InstalledLocal,
+            &HostPortCatalog::empty(),
+        )
+        .expect("manifest must parse");
+        let cap_id = manifest.capabilities[0].id.clone();
+        let root =
+            VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
+        let package = ExtensionPackage::from_manifest(manifest, root).expect("package must build");
+        let mut registry = ExtensionRegistry::new();
+        registry.insert(package).unwrap();
+        registry.get_capability(&cap_id).unwrap().clone()
+    }
+
+    /// `capability_credential_requirements` must return exactly the required
+    /// `SecretHandle`-source handles declared in the descriptor, filtered to
+    /// `required == true`, and must not include `ProductAuthAccount`-source handles.
+    ///
+    /// Previously `credential_requirements_extraction_matches_descriptor_required_credentials`
+    /// in host_runtime_services_contract.rs (moved here because the function is
+    /// now `pub(crate)`; coverage is identical).
+    #[test]
+    fn credential_requirements_extraction_matches_descriptor_required_credentials() {
+        const MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "script"
+name = "Script With Credential"
+version = "0.1.0"
+description = "Script extension that requires a runtime credential"
+trust = "untrusted"
+
+[runtime]
+kind = "script"
+runner = "sandboxed_process"
+command = "echo"
+args = []
+
+[[capabilities]]
+id = "script.echo"
+description = "Echo through Script"
+effects = ["dispatch_capability", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/test/input.v1.json"
+output_schema_ref = "schemas/test/output.v1.json"
+prompt_doc_ref = "prompts/test.md"
+
+[[capabilities.runtime_credentials]]
+handle = "script_api_token"
+source = { type = "secret_handle" }
+audience = { scheme = "https", host_pattern = "api.example.com" }
+target = { type = "header", name = "x-api-key" }
+required = true
+"#;
+        let descriptor = build_descriptor_for_manifest(MANIFEST);
+
+        let (preflight_handles, preflight_reqs) = capability_credential_requirements(&descriptor);
+
+        // The obligation handler iterates `descriptor.runtime_credentials` filtered
+        // to `required == true` — verify `capability_credential_requirements` produces
+        // the same handles from the same source.
+        let expected_handles: Vec<SecretHandle> = descriptor
+            .runtime_credentials
+            .iter()
+            .filter(|cred| cred.required)
+            .map(|cred| cred.handle.clone())
+            .collect();
+
+        assert_eq!(
+            preflight_handles, expected_handles,
+            "capability_credential_requirements must return exactly the required handles from the descriptor"
+        );
+        assert_eq!(preflight_handles.len(), 1, "expected one required handle");
+        assert_eq!(
+            preflight_handles[0].as_str(),
+            "script_api_token",
+            "required handle must be script_api_token"
+        );
+        // The manifest source is `secret_handle` (not `product_auth_account`), so
+        // `product_auth_requirement_for` returns None — credential_requirements is empty.
+        assert!(
+            preflight_reqs.is_empty(),
+            "credential_requirements must be empty for secret_handle source (no product_auth_account)"
+        );
+    }
+
+    /// A capability descriptor with only `required = false` credentials must
+    /// produce empty `required_secrets` and `credential_requirements`.
+    ///
+    /// Previously `credential_requirements_extraction_returns_empty_for_all_optional_credentials`
+    /// in host_runtime_services_contract.rs (moved here because the function is now
+    /// `pub(crate)`; coverage is identical).
+    #[test]
+    fn credential_requirements_extraction_returns_empty_for_all_optional_credentials() {
+        const MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "script"
+name = "Script With Optional Credential"
+version = "0.1.0"
+description = "Script extension with an optional runtime credential"
+trust = "untrusted"
+
+[runtime]
+kind = "script"
+runner = "sandboxed_process"
+command = "echo"
+args = []
+
+[[capabilities]]
+id = "script.echo"
+description = "Echo through Script"
+effects = ["dispatch_capability", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/test/input.v1.json"
+output_schema_ref = "schemas/test/output.v1.json"
+prompt_doc_ref = "prompts/test.md"
+
+[[capabilities.runtime_credentials]]
+handle = "optional_api_token"
+source = { type = "secret_handle" }
+audience = { scheme = "https", host_pattern = "api.example.com" }
+target = { type = "header", name = "x-api-key" }
+required = false
+"#;
+        let descriptor = build_descriptor_for_manifest(MANIFEST);
+
+        let (required_secrets, credential_requirements) =
+            capability_credential_requirements(&descriptor);
+
+        assert!(
+            required_secrets.is_empty(),
+            "capability with only optional credentials must produce empty required_secrets; got {required_secrets:?}"
+        );
+        assert!(
+            credential_requirements.is_empty(),
+            "capability with only optional credentials must produce empty credential_requirements; got {credential_requirements:?}"
+        );
     }
 
     #[test]
