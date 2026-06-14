@@ -2064,3 +2064,339 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
         "exactly one successful dispatch (loser never reached the dispatcher)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// BUG FIX 1b — Deny after AlreadyClaimed: lease must be Revoked
+//
+// When `auth_resume_json` is called with a prior Claimed lease (AlreadyClaimed
+// path), `begin_dispatch_claimed` transitions the lease Claimed→Dispatching
+// BEFORE `authorize_dispatch_with_trust` runs in `dispatch_resumed_capability`.
+//
+// Pre-fix: if authorization returns Deny, the function returned early without
+// touching the lease, leaving it stuck in Dispatching (burned / locked).
+//
+// Post-fix: the Deny arm revokes the AlreadyClaimed lease before returning,
+// so the lease ends in Revoked (terminal), not Dispatching.
+//
+// Test drive: invoke → approve → resume_json (auth bounce) → lease is Claimed →
+// auth_resume_json with DenyingAuthorizer → assert lease is Revoked.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn auth_resume_json_authorization_deny_revokes_dispatching_lease() {
+    use async_trait::async_trait;
+    use ironclaw_trust::TrustDecision as TrustDecisionAlias;
+
+    struct DenyingAuthorizer;
+
+    #[async_trait]
+    impl TrustAwareCapabilityDispatchAuthorizer for DenyingAuthorizer {
+        async fn authorize_dispatch_with_trust(
+            &self,
+            _context: &ExecutionContext,
+            _descriptor: &CapabilityDescriptor,
+            _estimate: &ResourceEstimate,
+            _trust_decision: &TrustDecisionAlias,
+        ) -> Decision {
+            Decision::Deny {
+                reason: DenyReason::MissingGrant,
+            }
+        }
+    }
+
+    // Dispatcher: first call (resume_json) → AuthRequired bounce; second call
+    // (auth_resume_json) is never reached because the authorizer denies first.
+    struct AuthRequiredOnFirstCall;
+
+    #[async_trait]
+    impl CapabilityDispatcher for AuthRequiredOnFirstCall {
+        async fn dispatch_json(
+            &self,
+            request: CapabilityDispatchRequest,
+        ) -> Result<CapabilityDispatchResult, DispatchError> {
+            Err(DispatchError::AuthRequired {
+                capability: request.capability_id,
+                required_secrets: vec![],
+                credential_requirements: vec![],
+            })
+        }
+    }
+
+    let registry = registry_with_echo_capability();
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let leases = InMemoryCapabilityLeaseStore::new();
+
+    // ── Phase 1: invoke → BlockedApproval ──────────────────────────────────
+    let block_dispatcher = AuthRequiredOnFirstCall;
+    let block_host = CapabilityHost::new(&registry, &block_dispatcher, &ApprovalAuthorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+
+    let original_context = execution_context(CapabilitySet::default());
+    let scope = original_context.resource_scope.clone();
+    let invocation_id = original_context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "deny-after-claimed test"});
+
+    block_host
+        .invoke_json(CapabilityInvocationRequest {
+            context: original_context.clone(),
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+
+    let approval_id = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .approval_request_id
+        .unwrap();
+
+    // ── Phase 2: approve → Active lease ────────────────────────────────────
+    let issued = ApprovalResolver::new(&approval_requests, &leases)
+        .approve_dispatch(&scope, approval_id, dispatch_lease_approval())
+        .await
+        .unwrap();
+    let lease_id = issued.grant.id;
+
+    // ── Phase 3: resume_json → AuthRequired bounce → lease Claimed ──────────
+    let mut resume_context = original_context.clone();
+    resume_context.grants = CapabilitySet {
+        grants: vec![dispatch_grant()],
+    };
+    let resume_authorizer = GrantAuthorizer::new();
+    let resume_dispatcher = AuthRequiredOnFirstCall;
+    let resume_host = CapabilityHost::new(&registry, &resume_dispatcher, &resume_authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+
+    resume_host
+        .resume_json(CapabilityResumeRequest {
+            context: resume_context.clone(),
+            approval_request_id: approval_id,
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+
+    // Pre-condition: lease must be Claimed after auth bounce.
+    let lease_before = leases.get(&scope, lease_id).await.unwrap();
+    assert_eq!(
+        lease_before.status,
+        CapabilityLeaseStatus::Claimed,
+        "pre-condition: lease must be Claimed after resume_json auth bounce"
+    );
+
+    // ── Phase 4: auth_resume_json with DenyingAuthorizer ────────────────────
+    // This is the bug path: begin_dispatch_claimed (Claimed→Dispatching) runs
+    // before authorize_dispatch_with_trust, then Deny is returned.
+    // Pre-fix: lease stuck in Dispatching.
+    // Post-fix: lease revoked → Revoked.
+    let deny_authorizer = DenyingAuthorizer;
+    let deny_dispatcher = RecordingDispatcher::default();
+    let deny_host = CapabilityHost::new(&registry, &deny_dispatcher, &deny_authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+
+    let err = deny_host
+        .auth_resume_json(CapabilityAuthResumeRequest {
+            context: resume_context,
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+            approval_request_id: Some(approval_id),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, CapabilityInvocationError::AuthorizationDenied { .. }),
+        "expected AuthorizationDenied, got {err:?}"
+    );
+    assert_eq!(
+        deny_dispatcher.dispatch_count(),
+        0,
+        "dispatch must not fire when authorization is denied"
+    );
+
+    // ── Core assertion: lease must be Revoked, not Dispatching ───────────────
+    // Pre-fix: lease.status == Dispatching (burned/locked).
+    // Post-fix: lease.status == Revoked.
+    let lease_after = leases.get(&scope, lease_id).await.unwrap();
+    assert_eq!(
+        lease_after.status,
+        CapabilityLeaseStatus::Revoked,
+        "lease must be Revoked after authorization Deny in auth_resume_json \
+         (pre-fix: lease was left stuck in Dispatching)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// BUG FIX 1b — RequireApproval after AlreadyClaimed: lease must be Revoked
+//
+// Same invariant as the Deny test above, but the authorizer returns
+// RequireApproval instead of Deny.  Both are terminal refusals in the context
+// of a resumed invocation; neither should leave the lease stuck in Dispatching.
+//
+// Pre-fix: RequireApproval arm returned early without revoking, leaving the
+// Dispatching lease permanently locked.
+// Post-fix: RequireApproval arm revokes AlreadyClaimed lease before returning.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn auth_resume_json_authorization_require_approval_revokes_dispatching_lease() {
+    use async_trait::async_trait;
+
+    // Dispatcher: always returns AuthRequired (used for the resume_json bounce).
+    struct AlwaysAuthRequired;
+
+    #[async_trait]
+    impl CapabilityDispatcher for AlwaysAuthRequired {
+        async fn dispatch_json(
+            &self,
+            request: CapabilityDispatchRequest,
+        ) -> Result<CapabilityDispatchResult, DispatchError> {
+            Err(DispatchError::AuthRequired {
+                capability: request.capability_id,
+                required_secrets: vec![],
+                credential_requirements: vec![],
+            })
+        }
+    }
+
+    let registry = registry_with_echo_capability();
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let leases = InMemoryCapabilityLeaseStore::new();
+
+    // ── Phase 1: invoke → BlockedApproval ──────────────────────────────────
+    let block_host = CapabilityHost::new(&registry, &AlwaysAuthRequired, &ApprovalAuthorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+
+    let original_context = execution_context(CapabilitySet::default());
+    let scope = original_context.resource_scope.clone();
+    let invocation_id = original_context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "require-approval-after-claimed test"});
+
+    block_host
+        .invoke_json(CapabilityInvocationRequest {
+            context: original_context.clone(),
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+
+    let approval_id = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .approval_request_id
+        .unwrap();
+
+    // ── Phase 2: approve → Active lease ────────────────────────────────────
+    let issued = ApprovalResolver::new(&approval_requests, &leases)
+        .approve_dispatch(&scope, approval_id, dispatch_lease_approval())
+        .await
+        .unwrap();
+    let lease_id = issued.grant.id;
+
+    // ── Phase 3: resume_json → AuthRequired → lease Claimed ─────────────────
+    let mut resume_context = original_context.clone();
+    resume_context.grants = CapabilitySet {
+        grants: vec![dispatch_grant()],
+    };
+    let resume_grant_authorizer = GrantAuthorizer::new();
+    let resume_host = CapabilityHost::new(&registry, &AlwaysAuthRequired, &resume_grant_authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+
+    resume_host
+        .resume_json(CapabilityResumeRequest {
+            context: resume_context.clone(),
+            approval_request_id: approval_id,
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+
+    // Pre-condition: lease Claimed after auth bounce.
+    let lease_before = leases.get(&scope, lease_id).await.unwrap();
+    assert_eq!(
+        lease_before.status,
+        CapabilityLeaseStatus::Claimed,
+        "pre-condition: lease must be Claimed after resume_json auth bounce"
+    );
+
+    // ── Phase 4: auth_resume_json with ApprovalAuthorizer (RequireApproval) ──
+    // ApprovalAuthorizer always returns Decision::RequireApproval.
+    // Pre-fix: lease stuck Dispatching.
+    // Post-fix: lease → Revoked.
+    let approval_authorizer_for_resume = ApprovalAuthorizer;
+    let recording_dispatcher = RecordingDispatcher::default();
+    let req_approval_host = CapabilityHost::new(
+        &registry,
+        &recording_dispatcher,
+        &approval_authorizer_for_resume,
+    )
+    .with_run_state(&run_state)
+    .with_approval_requests(&approval_requests)
+    .with_capability_leases(&leases);
+
+    let err = req_approval_host
+        .auth_resume_json(CapabilityAuthResumeRequest {
+            context: resume_context,
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+            approval_request_id: Some(approval_id),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            CapabilityInvocationError::AuthorizationRequiresApproval { .. }
+        ),
+        "expected AuthorizationRequiresApproval, got {err:?}"
+    );
+    assert_eq!(
+        recording_dispatcher.dispatch_count(),
+        0,
+        "dispatch must not fire when authorization requires approval"
+    );
+
+    // ── Core assertion: lease must be Revoked, not Dispatching ───────────────
+    // Pre-fix: lease.status == Dispatching (permanently locked).
+    // Post-fix: lease.status == Revoked.
+    let lease_after = leases.get(&scope, lease_id).await.unwrap();
+    assert_eq!(
+        lease_after.status,
+        CapabilityLeaseStatus::Revoked,
+        "lease must be Revoked after authorization RequireApproval in auth_resume_json \
+         (pre-fix: lease was left stuck in Dispatching)"
+    );
+}

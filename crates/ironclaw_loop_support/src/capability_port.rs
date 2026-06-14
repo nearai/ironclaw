@@ -1355,6 +1355,20 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             request.approval_resume.as_ref(),
             request.auth_resume.as_ref(),
         ) {
+            (Some(_), Some(_)) => {
+                // Both resume modes set simultaneously is an illegal invocation:
+                // approval_resume and auth_resume are mutually exclusive paths.
+                // Fail closed — do not dispatch.
+                tracing::warn!(
+                    invocation_id = %invocation_id,
+                    "capability invocation rejected: approval_resume and auth_resume are both set"
+                );
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "capability invocation has both approval_resume and auth_resume set; \
+                     these resume modes are mutually exclusive",
+                ));
+            }
             (Some(resume), _) => {
                 let runtime_request = RuntimeCapabilityResumeRequest::new(
                     invocation_context,
@@ -5591,6 +5605,72 @@ mod tests {
         assert_eq!(invocation_context.trust, TrustClass::UserTrusted);
         assert_eq!(invocation_context.mounts, MountView::default());
         assert_eq!(invocation_context.grants.grants.len(), 1);
+    }
+
+    /// Guard: a `CapabilityInvocation` with both `approval_resume` and `auth_resume` set
+    /// must be rejected fail-closed with `InvalidInvocation` — the two resume modes are
+    /// mutually exclusive and simultaneous presence indicates a malformed invocation.
+    #[tokio::test]
+    async fn invoke_capability_rejects_both_resume_modes_set() {
+        use ironclaw_host_api::ApprovalRequestId;
+        use ironclaw_turns::run_profile::{CapabilityApprovalResume, CapabilityAuthResume};
+
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let port = runtime_capability_port(
+            &capability_id,
+            &provider_id,
+            Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+                capability_id.clone(),
+                provider_id.clone(),
+            )])),
+            dummy_result_writer(),
+            dummy_milestone_sink(),
+            "thread-both-resume-modes-set",
+        )
+        .await;
+
+        // Obtain a valid surface_version and input_ref so the invocation
+        // reaches the dispatch match — the guard fires there.
+        let invocation = visible_runtime_invocation(&port).await;
+
+        let resume_token =
+            CapabilityResumeToken::new(InvocationId::new().to_string()).expect("valid token");
+        let dual_resume_invocation = CapabilityInvocation {
+            surface_version: invocation.surface_version,
+            capability_id: invocation.capability_id,
+            input_ref: invocation.input_ref,
+            approval_resume: Some(CapabilityApprovalResume {
+                approval_request_id: ApprovalRequestId::new(),
+                resume_token: resume_token.clone(),
+                correlation_id: CorrelationId::new(),
+                input_ref: CapabilityInputRef::new("input:test-dual-resume")
+                    .expect("valid input ref"),
+                input: serde_json::json!({}),
+                estimate: ResourceEstimate::default(),
+            }),
+            auth_resume: Some(CapabilityAuthResume {
+                resume_token,
+                prior_approval: None,
+            }),
+        };
+
+        let err = port
+            .invoke_capability(dual_resume_invocation)
+            .await
+            .expect_err("dual-resume invocation must be rejected");
+
+        assert_eq!(
+            err.kind,
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "expected InvalidInvocation, got {:?}",
+            err.kind
+        );
+        assert!(
+            err.safe_summary.contains("mutually exclusive"),
+            "error message should name the mutual-exclusion constraint: {:?}",
+            err.safe_summary
+        );
     }
 
     fn visible_request(

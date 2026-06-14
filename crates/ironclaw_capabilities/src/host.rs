@@ -1706,6 +1706,20 @@ where
                     "AuthorizationDenied",
                 )
                 .await;
+                // The AlreadyClaimed lease was transitioned to Dispatching in the
+                // auth_resume_json preamble, before this authorization check ran.
+                // A Deny is terminal — revoke the lease so it does not stay stuck
+                // in Dispatching.  PendingClaim and NoPriorLease have no pre-authz
+                // state mutation here.
+                if let ResumedLeaseState::AlreadyClaimed(store, lease) = &lease_state
+                    && let Err(error) = store.revoke(&scope, lease.grant.id).await
+                {
+                    warn!(
+                        lease_id = %lease.grant.id,
+                        revoke_error_kind = capability_lease_error_kind(&error),
+                        "failed to revoke reused approval lease after authorization refused auth-resume; lease may remain Dispatching",
+                    );
+                }
                 return Err(CapabilityInvocationError::AuthorizationDenied {
                     capability: capability_id,
                     reason,
@@ -1719,6 +1733,18 @@ where
                     "AuthorizationRequiresApproval",
                 )
                 .await;
+                // Same as the Deny arm: the AlreadyClaimed lease was transitioned to
+                // Dispatching before authorization ran; a RequireApproval refusal is
+                // also terminal — revoke so it does not remain stuck in Dispatching.
+                if let ResumedLeaseState::AlreadyClaimed(store, lease) = &lease_state
+                    && let Err(error) = store.revoke(&scope, lease.grant.id).await
+                {
+                    warn!(
+                        lease_id = %lease.grant.id,
+                        revoke_error_kind = capability_lease_error_kind(&error),
+                        "failed to revoke reused approval lease after authorization refused auth-resume; lease may remain Dispatching",
+                    );
+                }
                 return Err(CapabilityInvocationError::AuthorizationRequiresApproval {
                     capability: capability_id,
                 });
