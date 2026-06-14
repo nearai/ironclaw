@@ -5,7 +5,7 @@ use crate::{state::LoopExecutionState, strategies::TurnSummary};
 
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, HostStage, StageContext,
-    TurnCompletedStep,
+    TurnCompletedStep, loop_exit::try_final_answer_nudge,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -27,6 +27,27 @@ impl ExecutorStage<AssistantReplyInput> for AssistantReplyStage {
         input: AssistantReplyInput,
     ) -> Result<TurnCompletedStep, AgentLoopExecutorError> {
         let mut state = input.state;
+
+        // Primary nudge site: the model returned TEXT with no tool calls, but it's
+        // empty or a trailed-off preamble (ends with ":") — i.e. no real closing
+        // answer. Instead of finalizing that empty reply (→ GracefulStop with
+        // nothing to grade), try one tool-free final-answer nudge. No-op unless
+        // the run profile enables driver-specific nudges.
+        let trimmed = input.reply.content.trim();
+        if trimmed.is_empty() || trimmed.ends_with(':') {
+            if let Some(reply_ref) = try_final_answer_nudge(ctx, &mut state).await? {
+                state.assistant_refs.push(reply_ref.clone());
+                state = match CheckpointStage.cancel_if_requested(ctx, state).await? {
+                    CancelCheck::Continue(state) => *state,
+                    CancelCheck::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
+                };
+                return Ok(TurnCompletedStep::Continue {
+                    state: Box::new(state),
+                    summary: TurnSummary::reply_only(reply_ref),
+                });
+            }
+        }
+
         let output_tokens = input
             .usage
             .map(|usage| usage.output_tokens)
