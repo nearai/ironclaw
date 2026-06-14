@@ -34,7 +34,7 @@ test("highlight.js token classes have local readable styles", () => {
   }
   assert.match(
     appCssSource,
-    /\.markdown-body pre code \{ color: var\(--v2-text\); \}/,
+    /\.markdown-body\s+pre\s+code\s*\{\s*color:\s*var\(--v2-text\);\s*\}/,
     "plain or unknown-language code blocks should remain readable without highlighted tokens",
   );
 });
