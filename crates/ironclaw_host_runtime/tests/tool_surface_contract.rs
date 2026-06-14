@@ -24,9 +24,9 @@ use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, CapabilitySurfaceVersion, DefaultHostRuntime, HTTP_CAPABILITY_ID,
     HostRuntime, MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeFailureKind, SurfaceKind, VisibleCapabilityAccess,
-    VisibleCapabilityRequest, VisibleCapabilitySurface, builtin_first_party_package,
-    publish_hot_capability_catalog,
+    RuntimeCapabilityRequest, RuntimeFailureKind, SurfaceKind, TRIGGER_CREATE_CAPABILITY_ID,
+    VisibleCapabilityAccess, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    builtin_first_party_package, publish_hot_capability_catalog,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -542,6 +542,21 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
     assert_schema_has_property(&surface, "builtin.skill_install", "content");
     assert_schema_has_property(&surface, "builtin.skill_install", "url");
     assert_schema_has_property(&surface, "builtin.skill_install", "name");
+    let trigger_create_schema = &surface
+        .capabilities
+        .iter()
+        .find(|capability| capability.descriptor.id == capability_id(TRIGGER_CREATE_CAPABILITY_ID))
+        .expect("builtin.trigger_create should be visible")
+        .descriptor
+        .parameters_schema;
+    let cron_description = trigger_create_schema["properties"]["cron"]["description"]
+        .as_str()
+        .expect("cron property should describe accepted syntax");
+    assert!(
+        cron_description.contains("5-field standard cron")
+            && cron_description.contains("seconds-FIRST"),
+        "trigger_create cron description should expose 5-field and Quartz seconds-FIRST guidance: {cron_description}"
+    );
 
     let http_schema = &surface
         .capabilities

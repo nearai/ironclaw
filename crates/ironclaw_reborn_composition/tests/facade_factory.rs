@@ -1130,6 +1130,9 @@ async fn local_dev_services_dispatch_trigger_management_through_composed_runtime
         .as_str()
         .expect("created trigger id")
         .to_string();
+    assert_eq!(created["trigger"]["run_in_flight"], json!(false));
+    assert_eq!(created["trigger"]["enabled"], json!(true));
+    assert_eq!(created["trigger"]["last_error"], Value::Null);
 
     let local_dev_db = libsql_db_at(dir.path().join("reborn-local-dev.db")).await;
     assert_eq!(libsql_trigger_record_count(&local_dev_db).await, 1);

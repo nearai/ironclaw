@@ -316,7 +316,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                     "type": "string",
                     "description": "Prompt submitted when the trigger fires. Runtime validation caps UTF-8 content at 32768 bytes."
                 },
-                "cron": { "type": "string", "description": "Five-, six-, or seven-field cron expression; fire cadence must be at least one minute" },
+                "cron": { "type": "string", "description": "Cron expression controlling when the trigger fires. Use 5-field standard cron (minute hour dom month dow) as the safe default — e.g. every 10 minutes: `*/10 * * * *`; daily at 9am: `0 9 * * *`; hourly at :10 past: `10 * * * *`. 6- or 7-field Quartz format is also accepted but is seconds-FIRST; if you use it, the seconds field must be literal `0` (e.g. `0 30 8 * * *` = 8:30am daily). Fire cadence must be at least one minute." },
                 "timezone": { "type": "string", "description": "IANA timezone name for cron evaluation (e.g. 'America/New_York', 'Europe/London', 'UTC'). The cron expression is evaluated in this timezone; fire times are stored and compared in UTC. If the user's timezone is already known from the conversation or their settings, use it without asking; if unknown, ask the user before creating the trigger. Never silently assume UTC — a trigger that fires at the wrong local time is worse than no trigger." }
             },
             "required": ["name", "prompt", "cron", "timezone"],

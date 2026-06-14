@@ -85,9 +85,10 @@ It is the source of truth for fire eligibility.
 - `Scheduled` means the trigger may be polled and fired.
 - `Paused` means the trigger is retained but must not fire.
 - `Completed` is reserved for future finite schedules and must not be treated as a V1 cron-state requirement.
-- V1 does not expose a separate `enabled` field. Durable backends may add
-  denormalized indexes derived from `state == Scheduled`, but those indexes must
-  never become independent fire gates.
+- V1 tool output exposes `enabled` as a derived field for model/user
+  observability. It is `true` exactly when `state == Scheduled`; durable
+  backends may add denormalized indexes derived from `state == Scheduled`, but
+  those indexes must never become independent fire gates.
 
 ---
 
@@ -389,9 +390,13 @@ The trigger system must expose `trigger_create`, `trigger_list`, and `trigger_re
   The shared service preserves the conversation store's mutation lock across
   both paths and avoids racing optimistic durable-state writes.
 - `trigger_list` is caller-scoped and surfaces the current schedule state plus
-  `last_status` and a bounded `recent_runs` projection. Omitted `run_limit`
-  defaults to 25 recent runs per trigger; callers that do not need embedded run
-  history pass `run_limit = 0`.
+  `run_in_flight`, `enabled`, `last_status`, `last_error`, and a bounded
+  `recent_runs` projection. `run_in_flight` is true only while a fire is
+  actively claimed or accepted. `enabled` is derived from `state == Scheduled`.
+  `last_error` is present when the most recent fire failed and explains whether
+  the trigger will retry on schedule, is paused, or is terminally completed.
+  Omitted `run_limit` defaults to 25 recent runs per trigger; callers that do
+  not need embedded run history pass `run_limit = 0`.
 - `trigger_remove` is caller-scoped delete.
 - Local-dev builds compiled with `libsql` store trigger records in the
   local-dev libSQL database (`reborn-local-dev.db`) through the same
