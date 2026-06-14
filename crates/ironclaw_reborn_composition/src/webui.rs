@@ -625,9 +625,10 @@ fn status_check_from_readiness_diagnostic(
     let id = format!("readiness_{component}");
     let status = match diagnostic.status {
         RebornReadinessDiagnosticStatus::Blocking => RebornOperatorStatusState::Blocked,
-        RebornReadinessDiagnosticStatus::Warning
-        | RebornReadinessDiagnosticStatus::Info
-        | RebornReadinessDiagnosticStatus::Unknown(_) => RebornOperatorStatusState::Degraded,
+        RebornReadinessDiagnosticStatus::Warning | RebornReadinessDiagnosticStatus::Unknown(_) => {
+            RebornOperatorStatusState::Degraded
+        }
+        RebornReadinessDiagnosticStatus::Info => RebornOperatorStatusState::Ready,
     };
     let severity = match diagnostic.status {
         RebornReadinessDiagnosticStatus::Blocking => RebornOperatorStatusSeverity::Critical,
