@@ -40,7 +40,7 @@ sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "rt", "sync", "time"] }
 tokio-postgres = { version = "0.7", optional = true, features = ["with-serde_json-1"] }
-tokio-postgres-rustls = { version = "0.13", optional = true }
+tokio-postgres-rustls = { version = "0.14", optional = true }
 tracing = "0.1"
 urlencoding = "2"
 webpki-roots = { version = "0.26", optional = true }
