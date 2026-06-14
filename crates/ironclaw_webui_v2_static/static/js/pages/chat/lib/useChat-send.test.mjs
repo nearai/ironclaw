@@ -4,6 +4,7 @@ import test from "node:test";
 import vm from "node:vm";
 
 import { messagesFromTimeline } from "./history-messages.js";
+import { toRenderAttachment, toWireAttachment } from "./attachments.js";
 import {
   looksLikeChannelConnectCommand,
   resolveChannelConnectCommand,
@@ -59,56 +60,6 @@ function createReactStub({ initialByIndex = new Map(), setCalls = [] } = {}) {
   };
 }
 
-function createSendGuardContext() {
-  let sendCalled = false;
-  const context = {
-    AbortController,
-    Date,
-    Error,
-    Map,
-    Math,
-    React: createReactStub(),
-    addPending,
-    cancelRunRequest: async () => {},
-    clearTimeout,
-    createThreadRequest: async () => {
-      throw new Error("thread should already exist");
-    },
-    globalThis: {},
-    listConnectableChannels: async () => {
-      throw new Error("unsupported payloads should not fetch connectable channels");
-    },
-    looksLikeChannelConnectCommand,
-    queryClient: {
-      fetchQuery: async () => {
-        throw new Error("unsupported payloads should not fetch connectable channels");
-      },
-      invalidateQueries: () => {},
-    },
-    recordAcceptedMessageRef,
-    removePending,
-    resolveChannelConnectCommand,
-    resolveGateRequest: async () => {},
-    sendMessage: async () => {
-      sendCalled = true;
-    },
-    setInterval,
-    setTimeout,
-    submitManualToken: async () => {},
-    useChatEvents: () => () => {},
-    useHistory: () => ({
-      messages: [],
-      hasMore: false,
-      nextCursor: null,
-      isLoading: false,
-      loadHistory: () => {},
-      setMessages: () => {},
-    }),
-    useSSE: () => ({ status: "idle" }),
-  };
-  return { context, sendWasCalled: () => sendCalled };
-}
-
 test("useChat.send: accepted ref reconciles pending message on timeline reload", async () => {
   const threadId = "thread-1";
   let renderedMessages = [];
@@ -122,6 +73,8 @@ test("useChat.send: accepted ref reconciles pending message on timeline reload",
     Math,
     React: createReactStub(),
     addPending,
+    toRenderAttachment,
+    toWireAttachment,
     cancelRunRequest: async () => {},
     clearTimeout,
     createThreadRequest: async () => {
@@ -205,50 +158,140 @@ test("useChat.send: accepted ref reconciles pending message on timeline reload",
   );
 });
 
-test("useChat.send: rejects image attachments instead of dropping them", async () => {
+function createSendCaptureContext() {
+  let sentBody = null;
+  let renderedMessages = [];
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub(),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("thread should already exist");
+    },
+    globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("attachment sends should not fetch connectable channels");
+    },
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("attachment sends should not fetch connectable channels");
+      },
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async (body) => {
+      sentBody = body;
+      return {
+        accepted_message_ref: "msg:message-1",
+        run_id: "run-1",
+        status: "queued",
+        thread_id: body.threadId,
+      };
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: [],
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+  return {
+    context,
+    sentBody: () => sentBody,
+    renderedMessages: () => renderedMessages,
+  };
+}
+
+test("useChat.send: forwards staged attachments to sendMessage in wire shape", async () => {
   const threadId = "thread-1";
-  const { context, sendWasCalled } = createSendGuardContext();
+  const { context, sentBody } = createSendCaptureContext();
 
   vm.runInNewContext(useChatSourceForTest(), context);
 
   const chat = context.globalThis.__testExports.useChat(threadId);
-  await assert.rejects(
-    () =>
-      chat.send("", {
-        images: [{ dataUrl: "data:image/png;base64,cG5n", size: 3 }],
-      }),
-    (error) => {
-      assert.equal(
-        error.safeErrorCode,
-        "webui_v2_multimodal_payload_unsupported",
-      );
-      return true;
-    },
-  );
-  assert.equal(sendWasCalled(), false);
+  await chat.send("please review", {
+    attachments: [
+      {
+        id: "staged-0",
+        filename: "notes.txt",
+        mimeType: "text/plain",
+        kind: "document",
+        sizeBytes: 4,
+        sizeLabel: "4 B",
+        dataBase64: "bm90ZQ==",
+        previewUrl: null,
+      },
+    ],
+  });
+
+  const body = sentBody();
+  assert.equal(body.content, "please review");
+  assert.equal(body.threadId, threadId);
+  // The wire shape the v2 ingress (`WebUiInboundAttachment`) expects —
+  // never the staged camelCase object, never `[non_text_content]`.
+  assert.deepEqual(body.attachments, [
+    { mime_type: "text/plain", filename: "notes.txt", data_base64: "bm90ZQ==" },
+  ]);
 });
 
-test("useChat.send: rejects file attachments instead of dropping them", async () => {
+test("useChat.send: stamps render attachments on the optimistic message", async () => {
   const threadId = "thread-1";
-  const { context, sendWasCalled } = createSendGuardContext();
+  const { context, renderedMessages } = createSendCaptureContext();
 
   vm.runInNewContext(useChatSourceForTest(), context);
 
   const chat = context.globalThis.__testExports.useChat(threadId);
-  await assert.rejects(
-    () =>
-      chat.send("please review", {
-        attachments: [{ filename: "notes.txt", size: 4 }],
-      }),
-    (error) => {
-      assert.equal(
-        error.safeErrorCode,
-        "webui_v2_multimodal_payload_unsupported",
-      );
-      return true;
+  await chat.send("look at this", {
+    attachments: [
+      {
+        id: "staged-7",
+        filename: "shot.png",
+        mimeType: "image/png",
+        kind: "image",
+        sizeBytes: 11,
+        sizeLabel: "11 B",
+        dataBase64: "cG5n",
+        previewUrl: "data:image/png;base64,cG5n",
+      },
+    ],
+  });
+
+  // The optimistic bubble carries the render shape so the card/thumbnail
+  // shows immediately, before the timeline projection returns.
+  const optimistic = renderedMessages().find((m) => m.isOptimistic);
+  assert.ok(optimistic, "an optimistic user message is rendered");
+  assert.deepEqual(optimistic.attachments, [
+    {
+      id: "staged-7",
+      filename: "shot.png",
+      mime_type: "image/png",
+      kind: "image",
+      size_label: "11 B",
+      preview_url: "data:image/png;base64,cG5n",
     },
-  );
-  assert.equal(sendWasCalled(), false);
+  ]);
 });
 
 test("useChat.cancelRun clears local state before cancel request resolves", async () => {
@@ -274,6 +317,8 @@ test("useChat.cancelRun clears local state before cancel request resolves", asyn
       setCalls: stateUpdates,
     }),
     addPending,
+    toRenderAttachment,
+    toWireAttachment,
     cancelRunRequest: async (request) => {
       cancelRequest = request;
       return new Promise((resolve) => {
@@ -352,6 +397,8 @@ test("useChat.cancelRun completion does not clear a newer run", async () => {
       setCalls: stateUpdates,
     }),
     addPending,
+    toRenderAttachment,
+    toWireAttachment,
     cancelRunRequest: async () =>
       new Promise((resolve) => {
         resolveCancelRequest = resolve;
@@ -428,6 +475,8 @@ test("useChat.send: channel connect requests return an action without submitting
     Math,
     React: createReactStub(),
     addPending,
+    toRenderAttachment,
+    toWireAttachment,
     cancelRunRequest: async () => {},
     clearTimeout,
     createThreadRequest: async () => {
@@ -500,6 +549,8 @@ test("useChat.send: unmatched channel connect requests submit the prompt", async
     Math,
     React: createReactStub(),
     addPending,
+    toRenderAttachment,
+    toWireAttachment,
     cancelRunRequest: async () => {},
     clearTimeout,
     createThreadRequest: async () => {
@@ -578,6 +629,8 @@ test("useChat.send: connectable channel fetch failures submit the prompt", async
     Math,
     React: createReactStub(),
     addPending,
+    toRenderAttachment,
+    toWireAttachment,
     cancelRunRequest: async () => {},
     clearTimeout,
     console: {
