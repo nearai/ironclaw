@@ -118,26 +118,34 @@ export function ChatInput({
   // list, so this is async.
   const addFiles = React.useCallback(
     (files) => {
-      if (!files || files.length === 0) return;
+      // Paste/drop can call this while the composer is disabled; don't stage then.
+      if (disabled || !files || files.length === 0) return;
       // Chain on the staging queue so calls run one-at-a-time and each sees the
-      // attachments admitted by the previous one (via attachmentsRef).
-      stagingQueueRef.current = stagingQueueRef.current.then(async () => {
-        const { staged, errors } = await stageFiles(files, {
-          limits,
-          existing: attachmentsRef.current,
-          t,
-        });
-        if (staged.length > 0) {
-          setAttachments((prev) => {
-            const next = [...prev, ...staged];
-            attachmentsRef.current = next;
-            return next;
+      // attachments admitted by the previous one (via attachmentsRef). The
+      // `.catch` guarantees the shared queue promise always resolves — an
+      // unexpected staging failure must not permanently reject it and skip every
+      // later add.
+      stagingQueueRef.current = stagingQueueRef.current
+        .then(async () => {
+          const { staged, errors } = await stageFiles(files, {
+            limits,
+            existing: attachmentsRef.current,
+            t,
           });
-        }
-        setAttachmentError(errors.length > 0 ? errors.join(" ") : "");
-      });
+          if (staged.length > 0) {
+            setAttachments((prev) => {
+              const next = [...prev, ...staged];
+              attachmentsRef.current = next;
+              return next;
+            });
+          }
+          setAttachmentError(errors.length > 0 ? errors.join(" ") : "");
+        })
+        .catch(() => {
+          setAttachmentError(t("chat.attachmentStagingFailed"));
+        });
     },
-    [limits, t]
+    [disabled, limits, t]
   );
 
   const removeAttachment = React.useCallback((id) => {

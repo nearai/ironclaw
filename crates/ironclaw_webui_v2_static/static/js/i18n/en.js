@@ -92,6 +92,7 @@ registerPack("en", {
   "chat.attachmentTotalTooLarge": "Attachments exceed the {max} total limit.",
   "chat.attachmentUnsupportedType": "{name} is not a supported file type.",
   "chat.attachmentReadFailed": "Could not read {name}.",
+  "chat.attachmentStagingFailed": "Could not attach the selected files.",
   "chat.modeAutoReview": "Auto-review",
   "chat.runtimeLocal": "Work locally",
   "chat.statusWorking": "Working",

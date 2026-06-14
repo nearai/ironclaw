@@ -27,7 +27,9 @@ let projects = store.list_projects(&owner_id).await?;
 let rows = store.list_agent_jobs().await.unwrap_or_default(); // silent-ok: dashboard refresh, next poll retries
 ```
 
-Review flag: added lines containing `unwrap_or_default()`, `.ok()?`, `else { return` / `else { return None }`, or `map_err(|_|` (a closure discarding the error binding) on a DB/IO/workspace/boundary call must carry a `// silent-ok: <reason>` comment or be rejected.
+Review flag: added lines containing `unwrap_or_default()`, `.ok()?`, or `else { return` / `else { return None }` on a DB/IO/workspace/boundary call must carry a `// silent-ok: <reason>` comment or be rejected.
+
+A `map_err(|_| …)` (a closure discarding the error binding) is **not** `silent-ok`-exemptible — a comment does not make the dropped cause reappear. Fix it by carrying the cause (`.map_err(ErrorType::constructor)` / `RebornServicesError::internal_from`) or by logging the bound error before mapping. Reject the line otherwise.
 
 ## Persist-Then-Reload Atomicity
 

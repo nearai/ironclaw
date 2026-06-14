@@ -424,9 +424,12 @@ async def test_reborn_v2_attachment_card_renders_and_survives_refresh(reborn_gat
     page = await context.new_page()
     try:
         await page.goto(f"{reborn_gateway_server}/v2/?token={AUTH_TOKEN}")
-        # Stage a file through the composer's hidden picker, then send.
+        # Stage a file through the composer's hidden picker, then send. Target
+        # the multi-file picker specifically — a bare `input[type=file]` is
+        # ambiguous on /v2 (the Settings toolbar has one too), which could attach
+        # the file to the wrong input.
         await page.set_input_files(
-            "input[type=file]",
+            "input[type=file][multiple]",
             files=[{"name": "notes.txt", "mimeType": "text/plain", "buffer": b"hello from a file"}],
         )
         await expect(page.get_by_text("notes.txt")).to_be_visible()

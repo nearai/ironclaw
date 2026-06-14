@@ -69,14 +69,13 @@ fn collect(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
         if file_type.is_dir() {
             collect(root, &path, out);
         } else if file_type.is_file() {
-            // `*.test.js` / `*.test.mjs` are colocated Node `node:test` unit
-            // tests, not browser assets — never embed or serve them. A path
-            // ending in `.test.js`/`.test.mjs` implies its file name does too,
-            // so check the path.
-            if path
-                .to_str()
-                .is_some_and(|p| p.ends_with(".test.js") || p.ends_with(".test.mjs"))
-            {
+            // `*.test.js` are colocated Node `node:test` unit tests, not
+            // browser assets — never embed or serve them. A path ending in
+            // `.test.js` implies its file name does too, so check the path.
+            // (`*.test.mjs` are intentionally still embedded: the asset table
+            // is reused as a fixture by the `assets.rs` caller-level JS
+            // regression tests, which assert their content via `asset_text`.)
+            if path.to_str().is_some_and(|p| p.ends_with(".test.js")) {
                 continue;
             }
             let rel = path.strip_prefix(root).expect("strip prefix"); // safety: build script — strip_prefix only fails on a logic bug
