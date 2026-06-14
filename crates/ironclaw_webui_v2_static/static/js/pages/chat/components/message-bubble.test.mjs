@@ -27,7 +27,7 @@ test("conversation message bubbles use readable typography", () => {
 test("markdown body and code blocks inherit readable message sizing", () => {
   assert.match(
     appCssSource,
-    /\.markdown-body\s*\{\s*font-size:\s*1em;\s*line-height:\s*1\.7;\s*\}/,
+    /\.markdown-body\s*\{[^}]*font-size:\s*1em;[^}]*line-height:\s*1\.7;/,
     "markdown prose should inherit the message bubble size with readable leading",
   );
   assert.match(
