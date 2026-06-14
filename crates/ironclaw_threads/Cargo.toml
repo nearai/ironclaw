@@ -14,6 +14,7 @@ publish = false
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
+ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }

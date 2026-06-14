@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 #[cfg(test)]
 mod approval_test_support;
+mod attachment_landing;
 mod auth;
 #[cfg(test)]
 mod auth_dcr_tests;

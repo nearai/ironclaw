@@ -20,9 +20,12 @@ use ironclaw_outbound::{
     CommunicationPreferenceRepository, InMemoryOutboundStateStore, OutboundStateStore,
 };
 use ironclaw_product_adapters::{
-    AdapterInstallationId, DeliveryStatus, EgressCredentialHandle, EgressRequest, EgressResponse,
-    ExternalActorRef, OutboundDeliverySink, ProductAdapter, ProtocolHttpEgress,
-    ProtocolHttpEgressError,
+    AdapterInstallationId, AuthRequirement, AuthResolutionPayload, AuthResolutionResult,
+    DeliveryStatus, EgressCredentialHandle, EgressRequest, EgressResponse, ExternalActorRef,
+    ExternalConversationRef, ExternalEventId, OutboundDeliverySink, ParsedProductInbound,
+    ProductAdapter, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
+    ProductInboundPayload, ProtocolAuthEvidence, ProtocolHttpEgress, ProtocolHttpEgressError,
+    TrustedInboundContext,
 };
 use ironclaw_product_workflow::{
     ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
@@ -50,7 +53,8 @@ use ironclaw_turns::{
     TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 use ironclaw_wasm_product_adapters::{
-    HmacWebhookAuth, NativeProductAdapterRunner, NativeProductAdapterRunnerConfig, WebhookAuth,
+    HmacWebhookAuth, ImmediateAckWorkflowObserver, NativeProductAdapterRunner,
+    NativeProductAdapterRunnerConfig, WebhookAuth,
 };
 use tower::ServiceExt;
 
@@ -191,7 +195,16 @@ impl Harness {
 }
 
 async fn build_harness(mode: TurnMode) -> Harness {
-    build_harness_with_actor_user_resolver(mode, static_personal_actor_user_resolver()).await
+    build_harness_with_max_wait(mode, Duration::from_secs(2)).await
+}
+
+async fn build_harness_with_max_wait(mode: TurnMode, max_wait: Duration) -> Harness {
+    build_harness_with_actor_user_resolver_and_max_wait(
+        mode,
+        static_personal_actor_user_resolver(),
+        max_wait,
+    )
+    .await
 }
 
 async fn build_harness_with_actor_user_resolver(
@@ -202,10 +215,33 @@ async fn build_harness_with_actor_user_resolver(
         .await
 }
 
+async fn build_harness_with_actor_user_resolver_and_max_wait(
+    mode: TurnMode,
+    actor_user_resolver: Arc<dyn ProductActorUserResolver>,
+    max_wait: Duration,
+) -> Harness {
+    build_harness_with_full_settings(mode, actor_user_resolver, None, max_wait).await
+}
+
 async fn build_harness_with_actor_user_resolver_and_auth_challenges(
     mode: TurnMode,
     actor_user_resolver: Arc<dyn ProductActorUserResolver>,
     auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
+) -> Harness {
+    build_harness_with_full_settings(
+        mode,
+        actor_user_resolver,
+        auth_challenges,
+        Duration::from_secs(2),
+    )
+    .await
+}
+
+async fn build_harness_with_full_settings(
+    mode: TurnMode,
+    actor_user_resolver: Arc<dyn ProductActorUserResolver>,
+    auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
+    max_wait: Duration,
 ) -> Harness {
     let conversations = Arc::new(InMemoryConversationServices::default());
     let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
@@ -298,7 +334,7 @@ async fn build_harness_with_actor_user_resolver_and_auth_challenges(
         },
         SlackFinalReplyDeliverySettings {
             poll_interval: Duration::from_millis(1),
-            max_wait: Duration::from_secs(2),
+            max_wait,
             max_concurrent_deliveries: std::num::NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
             max_pending_deliveries: std::num::NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
         },
@@ -1140,6 +1176,97 @@ async fn slack_approval_reply_resumes_and_delivers_final_reply() {
     assert_eq!(approvals[0].gate_ref.as_str(), GATE);
 }
 
+/// Regression test: each gate prompt is posted exactly once even when the
+/// delivery loop for the original user message (L1) is still alive when the
+/// approval ack arrives.
+///
+/// Pre-fix behaviour (bug): the approval resolution ack carried the same
+/// `submitted_run_id` as the original user-message ack (it resumes the
+/// pre-existing run). `should_deliver_after_ack` returned `true` for
+/// `ApprovalResolution(Allow)`, so a second `deliver_final_reply` loop (L2)
+/// was spawned with `delivered_blocked_marker = None`. L2 immediately saw the
+/// run as `Completed` (the approval service calls `complete_run` inline) and
+/// posted the final reply; L1, still alive and polling, also saw `Completed`
+/// and posted it again. Result: 3 messages total (approval prompt + 2 final
+/// replies) instead of 2.
+///
+/// Post-fix behaviour: the single-flight guard in `observe_workflow_ack`
+/// detects that L1 is already watching `run_id` and returns early for L2.
+/// Only L1 delivers the final reply exactly once.
+///
+/// To keep L1 alive (not timed-out) when the approval ack arrives, we use a
+/// long `max_wait` (10 s) and poll for the approval prompt before posting
+/// the approve event, mirroring the pattern in
+/// `slack_dm_delivers_final_reply_after_auth_completes_outside_slack`.
+#[tokio::test]
+async fn gate_prompt_is_posted_exactly_once_when_approval_ack_races_live_delivery_loop() {
+    // Use a long max_wait so L1 is still alive when the approval ack arrives.
+    let harness =
+        build_harness_with_max_wait(TurnMode::BlockApproval, Duration::from_secs(10)).await;
+
+    // Post user message — L1 spawns, polls, sees BlockedApproval, posts the
+    // approval prompt, then waits for the run to advance.
+    let first = harness
+        .post_event(dm_message("Ev-fanout-block", "needs approval fanout"))
+        .await;
+    assert_eq!(first.status(), StatusCode::OK);
+
+    // Poll until the approval prompt appears (L1 has posted it and is looping).
+    for _ in 0..200 {
+        if harness.slack_messages().len() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let messages = harness.slack_messages();
+    assert_eq!(
+        messages.len(),
+        1,
+        "expected exactly one approval prompt before the approve event; got {}: {:?}",
+        messages.len(),
+        messages
+    );
+    assert!(
+        messages[0]["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("Approval needed")),
+        "first message must be the approval prompt; got {:?}",
+        messages[0]["text"]
+    );
+
+    // Post the approve event while L1 is still alive.
+    // RecordingApprovalInteractionService::resolve immediately marks the run
+    // as Completed. Without the fix, the resolution ack spawns L2 which also
+    // sees Completed and posts a second final reply, giving 3 messages total.
+    let second = harness
+        .post_event(dm_message("Ev-fanout-approve", "approve"))
+        .await;
+    assert_eq!(second.status(), StatusCode::OK);
+
+    // Drain all tasks (L1 + the approval-ack task). L1 observes Completed and
+    // posts the final reply; the single-flight guard prevents L2 from also
+    // delivering, so the final reply is posted exactly once.
+    harness.drain().await;
+
+    let messages = harness.slack_messages();
+    assert_eq!(
+        messages.len(),
+        2,
+        "expected exactly 2 messages: approval prompt + final reply, not {} (duplicate final reply was posted without the fix)",
+        messages.len()
+    );
+    assert!(
+        messages[0]["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("Approval needed")),
+        "messages[0] must be the approval prompt"
+    );
+    assert_eq!(
+        messages[1]["text"], "approved and finished",
+        "messages[1] must be the final reply"
+    );
+}
+
 #[tokio::test]
 async fn slack_thread_auth_deny_with_bot_mention_cancels_auth_gate_without_agent_turn() {
     let harness = build_harness(TurnMode::BlockAuth).await;
@@ -1835,6 +1962,9 @@ fn dm_message(event_id: &'static str, text: &'static str) -> &'static str {
         ("Ev-identity", "hello") => DM_IDENTITY,
         ("Ev-auth", "needs auth") => DM_AUTH,
         ("Ev-working", "think") => DM_WORKING,
+        // Gate-fanout regression fixtures
+        ("Ev-fanout-block", "needs approval fanout") => DM_FANOUT_BLOCK,
+        ("Ev-fanout-approve", "approve") => DM_FANOUT_APPROVE,
         _ => panic!("unknown fixture"),
     }
 }
@@ -1980,3 +2110,315 @@ const DM_APPROVE_EXPLICIT_GATE: &str = r#"{
   "event_id":"Ev-approve-explicit",
   "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"approve gate:approve-slack","ts":"1710000000.000005"}
 }"#;
+
+// ── Gate-fanout regression fixtures ──────────────────────────────────────────
+// Used by `gate_prompt_is_posted_exactly_once_when_approval_ack_races_live_delivery_loop`.
+// Distinct event_ids avoid idempotency-ledger collisions with all other fixtures.
+
+/// User message that triggers a BlockApproval turn (gate-fanout regression).
+const DM_FANOUT_BLOCK: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-fanout-block",
+  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"needs approval fanout","ts":"1710000002.000001"}
+}"#;
+
+/// Approve event for the gate-fanout regression (resolves the BlockApproval gate).
+const DM_FANOUT_APPROVE: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-fanout-approve",
+  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"approve","ts":"1710000002.000002"}
+}"#;
+
+// ── Auth-resolution fanout regression fixtures ────────────────────────────────
+// Used by `auth_prompt_is_posted_exactly_once_when_auth_resolution_ack_races_live_delivery_loop`.
+// Distinct event_ids avoid idempotency-ledger collisions with all other fixtures.
+
+/// User message that triggers a BlockAuth turn (auth-fanout regression).
+const DM_AUTH_FANOUT_BLOCK: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-auth-fanout-block",
+  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"needs auth fanout","ts":"1710000003.000001"}
+}"#;
+
+/// Build a `ProductInboundEnvelope` carrying an `AuthResolution(CallbackCompleted)` payload.
+///
+/// Mirrors the shape that the WebUI gate-resolve endpoint would produce when an
+/// OAuth callback completes and calls `observe_workflow_ack` directly (not via
+/// any Slack text command — the Slack adapter has no "auth allow" syntax).
+fn auth_resolution_allowed_envelope(callback_ref: &str) -> ProductInboundEnvelope {
+    let adapter_id = ProductAdapterId::new(ADAPTER).expect("adapter id"); // safety: static test adapter id is valid.
+    let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation id"); // safety: static test installation id is valid.
+    let evidence = ProtocolAuthEvidence::test_verified(
+        AuthRequirement::SharedSecretHeader {
+            header_name: SLACK_SIGNATURE_HEADER.to_string(),
+        },
+        installation_id.as_str(),
+    );
+    let context = TrustedInboundContext::from_verified_evidence(
+        adapter_id,
+        installation_id,
+        chrono::Utc::now(),
+        &evidence,
+    )
+    .expect("trusted context"); // safety: static test context is valid.
+    let payload = ProductInboundPayload::AuthResolution(
+        AuthResolutionPayload::new(
+            AUTH_GATE,
+            AuthResolutionResult::CallbackCompleted {
+                callback_ref: callback_ref.to_string(),
+            },
+        )
+        .expect("auth resolution payload"), // safety: static test auth gate ref is valid.
+    );
+    let parsed = ParsedProductInbound::new(
+        ExternalEventId::new("evt:auth-fanout-resolve").expect("event id"), // safety: static test event id is valid.
+        ExternalActorRef::new(SLACK_USER_ACTOR_KIND, SLACK_USER, None::<String>)
+            .expect("actor ref"), // safety: static test actor ref is valid.
+        ExternalConversationRef::new(Some(TEAM), CHANNEL, None, None).expect("conversation ref"), // safety: static test conversation ref is valid.
+        payload,
+    )
+    .expect("parsed inbound"); // safety: static test inbound is valid.
+    ProductInboundEnvelope::from_trusted_parse(context, parsed).expect("envelope") // safety: static test envelope is valid.
+}
+
+/// Build a harness for auth-fanout tests and return the observer alongside it.
+///
+/// The observer is needed because `AuthResolution(Allowed)` does not arrive via
+/// Slack text — it arrives from the WebUI gate-resolve path which calls
+/// `observe_workflow_ack` directly. Exposing the observer lets the test inject
+/// the resolution ack without going through the Slack route.
+async fn build_harness_for_auth_fanout_test(
+    max_wait: Duration,
+) -> (Harness, Arc<SlackFinalReplyDeliveryObserver>) {
+    let auth_provider = Arc::new(FakeAuthChallengeProvider::default());
+    let auth_challenges: Arc<dyn AuthChallengeProvider> = auth_provider;
+
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
+        conversations.clone();
+    let actor_pairings: Arc<dyn ironclaw_conversations::ConversationActorPairingService> =
+        conversations.clone();
+
+    let adapter_id = ProductAdapterId::new(ADAPTER).expect("adapter id"); // safety: static test adapter id is valid.
+    let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation id"); // safety: static test installation id is valid.
+    let adapter: Arc<dyn ProductAdapter> = Arc::new(SlackV2Adapter::new(SlackV2AdapterConfig {
+        adapter_id: adapter_id.clone(),
+        installation_id: installation_id.clone(),
+        egress_credential_handle: EgressCredentialHandle::new("slack_bot_token").expect("handle"), // safety: static test handle is valid.
+        auth_requirement: slack_request_signature_auth_requirement(),
+    }));
+
+    let scope = ProductInstallationScope::with_default_scope(
+        TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
+        AgentId::new(AGENT).expect("agent"),    // safety: static test agent id is valid.
+        Some(ProjectId::new(PROJECT).expect("project")), // safety: static test project id is valid.
+    )
+    .with_default_subject_user_id(UserId::new(USER).expect("user")) // safety: static test user id is valid.
+    .with_actor_user_resolver(static_personal_actor_user_resolver(), actor_pairings);
+    let resolver = StaticProductInstallationResolver::new([(
+        ProductInstallationKey::new(adapter_id, installation_id.clone()),
+        scope,
+    )]);
+    let binding = ProductConversationBindingService::new(conversation_port, resolver);
+
+    let threads = InMemorySessionThreadService::default();
+    let coordinator = RecordingTurnCoordinator::new(threads.clone(), TurnMode::BlockAuth);
+    let approvals = Arc::new(RecordingApprovalInteractionService::new(
+        coordinator.clone(),
+        threads.clone(),
+    ));
+    let auths = Arc::new(RecordingAuthInteractionService::new(coordinator.clone()));
+    let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
+        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+
+    let inbound = Arc::new(DefaultInboundTurnService::new(
+        binding.clone(),
+        threads.clone(),
+        coordinator.clone(),
+    ));
+    let workflow = Arc::new(
+        DefaultProductWorkflow::new(
+            inbound,
+            Arc::new(InMemoryIdempotencyLedger::new()),
+            Arc::new(binding.clone()),
+        )
+        .with_approval_interaction_service(approvals.clone())
+        .with_auth_interaction_service(auths.clone())
+        .with_delivered_gate_routes(route_store.clone()),
+    );
+
+    let runner = Arc::new(NativeProductAdapterRunner::with_config(
+        adapter.clone(),
+        workflow,
+        WebhookAuth::Hmac(HmacWebhookAuth::new(
+            SLACK_SIGNATURE_HEADER,
+            SLACK_TIMESTAMP_HEADER,
+            SECRET.as_bytes().to_vec(),
+            INSTALLATION,
+        )),
+        NativeProductAdapterRunnerConfig::new(
+            Duration::from_secs(2),
+            NonZeroUsize::new(4).expect("nonzero"), // safety: 4 is non-zero.
+        ),
+    ));
+
+    let outbound = Arc::new(InMemoryOutboundStateStore::default());
+    let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
+    let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
+    let egress = RecordingEgress::default();
+    let sink = RecordingDeliverySink::default();
+    let observer = Arc::new(SlackFinalReplyDeliveryObserver::with_settings(
+        SlackFinalReplyDeliveryServices {
+            binding_service: Arc::new(binding),
+            thread_service: Arc::new(threads),
+            turn_coordinator: Arc::new(coordinator.clone()),
+            outbound_store,
+            route_store: route_store.clone(),
+            communication_preferences: preferences,
+            adapter,
+            egress: Arc::new(egress.clone()),
+            delivery_sink: Arc::new(sink),
+            auth_challenges: Some(auth_challenges),
+        },
+        SlackFinalReplyDeliverySettings {
+            poll_interval: Duration::from_millis(1),
+            max_wait,
+            max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: 4 is non-zero.
+            max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: 16 is non-zero.
+        },
+    ));
+
+    let slack_resolver = StaticSlackInstallationResolver::new(vec![
+        SlackInstallationRecord::new(
+            TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
+            installation_id,
+            SlackInstallationSelector::team(TEAM),
+            runner,
+        )
+        .with_workflow_observer(observer.clone() as Arc<dyn ImmediateAckWorkflowObserver>),
+    ]);
+    let state = SlackEventsRouteState::from_resolver(Arc::new(slack_resolver));
+    let mount = slack_events_route_mount(state.clone());
+
+    let harness = Harness {
+        mount,
+        state,
+        egress,
+        coordinator: Arc::new(coordinator),
+        approvals,
+        auths,
+        route_store,
+    };
+    (harness, observer)
+}
+
+/// Regression test: auth prompt is posted exactly once even when an
+/// `AuthResolution(Allowed)` ack races the live delivery loop (L1).
+///
+/// Pre-fix behaviour (bug): the auth-resolution ack carried the same
+/// `submitted_run_id` as the original user-message ack. The guard check
+/// happened AFTER acquiring the semaphore permit, so L2 could block on the
+/// permit while L1 held it. When L1 released the permit and removed the
+/// run_id, L2 would wake, pass the now-empty guard, and spawn a second delivery
+/// loop. L2 immediately saw the run as Completed and posted a duplicate final
+/// reply. Result: 3 messages (auth prompt + 2 final replies) instead of 2.
+///
+/// Post-fix behaviour: the guard is checked and the run_id is inserted BEFORE
+/// acquiring the permit. L2 hits the already-populated guard set and returns
+/// early without ever competing for a permit. Only L1 delivers the final reply.
+///
+/// The comment in the original PR mentioned `AuthResolution(Allowed)` as an
+/// equal trigger to `ApprovalResolution(Allow)`, but only the approval case was
+/// tested. This test closes that gap.
+#[cfg(feature = "slack-v2-host-beta")]
+#[tokio::test]
+async fn auth_prompt_is_posted_exactly_once_when_auth_resolution_ack_races_live_delivery_loop() {
+    // Long max_wait keeps L1 alive (polling) when the auth-resolution ack arrives.
+    let (harness, observer) = build_harness_for_auth_fanout_test(Duration::from_secs(10)).await;
+
+    // Post user message — L1 spawns, polls, sees BlockedAuth, posts the auth
+    // prompt, then waits for the run to advance.
+    let first = harness.post_event(DM_AUTH_FANOUT_BLOCK).await;
+    assert_eq!(first.status(), StatusCode::OK);
+
+    // Poll until the auth prompt appears (L1 has posted it and is now looping).
+    for _ in 0..200 {
+        if harness.slack_messages().len() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let messages = harness.slack_messages();
+    assert_eq!(
+        messages.len(),
+        1,
+        "expected exactly one auth prompt before the auth-resolution ack; got {}: {:?}",
+        messages.len(),
+        messages
+    );
+    assert!(
+        messages[0]["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("Authentication required")),
+        "first message must be the auth prompt; got {:?}",
+        messages[0]["text"]
+    );
+
+    // Get the run_id of the blocked run so we can build a matching ack.
+    let blocked_run_id = harness
+        .coordinator
+        .blocked_run_id()
+        .expect("run must be blocked after auth-fanout message"); // safety: E2E test assertion.
+
+    // Inject an `AuthResolution(Allowed)` ack directly — this simulates the
+    // WebUI gate-resolve path (not a Slack text command). The ack carries the
+    // same `submitted_run_id` as L1, so without the guard fix this would spawn
+    // L2, which would see Completed and post a duplicate final reply.
+    let auth_ack = ProductInboundAck::Accepted {
+        accepted_message_ref: AcceptedMessageRef::new("msg:auth-fanout-resolve")
+            .expect("accepted message ref"), // safety: static test ref is valid.
+        submitted_run_id: blocked_run_id,
+    };
+    let auth_envelope = auth_resolution_allowed_envelope("callback:test-fanout");
+    observer.observe_workflow_ack(auth_envelope, auth_ack).await;
+
+    // Complete the blocked run so L1 can finish and post the final reply.
+    harness
+        .coordinator
+        .resume_blocked_run_to_running()
+        .await
+        .expect("resume auth-blocked run");
+    harness
+        .coordinator
+        .complete_active_run("auth completed and finished")
+        .await
+        .expect("complete resumed auth run");
+
+    // Drain all tasks. The guard prevents L2 from ever starting, so only L1
+    // delivers the final reply. Total: 1 auth prompt + 1 final reply = 2.
+    harness.drain().await;
+
+    let messages = harness.slack_messages();
+    assert_eq!(
+        messages.len(),
+        2,
+        "expected exactly 2 messages: auth prompt + final reply, not {} (duplicate final reply was posted without the fix)",
+        messages.len()
+    );
+    assert!(
+        messages[0]["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("Authentication required")),
+        "messages[0] must be the auth prompt"
+    );
+    assert_eq!(
+        messages[1]["text"], "auth completed and finished",
+        "messages[1] must be the final reply"
+    );
+}
