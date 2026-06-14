@@ -1272,8 +1272,10 @@ fn rejection_hint_for_resolution(
 /// RejectedBusy { active_run_id: Some(run) } }` still yields the blocking run id.
 /// The per-(conversation, run_id) throttle prevents a double-post when the first
 /// delivery already succeeded — the retry only posts if the original hint was lost.
-/// `Duplicate { prior: DeferredBusy }` returns `None` (DeferredBusy is never settled,
-/// so this case is unreachable in practice; suppressing it is safe).
+/// `Duplicate { prior: DeferredBusy { active_run_id, .. } }` yields `Some(active_run_id)` —
+/// the recursive call re-applies the same extraction on the prior ack.  DeferredBusy is never
+/// settled upstream (so this wrapping is unreachable in practice), but when it does occur the
+/// run id is surfaced rather than silently dropped.
 ///
 /// Returns `None` for all non-user-message payloads (resolution/control payloads must
 /// stay silent).
@@ -1300,8 +1302,9 @@ fn busy_hint_user_message_run_id(
         // Unwrap Duplicate and re-apply extraction on the prior ack.
         // RejectedBusy is a settled outcome, so transport retries arrive as
         // Duplicate{RejectedBusy{..}} — the prior still carries the blocking run id.
-        // DeferredBusy is never settled, so Duplicate{DeferredBusy} is unreachable
-        // in practice; the recursive call returns None safely for that case.
+        // DeferredBusy is never settled upstream, so Duplicate{DeferredBusy} is
+        // unreachable in practice; but when it occurs the recursive call yields
+        // Some(active_run_id) from the prior — the run id is not silently dropped.
         ProductInboundAck::Duplicate { prior } => busy_hint_user_message_run_id(envelope, prior),
         _ => None,
     }

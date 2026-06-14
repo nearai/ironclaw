@@ -546,22 +546,26 @@ fn classify_compaction_message(
             CompactionRejectReason::UnsupportedStatus,
         );
     }
-    // RejectedBusy is a stable terminal status (user must resend; never auto-retried).
-    // DeferredBusy is a frozen legacy status that is no longer written and will
-    // never transition further.  Neither is model-visible, so both are skipped
-    // rather than treated as unstable — preventing them from blocking compaction
-    // ranges indefinitely.
-    if matches!(
-        status,
-        MessageStatus::RejectedBusy | MessageStatus::DeferredBusy
-    ) {
+    // RejectedBusy is terminal and non-model-visible: the user must explicitly
+    // resend and the message will never be auto-retried, so skipping it is safe
+    // and prevents it from blocking compaction ranges indefinitely.
+    //
+    // DeferredBusy is NOT terminal: legacy rows can still transition to Submitted
+    // via the inbound replay path, which would make the message model-visible
+    // after a compaction summary was produced without it — silently omitting a
+    // user message from compacted context.  Defer until it reaches a stable
+    // status, exactly like Draft/Interrupted/Superseded.
+    if matches!(status, MessageStatus::RejectedBusy) {
         return CompactionMessageDisposition::SkipEphemeral(
             CompactionSkipReason::StableNonModelVisible,
         );
     }
     if matches!(
         status,
-        MessageStatus::Draft | MessageStatus::Interrupted | MessageStatus::Superseded
+        MessageStatus::DeferredBusy
+            | MessageStatus::Draft
+            | MessageStatus::Interrupted
+            | MessageStatus::Superseded
     ) {
         return CompactionMessageDisposition::DeferUntilStable(
             CompactionDeferralReason::UnstableTranscriptStatus,

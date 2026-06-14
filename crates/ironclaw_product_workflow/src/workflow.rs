@@ -1290,7 +1290,11 @@ fn dispatch_kind_from_ack(
             if let Some(run_id) = active_run_id {
                 Ok(ActionDispatchKind::UserMessageTurn { run_id: *run_id })
             } else {
-                ActionDispatchKind::try_from_payload(payload)
+                // No active run was recorded — this is a settled terminal busy replay with no
+                // run to reference. Do NOT fabricate a run id by falling through to
+                // try_from_payload; record NoOp so the ledger settles durably without a
+                // spurious UserMessageTurn entry tied to a run that was never submitted.
+                Ok(ActionDispatchKind::NoOp)
             }
         }
         ProductInboundAck::Rejected(rejection) => Ok(ActionDispatchKind::Rejected {

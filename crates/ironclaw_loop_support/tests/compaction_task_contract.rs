@@ -587,10 +587,12 @@ async fn compaction_port_completes_range_containing_rejected_busy_message() {
 }
 
 #[tokio::test]
-async fn compaction_port_completes_range_containing_deferred_busy_message() {
-    // DeferredBusy is a frozen legacy status that is no longer written.  Rows
-    // with this status will never transition further, so they must be skipped
-    // (not treated as unstable) to prevent compaction from deferring forever.
+async fn compaction_port_defers_range_containing_deferred_busy_message() {
+    // DeferredBusy is NOT terminal: legacy rows can still be submitted via the
+    // inbound replay path, transitioning to Submitted and becoming model-visible.
+    // A compaction summary produced before that transition would silently omit a
+    // user message from compacted context.  The range must DEFER (not complete)
+    // until the message reaches a stable status.
     let fixture = CompactionFixture::new().await;
     let deferred_id = fixture.append_user("deferred-busy-content").await;
     fixture
@@ -610,20 +612,15 @@ async fn compaction_port_completes_range_containing_deferred_busy_message() {
     let outcome = port
         .compact_loop_context(fixture.request(2))
         .await
-        .expect("range containing DeferredBusy should complete, not defer");
+        .expect("range containing DeferredBusy should return a typed deferral");
 
     assert!(
-        matches!(outcome, LoopCompactionOutcome::Compacted(_)),
-        "expected Compacted, got {outcome:?}",
-    );
-    let input = inference.last_input();
-    assert!(
-        input.contains("visible-after-deferred"),
-        "model-visible message should appear in compaction input",
+        matches!(outcome, LoopCompactionOutcome::Deferred { .. }),
+        "expected Deferred, got {outcome:?}",
     );
     assert!(
-        !input.contains("deferred-busy-content"),
-        "DeferredBusy message must not appear in model-visible compaction input",
+        inference.last_input().is_empty(),
+        "inference must not be called when the range is deferred",
     );
 }
 

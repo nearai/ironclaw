@@ -1217,14 +1217,15 @@ async fn filesystem_rejected_busy_rejects_already_submitted_user_message() {
 }
 
 #[tokio::test]
-async fn filesystem_rejected_busy_message_can_be_marked_submitted() {
-    // A RejectedBusy user message must be eligible for Submitted when the user
-    // resends — mirrors the in-memory contract test but exercises the
-    // FilesystemSessionThreadService persistence path.
+async fn filesystem_rejected_busy_cannot_be_marked_submitted_is_terminal() {
+    // RejectedBusy is a durable terminal state — the stored row must never
+    // transition to Submitted.  ensure_user_accepted no longer admits
+    // RejectedBusy, so mark_message_submitted must return
+    // InvalidMessageTransition and the persisted status must remain RejectedBusy.
     let backend = Arc::new(InMemoryBackend::new());
-    let scoped = scoped_threads_fs_at(backend, "tenant-rb-to-submitted", "alice");
+    let scoped = scoped_threads_fs_at(backend, "tenant-rb-terminal", "alice");
     let service = FilesystemSessionThreadService::new(scoped);
-    let scope = scope("rb-to-submitted");
+    let scope = scope("rb-terminal");
 
     let thread = service
         .ensure_thread(EnsureThreadRequest {
@@ -1256,7 +1257,7 @@ async fn filesystem_rejected_busy_message_can_be_marked_submitted() {
         .await
         .unwrap();
 
-    // User resends — mark_message_submitted must succeed from RejectedBusy.
+    // Attempting to submit the rejected row must fail — RejectedBusy is terminal.
     let result = service
         .mark_message_submitted(
             &scope,
@@ -1268,13 +1269,25 @@ async fn filesystem_rejected_busy_message_can_be_marked_submitted() {
         .await;
 
     assert!(
-        result.is_ok(),
-        "mark_message_submitted must succeed for a RejectedBusy user message (user resend path), got {result:?}"
+        matches!(
+            result,
+            Err(SessionThreadError::InvalidMessageTransition { .. })
+        ),
+        "mark_message_submitted must fail with InvalidMessageTransition on a RejectedBusy message (terminal state), got {result:?}"
     );
+
+    // Re-list to confirm the status was NOT mutated in the filesystem store.
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
     assert_eq!(
-        result.unwrap().status,
-        MessageStatus::Submitted,
-        "final status must be Submitted after the RejectedBusy → Submitted transition"
+        history.messages[0].status,
+        MessageStatus::RejectedBusy,
+        "persisted status must remain RejectedBusy after the failed Submitted transition"
     );
 }
 

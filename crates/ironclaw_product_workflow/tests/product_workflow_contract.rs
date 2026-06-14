@@ -5854,15 +5854,14 @@ async fn rejected_busy_with_no_active_run_id_is_settled_and_duplicate_on_transpo
     // Durable/settled: the action must appear in the ledger.
     assert_eq!(ledger.settled_count(), 1, "first call must settle the ack");
     assert_eq!(ledger.in_flight_count(), 0, "no in-flight after settlement");
-    // The settled action must have a dispatch_kind derived from the payload.
+    // The settled action must NOT have a fabricated run id.  RejectedBusy(active_run_id: None)
+    // has no run to reference, so the dispatch kind must be NoOp — not a UserMessageTurn with
+    // a minted run id that was never submitted.
     let actions = ledger.settled_actions();
     assert_eq!(actions.len(), 1);
     assert!(
-        matches!(
-            actions[0].dispatch_kind,
-            Some(ActionDispatchKind::UserMessageTurn { .. })
-        ),
-        "settled dispatch_kind should be UserMessageTurn (derived from payload), got: {:?}",
+        matches!(actions[0].dispatch_kind, Some(ActionDispatchKind::NoOp)),
+        "settled dispatch_kind should be NoOp (no fabricated run id), got: {:?}",
         actions[0].dispatch_kind
     );
 

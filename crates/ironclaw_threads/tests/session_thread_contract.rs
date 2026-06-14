@@ -993,11 +993,11 @@ async fn rejected_busy_rejects_already_finalized_user_message() {
 }
 
 #[tokio::test]
-async fn rejected_busy_message_can_be_marked_submitted() {
-    // A message that was RejectedBusy (user arrived while thread was busy) must
-    // be eligible for the Submitted transition when the user resends — i.e.
-    // ensure_user_accepted must admit RejectedBusy, and mark_message_submitted
-    // must succeed, landing in Submitted.
+async fn rejected_busy_cannot_be_marked_submitted_is_terminal() {
+    // RejectedBusy is a durable terminal state — the stored row must never
+    // transition to Submitted.  ensure_user_accepted no longer admits
+    // RejectedBusy, so mark_message_submitted must return
+    // InvalidMessageTransition and the status must remain RejectedBusy.
     let service = InMemorySessionThreadService::default();
     let thread = service
         .ensure_thread(EnsureThreadRequest {
@@ -1028,7 +1028,7 @@ async fn rejected_busy_message_can_be_marked_submitted() {
         .await
         .unwrap();
 
-    // Now the user resends — mark_message_submitted must succeed from RejectedBusy.
+    // Attempting to submit the rejected row must fail — RejectedBusy is terminal.
     let result = service
         .mark_message_submitted(
             &scope("a"),
@@ -1040,13 +1040,25 @@ async fn rejected_busy_message_can_be_marked_submitted() {
         .await;
 
     assert!(
-        result.is_ok(),
-        "mark_message_submitted must succeed for a RejectedBusy user message (user resend path), got {result:?}"
+        matches!(
+            result,
+            Err(SessionThreadError::InvalidMessageTransition { .. })
+        ),
+        "mark_message_submitted must fail with InvalidMessageTransition on a RejectedBusy message (terminal state), got {result:?}"
     );
+
+    // Status must remain RejectedBusy — the row is unchanged.
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
     assert_eq!(
-        result.unwrap().status,
-        MessageStatus::Submitted,
-        "final status must be Submitted after the RejectedBusy → Submitted transition"
+        history.messages[0].status,
+        MessageStatus::RejectedBusy,
+        "status must remain RejectedBusy after the failed Submitted transition"
     );
 }
 

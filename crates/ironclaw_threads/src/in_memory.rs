@@ -892,7 +892,7 @@ fn ensure_user_accepted(
     if message.kind == MessageKind::User
         && matches!(
             message.status,
-            MessageStatus::Accepted | MessageStatus::DeferredBusy | MessageStatus::RejectedBusy
+            MessageStatus::Accepted | MessageStatus::DeferredBusy
         )
     {
         return Ok(());

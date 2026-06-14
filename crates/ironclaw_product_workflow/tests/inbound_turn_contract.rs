@@ -1218,53 +1218,94 @@ async fn replay_lookup_is_namespaced_by_installation() {
 
 #[tokio::test]
 async fn legacy_deferred_busy_retry_resubmits_existing_message() {
+    // A message row whose status was force-downgraded to `DeferredBusy` (the
+    // legacy status written by the now-retired `mark_message_deferred_busy`
+    // writer) must be RESUBMITTED when replayed — `from_replay_parts` maps
+    // `DeferredBusy → NeedsSubmission`.  This is distinct from `RejectedBusy`
+    // replay, which is terminal and never resubmits (covered by the dedicated
+    // `rejected_busy_replay_is_re_rejected_not_resubmitted` test).
     let binding_service = FakeConversationBindingService::new();
     let thread_service = InMemorySessionThreadService::default();
     let coordinator = ScriptedTurnCoordinator::default();
-    let active_run_id = TurnRunId::new();
-    coordinator.push_result(Err(TurnError::ThreadBusy(ThreadBusy {
-        active_run_id,
-        status: TurnStatus::Running,
-        event_cursor: EventCursor::default(),
-    })));
-    let service =
-        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        coordinator.clone(),
+    );
 
-    let envelope = sample_user_message_envelope("busy-retry-existing");
+    // First call: submit successfully so the message row exists in the thread
+    // service with status `Submitted`.
+    let envelope = sample_user_message_envelope("deferred-busy-legacy");
     let first = service
         .accept_user_message(&envelope)
         .await
-        .expect("first busy");
-    assert!(matches!(first, InboundTurnOutcome::RejectedBusy { .. }));
-
-    let second = service
-        .accept_user_message(&envelope)
-        .await
-        .expect("replay of rejected busy message");
-    assert!(
-        matches!(second, InboundTurnOutcome::RejectedBusy { .. }),
-        "RejectedBusy replay must return RejectedBusy, not resubmit"
+        .expect("initial submission");
+    let binding = match first {
+        InboundTurnOutcome::Submitted { ref binding, .. } => binding.clone(),
+        _ => panic!("expected Submitted on first call, got {first:?}"),
+    };
+    let thread_scope = ThreadScope {
+        tenant_id: binding.tenant_id.clone(),
+        agent_id: binding.agent_id.clone().expect("agent id"),
+        project_id: binding.project_id.clone(),
+        owner_user_id: binding.subject_user_id.clone(),
+        mission_id: None,
+    };
+    assert_eq!(
+        coordinator.submissions().len(),
+        1,
+        "coordinator must have been called once after initial submission"
     );
 
-    let binding = match second {
-        InboundTurnOutcome::RejectedBusy { ref binding, .. } => binding.clone(),
-        _ => unreachable!(),
-    };
+    // Back-door: downgrade the stored row to `DeferredBusy` to simulate a
+    // legacy row written by the now-retired `mark_message_deferred_busy`
+    // writer.  Production code no longer creates `DeferredBusy` rows, but
+    // they may exist in older deployments.
     let history = thread_service
         .list_thread_history(ThreadHistoryRequest {
-            scope: ThreadScope {
-                tenant_id: binding.tenant_id.clone(),
-                agent_id: binding.agent_id.clone().expect("agent id"),
-                project_id: binding.project_id.clone(),
-                owner_user_id: binding.subject_user_id.clone(),
-                mission_id: None,
-            },
+            scope: thread_scope.clone(),
             thread_id: binding.thread_id.clone(),
         })
         .await
-        .expect("history");
+        .expect("history after initial submit");
     assert_eq!(history.messages.len(), 1);
-    assert_eq!(history.messages[0].status, MessageStatus::RejectedBusy);
+    let message_id = history.messages[0].message_id;
+    thread_service
+        .inject_legacy_deferred_busy_for_test(&thread_scope, &binding.thread_id, message_id)
+        .await
+        .expect("inject DeferredBusy");
+
+    // Second call with the same envelope: the replay path sees `DeferredBusy`
+    // and maps it to `NeedsSubmission`, triggering a new submission to the
+    // coordinator.
+    let second = service
+        .accept_user_message(&envelope)
+        .await
+        .expect("DeferredBusy replay resubmission");
+    assert!(
+        matches!(second, InboundTurnOutcome::Submitted { .. }),
+        "DeferredBusy replay must resubmit (NeedsSubmission path), got {second:?}"
+    );
+    assert_eq!(
+        coordinator.submissions().len(),
+        2,
+        "coordinator must be called a second time for the DeferredBusy replay resubmission"
+    );
+
+    // The message row must now reflect the new submission.
+    let history_after = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: thread_scope,
+            thread_id: binding.thread_id.clone(),
+        })
+        .await
+        .expect("history after DeferredBusy replay");
+    assert_eq!(history_after.messages.len(), 1, "must not create a new row");
+    assert_eq!(
+        history_after.messages[0].status,
+        MessageStatus::Submitted,
+        "resubmitted message must be marked Submitted"
+    );
 }
 
 #[tokio::test]
