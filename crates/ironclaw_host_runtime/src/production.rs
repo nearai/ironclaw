@@ -83,10 +83,11 @@ pub struct DefaultHostRuntime {
     obligation_handler: Option<Arc<dyn CapabilityObligationHandler>>,
     /// Optional secret store used for pre-flight credential presence checks.
     ///
-    /// When present, `invoke_capability` checks whether all required credentials
-    /// declared in the capability manifest are present before the authorization
-    /// step. This surfaces `AuthRequired` ahead of the approval gate so users
-    /// are never asked to approve an action that cannot yet execute.
+    /// When present, capability dispatch (both `invoke_capability` and
+    /// `spawn_capability`) checks whether all required credentials declared in the
+    /// capability manifest are present before the authorization step. This surfaces
+    /// `AuthRequired` ahead of the approval gate so users are never asked to
+    /// approve an action that cannot yet execute.
     ///
     /// When absent the pre-flight is skipped; the dispatch-time obligation check
     /// remains the enforcement backstop regardless.
@@ -314,10 +315,10 @@ impl DefaultHostRuntime {
 
     /// Attaches the secret store used for credential pre-flight checks.
     ///
-    /// When set, `invoke_capability` queries secret presence for all required
-    /// credentials declared in the capability manifest *before* the approval
-    /// gate fires. This prevents burning a human approval on an invocation
-    /// that cannot yet succeed because a credential is missing.
+    /// When set, `invoke_capability` and `spawn_capability` query secret presence
+    /// for all required credentials declared in the capability manifest *before*
+    /// the approval gate fires. This prevents burning a human approval on an
+    /// invocation that cannot yet succeed because a credential is missing.
     ///
     /// The dispatch-time obligation check remains the enforcement backstop
     /// regardless of whether this store is set.
@@ -403,6 +404,14 @@ impl HostRuntime for DefaultHostRuntime {
         context.trust = trust_decision.effective_trust.class();
 
         let registry = self.registry.snapshot();
+
+        // Validate the execution context before the credential pre-flight queries
+        // the secret store. Without this guard a malformed RuntimeCapabilityRequest
+        // could probe secret-store presence under a forged resource_scope that does
+        // not match the top-level tenant/user/agent/project fields.
+        if let Err(error) = context.validate() {
+            return Err(HostRuntimeError::invalid_request(error.to_string()));
+        }
 
         // Pre-flight credential check: surface AuthRequired BEFORE the approval
         // gate fires. This prevents a human approval being consumed for an action
@@ -502,6 +511,14 @@ impl HostRuntime for DefaultHostRuntime {
         context.trust = trust_decision.effective_trust.class();
 
         let registry = self.registry.snapshot();
+
+        // Validate the execution context before the credential pre-flight queries
+        // the secret store. Without this guard a malformed RuntimeCapabilityRequest
+        // could probe secret-store presence under a forged resource_scope that does
+        // not match the top-level tenant/user/agent/project fields.
+        if let Err(error) = context.validate() {
+            return Err(HostRuntimeError::invalid_request(error.to_string()));
+        }
 
         // Pre-flight credential check: surface AuthRequired BEFORE the approval
         // gate fires. The pre-flight is trust-class-agnostic by design — the
@@ -1511,7 +1528,7 @@ impl DefaultHostRuntime {
                         secret_handle = handle.as_str(),
                         "credential pre-flight: secret store metadata query failed; skipping pre-flight (dispatch-time check enforces)"
                     );
-                    return None;
+                    return None; // silent-ok: transient store error must not burn a user auth interaction; dispatch-time obligation check is the backstop
                 }
             }
         }
@@ -1782,7 +1799,12 @@ fn completed_outcome_from(
 /// Callers outside the pre-flight check must not recompute the requirement set
 /// independently — call this function instead.
 ///
-/// Only entries with `required == true` are included.
+/// Only entries with `required == true` **and** `source == SecretHandle` are
+/// included in `required_secrets`. `ProductAuthAccount`-source credentials are
+/// staged by the credential-account resolver at dispatch time (not via
+/// `secret_store.metadata`), so including their slot handle here would produce
+/// a false-positive `AuthRequired` for capabilities whose product-auth account
+/// is already connected.
 pub fn capability_credential_requirements(
     descriptor: &ironclaw_host_api::CapabilityDescriptor,
 ) -> (
@@ -1792,11 +1814,28 @@ pub fn capability_credential_requirements(
     let provider = descriptor.provider.clone();
     let mut required_secrets = Vec::new();
     let mut credential_requirements = Vec::new();
+
+    // Double-read accepted: the dispatch-time obligation path (in
+    // ironclaw_host_runtime::obligations) will re-check each handle's presence via
+    // the same secret_store when the capability executes. Threading the pre-flight
+    // result into the obligation path would cross crate-boundary constraints (per
+    // CLAUDE.md) without meaningful gain; the ordering guarantee (auth before
+    // approval gate) is the pre-flight's sole purpose.
     for cred in &descriptor.runtime_credentials {
         if !cred.required {
             continue;
         }
-        required_secrets.push(cred.handle.clone());
+        // Only SecretHandle-source credentials are presence-checkable in the
+        // secret store. ProductAuthAccount credentials are staged by the
+        // credential-account resolver at dispatch time (not via secret_store.metadata),
+        // so including their slot handle here would produce a false-positive AuthRequired
+        // for capabilities whose product-auth account is already connected.
+        if matches!(
+            cred.source,
+            ironclaw_host_api::RuntimeCredentialRequirementSource::SecretHandle
+        ) {
+            required_secrets.push(cred.handle.clone());
+        }
         if let Some(auth_req) = cred.product_auth_requirement_for(provider.clone()) {
             credential_requirements.push(auth_req);
         }

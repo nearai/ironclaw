@@ -7827,6 +7827,9 @@ fn submit_turn_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest
 // `capability_credential_requirements` — a single source of truth consumed by
 // both the pre-flight check (ordering) and the dispatch-time obligation check
 // (enforcement backstop).
+//
+// arch-exempt: large_file, credential preflight contract coverage,
+// plan docs/plans/2026-06-12-approval-invocation-identity.md
 
 /// Manifest for a script capability that declares a required runtime credential.
 /// The `required = true` field (default) tells both the pre-flight check and
@@ -7947,11 +7950,17 @@ async fn invoke_capability_present_credential_proceeds_to_approval() {
     let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
     let secret_store = Arc::new(InMemorySecretStore::new());
     let secret_handle = SecretHandle::new("script_api_token").unwrap();
-    let scope_for_seeding = execution_context_without_grants().resource_scope;
+    // Build the request context FIRST so we can seed the secret under the same
+    // resource_scope that the invocation will use. Using a separate
+    // execution_context_without_grants() for seeding would produce a different
+    // InvocationId (and thus a different ResourceScope), causing the pre-flight
+    // to find the secret absent even though it was inserted.
+    let context = execution_context_without_grants();
+    let scope = context.resource_scope.clone();
     // Seed the required credential so pre-flight passes.
     secret_store
         .put(
-            scope_for_seeding,
+            scope.clone(),
             secret_handle.clone(),
             SecretMaterial::from("token-value"),
         )
@@ -7978,8 +7987,6 @@ async fn invoke_capability_present_credential_proceeds_to_approval() {
     .with_secret_store(Arc::clone(&secret_store))
     .with_script_runtime(Arc::clone(&script_runtime));
     let runtime = services.host_runtime_for_local_testing();
-    let context = execution_context_without_grants();
-    let scope = context.resource_scope.clone();
     let estimate = ResourceEstimate::default();
     let input = json!({"message": "has credential"});
 
