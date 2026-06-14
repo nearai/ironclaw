@@ -8456,17 +8456,36 @@ async fn invoke_capability_secret_store_error_skips_preflight() {
         "script executor must not be reached when blocked at approval gate"
     );
 
-    // Step 2: simulate approval + resume to drive the manifest-backstop path.
-    // The approval grants DispatchCapability + UseSecret (both effects declared by
-    // SCRIPT_WITH_CREDENTIAL_MANIFEST). The grant deliberately does NOT include the
-    // required secret handle in `secrets`. On resume, GrantAuthorizer calls
-    // `obligations_for_grant` which sees the required SecretHandle credential is
-    // absent from the grant's secrets list → returns None (authorization withheld)
-    // → PolicyDenied. This is the manifest runtime_credentials backstop enforcing
-    // the missing credential at grant-evaluation time — NOT a test-authorizer-injected
-    // obligation. The AlwaysErrorSecretStore is irrelevant at this point; the block
-    // occurs during grant matching before obligation-handler invocation.
-    approve_dispatch_for_services(&services, &scope, gate.approval_request_id, None).await;
+    // Step 2: approve WITH the required secret handle granted, so dispatch
+    // authorization PASSES and the resumed call reaches the dispatch-time credential
+    // backstop inside the obligation handler (not the earlier grant-matching gate).
+    // The grant lists `script_api_token` (the manifest's required runtime_credential)
+    // plus the UseSecret effect, so the authorizer emits the secret-injection
+    // obligation. On resume, BuiltinObligationHandler::preflight_secret_injection
+    // probes the AlwaysErrorSecretStore via `metadata()`, which errors — and the
+    // backstop FAILS CLOSED (`secret_obligation_failed`) instead of injecting. This is
+    // the exact PR contract: a transient store error during the pre-flight skip cannot
+    // let an uncredentialed call execute, because the dispatch-time obligation backstop
+    // re-checks presence and fails closed on the same store error.
+    services
+        .approval_resolver()
+        .expect("approval resolver should be configured")
+        .approve_dispatch(
+            &scope,
+            gate.approval_request_id,
+            LeaseApproval {
+                issued_by: Principal::HostRuntime,
+                allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
+                mounts: MountView::default(),
+                network: NetworkPolicy::default(),
+                secrets: vec![SecretHandle::new("script_api_token").unwrap()],
+                resource_ceiling: None,
+                expires_at: None,
+                max_invocations: Some(1),
+            },
+        )
+        .await
+        .unwrap();
 
     let resumed = runtime
         .resume_capability(RuntimeCapabilityResumeRequest::new(
@@ -8480,26 +8499,26 @@ async fn invoke_capability_secret_store_error_skips_preflight() {
         .await
         .unwrap();
 
-    // The manifest runtime_credentials backstop (GrantAuthorizer::obligations_for_grant)
-    // withholds authorization when the required secret handle is absent from the grant's
-    // secrets list, producing PolicyDenied → Failed(Authorization). This confirms the
-    // manifest credential requirement is enforced at dispatch time independently of the
-    // test authorizer: ApprovalThenGrantAuthorizer does not inject any secret obligation
-    // itself — enforcement is fully driven by the grant's secrets vs the descriptor's
-    // runtime_credentials.
+    // The dispatch-time obligation backstop (BuiltinObligationHandler::
+    // preflight_secret_injection) re-probes the required secret via `metadata()`.
+    // Against AlwaysErrorSecretStore that probe errors and the handler fails closed
+    // (`secret_obligation_failed`), so the resumed dispatch is blocked — proving a
+    // transient store error in the pre-flight skip path does not allow an
+    // uncredentialed call to execute. ApprovalThenGrantAuthorizer injects no secret
+    // obligation itself; the enforcement is the manifest runtime_credentials backstop.
     match &resumed {
         RuntimeCapabilityOutcome::Failed(failure) => {
             assert_eq!(
                 failure.capability_id,
                 script_capability_id(),
-                "manifest credential backstop must reference the resumed capability"
+                "dispatch-time credential backstop must reference the resumed capability"
             );
         }
         other => {
             panic!(
-                "expected Failed from manifest credential backstop on resume path; got {other:?}. \
-                 GrantAuthorizer must block dispatch when the required runtime_credentials handle \
-                 is absent from the grant's secrets list."
+                "expected Failed from the dispatch-time obligation backstop on resume path; \
+                 got {other:?}. The obligation handler must fail closed when metadata() errors \
+                 for a required runtime_credentials handle."
             );
         }
     }
