@@ -3244,6 +3244,99 @@ async fn host_runtime_services_auth_resume_trust_preflight_failure_fails_blocked
     );
 }
 
+// ---------------------------------------------------------------------------
+// approval-then-auth path: auth-resume with approval_request_id = Some(id)
+// must still fail a BlockedAuth run whose record has approval_request_id = None
+//
+// When a run goes through approval → resume → BlockedAuth, the BlockedAuth
+// transition explicitly clears the persisted approval_request_id to None.
+// The subsequent auth-resume request still carries the original
+// approval_request_id so it can claim the approval lease.  Before the fix,
+// the guard in fail_matching_blocked_auth_resume_on_preflight_error compared
+// record.approval_request_id (None) against the request's Some(id) and
+// returned early without failing the run, leaving it stuck as BlockedAuth.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn host_runtime_services_auth_resume_with_approval_id_fails_blocked_auth_run_on_preflight_error()
+ {
+    let fixture = approval_resume_fixture();
+    let context = execution_context_without_grants();
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "approval-then-auth preflight fix"});
+
+    // Directly put the run into BlockedAuth with approval_request_id = None
+    // (this mirrors what block_auth does: it always clears approval_request_id).
+    fixture
+        .run_state
+        .start(RunStart {
+            invocation_id,
+            scope: scope.clone(),
+            capability_id: script_capability_id(),
+        })
+        .await
+        .unwrap();
+    fixture
+        .run_state
+        .block_auth(&scope, invocation_id, "AuthRequired".to_string())
+        .await
+        .unwrap();
+
+    let run = fixture
+        .run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        run.status,
+        RunStatus::BlockedAuth,
+        "pre-condition: run must be BlockedAuth"
+    );
+    assert_eq!(
+        run.approval_request_id, None,
+        "pre-condition: BlockedAuth record must have approval_request_id = None"
+    );
+
+    // Build a broken runtime (empty extension registry → trust preflight fails).
+    let broken_runtime = resume_runtime_with_empty_registry(&fixture);
+
+    // Auth-resume carries a non-None approval_request_id (the original gate id
+    // from the approval phase).  Before the fix, the guard compared
+    // record.approval_request_id (None) != Some(id) and returned early, leaving
+    // the run stuck as BlockedAuth.
+    let orphan_approval_id = ApprovalRequestId::new();
+    let outcome = broken_runtime
+        .auth_resume_capability(RuntimeCapabilityAuthResumeRequest::new(
+            context.clone(),
+            script_capability_id(),
+            estimate.clone(),
+            input.clone(),
+            trust_decision_with_dispatch_authority(),
+            Some(orphan_approval_id),
+        ))
+        .await
+        .unwrap();
+    assert_failed_outcome(outcome, RuntimeFailureKind::MissingRuntime);
+
+    // The BlockedAuth run must now be Failed, not stuck as BlockedAuth.
+    let after = fixture
+        .run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after.status,
+        RunStatus::Failed,
+        "approval-then-auth preflight failure must transition BlockedAuth run to Failed \
+         even when the request carries approval_request_id = Some(id) \
+         (pre-fix: run was left stuck as BlockedAuth)"
+    );
+}
+
 #[tokio::test]
 async fn host_runtime_services_resume_without_backing_stores_fails_closed() {
     let runtime = HostRuntimeServices::new(

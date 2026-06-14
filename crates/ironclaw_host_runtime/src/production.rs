@@ -625,7 +625,6 @@ impl HostRuntime for DefaultHostRuntime {
             self.fail_matching_blocked_auth_resume_on_preflight_error(
                 &context,
                 &capability_id,
-                approval_request_id,
                 error.kind(),
             )
             .await;
@@ -643,7 +642,6 @@ impl HostRuntime for DefaultHostRuntime {
                 self.fail_matching_blocked_auth_resume_on_preflight_error(
                     &context,
                     &capability_id,
-                    approval_request_id,
                     error.kind(),
                 )
                 .await;
@@ -1232,15 +1230,20 @@ impl DefaultHostRuntime {
 
     /// Mirrors `fail_matching_blocked_resume_on_preflight_error` for
     /// `auth_resume_capability` preflight rejections.  Checks for a
-    /// `BlockedAuth` run record matching the capability and optional
-    /// `approval_request_id`; if found, transitions it to `Failed` so
-    /// it is not left as a stale resumable gate after the caller has
-    /// returned a terminal failure outcome.
+    /// `BlockedAuth` run record matching the capability; if found,
+    /// transitions it to `Failed` so it is not left as a stale resumable
+    /// gate after the caller has returned a terminal failure outcome.
+    ///
+    /// The `approval_request_id` carried by the auth-resume request is
+    /// intentionally NOT compared here: the `BlockedAuth` transition always
+    /// clears `approval_request_id` to `None` on the persisted record, so
+    /// any equality check against `Some(id)` would always fail and silently
+    /// skip the fail-transition.  `invocation_id` (embedded in `context`)
+    /// already uniquely identifies the run.
     async fn fail_matching_blocked_auth_resume_on_preflight_error(
         &self,
         context: &ironclaw_host_api::ExecutionContext,
         capability_id: &CapabilityId,
-        approval_request_id: Option<ApprovalRequestId>,
         error_kind: &'static str,
     ) {
         if context.validate().is_err() {
@@ -1265,10 +1268,7 @@ impl DefaultHostRuntime {
                 return;
             }
         };
-        if record.status != RunStatus::BlockedAuth
-            || &record.capability_id != capability_id
-            || record.approval_request_id != approval_request_id
-        {
+        if record.status != RunStatus::BlockedAuth || &record.capability_id != capability_id {
             return;
         }
         if let Err(error) = run_state
