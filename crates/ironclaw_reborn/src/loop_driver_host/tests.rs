@@ -5,9 +5,10 @@ use super::port_adapters::HostManagedLoopCheckpointPort;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_threads::ThreadScope;
 use ironclaw_turns::{
-    InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryRunProfileResolver,
-    LoopCheckpointStateRef, LoopCheckpointStore, PutLoopCheckpointRequest, RunProfileResolver,
-    TurnActor, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
+    CheckpointStateStore, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
+    InMemoryRunProfileResolver, LoopCheckpointStateRef, LoopCheckpointStore,
+    PutCheckpointStateRequest, PutLoopCheckpointRequest, RunProfileResolver, TurnActor,
+    TurnCheckpointId, TurnId, TurnRunId, TurnScope,
     run_profile::{
         AgentLoopHostErrorKind, CheckpointSchemaId, InMemoryLoopHostMilestoneSink,
         LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopCheckpointPort,
@@ -83,6 +84,68 @@ async fn checkpoint_port_load_payload_roundtrips_staged_payload() {
         .expect("load checkpoint payload");
 
     assert_eq!(loaded.kind, LoopCheckpointKind::BeforeSideEffect);
+    assert_eq!(loaded.schema_id, expected_schema_id);
+    assert_eq!(loaded.schema_version, expected_schema_version);
+    assert_eq!(loaded.payload.as_bytes(), payload.as_slice());
+}
+
+#[tokio::test]
+async fn checkpoint_port_load_payload_follows_retry_linked_source_run_ref() {
+    let source_context = test_run_context().await;
+    let retry_context = LoopRunContext::new(
+        source_context.scope.clone(),
+        source_context.turn_id,
+        TurnRunId::new(),
+        source_context.resolved_run_profile.clone(),
+    );
+    let expected_schema_id = retry_context.checkpoint_schema_id.clone();
+    let expected_schema_version = retry_context.checkpoint_schema_version;
+    let (retry_port, state_store, checkpoint_store) = test_checkpoint_port(retry_context.clone());
+    let payload = br#"{"iteration":4,"retry":true}"#.to_vec();
+
+    let staged = state_store
+        .put_checkpoint_state(PutCheckpointStateRequest::new(
+            source_context.scope.clone(),
+            source_context.turn_id,
+            source_context.run_id,
+            expected_schema_id.clone(),
+            expected_schema_version,
+            LoopCheckpointKind::BeforeModel,
+            payload.clone(),
+        ))
+        .await
+        .expect("stage source run payload");
+    let token = staged
+        .state_ref
+        .as_str()
+        .strip_prefix("checkpoint:")
+        .expect("state store ref should use checkpoint prefix");
+    let source_run_ref =
+        LoopCheckpointStateRef::for_run(&source_context, token).expect("source run ref");
+    let metadata = checkpoint_store
+        .put_loop_checkpoint(PutLoopCheckpointRequest {
+            scope: retry_context.scope.clone(),
+            turn_id: retry_context.turn_id,
+            run_id: retry_context.run_id,
+            state_ref: source_run_ref,
+            schema_id: expected_schema_id.clone(),
+            schema_version: expected_schema_version,
+            kind: LoopCheckpointKind::BeforeModel,
+            gate_ref: None,
+        })
+        .await
+        .expect("write retry checkpoint link metadata");
+
+    let loaded = retry_port
+        .load_checkpoint_payload(LoadCheckpointPayloadRequest {
+            checkpoint_id: metadata.checkpoint_id,
+            expected_schema_id: expected_schema_id.clone(),
+            expected_schema_version,
+        })
+        .await
+        .expect("load retry-linked checkpoint payload");
+
+    assert_eq!(loaded.kind, LoopCheckpointKind::BeforeModel);
     assert_eq!(loaded.schema_id, expected_schema_id);
     assert_eq!(loaded.schema_version, expected_schema_version);
     assert_eq!(loaded.payload.as_bytes(), payload.as_slice());
@@ -268,4 +331,29 @@ async fn validate_thread_scope_skips_owner_check_without_actor() {
 
     super::validate_thread_scope(&thread_scope, &context)
         .expect("absent actor must skip the owner check");
+}
+
+#[tokio::test]
+async fn checkpoint_write_rejects_foreign_run_scoped_state_ref() {
+    // Regression: the checkpoint WRITE path must only stage refs scoped to the
+    // current run. A `checkpoint:{other_run}:{token}` ref is a read-only
+    // retry-resume link; accepting it on write would index the record against a
+    // foreign run's payload and later fail to load. (CodeRabbit PR #4841.)
+    let context = test_run_context().await;
+    let foreign_run = TurnRunId::new();
+    let (port, _state_store, _checkpoint_store) = test_checkpoint_port(context);
+
+    let foreign_ref =
+        LoopCheckpointStateRef::new(format!("checkpoint:{foreign_run}:retry_state")).unwrap();
+
+    let error = port
+        .checkpoint(LoopCheckpointRequest {
+            kind: LoopCheckpointKind::BeforeModel,
+            state_ref: foreign_ref,
+            gate_ref: None,
+        })
+        .await
+        .expect_err("foreign run-scoped checkpoint ref must be rejected on write");
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::CheckpointRejected);
 }

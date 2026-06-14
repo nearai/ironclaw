@@ -101,6 +101,13 @@ impl TurnCoordinator for CapturingTurnCoordinator {
         panic!("resume_turn is not used by inbound turn contract tests")
     }
 
+    async fn retry_turn(
+        &self,
+        _request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        panic!("retry_turn is not used by inbound turn contract tests")
+    }
+
     async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
         panic!("cancel_run is not used by inbound turn contract tests")
     }
@@ -169,6 +176,13 @@ impl TurnCoordinator for ScriptedTurnCoordinator {
         _request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
         panic!("resume_turn is not used by inbound turn contract tests")
+    }
+
+    async fn retry_turn(
+        &self,
+        _request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        panic!("retry_turn is not used by inbound turn contract tests")
     }
 
     async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {

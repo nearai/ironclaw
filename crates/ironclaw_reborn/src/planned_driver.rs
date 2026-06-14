@@ -149,7 +149,7 @@ impl AgentLoopDriver for PlannedDriver {
             payload.payload.as_bytes(),
             checkpoint_kind,
         ) {
-            Ok(initial) => initial,
+            Ok(initial) => initial.rebase_for_run(run_context),
             Err(error) => {
                 log_resume_payload_error(error);
                 return checkpoint_unavailable_exit(run_context.run_id);
@@ -255,12 +255,18 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
                 reason: format!("{}: {safe_summary}", host_stage_name(stage)),
             }
         }
-        AgentLoopExecutorError::PlannerContract { detail } => AgentLoopDriverError::Failed {
-            reason_kind: format!("driver_bug:{detail}"),
-        },
-        AgentLoopExecutorError::CheckpointFailed { stage } => AgentLoopDriverError::Failed {
-            reason_kind: format!("checkpoint_rejected:{}", checkpoint_kind_name(stage)),
-        },
+        AgentLoopExecutorError::PlannerContract { detail } => {
+            tracing::warn!(detail = %detail, "planned driver planner contract failed");
+            AgentLoopDriverError::Failed {
+                reason_kind: "driver_bug".to_string(),
+            }
+        }
+        AgentLoopExecutorError::CheckpointFailed { stage } => {
+            tracing::warn!(stage = ?stage, "planned driver checkpoint failed");
+            AgentLoopDriverError::Failed {
+                reason_kind: "checkpoint_rejected".to_string(),
+            }
+        }
         AgentLoopExecutorError::Cancelled => AgentLoopDriverError::Failed {
             reason_kind: "interrupted_unexpectedly".to_string(),
         },
@@ -298,15 +304,6 @@ fn host_stage_name(stage: HostStage) -> &'static str {
         HostStage::Transcript => "Transcript",
         HostStage::Checkpoint => "Checkpoint",
         HostStage::Input => "Input",
-    }
-}
-
-fn checkpoint_kind_name(kind: CheckpointKind) -> &'static str {
-    match kind {
-        CheckpointKind::BeforeModel => "before_model",
-        CheckpointKind::BeforeSideEffect => "before_side_effect",
-        CheckpointKind::BeforeBlock => "before_block",
-        CheckpointKind::Final => "final",
     }
 }
 
@@ -541,8 +538,14 @@ mod tests {
         let registry = build_loop_family_registry().expect("registry");
         let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
         let context = run_context_for_driver(&driver);
-        let mut restored_state = LoopExecutionState::initial_for_run(&context);
+        let source_context = test_run_context("planned-driver-source-run");
+        let mut restored_state = LoopExecutionState::initial_for_run(&source_context);
         restored_state.iteration = 7;
+        restored_state.input_cursor = LoopInputCursor::from_host_token(
+            &source_context,
+            ironclaw_turns::run_profile::LoopInputCursorToken::new("input-cursor:source-seen")
+                .expect("valid cursor"),
+        );
         let checkpoint_id = TurnCheckpointId::new();
         let loaded = LoadedCheckpointPayload {
             kind: LoopCheckpointKind::BeforeModel,

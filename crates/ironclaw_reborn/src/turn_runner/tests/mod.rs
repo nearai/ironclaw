@@ -173,6 +173,7 @@ struct MockTransitionPort {
     runner_failure_requests: Mutex<Vec<RecordRunnerFailureRequest>>,
     relinquish_result: Mutex<Result<TurnRunState, TurnError>>,
     relinquish_requests: Mutex<Vec<RelinquishRunRequest>>,
+    latest_resumable_checkpoint_result: Mutex<Result<Option<TurnCheckpointId>, TurnError>>,
 }
 
 impl MockTransitionPort {
@@ -195,6 +196,7 @@ impl MockTransitionPort {
             runner_failure_requests: Mutex::new(Vec::new()),
             relinquish_result: Mutex::new(Ok(test_run_state(test_scope(), TurnStatus::Queued))),
             relinquish_requests: Mutex::new(Vec::new()),
+            latest_resumable_checkpoint_result: Mutex::new(Ok(None)),
         }
     }
 
@@ -208,6 +210,17 @@ impl MockTransitionPort {
         self
     }
 
+    fn with_latest_resumable_checkpoint(
+        self,
+        result: Result<Option<TurnCheckpointId>, TurnError>,
+    ) -> Self {
+        *self
+            .latest_resumable_checkpoint_result
+            .lock()
+            .expect("lock") = result;
+        self
+    }
+
     fn calls(&self) -> Vec<TransitionCall> {
         self.calls.lock().expect("lock").clone()
     }
@@ -218,6 +231,10 @@ impl MockTransitionPort {
 
     fn route_snapshot_requests(&self) -> Vec<RecordModelRouteSnapshotRequest> {
         self.route_snapshot_requests.lock().expect("lock").clone()
+    }
+
+    fn runner_failure_requests(&self) -> Vec<RecordRunnerFailureRequest> {
+        self.runner_failure_requests.lock().expect("lock").clone()
     }
 }
 
@@ -265,6 +282,18 @@ impl TurnRunTransitionPort for MockTransitionPort {
             .push(TransitionCall::RecoverExpiredLeases);
         self.recover_requests.lock().expect("lock").push(request);
         self.recover_result.lock().expect("lock").clone()
+    }
+
+    async fn latest_resumable_checkpoint(
+        &self,
+        _scope: &TurnScope,
+        _turn_id: TurnId,
+        _run_id: TurnRunId,
+    ) -> Result<Option<TurnCheckpointId>, TurnError> {
+        self.latest_resumable_checkpoint_result
+            .lock()
+            .expect("lock")
+            .clone()
     }
 
     async fn record_model_route_snapshot(
@@ -688,12 +717,11 @@ fn assert_first_terminal_failure_matches_first_claim(port: &MockTransitionPort, 
     assert_eq!(runner_failure.lease_token, claim.lease_token);
 }
 
-fn first_terminal_failure_category(port: &MockTransitionPort) -> String {
-    port.runner_failure_requests
-        .lock()
-        .expect("lock")
+fn first_recorded_runner_failure(port: &MockTransitionPort) -> String {
+    let requests = port.runner_failure_requests();
+    requests
         .first()
-        .expect("worker should record terminal failure")
+        .expect("worker should record runner failure")
         .failure
         .category()
         .to_string()
@@ -1207,7 +1235,6 @@ async fn worker_records_terminal_failure_on_driver_error() {
     ));
     let registry = Arc::new(setup_registry(driver));
     let claimed = make_claimed_run(&desc, test_scope(), TurnStatus::Queued);
-    let run_id = claimed.state.run_id;
     let port = Arc::new(MockTransitionPort::new().with_claim_result(Ok(Some(claimed))));
 
     let (_ws, wake_receiver) = TurnRunnerWakeReceiver::new();
@@ -1235,8 +1262,189 @@ async fn worker_records_terminal_failure_on_driver_error() {
     handle.await.expect("worker task should complete");
 
     assert!(port.calls().contains(&TransitionCall::RecordRunnerFailure));
-    assert_first_terminal_failure_matches_first_claim(&port, run_id);
-    assert_eq!(first_terminal_failure_category(&port), "driver_failed");
+    assert_eq!(first_recorded_runner_failure(&port), "driver_failed");
+}
+
+#[tokio::test]
+async fn worker_uses_runner_failure_transition_for_cancelled_driver_failure() {
+    let desc = test_descriptor();
+    let driver = Arc::new(MockDriver::failing(
+        desc.clone(),
+        AgentLoopDriverError::Failed {
+            reason_kind: "interrupted_unexpectedly".to_string(),
+        },
+    ));
+    let registry = Arc::new(setup_registry(driver));
+    let claimed = make_claimed_run(&desc, test_scope(), TurnStatus::CancelRequested);
+    let port = Arc::new(MockTransitionPort::new().with_claim_result(Ok(Some(claimed))));
+
+    let (_ws, wake_receiver) = TurnRunnerWakeReceiver::new();
+    let worker = TurnRunnerWorker::new(
+        TurnRunnerWorkerConfig {
+            heartbeat_interval: Duration::from_secs(60),
+            poll_interval: Duration::from_millis(50),
+            scope_filter: None,
+        },
+        port.clone(),
+        make_applier(port.clone()),
+        registry,
+        Arc::new(MockHostFactory),
+        wake_receiver,
+    );
+
+    assert!(
+        worker
+            .try_claim_and_run(&CancellationToken::new())
+            .await
+            .unwrap()
+    );
+
+    assert!(
+        port.calls().contains(&TransitionCall::RecordRunnerFailure),
+        "driver cancellation failures must use the cancel-or-fail transition"
+    );
+    assert!(
+        !port
+            .calls()
+            .contains(&TransitionCall::ApplyValidatedLoopExit),
+        "failed loop-exit application rejects CancelRequested instead of cancelling it"
+    );
+    assert_eq!(first_recorded_runner_failure(&port), "driver_failed");
+}
+
+#[tokio::test]
+async fn worker_maps_driver_unavailable_to_retryable_host_stage_failure() {
+    let desc = test_descriptor();
+    let driver = Arc::new(MockDriver::failing(
+        desc.clone(),
+        AgentLoopDriverError::Unavailable {
+            reason: "Model: unavailable".to_string(),
+        },
+    ));
+    let registry = Arc::new(setup_registry(driver));
+    let checkpoint_id = TurnCheckpointId::new();
+    let mut claimed = make_claimed_run(&desc, test_scope(), TurnStatus::Queued);
+    claimed.state.checkpoint_id = Some(checkpoint_id);
+    let port = Arc::new(
+        MockTransitionPort::new()
+            .with_claim_result(Ok(Some(claimed)))
+            .with_latest_resumable_checkpoint(Ok(Some(checkpoint_id))),
+    );
+
+    let (_ws, wake_receiver) = TurnRunnerWakeReceiver::new();
+    let worker = TurnRunnerWorker::new(
+        TurnRunnerWorkerConfig {
+            heartbeat_interval: Duration::from_secs(60),
+            poll_interval: Duration::from_millis(50),
+            scope_filter: None,
+        },
+        port.clone(),
+        make_applier(port.clone()),
+        registry,
+        Arc::new(MockHostFactory),
+        wake_receiver,
+    );
+
+    assert!(
+        worker
+            .try_claim_and_run(&CancellationToken::new())
+            .await
+            .unwrap()
+    );
+
+    assert!(port.calls().contains(&TransitionCall::RecordRunnerFailure));
+    assert_eq!(
+        first_recorded_runner_failure(&port),
+        "host_stage_unavailable_model"
+    );
+}
+
+#[tokio::test]
+async fn worker_does_not_mark_driver_unavailable_retryable_without_confirmed_checkpoint() {
+    let desc = test_descriptor();
+    let driver = Arc::new(MockDriver::failing(
+        desc.clone(),
+        AgentLoopDriverError::Unavailable {
+            reason: "Model: unavailable".to_string(),
+        },
+    ));
+    let registry = Arc::new(setup_registry(driver));
+    let mut claimed = make_claimed_run(&desc, test_scope(), TurnStatus::Queued);
+    claimed.state.checkpoint_id = Some(TurnCheckpointId::new());
+    let port = Arc::new(MockTransitionPort::new().with_claim_result(Ok(Some(claimed))));
+
+    let (_ws, wake_receiver) = TurnRunnerWakeReceiver::new();
+    let worker = TurnRunnerWorker::new(
+        TurnRunnerWorkerConfig {
+            heartbeat_interval: Duration::from_secs(60),
+            poll_interval: Duration::from_millis(50),
+            scope_filter: None,
+        },
+        port.clone(),
+        make_applier(port.clone()),
+        registry,
+        Arc::new(MockHostFactory),
+        wake_receiver,
+    );
+
+    assert!(
+        worker
+            .try_claim_and_run(&CancellationToken::new())
+            .await
+            .unwrap()
+    );
+
+    assert_eq!(
+        first_recorded_runner_failure(&port),
+        "host_stage_unavailable_model"
+    );
+}
+
+#[tokio::test]
+async fn worker_threads_driver_failed_reason_kind_into_retryable_failure_summary() {
+    let desc = test_descriptor();
+    let driver = Arc::new(MockDriver::failing(
+        desc.clone(),
+        AgentLoopDriverError::Failed {
+            reason_kind: "model_credits_exhausted".to_string(),
+        },
+    ));
+    let registry = Arc::new(setup_registry(driver));
+    let checkpoint_id = TurnCheckpointId::new();
+    let mut claimed = make_claimed_run(&desc, test_scope(), TurnStatus::Queued);
+    claimed.state.checkpoint_id = Some(checkpoint_id);
+    let port = Arc::new(
+        MockTransitionPort::new()
+            .with_claim_result(Ok(Some(claimed)))
+            .with_latest_resumable_checkpoint(Ok(Some(checkpoint_id))),
+    );
+
+    let (_ws, wake_receiver) = TurnRunnerWakeReceiver::new();
+    let worker = TurnRunnerWorker::new(
+        TurnRunnerWorkerConfig {
+            heartbeat_interval: Duration::from_secs(60),
+            poll_interval: Duration::from_millis(50),
+            scope_filter: None,
+        },
+        port.clone(),
+        make_applier(port.clone()),
+        registry,
+        Arc::new(MockHostFactory),
+        wake_receiver,
+    );
+
+    assert!(
+        worker
+            .try_claim_and_run(&CancellationToken::new())
+            .await
+            .unwrap()
+    );
+
+    assert!(port.calls().contains(&TransitionCall::RecordRunnerFailure));
+    assert_eq!(
+        first_recorded_runner_failure(&port),
+        MODEL_CREDITS_EXHAUSTED_CATEGORY
+    );
 }
 
 #[tokio::test]
@@ -1274,8 +1482,9 @@ async fn worker_preserves_model_credit_exhaustion_failure_category() {
     cancel.cancel();
     handle.await.expect("worker task should complete");
 
+    assert!(port.calls().contains(&TransitionCall::RecordRunnerFailure));
     assert_eq!(
-        first_terminal_failure_category(&port),
+        first_recorded_runner_failure(&port),
         MODEL_CREDITS_EXHAUSTED_CATEGORY
     );
 }
@@ -1617,5 +1826,12 @@ fn sanitized_driver_failure_returns_model_credentials_for_known_category() {
 fn sanitized_driver_failure_returns_driver_failed_for_unknown_category() {
     let result = sanitized_driver_failure("some_unknown_driver_category");
     let failure = result.expect("should return Some fallback for unknown category");
+    assert_eq!(failure.category(), "driver_failed");
+}
+
+#[test]
+fn sanitized_driver_failure_returns_driver_failed_for_invalid_category() {
+    let result = sanitized_driver_failure("driver_bug:/tmp/secret");
+    let failure = result.expect("should return Some fallback for invalid category");
     assert_eq!(failure.category(), "driver_failed");
 }

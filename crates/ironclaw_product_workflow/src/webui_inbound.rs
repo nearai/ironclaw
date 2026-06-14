@@ -200,6 +200,17 @@ pub struct WebUiCancelRunRequest {
     pub reason: Option<String>,
 }
 
+/// Browser body for WebUI failed-run retry mutation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WebUiRetryRunRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_action_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+}
+
 /// Browser query for WebUI list-threads read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WebUiListThreadsRequest {
@@ -321,6 +332,12 @@ pub enum WebUiInboundCommand {
         client_action_id: IdempotencyKey,
         resolution: WebUiGateResolution,
     },
+    RetryRun {
+        scope: TurnScope,
+        actor: TurnActor,
+        run_id: TurnRunId,
+        client_action_id: IdempotencyKey,
+    },
 }
 
 impl WebUiCreateThreadRequest {
@@ -383,6 +400,24 @@ impl WebUiCancelRunRequest {
                 reason,
                 idempotency_key: client_action_id,
             },
+        })
+    }
+}
+
+impl WebUiRetryRunRequest {
+    pub fn into_command(
+        self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<WebUiInboundCommand, WebUiInboundValidationError> {
+        let client_action_id = parse_client_action_id(self.client_action_id)?;
+        let thread_id = parse_thread_id(self.thread_id)?;
+        let run_id = parse_run_id(self.run_id)?;
+
+        Ok(WebUiInboundCommand::RetryRun {
+            scope: caller.turn_scope(thread_id),
+            actor: caller.actor(),
+            run_id,
+            client_action_id,
         })
     }
 }

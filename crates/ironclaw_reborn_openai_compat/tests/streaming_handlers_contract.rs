@@ -855,6 +855,7 @@ fn run_status_envelope(cursor: &str, status: &str) -> ProductOutboundEnvelope {
                     status: status.to_string(),
                     failure_category: None,
                     failure_summary: None,
+                    retryable: None,
                 }],
             )
             .expect("projection state"),

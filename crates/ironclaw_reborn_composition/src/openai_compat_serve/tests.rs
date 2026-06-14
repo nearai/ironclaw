@@ -406,6 +406,7 @@ fn run_status_envelope(
                     status: status.to_string(),
                     failure_category: None,
                     failure_summary: None,
+                    retryable: None,
                 }],
             )
             .expect("projection state"),

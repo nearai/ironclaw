@@ -977,7 +977,8 @@ pub struct LoopInlineMessage {
 ///
 /// The optional cursor and checkpoint refs are run-scoped and are validated by
 /// host ports before context is loaded. `max_messages` is a host budget hint;
-/// zero is rejected and oversized values may be clamped by the implementation.
+/// zero is accepted only for inline-only context-free prompts, and oversized
+/// values may be clamped by the implementation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopPromptBundleRequest {
     pub mode: PromptMode,

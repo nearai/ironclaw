@@ -295,6 +295,13 @@ impl TurnCoordinator for FakeTurnCoordinator {
         unreachable!("projection tests only read run state")
     }
 
+    async fn retry_turn(
+        &self,
+        _request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        unreachable!("projection tests only read run state")
+    }
+
     async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
         unreachable!("projection tests only read run state")
     }

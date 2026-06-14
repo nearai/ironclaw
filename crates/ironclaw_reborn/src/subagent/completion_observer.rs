@@ -854,6 +854,8 @@ fn terminal_event_from_lifecycle(event: &TurnLifecycleEvent) -> AwaitedChildTerm
 }
 
 fn terminal_event_from_state(state: &TurnRunState) -> Result<TurnLifecycleEvent, TurnError> {
+    let kind = event_kind_from_terminal_status(state.status)?;
+    let retryable = (kind == TurnEventKind::Failed).then(|| state.checkpoint_id.is_some());
     Ok(TurnLifecycleEvent {
         cursor: state.event_cursor,
         scope: state.scope.clone(),
@@ -861,12 +863,13 @@ fn terminal_event_from_state(state: &TurnRunState) -> Result<TurnLifecycleEvent,
         owner_user_id: state.actor.clone().map(|actor| actor.user_id),
         run_id: state.run_id,
         status: state.status,
-        kind: event_kind_from_terminal_status(state.status)?,
+        kind,
         blocked_gate: None,
         sanitized_reason: state
             .failure
             .as_ref()
             .map(|failure| failure.category().to_string()),
+        retryable,
     })
 }
 
@@ -1079,10 +1082,11 @@ mod tests {
     };
     use ironclaw_turns::{
         AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
-        GetRunStateRequest, LoopResultRef, ReplyTargetBindingRef, ResumeTurnResponse, RunProfileId,
-        RunProfileVersion, SourceBindingRef, SpawnTreeReservation, SubmitTurnRequest,
-        SubmitTurnResponse, TurnEventKind, TurnRunId, TurnRunProfile, TurnRunRecord, TurnRunState,
-        TurnScope, TurnStateStore, events::TurnLifecycleEvent,
+        GetRunStateRequest, LoopResultRef, ReplyTargetBindingRef, ResumeTurnResponse,
+        RetryTurnRequest, RetryTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef,
+        SpawnTreeReservation, SubmitTurnRequest, SubmitTurnResponse, TurnEventKind, TurnRunId,
+        TurnRunProfile, TurnRunRecord, TurnRunState, TurnScope, TurnStateStore,
+        events::TurnLifecycleEvent,
     };
 
     use crate::subagent::goal_store::{
@@ -1120,6 +1124,18 @@ mod tests {
                 run_id: request.run_id,
                 status: TurnStatus::Queued,
                 event_cursor: EventCursor(10),
+            })
+        }
+
+        async fn retry_turn(
+            &self,
+            request: RetryTurnRequest,
+        ) -> Result<RetryTurnResponse, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: format!(
+                    "retry not used by completion observer tests: {}",
+                    request.run_id
+                ),
             })
         }
 
@@ -1195,6 +1211,18 @@ mod tests {
                 run_id: request.run_id,
                 status: TurnStatus::Queued,
                 event_cursor: EventCursor(10),
+            })
+        }
+
+        async fn retry_turn(
+            &self,
+            request: RetryTurnRequest,
+        ) -> Result<RetryTurnResponse, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: format!(
+                    "retry not used by completion observer tests: {}",
+                    request.run_id
+                ),
             })
         }
 
@@ -1634,6 +1662,16 @@ mod tests {
             })
         }
 
+        async fn retry_turn(
+            &self,
+            request: ironclaw_turns::RetryTurnRequest,
+        ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+            // WS-3 implements this.
+            Err(TurnError::RunNotRetryable {
+                run_id: request.run_id,
+            })
+        }
+
         async fn request_cancel(
             &self,
             _request: CancelRunRequest,
@@ -1906,6 +1944,7 @@ mod tests {
             kind: TurnEventKind::Completed,
             blocked_gate: None,
             sanitized_reason: None,
+            retryable: None,
         }
     }
 
@@ -2553,6 +2592,7 @@ mod tests {
                 kind: TurnEventKind::Completed,
                 blocked_gate: None,
                 sanitized_reason: None,
+                retryable: None,
             })
             .await
             .unwrap();
@@ -2707,6 +2747,7 @@ mod tests {
                 kind: TurnEventKind::Completed,
                 blocked_gate: None,
                 sanitized_reason: None,
+                retryable: None,
             })
             .await
             .unwrap();
@@ -2880,6 +2921,7 @@ mod tests {
                 kind: TurnEventKind::Completed,
                 blocked_gate: None,
                 sanitized_reason: None,
+                retryable: None,
             })
             .await
             .unwrap();
@@ -2987,6 +3029,7 @@ mod tests {
                 kind: TurnEventKind::Completed,
                 blocked_gate: None,
                 sanitized_reason: None,
+                retryable: None,
             })
             .await
             .unwrap();
@@ -3172,6 +3215,7 @@ mod tests {
                 kind: TurnEventKind::RecoveryRequired,
                 blocked_gate: None,
                 sanitized_reason: Some("driver_bug".to_string()),
+                retryable: None,
             })
             .await
             .unwrap();
@@ -3431,6 +3475,7 @@ mod tests {
                 kind: TurnEventKind::Completed,
                 blocked_gate: None,
                 sanitized_reason: None,
+                retryable: None,
             })
             .await
             .unwrap();
@@ -3618,6 +3663,7 @@ mod tests {
                 kind: TurnEventKind::Completed,
                 blocked_gate: None,
                 sanitized_reason: None,
+                retryable: None,
             })
             .await
             .unwrap();
@@ -3635,6 +3681,7 @@ mod tests {
                 kind: TurnEventKind::Completed,
                 blocked_gate: None,
                 sanitized_reason: None,
+                retryable: None,
             })
             .await
             .unwrap();
@@ -4038,6 +4085,7 @@ mod tests {
                 kind: TurnEventKind::Completed,
                 blocked_gate: None,
                 sanitized_reason: None,
+                retryable: None,
             })
             .await
             .unwrap();
@@ -4054,6 +4102,7 @@ mod tests {
                 kind: TurnEventKind::Completed,
                 blocked_gate: None,
                 sanitized_reason: None,
+                retryable: None,
             })
             .await
             .unwrap_err();
@@ -4083,6 +4132,7 @@ mod tests {
                 kind: TurnEventKind::Completed,
                 blocked_gate: None,
                 sanitized_reason: None,
+                retryable: None,
             })
             .await
             .unwrap();
@@ -4642,6 +4692,7 @@ mod tests {
                 kind: TurnEventKind::Completed,
                 blocked_gate: None,
                 sanitized_reason: None,
+                retryable: None,
             })
             .await
             .unwrap_err();

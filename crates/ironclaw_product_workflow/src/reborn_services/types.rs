@@ -4,7 +4,7 @@ use ironclaw_product_adapters::{ProductOutboundEnvelope, ProjectionCursor};
 use ironclaw_threads::{SessionThreadRecord, SummaryArtifact, ThreadMessageRecord};
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunResponse, EventCursor, GateRef, ResumeTurnResponse,
-    SanitizedFailure, TurnCheckpointId, TurnRunId, TurnRunState, TurnStatus,
+    RetryTurnResponse, SanitizedFailure, TurnCheckpointId, TurnRunId, TurnRunState, TurnStatus,
 };
 use secrecy::SecretString;
 use serde::ser::SerializeStruct;
@@ -308,6 +308,23 @@ pub struct RebornResumeGateResponse {
 
 impl From<ResumeTurnResponse> for RebornResumeGateResponse {
     fn from(value: ResumeTurnResponse) -> Self {
+        Self {
+            run_id: value.run_id,
+            status: value.status,
+            event_cursor: value.event_cursor,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornRetryRunResponse {
+    pub run_id: TurnRunId,
+    pub status: TurnStatus,
+    pub event_cursor: EventCursor,
+}
+
+impl From<RetryTurnResponse> for RebornRetryRunResponse {
+    fn from(value: RetryTurnResponse) -> Self {
         Self {
             run_id: value.run_id,
             status: value.status,

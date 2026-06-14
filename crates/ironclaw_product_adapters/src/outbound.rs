@@ -948,6 +948,10 @@ pub enum ProductProjectionItem {
         /// User-facing sanitized explanation for terminal failure states.
         #[serde(skip_serializing_if = "Option::is_none")]
         failure_summary: Option<String>,
+        /// Present only for failed runs: whether the run recorded a resumable
+        /// checkpoint and can be retried via the run retry endpoint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retryable: Option<bool>,
     },
     Gate {
         gate_ref: String,
@@ -983,6 +987,7 @@ impl ProductProjectionItem {
                 status,
                 failure_category: _,
                 failure_summary,
+                retryable,
                 ..
             } => {
                 validate_bounded_text(
@@ -990,6 +995,12 @@ impl ProductProjectionItem {
                     status,
                     PROJECTION_ITEM_ID_MAX_BYTES,
                 )?;
+                if retryable.is_some() && status != "failed" {
+                    return Err(invalid(
+                        "projection_run_retryable",
+                        "retryable is only valid for failed run status entries",
+                    ));
+                }
                 if let Some(summary) = failure_summary {
                     validate_bounded_text(
                         "projection_failure_summary",
@@ -1084,6 +1095,8 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 failure_category: Option<String>,
                 #[serde(default)]
                 failure_summary: Option<String>,
+                #[serde(default)]
+                retryable: Option<bool>,
             },
             Gate {
                 gate_ref: String,
@@ -1122,6 +1135,7 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 status,
                 failure_category,
                 failure_summary,
+                retryable,
             } => ProductProjectionItem::RunStatus {
                 run_id,
                 status,
@@ -1130,6 +1144,7 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                     .transpose()
                     .map_err(serde::de::Error::custom)?,
                 failure_summary,
+                retryable,
             },
             Wire::Gate {
                 gate_ref,
@@ -1415,6 +1430,7 @@ mod tests {
                 failure_summary: Some(
                     "The run failed because its runner lease expired.".to_string(),
                 ),
+                retryable: None,
             }],
         )
         .expect("valid run status projection");
@@ -1430,6 +1446,47 @@ mod tests {
         let decoded: ProductProjectionState =
             serde_json::from_value(value).expect("deserialize run status projection");
         assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn projection_state_allows_retryable_failed_run_status() {
+        ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::RunStatus {
+                run_id: TurnRunId::new(),
+                status: "failed".to_string(),
+                failure_category: None,
+                failure_summary: None,
+                retryable: Some(true),
+            }],
+        )
+        .expect("failed run status may carry retryability");
+    }
+
+    #[test]
+    fn projection_state_rejects_retryable_non_failed_run_status() {
+        let error = ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::RunStatus {
+                run_id: TurnRunId::new(),
+                status: "running".to_string(),
+                failure_category: None,
+                failure_summary: None,
+                retryable: Some(true),
+            }],
+        )
+        .expect_err("running run status must not carry retryability");
+
+        assert!(
+            matches!(
+                error,
+                ProductAdapterError::InvalidIdentifier {
+                    kind: "projection_run_retryable",
+                    ..
+                }
+            ),
+            "unexpected error: {error:?}"
+        );
     }
 
     #[test]
@@ -1454,6 +1511,7 @@ mod tests {
                 status: "failed".to_string(),
                 failure_category: None,
                 failure_summary: None,
+                retryable: None,
             }]
         );
     }

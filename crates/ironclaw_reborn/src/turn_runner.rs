@@ -38,6 +38,7 @@ use crate::{
     driver_registry::{DriverRegistry, LoopDriverRegistryKey},
     failure_categories::{
         MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
+        host_stage_unavailable_category,
     },
     loop_exit_applier::LoopExitApplier,
 };
@@ -64,23 +65,19 @@ fn sanitized_failure(category: &'static str) -> Option<SanitizedFailure> {
 }
 
 fn sanitized_driver_failure(reason_kind: &str) -> Option<SanitizedFailure> {
-    if matches!(
-        reason_kind,
-        MODEL_CREDITS_EXHAUSTED_CATEGORY | MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY
-    ) {
-        return match SanitizedFailure::new(reason_kind.to_string()) {
-            Ok(failure) => Some(failure),
-            Err(error) => {
-                debug!(
-                    reason_kind,
-                    %error,
-                    "model failure category failed validation; using generic driver failure"
-                );
-                sanitized_failure("driver_failed")
-            }
-        };
+    match reason_kind {
+        MODEL_CREDITS_EXHAUSTED_CATEGORY => sanitized_failure(MODEL_CREDITS_EXHAUSTED_CATEGORY),
+        MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY => {
+            sanitized_failure(MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY)
+        }
+        _ => {
+            debug!(
+                reason_kind,
+                "driver failure reason kind is not host-allowlisted; using generic driver failure"
+            );
+            sanitized_failure("driver_failed")
+        }
     }
-    sanitized_failure("driver_failed")
 }
 
 /// Configuration for the turn-runner worker.
@@ -410,8 +407,7 @@ impl TurnRunnerWorker {
                     error = %err,
                     "driver invocation failed, recording terminal failure"
                 );
-                self.record_terminal_failure(run_id, runner_id, lease_token, &err)
-                    .await;
+                self.record_terminal_failure(&claimed, &err).await;
             }
         }
     }
@@ -578,11 +574,12 @@ impl TurnRunnerWorker {
     /// lease so another worker can retry.  All other errors record a terminal failure.
     async fn record_terminal_failure(
         &self,
-        run_id: TurnRunId,
-        runner_id: TurnRunnerId,
-        lease_token: TurnLeaseToken,
+        claimed: &ClaimedTurnRun,
         error: &DriverInvocationError,
     ) {
+        let run_id = claimed.state.run_id;
+        let runner_id = claimed.runner_id;
+        let lease_token = claimed.lease_token;
         // Errors that warrant relinquish (re-queue) rather than terminal failure.
         let relinquish = matches!(
             error,
@@ -606,43 +603,60 @@ impl TurnRunnerWorker {
             return;
         }
 
-        let failure = match error {
-            DriverInvocationError::DriverError(AgentLoopDriverError::Failed { reason_kind }) => {
-                sanitized_driver_failure(reason_kind)
-            }
-            other => {
-                let category = match other {
-                    DriverInvocationError::DriverNotFound { .. } => "driver_not_found",
-                    DriverInvocationError::HostCreationFailed { .. } => "host_creation_failed",
-                    DriverInvocationError::RouteSnapshotPersistenceFailed(_) => {
-                        "route_snapshot_persistence_failed"
-                    }
-                    DriverInvocationError::DriverError(AgentLoopDriverError::InvalidRequest {
-                        ..
-                    }) => "driver_invalid_request",
-                    DriverInvocationError::DriverError(AgentLoopDriverError::Unavailable {
-                        ..
-                    }) => "driver_unavailable",
-                    // DriverError(Failed) is destructured in the outer arm and dispatched
-                    // through sanitized_driver_failure before this branch is reached.
-                    DriverInvocationError::DriverError(AgentLoopDriverError::Failed { .. }) => {
-                        unreachable!("failed driver errors handled above")
-                    }
-                    DriverInvocationError::DriverPanic => "driver_panic",
-                    DriverInvocationError::HeartbeatFailed(_) => "heartbeat_failed",
-                    // WorkerCancelled and HeartbeatStopped handled by relinquish branch above.
-                    DriverInvocationError::WorkerCancelled
-                    | DriverInvocationError::HeartbeatStopped => {
-                        unreachable!("relinquish branch handles these")
-                    }
-                };
-                sanitized_failure(category)
-            }
+        if let Some(failure) = self.driver_error_failure(error) {
+            self.record_runner_failure(claimed, failure).await;
+            return;
+        }
+
+        let failure = {
+            let category = match error {
+                DriverInvocationError::DriverNotFound { .. } => "driver_not_found",
+                DriverInvocationError::HostCreationFailed { .. } => "host_creation_failed",
+                DriverInvocationError::RouteSnapshotPersistenceFailed(_) => {
+                    "route_snapshot_persistence_failed"
+                }
+                DriverInvocationError::DriverError(AgentLoopDriverError::InvalidRequest {
+                    ..
+                }) => "driver_invalid_request",
+                DriverInvocationError::DriverError(AgentLoopDriverError::Unavailable {
+                    ..
+                })
+                | DriverInvocationError::DriverError(AgentLoopDriverError::Failed { .. }) => {
+                    unreachable!("driver error failures handled above")
+                }
+                DriverInvocationError::DriverPanic => "driver_panic",
+                DriverInvocationError::HeartbeatFailed(_) => "heartbeat_failed",
+                // WorkerCancelled and HeartbeatStopped handled by relinquish branch above.
+                DriverInvocationError::WorkerCancelled
+                | DriverInvocationError::HeartbeatStopped => {
+                    unreachable!("relinquish branch handles these")
+                }
+            };
+            sanitized_failure(category)
         };
 
         let Some(failure) = failure else {
             return;
         };
+        self.record_runner_failure(claimed, failure).await;
+    }
+
+    fn driver_error_failure(&self, error: &DriverInvocationError) -> Option<SanitizedFailure> {
+        match error {
+            DriverInvocationError::DriverError(AgentLoopDriverError::Unavailable { reason }) => {
+                sanitized_failure(host_stage_unavailable_category(reason))
+            }
+            DriverInvocationError::DriverError(AgentLoopDriverError::Failed { reason_kind }) => {
+                sanitized_driver_failure(reason_kind)
+            }
+            _ => None,
+        }
+    }
+
+    async fn record_runner_failure(&self, claimed: &ClaimedTurnRun, failure: SanitizedFailure) {
+        let run_id = claimed.state.run_id;
+        let runner_id = claimed.runner_id;
+        let lease_token = claimed.lease_token;
         let request = RecordRunnerFailureRequest {
             run_id,
             runner_id,

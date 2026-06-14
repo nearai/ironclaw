@@ -43,6 +43,7 @@ pub(crate) fn classify_inbound_error(error: &InboundTurnError) -> TrustedTrigger
                 TurnError::ScopeNotFound
                 | TurnError::Unauthorized
                 | TurnError::InvalidRequest { .. }
+                | TurnError::RunNotRetryable { .. }
                 | TurnError::InvalidTransition { .. }
                 | TurnError::LeaseMismatch,
         } => TrustedTriggerInboundFailureKind::SubmitRejected,

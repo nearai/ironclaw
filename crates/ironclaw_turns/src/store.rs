@@ -6,8 +6,8 @@ use ironclaw_host_api::{AgentId, ProjectId, RuntimeCredentialAuthRequirement, Te
 use crate::{
     AcceptedMessageRef, AdmissionRejection, CancelRunRequest, CancelRunResponse, GateRef,
     GetRunStateRequest, IdempotencyKey, LoopCheckpointRecord, ReplyTargetBindingRef,
-    ResumeTurnRequest, ResumeTurnResponse, RunProfileResolver, SourceBindingRef,
-    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
+    ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, RunProfileResolver,
+    SourceBindingRef, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
     TurnActiveRunRefState, TurnActor, TurnAdmissionPolicy, TurnAdmissionReservationRecord,
     TurnCapacityResource, TurnCheckpointId, TurnError, TurnErrorCategory, TurnId, TurnLeaseToken,
     TurnLifecycleEvent, TurnRunId, TurnRunProfile, TurnRunState, TurnRunnerId, TurnScope,
@@ -29,6 +29,8 @@ pub trait TurnStateStore: Send + Sync {
         &self,
         request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError>;
+
+    async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError>;
 
     async fn request_cancel(
         &self,
@@ -268,6 +270,7 @@ pub struct TurnCheckpointRecord {
 pub enum TurnIdempotencyOperationKind {
     Submit,
     Resume,
+    Retry,
     Cancel,
 }
 
@@ -278,6 +281,7 @@ pub enum TurnIdempotencyOutcomeKind {
     ThreadBusy,
     AdmissionRejected,
     Resumed,
+    Retried,
     CancelRecorded,
     ScopeNotFound,
     Unauthorized,
@@ -298,6 +302,7 @@ impl TurnIdempotencyOutcomeKind {
             TurnError::Unavailable { .. } => Self::Unavailable,
             TurnError::CapacityExceeded { .. } => Self::CapacityExceeded,
             TurnError::Conflict { .. }
+            | TurnError::RunNotRetryable { .. }
             | TurnError::InvalidTransition { .. }
             | TurnError::LeaseMismatch => Self::Conflict,
         }
@@ -310,6 +315,8 @@ pub enum TurnIdempotencyReplay {
     SubmitThreadBusy(ThreadBusy),
     SubmitAdmissionRejected(AdmissionRejection),
     ResumeSucceeded(ResumeTurnResponse),
+    RetrySucceeded(RetryTurnResponse),
+    RetryThreadBusy(ThreadBusy),
     CancelRecorded(CancelRunResponse),
     Error(TurnIdempotencyErrorReplay),
 }
@@ -425,6 +432,23 @@ impl TurnIdempotencyRecord {
             TurnIdempotencyReplay::CancelRecorded(response) => Some(Ok(response.clone())),
             TurnIdempotencyReplay::Error(error)
                 if self.operation == TurnIdempotencyOperationKind::Cancel =>
+            {
+                Some(Err(error.to_error()))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn replay_retry(&self) -> Option<Result<RetryTurnResponse, TurnError>> {
+        if self.operation != TurnIdempotencyOperationKind::Retry {
+            return None;
+        }
+        match &self.replay {
+            TurnIdempotencyReplay::RetrySucceeded(response) => Some(Ok(response.clone())),
+            // Same-thread busy is a transient lock state, not an idempotent retry outcome.
+            TurnIdempotencyReplay::RetryThreadBusy(_) => None,
+            TurnIdempotencyReplay::Error(error)
+                if self.operation == TurnIdempotencyOperationKind::Retry =>
             {
                 Some(Err(error.to_error()))
             }

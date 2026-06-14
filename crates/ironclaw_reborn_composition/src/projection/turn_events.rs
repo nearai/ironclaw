@@ -639,6 +639,7 @@ fn turn_event_projection_state(
             status: turn_status_wire(event.status).to_string(),
             failure_category: failure_details.category,
             failure_summary: failure_details.summary,
+            retryable: event.retryable,
         }],
     )
 }

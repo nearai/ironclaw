@@ -114,9 +114,9 @@ use ironclaw_turns::{
     CancelRunRequest, FilesystemTurnStateStore, GateRef, GetLoopCheckpointRequest,
     GetRunStateRequest, IdempotencyKey, InMemoryCheckpointStateStore, LoopBlockedKind,
     LoopCheckpointKind, LoopCheckpointStore, LoopGateRef, LoopResultRef, ReplyTargetBindingRef,
-    ResumeTurnRequest, SanitizedCancelReason, SourceBindingRef, TurnActor, TurnCoordinator,
-    TurnError, TurnRunId, TurnRunRecord, TurnRunState, TurnScope, TurnSpawnTreeStateStore,
-    TurnStateStore, TurnStatus,
+    ResumeTurnRequest, RetryTurnRequest, RetryTurnResponse, SanitizedCancelReason,
+    SourceBindingRef, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnRunRecord,
+    TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
         CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDescriptorView,
@@ -1212,6 +1212,38 @@ impl RebornBinaryE2EHarness {
             .into());
         }
         Ok(())
+    }
+
+    /// Retries a failed, retryable run through the coordinator, returning the
+    /// spawned retry run. Mirrors the WebUI v2 `retry_run` path.
+    pub async fn retry_turn(&self, run_id: TurnRunId) -> HarnessResult<RetryTurnResponse> {
+        self.retry_turn_as(
+            self.turn_scope.clone(),
+            TurnActor::new(self.binding.actor_user_id.clone()),
+            run_id,
+            format!("retry-{run_id}"),
+        )
+        .await
+    }
+
+    pub async fn retry_turn_as(
+        &self,
+        scope: TurnScope,
+        actor: TurnActor,
+        run_id: TurnRunId,
+        idempotency_key: impl Into<String>,
+    ) -> HarnessResult<RetryTurnResponse> {
+        Ok(self
+            .coordinator
+            .retry_turn(RetryTurnRequest {
+                scope,
+                actor,
+                run_id,
+                source_binding_ref: SourceBindingRef::new("src:retry")?,
+                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:retry")?,
+                idempotency_key: IdempotencyKey::new(idempotency_key.into())?,
+            })
+            .await?)
     }
 
     pub async fn wait_for_status(

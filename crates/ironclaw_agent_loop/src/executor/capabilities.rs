@@ -20,10 +20,11 @@ use crate::{
 
 use super::{
     AgentLoopExecutorError, AwaitDependentRunGateInput, AwaitDependentRunGateStage, BatchStep,
-    CancelCheck, CapabilitySurfaceIndex, CheckpointStage, ExecutorStage, GateInput, GateStage,
-    MAX_CAPABILITY_RETRIES, StageContext, TurnCompletedStep, append_capability_error_ref,
-    append_capability_result_ref, append_capability_safe_summary_ref, batch_policy_kind,
-    cancelled_exit, capability_batch_counts, capability_call_signature, capability_error_class,
+    CancelCheck, CapabilitySurfaceIndex, CheckpointStage, ExecutorStage, FailedExitDetails,
+    GateInput, GateStage, MAX_CAPABILITY_RETRIES, StageContext, TurnCompletedStep,
+    append_capability_error_ref, append_capability_result_ref, append_capability_safe_summary_ref,
+    attach_failure_explanation, batch_policy_kind, cancelled_exit, capability_batch_counts,
+    capability_call_signature, capability_error_class, capability_error_failure_category,
     capability_failure_kind, capability_host_error,
     capability_invocation_from_auth_resume_candidate, capability_invocation_from_candidate,
     capability_is_visible, capability_summary, clear_matching_pending_auth_resume, failed_exit,
@@ -678,6 +679,8 @@ impl CapabilityStage {
                         CancelCheck::Continue(next) => state = *next,
                         CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
                     }
+                    let explanation_message_ref =
+                        attach_failure_explanation(ctx, &mut state, failure_kind).await?;
                     let checked = CheckpointStage
                         .write(ctx, state, CheckpointKind::Final)
                         .await?;
@@ -686,6 +689,11 @@ impl CapabilityStage {
                         checked.state,
                         failure_kind,
                         Some(checked.checkpoint_id),
+                        FailedExitDetails {
+                            diagnostic_ref: summary.diagnostic_ref.clone(),
+                            safe_summary: Some(capability_error_failure_category(summary.class)?),
+                            explanation_message_ref,
+                        },
                     )?));
                 }
                 RecoveryOutcome::Retry {
@@ -773,6 +781,12 @@ impl CapabilityStage {
             capability_batch,
         )
         .await?;
+        // Route through the single failure-explanation chokepoint so the
+        // recent-failure-kind record and (when the kind is explainable) the
+        // explanation message ref are produced consistently with the other
+        // failed-exit sites instead of being pushed inline here.
+        let explanation_message_ref =
+            attach_failure_explanation(ctx, &mut state, LoopFailureKind::DriverBug).await?;
         let checked = CheckpointStage
             .write(ctx, state, CheckpointKind::Final)
             .await?;
@@ -781,6 +795,11 @@ impl CapabilityStage {
             checked.state,
             LoopFailureKind::DriverBug,
             Some(checked.checkpoint_id),
+            FailedExitDetails {
+                diagnostic_ref: summary.diagnostic_ref.clone(),
+                safe_summary: Some(capability_error_failure_category(summary.class)?),
+                explanation_message_ref,
+            },
         )?))
     }
 
@@ -798,6 +817,9 @@ impl CapabilityStage {
             "capability process wait is not supported".to_string(),
         )
         .await?;
+        let explanation_message_ref =
+            attach_failure_explanation(ctx, &mut state, LoopFailureKind::CapabilityProtocolError)
+                .await?;
         let checked = CheckpointStage
             .write(ctx, state, CheckpointKind::Final)
             .await?;
@@ -806,6 +828,11 @@ impl CapabilityStage {
             checked.state,
             LoopFailureKind::CapabilityProtocolError,
             Some(checked.checkpoint_id),
+            FailedExitDetails {
+                diagnostic_ref: None,
+                safe_summary: None,
+                explanation_message_ref,
+            },
         )?))
     }
 

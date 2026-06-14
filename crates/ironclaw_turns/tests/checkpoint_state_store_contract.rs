@@ -499,6 +499,7 @@ fn turn_checkpoint_public_status_does_not_expose_checkpoint_payload() {
             credential_requirements: Vec::new(),
         }),
         sanitized_reason: Some("checkpointed".to_string()),
+        retryable: None,
     };
     let snapshot = TurnPersistenceSnapshot {
         checkpoints: vec![TurnCheckpointRecord {

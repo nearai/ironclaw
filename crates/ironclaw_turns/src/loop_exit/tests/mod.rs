@@ -48,7 +48,9 @@ fn validation_policy_named_constructors_keep_terminal_default_and_host_verified_
     assert!(!default_policy.requires_final_checkpoint());
     assert!(!default_policy.allows_no_reply_completion());
     assert!(!default_policy.final_checkpoint_verified());
+    assert_eq!(default_policy.failure_resume_checkpoint_id(), None);
 
+    let resume_checkpoint_id = TurnCheckpointId::new();
     let trusted_policy = LoopExitValidationPolicy::default()
         .require_final_checkpoint()
         .with_allow_no_reply_completion()
@@ -56,6 +58,7 @@ fn validation_policy_named_constructors_keep_terminal_default_and_host_verified_
         .with_host_verified_completion_refs()
         .with_host_verified_blocked_evidence()
         .with_host_verified_failure_evidence()
+        .with_host_verified_failure_resume_checkpoint(resume_checkpoint_id)
         .with_host_cancellation_observed();
     assert!(trusted_policy.completion_refs_verified());
     assert!(trusted_policy.blocked_evidence_verified());
@@ -64,6 +67,10 @@ fn validation_policy_named_constructors_keep_terminal_default_and_host_verified_
     assert!(trusted_policy.requires_final_checkpoint());
     assert!(trusted_policy.allows_no_reply_completion());
     assert!(trusted_policy.final_checkpoint_verified());
+    assert_eq!(
+        trusted_policy.failure_resume_checkpoint_id(),
+        Some(resume_checkpoint_id)
+    );
 }
 
 #[test]
@@ -109,6 +116,25 @@ fn loop_exit_validation_policy_deserialization_cannot_mint_host_verified_evidenc
         );
     }
 
+    // `failure_resume_checkpoint_id` is host-verified state: it is
+    // `skip_serializing` on the policy and absent from the deserializable wire
+    // subset (which uses `deny_unknown_fields`). A wire payload that tries to
+    // mint a resume checkpoint must be rejected, not silently accepted.
+    let forged_resume_checkpoint = json!({
+        "require_final_checkpoint": false,
+        "allow_no_reply_completion": false,
+        "final_checkpoint_verified": false,
+        "host_cancellation_observed": false,
+        "completion_refs_verified": false,
+        "blocked_evidence_verified": false,
+        "failure_evidence_verified": false,
+        "failure_resume_checkpoint_id": "00000000-0000-0000-0000-000000000001"
+    });
+    assert!(
+        serde_json::from_value::<LoopExitValidationPolicy>(forged_resume_checkpoint).is_err(),
+        "failure_resume_checkpoint_id should not be wire-mintable"
+    );
+
     let strict_fail_closed = json!({
         "require_final_checkpoint": true,
         "allow_no_reply_completion": false,
@@ -143,6 +169,7 @@ fn completed_ask_user_exit_maps_to_trusted_completed_outcome_without_final_check
         completion_refs_verified: true,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
+        failure_resume_checkpoint_id: None,
     });
 
     assert_eq!(decision.exit_id, exit_id);
@@ -169,11 +196,14 @@ fn completed_exit_without_durable_refs_maps_to_protocol_failure_or_recovery() {
         completion_refs_verified: true,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
+        failure_resume_checkpoint_id: None,
     });
     assert_eq!(
         safe_decision.mapping,
         TurnRunnerOutcome::Failed {
             failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+            explanation_message_refs: Vec::new(),
+            resume_checkpoint_id: None,
         }
         .into()
     );
@@ -190,6 +220,7 @@ fn completed_exit_without_durable_refs_maps_to_protocol_failure_or_recovery() {
         completion_refs_verified: true,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
+        failure_resume_checkpoint_id: None,
     });
     assert!(matches!(
         uncertain_decision,
@@ -219,6 +250,7 @@ fn completed_exit_requires_host_verified_completion_refs_before_trusted_mapping(
         completion_refs_verified: false,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
+        failure_resume_checkpoint_id: None,
     });
 
     assert_eq!(
@@ -263,6 +295,7 @@ fn final_checkpoint_policy_rejects_terminal_exit_without_checkpoint() {
             completion_refs_verified: true,
             blocked_evidence_verified: false,
             failure_evidence_verified: true,
+            failure_resume_checkpoint_id: None,
         });
 
         assert_eq!(
@@ -273,6 +306,8 @@ fn final_checkpoint_policy_rejects_terminal_exit_without_checkpoint() {
             decision.mapping,
             TurnRunnerOutcome::Failed {
                 failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+                explanation_message_refs: Vec::new(),
+                resume_checkpoint_id: None,
             }
             .into()
         );
@@ -293,6 +328,8 @@ fn validation_policy_requires_final_checkpoint_only_when_configured() {
             Some(LoopExitViolationKind::MissingFinalCheckpoint),
             TurnRunnerOutcome::Failed {
                 failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+                explanation_message_refs: Vec::new(),
+                resume_checkpoint_id: None,
             }
             .into(),
             "strict policy should reject terminal exits without a final checkpoint",
@@ -316,6 +353,7 @@ fn validation_policy_requires_final_checkpoint_only_when_configured() {
             completion_refs_verified: true,
             blocked_evidence_verified: false,
             failure_evidence_verified: false,
+            failure_resume_checkpoint_id: None,
         });
 
         assert_eq!(
@@ -352,6 +390,7 @@ fn blocked_exit_maps_to_block_run_outcome_with_verified_checkpoint_and_gate_ref(
         completion_refs_verified: false,
         blocked_evidence_verified: true,
         failure_evidence_verified: false,
+        failure_resume_checkpoint_id: None,
     });
 
     assert_eq!(decision.violation, None);
@@ -384,6 +423,7 @@ fn blocked_exit_requires_host_verified_gate_and_checkpoint_before_trusted_mappin
         completion_refs_verified: false,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
+        failure_resume_checkpoint_id: None,
     });
 
     assert_eq!(
@@ -408,11 +448,14 @@ fn cancelled_exit_requires_observed_host_cancellation() {
         completion_refs_verified: false,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
+        failure_resume_checkpoint_id: None,
     });
     assert_eq!(
         rejected.mapping,
         TurnRunnerOutcome::Failed {
             failure: SanitizedFailure::new("interrupted_unexpectedly").unwrap(),
+            explanation_message_refs: Vec::new(),
+            resume_checkpoint_id: None,
         }
         .into()
     );
@@ -429,6 +472,7 @@ fn cancelled_exit_requires_observed_host_cancellation() {
         completion_refs_verified: false,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
+        failure_resume_checkpoint_id: None,
     });
     assert_eq!(accepted.mapping, TurnRunnerOutcome::Cancelled.into());
     assert_eq!(accepted.violation, None);
@@ -442,6 +486,7 @@ fn iteration_limit_failure_maps_to_stable_sanitized_runner_failure_after_host_ve
     )
     .validate(LoopExitValidationPolicy {
         failure_evidence_verified: true,
+        failure_resume_checkpoint_id: None,
         ..LoopExitValidationPolicy::default()
     });
 
@@ -449,6 +494,175 @@ fn iteration_limit_failure_maps_to_stable_sanitized_runner_failure_after_host_ve
         decision.mapping,
         TurnRunnerOutcome::Failed {
             failure: SanitizedFailure::new("iteration_limit").unwrap(),
+            explanation_message_refs: Vec::new(),
+            resume_checkpoint_id: None,
+        }
+        .into()
+    );
+}
+
+#[test]
+fn loop_failed_legacy_payload_deserializes_and_empty_new_fields_serialize_to_legacy_shape() {
+    let legacy = json!({
+        "reason_kind": "iteration_limit",
+        "checkpoint_id": null,
+        "usage_summary_ref": null,
+        "diagnostic_ref": null,
+        "exit_id": "exit:legacy-failed"
+    });
+
+    let failed = serde_json::from_value::<LoopFailed>(legacy.clone()).unwrap();
+
+    assert_eq!(failed.reason_kind, LoopFailureKind::IterationLimit);
+    assert!(failed.explanation_message_refs.is_empty());
+    assert_eq!(failed.safe_summary, None);
+    assert_eq!(serde_json::to_value(&failed).unwrap(), legacy);
+}
+
+#[test]
+fn verified_failed_exit_carries_explanation_refs_checkpoint_and_safe_summary() {
+    let final_checkpoint_id = TurnCheckpointId::new();
+    let resume_checkpoint_id = TurnCheckpointId::new();
+    let explanation_ref = message_ref("msg:failure-explanation");
+    let safe_summary = SanitizedFailure::new("model_credits_exhausted").unwrap();
+    let decision = LoopExit::Failed(LoopFailed {
+        reason_kind: LoopFailureKind::ModelError,
+        checkpoint_id: Some(final_checkpoint_id),
+        usage_summary_ref: None,
+        diagnostic_ref: None,
+        exit_id: exit_id("exit:verified-failed"),
+        explanation_message_refs: vec![explanation_ref.clone()],
+        safe_summary: Some(safe_summary.clone()),
+    })
+    .validate(
+        LoopExitValidationPolicy::default()
+            .with_host_verified_failure_evidence()
+            .with_host_verified_failure_resume_checkpoint(resume_checkpoint_id),
+    );
+
+    assert_eq!(decision.violation, None);
+    assert_eq!(
+        decision.mapping,
+        TurnRunnerOutcome::Failed {
+            failure: safe_summary,
+            explanation_message_refs: vec![explanation_ref],
+            resume_checkpoint_id: Some(resume_checkpoint_id),
+        }
+        .into()
+    );
+}
+
+#[test]
+fn verified_failed_exit_does_not_reuse_final_checkpoint_as_resume_checkpoint() {
+    let final_checkpoint_id = TurnCheckpointId::new();
+    let decision = LoopExit::Failed(LoopFailed {
+        reason_kind: LoopFailureKind::IterationLimit,
+        checkpoint_id: Some(final_checkpoint_id),
+        usage_summary_ref: None,
+        diagnostic_ref: None,
+        exit_id: exit_id("exit:final-only-failed"),
+        explanation_message_refs: Vec::new(),
+        safe_summary: None,
+    })
+    .validate(LoopExitValidationPolicy::default().with_host_verified_failure_evidence());
+
+    assert_eq!(decision.violation, None);
+    assert_eq!(
+        decision.mapping,
+        TurnRunnerOutcome::Failed {
+            failure: SanitizedFailure::new("iteration_limit").unwrap(),
+            explanation_message_refs: Vec::new(),
+            resume_checkpoint_id: None,
+        }
+        .into()
+    );
+}
+
+#[test]
+fn unverified_failed_exit_drops_explanation_refs_and_keeps_existing_violation_behavior() {
+    let decision = LoopExit::Failed(LoopFailed {
+        reason_kind: LoopFailureKind::ModelError,
+        checkpoint_id: Some(TurnCheckpointId::new()),
+        usage_summary_ref: None,
+        diagnostic_ref: None,
+        exit_id: exit_id("exit:unverified-failed"),
+        explanation_message_refs: vec![message_ref("msg:unverified-explanation")],
+        safe_summary: Some(SanitizedFailure::new("model_credits_exhausted").unwrap()),
+    })
+    .validate(LoopExitValidationPolicy::default());
+
+    assert_eq!(
+        decision.violation.as_ref().map(LoopExitViolation::kind),
+        Some(LoopExitViolationKind::UnverifiedFailureEvidence)
+    );
+    assert_eq!(
+        decision.mapping,
+        TurnRunnerOutcome::Failed {
+            failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+            explanation_message_refs: Vec::new(),
+            resume_checkpoint_id: None,
+        }
+        .into()
+    );
+}
+
+#[test]
+fn strict_final_checkpoint_policy_admits_failed_resume_checkpoint_only_after_verification() {
+    let checkpoint_id = TurnCheckpointId::new();
+    // Distinct from the final checkpoint: this is the last resumable checkpoint
+    // the host would retry from.
+    let resume_checkpoint_id = TurnCheckpointId::new();
+    let exit = LoopExit::Failed(LoopFailed {
+        reason_kind: LoopFailureKind::IterationLimit,
+        checkpoint_id: Some(checkpoint_id),
+        usage_summary_ref: None,
+        diagnostic_ref: None,
+        exit_id: exit_id("exit:strict-failed-checkpoint"),
+        explanation_message_refs: Vec::new(),
+        safe_summary: None,
+    });
+
+    // Before the final checkpoint is host-verified the failed exit is a
+    // protocol violation, and the resume checkpoint is withheld even though the
+    // policy carries one — an unverified terminal state must not surface a
+    // retryable checkpoint.
+    let rejected = exit.clone().validate(LoopExitValidationPolicy {
+        require_final_checkpoint: true,
+        failure_evidence_verified: true,
+        failure_resume_checkpoint_id: Some(resume_checkpoint_id),
+        ..LoopExitValidationPolicy::default()
+    });
+    assert_eq!(
+        rejected.violation.as_ref().map(LoopExitViolation::kind),
+        Some(LoopExitViolationKind::MissingFinalCheckpoint)
+    );
+    assert_eq!(
+        rejected.mapping,
+        TurnRunnerOutcome::Failed {
+            failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+            explanation_message_refs: Vec::new(),
+            resume_checkpoint_id: None,
+        }
+        .into(),
+        "resume checkpoint must be withheld until the final checkpoint is verified"
+    );
+
+    // After verification, the trusted failed outcome surfaces the host-verified
+    // resume checkpoint so the run can be retried from it.
+    let accepted = exit.validate(LoopExitValidationPolicy {
+        require_final_checkpoint: true,
+        final_checkpoint_verified: true,
+        failure_evidence_verified: true,
+        failure_resume_checkpoint_id: Some(resume_checkpoint_id),
+        ..LoopExitValidationPolicy::default()
+    });
+    assert_eq!(accepted.violation, None);
+    assert_eq!(
+        accepted.mapping,
+        TurnRunnerOutcome::Failed {
+            failure: SanitizedFailure::new("iteration_limit").unwrap(),
+            explanation_message_refs: Vec::new(),
+            resume_checkpoint_id: Some(resume_checkpoint_id),
         }
         .into()
     );
@@ -574,6 +788,7 @@ fn no_reply_with_empty_refs_requires_explicit_policy_permission() {
         completion_refs_verified: true,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
+        failure_resume_checkpoint_id: None,
     });
 
     assert_eq!(
@@ -584,6 +799,8 @@ fn no_reply_with_empty_refs_requires_explicit_policy_permission() {
         decision.mapping,
         TurnRunnerOutcome::Failed {
             failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+            explanation_message_refs: Vec::new(),
+            resume_checkpoint_id: None,
         }
         .into()
     );
@@ -607,6 +824,7 @@ fn no_reply_with_empty_refs_maps_to_completed_when_policy_allows_it() {
         completion_refs_verified: false,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
+        failure_resume_checkpoint_id: None,
     });
 
     assert_eq!(decision.violation, None);
@@ -631,6 +849,7 @@ fn delegated_result_with_result_refs_maps_to_trusted_completed() {
         completion_refs_verified: true,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
+        failure_resume_checkpoint_id: None,
     });
 
     assert_eq!(decision.violation, None);
@@ -655,6 +874,7 @@ fn result_only_with_result_refs_maps_to_trusted_completed() {
         completion_refs_verified: true,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
+        failure_resume_checkpoint_id: None,
     });
 
     assert_eq!(decision.violation, None);
@@ -671,6 +891,7 @@ fn completion_kind_must_match_durable_reference_shape() {
         completion_refs_verified: true,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
+        failure_resume_checkpoint_id: None,
     };
 
     for (completion_kind, reply_message_refs, result_refs, expected_violation) in [
@@ -724,6 +945,8 @@ fn completion_kind_must_match_durable_reference_shape() {
             decision.mapping,
             TurnRunnerOutcome::Failed {
                 failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+                explanation_message_refs: Vec::new(),
+                resume_checkpoint_id: None,
             }
             .into()
         );
@@ -808,6 +1031,7 @@ fn all_failure_kinds_produce_stable_sanitized_category_strings() {
         let decision = LoopExit::failed(*kind, exit_id("exit:failure-variant")).validate(
             LoopExitValidationPolicy {
                 failure_evidence_verified: true,
+                failure_resume_checkpoint_id: None,
                 ..LoopExitValidationPolicy::default()
             },
         );
@@ -820,6 +1044,8 @@ fn all_failure_kinds_produce_stable_sanitized_category_strings() {
             decision.mapping,
             TurnRunnerOutcome::Failed {
                 failure: SanitizedFailure::new(*expected_category).unwrap(),
+                explanation_message_refs: Vec::new(),
+                resume_checkpoint_id: None,
             }
             .into(),
             "wrong category for {kind:?}"

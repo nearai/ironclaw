@@ -15,9 +15,10 @@ use ironclaw_conversations::{
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
-    ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileRequest,
-    RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
-    TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest,
+    RetryTurnResponse, RunProfileId, RunProfileRequest, RunProfileVersion, SourceBindingRef,
+    SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor, TurnCoordinator, TurnError,
+    TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 
 #[tokio::test]
@@ -3061,6 +3062,10 @@ impl TurnCoordinator for PermanentFailureTurnCoordinator {
         unimplemented!("not used by inbound facade tests")
     }
 
+    async fn retry_turn(&self, _request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
+        unimplemented!("not used by inbound facade tests")
+    }
+
     async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
         unimplemented!("not used by inbound facade tests")
     }
@@ -3091,6 +3096,10 @@ impl TurnCoordinator for CapacityFailureTurnCoordinator {
         &self,
         _request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
+        unimplemented!("not used by inbound facade tests")
+    }
+
+    async fn retry_turn(&self, _request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
         unimplemented!("not used by inbound facade tests")
     }
 
@@ -3132,6 +3141,10 @@ impl TurnCoordinator for BusyFirstUniqueKeyCoordinator {
         unimplemented!("not used by inbound facade tests")
     }
 
+    async fn retry_turn(&self, _request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
+        unimplemented!("not used by inbound facade tests")
+    }
+
     async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
         unimplemented!("not used by inbound facade tests")
     }
@@ -3168,6 +3181,10 @@ impl TurnCoordinator for FailFirstTurnCoordinator {
         unimplemented!("not used by inbound facade tests")
     }
 
+    async fn retry_turn(&self, _request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
+        unimplemented!("not used by inbound facade tests")
+    }
+
     async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
         unimplemented!("not used by inbound facade tests")
     }
@@ -3195,6 +3212,10 @@ impl TurnCoordinator for RecordingTurnCoordinator {
         &self,
         _request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
+        unimplemented!("not used by inbound facade tests")
+    }
+
+    async fn retry_turn(&self, _request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
         unimplemented!("not used by inbound facade tests")
     }
 

@@ -103,6 +103,14 @@ impl RebornServicesApi for RecordingServices {
         unreachable!("not exercised by this test")
     }
 
+    async fn retry_run(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: WebUiRetryRunRequest,
+    ) -> Result<RebornRetryRunResponse, RebornServicesError> {
+        unreachable!("not exercised by this test")
+    }
+
     async fn get_run_state(
         &self,
         _caller: WebUiAuthenticatedCaller,

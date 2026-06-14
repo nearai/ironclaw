@@ -9,6 +9,7 @@ mod capabilities;
 mod capability_helpers;
 mod checkpoint;
 mod exit_helpers;
+mod failure_explanation;
 mod gates;
 mod input;
 mod loop_exit;
@@ -36,9 +37,10 @@ use capability_helpers::{
 use capability_helpers::{sanitize_result_ref_suffix, synthetic_provider_error_result_ref};
 use checkpoint::{CheckpointInput, CheckpointStage};
 use exit_helpers::{
-    cancelled_exit, cancelled_exit_with_reason, cancelled_reason_from_signal, completed_exit,
-    exit_id, failed_exit,
+    FailedExitDetails, cancelled_exit, cancelled_exit_with_reason, cancelled_reason_from_signal,
+    completed_exit, exit_id, failed_exit,
 };
+use failure_explanation::attach_failure_explanation;
 use gates::{AwaitDependentRunGateInput, AwaitDependentRunGateStage, GateInput, GateStage};
 #[cfg(test)]
 use input::consume_drainable_inputs;
@@ -46,9 +48,9 @@ use input::{DrainInput, InputStage, InputStep, UserFacingInputDrainMode};
 use loop_exit::{ExitInput, ExitStage};
 use mapping::{
     batch_policy_kind, blocked_kind, capability_batch_counts, capability_error_class,
-    capability_failure_kind, capability_host_error, checkpoint_kind_to_host,
-    honor_retry_alteration, loop_gate_kind, model_error_class, model_preference_to_host,
-    sanitized_strategy_summary,
+    capability_error_failure_category, capability_failure_kind, capability_host_error,
+    checkpoint_kind_to_host, honor_retry_alteration, loop_gate_kind, model_error_class,
+    model_error_failure_category, model_preference_to_host, sanitized_strategy_summary,
 };
 use model::{ModelInput, ModelStage, ModelStep};
 use pipeline::{DefaultExecutorPipeline, ExecutorStage, StageContext};

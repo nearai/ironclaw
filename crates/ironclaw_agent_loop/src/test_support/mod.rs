@@ -64,8 +64,10 @@ pub struct MockAgentLoopDriverHost {
     prompt_requests: Mutex<Vec<LoopPromptBundleRequest>>,
     acked_tokens: Mutex<Vec<LoopInputAckToken>>,
     finalized_assistant_messages: Mutex<Vec<String>>,
+    model_requests: Mutex<Vec<LoopModelRequest>>,
     cancellation: Mutex<Option<LoopCancellationSignal>>,
     cancellation_notify: tokio::sync::Notify,
+    cancel_after_capability_batch: Mutex<Option<LoopCancellationSignal>>,
 }
 
 impl MockAgentLoopDriverHost {
@@ -107,6 +109,11 @@ impl MockAgentLoopDriverHost {
         clone_mutex_vec(&self.finalized_assistant_messages)
     }
 
+    /// Returns model requests passed to [`stream_model`] in call order.
+    pub fn model_requests(&self) -> Vec<LoopModelRequest> {
+        clone_mutex_vec(&self.model_requests)
+    }
+
     /// Sets the exact cancellation signal and wakes async waiters.
     pub fn set_cancellation_signal(&self, signal: LoopCancellationSignal) {
         *lock_or_panic(&self.cancellation) = Some(signal);
@@ -128,6 +135,7 @@ pub struct MockAgentLoopDriverHostBuilder {
     fail_model_with: Option<AgentLoopHostErrorKind>,
     compaction_result: Result<LoopCompactionOutcome, LoopCompactionError>,
     cancellation: Option<LoopCancellationSignal>,
+    cancel_after_capability_batch: Option<LoopCancellationSignal>,
 }
 
 impl MockAgentLoopDriverHostBuilder {
@@ -145,6 +153,7 @@ impl MockAgentLoopDriverHostBuilder {
             fail_model_with: None,
             compaction_result: Err(LoopCompactionError::InputTooLarge),
             cancellation: None,
+            cancel_after_capability_batch: None,
         }
     }
 
@@ -217,6 +226,12 @@ impl MockAgentLoopDriverHostBuilder {
         self
     }
 
+    /// Requests cancellation immediately after the next batch capability call.
+    pub fn cancel_after_capability_batch(mut self, signal: LoopCancellationSignal) -> Self {
+        self.cancel_after_capability_batch = Some(signal);
+        self
+    }
+
     /// Builds the host and its shared checkpoint recorder.
     pub fn build(self) -> (MockAgentLoopDriverHost, Arc<CheckpointRecorder>) {
         let checkpoints = Arc::new(CheckpointRecorder::default());
@@ -236,8 +251,10 @@ impl MockAgentLoopDriverHostBuilder {
                 prompt_requests: Mutex::new(Vec::new()),
                 acked_tokens: Mutex::new(Vec::new()),
                 finalized_assistant_messages: Mutex::new(Vec::new()),
+                model_requests: Mutex::new(Vec::new()),
                 cancellation: Mutex::new(self.cancellation),
                 cancellation_notify: tokio::sync::Notify::new(),
+                cancel_after_capability_batch: Mutex::new(self.cancel_after_capability_batch),
             },
             checkpoints,
         )
@@ -732,9 +749,10 @@ impl ironclaw_turns::run_profile::LoopInputPort for MockAgentLoopDriverHost {
 impl ironclaw_turns::run_profile::LoopModelPort for MockAgentLoopDriverHost {
     async fn stream_model(
         &self,
-        _request: LoopModelRequest,
+        request: LoopModelRequest,
     ) -> Result<LoopModelResponse, AgentLoopHostError> {
         self.record_call(MockHostCall::StreamModel);
+        lock_or_panic(&self.model_requests).push(request);
         if let Some(kind) = *lock_or_panic(&self.fail_model_with) {
             return Err(AgentLoopHostError::new(kind, "scripted model failure"));
         }
@@ -797,6 +815,9 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockAgentLoopDriverHost
             .collect::<Result<Vec<_>, _>>()?;
         let stopped_on_suspension = request.stop_on_first_suspension
             && outcomes.iter().any(CapabilityOutcome::is_suspension);
+        if let Some(signal) = lock_or_panic(&self.cancel_after_capability_batch).take() {
+            self.set_cancellation_signal(signal);
+        }
         Ok(CapabilityBatchOutcome {
             outcomes,
             stopped_on_suspension,

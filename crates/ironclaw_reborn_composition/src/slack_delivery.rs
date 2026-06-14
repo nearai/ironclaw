@@ -2393,9 +2393,9 @@ mod tests {
     use ironclaw_triggers::{TriggerFire, TriggerFireIdentity, TriggerId};
     use ironclaw_turns::{
         EventCursor, GateRef, GetRunStateRequest, ReplyTargetBindingRef, ResumeTurnRequest,
-        ResumeTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
-        SubmitTurnResponse, TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope,
-        TurnStatus,
+        ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, RunProfileId, RunProfileVersion,
+        SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError,
+        TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
     };
 
     // --- Minimal inline fakes ------------------------------------------------
@@ -2474,6 +2474,15 @@ mod tests {
         ) -> Result<ResumeTurnResponse, TurnError> {
             Err(TurnError::Unavailable {
                 reason: "ScriptedTurnCoordinator does not support resume_turn".to_string(),
+            })
+        }
+
+        async fn retry_turn(
+            &self,
+            _request: ironclaw_turns::RetryTurnRequest,
+        ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: "ScriptedTurnCoordinator does not support retry_turn".to_string(),
             })
         }
 
@@ -4948,6 +4957,15 @@ mod tests {
             })
         }
 
+        async fn retry_turn(
+            &self,
+            _request: RetryTurnRequest,
+        ) -> Result<RetryTurnResponse, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: "ErroringTurnCoordinator".to_string(),
+            })
+        }
+
         async fn get_run_state(
             &self,
             _request: GetRunStateRequest,
@@ -5275,6 +5293,13 @@ mod tests {
                 req: ResumeTurnRequest,
             ) -> Result<ResumeTurnResponse, TurnError> {
                 self.inner.resume_turn(req).await
+            }
+
+            async fn retry_turn(
+                &self,
+                req: RetryTurnRequest,
+            ) -> Result<RetryTurnResponse, TurnError> {
+                self.inner.retry_turn(req).await
             }
             async fn get_run_state(
                 &self,

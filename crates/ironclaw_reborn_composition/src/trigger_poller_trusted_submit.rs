@@ -372,6 +372,7 @@ fn classify_materializer_inbound_error(error: InboundTurnError) -> TriggerError 
                 TurnError::ScopeNotFound
                 | TurnError::Unauthorized
                 | TurnError::InvalidRequest { .. }
+                | TurnError::RunNotRetryable { .. }
                 | TurnError::InvalidTransition { .. }
                 | TurnError::LeaseMismatch,
         } => rejected_trigger_materialization("trusted trigger submit rejected"),
@@ -913,6 +914,13 @@ mod tests {
             unreachable!("trigger submitter tests do not resume turns")
         }
 
+        async fn retry_turn(
+            &self,
+            _request: ironclaw_turns::RetryTurnRequest,
+        ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+            unreachable!("trigger submitter tests do not retry turns")
+        }
+
         async fn cancel_run(
             &self,
             _request: CancelRunRequest,
@@ -961,6 +969,13 @@ mod tests {
             _request: ResumeTurnRequest,
         ) -> Result<ResumeTurnResponse, TurnError> {
             unreachable!("trigger submitter tests do not resume turns")
+        }
+
+        async fn retry_turn(
+            &self,
+            _request: ironclaw_turns::RetryTurnRequest,
+        ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+            unreachable!("trigger submitter tests do not retry turns")
         }
 
         async fn cancel_run(
@@ -1214,6 +1229,19 @@ mod tests {
             error: TurnError::AdmissionRejected(AdmissionRejection::new(
                 AdmissionRejectionReason::Policy,
             )),
+        });
+
+        assert!(
+            matches!(error, TriggerError::InvalidMaterialization { reason } if reason == "trusted trigger submit rejected")
+        );
+    }
+
+    #[test]
+    fn run_not_retryable_is_terminal_materialization_failure() {
+        let error = classify_materializer_inbound_error(InboundTurnError::TurnSubmissionFailed {
+            error: TurnError::RunNotRetryable {
+                run_id: TurnRunId::new(),
+            },
         });
 
         assert!(

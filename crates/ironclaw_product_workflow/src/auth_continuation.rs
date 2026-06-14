@@ -410,6 +410,13 @@ mod tests {
             })
         }
 
+        async fn retry_turn(
+            &self,
+            _request: ironclaw_turns::RetryTurnRequest,
+        ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+            panic!("retry_turn is not used by auth continuation tests");
+        }
+
         async fn cancel_run(
             &self,
             _request: CancelRunRequest,

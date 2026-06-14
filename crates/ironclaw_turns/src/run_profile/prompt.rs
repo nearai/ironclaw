@@ -3,9 +3,10 @@ use std::{collections::HashSet, sync::Arc};
 use async_trait::async_trait;
 
 use super::host::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilitySurfaceVersion, LoopContextPort,
-    LoopContextRequest, LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRef,
-    LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, PromptMode, VisibleCapabilitySurface,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilitySurfaceVersion, LoopContextBundle,
+    LoopContextPort, LoopContextRequest, LoopPromptBundle, LoopPromptBundleAuthority,
+    LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, PromptMode,
+    VisibleCapabilitySurface,
 };
 use super::instruction_bundle::{
     InstructionBundleBuilder, InstructionBundleRequest, InstructionMaterializationStore,
@@ -207,10 +208,11 @@ where
             ));
         }
 
-        if matches!(request.max_messages, Some(0)) {
+        if matches!(request.max_messages, Some(0)) && !is_inline_only_context_free_request(request)
+        {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::BudgetExceeded,
-                "prompt message limit must be greater than zero",
+                "prompt message limit must be greater than zero unless the request is inline-only",
             ));
         }
 
@@ -222,7 +224,7 @@ where
             .max_messages
             .map(|messages| messages as usize)
             .unwrap_or(self.default_message_limit)
-            .clamp(1, MAX_TEXT_ONLY_MESSAGE_LIMIT)
+            .clamp(0, MAX_TEXT_ONLY_MESSAGE_LIMIT)
     }
 
     fn instruction_builder(&self) -> InstructionBundleBuilder {
@@ -247,14 +249,18 @@ where
                 "instruction materialization store is required for this prompt bundle",
             ));
         }
-        let context = self
-            .context_port
-            .load_loop_context(LoopContextRequest {
-                after: request.context_cursor.clone(),
-                limit: self.message_limit(&request),
-                mode: request.mode,
-            })
-            .await?;
+        let message_limit = self.message_limit(&request);
+        let context = if message_limit == 0 {
+            LoopContextBundle::default()
+        } else {
+            self.context_port
+                .load_loop_context(LoopContextRequest {
+                    after: request.context_cursor.clone(),
+                    limit: message_limit,
+                    mode: request.mode,
+                })
+                .await?
+        };
         let identity_message_count = context.identity_messages.len() as u32;
         let instruction_snippet_count = context.instruction_snippets.len() as u32;
         let visible_surface = if request.surface_version.is_some() {
@@ -329,6 +335,14 @@ where
     }
 }
 
+fn is_inline_only_context_free_request(request: &LoopPromptBundleRequest) -> bool {
+    !request.inline_messages.is_empty()
+        && request.context_cursor.is_none()
+        && request.surface_version.is_none()
+        && request.capability_view.is_none()
+        && request.checkpoint_state_ref.is_none()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -357,6 +371,21 @@ mod tests {
             _request: LoopContextRequest,
         ) -> Result<LoopContextBundle, AgentLoopHostError> {
             Ok(LoopContextBundle::default())
+        }
+    }
+
+    struct UnavailableContextPort;
+
+    #[async_trait]
+    impl LoopContextPort for UnavailableContextPort {
+        async fn load_loop_context(
+            &self,
+            _request: LoopContextRequest,
+        ) -> Result<LoopContextBundle, AgentLoopHostError> {
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "context should not be loaded for inline-only prompt",
+            ))
         }
     }
 
@@ -394,6 +423,47 @@ mod tests {
             .expect("inline message should materialize");
         assert_eq!(materialized.role, "user");
         assert_eq!(materialized.model_content, "safe inline nudge");
+    }
+
+    #[tokio::test]
+    async fn inline_only_zero_message_prompt_skips_context_loading() {
+        let context = test_context();
+        let store = Arc::new(InMemoryInstructionMaterializationStore::default());
+        let port = HostManagedLoopPromptPort::new(
+            context.clone(),
+            Arc::new(UnavailableContextPort),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        )
+        .with_instruction_materialization_store(store.clone());
+
+        let bundle = port
+            .build_prompt_bundle(LoopPromptBundleRequest {
+                mode: PromptMode::TextOnly,
+                context_cursor: None,
+                surface_version: None,
+                checkpoint_state_ref: None,
+                max_messages: Some(0),
+                capability_view: None,
+                inline_messages: vec![LoopInlineMessage {
+                    role: LoopInlineMessageRole::System,
+                    safe_body: LoopSafeSummary::new("safe failure explanation context").unwrap(),
+                }],
+            })
+            .await
+            .expect("inline-only prompt should not ask context port");
+
+        assert_eq!(bundle.identity_message_count, 0);
+        assert_eq!(bundle.instruction_snippet_count, 0);
+        assert_eq!(bundle.compaction_message_index, Vec::new());
+        let inline_ref = &bundle.messages[0].content_ref;
+        let materialized = store
+            .get_materialized_message(&context, inline_ref)
+            .unwrap()
+            .expect("inline message should materialize");
+        assert_eq!(
+            materialized.model_content,
+            "safe failure explanation context"
+        );
     }
 
     /// A context port that returns configurable identity and body messages.

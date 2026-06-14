@@ -17,14 +17,15 @@ use ironclaw_turns::{
     InMemoryRunProfileResolver, InMemoryTurnEventSink, InMemoryTurnStateStore,
     InMemoryTurnStateStoreLimits, LifecyclePublicationErrorPort, LifecyclePublishingTurnStateStore,
     LoopBlockedKind, LoopCheckpointStateRef, LoopExitMapping, LoopGateRef, LoopResultRef,
-    ReplyTargetBindingRef, ResolvedRunProfile, ResumeTurnRequest, RunProfileId, RunProfileRequest,
-    RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
-    SanitizedCancelReason, SanitizedFailure, SourceBindingRef, StaticTurnAdmissionLimitProvider,
-    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
-    TurnAdmissionAxisKind, TurnAdmissionBucketKind, TurnAdmissionBucketScope,
-    TurnAdmissionCapacityDenial, TurnAdmissionClass, TurnAdmissionPolicy, TurnCapacityResource,
-    TurnCheckpointId, TurnCommittedEventObserver, TurnCoordinator, TurnError, TurnErrorCategory,
-    TurnEventKind, TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
+    ReplyTargetBindingRef, ResolvedRunProfile, ResumeTurnRequest, RetryTurnRequest,
+    RetryTurnResponse, RunProfileId, RunProfileRequest, RunProfileResolutionError,
+    RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion, SanitizedCancelReason,
+    SanitizedFailure, SourceBindingRef, StaticTurnAdmissionLimitProvider, SubmitChildRunRequest,
+    SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor, TurnAdmissionAxisKind,
+    TurnAdmissionBucketKind, TurnAdmissionBucketScope, TurnAdmissionCapacityDenial,
+    TurnAdmissionClass, TurnAdmissionPolicy, TurnCapacityResource, TurnCheckpointId,
+    TurnCommittedEventObserver, TurnCoordinator, TurnError, TurnErrorCategory, TurnEventKind,
+    TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
     TurnEventProjectionService, TurnEventSink, TurnIdempotencyErrorReplay,
     TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyRecord,
     TurnIdempotencyReplay, TurnLeaseToken, TurnLifecycleEvent, TurnLifecycleEventBus,
@@ -77,6 +78,8 @@ fn cancelled_mapping() -> LoopExitMapping {
 fn failed_mapping(category: &'static str) -> LoopExitMapping {
     LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Failed {
         failure: SanitizedFailure::new(category).unwrap(),
+        explanation_message_refs: Vec::new(),
+        resume_checkpoint_id: None,
     })
 }
 
@@ -237,6 +240,77 @@ fn subagent_capability_outcomes_round_trip_with_non_zero_byte_len() {
     } else {
         panic!("expected SpawnedChildRun variant");
     }
+}
+
+#[test]
+fn retry_turn_request_wire_shape_matches_resume_without_gate_resolution() {
+    let run_id = TurnRunId::new();
+    let request = RetryTurnRequest {
+        scope: scope("thread-retry-wire"),
+        actor: actor(),
+        run_id,
+        source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
+        idempotency_key: IdempotencyKey::new("idem-retry-wire").unwrap(),
+    };
+
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(value["run_id"], serde_json::to_value(run_id).unwrap());
+    assert!(value.get("gate_resolution_ref").is_none());
+    assert_eq!(
+        serde_json::from_value::<RetryTurnRequest>(value).unwrap(),
+        request
+    );
+}
+
+#[tokio::test]
+async fn retry_turn_delegates_to_store_and_wakes_requeued_run() {
+    let response = RetryTurnResponse {
+        run_id: TurnRunId::new(),
+        status: TurnStatus::Queued,
+        event_cursor: EventCursor(17),
+    };
+    let store = Arc::new(RetryOnlyStore::new(Ok(response.clone())));
+    let wake_notifier = Arc::new(RecordingWakeNotifier::default());
+    let coordinator =
+        DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(wake_notifier.clone());
+    let request = retry_request(
+        "thread-retry-delegate",
+        response.run_id,
+        "idem-retry-delegate",
+    );
+
+    let actual = coordinator.retry_turn(request.clone()).await.unwrap();
+
+    assert_eq!(actual, response);
+    assert_eq!(store.retry_requests(), vec![request.clone()]);
+    assert_eq!(
+        wake_notifier.wakes(),
+        vec![TurnRunWake {
+            scope: request.scope,
+            run_id: response.run_id,
+            status: TurnStatus::Queued,
+            event_cursor: EventCursor(17),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn retry_turn_surfaces_not_retryable_without_wake() {
+    let run_id = TurnRunId::new();
+    let store = Arc::new(RetryOnlyStore::new(Err(TurnError::RunNotRetryable {
+        run_id,
+    })));
+    let wake_notifier = Arc::new(RecordingWakeNotifier::default());
+    let coordinator =
+        DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(wake_notifier.clone());
+    let request = retry_request("thread-retry-not-retryable", run_id, "idem-retry-denied");
+
+    let err = coordinator.retry_turn(request.clone()).await.unwrap_err();
+
+    assert_eq!(err, TurnError::RunNotRetryable { run_id });
+    assert_eq!(store.retry_requests(), vec![request]);
+    assert!(wake_notifier.wakes().is_empty());
 }
 
 #[test]
@@ -5886,6 +5960,7 @@ async fn in_memory_event_sink_retains_a_bounded_tail() {
             kind: TurnEventKind::Submitted,
             blocked_gate: None,
             sanitized_reason: None,
+            retryable: None,
         })
         .await
         .unwrap();
@@ -6242,6 +6317,17 @@ fn cancel_request(thread: &str, run_id: TurnRunId, idempotency_key: &str) -> Can
     }
 }
 
+fn retry_request(thread: &str, run_id: TurnRunId, idempotency_key: &str) -> RetryTurnRequest {
+    RetryTurnRequest {
+        scope: scope(thread),
+        actor: actor(),
+        run_id,
+        source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
+        idempotency_key: IdempotencyKey::new(idempotency_key).unwrap(),
+    }
+}
+
 fn accepted_run_id(response: &SubmitTurnResponse) -> TurnRunId {
     let SubmitTurnResponse::Accepted { run_id, .. } = response;
     *run_id
@@ -6283,6 +6369,67 @@ impl TurnRunWakeNotifier for RecordingWakeNotifier {
     fn notify_queued_run(&self, wake: TurnRunWake) -> Result<(), TurnRunWakeNotifyError> {
         self.wakes.lock().unwrap().push(wake);
         Ok(())
+    }
+}
+
+struct RetryOnlyStore {
+    retry_response: Mutex<Result<RetryTurnResponse, TurnError>>,
+    retry_requests: Mutex<Vec<RetryTurnRequest>>,
+}
+
+impl RetryOnlyStore {
+    fn new(retry_response: Result<RetryTurnResponse, TurnError>) -> Self {
+        Self {
+            retry_response: Mutex::new(retry_response),
+            retry_requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn retry_requests(&self) -> Vec<RetryTurnRequest> {
+        self.retry_requests.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl TurnStateStore for RetryOnlyStore {
+    async fn submit_turn(
+        &self,
+        _request: SubmitTurnRequest,
+        _admission_policy: &dyn TurnAdmissionPolicy,
+        _run_profile_resolver: &dyn RunProfileResolver,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "test store only implements retry_turn".to_string(),
+        })
+    }
+
+    async fn resume_turn(
+        &self,
+        _request: ResumeTurnRequest,
+    ) -> Result<ironclaw_turns::ResumeTurnResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "test store only implements retry_turn".to_string(),
+        })
+    }
+
+    async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
+        self.retry_requests.lock().unwrap().push(request);
+        self.retry_response.lock().unwrap().clone()
+    }
+
+    async fn request_cancel(
+        &self,
+        _request: CancelRunRequest,
+    ) -> Result<CancelRunResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "test store only implements retry_turn".to_string(),
+        })
+    }
+
+    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "test store only implements retry_turn".to_string(),
+        })
     }
 }
 
