@@ -1,5 +1,3 @@
-use std::path::{Component, Path};
-
 use ironclaw_filesystem::{FileStat, FilesystemError, FilesystemOperation};
 use ironclaw_host_api::{RuntimeDispatchErrorKind, ScopedPath, VirtualPath};
 use ironclaw_safety::sensitive_paths::is_sensitive_path_str;
@@ -85,29 +83,20 @@ fn scoped_path_input(path: &str) -> String {
 }
 
 fn workspace_scoped_alias(path: &str) -> Option<String> {
-    let mut components = Path::new(path).components().peekable();
-    while matches!(components.peek(), Some(Component::CurDir)) {
-        components.next();
+    let path = strip_leading_current_dir_segments(path);
+    if path == "workspace" {
+        return Some(DEFAULT_SCOPED_ROOT.to_string());
     }
 
-    match components.next()? {
-        Component::Normal(segment) if segment == "workspace" => {}
-        _ => return None,
-    }
+    path.strip_prefix("workspace/")
+        .map(|relative| format!("{DEFAULT_SCOPED_ROOT}/{relative}"))
+}
 
-    let mut scoped_path = DEFAULT_SCOPED_ROOT.to_string();
-    for component in components {
-        match component {
-            Component::Normal(segment) => {
-                scoped_path.push('/');
-                scoped_path.push_str(segment.to_str()?);
-            }
-            Component::CurDir => {}
-            Component::ParentDir => scoped_path.push_str("/.."),
-            Component::RootDir | Component::Prefix(_) => return None,
-        }
+fn strip_leading_current_dir_segments(mut path: &str) -> &str {
+    while let Some(stripped) = path.strip_prefix("./") {
+        path = stripped;
     }
-    Some(scoped_path)
+    path
 }
 
 pub(super) fn operation_allowed(

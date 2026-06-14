@@ -191,7 +191,7 @@ mod tests {
     use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
     use ironclaw_host_api::{
         HostPath, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
-        UserId, VirtualPath,
+        RuntimeDispatchErrorKind, UserId, VirtualPath,
     };
     use serde_json::json;
 
@@ -297,7 +297,7 @@ mod tests {
             super::CodingCapabilityKind::ReadFile,
             &scope,
             Some(&mounts),
-            filesystem,
+            Arc::clone(&filesystem),
             &read_input,
         );
         let read_output = state.dispatch(&read_request).await.expect("read file");
@@ -309,6 +309,31 @@ mod tests {
         assert_eq!(
             read_output.output["content"].as_str(),
             Some("     1│ hello")
+        );
+
+        let url_like_input = json!({
+            "path": "workspace/http://example.com/a.txt",
+            "content": "blocked"
+        });
+        let url_like_request = super::CodingCapabilityRequest::new(
+            super::CodingCapabilityKind::WriteFile,
+            &scope,
+            Some(&mounts),
+            filesystem,
+            &url_like_input,
+        );
+        let err = state
+            .dispatch(&url_like_request)
+            .await
+            .expect_err("URL-like workspace alias path rejected");
+
+        assert_eq!(err.kind(), RuntimeDispatchErrorKind::InputEncode);
+        assert!(
+            !temp_root
+                .path()
+                .join("workspace/http:/example.com/a.txt")
+                .exists(),
+            "URL-like path must not be normalized into a writable scoped path"
         );
     }
 
