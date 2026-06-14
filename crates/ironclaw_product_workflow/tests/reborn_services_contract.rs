@@ -5298,7 +5298,7 @@ async fn query_operator_logs_bounds_query_before_logs_service() {
                 tool_name: Some("shell".to_string()),
                 source: Some(boundary_source),
                 tail: true,
-                follow: true,
+                follow: false,
             },
         )
         .await
@@ -5325,7 +5325,47 @@ async fn query_operator_logs_bounds_query_before_logs_service() {
     assert!(run_id.is_char_boundary(run_id.len()));
     assert_eq!(requests[0].level, Some(RebornLogLevel::Warn));
     assert!(requests[0].tail);
-    assert!(requests[0].follow);
+    assert!(!requests[0].follow);
+}
+
+#[tokio::test]
+async fn query_operator_logs_rejects_ambiguous_tail_follow_modes() {
+    let operator_logs = Arc::new(RecordingOperatorLogsService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_operator_logs_service(operator_logs.clone());
+
+    let err = services
+        .query_operator_logs(
+            caller(),
+            RebornOperatorLogsQuery {
+                limit: None,
+                cursor: None,
+                level: None,
+                target: None,
+                thread_id: None,
+                run_id: None,
+                turn_id: None,
+                tool_call_id: None,
+                tool_name: None,
+                source: None,
+                tail: true,
+                follow: true,
+            },
+        )
+        .await
+        .expect_err("tail and follow cannot be combined");
+
+    assert_eq!(err.kind, RebornServicesErrorKind::Validation);
+    assert_eq!(err.status_code, 400);
+    assert_eq!(err.field.as_deref(), Some("follow"));
+    assert_eq!(
+        err.validation_code,
+        Some(WebUiInboundValidationCode::InvalidValue)
+    );
+    assert!(operator_logs.requests().is_empty());
 }
 
 #[tokio::test]
