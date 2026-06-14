@@ -2,7 +2,8 @@ use super::*;
 use async_trait::async_trait;
 use ironclaw_host_api::CapabilityDisplayOutputPreview;
 use ironclaw_product_adapters::{
-    CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES, ProductAdapterError, RedactedString,
+    CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES, CapabilityDisplayPreviewView, ProductAdapterError,
+    RedactedString,
 };
 use ironclaw_turns::run_profile::CapabilityInputRef;
 
@@ -22,6 +23,45 @@ impl CapabilityDisplayPreviewSource for FailingPreviewSource {
             detail: RedactedString::new("preview encoder failed"),
         })
     }
+}
+
+async fn completed_preview_for_input(
+    tool_name: &str,
+    capability_id: &str,
+    arguments: serde_json::Value,
+) -> CapabilityDisplayPreviewView {
+    let run_id = TurnRunId::new();
+    let capability = CapabilityId::new(capability_id).unwrap();
+    let input_ref = preview_input_ref(&format!("preview-input-{tool_name}"));
+    let store = CapabilityDisplayPreviewStore::default();
+    store.record_input(&run_id.to_string(), &input_ref, tool_name, &arguments);
+    store.record_result(CapabilityDisplayPreviewResult {
+        run_id: &run_id.to_string(),
+        input_ref: &input_ref,
+        invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
+        capability_id: &capability,
+        result_ref: "result:preview",
+        output: &serde_json::json!({"ok": true}),
+        output_bytes: 12,
+    });
+    store
+        .preview(&CapabilityActivityProjection {
+            invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
+            run_id: Some(InvocationId::from_uuid(run_id.as_uuid())),
+            capability_id: capability,
+            thread_id: Some(ThreadId::new("webui-preview-thread").unwrap()),
+            status: ironclaw_event_projections::CapabilityActivityStatus::Completed,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: Some(12),
+            error_kind: None,
+            last_cursor: ironclaw_events::EventCursor::new(1),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap()
+        .unwrap()
 }
 
 #[tokio::test]
@@ -265,6 +305,144 @@ async fn capability_display_preview_store_summarizes_shell_command_safely() {
     assert!(input_summary.contains("https://example.test/path?..."));
     assert!(!input_summary.contains("sk-secret"));
     assert!(!input_summary.contains("token=secret"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_summarizes_http_inputs_safely() {
+    let preview = completed_preview_for_input(
+        "builtin.http.save",
+        "builtin.http.save",
+        serde_json::json!({
+            "method": "post",
+            "url": "https://user:secret@example.test/path?token=secret#frag",
+            "save_to": "/workspace/tmp/result.json",
+            "headers": {
+                "Authorization": "Bearer sk-secret"
+            },
+            "body": "secret request body",
+            "response_body_limit": 4096,
+            "timeout_ms": 5000
+        }),
+    )
+    .await;
+
+    let input_summary = preview.input_summary.as_deref().unwrap();
+    assert!(input_summary.contains("method: POST"));
+    assert!(input_summary.contains("url: https://example.test/path?..."));
+    assert!(input_summary.contains("save_to: tmp/result.json"));
+    assert!(input_summary.contains("response_body_limit: 4096"));
+    assert!(input_summary.contains("timeout_ms: 5000"));
+    assert!(!input_summary.contains("user:secret"));
+    assert!(!input_summary.contains("token=secret"));
+    assert!(!input_summary.contains("Authorization"));
+    assert!(!input_summary.contains("secret request body"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_summarizes_file_inputs_without_contents() {
+    let write_preview = completed_preview_for_input(
+        "builtin.write_file",
+        "builtin.write_file",
+        serde_json::json!({
+            "path": "/workspace/src/main.rs",
+            "content": "fn main() {}"
+        }),
+    )
+    .await;
+    let write_summary = write_preview.input_summary.as_deref().unwrap();
+    assert!(write_summary.contains("path: src/main.rs"));
+    assert!(write_summary.contains("content_bytes: 12"));
+    assert!(!write_summary.contains("fn main"));
+
+    let patch_preview = completed_preview_for_input(
+        "builtin.apply_patch",
+        "builtin.apply_patch",
+        serde_json::json!({
+            "path": "src/lib.rs",
+            "old_string": "let token = \"sk-secret\";",
+            "new_string": "let token = load_token();",
+            "replace_all": true
+        }),
+    )
+    .await;
+    let patch_summary = patch_preview.input_summary.as_deref().unwrap();
+    assert!(patch_summary.contains("path: src/lib.rs"));
+    assert!(patch_summary.contains("old_bytes: 24"));
+    assert!(patch_summary.contains("new_bytes: 25"));
+    assert!(patch_summary.contains("replace_all: true"));
+    assert!(!patch_summary.contains("sk-secret"));
+    assert!(!patch_summary.contains("load_token"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_summarizes_search_and_memory_inputs() {
+    let search_preview = completed_preview_for_input(
+        "nearai.web_search",
+        "nearai.web_search",
+        serde_json::json!({
+            "query": "deployment status token: sk-secret",
+            "limit": 5
+        }),
+    )
+    .await;
+    let search_summary = search_preview.input_summary.as_deref().unwrap();
+    assert!(search_summary.contains("query: deployment status token: [redacted]"));
+    assert!(search_summary.contains("limit: 5"));
+    assert!(!search_summary.contains("sk-secret"));
+
+    let memory_preview = completed_preview_for_input(
+        "builtin.memory_write",
+        "builtin.memory_write",
+        serde_json::json!({
+            "target": "/workspace/notes/deploy.md",
+            "content": "token: sk-secret",
+            "append": true
+        }),
+    )
+    .await;
+    let memory_summary = memory_preview.input_summary.as_deref().unwrap();
+    assert!(memory_summary.contains("target: notes/deploy.md"));
+    assert!(memory_summary.contains("append: true"));
+    assert!(memory_summary.contains("content_bytes: 16"));
+    assert!(!memory_summary.contains("sk-secret"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_summarizes_grep_and_glob_inputs() {
+    let grep_preview = completed_preview_for_input(
+        "builtin.grep",
+        "builtin.grep",
+        serde_json::json!({
+            "pattern": "Authorization: Bearer sk-secret",
+            "path": "/workspace/src",
+            "glob": "*.rs",
+            "output_mode": "content",
+            "head_limit": 20
+        }),
+    )
+    .await;
+    let grep_summary = grep_preview.input_summary.as_deref().unwrap();
+    assert!(grep_summary.contains("pattern: Authorization: Bearer [redacted]"));
+    assert!(grep_summary.contains("path: src"));
+    assert!(grep_summary.contains("glob: *.rs"));
+    assert!(grep_summary.contains("output_mode: content"));
+    assert!(grep_summary.contains("head_limit: 20"));
+    assert!(!grep_summary.contains("sk-secret"));
+
+    let glob_preview = completed_preview_for_input(
+        "builtin.glob",
+        "builtin.glob",
+        serde_json::json!({
+            "pattern": "**/*.rs",
+            "path": "/workspace/crates",
+            "max_results": 100
+        }),
+    )
+    .await;
+    let glob_summary = glob_preview.input_summary.as_deref().unwrap();
+    assert!(glob_summary.contains("pattern: **/*.rs"));
+    assert!(glob_summary.contains("path: crates"));
+    assert!(glob_summary.contains("max_results: 100"));
 }
 
 #[tokio::test]
