@@ -14,12 +14,12 @@ const appCssSource = readFileSync(
 test("conversation message bubbles use readable typography", () => {
   assert.match(
     messageBubbleSource,
-    /"text-base leading-7"/,
+    /['"`]text-base\s+leading-7['"`]/,
     "chat message content should render at a readable base size",
   );
   assert.doesNotMatch(
     messageBubbleSource,
-    /"text-sm leading-6"/,
+    /['"`]text-sm\s+leading-6['"`]/,
     "chat message content should not regress to the compact body size",
   );
 });
@@ -27,12 +27,12 @@ test("conversation message bubbles use readable typography", () => {
 test("markdown body and code blocks inherit readable message sizing", () => {
   assert.match(
     appCssSource,
-    /\.markdown-body\s*\{\s*font-size: 1em; line-height: 1\.7; \}/,
+    /\.markdown-body\s*\{\s*font-size:\s*1em;\s*line-height:\s*1\.7;\s*\}/,
     "markdown prose should inherit the message bubble size with readable leading",
   );
   assert.match(
     appCssSource,
-    /\.markdown-body pre code \{[^}]*font-size: 0\.9em; line-height: 1\.65;/,
+    /\.markdown-body\s+pre\s+code\s*\{[^}]*font-size:\s*0\.9em;\s*line-height:\s*1\.65;/,
     "fenced code should stay close to body size instead of shrinking below readability",
   );
 });
