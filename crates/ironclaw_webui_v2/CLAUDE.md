@@ -120,8 +120,9 @@ unsupported-config reason codes currently include
 `operator_config_deprecated`, `operator_config_immutable`,
 `operator_config_not_wired`, and `operator_config_unknown_key`.
 `POST /api/webchat/v2/operator/setup` uses the typed LLM config service
-for provider/model setup; profile and WebUI access setup return redacted
-not-yet-wired diagnostics until those owning services are exposed.
+for provider/model setup. Profile selection and WebUI access inputs are
+validated through the same operator setup facade and reported back only as
+redacted setup state; token values are never echoed.
 
 ### List-threads
 
