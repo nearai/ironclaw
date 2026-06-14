@@ -7018,6 +7018,33 @@ async fn run_operator_setup_rejects_short_webui_access_token_before_provider_wri
 }
 
 #[tokio::test]
+async fn run_operator_setup_rejects_oversized_webui_access_token_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                adapter: Some("open_ai_completions".to_string()),
+                webui_access_token: Some(SecretString::from("x".repeat(4097))),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("oversized WebUI token is rejected");
+
+    assert_setup_validation(
+        err,
+        "webui_access_token",
+        WebUiInboundValidationCode::InvalidValue,
+    );
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
 async fn upsert_llm_provider_allows_loopback_base_url_for_self_hosted() {
     // Loopback/private endpoints are the primary self-hosted use case (Ollama,
     // vLLM): the guard must let them through to the service, not reject them as
@@ -7159,7 +7186,7 @@ async fn run_operator_setup_upserts_and_activates_provider_config() {
 }
 
 #[tokio::test]
-async fn run_operator_setup_accepts_profile_and_webui_access_without_echoing_token() {
+async fn run_operator_setup_ignores_redacted_webui_access_token_sentinel() {
     let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
     llm_config.use_active_snapshot("openai", "gpt-5-mini");
     let services = services_with_setup_llm_config(llm_config.clone());
@@ -7170,6 +7197,45 @@ async fn run_operator_setup_accepts_profile_and_webui_access_without_echoing_tok
             RebornOperatorSetupRequest {
                 provider_id: Some("openai".to_string()),
                 model: Some("gpt-5-mini".to_string()),
+                webui_access_token: Some(SecretString::from("••••••••".to_string())),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("setup response");
+
+    assert_eq!(response.status, RebornOperatorSetupStatus::Complete);
+    let webui_step = response
+        .steps
+        .iter()
+        .find(|step| step.name == "webui_access")
+        .expect("webui access step");
+    assert_eq!(
+        webui_step.status,
+        ironclaw_product_workflow::RebornOperatorSetupStepStatus::Complete
+    );
+    assert_eq!(
+        llm_config.set_active_calls.lock().expect("lock").as_slice(),
+        [SetupSetActiveCall {
+            provider_id: "openai".to_string(),
+            model: Some("gpt-5-mini".to_string()),
+        }]
+    );
+    let serialized = serde_json::to_string(&response).expect("serialize setup response");
+    assert!(!serialized.contains("••••••••"));
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_unwired_host_mutations_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                adapter: Some("open_ai_completions".to_string()),
                 profile_id: Some("production".to_string()),
                 webui_access_token: Some(SecretString::from(
                     "webui-secret-token-value".to_string(),
@@ -7178,21 +7244,13 @@ async fn run_operator_setup_accepts_profile_and_webui_access_without_echoing_tok
             },
         )
         .await
-        .expect("setup response");
+        .expect_err("unwired host mutations fail closed");
 
-    assert_eq!(response.status, RebornOperatorSetupStatus::Complete);
-    let profile_step = response
-        .steps
-        .iter()
-        .find(|step| step.name == "profile")
-        .expect("profile step");
-    assert_eq!(
-        profile_step.status,
-        ironclaw_product_workflow::RebornOperatorSetupStepStatus::Complete
-    );
-    assert!(profile_step.message.contains("production"));
-    let serialized = serde_json::to_string(&response).expect("serialize setup response");
-    assert!(!serialized.contains("webui-secret-token-value"));
+    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::ServiceUnavailable);
+    assert_eq!(err.status_code, 503);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
 }
 
 #[tokio::test]

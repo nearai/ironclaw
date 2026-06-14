@@ -602,6 +602,8 @@ fn operator_setup_validation_error(field: &str) -> RebornServicesError {
 
 const OPERATOR_SETUP_PROFILE_ID_MAX_BYTES: usize = 128;
 const OPERATOR_SETUP_WEBUI_TOKEN_MIN_BYTES: usize = 16;
+const OPERATOR_SETUP_WEBUI_TOKEN_MAX_BYTES: usize = 4096;
+const OPERATOR_SETUP_REDACTED_SECRET_SENTINEL: &str = "••••••••";
 
 fn validate_operator_setup_profile_id(
     profile_id: Option<&str>,
@@ -622,10 +624,26 @@ fn validate_operator_setup_webui_access_token(
     let Some(token) = webui_access_token else {
         return Ok(false);
     };
-    if token.expose_secret().trim().len() < OPERATOR_SETUP_WEBUI_TOKEN_MIN_BYTES {
+    let token = token.expose_secret().trim();
+    if token == OPERATOR_SETUP_REDACTED_SECRET_SENTINEL {
+        return Ok(false);
+    }
+    if token.len() < OPERATOR_SETUP_WEBUI_TOKEN_MIN_BYTES
+        || token.len() > OPERATOR_SETUP_WEBUI_TOKEN_MAX_BYTES
+    {
         return Err(operator_setup_validation_error("webui_access_token"));
     }
     Ok(true)
+}
+
+fn reject_unwired_operator_setup_host_mutation(
+    profile_id: Option<String>,
+    webui_access_token_updated: bool,
+) -> Result<(), RebornServicesError> {
+    if profile_id.is_some() || webui_access_token_updated {
+        return Err(RebornServicesError::service_unavailable(false));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1555,9 +1573,10 @@ impl RebornServicesApi for RebornServices {
         let profile_id = validate_operator_setup_profile_id(request.profile_id.as_deref())?;
         let webui_access_token_updated =
             validate_operator_setup_webui_access_token(request.webui_access_token.as_ref())?;
+        reject_unwired_operator_setup_host_mutation(profile_id, webui_access_token_updated)?;
         let host_state = OperatorSetupHostState {
-            profile_id,
-            webui_access_token_updated,
+            profile_id: None,
+            webui_access_token_updated: false,
         };
 
         let snapshot = match (request.provider_id, request.adapter) {
