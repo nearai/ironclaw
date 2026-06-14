@@ -466,14 +466,18 @@ async fn load_delivered_routes_for_envelope(
     binding: &ResolvedBinding,
     delivered_gate_routes: &dyn ironclaw_outbound::DeliveredGateRouteStore,
     expected_gate_ref: Option<&str>,
-    // When `Some`, only routes whose `gate_ref` satisfies the predicate are
-    // considered live. This separates approval routes (`is_approval_gate_ref`)
-    // from auth routes (`is_auth_gate_ref`) so that a lingering auth gate
-    // recorded in the same conversation bucket cannot make a bare "approve"
-    // look ambiguous, and vice-versa.  The predicate receives the raw stored
-    // gate string directly — no `GateRef::new` wrap — so routes whose stored
-    // string fails validation are not silently dropped before the predicate
-    // runs.
+    // When `Some` AND `expected_gate_ref` is `None` (bare lookup), only routes
+    // whose `gate_ref` satisfies the predicate are considered live. This
+    // separates approval routes (`is_approval_gate_ref`) from auth routes
+    // (`is_auth_gate_ref`) so that a lingering auth gate recorded in the same
+    // conversation bucket cannot make a bare "approve" look ambiguous, and
+    // vice-versa.  For exact-ref lookups (`expected_gate_ref == Some(_)`) this
+    // predicate is NOT applied: all routes surviving the exact-match share the
+    // identical gate_ref string, so the kind filter can only total-drop a
+    // validly named generic/legacy gate — it can never disambiguate.  The
+    // predicate receives the raw stored gate string directly — no `GateRef::new`
+    // wrap — so routes whose stored string fails validation are not silently
+    // dropped before the predicate runs.
     gate_kind_filter: Option<fn(&str) -> bool>,
 ) -> DeliveredRouteOutcome {
     let conversation_ref = match delivered_route_conversation_ref(envelope) {
@@ -505,8 +509,9 @@ async fn load_delivered_routes_for_envelope(
             return DeliveredRouteOutcome::Miss;
         }
     };
-    // Filter: non-expired, tenant+actor match, gate-kind match (when a kind
-    // filter is supplied), and (if an explicit ref is supplied) gate_ref match.
+    // Filter: non-expired, tenant+actor match, then either exact-ref match
+    // (when the caller names a specific gate) or gate-kind filter (for bare
+    // lookups only — see gate_kind_filter parameter comment above).
     let live: Vec<ironclaw_outbound::DeliveredGateRouteRecord> = all_routes
         .into_iter()
         .filter(|r| {
@@ -529,21 +534,22 @@ async fn load_delivered_routes_for_envelope(
             if r.tenant_id != binding.tenant_id || r.user_id != binding.actor_user_id {
                 return false;
             }
-            // Gate-kind filter: when the caller knows it is resolving an
-            // approval (or auth) interaction, drop routes that belong to the
-            // other kind.  This prevents a lingering auth gate recorded in the
-            // same conversation fingerprint bucket from inflating the live-route
-            // count and triggering a spurious AmbiguousGate error on a bare
-            // "approve" (and vice-versa for a bare "auth deny").
-            if let Some(kind_filter) = gate_kind_filter
-                && !kind_filter(&r.gate_ref)
-            {
-                return false;
-            }
-            if let Some(expected) = expected_gate_ref
-                && r.gate_ref != expected
-            {
-                return false;
+            if let Some(expected) = expected_gate_ref {
+                // Exact ref named: the named ref is authoritative and the downstream
+                // interaction service decides resolvability. Do NOT apply the gate-kind
+                // filter here — for an exact-ref lookup every surviving route shares the
+                // same gate_ref string, so the kind filter can only total-drop a validly
+                // named generic/legacy gate, never disambiguate.
+                if r.gate_ref != expected {
+                    return false;
+                }
+            } else if let Some(kind_filter) = gate_kind_filter {
+                // Bare lookup: use the kind filter so a lingering gate of the other kind
+                // (e.g. an auth gate when resolving a bare "approve") cannot inflate the
+                // live-route count and trigger a spurious ambiguity.
+                if !kind_filter(&r.gate_ref) {
+                    return false;
+                }
             }
             true
         })
