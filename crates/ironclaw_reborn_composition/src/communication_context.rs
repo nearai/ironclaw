@@ -164,31 +164,26 @@ async fn fetch_communication_context(
     };
 
     let connected_channels = match lifecycle_result {
+        // `lifecycle_fut` only issues the ExtensionList call when
+        // CHANNEL_CLASSIFICATION_AVAILABLE is true, so a present response here
+        // means classification is on and the surface predicate is meaningful.
         Some(Ok(response)) => {
-            if !CHANNEL_CLASSIFICATION_AVAILABLE {
-                // Channel-surface classification is a stub until #4778's
-                // ProductAdapter surface projection lands. Returning Known([])
-                // would be false certainty ("none connected") when the predicate
-                // cannot yet distinguish channel extensions from tool extensions.
-                ConnectedChannelsState::Unknown
-            } else {
-                let extensions = match response.payload {
-                    Some(LifecycleProductPayload::ExtensionList { extensions, .. }) => extensions,
-                    _ => Vec::new(),
-                };
-                let channels: Vec<ConnectedChannelSummary> = extensions
-                    .into_iter()
-                    .filter(|ext| {
-                        extension_is_channel_surface(ext) && ext.phase == LifecyclePhase::Active
-                    })
-                    .map(|ext| ConnectedChannelSummary {
-                        name: ext.summary.name.clone(),
-                        authenticated: true,
-                        active: true,
-                    })
-                    .collect();
-                ConnectedChannelsState::Known(channels)
-            }
+            let extensions = match response.payload {
+                Some(LifecycleProductPayload::ExtensionList { extensions, .. }) => extensions,
+                _ => Vec::new(),
+            };
+            let channels: Vec<ConnectedChannelSummary> = extensions
+                .into_iter()
+                .filter(|ext| {
+                    extension_is_channel_surface(ext) && ext.phase == LifecyclePhase::Active
+                })
+                .map(|ext| ConnectedChannelSummary {
+                    name: ext.summary.name.clone(),
+                    authenticated: true,
+                    active: true,
+                })
+                .collect();
+            ConnectedChannelsState::Known(channels)
         }
         Some(Err(error)) => {
             tracing::debug!(
@@ -237,10 +232,9 @@ mod tests {
     use ironclaw_product_workflow::{
         LifecycleExtensionRuntimeKind, LifecycleExtensionSource, LifecycleExtensionSummary,
         LifecycleExtensionSurfaceKind, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
-        LifecyclePackageRef,
-        LifecyclePhase, LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-        LifecycleProductPayload, LifecycleProductResponse, OutboundPreferencesProductFacade,
-        ProductWorkflowError, RebornOutboundDeliveryTargetId,
+        LifecyclePackageRef, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
+        LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
+        OutboundPreferencesProductFacade, ProductWorkflowError, RebornOutboundDeliveryTargetId,
         RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetStatus,
         RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
         RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
