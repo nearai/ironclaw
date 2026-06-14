@@ -587,6 +587,49 @@ async fn compaction_port_completes_range_containing_rejected_busy_message() {
 }
 
 #[tokio::test]
+async fn compaction_port_accepts_terminal_cut_point_that_is_rejected_busy() {
+    // Regression: when drop_through_seq points directly at a RejectedBusy message
+    // (i.e. RejectedBusy IS the terminal cut point), validation must NOT return
+    // InvalidCutPoint.  RejectedBusy is stable-non-model-visible; it is a legal
+    // cut point and must be excluded from the compacted output.
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user("visible-before-rejected").await;
+    let rejected_id = fixture.append_user("rejected-busy-terminal").await;
+    fixture
+        .threads
+        .mark_message_rejected_busy(&fixture.scope, &fixture.thread_id, rejected_id)
+        .await
+        .unwrap();
+    let inference = Arc::new(CapturingInference::new("summary"));
+    // drop_through_seq = 2 — the RejectedBusy message is the cut point itself.
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(CleanLeakScanner),
+        fixture.scope.clone(),
+    );
+
+    let outcome = port
+        .compact_loop_context(fixture.request(2))
+        .await
+        .expect("RejectedBusy terminal cut point should not return InvalidCutPoint");
+
+    assert!(
+        matches!(outcome, LoopCompactionOutcome::Compacted(_)),
+        "expected Compacted, got {outcome:?}",
+    );
+    let input = inference.last_input();
+    assert!(
+        input.contains("visible-before-rejected"),
+        "message before the rejected terminal should appear in compaction input",
+    );
+    assert!(
+        !input.contains("rejected-busy-terminal"),
+        "RejectedBusy terminal must not appear in model-visible compaction input",
+    );
+}
+
+#[tokio::test]
 async fn compaction_port_defers_range_containing_deferred_busy_message() {
     // DeferredBusy is NOT terminal: legacy rows can still be submitted via the
     // inbound replay path, transitioning to Submitted and becoming model-visible.

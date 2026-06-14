@@ -320,8 +320,11 @@ where
                 deferred_reason = Some(reason);
             }
             CompactionMessageDisposition::Include if terminal.kind == MessageKind::User => {}
+            // A stable-non-model-visible terminal (e.g. RejectedBusy) is a legal
+            // cut point: it is excluded from the compacted output (same as the
+            // in-range SkipEphemeral branch below) and compaction proceeds normally.
+            CompactionMessageDisposition::SkipEphemeral(_) => {}
             CompactionMessageDisposition::Include
-            | CompactionMessageDisposition::SkipEphemeral(_)
             | CompactionMessageDisposition::RejectInvalid(_) => {
                 return Err(CompactionError::InvalidCutPoint);
             }
