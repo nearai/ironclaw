@@ -73,6 +73,7 @@ mod oauth_provider_client;
 #[cfg(feature = "openai-compat-beta")]
 mod openai_compat_serve;
 mod operator_logs;
+mod operator_service_lifecycle;
 mod outbound_preferences;
 mod product_auth_durable;
 mod product_auth_providers;
@@ -213,6 +214,7 @@ pub use nearai_mcp::{
 #[cfg(feature = "openai-compat-beta")]
 pub use openai_compat_serve::build_openai_compat_route_mount;
 pub use operator_logs::{OperatorLogLayer, capture_tracing_log, operator_log_buffer};
+pub use operator_service_lifecycle::RebornLocalServiceLifecycle;
 pub use product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
     ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
