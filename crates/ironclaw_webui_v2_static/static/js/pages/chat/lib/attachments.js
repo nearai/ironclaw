@@ -66,7 +66,16 @@ export function isAcceptedFile(file, accept) {
 function readAsDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
+    reader.onload = () => {
+      // `readAsDataURL` yields a string; guard the contract so a non-string /
+      // null result rejects here (surfaced as `chat.attachmentReadFailed`)
+      // rather than crashing `splitDataUrl`'s `.indexOf` downstream.
+      if (typeof reader.result === "string") {
+        resolve(reader.result);
+      } else {
+        reject(new Error("file read produced no data URL"));
+      }
+    };
     reader.onerror = () => reject(reader.error || new Error("file read failed"));
     reader.readAsDataURL(file);
   });

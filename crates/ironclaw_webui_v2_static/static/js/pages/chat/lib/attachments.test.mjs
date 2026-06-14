@@ -200,3 +200,16 @@ test("stageFiles skips an over-budget file but still stages a later fitting one"
   // The over-budget notice is recorded once, not once per skipped file.
   assert.deepEqual(errors, ["chat.attachmentTotalTooLarge"]);
 });
+
+test("stageFiles rejects a file whose reader yields a non-string result", async () => {
+  // A FileReader that produces a non-string `result` (e.g. null) must not
+  // crash `splitDataUrl`'s `.indexOf`; the file is rejected with a read error.
+  const file = fakeFile({ name: "weird.txt", type: "text/plain", size: 10, dataUrl: null });
+  const { staged, errors } = await stageFiles([file], {
+    limits: LIMITS,
+    existing: [],
+    t: tKey,
+  });
+  assert.deepEqual(staged, []);
+  assert.deepEqual(errors, ["chat.attachmentReadFailed"]);
+});
