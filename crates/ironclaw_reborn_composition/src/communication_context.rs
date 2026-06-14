@@ -722,61 +722,60 @@ mod tests {
         // it. A detached task wastes the ~500 ms timeout budget on failed runs
         // in the hot run-start path.
         //
-        // Strategy: the task awaits a `Notify` it will never receive (simulating
-        // a hanging preferences facade), then sets an `AtomicBool` before
-        // returning. An aborted task never reaches the flag store. We drop the
-        // fetch right after construction and yield to the scheduler, then assert
-        // the flag was never set — proving abort fired.
+        // Strategy: the task parks forever on a `Notify` it will never receive
+        // (simulating a hanging backend) while holding a drop guard. The guard's
+        // `Drop` fires ONLY when the task future is dropped — which happens on
+        // abort (or genuine completion, which never occurs here). If the fetch
+        // detaches instead of aborting, the task stays parked, the guard never
+        // drops, and `aborted` stays `false`. So the assertion fails iff
+        // abort-on-drop regresses. (The previous version asserted a "completed"
+        // flag stayed false, which was true whether aborted OR merely parked —
+        // a false positive flagged in review.)
         use std::sync::{
             Arc,
             atomic::{AtomicBool, Ordering},
         };
         use tokio::sync::Notify;
 
+        struct AbortObserver(Arc<AtomicBool>);
+        impl Drop for AbortObserver {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
         let task_started = Arc::new(Notify::new());
-        let task_completed = Arc::new(AtomicBool::new(false));
+        let task_future_dropped = Arc::new(AtomicBool::new(false));
 
         let task_started_inner = Arc::clone(&task_started);
-        let task_completed_inner = Arc::clone(&task_completed);
+        let observer = AbortObserver(Arc::clone(&task_future_dropped));
 
-        // Spawn the blocking task directly so we can wrap its JoinHandle in a
-        // CommunicationContextFetch and test the abort-on-drop path.
-        // The return type must match `JoinHandle<Option<CommunicationRuntimeContext>>`
-        // as required by `from_handle`; the `None` literal provides the type.
         let handle = tokio::spawn(async move {
+            // Held across the await: dropped iff this future is dropped (abort).
+            let _observer = observer;
             task_started_inner.notify_one();
-            // Await a notify that is never signalled — simulates a hanging
-            // backend. The abort must interrupt the task here.
-            let never_resolves = Arc::new(Notify::new());
-            never_resolves.notified().await;
-            // Only reached if abort did NOT fire.
-            task_completed_inner.store(true, Ordering::SeqCst);
+            // Park forever — only an abort interrupts this.
+            let never = Notify::new();
+            never.notified().await;
             None::<ironclaw_turns::run_profile::CommunicationRuntimeContext>
         });
 
-        // Wait until the task has started so we know it's actually blocked and
-        // that dropping the fetch will exercise a live abort.
+        // Ensure the task is actually running and parked before we drop.
         task_started.notified().await;
 
-        // Wrap in a fetch and immediately drop it — this must call abort().
-        // `actor_present: false` since this test only cares about abort behavior;
-        // the JoinError degrade path is covered by `actor_present_join_failure_degrades_to_unknown`.
         let fetch =
             ironclaw_turns::run_profile::CommunicationContextFetch::from_handle(handle, false);
         drop(fetch);
 
-        // Yield to the scheduler to give the abort machinery time to deliver.
-        // A few cooperative yields are enough for tokio's single-threaded test
-        // executor to process the abort signal.
+        // Give tokio's abort machinery time to drop the task future.
         for _ in 0..10 {
             tokio::task::yield_now().await;
         }
 
-        // The task must NOT have reached the completion store.  If it did, the
-        // abort-on-drop invariant is broken and this test will fail.
         assert!(
-            !task_completed.load(Ordering::SeqCst),
-            "spawned task must be aborted on fetch drop, not allowed to run to completion"
+            task_future_dropped.load(Ordering::SeqCst),
+            "dropping the fetch must abort the spawned task (its future must be dropped); \
+             a detached task would stay parked and never drop the observer"
         );
     }
 

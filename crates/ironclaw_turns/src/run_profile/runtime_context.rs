@@ -355,37 +355,44 @@ impl CommunicationContextFetch {
         mut self,
         delivery_tools_visible: bool,
     ) -> Option<CommunicationRuntimeContext> {
-        // Take the inner value so that `Drop` does not also call `abort` when
-        // `self` is dropped at the end of this function (the handle is consumed
-        // by `await` below, not by `Drop`).
-        let result = match self.inner.take() {
+        // Borrow the handle (via `as_mut`) rather than moving it out, so that if
+        // THIS future is dropped mid-`await` — i.e. the caller cancels `resolve`
+        // — `self` is dropped with its `Spawned` handle still in place and `Drop`
+        // aborts the task instead of detaching it. (A completed handle left in
+        // place is fine: `abort()` on a finished task is a no-op.)
+        let result = match self.inner.as_mut() {
             Some(CommunicationContextInner::Spawned {
                 handle,
                 actor_present,
-            }) => match handle.await {
-                Ok(value) => value,
-                Err(error) => {
-                    tracing::debug!(
-                        error = %error,
-                        "communication context fetch task failed; degrading advisory slice"
-                    );
-                    if actor_present {
-                        Some(CommunicationRuntimeContext {
-                            connected_channels: ConnectedChannelsState::Unknown,
-                            delivery_target: DeliveryTargetState::Unknown,
-                            delivery_tools_visible: false,
-                        })
-                    } else {
-                        // silent-ok: communication context is not applicable
-                        // without an actor.
-                        None
+            }) => {
+                let actor_present = *actor_present;
+                match handle.await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::debug!(
+                            error = %error,
+                            "communication context fetch task failed; degrading advisory slice"
+                        );
+                        if actor_present {
+                            Some(CommunicationRuntimeContext {
+                                connected_channels: ConnectedChannelsState::Unknown,
+                                delivery_target: DeliveryTargetState::Unknown,
+                                delivery_tools_visible: false,
+                            })
+                        } else {
+                            // silent-ok: communication context is not applicable
+                            // without an actor.
+                            None
+                        }
                     }
                 }
+            }
+            // No background task to abort — move the ready value out. (`None` is
+            // unreachable in normal use: `inner` is only emptied inside `Drop`.)
+            Some(CommunicationContextInner::Ready(_)) | None => match self.inner.take() {
+                Some(CommunicationContextInner::Ready(value)) => value,
+                _ => None,
             },
-            Some(CommunicationContextInner::Ready(value)) => value,
-            // Unreachable in normal use: `inner` is only `None` inside `Drop`
-            // after `resolve` has already consumed the value.
-            None => None,
         };
         result.map(|mut ctx| {
             ctx.delivery_tools_visible = delivery_tools_visible;
