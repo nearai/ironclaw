@@ -81,9 +81,21 @@ async fn fetch_communication_context(
     actor: Option<TurnActor>,
 ) -> Option<CommunicationRuntimeContext> {
     let actor = actor?;
+    // Key outbound preferences by the run's *owner*, not the acting principal.
+    // Product inbound and trusted-trigger runs can carry an explicit thread
+    // owner (subject/creator) that differs from `actor`; the owner is who the
+    // stored delivery preference belongs to. Fall back to the actor when no
+    // explicit owner is set, matching `TurnScope::to_resource_scope`'s owner
+    // resolution. Without this, shared/channel inbound and trigger runs would
+    // render the actor's delivery target (or "none set") instead of the
+    // owner's, producing wrong delivery guidance.
+    let owner_user_id = scope
+        .explicit_owner_user_id()
+        .cloned()
+        .unwrap_or_else(|| actor.user_id.clone());
     let caller = WebUiAuthenticatedCaller::new(
         scope.tenant_id.clone(),
-        actor.user_id.clone(),
+        owner_user_id,
         scope.agent_id.clone(),
         scope.project_id.clone(),
     );
@@ -491,6 +503,97 @@ mod tests {
             .resolve(false)
             .await;
         assert!(result.is_none(), "actor None must return None");
+    }
+
+    // --- Tests: preference lookup is keyed by the run owner, not the actor ---
+
+    /// Preferences facade that records the `user_id` of the caller it received,
+    /// so tests can assert the provider keys the lookup by the run owner rather
+    /// than the acting principal.
+    struct CaptureCallerPreferencesFacade {
+        seen_user_id: Arc<std::sync::Mutex<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl OutboundPreferencesProductFacade for CaptureCallerPreferencesFacade {
+        async fn get_outbound_preferences(
+            &self,
+            caller: WebUiAuthenticatedCaller,
+        ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+            *self.seen_user_id.lock().expect("lock") = Some(caller.user_id.as_str().to_string());
+            Ok(RebornOutboundPreferencesResponse::default())
+        }
+
+        async fn set_outbound_preferences(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _request: RebornSetOutboundPreferencesRequest,
+        ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+            Ok(RebornOutboundPreferencesResponse::default())
+        }
+
+        async fn list_outbound_delivery_targets(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+        ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
+            Ok(RebornOutboundDeliveryTargetListResponse {
+                targets: Vec::new(),
+                next_cursor: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn preferences_keyed_by_explicit_owner_not_actor() {
+        let seen_user_id = Arc::new(std::sync::Mutex::new(None));
+        let facade = CaptureCallerPreferencesFacade {
+            seen_user_id: Arc::clone(&seen_user_id),
+        };
+        let provider = RuntimeCommunicationContextProvider::new(Arc::new(facade));
+
+        // Scope owned by a subject/creator distinct from the acting principal
+        // (e.g. a trusted trigger or shared/channel inbound run).
+        let owned_scope = TurnScope::new_with_owner(
+            TenantId::new("tenant-test").unwrap(),
+            Some(AgentId::new("agent-test").unwrap()),
+            Some(ProjectId::new("project-test").unwrap()),
+            ironclaw_host_api::ThreadId::new("thread-test").unwrap(),
+            Some(UserId::new("owner-test").unwrap()),
+        );
+
+        provider
+            .begin_communication_context(owned_scope, Some(actor()))
+            .resolve(false)
+            .await
+            .expect("context");
+
+        assert_eq!(
+            seen_user_id.lock().expect("lock").as_deref(),
+            Some("owner-test"),
+            "preference lookup must be keyed by the explicit run owner, not the actor",
+        );
+    }
+
+    #[tokio::test]
+    async fn preferences_fall_back_to_actor_without_explicit_owner() {
+        let seen_user_id = Arc::new(std::sync::Mutex::new(None));
+        let facade = CaptureCallerPreferencesFacade {
+            seen_user_id: Arc::clone(&seen_user_id),
+        };
+        let provider = RuntimeCommunicationContextProvider::new(Arc::new(facade));
+
+        // `scope()` uses `TurnThreadOwner::ActorFallback` (no explicit owner).
+        provider
+            .begin_communication_context(scope(), Some(actor()))
+            .resolve(false)
+            .await
+            .expect("context");
+
+        assert_eq!(
+            seen_user_id.lock().expect("lock").as_deref(),
+            Some("user-test"),
+            "with no explicit owner the lookup must fall back to the actor",
+        );
     }
 
     // --- Tests: delivery target state branches ---
