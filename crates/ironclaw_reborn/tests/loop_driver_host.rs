@@ -985,16 +985,14 @@ impl CommunicationContextProvider for StubCommunicationContextProvider {
     ) -> CommunicationContextFetch {
         // `delivery_tools_visible` is a placeholder; the host stamps the real
         // surface-derived value in `CommunicationContextFetch::resolve`.
-        CommunicationContextFetch::new(Box::pin(async {
-            Some(CommunicationRuntimeContext {
-                connected_channels: ConnectedChannelsState::Known(vec![ConnectedChannelSummary {
-                    name: "test-channel".to_string(),
-                    authenticated: true,
-                    active: true,
-                }]),
-                delivery_target: DeliveryTargetState::NoneSet,
-                delivery_tools_visible: false,
-            })
+        CommunicationContextFetch::from_ready(Some(CommunicationRuntimeContext {
+            connected_channels: ConnectedChannelsState::Known(vec![ConnectedChannelSummary {
+                name: "test-channel".to_string(),
+                authenticated: true,
+                active: true,
+            }]),
+            delivery_target: DeliveryTargetState::NoneSet,
+            delivery_tools_visible: false,
         }))
     }
 }
@@ -1072,20 +1070,19 @@ impl CommunicationContextProvider for RecordingCommunicationContextProvider {
         *self.recorded_thread_id.lock().unwrap() = Some(scope.thread_id.clone());
         *self.recorded_actor_present.lock().unwrap() = Some(actor.is_some());
         // Placeholder flag; the host stamps the surface-derived value in `resolve`.
-        CommunicationContextFetch::new(Box::pin(async {
-            Some(CommunicationRuntimeContext {
-                connected_channels: ConnectedChannelsState::Unknown,
-                delivery_target: DeliveryTargetState::NoneSet,
-                delivery_tools_visible: false,
-            })
+        CommunicationContextFetch::from_ready(Some(CommunicationRuntimeContext {
+            connected_channels: ConnectedChannelsState::Unknown,
+            delivery_target: DeliveryTargetState::NoneSet,
+            delivery_tools_visible: false,
         }))
     }
 }
 
-// f-test-5: when the visible surface includes builtin.outbound_delivery_target_set,
-// the host derives delivery_tools_visible=true and stamps it onto the resolved
-// communication context. Asserted end-to-end via the rendered ScheduledTrigger +
-// NoneSet warning, whose tool-hint sentence only appears when the flag is true.
+// f-test-5: when the visible surface includes BOTH builtin.outbound_delivery_target_set
+// AND builtin.outbound_delivery_targets_list, the host derives delivery_tools_visible=true
+// and stamps it onto the resolved communication context. Asserted end-to-end via the
+// rendered ScheduledTrigger + NoneSet warning, whose tool-hint sentence only appears when
+// both delivery capabilities are present in the surface.
 #[tokio::test]
 async fn delivery_tools_visible_from_surface_renders_tool_hint_warning() {
     let mut fixture = HostFixture::new("thread-comm-delivery-visible", "hello delivery").await;
@@ -1106,9 +1103,12 @@ async fn delivery_tools_visible_from_surface_renders_tool_hint_warning() {
                 },
             ));
 
-    let delivery_id = CapabilityId::new("builtin.outbound_delivery_target_set").unwrap();
+    // Both the setter AND the lister must be present: the rendered guidance names both tools.
+    let setter_id = CapabilityId::new("builtin.outbound_delivery_target_set").unwrap();
+    let lister_id = CapabilityId::new("builtin.outbound_delivery_targets_list").unwrap();
     let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
-        capability_descriptor(delivery_id.as_str()),
+        capability_descriptor(setter_id.as_str()),
+        capability_descriptor(lister_id.as_str()),
     ])));
     let io = Arc::new(InMemoryCapabilityIo::default());
     let capability_port = HostRuntimeLoopCapabilityPort::new(
@@ -1120,7 +1120,7 @@ async fn delivery_tools_visible_from_surface_renders_tool_hint_warning() {
         fixture.milestone_sink.clone(),
     );
     let surface_resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
-        CapabilityAllowSet::allowlist([delivery_id.clone()]),
+        CapabilityAllowSet::allowlist([setter_id.clone(), lister_id.clone()]),
     ));
     let recording_provider = RecordingCommunicationContextProvider::new();
 
@@ -1150,7 +1150,81 @@ async fn delivery_tools_visible_from_surface_renders_tool_hint_warning() {
         requests[0].messages.iter().any(|message| message
             .content
             .contains("Set one with builtin__outbound_delivery_target_set.")),
-        "delivery_tools_visible=true (capability in surface) must render the tool-hint warning variant"
+        "delivery_tools_visible=true (both capabilities in surface) must render the tool-hint warning variant"
+    );
+}
+
+// f-test-5b: when the visible surface includes ONLY builtin.outbound_delivery_target_set
+// but NOT builtin.outbound_delivery_targets_list, delivery_tools_visible must be false.
+// The rendered guidance must not name tools the model cannot call.
+#[tokio::test]
+async fn delivery_tools_visible_requires_both_caps_setter_only_suppresses_hint() {
+    let mut fixture =
+        HostFixture::new("thread-comm-delivery-setter-only", "hello setter-only").await;
+    let driver = TextOnlyModelReplyDriver::default();
+    assign_driver_to_fixture(&mut fixture, driver.descriptor());
+
+    // ScheduledTrigger + NoneSet is the render path gated on delivery_tools_visible.
+    let loop_run_context =
+        fixture
+            .context
+            .clone()
+            .with_product_context(ironclaw_turns::ProductTurnContext::new(
+                ironclaw_turns::TurnOriginKind::ScheduledTrigger,
+                None,
+                None,
+                ironclaw_turns::TurnOwner::Personal {
+                    user: UserId::new("user-comm-delivery-setter-only").unwrap(),
+                },
+            ));
+
+    // Only the setter — lister absent. delivery_tools_visible must remain false.
+    let setter_id = CapabilityId::new("builtin.outbound_delivery_target_set").unwrap();
+    let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
+        capability_descriptor(setter_id.as_str()),
+    ])));
+    let io = Arc::new(InMemoryCapabilityIo::default());
+    let capability_port = HostRuntimeLoopCapabilityPort::new(
+        runtime.clone(),
+        loop_run_context.clone(),
+        host_runtime_visible_request(&fixture, ["builtin"]),
+        io.clone(),
+        io,
+        fixture.milestone_sink.clone(),
+    );
+    let surface_resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
+        CapabilityAllowSet::allowlist([setter_id.clone()]),
+    ));
+    let recording_provider = RecordingCommunicationContextProvider::new();
+
+    let host = fixture
+        .factory()
+        .with_communication_context_provider(
+            Arc::clone(&recording_provider) as Arc<dyn CommunicationContextProvider>
+        )
+        .build_text_only_host_with_profiled_capabilities(
+            RebornLoopDriverHostRequest {
+                claimed_run: fixture.claimed.clone(),
+                loop_run_context: loop_run_context.clone(),
+            },
+            Arc::new(capability_port),
+            surface_resolver,
+        )
+        .await
+        .unwrap();
+
+    driver
+        .run(driver_request(&loop_run_context), &host)
+        .await
+        .unwrap();
+
+    let requests = fixture.gateway.requests();
+    // The tool-hint variant must NOT appear: lister is not in the surface.
+    assert!(
+        !requests[0].messages.iter().any(|message| message
+            .content
+            .contains("builtin__outbound_delivery_target_set")),
+        "delivery_tools_visible must be false when only the setter capability is present (lister absent)"
     );
 }
 

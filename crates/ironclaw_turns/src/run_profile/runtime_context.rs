@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
+use tracing;
 
 use crate::{ProductTurnContext, TurnOriginKind};
 
@@ -267,13 +268,25 @@ fn model_safe_label(value: &str, placeholder: &str) -> String {
     }
 }
 
-/// Boxed, already-running future yielding the advisory communication context.
+/// Inner state of a [`CommunicationContextFetch`].
 ///
-/// The `delivery_tools_visible` field of the yielded context is a placeholder;
-/// the real, surface-derived value is stamped by [`CommunicationContextFetch::resolve`].
-pub type CommunicationContextFuture = std::pin::Pin<
-    Box<dyn std::future::Future<Output = Option<CommunicationRuntimeContext>> + Send>,
->;
+/// `Spawned` owns a live tokio `JoinHandle`; dropping it aborts the task via
+/// `CommunicationContextFetch`'s `Drop` impl.  `Ready` holds a pre-resolved
+/// value for test fakes that do not need a background task.
+enum CommunicationContextInner {
+    /// An already-running spawned task.
+    Spawned {
+        handle: tokio::task::JoinHandle<Option<CommunicationRuntimeContext>>,
+        /// Whether an actor is present for this run.  Used by `resolve` to
+        /// degrade a `JoinError` (task panicked or was aborted) to
+        /// `Some(Unknown)` rather than `None`, preserving the actor-present /
+        /// no-actor distinction the composition layer established at construction
+        /// time.  See `CommunicationContextProvider::begin_communication_context`.
+        actor_present: bool,
+    },
+    /// A pre-resolved value; used by test fakes.  Drop is a no-op.
+    Ready(Option<CommunicationRuntimeContext>),
+}
 
 /// In-flight advisory communication-context fetch.
 ///
@@ -282,29 +295,99 @@ pub type CommunicationContextFuture = std::pin::Pin<
 /// construction, capability-surface computation) instead of blocking prompt
 /// construction. The caller joins it via [`CommunicationContextFetch::resolve`]
 /// once the capability surface — and therefore `delivery_tools_visible` — is known.
+///
+/// Dropping a fetch that has not been resolved aborts the underlying spawned
+/// task, preventing wasted backend work on the run-start hot path.
 pub struct CommunicationContextFetch {
-    inner: CommunicationContextFuture,
+    // Wrapped in `Option` so `Drop` and `resolve` can both take ownership of
+    // the inner value.  Callers never observe `None` — it is only an
+    // implementation detail of the move-out-under-Drop pattern.
+    inner: Option<CommunicationContextInner>,
+}
+
+impl Drop for CommunicationContextFetch {
+    fn drop(&mut self) {
+        if let Some(CommunicationContextInner::Spawned { handle, .. }) = self.inner.take() {
+            handle.abort();
+        }
+    }
 }
 
 impl CommunicationContextFetch {
-    /// Wrap an already-running fetch future.
+    /// Construct a fetch backed by an already-spawned task handle.
     ///
-    /// The future MUST already be making progress concurrently (e.g. backed by a
-    /// spawned task). A future that only begins work when first polled in
-    /// [`resolve`](Self::resolve) would reintroduce the serial cost this type
-    /// exists to avoid.
-    pub fn new(inner: CommunicationContextFuture) -> Self {
-        Self { inner }
+    /// `actor_present` controls how a `JoinError` (task panic or external abort)
+    /// is degraded in [`resolve`](Self::resolve): `true` → `Some(Unknown…)` so
+    /// the run is not mistaken for an actor-absent one; `false` → `None`.
+    ///
+    /// Dropping the returned `CommunicationContextFetch` before calling
+    /// [`resolve`] will abort the task.
+    pub fn from_handle(
+        handle: tokio::task::JoinHandle<Option<CommunicationRuntimeContext>>,
+        actor_present: bool,
+    ) -> Self {
+        Self {
+            inner: Some(CommunicationContextInner::Spawned {
+                handle,
+                actor_present,
+            }),
+        }
+    }
+
+    /// Construct a fetch from an already-known value.
+    ///
+    /// Intended for test fakes and other callers that have the result
+    /// immediately available.  No background task is involved; drop is a no-op.
+    pub fn from_ready(value: Option<CommunicationRuntimeContext>) -> Self {
+        Self {
+            inner: Some(CommunicationContextInner::Ready(value)),
+        }
     }
 
     /// Join the in-flight fetch and stamp the surface-derived visibility flag.
     ///
-    /// Returns `None` when the slice is unavailable for this run.
+    /// Returns `None` when the slice is unavailable for this run (no actor, or
+    /// task failed and no actor was present).  When `actor_present` was `true`
+    /// at construction time and the task fails with a `JoinError`, degrades to
+    /// `Some` with `Unknown` channel and delivery states so the actor-present /
+    /// no-actor distinction is preserved.
     pub async fn resolve(
-        self,
+        mut self,
         delivery_tools_visible: bool,
     ) -> Option<CommunicationRuntimeContext> {
-        self.inner.await.map(|mut ctx| {
+        // Take the inner value so that `Drop` does not also call `abort` when
+        // `self` is dropped at the end of this function (the handle is consumed
+        // by `await` below, not by `Drop`).
+        let result = match self.inner.take() {
+            Some(CommunicationContextInner::Spawned {
+                handle,
+                actor_present,
+            }) => match handle.await {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::debug!(
+                        error = %error,
+                        "communication context fetch task failed; degrading advisory slice"
+                    );
+                    if actor_present {
+                        Some(CommunicationRuntimeContext {
+                            connected_channels: ConnectedChannelsState::Unknown,
+                            delivery_target: DeliveryTargetState::Unknown,
+                            delivery_tools_visible: false,
+                        })
+                    } else {
+                        // silent-ok: communication context is not applicable
+                        // without an actor.
+                        None
+                    }
+                }
+            },
+            Some(CommunicationContextInner::Ready(value)) => value,
+            // Unreachable in normal use: `inner` is only `None` inside `Drop`
+            // after `resolve` has already consumed the value.
+            None => None,
+        };
+        result.map(|mut ctx| {
             ctx.delivery_tools_visible = delivery_tools_visible;
             ctx
         })

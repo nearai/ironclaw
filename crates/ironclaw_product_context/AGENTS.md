@@ -2,7 +2,9 @@
 
 ## Start Here
 
-- Read `CLAUDE.md` first; it is the project-wide guardrail file.
+- This crate has no local `CLAUDE.md`; this `AGENTS.md` is the crate guide.
+  For project-wide guardrails read the repo-root `CLAUDE.md` and the rules under
+  `.claude/rules/` (especially `types.md` and `architecture.md`).
 - Read `Cargo.toml` to confirm the dependency surface before adding any imports.
 
 ## What This Crate Owns

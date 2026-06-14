@@ -1521,10 +1521,18 @@ where
             .map_err(|error| RebornLoopDriverHostError::InvalidRequest {
                 reason: error.safe_summary,
             })?;
-        let delivery_tools_visible = visible_surface
-            .descriptors
-            .iter()
-            .any(|d| d.capability_id.as_str() == "builtin.outbound_delivery_target_set");
+        // The rendered guidance names BOTH the lister and the setter; require both
+        // capabilities to be visible before setting the flag, so we never prompt
+        // the model to call a tool that is not actually in the surface.
+        let delivery_tools_visible = {
+            let ids: std::collections::HashSet<&str> = visible_surface
+                .descriptors
+                .iter()
+                .map(|d| d.capability_id.as_str())
+                .collect();
+            ids.contains("builtin.outbound_delivery_target_set")
+                && ids.contains("builtin.outbound_delivery_targets_list")
+        };
         // Join the fetch started at loop entry and stamp the surface-derived
         // `delivery_tools_visible` flag. In the common case the fetch has already
         // resolved during the work above, so this adds no critical-path latency.

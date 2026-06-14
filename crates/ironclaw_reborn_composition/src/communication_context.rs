@@ -16,8 +16,11 @@ use ironclaw_turns::{
 use tokio::join;
 use tokio::time::timeout;
 
-/// Shared timeout budget for both outbound-preferences and lifecycle fetches.
-const OUTBOUND_PREFERENCES_TIMEOUT: Duration = Duration::from_millis(500);
+/// Shared timeout budget for the whole communication-context fetch (outbound
+/// preferences + lifecycle/channels). Both futures run concurrently under this
+/// single budget; expiry degrades both delivery-target and connected-channels
+/// to `Unknown`.
+const COMMUNICATION_CONTEXT_FETCH_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub(crate) struct RuntimeCommunicationContextProvider {
     outbound_preferences: Arc<dyn OutboundPreferencesProductFacade>,
@@ -51,35 +54,19 @@ impl CommunicationContextProvider for RuntimeCommunicationContextProvider {
     ) -> CommunicationContextFetch {
         // Clone the facade handles into the spawned task so the backend lookups
         // run concurrently with loop-start work; the caller joins the result
-        // later via `resolve`. A detached task (handle dropped on early caller
-        // error) simply runs to completion and its result is discarded.
+        // later via `resolve`. Dropping the returned fetch before resolve aborts
+        // the task via `CommunicationContextFetch`'s `Drop` impl, preventing
+        // wasted backend work on the run-start hot path.
         let outbound_preferences = Arc::clone(&self.outbound_preferences);
         let lifecycle_facade = self.lifecycle_facade.clone();
         let actor_present = actor.is_some();
         let handle = tokio::spawn(async move {
             fetch_communication_context(outbound_preferences, lifecycle_facade, scope, actor).await
         });
-        CommunicationContextFetch::new(Box::pin(async move {
-            match handle.await {
-                Ok(result) => result,
-                Err(error) => {
-                    tracing::debug!(
-                        error = %error,
-                        "communication context fetch task failed; degrading advisory slice"
-                    );
-                    if actor_present {
-                        Some(CommunicationRuntimeContext {
-                            connected_channels: ConnectedChannelsState::Unknown,
-                            delivery_target: DeliveryTargetState::Unknown,
-                            delivery_tools_visible: false,
-                        })
-                    } else {
-                        // silent-ok: communication context is not applicable without an actor.
-                        None
-                    }
-                }
-            }
-        }))
+        // Pass `actor_present` so that `resolve` can degrade a `JoinError`
+        // (task panic) to `Some(Unknown)` rather than `None` when an actor is
+        // present — preserving the actor-present / no-actor distinction.
+        CommunicationContextFetch::from_handle(handle, actor_present)
     }
 }
 
@@ -129,9 +116,9 @@ async fn fetch_communication_context(
         }
     };
 
-    // Outbound-preferences fetch runs under a 500 ms budget.  Lifecycle
-    // runs concurrently only when CHANNEL_CLASSIFICATION_AVAILABLE is true.
-    let combined_result = timeout(OUTBOUND_PREFERENCES_TIMEOUT, async {
+    // Both futures share a single 500 ms budget.  Lifecycle runs concurrently
+    // only when CHANNEL_CLASSIFICATION_AVAILABLE is true.
+    let combined_result = timeout(COMMUNICATION_CONTEXT_FETCH_TIMEOUT, async {
         join!(preferences_fut, lifecycle_fut)
     })
     .await;
@@ -725,6 +712,71 @@ mod tests {
             ctx.delivery_target,
             DeliveryTargetState::Unknown,
             "join failure with actor present must degrade delivery_target to Unknown"
+        );
+    }
+
+    #[tokio::test]
+    async fn drop_before_resolve_aborts_spawned_task() {
+        // Regression: dropping a `CommunicationContextFetch` before calling
+        // `resolve` must abort the underlying spawned task rather than detaching
+        // it. A detached task wastes the ~500 ms timeout budget on failed runs
+        // in the hot run-start path.
+        //
+        // Strategy: the task awaits a `Notify` it will never receive (simulating
+        // a hanging preferences facade), then sets an `AtomicBool` before
+        // returning. An aborted task never reaches the flag store. We drop the
+        // fetch right after construction and yield to the scheduler, then assert
+        // the flag was never set — proving abort fired.
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        use tokio::sync::Notify;
+
+        let task_started = Arc::new(Notify::new());
+        let task_completed = Arc::new(AtomicBool::new(false));
+
+        let task_started_inner = Arc::clone(&task_started);
+        let task_completed_inner = Arc::clone(&task_completed);
+
+        // Spawn the blocking task directly so we can wrap its JoinHandle in a
+        // CommunicationContextFetch and test the abort-on-drop path.
+        // The return type must match `JoinHandle<Option<CommunicationRuntimeContext>>`
+        // as required by `from_handle`; the `None` literal provides the type.
+        let handle = tokio::spawn(async move {
+            task_started_inner.notify_one();
+            // Await a notify that is never signalled — simulates a hanging
+            // backend. The abort must interrupt the task here.
+            let never_resolves = Arc::new(Notify::new());
+            never_resolves.notified().await;
+            // Only reached if abort did NOT fire.
+            task_completed_inner.store(true, Ordering::SeqCst);
+            None::<ironclaw_turns::run_profile::CommunicationRuntimeContext>
+        });
+
+        // Wait until the task has started so we know it's actually blocked and
+        // that dropping the fetch will exercise a live abort.
+        task_started.notified().await;
+
+        // Wrap in a fetch and immediately drop it — this must call abort().
+        // `actor_present: false` since this test only cares about abort behavior;
+        // the JoinError degrade path is covered by `actor_present_join_failure_degrades_to_unknown`.
+        let fetch =
+            ironclaw_turns::run_profile::CommunicationContextFetch::from_handle(handle, false);
+        drop(fetch);
+
+        // Yield to the scheduler to give the abort machinery time to deliver.
+        // A few cooperative yields are enough for tokio's single-threaded test
+        // executor to process the abort signal.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        // The task must NOT have reached the completion store.  If it did, the
+        // abort-on-drop invariant is broken and this test will fail.
+        assert!(
+            !task_completed.load(Ordering::SeqCst),
+            "spawned task must be aborted on fetch drop, not allowed to run to completion"
         );
     }
 

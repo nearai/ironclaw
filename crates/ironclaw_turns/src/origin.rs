@@ -1,3 +1,5 @@
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 use ironclaw_host_api::{AgentId, ProjectId, UserId};
@@ -19,34 +21,72 @@ pub enum TurnSurfaceType {
     Channel,
 }
 
+/// Maximum byte length for a [`RunOriginAdapter`] value. Mirrors `AdapterKind`'s
+/// validation bound in `ironclaw_conversations` so that any valid `AdapterKind`
+/// always converts without narrowing. If `AdapterKind`'s limit changes, update
+/// this constant to match.
+const MAX_RUN_ORIGIN_ADAPTER_BYTES: usize = 512;
+
 /// Generic adapter identity carried into the turn context. Bounded validated string;
 /// callers convert their rich adapter id (e.g. `ProductAdapterId`, `AdapterKind`) into this.
 ///
 /// Serializes as a plain string. Deserialization validates via `TryFrom<String>` so
 /// persisted payloads with empty or oversized values are rejected at the boundary.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// The byte-length cap matches `AdapterKind`'s validation bound (512 bytes) so that
+/// any valid `AdapterKind` always converts into a `RunOriginAdapter` without silent
+/// narrowing.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String")]
 pub struct RunOriginAdapter(String);
 
 impl RunOriginAdapter {
-    pub fn new(value: impl Into<String>) -> Result<Self, crate::TurnError> {
-        let value = value.into();
-        if value.is_empty() || value.len() > 256 {
+    fn validate(s: &str) -> Result<(), crate::TurnError> {
+        if s.is_empty() || s.len() > MAX_RUN_ORIGIN_ADAPTER_BYTES {
             return Err(crate::TurnError::InvalidRunOriginAdapter);
         }
-        Ok(Self(value))
+        Ok(())
+    }
+
+    pub fn new(value: impl Into<String>) -> Result<Self, crate::TurnError> {
+        let s = value.into();
+        Self::validate(&s)?;
+        Ok(Self(s))
     }
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
     }
 }
 
 impl TryFrom<String> for RunOriginAdapter {
     type Error = crate::TurnError;
 
-    fn try_from(v: String) -> Result<Self, Self::Error> {
-        Self::new(v)
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::validate(&value)?;
+        Ok(Self(value))
+    }
+}
+
+impl AsRef<str> for RunOriginAdapter {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for RunOriginAdapter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<RunOriginAdapter> for String {
+    fn from(a: RunOriginAdapter) -> Self {
+        a.0
     }
 }
 
@@ -132,11 +172,21 @@ mod tests {
     }
 
     #[test]
-    fn run_origin_adapter_rejects_over_256_bytes() {
-        let long = "a".repeat(257);
+    fn run_origin_adapter_accepts_at_max_bytes() {
+        // Exactly at the limit must succeed — mirrors AdapterKind's 512-byte cap.
+        let at_limit = "a".repeat(MAX_RUN_ORIGIN_ADAPTER_BYTES);
         assert!(
-            RunOriginAdapter::new(long).is_err(),
-            "adapter exceeding 256 bytes must be rejected"
+            RunOriginAdapter::new(at_limit).is_ok(),
+            "adapter at exactly {MAX_RUN_ORIGIN_ADAPTER_BYTES} bytes must be accepted"
+        );
+    }
+
+    #[test]
+    fn run_origin_adapter_rejects_over_512_bytes() {
+        let overlong = "a".repeat(MAX_RUN_ORIGIN_ADAPTER_BYTES + 1);
+        assert!(
+            RunOriginAdapter::new(overlong).is_err(),
+            "adapter exceeding {MAX_RUN_ORIGIN_ADAPTER_BYTES} bytes must be rejected"
         );
     }
 
@@ -158,15 +208,15 @@ mod tests {
     #[test]
     fn deserialize_rejects_overlong_run_origin_adapter() {
         // The try_from serde gate must also reject persisted payloads whose adapter
-        // exceeds 256 bytes — the >256 branch that the direct constructor test covers
+        // exceeds the max — the >512 branch that the direct constructor test covers
         // but the serde boundary did not.
-        let overlong = "a".repeat(257);
+        let overlong = "a".repeat(MAX_RUN_ORIGIN_ADAPTER_BYTES + 1);
         let json = format!(
             r#"{{"origin":"inbound","adapter":"{overlong}","owner":{{"kind":"personal","user":"u1"}}}}"#
         );
         assert!(
             serde_json::from_str::<ProductTurnContext>(&json).is_err(),
-            "adapter exceeding 256 bytes must fail deserialization via try_from"
+            "adapter exceeding {MAX_RUN_ORIGIN_ADAPTER_BYTES} bytes must fail deserialization via try_from"
         );
     }
 }

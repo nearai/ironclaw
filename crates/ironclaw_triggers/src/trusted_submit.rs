@@ -72,6 +72,24 @@ impl TriggerTrustedInboundBinding {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::is_trusted_trigger_adapter_kind;
+
+    #[test]
+    fn is_trusted_trigger_adapter_kind_matches_only_canonical_kind() {
+        // The canonical value must match.
+        assert!(is_trusted_trigger_adapter_kind("trigger"));
+
+        // Non-canonical values must not match.
+        assert!(!is_trusted_trigger_adapter_kind("telegram"));
+        assert!(!is_trusted_trigger_adapter_kind("slack"));
+        assert!(!is_trusted_trigger_adapter_kind("Trigger")); // wrong case
+        assert!(!is_trusted_trigger_adapter_kind("")); // empty string
+        assert!(!is_trusted_trigger_adapter_kind("trigger ")); // trailing space
+    }
+}
+
 /// Materialized prompt content plus the canonical trusted inbound binding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TriggerMaterializedPrompt {

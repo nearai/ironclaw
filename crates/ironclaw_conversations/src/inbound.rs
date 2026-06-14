@@ -1760,4 +1760,74 @@ mod tests {
             "ordinary inbound adapter must carry adapter name"
         );
     }
+
+    /// A long but valid adapter kind (300 bytes, well within `AdapterKind`'s 512-byte
+    /// cap) must NOT be rejected by the `AdapterKind` → `RunOriginAdapter` conversion
+    /// inside `handle_inbound_turn`. Before the bound alignment fix, `RunOriginAdapter`
+    /// capped at 256 bytes and would return `InvalidCanonicalRef` for any adapter kind
+    /// between 257–512 bytes — a silent narrowing below `AdapterKind`'s own limit.
+    #[tokio::test]
+    async fn long_valid_adapter_kind_is_not_rejected_by_run_origin_conversion() {
+        // 300-byte adapter kind: valid for both AdapterKind (≤ 512) and the now-aligned
+        // RunOriginAdapter (≤ 512). Must reach accept/submit normally.
+        let long_name = "a".repeat(300);
+        let long_adapter = AdapterKind::new(&long_name)
+            .expect("300-byte adapter kind must be valid — AdapterKind allows up to 512 bytes");
+        let long_install = AdapterInstallationId::new("long-adapter-install").unwrap();
+        let long_actor = ExternalActorRef::new("long", "user-alice").unwrap();
+        let services = InMemoryConversationServices::default();
+        services
+            .pair_external_actor(
+                tenant(),
+                long_adapter.clone(),
+                long_install.clone(),
+                long_actor.clone(),
+                user("alice"),
+            )
+            .await;
+        let coordinator = Arc::new(RecordingTurnCoordinator::default());
+        let inbound =
+            InboundTurnService::new(services.clone(), services.clone(), coordinator.clone());
+
+        let request = InboundTurnRequest {
+            tenant_id: tenant(),
+            adapter_kind: long_adapter,
+            adapter_installation_id: long_install,
+            external_actor_ref: long_actor,
+            external_conversation_ref: ExternalConversationRef::new(
+                None,
+                "long-adapter-conv",
+                Some("long-adapter-thread"),
+                None,
+            )
+            .unwrap(),
+            external_event_id: ExternalEventId::new("long-adapter-event-1").unwrap(),
+            route_kind: ConversationRouteKind::Direct,
+            content_ref: InboundMessageContentRef::new("content:long-adapter-1").unwrap(),
+            requested_agent_id: None,
+            requested_project_id: None,
+            received_at: Utc.with_ymd_and_hms(2026, 6, 14, 10, 0, 0).unwrap(),
+            requested_run_profile: None,
+        };
+
+        let result = inbound.handle_inbound_turn(request).await;
+
+        // Must NOT return InvalidCanonicalRef — the conversion must not narrow below
+        // AdapterKind's own limit.
+        assert!(
+            !matches!(result, Err(InboundTurnError::InvalidCanonicalRef { .. })),
+            "a 300-byte adapter kind must not be rejected by the RunOriginAdapter conversion; \
+             got: {result:?}"
+        );
+        // Should reach the submit path successfully.
+        assert!(
+            result.is_ok(),
+            "a 300-byte adapter kind must succeed end-to-end; got: {result:?}"
+        );
+        assert_eq!(
+            coordinator.submissions().len(),
+            1,
+            "exactly one turn submission must have been recorded"
+        );
+    }
 }
