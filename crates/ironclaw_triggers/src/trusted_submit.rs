@@ -4,6 +4,15 @@ pub const TRIGGER_TRUSTED_ADAPTER_KIND: &str = "trigger";
 pub const TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID: &str = "reborn-trigger-poller";
 pub const TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE: &str = "user";
 
+/// Returns `true` when `kind` is the trusted-trigger adapter kind string.
+///
+/// This is the trigger-owned authority on the predicate — callers in other
+/// crates must use this function rather than comparing to `TRIGGER_TRUSTED_ADAPTER_KIND`
+/// directly or carrying the check in a generic identifier type.
+pub fn is_trusted_trigger_adapter_kind(kind: &str) -> bool {
+    kind == TRIGGER_TRUSTED_ADAPTER_KIND
+}
+
 /// Canonical conversation identity for a trusted trigger fire.
 ///
 /// Composition computes this once while materializing the trigger prompt, uses

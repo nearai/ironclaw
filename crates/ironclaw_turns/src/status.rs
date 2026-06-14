@@ -4,9 +4,9 @@ use thiserror::Error;
 use ironclaw_host_api::RuntimeCredentialAuthRequirement;
 
 use crate::{
-    AcceptedMessageRef, GateRef, ReplyTargetBindingRef, ResolvedRunProfile, RunProfileId,
-    RunProfileVersion, SourceBindingRef, TurnActor, TurnAdmissionClass, TurnCheckpointId, TurnId,
-    TurnRunId, TurnScope, events::EventCursor, request::TurnTimestamp,
+    AcceptedMessageRef, GateRef, ProductTurnContext, ReplyTargetBindingRef, ResolvedRunProfile,
+    RunProfileId, RunProfileVersion, SourceBindingRef, TurnActor, TurnAdmissionClass,
+    TurnCheckpointId, TurnId, TurnRunId, TurnScope, events::EventCursor, request::TurnTimestamp,
     run_profile::LoopModelRouteSnapshot,
 };
 
@@ -320,6 +320,8 @@ pub struct TurnRunState {
     pub credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
     pub failure: Option<SanitizedFailure>,
     pub event_cursor: EventCursor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product_context: Option<ProductTurnContext>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -385,6 +387,8 @@ pub enum TurnError {
     InvalidTransition { from: TurnStatus, to: TurnStatus },
     #[error("turn run lease mismatch")]
     LeaseMismatch,
+    #[error("invalid run-origin adapter: must be 1..=256 bytes")]
+    InvalidRunOriginAdapter,
 }
 
 impl TurnError {
@@ -407,6 +411,7 @@ impl TurnError {
                 TurnErrorCategory::Conflict
             }
             Self::CapacityExceeded { .. } => TurnErrorCategory::CapacityExceeded,
+            Self::InvalidRunOriginAdapter => TurnErrorCategory::InvalidRequest,
         }
     }
 
