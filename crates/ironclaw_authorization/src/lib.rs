@@ -188,6 +188,11 @@ impl CapabilityLease {
 pub enum CapabilityLeaseStatus {
     Active,
     Claimed,
+    /// Transient state set by `begin_dispatch_claimed` to ensure exactly one
+    /// concurrent auth-resume reuses a fingerprinted claimed lease. A second
+    /// caller sees `Dispatching` and gets `InactiveLease` — matching the loser
+    /// path of a concurrent `Active` lease `claim()` race.
+    Dispatching,
     Consumed,
     Revoked,
 }
@@ -255,6 +260,25 @@ pub trait CapabilityLeaseStore: Send + Sync {
 
     /// Consumes or decrements an active/claimed lease after successful dispatch.
     async fn consume(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError>;
+
+    /// Atomically transitions a Claimed, fingerprint-matched lease to
+    /// `Dispatching` so exactly one concurrent auth-resume reuses it. A second
+    /// caller sees a non-Claimed status and gets `InactiveLease` — the loser
+    /// bails exactly like a lost Active `claim()`.
+    async fn begin_dispatch_claimed(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<CapabilityLease, CapabilityLeaseError>;
+
+    /// Reverts a `Dispatching` lease back to `Claimed` so a later auth-resume
+    /// can reuse it after a non-terminal auth re-bounce. No-op-safe if already Claimed.
+    async fn abort_dispatch_claimed(
         &self,
         scope: &ResourceScope,
         lease_id: CapabilityGrantId,
@@ -354,7 +378,10 @@ impl CapabilityLeaseStore for InMemoryCapabilityLeaseStore {
             .get_mut(&CapabilityLeaseKey::new(scope, lease_id))
             .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
 
-        let was_claimed = lease.status == CapabilityLeaseStatus::Claimed;
+        let was_claimed = matches!(
+            lease.status,
+            CapabilityLeaseStatus::Claimed | CapabilityLeaseStatus::Dispatching
+        );
         ensure_consumable(lease)?;
         if lease.invocation_fingerprint.is_some() {
             if let Some(remaining) = lease.grant.constraints.max_invocations.as_mut() {
@@ -370,6 +397,56 @@ impl CapabilityLeaseStore for InMemoryCapabilityLeaseStore {
             }
         } else if was_claimed {
             lease.status = CapabilityLeaseStatus::Active;
+        }
+        Ok(lease.clone())
+    }
+
+    async fn begin_dispatch_claimed(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        let mut leases = self.leases_guard();
+        let lease = leases
+            .get_mut(&CapabilityLeaseKey::new(scope, lease_id))
+            .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
+        if lease.status != CapabilityLeaseStatus::Claimed {
+            return Err(CapabilityLeaseError::InactiveLease {
+                lease_id,
+                status: lease.status,
+            });
+        }
+        if lease.invocation_fingerprint.as_ref() != Some(invocation_fingerprint) {
+            return Err(CapabilityLeaseError::FingerprintMismatch { lease_id });
+        }
+        ensure_not_expired_or_exhausted(lease)?;
+        lease.status = CapabilityLeaseStatus::Dispatching;
+        Ok(lease.clone())
+    }
+
+    async fn abort_dispatch_claimed(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        let mut leases = self.leases_guard();
+        let lease = leases
+            .get_mut(&CapabilityLeaseKey::new(scope, lease_id))
+            .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
+        match lease.status {
+            CapabilityLeaseStatus::Dispatching => {
+                lease.status = CapabilityLeaseStatus::Claimed;
+            }
+            CapabilityLeaseStatus::Claimed => {
+                // Already Claimed — no-op.
+            }
+            _ => {
+                return Err(CapabilityLeaseError::InactiveLease {
+                    lease_id,
+                    status: lease.status,
+                });
+            }
         }
         Ok(lease.clone())
     }
@@ -821,7 +898,10 @@ where
         // authority. The retry re-evaluates `ensure_consumable` against
         // the latest version so the loser sees `InactiveLease`.
         self.update_lease_cas(scope, lease_id, |lease| {
-            let was_claimed = lease.status == CapabilityLeaseStatus::Claimed;
+            let was_claimed = matches!(
+                lease.status,
+                CapabilityLeaseStatus::Claimed | CapabilityLeaseStatus::Dispatching
+            );
             ensure_consumable(lease)?;
             if lease.invocation_fingerprint.is_some() {
                 if let Some(remaining) = lease.grant.constraints.max_invocations.as_mut() {
@@ -839,6 +919,53 @@ where
                 lease.status = CapabilityLeaseStatus::Active;
             }
             Ok(())
+        })
+        .await
+    }
+
+    async fn begin_dispatch_claimed(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        let lock = self.mutation_lock(scope);
+        let _guard = lock.lock().await;
+        let fingerprint = invocation_fingerprint.clone();
+        self.update_lease_cas(scope, lease_id, |lease| {
+            if lease.status != CapabilityLeaseStatus::Claimed {
+                return Err(CapabilityLeaseError::InactiveLease {
+                    lease_id,
+                    status: lease.status,
+                });
+            }
+            if lease.invocation_fingerprint.as_ref() != Some(&fingerprint) {
+                return Err(CapabilityLeaseError::FingerprintMismatch { lease_id });
+            }
+            ensure_not_expired_or_exhausted(lease)?;
+            lease.status = CapabilityLeaseStatus::Dispatching;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn abort_dispatch_claimed(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        let lock = self.mutation_lock(scope);
+        let _guard = lock.lock().await;
+        self.update_lease_cas(scope, lease_id, |lease| match lease.status {
+            CapabilityLeaseStatus::Dispatching => {
+                lease.status = CapabilityLeaseStatus::Claimed;
+                Ok(())
+            }
+            CapabilityLeaseStatus::Claimed => Ok(()),
+            _ => Err(CapabilityLeaseError::InactiveLease {
+                lease_id,
+                status: lease.status,
+            }),
         })
         .await
     }
@@ -1463,7 +1590,9 @@ pub(crate) fn ensure_claimable(
 pub(crate) fn ensure_consumable(lease: &CapabilityLease) -> Result<(), CapabilityLeaseError> {
     let lease_id = lease.grant.id;
     match lease.status {
-        CapabilityLeaseStatus::Active | CapabilityLeaseStatus::Claimed => {}
+        CapabilityLeaseStatus::Active
+        | CapabilityLeaseStatus::Claimed
+        | CapabilityLeaseStatus::Dispatching => {}
         CapabilityLeaseStatus::Consumed => {
             return Err(CapabilityLeaseError::ExhaustedLease { lease_id });
         }
@@ -1475,7 +1604,13 @@ pub(crate) fn ensure_consumable(lease: &CapabilityLease) -> Result<(), Capabilit
         }
     }
 
-    if lease.invocation_fingerprint.is_some() && lease.status != CapabilityLeaseStatus::Claimed {
+    // Allow a fingerprinted lease to be consumed when Claimed OR Dispatching.
+    if lease.invocation_fingerprint.is_some()
+        && !matches!(
+            lease.status,
+            CapabilityLeaseStatus::Claimed | CapabilityLeaseStatus::Dispatching
+        )
+    {
         return Err(CapabilityLeaseError::UnclaimedFingerprintLease { lease_id });
     }
 

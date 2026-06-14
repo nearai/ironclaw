@@ -310,7 +310,9 @@ pub(crate) fn claim_error_may_be_concurrent_resume(error: &CapabilityLeaseError)
     matches!(
         error,
         CapabilityLeaseError::InactiveLease {
-            status: CapabilityLeaseStatus::Claimed | CapabilityLeaseStatus::Consumed,
+            status: CapabilityLeaseStatus::Claimed
+                | CapabilityLeaseStatus::Dispatching
+                | CapabilityLeaseStatus::Consumed,
             ..
         }
     )

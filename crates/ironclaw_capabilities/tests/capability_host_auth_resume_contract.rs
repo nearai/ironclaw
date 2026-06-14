@@ -1328,6 +1328,25 @@ async fn concurrent_auth_resume_claim_loser_returns_lease_error_without_failing_
             self.inner.consume(scope, lease_id).await
         }
 
+        async fn begin_dispatch_claimed(
+            &self,
+            scope: &ResourceScope,
+            lease_id: CapabilityGrantId,
+            invocation_fingerprint: &InvocationFingerprint,
+        ) -> Result<CapabilityLease, CapabilityLeaseError> {
+            self.inner
+                .begin_dispatch_claimed(scope, lease_id, invocation_fingerprint)
+                .await
+        }
+
+        async fn abort_dispatch_claimed(
+            &self,
+            scope: &ResourceScope,
+            lease_id: CapabilityGrantId,
+        ) -> Result<CapabilityLease, CapabilityLeaseError> {
+            self.inner.abort_dispatch_claimed(scope, lease_id).await
+        }
+
         async fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease> {
             self.inner.leases_for_scope(scope).await
         }
@@ -1431,5 +1450,285 @@ async fn concurrent_auth_resume_claim_loser_returns_lease_error_without_failing_
     assert!(
         !dispatcher.has_request(),
         "concurrent claim loser must not dispatch"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Concurrent auth-resume: begin_dispatch_claimed race loser returns lease
+// error without failing the run (Claimed-lease reuse path)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // A lease store that delegates everything to an inner InMemoryCapabilityLeaseStore
+    // except `begin_dispatch_claimed()`, which returns InactiveLease { status: Dispatching }
+    // once the `fail_next_begin_dispatch` flag is set — simulating the loser of a
+    // concurrent begin_dispatch_claimed race on a Claimed lease.
+    struct BeginDispatchClaimFailingLeaseStore {
+        inner: InMemoryCapabilityLeaseStore,
+        fail_next_begin_dispatch: AtomicBool,
+    }
+
+    impl BeginDispatchClaimFailingLeaseStore {
+        fn new() -> Self {
+            Self {
+                inner: InMemoryCapabilityLeaseStore::new(),
+                fail_next_begin_dispatch: AtomicBool::new(false),
+            }
+        }
+
+        fn arm_begin_dispatch_failure(&self) {
+            self.fail_next_begin_dispatch.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl CapabilityLeaseStore for BeginDispatchClaimFailingLeaseStore {
+        async fn issue(
+            &self,
+            lease: CapabilityLease,
+        ) -> Result<CapabilityLease, CapabilityLeaseError> {
+            self.inner.issue(lease).await
+        }
+
+        async fn revoke(
+            &self,
+            scope: &ResourceScope,
+            lease_id: CapabilityGrantId,
+        ) -> Result<CapabilityLease, CapabilityLeaseError> {
+            self.inner.revoke(scope, lease_id).await
+        }
+
+        async fn get(
+            &self,
+            scope: &ResourceScope,
+            lease_id: CapabilityGrantId,
+        ) -> Option<CapabilityLease> {
+            self.inner.get(scope, lease_id).await
+        }
+
+        async fn claim(
+            &self,
+            scope: &ResourceScope,
+            lease_id: CapabilityGrantId,
+            invocation_fingerprint: &InvocationFingerprint,
+        ) -> Result<CapabilityLease, CapabilityLeaseError> {
+            self.inner
+                .claim(scope, lease_id, invocation_fingerprint)
+                .await
+        }
+
+        async fn consume(
+            &self,
+            scope: &ResourceScope,
+            lease_id: CapabilityGrantId,
+        ) -> Result<CapabilityLease, CapabilityLeaseError> {
+            self.inner.consume(scope, lease_id).await
+        }
+
+        async fn begin_dispatch_claimed(
+            &self,
+            scope: &ResourceScope,
+            lease_id: CapabilityGrantId,
+            _invocation_fingerprint: &InvocationFingerprint,
+        ) -> Result<CapabilityLease, CapabilityLeaseError> {
+            if self.fail_next_begin_dispatch.swap(false, Ordering::SeqCst) {
+                // Return the error a concurrent winner would trigger: the lease
+                // is now Dispatching (the other caller got there first).
+                return Err(CapabilityLeaseError::InactiveLease {
+                    lease_id,
+                    status: CapabilityLeaseStatus::Dispatching,
+                });
+            }
+            self.inner
+                .begin_dispatch_claimed(scope, lease_id, _invocation_fingerprint)
+                .await
+        }
+
+        async fn abort_dispatch_claimed(
+            &self,
+            scope: &ResourceScope,
+            lease_id: CapabilityGrantId,
+        ) -> Result<CapabilityLease, CapabilityLeaseError> {
+            self.inner.abort_dispatch_claimed(scope, lease_id).await
+        }
+
+        async fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease> {
+            self.inner.leases_for_scope(scope).await
+        }
+
+        async fn active_leases_for_context(
+            &self,
+            context: &ExecutionContext,
+        ) -> Vec<CapabilityLease> {
+            self.inner.active_leases_for_context(context).await
+        }
+    }
+
+    // A dispatcher that returns AuthRequired on the first call (resume_json bounce),
+    // leaving the lease Claimed, and succeeds on the second (auth_resume_json winner).
+    struct FirstCallAuthRequiredDispatcher {
+        inner: RecordingDispatcher,
+        call_count: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Default for FirstCallAuthRequiredDispatcher {
+        fn default() -> Self {
+            Self {
+                inner: RecordingDispatcher::default(),
+                call_count: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl CapabilityDispatcher for FirstCallAuthRequiredDispatcher {
+        async fn dispatch_json(
+            &self,
+            request: CapabilityDispatchRequest,
+        ) -> Result<CapabilityDispatchResult, DispatchError> {
+            let count = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if count == 0 {
+                Err(DispatchError::AuthRequired {
+                    capability: request.capability_id,
+                    required_secrets: vec![],
+                    credential_requirements: vec![],
+                })
+            } else {
+                self.inner.dispatch_json(request).await
+            }
+        }
+    }
+
+    let registry = registry_with_echo_capability();
+    let dispatcher = FirstCallAuthRequiredDispatcher::default();
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let leases = BeginDispatchClaimFailingLeaseStore::new();
+
+    // Phase 1: invoke → BlockedApproval.
+    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    let original_context = execution_context(CapabilitySet::default());
+    let scope = original_context.resource_scope.clone();
+    let invocation_id = original_context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "concurrent dispatch reuse race"});
+
+    block_host
+        .invoke_json(CapabilityInvocationRequest {
+            context: original_context.clone(),
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+
+    let approval_id = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .approval_request_id
+        .unwrap();
+
+    // Phase 2: approve → Active lease issued (one-shot).
+    ApprovalResolver::new(&approval_requests, &leases)
+        .approve_dispatch(&scope, approval_id, dispatch_lease_approval())
+        .await
+        .unwrap();
+
+    // Phase 3: resume_json → dispatcher returns AuthRequired → lease becomes Claimed.
+    let mut resume_context = original_context.clone();
+    resume_context.grants = CapabilitySet {
+        grants: vec![dispatch_grant()],
+    };
+    let resume_authorizer = GrantAuthorizer::new();
+    let resume_host = CapabilityHost::new(&registry, &dispatcher, &resume_authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+
+    resume_host
+        .resume_json(CapabilityResumeRequest {
+            context: resume_context.clone(),
+            approval_request_id: approval_id,
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+
+    // Verify the lease is now Claimed (not Revoked — the non-terminal auth bounce fix).
+    let lease_id = leases
+        .inner
+        .leases_for_scope(&scope)
+        .await
+        .into_iter()
+        .next()
+        .expect("lease must exist after resume_json")
+        .grant
+        .id;
+
+    let lease_after_bounce = leases.inner.get(&scope, lease_id).await.unwrap();
+    assert_eq!(
+        lease_after_bounce.status,
+        CapabilityLeaseStatus::Claimed,
+        "lease must be Claimed after non-terminal auth bounce before the race test"
+    );
+
+    // Phase 4: arm begin_dispatch_claimed failure to simulate the concurrent race loser,
+    // then call auth_resume_json — it must return Err(Lease) WITHOUT failing the run.
+    leases.arm_begin_dispatch_failure();
+
+    let mut auth_resume_context = original_context.clone();
+    auth_resume_context.grants = CapabilitySet {
+        grants: vec![dispatch_grant()],
+    };
+    let auth_resume_authorizer = GrantAuthorizer::new();
+    let auth_resume_host = CapabilityHost::new(&registry, &dispatcher, &auth_resume_authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+
+    let err = auth_resume_host
+        .auth_resume_json(CapabilityAuthResumeRequest {
+            context: auth_resume_context,
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+            approval_request_id: Some(approval_id),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, CapabilityInvocationError::Lease(_)),
+        "concurrent begin_dispatch_claimed loser must return Lease error, got {err:?}"
+    );
+
+    // Run must still be BlockedAuth — the loser must not fail the run.
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(
+        run.status,
+        RunStatus::BlockedAuth,
+        "concurrent begin_dispatch_claimed loser must not transition run to Failed"
+    );
+
+    // Dispatch must not have been called (begin_dispatch_claimed failed before dispatch).
+    assert!(
+        !dispatcher.inner.has_request(),
+        "concurrent begin_dispatch_claimed loser must not dispatch"
     );
 }

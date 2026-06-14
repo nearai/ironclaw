@@ -951,17 +951,44 @@ where
             )
             .await
             {
-                // Claimed lease from a prior resume_json auth bounce: reuse it
-                // directly (already claimed by the approval-resume; same
-                // invocation via the non-terminal auth bounce fix).
-                debug!(
-                    lease_id = %claimed_lease.grant.id,
-                    invocation_id = %invocation_id,
-                    capability_id = %capability_id,
-                    approval_request_id = %approval_request_id,
-                    "auth_resume reusing claimed approval lease from prior auth bounce"
-                );
-                claimed_lease
+                // Claimed lease from a prior resume_json auth bounce: atomically
+                // transition it to Dispatching so exactly one concurrent auth-resume
+                // wins the reuse race. The loser sees InactiveLease{Dispatching} and
+                // bails — matching the Active-lease claim() loser path.
+                match capability_leases
+                    .begin_dispatch_claimed(&scope, claimed_lease.grant.id, &invocation_fingerprint)
+                    .await
+                {
+                    Ok(dispatching_lease) => {
+                        debug!(
+                            lease_id = %dispatching_lease.grant.id,
+                            invocation_id = %invocation_id,
+                            capability_id = %capability_id,
+                            approval_request_id = %approval_request_id,
+                            "auth_resume won dispatch race for claimed approval lease"
+                        );
+                        dispatching_lease
+                    }
+                    Err(error) => {
+                        if claim_error_may_be_concurrent_resume(&error) {
+                            warn!(
+                                invocation_id = %invocation_id,
+                                capability_id = %capability_id,
+                                error_kind = capability_lease_error_kind(&error),
+                                "approval lease reuse lost to a concurrent auth-resume; leaving run state unchanged",
+                            );
+                        } else {
+                            fail_run_if_configured(
+                                Some(run_state),
+                                &scope,
+                                invocation_id,
+                                "ApprovalLeaseClaim",
+                            )
+                            .await;
+                        }
+                        return Err(CapabilityInvocationError::Lease(Box::new(error)));
+                    }
+                }
             } else {
                 fail_run_if_configured(
                     Some(run_state),
@@ -1760,21 +1787,33 @@ where
                     &error,
                 )
                 .await;
-                // Non-terminal auth bounce: leave the lease Claimed so the same
-                // invocation can resume via auth_resume_json without a new approval.
-                if let Some((capability_leases, ref claimed)) = claimed_lease
-                    && !is_block_auth_transition(&error)
-                    && let Err(revoke_error) =
+                // Non-terminal auth bounce: revert Dispatching → Claimed so the next
+                // auth_resume_json call can find and reuse the lease.
+                if let Some((capability_leases, ref claimed)) = claimed_lease {
+                    if is_block_auth_transition(&error) {
+                        if let Err(abort_error) = capability_leases
+                            .abort_dispatch_claimed(&scope, claimed.grant.id)
+                            .await
+                        {
+                            warn!(
+                                lease_id = %claimed.grant.id,
+                                invocation_id = %invocation_id,
+                                capability_id = %capability_id,
+                                abort_error_kind = capability_lease_error_kind(&abort_error),
+                                "capability lease abort-dispatch failed after non-terminal auth bounce; lease may remain Dispatching",
+                            );
+                        }
+                    } else if let Err(revoke_error) =
                         capability_leases.revoke(&scope, claimed.grant.id).await
-                {
-                    warn!(
-                        lease_id = %claimed.grant.id,
-                        invocation_id = %invocation_id,
-                        capability_id = %capability_id,
-                        obligation_error = %error,
-                        revoke_error_kind = capability_lease_error_kind(&revoke_error),
-                        "capability lease revoke failed after obligation failure; lease may remain claimed",
-                    );
+                    {
+                        warn!(
+                            lease_id = %claimed.grant.id,
+                            invocation_id = %invocation_id,
+                            capability_id = %capability_id,
+                            revoke_error_kind = capability_lease_error_kind(&revoke_error),
+                            "capability lease revoke failed after obligation failure; lease may remain claimed",
+                        );
+                    }
                 }
                 return Err(error);
             }
@@ -1811,21 +1850,33 @@ where
                     &invocation_error,
                 )
                 .await;
-                // Non-terminal auth bounce: leave the lease Claimed so the same
-                // invocation can resume via auth_resume_json without a new approval.
-                if let Some((capability_leases, ref claimed)) = claimed_lease
-                    && !is_block_auth_transition(&invocation_error)
-                    && let Err(revoke_error) =
+                // Non-terminal auth bounce: revert Dispatching → Claimed so the next
+                // auth_resume_json call can find and reuse the lease.
+                if let Some((capability_leases, ref claimed)) = claimed_lease {
+                    if is_block_auth_transition(&invocation_error) {
+                        if let Err(abort_error) = capability_leases
+                            .abort_dispatch_claimed(&scope, claimed.grant.id)
+                            .await
+                        {
+                            warn!(
+                                lease_id = %claimed.grant.id,
+                                invocation_id = %invocation_id,
+                                capability_id = %capability_id,
+                                abort_error_kind = capability_lease_error_kind(&abort_error),
+                                "capability lease abort-dispatch failed after non-terminal auth bounce; lease may remain Dispatching",
+                            );
+                        }
+                    } else if let Err(revoke_error) =
                         capability_leases.revoke(&scope, claimed.grant.id).await
-                {
-                    warn!(
-                        lease_id = %claimed.grant.id,
-                        invocation_id = %invocation_id,
-                        capability_id = %capability_id,
-                        dispatch_error = %invocation_error,
-                        revoke_error_kind = capability_lease_error_kind(&revoke_error),
-                        "capability lease revoke failed after dispatch failure; lease may remain claimed",
-                    );
+                    {
+                        warn!(
+                            lease_id = %claimed.grant.id,
+                            invocation_id = %invocation_id,
+                            capability_id = %capability_id,
+                            revoke_error_kind = capability_lease_error_kind(&revoke_error),
+                            "capability lease revoke failed after dispatch failure; lease may remain claimed",
+                        );
+                    }
                 }
                 return Err(invocation_error);
             }

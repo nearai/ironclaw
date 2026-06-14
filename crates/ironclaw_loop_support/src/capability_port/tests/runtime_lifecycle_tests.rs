@@ -988,8 +988,8 @@ async fn auth_resume_after_approval_reuses_original_invocation_identity() {
         "auth resume must dispatch and complete, got {auth_resumed:?}"
     );
 
-    // The pre-fix behavior minted a fresh invocation identifier here, which
-    // made the one-shot approval lease unmatchable and forced a second approval.
+    // Auth re-dispatch must reuse the original invocation identifier so that
+    // fingerprinted approval leases (scoped to the original invocation) remain matchable.
     let original_invocation_id =
         ironclaw_host_api::InvocationId::parse(resume.resume_token.as_str())
             .expect("resume token carries original invocation id");
