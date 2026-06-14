@@ -96,6 +96,13 @@ pub async fn build_openai_compat_route_mount(
         runtime.webui_thread_service(),
         runtime.webui_turn_coordinator(),
     ));
+    // `.with_delivered_gate_routes` is intentionally omitted here. The
+    // OpenAI-compat surface never produces `ApprovalResolution`,
+    // `ScopedApprovalResolution`, or `AuthResolution` payloads (verified: no
+    // such payload constructions exist in `crates/ironclaw_reborn_openai_compat/`),
+    // so the delivered-route conversation-fingerprint fallback is unreachable on
+    // this surface. The workflow falls back to the default in-memory no-op store,
+    // which is correct for this surface.
     let product_workflow: Arc<dyn ProductWorkflow> = Arc::new(
         DefaultProductWorkflow::new(
             inbound,

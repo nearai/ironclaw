@@ -86,6 +86,11 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     )
     .with_approval_interactions(runtime.webui_approval_interaction_service())
     .with_auth_interactions(runtime.webui_auth_interaction_service());
+    if let Some(workspace_filesystem) = runtime.webui_workspace_filesystem() {
+        api = api.with_inbound_attachments(Arc::new(
+            crate::attachment_landing::ProjectScopedAttachmentLander::new(workspace_filesystem),
+        ));
+    }
     if let Some(skill_activation_source) = runtime.webui_skill_activation_source() {
         let activation_recorder = Arc::clone(&skill_activation_source);
         let activation_clearer = skill_activation_source;

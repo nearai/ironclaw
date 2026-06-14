@@ -751,6 +751,7 @@ mod tests {
             tool_result_ref: None,
             tool_result_provider_call: None,
             content: content.map(ToString::to_string),
+            attachments: Vec::new(),
             redaction_ref: None,
         }
     }
