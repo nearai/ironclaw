@@ -2091,6 +2091,18 @@ pub async fn build_reborn_runtime(
             Some(local_dev_capabilities.display_previews),
         )
     } else {
+        // The trajectory observer is wired only through the local-dev capability
+        // path; non-local-dev runtimes have no capability/result hook to forward
+        // to. Accepting one here would silently produce an empty trajectory, so
+        // fail fast — the seam is local-dev/bench-only (see
+        // `RebornRuntimeInput::with_trajectory_observer`).
+        if trajectory_observer.is_some() {
+            return Err(RebornRuntimeError::InvalidArgument {
+                reason: "a trajectory observer was supplied, but it is only supported on \
+                         local-dev runtimes; this profile has no local runtime to observe"
+                    .to_string(),
+            });
+        }
         let capability_io = Arc::new(UnavailableCapabilityIo);
         let capability_input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io;
@@ -2742,11 +2754,11 @@ async fn build_llm_gateway(llm: ResolvedRebornLlm) -> Result<LlmGatewayBundle, R
     let built = ironclaw_llm::build_static_provider_chain(&llm.config, Arc::clone(&session))
         .await
         .map_err(|error| RebornRuntimeError::LlmProvider(error.to_string()))?;
-    let raw = match llm.provider_factory.clone() {
-        Some(factory) => factory(built),
-        None => built,
-    };
-    wrap_swappable_gateway(raw, session)
+    // The factory is applied *inside* `wrap_swappable_gateway` — over the
+    // swappable wrapper, not the bare config provider — so a live config reload
+    // (which swaps the swappable's inner) keeps the factory's wrapper in the
+    // call path. See `wrap_swappable_gateway`.
+    wrap_swappable_gateway(built, session, llm.provider_factory.clone())
 }
 
 /// Cold-boot gateway: no LLM configured yet. Wraps a placeholder provider (which
@@ -2758,16 +2770,25 @@ async fn build_placeholder_llm_gateway() -> Result<LlmGatewayBundle, RebornRunti
     let session =
         ironclaw_llm::create_session_manager(ironclaw_llm::SessionConfig::default()).await;
     let raw: Arc<dyn ironclaw_llm::LlmProvider> = Arc::new(PlaceholderLlmProvider);
-    wrap_swappable_gateway(raw, session)
+    wrap_swappable_gateway(raw, session, None)
 }
 
 /// Wrap a raw provider in a [`SwappableLlmProvider`] + reload handle and build
 /// the model gateway. Shared by the real and placeholder boot paths so both get
 /// an identical live-reload seam.
+///
+/// The optional `provider_factory` (caller instrumentation, e.g. token/reasoning
+/// capture) is applied **over the swappable wrapper**, so the gateway drives
+/// `factory(swappable)`. A live config reload swaps the *inner* of the swappable
+/// via the reload handle; because the factory wraps the swappable itself, its
+/// instrumentation stays in the call path and continues to observe model calls
+/// against the reloaded provider. (Applying the factory to the bare provider
+/// instead would let the first reload silently drop the wrapper.)
 #[cfg(feature = "root-llm-provider")]
 fn wrap_swappable_gateway(
     raw: Arc<dyn ironclaw_llm::LlmProvider>,
     session: Arc<ironclaw_llm::SessionManager>,
+    provider_factory: Option<crate::runtime_input::RebornProviderFactory>,
 ) -> Result<LlmGatewayBundle, RebornRuntimeError> {
     use ironclaw_llm::{LlmProvider, LlmReloadHandle, SwappableLlmProvider};
     use ironclaw_reborn::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
@@ -2775,7 +2796,13 @@ fn wrap_swappable_gateway(
 
     let swappable = Arc::new(SwappableLlmProvider::new(raw));
     let reload_handle = Arc::new(LlmReloadHandle::new(Arc::clone(&swappable), None));
-    let provider: Arc<dyn LlmProvider> = swappable;
+    let swappable_provider: Arc<dyn LlmProvider> = swappable;
+    // Gateway drives the factory's wrapper over the swappable (reload-stable);
+    // with no factory it drives the swappable directly.
+    let provider: Arc<dyn LlmProvider> = match provider_factory {
+        Some(factory) => factory(Arc::clone(&swappable_provider)),
+        None => swappable_provider,
+    };
 
     let model_profile_id = ModelProfileId::new("interactive_model").map_err(|reason| {
         RebornRuntimeError::LlmProvider(format!("invalid interactive model profile id: {reason}"))
@@ -3633,7 +3660,7 @@ mod tests {
         let raw: Arc<dyn ironclaw_llm::LlmProvider> = provider.clone();
         let session =
             ironclaw_llm::create_session_manager(ironclaw_llm::SessionConfig::default()).await;
-        let bundle = super::wrap_swappable_gateway(raw, session).expect("gateway bundle");
+        let bundle = super::wrap_swappable_gateway(raw, session, None).expect("gateway bundle");
 
         bundle
             .gateway
@@ -3896,6 +3923,147 @@ mod tests {
         );
     }
 
+    /// Provider wrapper that counts model calls and delegates to its inner — a
+    /// stand-in for the bench's instrumentation wrapper. Unlike
+    /// `CountingOverrideProvider`, it wraps `inner` so swapping the inner (via a
+    /// live reload of a `SwappableLlmProvider`) is observable through it.
+    #[cfg(feature = "root-llm-provider")]
+    struct CountingWrapperProvider {
+        inner: Arc<dyn ironclaw_llm::LlmProvider>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    #[async_trait::async_trait]
+    impl ironclaw_llm::LlmProvider for CountingWrapperProvider {
+        fn model_name(&self) -> &str {
+            self.inner.model_name()
+        }
+
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            self.inner.cost_per_token()
+        }
+
+        async fn complete(
+            &self,
+            request: ironclaw_llm::CompletionRequest,
+        ) -> Result<ironclaw_llm::CompletionResponse, ironclaw_llm::LlmError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.complete(request).await
+        }
+
+        async fn complete_with_tools(
+            &self,
+            request: ironclaw_llm::ToolCompletionRequest,
+        ) -> Result<ironclaw_llm::ToolCompletionResponse, ironclaw_llm::LlmError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.complete_with_tools(request).await
+        }
+    }
+
+    /// Minimal nearai `LlmConfig` pointed at a dead endpoint: it *builds* lazily
+    /// (no connection at construction) but any model call errors. Enough to
+    /// exercise gateway/reload wiring without a network.
+    #[cfg(feature = "root-llm-provider")]
+    fn dead_endpoint_nearai_config(session_path: std::path::PathBuf) -> ironclaw_llm::LlmConfig {
+        ironclaw_llm::LlmConfig {
+            backend: "nearai".to_string(),
+            session: ironclaw_llm::SessionConfig {
+                auth_base_url: "http://127.0.0.1:1".to_string(),
+                session_path,
+            },
+            nearai: ironclaw_llm::NearAiConfig {
+                model: "config-model".to_string(),
+                cheap_model: None,
+                base_url: "http://127.0.0.1:1".to_string(),
+                api_key: None,
+                fallback_model: None,
+                max_retries: 0,
+                circuit_breaker_threshold: None,
+                circuit_breaker_recovery_secs: 30,
+                response_cache_enabled: false,
+                response_cache_ttl_secs: 3600,
+                response_cache_max_entries: 1000,
+                failover_cooldown_secs: 300,
+                failover_cooldown_threshold: 3,
+                smart_routing_cascade: false,
+            },
+            provider: None,
+            bedrock: None,
+            gemini_oauth: None,
+            openai_codex: None,
+            request_timeout_secs: 5,
+            cheap_model: None,
+            smart_routing_cascade: false,
+            max_retries: 0,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+        }
+    }
+
+    /// Regression guard for Firat's review: the provider factory (caller
+    /// instrumentation) must survive a live config reload. `build_llm_gateway`
+    /// wraps the factory over the `SwappableLlmProvider`, so reloading — which
+    /// swaps the swappable's *inner* — keeps the wrapper in the call path. If the
+    /// factory were applied to the bare provider instead, the first reload would
+    /// silently drop instrumentation and this test's post-reload count would stay
+    /// at 1.
+    #[cfg(feature = "root-llm-provider")]
+    #[tokio::test]
+    async fn provider_factory_survives_live_reload() {
+        let session_dir = tempfile::tempdir().expect("session tempdir");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_factory = Arc::clone(&calls);
+        let factory: crate::runtime_input::RebornProviderFactory = Arc::new(move |inner| {
+            Arc::new(CountingWrapperProvider {
+                inner,
+                calls: Arc::clone(&calls_for_factory),
+            }) as Arc<dyn ironclaw_llm::LlmProvider>
+        });
+
+        let config = dead_endpoint_nearai_config(session_dir.path().join("session.json"));
+        let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config.clone())
+            .with_provider_factory(factory);
+        let bundle = super::build_llm_gateway(llm)
+            .await
+            .expect("gateway builds with the provider factory");
+
+        // First model call routes through the instrumentation wrapper. The dead
+        // endpoint makes the underlying call error, but the wrapper counts before
+        // delegating, so the result is irrelevant — only that it was observed.
+        let _ = bundle
+            .gateway
+            .stream_model(nearai_gateway_test_request())
+            .await;
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the instrumentation wrapper should observe the first model call"
+        );
+
+        // Live config reload: rebuild the chain and atomically swap the
+        // swappable's inner provider — exactly what the WebUI settings path does.
+        bundle
+            .reload
+            .reload_handle
+            .reload(&config, Arc::clone(&bundle.reload.session))
+            .await
+            .expect("live reload rebuilds the provider chain");
+
+        let _ = bundle
+            .gateway
+            .stream_model(nearai_gateway_test_request())
+            .await;
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the instrumentation wrapper must still observe model calls after a live reload"
+        );
+    }
+
     #[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
     #[tokio::test]
     async fn local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart() {
@@ -4119,6 +4287,78 @@ mod tests {
         assert!(runtime.services().readiness.workers.turn_runner);
 
         runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    /// Regression guard for Firat's review: a trajectory observer is only wired
+    /// through the local-dev capability path, so supplying one to a production
+    /// runtime (no local runtime to observe) must fail fast rather than silently
+    /// produce an empty trajectory.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn build_reborn_runtime_rejects_trajectory_observer_for_production() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Arc::new(
+            libsql::Builder::new_local(dir.path().join("reborn.db"))
+                .build()
+                .await
+                .expect("libsql db"),
+        );
+        let gateway = Arc::new(RecordingGateway {
+            reply: "production".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let observer = Arc::new(RecordingTrajectoryObserver::default());
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::libsql(
+                crate::RebornCompositionProfile::Production,
+                "runtime-observer-reject-owner",
+                db,
+                dir.path().join("events.db").to_string_lossy(),
+                None,
+                ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
+            )
+            .with_production_trust_policy(Arc::new(
+                crate::builtin_first_party_trust_policy().expect("trust policy"),
+            ))
+            .with_runtime_policy(EffectiveRuntimePolicy {
+                deployment: DeploymentMode::HostedMultiTenant,
+                requested_profile: RuntimeProfile::SecureDefault,
+                resolved_profile: RuntimeProfile::SecureDefault,
+                filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+                process_backend: ProcessBackendKind::TenantSandbox,
+                network_mode: NetworkMode::Deny,
+                secret_mode: SecretMode::BrokeredHandles,
+                approval_policy: ApprovalPolicy::AskAlways,
+                audit_mode: AuditMode::Standard,
+            })
+            .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
+                ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(
+                    RecordingSandboxTransport,
+                )),
+            ))),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-observer-reject-tenant".to_string(),
+            agent_id: "runtime-observer-reject-agent".to_string(),
+            source_binding_id: "runtime-observer-reject-source".to_string(),
+            reply_target_binding_id: "runtime-observer-reject-reply".to_string(),
+        })
+        .with_raw_trajectory_observer(observer)
+        .with_model_gateway_override(gateway);
+
+        let err = match build_reborn_runtime(input).await {
+            Ok(runtime) => {
+                runtime.shutdown().await.expect("shutdown");
+                panic!("production runtime must reject a trajectory observer");
+            }
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err, super::RebornRuntimeError::InvalidArgument { ref reason }
+                if reason.contains("trajectory observer") && reason.contains("local-dev")),
+            "expected an InvalidArgument naming the local-dev-only constraint, got {err:#}"
+        );
     }
 
     #[cfg(feature = "libsql")]
