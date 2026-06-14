@@ -66,10 +66,11 @@ pub enum TurnOwner {
 /// Generic, persisted product context for one turn. Resolved once at ingress by
 /// `ironclaw_product_context`; rendered into the model-visible runtime context.
 ///
-/// `#[non_exhaustive]` blocks struct-literal construction from external crates, making
-/// `ProductTurnContext::new(...)` the single *intended* mint point. Turn submission is a
-/// trusted internal boundary; `new(ScheduledTrigger, ..)` is not prevented, but this raises
-/// friction and keeps grep results unambiguous.
+/// **Intended mint points** are the resolver functions in `ironclaw_product_context`:
+/// `resolve_inbound` (for all inbound/trigger paths) and `resolve_web_ui` (for the WebUI
+/// gateway). Those resolvers call `ProductTurnContext::new` internally; callers outside
+/// that crate should not call `new` directly. `#[non_exhaustive]` blocks struct-literal
+/// construction from external crates to reinforce this boundary.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProductTurnContext {
@@ -142,6 +143,21 @@ mod tests {
         assert!(
             serde_json::from_str::<ProductTurnContext>(json).is_err(),
             "empty adapter must fail deserialization via try_from"
+        );
+    }
+
+    #[test]
+    fn deserialize_rejects_overlong_run_origin_adapter() {
+        // The try_from serde gate must also reject persisted payloads whose adapter
+        // exceeds 256 bytes — the >256 branch that the direct constructor test covers
+        // but the serde boundary did not.
+        let overlong = "a".repeat(257);
+        let json = format!(
+            r#"{{"origin":"inbound","adapter":"{overlong}","owner":{{"kind":"personal","user":"u1"}}}}"#
+        );
+        assert!(
+            serde_json::from_str::<ProductTurnContext>(&json).is_err(),
+            "adapter exceeding 256 bytes must fail deserialization via try_from"
         );
     }
 }

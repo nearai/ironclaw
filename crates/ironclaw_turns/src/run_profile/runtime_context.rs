@@ -159,25 +159,7 @@ impl LoopRuntimeContext {
             // Run origin line (and optional ScheduledTrigger+NoneSet warning) when
             // both origin (self.product_context) and delivery state (comm) are present.
             if let Some(ctx) = &self.product_context {
-                let origin_line = match ctx.origin {
-                    TurnOriginKind::WebUi => {
-                        "Run origin: WebUI chat; replies render in this chat.".to_string()
-                    }
-                    TurnOriginKind::Inbound => {
-                        let adapter_str = ctx
-                            .adapter
-                            .as_ref()
-                            .map(|a| model_safe_label(a.as_str(), "a connected product"))
-                            .unwrap_or_else(|| "unknown".to_string());
-                        format!(
-                            "Run origin: inbound message via {adapter_str}; replies post back to that conversation.",
-                        )
-                    }
-                    TurnOriginKind::ScheduledTrigger => {
-                        "Run origin: scheduled trigger fire.".to_string()
-                    }
-                };
-                parts.push(origin_line);
+                parts.push(render_origin_line(ctx));
 
                 // The no-delivery warning is emitted only when the delivery state is
                 // *known* to be NoneSet, which requires the communication slice. When
@@ -210,25 +192,7 @@ impl LoopRuntimeContext {
             // rendered here: without the communication slice the delivery state is
             // unknown, and a target may well be configured, so claiming "result will
             // not be delivered" would be wrong.
-            let origin_line = match ctx.origin {
-                TurnOriginKind::WebUi => {
-                    "Run origin: WebUI chat; replies render in this chat.".to_string()
-                }
-                TurnOriginKind::Inbound => {
-                    let adapter_str = ctx
-                        .adapter
-                        .as_ref()
-                        .map(|a| model_safe_label(a.as_str(), "a connected product"))
-                        .unwrap_or_else(|| "unknown".to_string());
-                    format!(
-                        "Run origin: inbound message via {adapter_str}; replies post back to that conversation.",
-                    )
-                }
-                TurnOriginKind::ScheduledTrigger => {
-                    "Run origin: scheduled trigger fire.".to_string()
-                }
-            };
-            parts.push(origin_line);
+            parts.push(render_origin_line(ctx));
         }
 
         if parts.len() == 1 {
@@ -236,6 +200,28 @@ impl LoopRuntimeContext {
         } else {
             parts.join("\n")
         }
+    }
+}
+
+/// Build the run-origin line from a `ProductTurnContext`.
+///
+/// Returns the single origin line string; does not include the optional
+/// ScheduledTrigger+NoneSet delivery warning — that depends on the communication
+/// slice and is emitted by the caller only when delivery state is known.
+fn render_origin_line(ctx: &ProductTurnContext) -> String {
+    match ctx.origin {
+        TurnOriginKind::WebUi => "Run origin: WebUI chat; replies render in this chat.".to_string(),
+        TurnOriginKind::Inbound => {
+            let adapter_str = ctx
+                .adapter
+                .as_ref()
+                .map(|a| model_safe_label(a.as_str(), "a connected product"))
+                .unwrap_or_else(|| "unknown".to_string());
+            format!(
+                "Run origin: inbound message via {adapter_str}; replies post back to that conversation.",
+            )
+        }
+        TurnOriginKind::ScheduledTrigger => "Run origin: scheduled trigger fire.".to_string(),
     }
 }
 

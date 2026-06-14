@@ -1499,32 +1499,16 @@ where
                 hooked
             };
         }
-        capabilities
+        let visible_surface = capabilities
             .visible_capabilities(VisibleCapabilityRequest)
             .await
             .map_err(|error| RebornLoopDriverHostError::InvalidRequest {
                 reason: error.safe_summary,
             })?;
-        // SurfaceTrackingLoopCapabilityPort::visible_capabilities calls
-        // surface_state.set_current() synchronously before returning, so
-        // surface_state.current() here is always populated.
-        let delivery_tools_visible = match surface_state.current() {
-            Ok(surface) => surface
-                .map(|s| {
-                    s.descriptors
-                        .iter()
-                        .any(|d| d.capability_id.as_str() == "builtin.outbound_delivery_target_set")
-                })
-                .unwrap_or(false),
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    "capability surface unavailable while deriving delivery_tools_visible"
-                );
-                // silent-ok: communication runtime context is advisory; degrade if surface cache unavailable.
-                false
-            }
-        };
+        let delivery_tools_visible = visible_surface
+            .descriptors
+            .iter()
+            .any(|d| d.capability_id.as_str() == "builtin.outbound_delivery_target_set");
         let communication = match &self.communication_context_provider {
             Some(provider) => {
                 provider

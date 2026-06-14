@@ -1351,6 +1351,75 @@ mod tests {
 
     // --- Tests: run_origin integrity ---
 
+    /// A trusted inbound request whose adapter_kind is NOT a trusted-trigger
+    /// adapter (e.g. "slack") must record `TurnOriginKind::Inbound`, not
+    /// `ScheduledTrigger`.  This exercises the `TrustedOther` classification
+    /// branch that sits between `TrustedTrigger` and `Untrusted`.
+    #[tokio::test]
+    async fn trusted_non_trigger_adapter_records_inbound_origin() {
+        let slack = AdapterKind::new("slack").unwrap();
+        let slack_install = AdapterInstallationId::new("slack-install").unwrap();
+        let slack_actor = ExternalActorRef::new("slack", "alice").unwrap();
+        let services = InMemoryConversationServices::default();
+        services
+            .pair_external_actor(
+                tenant(),
+                slack.clone(),
+                slack_install.clone(),
+                slack_actor.clone(),
+                user("alice"),
+            )
+            .await;
+        let coordinator = Arc::new(RecordingTurnCoordinator::default());
+        let inbound =
+            InboundTurnService::new(services.clone(), services.clone(), coordinator.clone());
+
+        // Build a trusted request using a non-trigger adapter ("slack").
+        let request = TrustedInboundTurnRequest::new(
+            InboundTurnRequest {
+                tenant_id: tenant(),
+                adapter_kind: slack,
+                adapter_installation_id: slack_install,
+                external_actor_ref: slack_actor,
+                external_conversation_ref: ExternalConversationRef::new(
+                    None,
+                    "slack-trusted-conv",
+                    Some("slack-trusted-thread"),
+                    None,
+                )
+                .unwrap(),
+                external_event_id: ExternalEventId::new("slack-trusted-event-1").unwrap(),
+                route_kind: ConversationRouteKind::Direct,
+                content_ref: InboundMessageContentRef::new("content:slack-trusted-1").unwrap(),
+                requested_agent_id: None,
+                requested_project_id: None,
+                received_at: Utc.with_ymd_and_hms(2026, 6, 13, 10, 0, 0).unwrap(),
+                requested_run_profile: None,
+            },
+            Some(agent()),
+            Some(project()),
+            None,
+        );
+
+        inbound
+            .handle_inbound_turn_with_trusted_scope(request)
+            .await
+            .expect("trusted non-trigger inbound succeeds");
+
+        let submissions = coordinator.submissions();
+        assert_eq!(submissions.len(), 1);
+        assert_eq!(
+            submissions[0].product_context.as_ref().map(|c| c.origin),
+            Some(TurnOriginKind::Inbound),
+            "trusted binding with non-trigger adapter 'slack' must record Inbound origin, not ScheduledTrigger"
+        );
+        assert_ne!(
+            submissions[0].product_context.as_ref().map(|c| c.origin),
+            Some(TurnOriginKind::ScheduledTrigger),
+            "trusted non-trigger adapter must NOT be labelled ScheduledTrigger"
+        );
+    }
+
     /// An untrusted inbound request with adapter_kind "trigger" must NOT be
     /// labelled ScheduledTrigger — only a Trusted binding policy + trusted-trigger
     /// adapter qualifies.
