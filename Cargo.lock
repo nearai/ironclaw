@@ -4542,6 +4542,7 @@ dependencies = [
  "sha2 0.10.9",
  "static_assertions",
  "thiserror 2.0.18",
+ "urlencoding",
  "uuid",
  "zeroize",
 ]

@@ -144,7 +144,7 @@ output_schema_ref = "schemas/shell.output.v1.json"
         approval
             .request
             .reason
-            .contains("-H 'Authorization: <REDACTED>'")
+            .contains("-H 'Authorization: [redacted]'")
     );
     assert!(
         approval

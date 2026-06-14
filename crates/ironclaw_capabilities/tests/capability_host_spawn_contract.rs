@@ -148,7 +148,7 @@ output_schema_ref = "schemas/shell.output.v1.json"
         approval
             .request
             .reason
-            .contains("Command:\ncurl -H 'Authorization: <REDACTED>'")
+            .contains("Command:\ncurl -H 'Authorization: [redacted]'")
     );
     assert!(
         approval

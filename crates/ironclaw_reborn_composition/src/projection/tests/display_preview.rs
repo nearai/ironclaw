@@ -301,7 +301,7 @@ async fn capability_display_preview_store_summarizes_shell_command_safely() {
 
     let input_summary = preview.input_summary.as_deref().unwrap();
     assert!(input_summary.contains("command: pwd && curl"));
-    assert!(input_summary.contains("-H 'Authorization: <REDACTED>'"));
+    assert!(input_summary.contains("-H 'Authorization: [redacted]'"));
     assert!(input_summary.contains("https://example.test/path?..."));
     assert!(!input_summary.contains("sk-secret"));
     assert!(!input_summary.contains("token=secret"));

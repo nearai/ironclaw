@@ -130,10 +130,10 @@ fn redact_shell_command_for_display(cmd: &str) -> String {
         ]
     });
     let mut out = patterns[0]
-        .replace_all(cmd, "$1$2$3<REDACTED>$4")
+        .replace_all(cmd, "$1$2$3[redacted]$4")
         .into_owned();
-    out = patterns[1].replace_all(&out, "$1$2<REDACTED>").into_owned();
-    out = patterns[2].replace_all(&out, "$1: <REDACTED>").into_owned();
+    out = patterns[1].replace_all(&out, "$1$2[redacted]").into_owned();
+    out = patterns[2].replace_all(&out, "$1: [redacted]").into_owned();
     out = patterns[3]
         .replace_all(&out, |captures: &regex::Captures<'_>| {
             sanitize_url_for_display(&captures[0])
@@ -232,6 +232,17 @@ fn redact_secret_url_path_segments(path: &str) -> String {
 
 fn is_secret_url_path_segment(segment: &str) -> bool {
     let segment = segment.trim_matches(token_boundary_punctuation);
+    if is_secret_url_path_segment_value(segment) {
+        return true;
+    }
+    let Ok(decoded) = urlencoding::decode(segment) else {
+        return false;
+    };
+    decoded.as_ref() != segment
+        && is_secret_url_path_segment_value(decoded.trim_matches(token_boundary_punctuation))
+}
+
+fn is_secret_url_path_segment_value(segment: &str) -> bool {
     let lower = segment.to_ascii_lowercase();
     is_secret_like(segment)
         || lower.starts_with("secret")
@@ -450,7 +461,7 @@ mod tests {
             "curl -H 'Authorization: Bearer sk-secret' https://example.test/path?token=secret && echo ok",
         );
 
-        assert!(display.text.contains("curl -H 'Authorization: <REDACTED>'"));
+        assert!(display.text.contains("curl -H 'Authorization: [redacted]'"));
         assert!(display.text.contains("https://example.test/path?..."));
         assert!(display.text.contains("echo ok"));
         assert!(!display.text.contains("sk-secret"));
@@ -488,13 +499,29 @@ mod tests {
     }
 
     #[test]
+    fn shell_command_display_text_redacts_percent_encoded_secret_url_path_segments() {
+        let display = shell_command_display_text(
+            "curl https://example.test/reset/sk%2Dsecret/token%31%32%33?debug=true",
+        );
+
+        assert!(
+            display
+                .text
+                .contains("https://example.test/reset/[redacted]/[redacted]?...")
+        );
+        assert!(!display.text.contains("sk%2Dsecret"));
+        assert!(!display.text.contains("token%31%32%33"));
+        assert!(!display.text.contains("debug=true"));
+    }
+
+    #[test]
     fn shell_command_display_text_keeps_benign_headers_visible() {
         let display = shell_command_display_text(
             "curl -H 'Accept: application/json' -H 'Authorization: Bearer sk-secret' https://example.test",
         );
 
         assert!(display.text.contains("-H 'Accept: application/json'"));
-        assert!(display.text.contains("-H 'Authorization: <REDACTED>'"));
+        assert!(display.text.contains("-H 'Authorization: [redacted]'"));
         assert!(!display.text.contains("sk-secret"));
     }
 }
