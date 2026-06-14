@@ -242,6 +242,7 @@ fn is_secret_url_path_segment(segment: &str) -> bool {
         && decoded
             .trim_matches(token_boundary_punctuation)
             .split('/')
+            .map(|part| part.trim_matches(token_boundary_punctuation))
             .any(is_secret_url_path_segment_value)
 }
 
@@ -530,6 +531,22 @@ mod tests {
         );
         assert!(!display.text.contains("reset%2Fsk-secret"));
         assert!(!display.text.contains("sk-secret"));
+        assert!(!display.text.contains("debug=true"));
+    }
+
+    #[test]
+    fn shell_command_display_text_redacts_wrapped_encoded_secret_url_path_separators() {
+        let display = shell_command_display_text(
+            "curl https://example.test/reset%2F(token123)/public?debug=true",
+        );
+
+        assert!(
+            display
+                .text
+                .contains("https://example.test/[redacted]/public?...")
+        );
+        assert!(!display.text.contains("reset%2F(token123)"));
+        assert!(!display.text.contains("token123"));
         assert!(!display.text.contains("debug=true"));
     }
 
