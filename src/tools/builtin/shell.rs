@@ -343,7 +343,8 @@ fn shell_tokens(segment: &str) -> Vec<String> {
     let mut quote: Option<char> = None;
     let mut escaped = false;
 
-    for ch in segment.chars() {
+    let mut chars = segment.chars().peekable();
+    while let Some(ch) = chars.next() {
         if escaped {
             current.push(ch);
             escaped = false;
@@ -351,7 +352,13 @@ fn shell_tokens(segment: &str) -> Vec<String> {
         }
 
         if ch == '\\' && quote != Some('\'') {
-            escaped = true;
+            if chars.peek().is_some_and(|next| {
+                next.is_whitespace() || matches!(next, '\'' | '"' | '\\' | '$' | '`')
+            }) {
+                escaped = true;
+            } else {
+                current.push(ch);
+            }
             continue;
         }
 
@@ -383,13 +390,13 @@ fn shell_tokens(segment: &str) -> Vec<String> {
 }
 
 fn command_basename(token: &str) -> &str {
-    token.rsplit('/').next().unwrap_or(token)
+    token.rsplit(['/', '\\']).next().unwrap_or(token)
 }
 
 fn is_env_assignment(token: &str) -> bool {
     token
         .split_once('=')
-        .is_some_and(|(name, _)| !name.is_empty() && !name.contains('/'))
+        .is_some_and(|(name, _)| !name.is_empty() && !name.contains('/') && !name.contains('\\'))
 }
 
 fn shell_script_arg<'a>(tokens: &'a [String], start: usize) -> Option<&'a str> {
@@ -399,7 +406,11 @@ fn shell_script_arg<'a>(tokens: &'a [String], start: usize) -> Option<&'a str> {
         if token == "-c" {
             return tokens.get(idx + 1).map(String::as_str);
         }
-        if token.starts_with('-') && token.contains('c') && token.len() > 2 {
+        if token.starts_with('-')
+            && !token.starts_with("--")
+            && token.contains('c')
+            && token.len() > 2
+        {
             return tokens.get(idx + 1).map(String::as_str);
         }
         idx += 1;
@@ -411,6 +422,20 @@ fn delegated_env_command(tokens: &[String]) -> Option<&[String]> {
     let mut idx = 1;
     while idx < tokens.len() {
         let token = tokens[idx].as_str();
+        if matches!(
+            token,
+            "-u" | "--unset"
+                | "-C"
+                | "--chdir"
+                | "-S"
+                | "--split-string"
+                | "--block-signal"
+                | "--default-signal"
+                | "--ignore-signal"
+        ) {
+            idx += 2;
+            continue;
+        }
         if token.starts_with('-') {
             idx += 1;
             continue;
@@ -428,6 +453,10 @@ fn delegated_time_command(tokens: &[String]) -> Option<&[String]> {
     let mut idx = 1;
     while idx < tokens.len() {
         let token = tokens[idx].as_str();
+        if matches!(token, "-o" | "--output" | "-f" | "--format") {
+            idx += 2;
+            continue;
+        }
         if token.starts_with('-') {
             idx += 1;
             continue;
