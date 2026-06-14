@@ -814,8 +814,8 @@ async fn auth_resume_after_real_approval_bounce_reuses_claimed_lease() {
     // ── Phase 3: resume_json → dispatcher returns AuthRequired ──────────────
     // resume_json calls: find lease (Active) → claim (Active→Claimed) → dispatch
     // → DispatchError::AuthRequired → apply_run_state_transition (BlockAuth) →
-    // BEFORE FIX: revoke (Claimed→Revoked) ← the bug
-    // AFTER FIX:  skip revoke (non-terminal auth bounce) → lease stays Claimed
+    // A non-terminal auth bounce must NOT revoke: the lease stays Claimed so the
+    // subsequent auth_resume can reuse it (revoking here was the original bug).
     let mut resume_context = original_context.clone();
     resume_context.grants = CapabilitySet {
         grants: vec![dispatch_grant()],
@@ -2066,7 +2066,7 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
 }
 
 // ---------------------------------------------------------------------------
-// BUG FIX 1b — Deny after AlreadyClaimed: lease must be Revoked
+// Authorization Deny on an AlreadyClaimed (Dispatching) reuse lease: lease must be Revoked
 //
 // When `auth_resume_json` is called with a prior Claimed lease (AlreadyClaimed
 // path), `begin_dispatch_claimed` transitions the lease Claimed→Dispatching
@@ -2244,7 +2244,7 @@ async fn auth_resume_json_authorization_deny_revokes_dispatching_lease() {
 }
 
 // ---------------------------------------------------------------------------
-// BUG FIX 1b — RequireApproval after AlreadyClaimed: lease must be Revoked
+// Authorization RequireApproval on an AlreadyClaimed (Dispatching) reuse lease: lease must be Revoked
 //
 // Same invariant as the Deny test above, but the authorizer returns
 // RequireApproval instead of Deny.  Both are terminal refusals in the context
