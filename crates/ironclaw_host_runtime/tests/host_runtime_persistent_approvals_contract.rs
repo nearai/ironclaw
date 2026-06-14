@@ -477,19 +477,43 @@ async fn default_runtime_skips_expired_persistent_policy() {
 }
 
 #[tokio::test]
-async fn default_runtime_falls_back_gracefully_for_unsupported_persistent_scope() {
+async fn default_runtime_uses_persistent_policy_for_no_project_no_thread_scope() {
+    // A WebChat-style context (no project, no thread) now yields a valid
+    // (tenant, user, agent) persistent approval scope: the lookup proceeds and a
+    // seeded "always allow" policy authorizes dispatch without a gate.
     let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
-    let policies: Arc<dyn PersistentApprovalPolicyStore> =
-        Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+    let policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
     let mut context = execution_context_without_grants();
     context.project_id = None;
     context.thread_id = None;
     context.resource_scope.project_id = None;
     context.resource_scope.thread_id = None;
+
+    policies
+        .allow(PersistentApprovalPolicyInput {
+            scope: context.resource_scope.clone(),
+            action: PersistentApprovalAction::Dispatch,
+            capability_id: capability_id(),
+            grantee: Principal::Extension(context.extension_id.clone()),
+            approved_by: Principal::User(context.user_id.clone()),
+            constraints: GrantConstraints {
+                allowed_effects: vec![EffectKind::DispatchCapability],
+                mounts: MountView::default(),
+                network: NetworkPolicy::default(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
+                expires_at: None,
+                max_invocations: Some(1),
+            },
+            source_approval_request_id: None,
+        })
+        .await
+        .expect("seed persistent policy");
+    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies;
 
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -501,7 +525,7 @@ async fn default_runtime_falls_back_gracefully_for_unsupported_persistent_scope(
     .with_trust_policy(Arc::new(local_manifest_trust_policy()))
     .with_run_state(run_state)
     .with_approval_requests(approval_requests)
-    .with_persistent_approval_policies(policies);
+    .with_persistent_approval_policies(policy_store);
 
     let outcome = runtime
         .invoke_capability(RuntimeCapabilityRequest::new(
@@ -515,13 +539,13 @@ async fn default_runtime_falls_back_gracefully_for_unsupported_persistent_scope(
         .unwrap();
 
     match outcome {
-        ironclaw_host_runtime::RuntimeCapabilityOutcome::Failed(failure) => {
-            assert_eq!(failure.capability_id, capability_id());
-            assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, capability_id());
+            assert_eq!(completed.output, json!({"ok": true}));
         }
-        other => panic!("expected authorization failure, got {:?}", other),
+        other => panic!("expected Completed outcome, got {:?}", other),
     }
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.has_request());
 }
 
 #[tokio::test]
