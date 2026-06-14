@@ -419,17 +419,6 @@ impl RecordingTransitionPort {
         *self.apply_calls.lock().expect("lock")
     }
 
-    pub(super) fn with_latest_resumable_checkpoint(
-        self,
-        result: Result<Option<TurnCheckpointId>, TurnError>,
-    ) -> Self {
-        *self
-            .latest_resumable_checkpoint_result
-            .lock()
-            .expect("lock") = result;
-        self
-    }
-
     pub(super) fn failed_resume_checkpoints(&self) -> Vec<Option<TurnCheckpointId>> {
         self.failed_resume_checkpoints.lock().expect("lock").clone()
     }

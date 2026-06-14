@@ -611,6 +611,13 @@ impl TurnCoordinator for StaticCoordinator {
         unreachable!("spawn tests do not resume turns")
     }
 
+    async fn retry_turn(
+        &self,
+        _request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        unreachable!("spawn tests do not retry turns")
+    }
+
     async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
         unreachable!("spawn tests do not cancel turns")
     }
