@@ -97,6 +97,14 @@ pub fn validate_path(path_str: &str, base_dir: Option<&Path>) -> Result<PathBuf,
         // all `..` components, so starts_with is reliable.
         let check_path = if resolved.exists() {
             resolved.canonicalize().unwrap_or_else(|_| resolved.clone())
+        } else if std::fs::symlink_metadata(&resolved)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(ToolError::NotAuthorized(format!(
+                "Path is a dangling symlink: {}",
+                path_str
+            )));
         } else {
             // Walk up to the nearest existing ancestor directory, canonicalize it,
             // then re-append the remaining tail. This handles the case where a
@@ -247,5 +255,19 @@ mod tests {
         // This should be allowed as it stays within the sandbox
         let result = validate_path("a/b/../c.txt", Some(dir.path()));
         assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_path_rejects_dangling_final_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let sandbox = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let outside_target = outside.path().join("owned.txt");
+        symlink(&outside_target, sandbox.path().join("jump")).unwrap();
+
+        let result = validate_path("jump", Some(sandbox.path()));
+        assert!(result.is_err());
     }
 }
