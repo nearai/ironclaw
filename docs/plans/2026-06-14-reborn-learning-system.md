@@ -64,12 +64,23 @@ prompt (WS-2) + secret redaction, not a memory-engine boundary.
   `f(confidence, age)`; aged/low-confidence learnings rank lower and are flagged, never deleted.
   No curator worker, no archive dance, no mutation.
 
+### 3.0 Feature gate (A/B)
+The whole learning *behavior* sits behind a single env flag, **default off**, so it can be A/B
+tested by toggling: `IRONCLAW_LEARNING_ENABLED` (bool; read once via the reborn config layer, not
+scattered `std::env::var` calls). When off: the learning persona is NOT injected and the reflection
+service is NOT constructed/subscribed — the agent behaves exactly as today. When on: persona +
+reflection are active. The WS-1 memory *mechanics* (frontmatter, overwrite-on-key, decay-at-read,
+redaction) are always compiled but inert unless a learning is actually written; decay-at-read only
+affects documents that carry confidence frontmatter, so non-learning memory ranking is unchanged
+either way. (One gate for now; can split persona vs reflection later if A/B needs it.)
+
 ### 3.2 Layer A — in-turn learning (core)
-The agent, during normal turns, uses the existing `memory_*` tools to save/overwrite/search/report
-learnings, driven by a **default learning persona** baked into the reborn system prompt (so baseline
-behavior — empty per-scenario identity — already assigns confidence, surfaces staleness, overwrites
-on correction, tracks FPs, supports `/learn`, and doesn't echo secrets from another context). Recall
-is the **existing** memory-snippet injection — no second injection path.
+When `IRONCLAW_LEARNING_ENABLED` is on, the agent uses the existing `memory_*` tools to
+save/overwrite/search/report learnings, driven by a **learning persona** injected into the reborn
+system prompt (so baseline behavior — empty per-scenario identity — already assigns confidence,
+surfaces staleness, overwrites on correction, tracks FPs, supports `/learn`, and doesn't echo
+secrets from another context). Recall is the **existing** memory-snippet injection — no second
+injection path.
 
 Minimal `ironclaw_memory` additions: the learning frontmatter fields, decay-at-read ranking, and a
 **secret-redaction export** helper (`[REDACTED - sensitive]`). Scoping reuses the existing
@@ -90,8 +101,9 @@ delays the user turn):
    (`PromptWriteSafetyPolicy`). Overwrite-on-key handles dedup.
 
 This is **not** a reborn "run": no run profile, no trusted-submit, no capability-surface narrowing,
-no transcript-readback port. It's a bounded service: one model call + one safe write. Config-flagged
-(`[reflection] enabled`, default off). The reflection prompt carries the anti-poisoning rules
+no transcript-readback port. It's a bounded service: one model call + one safe write. Gated by the
+same `IRONCLAW_LEARNING_ENABLED` env flag (default off) — when off it is not constructed/subscribed.
+The reflection prompt carries the anti-poisoning rules
 (never store env-dependent failures, transient errors that a retry fixed, or negative capability
 claims; store the fix; declarative facts; user-correction is the top signal) — ported in spirit from
 `crates/ironclaw_engine/prompts/mission_*.md`.
@@ -113,17 +125,20 @@ stable-key overwrite (no-ghost); decay-at-read ranking (confidence × recency, f
 secret-redaction export. Reuse the existing `(tenant, user, agent)` memory scope as-is (no project
 dimension). TDD mirroring dedup-correction/*, confidence-decay/*, learn-management/export-sanitizes-secrets.
 
-### WS-2 — Learning persona + `/learn` surface (prompt file + `crates/ironclaw_host_runtime` wiring)
-Default learning preamble injected as a stable identity candidate (baseline behavior); `/learn`
-stats/prune/search/export expressed over the existing memory tools (add a host helper only if a
-behavior can't be expressed over the tools). TDD reborn-tier covering confidence-scoring/*,
+### WS-2 — Learning persona + `/learn` surface (prompt file + `crates/ironclaw_host_runtime` + `crates/ironclaw_reborn_config`)
+`IRONCLAW_LEARNING_ENABLED` env flag (default off) read via the reborn config layer. When on, inject
+the learning preamble (prompt file, `include_str!`) as a stable identity candidate (baseline
+behavior); when off, inject nothing. `/learn` stats/prune/search/export expressed over the existing
+memory tools (add a host helper only if a behavior can't be expressed over the tools). TDD: flag off
+⇒ preamble absent; flag on ⇒ present + reborn-tier behavior covering confidence-scoring/*,
 learn-management/*, fp-learning-loop/*.
 
 ### WS-3 — Lightweight reflection service (`crates/ironclaw_reborn_composition` + `crates/ironclaw_reborn_config` + reflection prompt)
-Turn-completed observer (best-effort) → cheap gate → one structured model call → deterministic safe
-write. `[reflection]` config (enabled default false; gate options; model slot). Anti-poisoning
-reflection prompt. TDD: gate fires only on signal; one write on a learnable turn; disabled → no-op;
-never blocks the turn (best-effort failure swallowed + logged at debug).
+Turn-completed observer (best-effort) → cheap signal gate → one structured model call →
+deterministic safe write. Gated by `IRONCLAW_LEARNING_ENABLED` (default off; not constructed/
+subscribed when off). Anti-poisoning reflection prompt. TDD: flag off ⇒ no observer/no-op; flag on ⇒
+gate fires only on signal; one write on a learnable turn; never blocks the turn (best-effort failure
+swallowed + logged at debug).
 
 ### WS-4 — Never-repeat E2E + benchmark-equivalent tests + quality gate (NO PR)
 Headline E2E: a turn with a user correction (or a failure) → reflection writes a learning → a fresh
@@ -138,7 +153,8 @@ scenarios. `cargo fmt`, `cargo clippy --all --tests --all-features` (zero warnin
 4. Learnings isolated by the existing `(tenant, user, agent)` memory scope; the agent doesn't echo another context's secrets (persona) and `/learn export` redacts secrets.
 5. On a learnable turn (correction/failure), the reflection service writes/updates a learning via one model call + deterministic safe write; disabled by config → no-op; never blocks the turn.
 6. Never-repeat E2E: correction/failure in turn N → correct behavior in turn N+1 via the recalled learning.
-7. Zero clippy warnings; tests green; reflection feature-flagged off by default; both memory backends at parity.
+7. Zero clippy warnings; tests green; both memory backends at parity.
+8. The entire learning behavior (persona + reflection) is gated by `IRONCLAW_LEARNING_ENABLED`, default off: with the flag unset the agent is byte-for-byte the pre-learning agent (no persona injected, no reflection observer), enabling clean A/B.
 
 ## 6. Deleted from the prior design (and why)
 - **Per-turn background reflection *run*** + dedicated run profile + trusted-submit orchestrator + transcript-readback port → replaced by a bounded reflection *service* (one model call + safe write); the observer already holds the conversation.
