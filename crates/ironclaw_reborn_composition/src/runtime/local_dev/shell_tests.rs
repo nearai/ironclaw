@@ -130,6 +130,7 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
             capability_id: CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability id"),
             input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .expect("shell invocation");

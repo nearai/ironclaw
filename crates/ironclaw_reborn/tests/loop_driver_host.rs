@@ -2597,6 +2597,7 @@ async fn planned_host_factory_create_host_uses_profiled_capabilities() {
             capability_id: denied_id,
             input_ref: CapabilityInputRef::new("input:denied-from-planned-host").unwrap(),
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -2930,6 +2931,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
             capability_id: denied_id,
             input_ref: CapabilityInputRef::new("input:runtime-denied").unwrap(),
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -3162,6 +3164,7 @@ async fn hooks_flag_off_capability_invocation_is_unaffected() {
             capability_id: allowed_id.clone(),
             input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -3204,6 +3207,7 @@ async fn hooks_flag_on_first_party_only_does_not_change_outcome() {
             capability_id: allowed_id.clone(),
             input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -3239,6 +3243,7 @@ async fn hooks_flag_on_extension_deny_hook_denies_through_composed_runtime() {
             capability_id: allowed_id.clone(),
             input_ref: CapabilityInputRef::new("input:hooks-deny").unwrap(),
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -3274,6 +3279,7 @@ async fn hooks_are_isolated_per_tenant_runtime() {
             capability_id: allowed_id.clone(),
             input_ref: CapabilityInputRef::new("input:tenant-a").unwrap(),
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -3302,6 +3308,7 @@ async fn hooks_are_isolated_per_tenant_runtime() {
             capability_id: allowed_id.clone(),
             input_ref: input_ref_b,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -4785,6 +4792,7 @@ async fn text_only_host_skill_context_does_not_expand_capability_surface() {
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
                 input_ref: CapabilityInputRef::new("input:opaque-tool-input").unwrap(),
                 approval_resume: None,
+                auth_resume: None,
             }],
             stop_on_first_suspension: true,
         })
@@ -4911,6 +4919,7 @@ async fn text_only_host_routes_capability_invocation_through_host_runtime() {
             capability_id: capability_id.clone(),
             input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -4975,6 +4984,7 @@ async fn text_only_host_profiled_capabilities_filter_surface_and_invocation() {
             capability_id: denied_id,
             input_ref: CapabilityInputRef::new("input:denied-profile").unwrap(),
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -5050,6 +5060,7 @@ async fn default_strategy_filter_all_loses_to_host_profile_filter() {
             capability_id: tool_b_id,
             input_ref: CapabilityInputRef::new("input:tool-b-denied").unwrap(),
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -5123,6 +5134,7 @@ async fn text_only_host_uses_fresh_execution_context_per_capability_invocation()
                 capability_id: capability_id.clone(),
                 input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .unwrap();
@@ -5211,6 +5223,7 @@ async fn text_only_host_rejects_outside_surface_capability_before_host_runtime()
             capability_id: hidden_id,
             input_ref: CapabilityInputRef::new("input:hidden-request").unwrap(),
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -5227,6 +5240,7 @@ async fn text_only_host_rejects_outside_surface_capability_before_host_runtime()
             capability_id: visible_id,
             input_ref: CapabilityInputRef::new("input:stale-request").unwrap(),
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap_err();
@@ -5281,6 +5295,7 @@ async fn text_only_host_sanitizes_runtime_failure_message_before_driver_output()
             capability_id,
             input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -5386,6 +5401,7 @@ async fn text_only_host_maps_runtime_suspension_and_process_outcomes() {
                 capability_id,
                 input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .unwrap(),
@@ -5471,6 +5487,7 @@ async fn text_only_host_maps_explicit_unknown_runtime_outcome_to_failure() {
             capability_id,
             input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -5539,6 +5556,7 @@ async fn text_only_host_preserves_invalid_request_and_returns_unavailable_as_fai
             capability_id: capability_id.clone(),
             input_ref: first_input,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap_err();
@@ -5548,6 +5566,7 @@ async fn text_only_host_preserves_invalid_request_and_returns_unavailable_as_fai
             capability_id,
             input_ref: second_input,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -5623,12 +5642,14 @@ async fn text_only_host_batch_stops_on_first_suspension_before_later_invocations
                     capability_id: approval_id,
                     input_ref: approval_input,
                     approval_resume: None,
+                    auth_resume: None,
                 },
                 CapabilityInvocation {
                     surface_version: surface.version,
                     capability_id: echo_id,
                     input_ref: echo_input,
                     approval_resume: None,
+                    auth_resume: None,
                 },
             ],
             stop_on_first_suspension: true,
@@ -5687,6 +5708,7 @@ async fn text_only_host_does_not_reinvoke_runtime_after_failed_outcome_retry() {
         capability_id: capability_id.clone(),
         input_ref,
         approval_resume: None,
+        auth_resume: None,
     };
 
     let first = host.invoke_capability(invocation.clone()).await.unwrap();
@@ -5809,6 +5831,7 @@ async fn text_only_host_waits_for_concurrent_duplicate_invocation_result() {
         capability_id: capability_id.clone(),
         input_ref,
         approval_resume: None,
+        auth_resume: None,
     };
 
     let (first, second) = tokio::join!(
@@ -5889,6 +5912,7 @@ async fn text_only_host_bounds_completed_dispatch_records() {
                 capability_id: capability_id.clone(),
                 input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .unwrap();
@@ -5900,6 +5924,7 @@ async fn text_only_host_bounds_completed_dispatch_records() {
             capability_id,
             input_ref: input_refs[0].clone(),
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -6002,6 +6027,7 @@ async fn text_only_host_does_not_reinvoke_runtime_after_result_write_failure_ret
         capability_id: capability_id.clone(),
         input_ref,
         approval_resume: None,
+        auth_resume: None,
     };
 
     let first = host
@@ -6070,6 +6096,7 @@ async fn text_only_host_rejects_runtime_outcome_for_different_capability() {
             capability_id: requested_id,
             input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap_err();
@@ -6140,6 +6167,7 @@ async fn text_only_host_rejects_previous_surface_after_refetch() {
             capability_id: first_id,
             input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap_err();
@@ -6164,6 +6192,7 @@ async fn text_only_host_empty_capability_surface_denies_invocation() {
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
                 input_ref: CapabilityInputRef::new("input:opaque-tool-input").unwrap(),
                 approval_resume: None,
+                auth_resume: None,
             }],
             stop_on_first_suspension: true,
         })
@@ -6181,6 +6210,7 @@ async fn text_only_host_empty_capability_surface_denies_invocation() {
             capability_id: CapabilityId::new("demo.echo").unwrap(),
             input_ref: CapabilityInputRef::new("input:opaque-tool-input").unwrap(),
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap_err();
@@ -6250,6 +6280,7 @@ async fn text_only_host_e2e_invokes_script_capability_through_real_host_runtime(
             capability_id: e2e_script_capability_id(),
             input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -6303,6 +6334,7 @@ async fn text_only_host_denies_capability_without_provider_trust_before_host_run
             capability_id,
             input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -6361,6 +6393,7 @@ async fn text_only_host_allows_retry_after_missing_capability_input_is_staged() 
         capability_id: capability_id.clone(),
         input_ref: input_ref.clone(),
         approval_resume: None,
+        auth_resume: None,
     };
 
     let missing = host
@@ -7230,6 +7263,7 @@ impl AgentLoopDriver for ScriptCapabilityFinalReplyDriver {
                 capability_id: self.capability_id.clone(),
                 input_ref: self.input_ref.clone(),
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .map_err(driver_host_error)?;

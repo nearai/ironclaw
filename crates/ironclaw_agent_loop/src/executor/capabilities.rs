@@ -24,7 +24,8 @@ use super::{
     MAX_CAPABILITY_RETRIES, StageContext, TurnCompletedStep, append_capability_error_ref,
     append_capability_result_ref, append_capability_safe_summary_ref, batch_policy_kind,
     cancelled_exit, capability_batch_counts, capability_call_signature, capability_error_class,
-    capability_failure_kind, capability_host_error, capability_invocation_from_candidate,
+    capability_failure_kind, capability_host_error,
+    capability_invocation_from_auth_resume_candidate, capability_invocation_from_candidate,
     capability_is_visible, capability_summary, clear_matching_pending_auth_resume, failed_exit,
     honor_retry_alteration, model_visible_capability_failure_observation, push_call_signature_once,
     push_completed_result, sanitized_strategy_summary,
@@ -129,6 +130,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             .await;
 
         let mut pending_approval_resume = state.pending_approval_resume.clone();
+        let mut pending_auth_resume = state.pending_auth_resume.clone();
         let batch_result = ctx
             .host
             .invoke_capability_batch(CapabilityBatchInvocation {
@@ -136,18 +138,24 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     .iter()
                     .cloned()
                     .map(|call| {
+                        // Auth-resume takes precedence: when the run is parked
+                        // at a BlockedAuth checkpoint that also carried prior
+                        // approval identity, re-dispatch through the auth-resume
+                        // path so the original invocation_id is reused.
+                        //
+                        // Consume the slot on first match so that a batch with two
+                        // calls to the same capability_id does not tag both as
+                        // auth-resume (which would reuse one resume_token across
+                        // distinct calls — a correctness and security bug).  Mirror
+                        // the approval path immediately below which uses take_if.
+                        if let Some(auth) = pending_auth_resume
+                            .take_if(|auth| auth.capability_id == call.capability_id)
+                        {
+                            return capability_invocation_from_auth_resume_candidate(call, &auth);
+                        }
                         let resume = pending_approval_resume
                             .take_if(|resume| resume.capability_id == call.capability_id)
-                            .map(
-                                |resume| ironclaw_turns::run_profile::CapabilityApprovalResume {
-                                    approval_request_id: resume.approval_request_id,
-                                    resume_token: resume.resume_token,
-                                    correlation_id: resume.correlation_id,
-                                    input_ref: resume.input_ref,
-                                    input: resume.input,
-                                    estimate: resume.estimate,
-                                },
-                            );
+                            .map(|resume| resume.to_approval_resume());
                         capability_invocation_from_candidate(call, resume)
                     })
                     .collect(),
@@ -497,6 +505,19 @@ impl CapabilityStage {
                 credential_requirements,
                 ..
             } => {
+                // When the invocation already passed an approval gate, carry the
+                // approval identity into GateStage so GateStage can propagate it
+                // into the pending_auth_resume slot.  The resume_token encodes the
+                // original invocation_id; without it, auth re-dispatch would mint a
+                // fresh invocation_id and the fingerprinted approval lease (scoped
+                // to the original invocation_id) would never match.
+                //
+                // Extract BEFORE clearing so the data is still present.
+                let prior_approval = state
+                    .pending_approval_resume
+                    .as_ref()
+                    .filter(|r| r.capability_id == call.capability_id)
+                    .map(|r| r.to_approval_resume());
                 // Clearing here keeps the clear-on-every-outcome invariant; for auth
                 // outcomes GateStage re-populates the record when it blocks.
                 clear_matching_pending_approval_resume(&mut state, &call);
@@ -510,7 +531,7 @@ impl CapabilityStage {
                             kind: GateKind::Auth,
                             gate_ref,
                             credential_requirements,
-                            approval_resume: None,
+                            approval_resume: prior_approval,
                         },
                     )
                     .await

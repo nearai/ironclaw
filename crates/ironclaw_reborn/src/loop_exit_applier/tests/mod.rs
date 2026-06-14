@@ -835,6 +835,7 @@ async fn thread_checkpoint_evidence_rejects_wrong_run_and_malformed_result_ref_r
             tool_result_ref: Some(malformed_result.as_str().to_string()),
             tool_result_provider_call: None,
             content: Some("not-json".to_string()),
+            attachments: Vec::new(),
             redaction_ref: None,
         });
         history.messages.push(ThreadMessageRecord {
@@ -854,6 +855,7 @@ async fn thread_checkpoint_evidence_rejects_wrong_run_and_malformed_result_ref_r
                 r#"{{"version":1,"result_ref":"{}","safe_summary":"raw tool input includes secret"}}"#,
                 unsafe_summary_result.as_str()
             )),
+            attachments: Vec::new(),
             redaction_ref: None,
         });
         history

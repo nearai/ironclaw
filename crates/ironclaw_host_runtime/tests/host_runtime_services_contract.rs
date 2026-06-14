@@ -44,10 +44,10 @@ use ironclaw_host_runtime::{
     BuiltinObligationHandler, BuiltinObligationServices, CancelReason, CancelRuntimeWorkRequest,
     CapabilitySurfaceVersion, CommandExecutionOutput, CommandExecutionRequest, DefaultHostRuntime,
     HostRuntime, HostRuntimeServices, ProcessObligationLifecycleStore, ProductionWiringComponent,
-    ProductionWiringConfig, ProductionWiringIssueKind, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind,
-    RuntimeProcessError, RuntimeProcessPort, RuntimeStatusRequest, RuntimeWorkId,
-    SandboxCommandTransport, TenantSandboxProcessPort, builtin_first_party_handlers,
+    ProductionWiringConfig, ProductionWiringIssueKind, RuntimeCapabilityAuthResumeRequest,
+    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
+    RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort, RuntimeStatusRequest,
+    RuntimeWorkId, SandboxCommandTransport, TenantSandboxProcessPort, builtin_first_party_handlers,
     builtin_first_party_package,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutionResult, McpExecutor};
@@ -2704,13 +2704,16 @@ async fn host_runtime_services_resume_missing_runtime_secret_returns_auth_gate()
         .unwrap();
     assert_eq!(run.status, RunStatus::BlockedAuth);
     assert_eq!(run.error_kind.as_deref(), Some("AuthRequired"));
+    // A missing-credential bounce parks the run at BlockedAuth (non-terminal):
+    // the claimed approval lease is intentionally preserved, not revoked, so the
+    // same invocation can reuse it on auth-resume without a second human approval.
     assert_eq!(
         capability_leases
             .get(&scope, lease.grant.id)
             .await
             .unwrap()
             .status,
-        CapabilityLeaseStatus::Revoked
+        CapabilityLeaseStatus::Claimed
     );
     assert!(
         script_runtime.recorded_mounts().is_empty(),
@@ -3011,6 +3014,327 @@ async fn host_runtime_services_resume_runtime_policy_denial_fails_matching_block
         "runtime-policy preflight failure must not claim or consume the approval lease"
     );
     assert!(fixture.events.events().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Happy-path auth-resume: BlockedAuth run with credential present → dispatch+complete
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn host_runtime_services_auth_resume_dispatches_blocked_auth_run() {
+    // Setup: uses ApprovalThenSecretObligationAuthorizer so the first invoke
+    // fires an approval gate, and the first resume (missing credential) bounces
+    // to BlockedAuth.  After adding the credential we verify that
+    // auth_resume_capability dispatches and completes the run.
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_handle = SecretHandle::new("auth_resume_token").unwrap();
+    let script_runtime = Arc::new(RecordingScriptExecutor::default());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenSecretObligationAuthorizer {
+            handle: secret_handle.clone(),
+        }),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability],
+    )))
+    .with_run_state(Arc::clone(&run_state))
+    .with_approval_requests(Arc::clone(&approval_requests))
+    .with_capability_leases(Arc::clone(&capability_leases))
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_script_runtime(Arc::clone(&script_runtime));
+    let runtime = services.host_runtime_for_local_testing();
+    let context = execution_context_without_grants();
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "auth-resume dispatch"});
+
+    // Phase 1: invoke → approval gate.
+    let gate = block_for_approval(&runtime, context.clone(), estimate.clone(), input.clone()).await;
+    approve_dispatch_for_services(&services, &scope, gate.approval_request_id, None).await;
+
+    // Phase 2: resume with credential absent → AuthRequired / BlockedAuth.
+    let auth_gate = runtime
+        .resume_capability(RuntimeCapabilityResumeRequest::new(
+            context.clone(),
+            gate.approval_request_id,
+            script_capability_id(),
+            estimate.clone(),
+            input.clone(),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        matches!(auth_gate, RuntimeCapabilityOutcome::AuthRequired(_)),
+        "expected AuthRequired after credential-missing resume, got {auth_gate:?}"
+    );
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(
+        run.status,
+        RunStatus::BlockedAuth,
+        "pre-condition: run must be BlockedAuth"
+    );
+
+    // Phase 3: add credential, then auth_resume → dispatch + complete.
+    secret_store
+        .put(
+            scope.clone(),
+            secret_handle,
+            SecretMaterial::from("test-secret-value"),
+        )
+        .await
+        .unwrap();
+
+    let auth_resumed = runtime
+        .auth_resume_capability(RuntimeCapabilityAuthResumeRequest::new(
+            context.clone(),
+            script_capability_id(),
+            estimate.clone(),
+            input.clone(),
+            trust_decision_with_dispatch_authority(),
+            Some(gate.approval_request_id),
+        ))
+        .await
+        .unwrap();
+
+    match auth_resumed {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, script_capability_id());
+            assert_eq!(completed.output, input);
+        }
+        other => panic!("expected completed auth-resume outcome, got {other:?}"),
+    }
+    let completed_run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(
+        completed_run.status,
+        RunStatus::Completed,
+        "auth_resume must complete the BlockedAuth run"
+    );
+    assert_eq!(
+        script_runtime.recorded_mounts().len(),
+        1,
+        "dispatch must have been called exactly once"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// auth-resume preflight rejection must fail the BlockedAuth run record
+//
+// Before the fix, `auth_resume_capability` returned a terminal failure outcome
+// on preflight errors (policy/trust) WITHOUT transitioning the BlockedAuth run
+// to Failed — leaving a stale resumable gate after the caller saw a terminal
+// failure.  The approval-resume path (`resume_capability`) already called
+// `fail_matching_blocked_resume_on_preflight_error`.  This test verifies the
+// equivalent now exists for auth-resume.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn host_runtime_services_auth_resume_trust_preflight_failure_fails_blocked_auth_run() {
+    // Setup: use the standard fixture so we get a real run_state/approval_requests.
+    let fixture = approval_resume_fixture();
+    let _runtime = fixture.services.host_runtime_for_local_testing();
+    let context = execution_context_without_grants();
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "auth-resume preflight fix"});
+
+    // Put the run in BlockedAuth directly (mirrors what happens after approval →
+    // resume_json auth bounce: run is BlockedAuth).
+    fixture
+        .run_state
+        .start(RunStart {
+            invocation_id,
+            scope: scope.clone(),
+            capability_id: script_capability_id(),
+        })
+        .await
+        .unwrap();
+    fixture
+        .run_state
+        .block_auth(&scope, invocation_id, "AuthRequired".to_string())
+        .await
+        .unwrap();
+
+    let run = fixture
+        .run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        run.status,
+        RunStatus::BlockedAuth,
+        "pre-condition: run must be BlockedAuth"
+    );
+
+    // Build a broken runtime (empty extension registry → trust preflight fails).
+    let broken_runtime = resume_runtime_with_empty_registry(&fixture);
+
+    // Wrong-scope call: preflight fails with wrong scope, must NOT fail the
+    // matching BlockedAuth run (different scope = different invocation).
+    let wrong_scope = ResourceScope {
+        user_id: UserId::new("other-user").unwrap(),
+        ..scope.clone()
+    };
+    let wrong_context = execution_context_without_grants_for_scope(wrong_scope);
+    let wrong_outcome = broken_runtime
+        .auth_resume_capability(RuntimeCapabilityAuthResumeRequest::new(
+            wrong_context,
+            script_capability_id(),
+            estimate.clone(),
+            input.clone(),
+            trust_decision_with_dispatch_authority(),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_failed_outcome(wrong_outcome, RuntimeFailureKind::MissingRuntime);
+
+    // Matching run must still be BlockedAuth (wrong scope → guard skips it).
+    let run_after_wrong = fixture
+        .run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        run_after_wrong.status,
+        RunStatus::BlockedAuth,
+        "wrong-scope preflight failure must not affect the matching BlockedAuth run"
+    );
+
+    // Matching-scope call: preflight fails → must transition the BlockedAuth run to Failed.
+    // Pre-fix: the run was left as stale BlockedAuth because
+    // fail_matching_blocked_auth_resume_on_preflight_error was not called.
+    let matching_outcome = broken_runtime
+        .auth_resume_capability(RuntimeCapabilityAuthResumeRequest::new(
+            context.clone(),
+            script_capability_id(),
+            estimate.clone(),
+            input.clone(),
+            trust_decision_with_dispatch_authority(),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_failed_outcome(matching_outcome, RuntimeFailureKind::MissingRuntime);
+
+    let failed_run = fixture
+        .run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        failed_run.status,
+        RunStatus::Failed,
+        "matching-scope auth-resume preflight failure must transition BlockedAuth run to Failed \
+         (pre-fix: run was left as stale BlockedAuth)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// approval-then-auth path: auth-resume with approval_request_id = Some(id)
+// must still fail a BlockedAuth run whose record has approval_request_id = None
+//
+// When a run goes through approval → resume → BlockedAuth, the BlockedAuth
+// transition explicitly clears the persisted approval_request_id to None.
+// The subsequent auth-resume request still carries the original
+// approval_request_id so it can claim the approval lease.  Before the fix,
+// the guard in fail_matching_blocked_auth_resume_on_preflight_error compared
+// record.approval_request_id (None) against the request's Some(id) and
+// returned early without failing the run, leaving it stuck as BlockedAuth.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn host_runtime_services_auth_resume_with_approval_id_fails_blocked_auth_run_on_preflight_error()
+ {
+    let fixture = approval_resume_fixture();
+    let context = execution_context_without_grants();
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "approval-then-auth preflight fix"});
+
+    // Directly put the run into BlockedAuth with approval_request_id = None
+    // (this mirrors what block_auth does: it always clears approval_request_id).
+    fixture
+        .run_state
+        .start(RunStart {
+            invocation_id,
+            scope: scope.clone(),
+            capability_id: script_capability_id(),
+        })
+        .await
+        .unwrap();
+    fixture
+        .run_state
+        .block_auth(&scope, invocation_id, "AuthRequired".to_string())
+        .await
+        .unwrap();
+
+    let run = fixture
+        .run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        run.status,
+        RunStatus::BlockedAuth,
+        "pre-condition: run must be BlockedAuth"
+    );
+    assert_eq!(
+        run.approval_request_id, None,
+        "pre-condition: BlockedAuth record must have approval_request_id = None"
+    );
+
+    // Build a broken runtime (empty extension registry → trust preflight fails).
+    let broken_runtime = resume_runtime_with_empty_registry(&fixture);
+
+    // Auth-resume carries a non-None approval_request_id (the original gate id
+    // from the approval phase).  Before the fix, the guard compared
+    // record.approval_request_id (None) != Some(id) and returned early, leaving
+    // the run stuck as BlockedAuth.
+    let orphan_approval_id = ApprovalRequestId::new();
+    let outcome = broken_runtime
+        .auth_resume_capability(RuntimeCapabilityAuthResumeRequest::new(
+            context.clone(),
+            script_capability_id(),
+            estimate.clone(),
+            input.clone(),
+            trust_decision_with_dispatch_authority(),
+            Some(orphan_approval_id),
+        ))
+        .await
+        .unwrap();
+    assert_failed_outcome(outcome, RuntimeFailureKind::MissingRuntime);
+
+    // The BlockedAuth run must now be Failed, not stuck as BlockedAuth.
+    let after = fixture
+        .run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after.status,
+        RunStatus::Failed,
+        "approval-then-auth preflight failure must transition BlockedAuth run to Failed \
+         even when the request carries approval_request_id = Some(id) \
+         (pre-fix: run was left stuck as BlockedAuth)"
+    );
 }
 
 #[tokio::test]

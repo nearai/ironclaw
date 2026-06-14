@@ -244,9 +244,11 @@ fn send_message_descriptor() -> IngressRouteDescriptor {
         NetworkMethod::Post,
         WEBUI_V2_PATTERN_SEND_MESSAGE,
         mutation_policy(
-            // Message bodies carry user content. 1 MiB is the same cap the
-            // existing turn admission layer enforces.
-            body_limit_kib(1024),
+            // Message bodies carry user text plus optional base64-encoded inline
+            // attachments. 14 MiB matches the gateway-wide body budget and covers
+            // base64 of the 10 MiB decoded per-message attachment cap (the facade
+            // enforces the 5 MiB-per-file / 10 MiB-total decoded budgets).
+            body_limit_kib(14 * 1024),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
             AllowedEffectPath::TurnCoordinator,

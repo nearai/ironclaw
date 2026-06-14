@@ -1040,6 +1040,7 @@ mod tests {
             tool_result_ref: None,
             tool_result_provider_call: None,
             content: None,
+            attachments: Vec::new(),
             redaction_ref: None,
         }
     }
