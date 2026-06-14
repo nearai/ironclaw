@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/nearai/ironclaw/compare/ironclaw_common-v0.4.2...ironclaw_common-v0.5.0) - 2026-06-14
+
+### Added
+
+- *(attachments)* bridge inbound bytes into transcript AttachmentRefs ([#4644](https://github.com/nearai/ironclaw/pull/4644)) ([#4670](https://github.com/nearai/ironclaw/pull/4670))
+- *(threads)* carry attachment refs through the Reborn transcript contract ([#4644](https://github.com/nearai/ironclaw/pull/4644)) ([#4655](https://github.com/nearai/ironclaw/pull/4655))
+- *(common)* extensible attachment format registry ([#4644](https://github.com/nearai/ironclaw/pull/4644)) ([#4654](https://github.com/nearai/ironclaw/pull/4654))
+
+### Fixed
+
+- *(reborn)* admit final replies deterministically ([#4207](https://github.com/nearai/ironclaw/pull/4207))
+
+### Other
+
+- *(agents)* reconcile crate AGENTS.md maps with current Reborn code ([#4302](https://github.com/nearai/ironclaw/pull/4302))
+- *(reborn)* consolidate PKCE math into ironclaw_common::pkce (Track A, #4215) ([#4216](https://github.com/nearai/ironclaw/pull/4216))
+- [codex] Use shared LLM config resolution for Reborn ([#4079](https://github.com/nearai/ironclaw/pull/4079))
+- Merge main into reborn integration ([#4078](https://github.com/nearai/ironclaw/pull/4078))
+- Reborn cost-based budgets: foundation (resources, accountant, gate, period) ([#3841](https://github.com/nearai/ironclaw/pull/3841))
+- *(ironclaw_common)* seal internal modules
+- *(crates)* enable unreachable_pub and prune dead re-exports
+- *(reborn)* establish trust-boundary hardening baseline ([#3494](https://github.com/nearai/ironclaw/pull/3494))
+- Merge origin/main into reborn-integration
+
 ## [0.4.2](https://github.com/nearai/ironclaw/compare/ironclaw_common-v0.4.1...ironclaw_common-v0.4.2) - 2026-05-11
 
 ### Added

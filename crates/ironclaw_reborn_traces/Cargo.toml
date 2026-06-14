@@ -13,9 +13,9 @@ base64 = "0.22.1"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 hex = "0.4.3"
-ironclaw_common = { path = "../ironclaw_common", version = "0.4.1" }
+ironclaw_common = { path = "../ironclaw_common", version = "0.5.0" }
 ironclaw_llm = { path = "../ironclaw_llm", version = "0.1.0" }
-ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
+ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.3" }
 jsonwebtoken = "9"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }

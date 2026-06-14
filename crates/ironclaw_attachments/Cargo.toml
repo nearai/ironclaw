@@ -11,7 +11,7 @@ repository = "https://github.com/nearai/ironclaw"
 publish = false
 
 [dependencies]
-ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
+ironclaw_common = { path = "../ironclaw_common", version = "0.5.0" }
 ironclaw_extractors = { path = "../ironclaw_extractors", version = "0.1.0" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
