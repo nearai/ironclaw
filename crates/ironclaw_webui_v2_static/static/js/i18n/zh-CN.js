@@ -632,6 +632,9 @@ registerPack("zh-CN", {
   "automations.filter.paused": "暂已挂起与暂停的自动化",
   "automations.refresh": "更新最新自动化",
   "automations.error.loadFailed": "提取系统自动化计划列表不成功！",
+  "automations.schedulerOff.title": "Scheduling is turned off",
+  "automations.schedulerOff.description":
+    "These automations are saved but won't run until the scheduler is enabled.",
   "automations.delivery.eyebrow": "Delivery defaults",
   "automations.delivery.title": "Where triggered results are sent",
   "automations.delivery.explainer": "Choose where automation results are delivered when a triggered run finishes.",

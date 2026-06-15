@@ -632,6 +632,9 @@ registerPack("ko", {
   "automations.filter.paused": "일시 중지됨",
   "automations.refresh": "자동화 새로 고침",
   "automations.error.loadFailed": "자동화를 로드할 수 없음",
+  "automations.schedulerOff.title": "Scheduling is turned off",
+  "automations.schedulerOff.description":
+    "These automations are saved but won't run until the scheduler is enabled.",
   "automations.delivery.eyebrow": "Delivery defaults",
   "automations.delivery.title": "Where triggered results are sent",
   "automations.delivery.explainer": "Choose where automation results are delivered when a triggered run finishes.",
