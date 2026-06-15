@@ -1889,7 +1889,23 @@ fn validate_resolved_master_key(
 fn resolve_local_dev_secret_master_key(
     root: &Path,
 ) -> Result<ironclaw_secrets::SecretMaterial, RebornBuildError> {
-    let env_key = std::env::var(ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV).ok();
+    // Fail closed on an explicitly-set-but-unusable master key: only an
+    // *absent* env var is "not configured". A non-Unicode value must not be
+    // silently dropped (via `.ok()`) and fall through to generating a fresh
+    // key, which would encrypt local-dev secrets under an unintended key the
+    // operator never chose.
+    let env_key = match std::env::var(ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "local-dev secrets master key env var {} is set but not valid UTF-8",
+                    ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV
+                ),
+            });
+        }
+    };
     resolve_local_dev_secret_master_key_with_env(root, env_key)
 }
 
@@ -1921,10 +1937,21 @@ fn resolve_local_dev_secret_master_key_with_env(
     }
 
     // No cached file. Prefer an explicit env key (validated, so a bad value is
-    // never persisted to the cached file); otherwise generate a fresh one.
-    match env_key.filter(|value| !value.trim().is_empty()) {
+    // never persisted to the cached file); otherwise generate a fresh one. A
+    // *set-but-empty* env value is an explicit-but-unusable configuration and
+    // must fail closed rather than collapse to "absent" and generate a key the
+    // operator never chose.
+    match env_key {
         Some(env_key) => {
             let key = env_key.trim().to_string();
+            if key.is_empty() {
+                return Err(RebornBuildError::InvalidConfig {
+                    reason: format!(
+                        "local-dev secrets master key env var {} is set but empty",
+                        ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV
+                    ),
+                });
+            }
             validate_resolved_master_key(&key, &MasterKeySource::Env)?;
             write_local_dev_secret_master_key(&key_path, &key)?;
             Ok(ironclaw_secrets::SecretMaterial::from(key))
@@ -3844,6 +3871,34 @@ mod tests {
             "rejected env master key must not be persisted to {}",
             key_path.display()
         );
+    }
+
+    #[test]
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    fn resolve_local_dev_secret_master_key_rejects_set_but_empty_env_without_persisting() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let key_path = root.join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH);
+
+        // A set-but-empty (or whitespace-only) env value is explicit-but-unusable
+        // configuration: it must fail closed, NOT collapse to "absent" and
+        // generate + persist a fresh key the operator never chose.
+        for empty in ["", "   ", "\n\t "] {
+            let error = resolve_local_dev_secret_master_key_with_env(root, Some(empty.to_string()))
+                .expect_err("set-but-empty env master key must be rejected");
+            match error {
+                RebornBuildError::InvalidConfig { reason } => assert!(
+                    reason.contains(ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV),
+                    "error must name the env var, got: {reason}"
+                ),
+                other => panic!("expected InvalidConfig, got {other:?}"),
+            }
+            assert!(
+                !key_path.exists(),
+                "a set-but-empty env master key must not generate/persist a key at {}",
+                key_path.display()
+            );
+        }
     }
 
     /// A well-formed cached key file passes through unchanged.
