@@ -187,13 +187,33 @@ impl ProductAdapter for SlackV2Adapter {
             }
         };
 
+        let mut delivered_any_part = false;
         for request in requests {
             if let Err(error) =
                 send_slack_post_message(egress, request, attempt_id, &target_binding, run_id).await
             {
+                if delivered_any_part
+                    && matches!(&error.status, DeliveryStatus::FailedRetryable { .. })
+                {
+                    let reason = RedactedString::new(
+                        "partial Slack multipart delivery; suppressing retry to avoid duplicate parts",
+                    );
+                    record_status(
+                        delivery_sink,
+                        DeliveryStatus::FailedPermanent {
+                            attempt_id,
+                            target: target_binding.clone(),
+                            run_id,
+                            reason: reason.clone(),
+                        },
+                    )
+                    .await;
+                    return Err(ProductAdapterError::EgressDenied { reason });
+                }
                 record_status(delivery_sink, error.status).await;
                 return Err(error.adapter_error);
             }
+            delivered_any_part = true;
         }
 
         record_status(
@@ -475,6 +495,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn multipart_final_reply_suppresses_retry_after_partial_delivery() {
+        use ironclaw_product_adapters::ProtocolHttpEgressError;
+
+        let adapter = SlackV2Adapter::new(config());
+        let egress = FakeProtocolHttpEgress::new(vec![SLACK_API_HOST.to_string()]);
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            SLACK_API_HOST,
+            Ok(ironclaw_product_adapters::EgressResponse::new(
+                200,
+                br#"{"ok":true}"#.to_vec(),
+            )),
+        );
+        egress.program_response(SLACK_API_HOST, Err(ProtocolHttpEgressError::Timeout));
+        let sink = FakeOutboundDeliverySink::new();
+
+        let err = adapter
+            .render_outbound(
+                envelope(final_reply_payload(&"a".repeat(35_050))),
+                &egress,
+                &sink,
+            )
+            .await
+            .expect_err("second multipart send should fail");
+
+        assert!(
+            matches!(err, ProductAdapterError::EgressDenied { .. }),
+            "partial multipart failure must not be retryable, got {err:?}"
+        );
+        assert_eq!(egress.calls().len(), 2);
+        assert!(
+            matches!(
+                sink.statuses().as_slice(),
+                [DeliveryStatus::FailedPermanent { .. }]
+            ),
+            "partial multipart failure must record permanent status, got {:?}",
+            sink.statuses()
+        );
+    }
+
+    #[tokio::test]
     async fn render_outbound_rejects_mismatched_envelope_ids_without_egress() {
         let adapter = SlackV2Adapter::new(config());
         let egress = FakeProtocolHttpEgress::new(vec![SLACK_API_HOST.to_string()]);
@@ -559,6 +620,7 @@ mod tests {
     #[tokio::test]
     async fn render_outbound_records_status_for_slack_http_failures() {
         for (status, expected) in [
+            (408, "retryable"),
             (429, "retryable"),
             (500, "retryable"),
             (401, "unauthorized"),

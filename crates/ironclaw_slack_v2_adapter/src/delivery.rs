@@ -155,7 +155,7 @@ impl SlackDeliveryFailureKind {
     }
 
     fn from_http_status(status: u16) -> Self {
-        if status >= 500 || status == 429 {
+        if status >= 500 || status == 429 || status == 408 {
             Self::Retryable
         } else if status == 401 || status == 403 {
             Self::Unauthorized

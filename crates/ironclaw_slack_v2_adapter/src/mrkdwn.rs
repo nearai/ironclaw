@@ -302,11 +302,23 @@ fn strip_heading_marker(line: &str) -> &str {
     if !trimmed.starts_with('#') {
         return line;
     }
-    let hash_count = trimmed.chars().take_while(|ch| *ch == '#').count();
+    let mut hash_count = 0usize;
+    let mut rest_start = None;
+    for (index, ch) in trimmed.char_indices() {
+        if ch == '#' {
+            hash_count += 1;
+            continue;
+        }
+        rest_start = Some(index);
+        break;
+    }
     if !(1..=6).contains(&hash_count) {
         return line;
     }
-    let rest = &trimmed[hash_count..];
+    let Some(rest_start) = rest_start else {
+        return line;
+    };
+    let rest = &trimmed[rest_start..];
     let Some(rest) = rest.strip_prefix(' ') else {
         return line;
     };
@@ -315,37 +327,57 @@ fn strip_heading_marker(line: &str) -> &str {
 
 fn convert_markdown_links(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
-    let bytes = line.as_bytes();
     let mut index = 0;
     while index < line.len() {
-        if bytes[index] == b'['
-            && let Some(label_end_rel) = line[index + 1..].find(']')
-        {
-            let label_end = index + 1 + label_end_rel;
-            if line[label_end..].starts_with("](")
-                && let Some(url_end_rel) = line[label_end + 2..].find(')')
-            {
-                let label = &line[index + 1..label_end];
-                let url_end = label_end + 2 + url_end_rel;
-                let url = &line[label_end + 2..url_end];
-                if is_safe_slack_link_url(url) {
-                    out.push('<');
-                    out.push_str(url);
-                    out.push('|');
-                    out.push_str(label);
-                    out.push('>');
-                    index = url_end + 1;
-                    continue;
-                }
-            }
+        if !line.is_char_boundary(index) {
+            break;
         }
-        let Some(ch) = line[index..].chars().next() else {
+        let Some((_, ch)) = line[index..].char_indices().next() else {
             break;
         };
+        if ch == '['
+            && let Some((next_index, label, url)) = markdown_link_at(line, index)
+            && is_safe_slack_link_url(url)
+        {
+            out.push('<');
+            out.push_str(url);
+            out.push('|');
+            out.push_str(label);
+            out.push('>');
+            index = next_index;
+            continue;
+        }
         out.push(ch);
         index += ch.len_utf8();
     }
     out
+}
+
+fn markdown_link_at(line: &str, start: usize) -> Option<(usize, &str, &str)> {
+    if !line.is_char_boundary(start) {
+        return None;
+    }
+    if line[start..].char_indices().next()?.1 != '[' {
+        return None;
+    }
+    let label_start = start + '['.len_utf8();
+    let label_end = line[label_start..]
+        .char_indices()
+        .find_map(|(index, ch)| (ch == ']').then_some(label_start + index))?;
+    let after_label = &line[label_end..];
+    if !after_label.starts_with("](") {
+        return None;
+    }
+    let url_start = label_end + "](".len();
+    let url_end = line[url_start..]
+        .char_indices()
+        .find_map(|(index, ch)| (ch == ')').then_some(url_start + index))?;
+    let next_index = url_end + ')'.len_utf8();
+    Some((
+        next_index,
+        &line[label_start..label_end],
+        &line[url_start..url_end],
+    ))
 }
 
 fn is_safe_slack_link_url(url: &str) -> bool {
@@ -404,6 +436,15 @@ mod tests {
         assert!(!text.contains("|---|---|"));
         assert!(text.contains("• *Doc:* *Priority Agents*"));
         assert!(text.contains("*Highlight:* Priority Agents"));
+    }
+
+    #[test]
+    fn unicode_markdown_renders_without_byte_boundary_slicing() {
+        let text = render_slack_mrkdwn("### Résumé\nПривет [世界](https://example.com/路径)");
+
+        assert!(text.contains("Résumé"));
+        assert!(!text.contains("###"));
+        assert!(text.contains("Привет <https://example.com/路径|世界>"));
     }
 
     #[test]

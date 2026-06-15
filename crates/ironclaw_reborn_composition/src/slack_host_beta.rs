@@ -478,10 +478,9 @@ pub fn build_slack_host_beta_mounts(
         )? {
         OutboundDeliveryTargetRegistrationOutcome::Registered => {}
         OutboundDeliveryTargetRegistrationOutcome::Replaced => {
-            tracing::debug!(
-                target = "ironclaw::reborn::slack_host_beta",
-                "Slack outbound delivery target provider replaced an existing registration"
-            );
+            return Err(SlackHostBetaBuildError::OutboundDeliveryTargetRegistration {
+                reason: "Slack outbound delivery target provider is already registered; replacement would diverge from the first-writer trigger delivery hook".to_string(),
+            });
         }
     }
     Ok(SlackHostBetaMounts {
@@ -1886,6 +1885,28 @@ mod tests {
                 .as_ref()
                 .map(|target| target.target_id.as_str()),
             Some(target.target.target_id.as_str())
+        );
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
+    async fn build_slack_host_beta_mounts_rejects_outbound_target_provider_replacement() {
+        let (runtime, _root) = runtime().await;
+        let _mounts = build_slack_host_beta_mounts(&runtime, config()).expect("first mount builds");
+
+        let error = match build_slack_host_beta_mounts(&runtime, config()) {
+            Ok(_) => panic!("second Slack mount must not replace outbound provider"),
+            Err(error) => error,
+        };
+
+        assert!(
+            matches!(
+                error,
+                SlackHostBetaBuildError::OutboundDeliveryTargetRegistration { ref reason }
+                    if reason.contains("already registered")
+            ),
+            "unexpected replacement error: {error:?}"
         );
 
         runtime.shutdown().await.expect("runtime shuts down");

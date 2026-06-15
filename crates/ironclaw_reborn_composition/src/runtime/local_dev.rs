@@ -55,11 +55,11 @@ mod skill_activation;
 mod surface_disclosure;
 mod synthetic_capability;
 
-use extension_surface::{LocalDevExtensionSurface, LocalDevExtensionSurfaceSource};
 #[cfg(test)]
-pub(crate) use outbound_delivery::{
+pub(crate) use crate::outbound_delivery_capability_surface::{
     OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
 };
+use extension_surface::{LocalDevExtensionSurface, LocalDevExtensionSurfaceSource};
 use refreshing_capability_port::{
     RefreshingLocalDevCapabilityPortConfig, create_refreshing_local_dev_capability_port,
 };
