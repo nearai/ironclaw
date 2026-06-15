@@ -2474,6 +2474,17 @@ pub async fn build_reborn_runtime(
         turn_state: Arc::clone(&turn_state_store),
         thread_service: Arc::clone(&thread_service),
         thread_scope: thread_scope.clone(),
+        // Read landed attachment bytes back through the project workspace
+        // filesystem so the model port can build multimodal image parts for
+        // vision-capable models. Only available when a local runtime (and thus a
+        // workspace filesystem) is composed.
+        attachment_read_port: local_runtime.map(|rt| {
+            Arc::new(
+                crate::attachment_landing::ProjectScopedAttachmentReader::new(Arc::clone(
+                    &rt.workspace_filesystem,
+                )),
+            ) as Arc<dyn ironclaw_loop_support::LoopAttachmentReadPort>
+        }),
         model_gateway: Arc::clone(&model_gateway),
         checkpoint_state_store: Arc::clone(&checkpoint_state_store)
             as Arc<dyn ironclaw_turns::CheckpointStateStore>,
