@@ -584,9 +584,9 @@ material is reachable from inside the sandbox.
 
 ## Phase 3 Addendum — Selective TLS-MITM Credential-Injection Lane (opt-in)
 
-> **Provenance.** Council-accepted companion design (Opus 4.8 + GPT-5.5 XHigh, both
-> `ACCEPT_WITH_NONBLOCKING_NOTES`, no blockers). Stand-alone copy:
-> `docs/plans/2026-06-14-reborn-sandbox-mitm-injection-lane.md`.
+> **Provenance.** Council-accepted design (Opus 4.8 + GPT-5.5 XHigh design council,
+> both `ACCEPT_WITH_NONBLOCKING_NOTES`, no blockers). Extends Phase 3 above; ships
+> disabled by default and is enabled per-deployment for specific inject-hosts.
 
 Phase 3 ships the egress broker **credential-free, CONNECT-only**. But cookie-gated
 tools — the motivating case is the Agent-Reach social CLIs (`twitter-cli`,
