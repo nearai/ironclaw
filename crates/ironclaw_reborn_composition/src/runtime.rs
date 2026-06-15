@@ -376,6 +376,7 @@ pub struct RebornRuntime {
     worker_handle: JoinHandle<()>,
     worker_cancel: CancellationToken,
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
+    trace_flush_worker: crate::trace_capture::TraceQueueFlushWorkerHandle,
     /// Late-binding slot shared with the poller's `PostSubmitHookWrappedSubmitter`.
     /// `set_trigger_post_submit_hook` fills this after `build_reborn_runtime` returns.
     /// `None` when the trigger poller is not enabled.
@@ -1541,6 +1542,7 @@ impl RebornRuntime {
                 .shutdown(TRIGGER_POLLER_SHUTDOWN_TIMEOUT)
                 .await;
         }
+        self.trace_flush_worker.shutdown().await;
         self.worker_cancel.cancel();
         if let Some(projection) = self.budget_event_projection {
             projection.shutdown().await;
@@ -2460,6 +2462,28 @@ pub async fn build_reborn_runtime(
         None
     };
 
+    // Autonomous Trace Commons capture: a best-effort lifecycle sink mirrors
+    // the v1 binary's turn-end capture. Policy-gated per user scope — the
+    // sink is inert (one policy-file read per turn) until a scope enrolls
+    // via `builtin.trace_commons.onboard` or `traces opt-in`.
+    // Seed with the runtime owner's TENANT-SCOPED key (matching how capture
+    // keys state), so startup pending-queue discovery finds the owner's queued
+    // traces — a bare owner id would miss the `trace_scope_key(tenant, owner)`
+    // queue dir.
+    let runtime_owner_trace_scope = ironclaw_reborn_traces::contribution::trace_scope_key(
+        thread_scope.tenant_id.as_str(),
+        actor_user_id.as_str(),
+    );
+    let trace_capture_scopes: crate::trace_capture::ObservedTraceScopes =
+        Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::from([
+            runtime_owner_trace_scope,
+        ])));
+    let trace_capture_sink: Arc<dyn ironclaw_turns::TurnEventSink> =
+        Arc::new(crate::trace_capture::TraceCaptureTurnEventSink::new(
+            Arc::clone(&thread_service),
+            Arc::clone(&trace_capture_scopes),
+        ));
+
     let communication_context_provider: Option<
         Arc<dyn ironclaw_turns::run_profile::CommunicationContextProvider>,
     > = local_runtime.map(|local_runtime| {
@@ -2536,7 +2560,7 @@ pub async fn build_reborn_runtime(
         model_budget_accountant,
         safety_context: None,
         hook_security_audit_sink: Some(Arc::new(ironclaw_events::TracingSecurityAuditSink)),
-        turn_event_sink: None,
+        turn_event_sink: Some(trace_capture_sink),
         hook_dispatcher_builder_factory,
         communication_context_provider,
     };
@@ -2727,6 +2751,8 @@ pub async fn build_reborn_runtime(
     let worker_handle = tokio::spawn(async move {
         worker.run(worker_cancel_clone).await;
     });
+    let trace_flush_worker =
+        crate::trace_capture::spawn_trace_queue_flush_worker(trace_capture_scopes);
     services.readiness.workers.turn_runner = true;
     services.readiness.workers.trigger_poller = trigger_poller_handle.is_some();
     let turn_coordinator = planned_turn_coordinator;
@@ -2759,6 +2785,7 @@ pub async fn build_reborn_runtime(
         worker_handle,
         worker_cancel,
         trigger_poller_handle,
+        trace_flush_worker,
         #[cfg(feature = "slack-v2-host-beta")]
         post_submit_hook_slot: runtime_post_submit_hook_slot,
         #[cfg(any(test, feature = "test-support"))]
@@ -5186,6 +5213,124 @@ mod tests {
         assert_eq!(recorded_request_count(&requests), 1);
 
         runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    /// End-to-end Trace Commons auto-capture: a real runtime turn through
+    /// `send_user_message` must, for an enrolled owner scope, land a redacted
+    /// envelope in that scope's submission queue without any manual trace
+    /// command. This drives the full chain: turn completion → lifecycle bus →
+    /// best-effort capture sink → thread-history read → redact/score →
+    /// eligibility → queue (+ immediate flush attempt, which fails locally
+    /// against the closed loopback endpoint and must leave the entry queued).
+    #[tokio::test]
+    async fn send_user_message_auto_queues_trace_for_enrolled_scope() {
+        use ironclaw_reborn_traces::contribution as trace_contribution;
+
+        let owner = format!("runtime-trace-capture-owner-{}", uuid::Uuid::new_v4());
+        // Trace state is keyed by the tenant-scoped composite, so enroll (and
+        // later read the queue) under `trace_scope_key(tenant, owner)`, not the
+        // bare owner id.
+        let scope = trace_contribution::trace_scope_key("runtime-trace-capture-tenant", &owner);
+        let policy = trace_contribution::StandingTraceContributionPolicy {
+            enabled: true,
+            // Closed loopback port: the immediate flush fails fast and
+            // locally; no traffic leaves the machine.
+            ingestion_endpoint: Some("https://127.0.0.1:1/v1/traces".to_string()),
+            min_submission_score: 0.0,
+            require_manual_approval_when_pii_detected: false,
+            auto_submit_high_value_traces: true,
+            ..trace_contribution::StandingTraceContributionPolicy::default()
+        };
+        trace_contribution::write_trace_policy_for_scope(Some(&scope), &policy)
+            .expect("write trace policy");
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "auto capture reply".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(&owner, root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-trace-capture-tenant".to_string(),
+            agent_id: "runtime-trace-capture-agent".to_string(),
+            source_binding_id: "runtime-trace-capture-source".to_string(),
+            reply_target_binding_id: "runtime-trace-capture-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: RUNTIME_SEND_TIMEOUT,
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            RUNTIME_SEND_TIMEOUT,
+            runtime.send_user_message(&conversation, "capture this turn"),
+        )
+        .await
+        .expect("runtime send should finish")
+        .expect("runtime send should succeed");
+        assert_eq!(reply.status, TurnStatus::Completed);
+
+        // The capture task is detached from the lifecycle path; poll briefly.
+        let queue_dir =
+            trace_contribution::trace_contribution_dir_for_scope(Some(&scope)).join("queue");
+        let queued = |dir: &std::path::Path| -> Vec<std::path::PathBuf> {
+            match std::fs::read_dir(dir) {
+                Ok(entries) => entries
+                    .map(|entry| {
+                        // Fail loud on a per-entry IO error too, so the test
+                        // can't silently drop a broken entry and still claim the
+                        // queue holds exactly one envelope.
+                        entry
+                            .unwrap_or_else(|error| {
+                                panic!(
+                                    "failed to read a trace queue entry in {}: {error}",
+                                    dir.display()
+                                )
+                            })
+                            .path()
+                    })
+                    .filter(|path| {
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| {
+                                name.ends_with(".json") && !name.ends_with(".held.json")
+                            })
+                    })
+                    .collect(),
+                // The queue dir not existing yet is the expected pre-capture
+                // state; any other IO error is a real failure the test must not
+                // mask as "no queued traces".
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                Err(error) => panic!("failed to read trace queue dir {}: {error}", dir.display()),
+            }
+        };
+        let mut entries = Vec::new();
+        for _ in 0..150 {
+            entries = queued(&queue_dir);
+            if !entries.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            entries.len(),
+            1,
+            "a completed turn for an enrolled scope must auto-queue one trace envelope"
+        );
+        let body = std::fs::read_to_string(&entries[0]).expect("queued envelope readable");
+        let envelope: serde_json::Value = serde_json::from_str(&body).expect("envelope is JSON");
+        assert_eq!(envelope["outcome"]["task_success"], "success");
+
+        runtime.shutdown().await.expect("runtime shutdown");
+        let _ = std::fs::remove_dir_all(trace_contribution::trace_contribution_dir_for_scope(
+            Some(&scope),
+        ));
     }
 
     /// Regression guard: `send_user_message` must persist a

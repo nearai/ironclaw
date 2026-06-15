@@ -54,9 +54,11 @@ use ironclaw_host_runtime::{
     RuntimeCapabilityResumeRequest, RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
     RuntimeCredentialAccountResolver, RuntimeStatusRequest, SHELL_CAPABILITY_ID,
     SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
-    SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind, TIME_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID,
-    TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
-    VisibleCapabilityRequest as RuntimeVisibleCapabilityRequest,
+    SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind, TIME_CAPABILITY_ID,
+    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
+    TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, VisibleCapabilityRequest as RuntimeVisibleCapabilityRequest,
     VisibleCapabilitySurface as RuntimeVisibleCapabilitySurface, WRITE_FILE_CAPABILITY_ID,
     builtin_first_party_handlers, builtin_first_party_package,
 };
@@ -571,6 +573,20 @@ impl RebornBinaryE2EHarness {
     ) -> HarnessResult<Self> {
         let host_runtime =
             Arc::new(HostRuntimeCapabilityHarness::trigger_management_tools().await?);
+        Self::with_model_gateway_capability_mode(
+            conversation_id,
+            model_gateway,
+            HarnessCapabilityMode::HostRuntime(host_runtime),
+            false,
+        )
+        .await
+    }
+
+    pub async fn with_host_runtime_trace_commons_capabilities(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+    ) -> HarnessResult<Self> {
+        let host_runtime = Arc::new(HostRuntimeCapabilityHarness::trace_commons_tools().await?);
         Self::with_model_gateway_capability_mode(
             conversation_id,
             model_gateway,
@@ -1683,6 +1699,49 @@ impl HostRuntimeCapabilityHarness {
             ),
         )
         .await
+    }
+
+    async fn trace_commons_tools() -> HarnessResult<Self> {
+        let mut harness = Self::new_with_options(
+            "reborn-e2e-trace-commons-tools",
+            vec![
+                CapabilityId::new(TRACE_COMMONS_ONBOARD_CAPABILITY_ID)?,
+                CapabilityId::new(TRACE_COMMONS_STATUS_CAPABILITY_ID)?,
+                CapabilityId::new(TRACE_COMMONS_CREDITS_CAPABILITY_ID)?,
+                CapabilityId::new(TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID)?,
+                CapabilityId::new(TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID)?,
+            ],
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                // onboard persists device-key material (Ed25519 keypair +
+                // policy.json) and profile_token writes profile_token.jwt, so
+                // the harness allow-set must grant WriteFilesystem or those
+                // capabilities are filtered out of the model-visible surface.
+                EffectKind::WriteFilesystem,
+                EffectKind::Network,
+                EffectKind::ExternalWrite,
+            ],
+            Vec::new(),
+            ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            UserId::new("reborn-e2e-trace-commons-user")?,
+            // The Trace Commons write/network capabilities are
+            // PermissionMode::Ask (onboard, profile_token, profile_set) — like
+            // the skill/trigger harnesses, the yolo runtime policy
+            // auto-approves them so the scripted run is not gated.
+            HostRuntimeHarnessOptions::new(
+                MountView::default(),
+                Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
+                    true,
+                )?),
+            ),
+        )
+        .await?;
+        // onboard declares EffectKind::Network, so the lease must carry a
+        // non-empty network policy or the obligation check rejects dispatch
+        // before the consent gate runs.
+        harness.network_policy = http_test_policy();
+        Ok(harness)
     }
 
     async fn new(
