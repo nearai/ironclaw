@@ -404,6 +404,7 @@ registerPack("ko", {
   "channels.cliDesc": "TUI 또는 간단한 REPL이 있는 터미널 인터페이스",
   "channels.repl": "REPL",
   "channels.replDesc": "테스트를 위한 간단한 읽기-실행-출력 루프",
+  "channels.slack": "Slack",
   "channels.slackDesc": "DM 및 앱 멘션을 위한 테넌트 앱 채널",
   "channels.slackDetail": "테넌트 Slack 앱 설치",
   "channels.statusOn": "켜짐",

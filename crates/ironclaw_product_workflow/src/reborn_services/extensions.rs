@@ -523,6 +523,39 @@ mod tests {
         assert_eq!(entry.kind, "channel");
     }
 
+    #[test]
+    fn non_channel_extension_keeps_runtime_wire_kind() {
+        // wasm_tool runtime with no channel surface → "wasm_tool"
+        let mut wasm_summary = summary_with_onboarding();
+        wasm_summary.runtime_kind = LifecycleExtensionRuntimeKind::WasmTool;
+        wasm_summary.surface_kinds = Vec::new();
+        assert_eq!(
+            extension_kind(&wasm_summary),
+            "wasm_tool",
+            "WasmTool with empty surface_kinds must wire as wasm_tool"
+        );
+
+        // mcp_server runtime with no channel surface → "mcp_server"
+        let mut mcp_summary = summary_with_onboarding();
+        mcp_summary.runtime_kind = LifecycleExtensionRuntimeKind::McpServer;
+        mcp_summary.surface_kinds = Vec::new();
+        assert_eq!(
+            extension_kind(&mcp_summary),
+            "mcp_server",
+            "McpServer with empty surface_kinds must wire as mcp_server"
+        );
+
+        // channel surface overrides runtime kind → "channel"
+        let mut channel_summary = summary_with_onboarding();
+        channel_summary.runtime_kind = LifecycleExtensionRuntimeKind::WasmTool;
+        channel_summary.surface_kinds = vec![LifecycleExtensionSurfaceKind::ExternalChannel];
+        assert_eq!(
+            extension_kind(&channel_summary),
+            "channel",
+            "ExternalChannel surface must override runtime kind to channel"
+        );
+    }
+
     #[tokio::test]
     async fn list_projects_external_channel_surface_kind_through_extension_info() {
         let mut summary = summary_with_onboarding();

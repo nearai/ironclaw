@@ -404,6 +404,7 @@ registerPack("pt-BR", {
   "channels.cliDesc": "Interface de terminal com TUI ou REPL simples",
   "channels.repl": "REPL",
   "channels.replDesc": "Loop mínimo de leitura‑avaliação‑impressão",
+  "channels.slack": "Slack",
   "channels.slackDesc": "Canal de app do tenant para DMs e menções ao app",
   "channels.slackDetail": "Instalação do app Slack do tenant",
   "channels.statusOn": "ligado",

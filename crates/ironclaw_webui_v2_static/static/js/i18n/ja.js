@@ -404,6 +404,7 @@ registerPack("ja", {
   "channels.cliDesc": "TUI または簡易 REPL の端末インターフェース",
   "channels.repl": "REPL",
   "channels.replDesc": "テスト用の最小 read-eval-print ループ",
+  "channels.slack": "Slack",
   "channels.slackDesc": "DM とアプリメンション用のテナントアプリチャネル",
   "channels.slackDetail": "テナント Slack アプリのインストール",
   "channels.statusOn": "オン",

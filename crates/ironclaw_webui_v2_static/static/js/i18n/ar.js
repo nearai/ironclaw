@@ -404,6 +404,7 @@ registerPack("ar", {
   "channels.cliDesc": "واجهة طرفية مع TUI أو REPL بسيط",
   "channels.repl": "REPL",
   "channels.replDesc": "حلقة قراءة-تقييم-طباعة بسيطة للاختبار",
+  "channels.slack": "Slack",
   "channels.slackDesc": "قناة تطبيق المستأجر للرسائل المباشرة وإشارات التطبيق",
   "channels.slackDetail": "تثبيت تطبيق Slack للمستأجر",
   "channels.statusOn": "تشغيل",

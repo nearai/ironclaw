@@ -404,6 +404,7 @@ registerPack("uk", {
   "channels.cliDesc": "Термінальний інтерфейс із TUI або простим REPL",
   "channels.repl": "REPL",
   "channels.replDesc": "Мінімальний read-eval-print loop для тестування",
+  "channels.slack": "Slack",
   "channels.slackDesc": "Канал застосунку орендаря для особистих повідомлень і згадок",
   "channels.slackDetail": "Встановлення застосунку Slack орендаря",
   "channels.statusOn": "увімкнено",

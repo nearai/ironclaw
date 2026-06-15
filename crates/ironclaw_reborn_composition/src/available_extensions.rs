@@ -2111,6 +2111,69 @@ handle = "web_token"
         assert_eq!(catalog.search("slack").count(), 0);
     }
 
+    #[tokio::test]
+    async fn filesystem_manifest_external_channel_surface_kind_projects_to_lifecycle_surface() {
+        const MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "channel-ext"
+name = "Channel Ext"
+version = "0.1.0"
+description = "A filesystem-discovered external channel extension."
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "channel_ext_host"
+
+[[host_api]]
+id = "ironclaw.product_adapter/v1"
+section = "product_adapter.inbound"
+
+[product_adapter.inbound]
+surface_kind = "external_channel"
+
+[product_adapter.inbound.auth]
+kind = "request_signature"
+header_name = "X-Channel-Signature"
+timestamp_header_name = "X-Channel-Timestamp"
+
+[product_adapter.inbound.capabilities]
+flags = ["inbound_messages"]
+
+[[product_adapter.inbound.required_credentials]]
+handle = "channel_ext_token"
+
+[[product_adapter.inbound.egress]]
+host = "example.com"
+credential_handle = "channel_ext_token"
+"#;
+
+        let fs = InMemoryBackend::default();
+        fs.write_file(
+            &VirtualPath::new("/system/extensions/channel-ext/manifest.toml").unwrap(),
+            MANIFEST.as_bytes(),
+        )
+        .await
+        .unwrap();
+
+        let catalog = AvailableExtensionCatalog::from_filesystem_root(
+            &fs,
+            &VirtualPath::new("/system/extensions").unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let results = catalog.search("channel-ext").collect::<Vec<_>>();
+        assert_eq!(results.len(), 1, "filesystem manifest should be loaded");
+
+        let package = results.into_iter().next().unwrap();
+        assert_eq!(
+            package.summary().surface_kinds,
+            vec![LifecycleExtensionSurfaceKind::ExternalChannel],
+            "filesystem-loaded external_channel manifest must project ExternalChannel surface kind"
+        );
+    }
+
     #[derive(Default)]
     struct FailingWriteFilesystem {
         state: Arc<Mutex<FailingWriteState>>,

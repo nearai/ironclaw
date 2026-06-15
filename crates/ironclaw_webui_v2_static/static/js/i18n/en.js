@@ -420,6 +420,7 @@ registerPack("en", {
   "channels.cliDesc": "Terminal interface with TUI or simple REPL",
   "channels.repl": "REPL",
   "channels.replDesc": "Minimal read-eval-print loop for testing",
+  "channels.slack": "Slack",
   "channels.slackDesc": "Tenant app channel for DMs and app mentions",
   "channels.slackDetail": "Tenant Slack app install",
   "channels.statusOn": "on",

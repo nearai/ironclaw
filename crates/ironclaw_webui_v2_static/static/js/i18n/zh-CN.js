@@ -404,6 +404,7 @@ registerPack("zh-CN", {
   "channels.cliDesc": "带 TUI 或简单 REPL 的终端界面",
   "channels.repl": "REPL",
   "channels.replDesc": "用于测试的简易读取-执行-打印循环",
+  "channels.slack": "Slack",
   "channels.slackDesc": "用于私信和应用提及的租户应用频道",
   "channels.slackDetail": "租户 Slack 应用安装",
   "channels.statusOn": "开",

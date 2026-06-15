@@ -404,6 +404,7 @@ registerPack("hi", {
   "channels.cliDesc": "TUI या simple REPL के साथ terminal interface",
   "channels.repl": "REPL",
   "channels.replDesc": "Testing के लिए minimal read-eval-print loop",
+  "channels.slack": "Slack",
   "channels.slackDesc": "DM और ऐप मेंशन के लिए टेनेंट ऐप चैनल",
   "channels.slackDetail": "टेनेंट Slack ऐप इंस्टॉल",
   "channels.statusOn": "on",
