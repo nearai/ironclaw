@@ -2,7 +2,7 @@ use std::{
     collections::VecDeque,
     sync::{
         Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -45,10 +45,7 @@ use ironclaw_turns::{
     },
 };
 
-fn run_request(
-    driver: &PlannedDriver,
-    host: &MockAgentLoopDriverHost,
-) -> AgentLoopDriverRunRequest {
+fn run_request(driver: &PlannedDriver, host: &impl LoopRunInfoPort) -> AgentLoopDriverRunRequest {
     let mut profile = host.run_context().resolved_run_profile.clone();
     let descriptor = driver.descriptor();
     profile.loop_driver = descriptor.clone();
@@ -616,7 +613,7 @@ async fn planned_driver_resume_approval_backend_failure_surfaces_as_tool_error_n
 
     // Run phase: model calls "demo.echo", batch returns ApprovalRequired with
     // approval_resume populated.  Driver suspends with LoopExit::Blocked.
-    let run_req = capable_resume_run_request(&driver, &context);
+    let run_req = run_request(&driver, &host);
     let exit = driver
         .run(run_req, &host)
         .await
@@ -652,6 +649,39 @@ async fn planned_driver_resume_approval_backend_failure_surfaces_as_tool_error_n
         0,
         "invoke_capability must NOT be called after resume-origin Backend failure (PR #4899 fix)"
     );
+
+    // --- Strengthened assertions (Codex P2 review) ---
+    // These ensure the test cannot false-green when the resume batch is skipped.
+
+    // (a) The resume-phase batch must have been invoked: total batch calls == 2
+    //     (one in run phase for ApprovalRequired, one in resume phase for Backend failure).
+    //     If checkpoint/resume regressed and the executor skipped invoke_capability_batch
+    //     during resume, this count would be 1, failing the test.
+    assert_eq!(
+        host.batch_call_count(),
+        2,
+        "invoke_capability_batch must be called exactly twice: once in run (ApprovalRequired) \
+         and once in resume (Backend failure); a count of 1 means the resume batch was skipped"
+    );
+
+    // (b) The resume batch must have carried approval_resume: Some(...) on its invocation.
+    //     This confirms the checkpoint's pending_approval_resume was correctly threaded
+    //     through to the re-dispatch.  If approval_resume were stripped (None), the
+    //     is_resume_origin guard would not fire and the PR #4899 fix would not apply.
+    assert!(
+        host.resume_batch_had_approval_resume(),
+        "the resume-phase batch must carry approval_resume: Some(...) so the Backend failure \
+         is intercepted by the is_resume_origin guard (PR #4899 fix path)"
+    );
+
+    // (c) Both scripted batch outcomes must be consumed.
+    //     A non-empty queue means the resume batch was never called and the scripted
+    //     Failed(Backend) outcome was never delivered, so the test exercised nothing.
+    assert!(
+        host.scripted_batch_outcomes_fully_consumed(),
+        "all scripted batch outcomes must be consumed: a leftover outcome means the resume \
+         invoke_capability_batch call was skipped and the Backend failure path was not exercised"
+    );
 }
 
 /// A host that drives the approval-resume → Backend-failure scenario.
@@ -680,6 +710,12 @@ struct CapableResumeHost {
     committed_payloads: Mutex<Vec<(TurnCheckpointId, Vec<u8>, LoopCheckpointKind)>>,
     /// Tracks calls to `invoke_capability` (single-call retry path).
     single_retry_calls: AtomicUsize,
+    /// Counts how many times `invoke_capability_batch` was called (both phases).
+    batch_call_count: AtomicUsize,
+    /// Set to true when any `invoke_capability_batch` call contained an invocation
+    /// with `approval_resume: Some(...)`.  This confirms the resume-origin path was
+    /// exercised and the checkpoint payload was correctly threaded through.
+    resume_batch_had_approval_resume: AtomicBool,
 }
 
 impl CapableResumeHost {
@@ -740,38 +776,36 @@ impl CapableResumeHost {
             pending_payload: Mutex::new(None),
             committed_payloads: Mutex::new(Vec::new()),
             single_retry_calls: AtomicUsize::new(0),
+            batch_call_count: AtomicUsize::new(0),
+            resume_batch_had_approval_resume: AtomicBool::new(false),
         }
     }
 
     fn single_retry_call_count(&self) -> usize {
         self.single_retry_calls.load(Ordering::SeqCst)
     }
+
+    /// Total number of times `invoke_capability_batch` was called across both phases.
+    fn batch_call_count(&self) -> usize {
+        self.batch_call_count.load(Ordering::SeqCst)
+    }
+
+    /// Whether any batch call carried `approval_resume: Some(...)` on its invocations.
+    /// True iff the resume path actually threaded the approval context through.
+    fn resume_batch_had_approval_resume(&self) -> bool {
+        self.resume_batch_had_approval_resume.load(Ordering::SeqCst)
+    }
+
+    /// Whether the scripted `batch_outcomes` queue was fully drained (all scripted
+    /// outcomes consumed).  A leftover outcome means the resume batch was never called.
+    fn scripted_batch_outcomes_fully_consumed(&self) -> bool {
+        self.batch_outcomes.lock().unwrap().is_empty()
+    }
 }
 
 /// Build an `AgentLoopDriverRunRequest` from a `CapableResumeHost` context,
 /// mirroring the logic of the `run_request` helper but without requiring a
 /// `MockAgentLoopDriverHost`.
-fn capable_resume_run_request(
-    driver: &PlannedDriver,
-    context: &LoopRunContext,
-) -> AgentLoopDriverRunRequest {
-    let mut profile = context.resolved_run_profile.clone();
-    let descriptor = driver.descriptor();
-    profile.loop_driver = descriptor.clone();
-    profile.checkpoint_schema_id = descriptor
-        .checkpoint_schema_id
-        .clone()
-        .expect("planned driver descriptor should carry checkpoint schema");
-    profile.checkpoint_schema_version = descriptor
-        .checkpoint_schema_version
-        .expect("planned driver descriptor should carry checkpoint version");
-    AgentLoopDriverRunRequest {
-        turn_id: context.turn_id,
-        run_id: context.run_id,
-        resolved_run_profile: profile,
-    }
-}
-
 fn capable_resume_call() -> ironclaw_turns::run_profile::CapabilityCallCandidate {
     use ironclaw_turns::run_profile::{CapabilityCallCandidate, CapabilitySurfaceVersion};
     CapabilityCallCandidate {
@@ -909,6 +943,20 @@ impl LoopCapabilityPort for CapableResumeHost {
         &self,
         request: CapabilityBatchInvocation,
     ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        self.batch_call_count.fetch_add(1, Ordering::SeqCst);
+
+        // Record whether any invocation in this batch carries approval_resume.
+        // This is set on the resume-phase batch, confirming the checkpoint's
+        // pending_approval_resume was threaded through to the re-dispatch.
+        if request
+            .invocations
+            .iter()
+            .any(|inv| inv.approval_resume.is_some())
+        {
+            self.resume_batch_had_approval_resume
+                .store(true, Ordering::SeqCst);
+        }
+
         let outcomes = self
             .batch_outcomes
             .lock()
