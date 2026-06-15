@@ -1,6 +1,9 @@
 use std::{
     collections::VecDeque,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use chrono::Utc;
@@ -11,6 +14,9 @@ use ironclaw_agent_loop::{
         test_run_context,
     },
 };
+use ironclaw_host_api::{
+    ApprovalRequestId, CapabilityId, CorrelationId, ResourceEstimate, RuntimeKind,
+};
 use ironclaw_reborn::app_loop_family::build_loop_family_registry;
 use ironclaw_reborn::planned_driver::PlannedDriver;
 use ironclaw_reborn::planned_driver_factory::{
@@ -18,19 +24,22 @@ use ironclaw_reborn::planned_driver_factory::{
 };
 use ironclaw_turns::{
     AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, LoopCancelledReasonKind, LoopExit,
-    LoopMessageRef, TurnCheckpointId,
+    LoopGateRef, LoopMessageRef, RedactedCheckpointPayload, TurnCheckpointId,
     run_profile::{
         AgentLoopDriver, AgentLoopDriverError, AgentLoopHostError, AgentLoopHostErrorKind,
-        AppendCapabilityResultRef, BeginAssistantDraft, CapabilityBatchInvocation,
-        CapabilityBatchOutcome, CapabilityInvocation, CapabilityOutcome, FinalizeAssistantMessage,
-        LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCancelReasonKind,
-        LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort,
+        AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityApprovalResume,
+        CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityFailure,
+        CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
+        CapabilityResumeToken, FinalizeAssistantMessage, LoadCheckpointPayloadRequest,
+        LoadedCheckpointPayload, LoopCancelReasonKind, LoopCancellationPort,
+        LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort,
         LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome,
         LoopCompactionPort, LoopCompactionRequest, LoopContextBundle, LoopContextPort,
         LoopContextRequest, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
-        LoopInputPort, LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent,
-        LoopProgressPort, LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort,
-        LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, RunProfileResolver,
+        LoopInputPort, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
+        LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleRef,
+        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
+        LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput, RunProfileResolver,
         StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
         VisibleCapabilitySurface,
     },
@@ -569,6 +578,470 @@ impl LoopCompactionPort for ForbiddenResumeHost {
 
 #[async_trait::async_trait]
 impl LoopCancellationPort for ForbiddenResumeHost {
+    fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
+        None
+    }
+
+    async fn cancellation_requested(&self) -> LoopCancellationSignal {
+        std::future::pending().await
+    }
+}
+
+/// Regression test for PR #4899: a resume-origin Backend failure must surface
+/// as a model-visible tool error rather than triggering a scope_mismatch /
+/// terminal `HostUnavailable` run death.
+///
+/// Before the fix, `handle_capability_error` returned `RecoveryOutcome::Retry`
+/// for a `Backend` failure and called `capability_invocation_from_candidate(call, None)`,
+/// dropping the resume context and causing scope_mismatch.  After the fix, the
+/// `is_resume_origin` guard intercepts the retry and surfaces the error as a
+/// `ToolErrorResult` so the model can re-approve.
+///
+/// Flow:
+///   1. `run()`: model returns a call to "demo.echo" → batch returns
+///      `ApprovalRequired { approval_resume: Some(...) }` → driver writes
+///      `BeforeBlock` checkpoint, exits `LoopExit::Blocked`.
+///   2. `resume()`: driver loads checkpoint (state has `pending_approval_resume`)
+///      → executor re-dispatches batch → batch returns
+///      `Failed { error_kind: Backend }` → fix intercepts retry, surfaces as
+///      tool error → model returns reply → `LoopExit::Completed`.
+///   3. Assert `invoke_capability` (single-call retry) was NOT called — the fix
+///      must NOT reach the re-dispatch path.
+#[tokio::test]
+async fn planned_driver_resume_approval_backend_failure_surfaces_as_tool_error_not_retry() {
+    let registry = build_loop_family_registry().expect("registry should build");
+    let driver = PlannedDriver::default_from_registry(&registry).expect("driver should build");
+    let context = run_context_for_driver(&driver);
+    let host = CapableResumeHost::new(context.clone());
+
+    // Run phase: model calls "demo.echo", batch returns ApprovalRequired with
+    // approval_resume populated.  Driver suspends with LoopExit::Blocked.
+    let run_req = capable_resume_run_request(&driver, &context);
+    let exit = driver
+        .run(run_req, &host)
+        .await
+        .expect("run should produce a loop exit");
+
+    let blocked = match exit {
+        LoopExit::Blocked(blocked) => blocked,
+        other => panic!("expected blocked exit from approval gate, got {other:?}"),
+    };
+    assert_eq!(blocked.kind, ironclaw_turns::LoopBlockedKind::Approval);
+    let checkpoint_id = blocked.checkpoint_id;
+
+    assert_eq!(
+        host.single_retry_call_count(),
+        0,
+        "invoke_capability must not be called during the run phase"
+    );
+
+    // Resume phase: driver loads checkpoint, executor sees pending_approval_resume,
+    // re-dispatches batch which returns Backend failure.  The fix surfaces it as a
+    // tool error, model returns a reply, loop completes.
+    let exit = driver
+        .resume(resume_request(&context, checkpoint_id), &host)
+        .await
+        .expect("resume should produce a loop exit");
+
+    assert!(
+        matches!(exit, LoopExit::Completed(_)),
+        "after Backend surface-and-continue, model reply should complete the loop; got {exit:?}"
+    );
+    assert_eq!(
+        host.single_retry_call_count(),
+        0,
+        "invoke_capability must NOT be called after resume-origin Backend failure (PR #4899 fix)"
+    );
+}
+
+/// A host that drives the approval-resume → Backend-failure scenario.
+///
+/// Phase 1 (run):
+///   - `stream_model` → one capability call to "demo.echo"
+///   - `invoke_capability_batch` → `ApprovalRequired { approval_resume: Some(...) }`
+///   - `stage_checkpoint_payload` + `checkpoint` → stores payload, returns ID
+///
+/// Phase 2 (resume):
+///   - `load_checkpoint_payload` → returns stored payload
+///   - `invoke_capability_batch` → `Failed { error_kind: Backend }`
+///   - `stream_model` → assistant reply (model sees the surfaced tool error)
+///
+/// `invoke_capability` must never be called in either phase (tracked separately).
+struct CapableResumeHost {
+    context: LoopRunContext,
+    /// Scripted model responses (pop_front each call).
+    model_responses: Mutex<VecDeque<LoopModelResponse>>,
+    /// Scripted batch outcomes (pop_front each call).
+    batch_outcomes: Mutex<VecDeque<Vec<CapabilityOutcome>>>,
+    /// Stores (payload_bytes, kind) staged between stage_checkpoint_payload and
+    /// checkpoint().  We only need to handle one pending payload at a time.
+    pending_payload: Mutex<Option<(Vec<u8>, LoopCheckpointKind)>>,
+    /// Stores the committed (checkpoint_id → (bytes, kind)) mapping.
+    committed_payloads: Mutex<Vec<(TurnCheckpointId, Vec<u8>, LoopCheckpointKind)>>,
+    /// Tracks calls to `invoke_capability` (single-call retry path).
+    single_retry_calls: AtomicUsize,
+}
+
+impl CapableResumeHost {
+    fn new(context: LoopRunContext) -> Self {
+        // Phase 1 model response: one capability call.
+        let phase1_model = LoopModelResponse {
+            chunks: vec![ModelStreamChunk {
+                safe_text_delta: String::new(),
+            }],
+            safe_reasoning_deltas: Vec::new(),
+            output: ParentLoopOutput::CapabilityCalls(vec![capable_resume_call()]),
+            effective_model_profile_id: ironclaw_turns::run_profile::ModelProfileId::new("model")
+                .unwrap(),
+            usage: None,
+        };
+        // Phase 2 model response: plain assistant reply (after the error is surfaced).
+        let phase2_model = LoopModelResponse {
+            chunks: vec![ModelStreamChunk {
+                safe_text_delta: String::new(),
+            }],
+            safe_reasoning_deltas: Vec::new(),
+            output: ParentLoopOutput::AssistantReply(AssistantReply {
+                content: "error noted, please re-approve".to_string(),
+            }),
+            effective_model_profile_id: ironclaw_turns::run_profile::ModelProfileId::new("model")
+                .unwrap(),
+            usage: None,
+        };
+
+        // Phase 1 batch outcome: ApprovalRequired with approval_resume.
+        let approval_request_id = ApprovalRequestId::new();
+        let resume_token = CapabilityResumeToken::new("resume-token:demo-echo").unwrap();
+        let correlation_id = CorrelationId::new();
+        let input_ref = CapabilityInputRef::new("input:demo-echo").expect("valid input ref");
+        let phase1_batch = vec![CapabilityOutcome::ApprovalRequired {
+            gate_ref: LoopGateRef::new("gate:demo-echo-approval").unwrap(),
+            safe_summary: "approval required for demo.echo".to_string(),
+            approval_resume: Some(CapabilityApprovalResume {
+                approval_request_id,
+                resume_token,
+                correlation_id,
+                input_ref,
+                input: serde_json::json!({"message": "hello"}),
+                estimate: ResourceEstimate::default(),
+            }),
+        }];
+        // Phase 2 batch outcome: Backend failure (triggers the PR #4899 fix path).
+        let phase2_batch = vec![CapabilityOutcome::Failed(CapabilityFailure {
+            error_kind: CapabilityFailureKind::Backend,
+            safe_summary: "backend unavailable during resume".to_string(),
+            detail: None,
+        })];
+
+        Self {
+            context,
+            model_responses: Mutex::new(VecDeque::from([phase1_model, phase2_model])),
+            batch_outcomes: Mutex::new(VecDeque::from([phase1_batch, phase2_batch])),
+            pending_payload: Mutex::new(None),
+            committed_payloads: Mutex::new(Vec::new()),
+            single_retry_calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn single_retry_call_count(&self) -> usize {
+        self.single_retry_calls.load(Ordering::SeqCst)
+    }
+}
+
+/// Build an `AgentLoopDriverRunRequest` from a `CapableResumeHost` context,
+/// mirroring the logic of the `run_request` helper but without requiring a
+/// `MockAgentLoopDriverHost`.
+fn capable_resume_run_request(
+    driver: &PlannedDriver,
+    context: &LoopRunContext,
+) -> AgentLoopDriverRunRequest {
+    let mut profile = context.resolved_run_profile.clone();
+    let descriptor = driver.descriptor();
+    profile.loop_driver = descriptor.clone();
+    profile.checkpoint_schema_id = descriptor
+        .checkpoint_schema_id
+        .clone()
+        .expect("planned driver descriptor should carry checkpoint schema");
+    profile.checkpoint_schema_version = descriptor
+        .checkpoint_schema_version
+        .expect("planned driver descriptor should carry checkpoint version");
+    AgentLoopDriverRunRequest {
+        turn_id: context.turn_id,
+        run_id: context.run_id,
+        resolved_run_profile: profile,
+    }
+}
+
+fn capable_resume_call() -> ironclaw_turns::run_profile::CapabilityCallCandidate {
+    use ironclaw_turns::run_profile::{CapabilityCallCandidate, CapabilitySurfaceVersion};
+    CapabilityCallCandidate {
+        surface_version: CapabilitySurfaceVersion::new("surface:v1").unwrap(),
+        capability_id: CapabilityId::new("demo.echo").unwrap(),
+        input_ref: CapabilityInputRef::new("input:demo-echo").unwrap(),
+        effective_capability_ids: vec![CapabilityId::new("demo.echo").unwrap()],
+        provider_replay: None,
+    }
+}
+
+impl LoopRunInfoPort for CapableResumeHost {
+    fn run_context(&self) -> &LoopRunContext {
+        &self.context
+    }
+}
+
+#[async_trait::async_trait]
+impl LoopContextPort for CapableResumeHost {
+    async fn load_loop_context(
+        &self,
+        _request: LoopContextRequest,
+    ) -> Result<LoopContextBundle, AgentLoopHostError> {
+        Ok(LoopContextBundle {
+            identity_messages: Vec::new(),
+            messages: Vec::new(),
+            compaction_message_index: Vec::new(),
+            instruction_snippets: Vec::new(),
+            memory_snippets: Vec::new(),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl LoopPromptPort for CapableResumeHost {
+    async fn build_prompt_bundle(
+        &self,
+        _request: LoopPromptBundleRequest,
+    ) -> Result<LoopPromptBundle, AgentLoopHostError> {
+        let bundle_ref = LoopPromptBundleRef::for_run(&self.context, "bundle")
+            .map_err(|e| AgentLoopHostError::new(AgentLoopHostErrorKind::Internal, e))?;
+        Ok(LoopPromptBundle {
+            bundle_ref,
+            messages: vec![LoopModelMessage {
+                role: "user".to_string(),
+                content_ref: LoopMessageRef::new("msg:user").unwrap(),
+            }],
+            surface_version: Some(
+                ironclaw_turns::run_profile::CapabilitySurfaceVersion::new("surface:v1").unwrap(),
+            ),
+            compaction_message_index: Vec::new(),
+            instruction_fingerprint: None,
+            identity_message_count: 0,
+            instruction_snippet_count: 0,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl LoopInputPort for CapableResumeHost {
+    async fn poll_inputs(
+        &self,
+        after: LoopInputCursor,
+        _limit: usize,
+    ) -> Result<LoopInputBatch, AgentLoopHostError> {
+        Ok(LoopInputBatch {
+            inputs: Vec::new(),
+            input_acks: Vec::new(),
+            next_cursor: after,
+        })
+    }
+
+    async fn ack_inputs(&self, _tokens: Vec<LoopInputAckToken>) -> Result<(), AgentLoopHostError> {
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl LoopModelPort for CapableResumeHost {
+    async fn stream_model(
+        &self,
+        _request: LoopModelRequest,
+    ) -> Result<LoopModelResponse, AgentLoopHostError> {
+        let response = self
+            .model_responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Internal,
+                    "model script exhausted in CapableResumeHost",
+                )
+            })?;
+        Ok(response)
+    }
+}
+
+#[async_trait::async_trait]
+impl LoopCapabilityPort for CapableResumeHost {
+    async fn visible_capabilities(
+        &self,
+        _request: VisibleCapabilityRequest,
+    ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+        use ironclaw_turns::run_profile::{
+            CapabilityDescriptorView, CapabilitySurfaceVersion, ConcurrencyHint,
+        };
+        Ok(VisibleCapabilitySurface {
+            version: CapabilitySurfaceVersion::new("surface:v1").unwrap(),
+            descriptors: vec![CapabilityDescriptorView {
+                capability_id: CapabilityId::new("demo.echo").unwrap(),
+                provider: None,
+                runtime: RuntimeKind::FirstParty,
+                safe_name: "demo_echo".to_string(),
+                safe_description: "echo demo capability".to_string(),
+                concurrency_hint: ConcurrencyHint::Exclusive,
+                parameters_schema: serde_json::json!({"type": "object"}),
+            }],
+        })
+    }
+
+    async fn invoke_capability(
+        &self,
+        _request: CapabilityInvocation,
+    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        // This must NOT be called after a resume-origin Backend failure.
+        self.single_retry_calls.fetch_add(1, Ordering::SeqCst);
+        Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Internal,
+            "invoke_capability must not be called in the resume-origin Backend failure path",
+        ))
+    }
+
+    async fn invoke_capability_batch(
+        &self,
+        request: CapabilityBatchInvocation,
+    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        let outcomes = self
+            .batch_outcomes
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Internal,
+                    "batch script exhausted in CapableResumeHost",
+                )
+            })?;
+        let stopped_on_suspension = request.stop_on_first_suspension
+            && outcomes.iter().any(CapabilityOutcome::is_suspension);
+        Ok(CapabilityBatchOutcome {
+            outcomes,
+            stopped_on_suspension,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl LoopTranscriptPort for CapableResumeHost {
+    async fn begin_assistant_draft(
+        &self,
+        _request: BeginAssistantDraft,
+    ) -> Result<LoopMessageRef, AgentLoopHostError> {
+        Ok(LoopMessageRef::new("msg:draft").unwrap())
+    }
+
+    async fn update_assistant_draft(
+        &self,
+        _request: UpdateAssistantDraft,
+    ) -> Result<(), AgentLoopHostError> {
+        Ok(())
+    }
+
+    async fn finalize_assistant_message(
+        &self,
+        _request: FinalizeAssistantMessage,
+    ) -> Result<LoopMessageRef, AgentLoopHostError> {
+        Ok(LoopMessageRef::new("msg:assistant").unwrap())
+    }
+
+    async fn append_capability_result_ref(
+        &self,
+        _request: AppendCapabilityResultRef,
+    ) -> Result<LoopMessageRef, AgentLoopHostError> {
+        Ok(LoopMessageRef::new("msg:tool-result").unwrap())
+    }
+}
+
+#[async_trait::async_trait]
+impl LoopCheckpointPort for CapableResumeHost {
+    async fn checkpoint(
+        &self,
+        request: LoopCheckpointRequest,
+    ) -> Result<TurnCheckpointId, AgentLoopHostError> {
+        let id = TurnCheckpointId::new();
+        // Move the pending payload (staged by stage_checkpoint_payload) into the
+        // committed map, keyed by the new checkpoint ID.
+        let pending = self.pending_payload.lock().unwrap().take();
+        if let Some((bytes, _kind)) = pending {
+            self.committed_payloads
+                .lock()
+                .unwrap()
+                .push((id, bytes, request.kind));
+        }
+        Ok(id)
+    }
+
+    async fn stage_checkpoint_payload(
+        &self,
+        request: StageCheckpointPayloadRequest,
+    ) -> Result<LoopCheckpointStateRef, AgentLoopHostError> {
+        // Store the raw bytes with the kind so checkpoint() can commit them.
+        *self.pending_payload.lock().unwrap() = Some((request.payload, request.kind));
+        LoopCheckpointStateRef::for_run(&self.context, "state-payload")
+            .map_err(|e| AgentLoopHostError::new(AgentLoopHostErrorKind::Internal, e))
+    }
+
+    async fn load_checkpoint_payload(
+        &self,
+        request: LoadCheckpointPayloadRequest,
+    ) -> Result<LoadedCheckpointPayload, AgentLoopHostError> {
+        let committed = self.committed_payloads.lock().unwrap();
+        let (_, bytes, kind) = committed
+            .iter()
+            .find(|(id, _, _)| *id == request.checkpoint_id)
+            .ok_or_else(|| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Unavailable,
+                    format!(
+                        "checkpoint {} not found in CapableResumeHost",
+                        request.checkpoint_id.as_uuid()
+                    ),
+                )
+            })?;
+        let payload = RedactedCheckpointPayload::new(bytes.clone())
+            .map_err(|e| AgentLoopHostError::new(AgentLoopHostErrorKind::Internal, e))?;
+        Ok(LoadedCheckpointPayload {
+            kind: *kind,
+            schema_id: request.expected_schema_id.clone(),
+            schema_version: request.expected_schema_version,
+            payload,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl LoopProgressPort for CapableResumeHost {
+    async fn emit_loop_progress(
+        &self,
+        _event: LoopProgressEvent,
+    ) -> Result<(), AgentLoopHostError> {
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl LoopCompactionPort for CapableResumeHost {
+    async fn compact_loop_context(
+        &self,
+        _request: LoopCompactionRequest,
+    ) -> Result<LoopCompactionOutcome, LoopCompactionError> {
+        Err(LoopCompactionError::PersistenceFailed {
+            safe_summary: LoopSafeSummary::new("compaction not supported in test host")
+                .expect("valid"),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl LoopCancellationPort for CapableResumeHost {
     fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
         None
     }
