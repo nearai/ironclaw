@@ -203,12 +203,18 @@ function SkillsPage() {
   }, []);
 
   return (
-    <div className="space-y-6">
-      <div className="space-y-1">
-        <h2 className="text-lg font-semibold text-foreground">Skills</h2>
-        <p className="text-sm text-muted-foreground">
-          Manage installed skills and discover new ones from the catalog.
-        </p>
+    <div className="flex-1 overflow-y-auto">
+      <div className="space-y-6 p-6 max-w-5xl mx-auto">
+      <div className="flex items-center gap-3">
+        <div className="flex h-10 w-10 items-center justify-center rounded-full bg-primary/10">
+          <BookOpen className="h-5 w-5 text-primary" />
+        </div>
+        <div className="space-y-0.5">
+          <h1 className="text-lg font-semibold text-foreground">Skills</h1>
+          <p className="text-sm text-muted-foreground">
+            Manage installed skills and discover new ones from the catalog.
+          </p>
+        </div>
       </div>
 
       <Tabs defaultValue="installed">
@@ -464,5 +470,7 @@ function SkillsPage() {
         </DialogContent>
       </Dialog>
     </div>
+    </div>
   );
 }
+

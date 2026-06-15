@@ -1,5 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useApiClient } from "@/app";
+import { getConnectionMode } from "@/hooks/use-connection-mode";
 
 export type IronclawConnectionStatus = "connected" | "disconnected" | "never-connected" | "checking";
 
@@ -23,6 +24,7 @@ export function useIronclawStatus(): {
   status: IronclawConnectionStatus;
   refetch: () => void;
   disconnect: () => Promise<void>;
+  connectionMode: "local" | "hosted";
 } {
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
@@ -39,6 +41,8 @@ export function useIronclawStatus(): {
     staleTime: 8_000,
   });
 
+  const connectionMode = getConnectionMode();
+
   let status: IronclawConnectionStatus;
   if (isFetching && data === undefined) {
     status = "checking";
@@ -49,17 +53,14 @@ export function useIronclawStatus(): {
   }
 
   const disconnect = async () => {
-    try {
-      await apiClient.ironclaw.auth.logout();
-    } catch { }
     clearWasConnected();
     queryClient.setQueryData(ironclawStatusQueryKey, undefined);
-    queryClient.invalidateQueries({ queryKey: ironclawStatusQueryKey });
   };
 
   return {
     status,
     refetch: () => { refetch(); },
     disconnect,
+    connectionMode,
   };
 }

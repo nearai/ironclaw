@@ -22,6 +22,7 @@
       "@tanstack/ai": "^0.28.0",
       "@tanstack/ai-client": "^0.16.3",
       "@tanstack/ai-react": "^0.15.4",
+      "@tanstack/ai-react-ui": "^0.8.6",
       "near-kit": "^0.14.0",
       "@scure/base": "^2.2.0",
       "drizzle-orm": "^0.45.1",

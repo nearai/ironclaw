@@ -1,4 +1,4 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { useChat } from "@tanstack/ai-react";
 import type { StreamChunk, UIMessage } from "@tanstack/ai/client";
 import type { ApiClient } from "@/app";
@@ -11,26 +11,12 @@ function messageTextContent(message: UIMessage): string {
     .join(" ");
 }
 
-function promptToolName(prompt: Record<string, unknown> | undefined): string {
-  const ctx = prompt?.approvalContext as Record<string, unknown> | undefined;
-  return (ctx?.toolName as string) ?? (prompt?.headline as string) ?? "approval";
-}
-
-function errorMessageFromFailure(failure: unknown): string {
-  if (failure && typeof failure === "object" && "message" in failure) {
-    const value = (failure as { message?: unknown }).message;
-    if (typeof value === "string" && value.length > 0) return value;
-  }
-  return "Run failed";
-}
-
 function createIronclawStream({
   apiClient,
   threadId,
   content,
   clientActionId,
   onRunStarted,
-  onGateSeen,
   signal,
 }: {
   apiClient: ApiClient;
@@ -38,14 +24,8 @@ function createIronclawStream({
   content: string;
   clientActionId: string;
   onRunStarted: (runId: string) => void;
-  onGateSeen: (gateRef: string, runId: string) => void;
   signal: AbortSignal;
 }): AsyncIterable<StreamChunk> {
-  function getEventCursor(event: Record<string, unknown>): number | undefined {
-    const c = (event as any).cursor ?? (event as any).ack?.eventCursor ?? (event as any).runState?.eventCursor;
-    return c !== undefined ? Number(c) : undefined;
-  }
-
   return {
     [Symbol.asyncIterator]() {
       const queue: Array<Record<string, unknown>> = [];
@@ -86,123 +66,48 @@ function createIronclawStream({
       }
 
       void (async () => {
-        let sendCursor: number | undefined;
-        let runId: string | undefined;
+        let runId: string;
         let replyMessageId = "reply-pending";
-        const preSendBuffer: Array<Record<string, unknown>> = [];
-
-        const processEvent = (event: Record<string, unknown>) => {
-          if (closed) return;
-
-          if (sendCursor !== undefined) {
-            const cursor = getEventCursor(event);
-            if (cursor !== undefined && cursor <= sendCursor) return;
-          }
-
-          switch (event.type) {
-            case "capability_progress": {
-              const toolCallId = (event as any).progress?.turnRunId ?? `tool-${crypto.randomUUID()}`;
-              push({
-                type: "TOOL_CALL_START",
-                toolCallId,
-                toolCallName: (event as any).progress?.kind ?? "tool",
-                toolName: (event as any).progress?.kind ?? "tool",
-              });
-              return;
-            }
-
-            case "capability_activity": {
-              if (!(event as any).activity) return;
-              push({
-                type: "TOOL_CALL_END",
-                toolCallId: (event as any).activity.invocationId,
-                toolCallName: (event as any).activity.capabilityId,
-                toolName: (event as any).activity.capabilityId,
-                result: (event as any).activity.status,
-                state: (event as any).activity.status === "completed" ? "output-available" : "output-error",
-              });
-              return;
-            }
-
-            case "capability_display_preview": {
-              if (!(event as any).preview) return;
-              push({
-                type: "TOOL_CALL_END",
-                toolCallId: (event as any).preview.invocationId,
-                toolCallName: (event as any).preview.capabilityId,
-                toolName: (event as any).preview.capabilityId,
-                result: (event as any).preview.outputSummary ?? (event as any).preview.title,
-                state: "output-available",
-              });
-              return;
-            }
-
-            case "gate": {
-              const gatePrompt = (event as any).prompt as Record<string, unknown> | undefined;
-              const gateRef = gatePrompt?.gateRef as string | undefined;
-              if (!gateRef || !runId) return;
-              onGateSeen(gateRef, runId);
-              const toolName = promptToolName(gatePrompt);
-              push({ type: "TOOL_CALL_START", toolCallId: gateRef, toolCallName: toolName, toolName });
-              push({
-                type: "CUSTOM",
-                name: "approval-requested",
-                value: {
-                  toolCallId: gateRef,
-                  toolName,
-                  input: gatePrompt?.approvalContext ?? {},
-                  approval: { id: gateRef, needsApproval: true },
-                  runId,
-                },
-              });
-              return;
-            }
-
-            case "auth_required": {
-              push({ type: "CUSTOM", name: "auth-required", value: (event as any).authPrompt ?? {} });
-              return;
-            }
-
-            case "final_reply": {
-              const replyText = (event as any).reply?.text ?? "";
-              push({ type: "TEXT_MESSAGE_START", messageId: replyMessageId, role: "assistant" });
-              if (replyText.length > 0) {
-                push({ type: "TEXT_MESSAGE_CONTENT", messageId: replyMessageId, delta: replyText, content: replyText });
-              }
-              push({ type: "TEXT_MESSAGE_END", messageId: replyMessageId });
-              push({ type: "RUN_FINISHED", runId, finishReason: "stop" });
-              finish();
-              return;
-            }
-
-            case "cancelled": {
-              push({ type: "RUN_FINISHED", runId, finishReason: "stop" });
-              finish();
-              return;
-            }
-
-            case "failed": {
-              push({ type: "RUN_ERROR", message: errorMessageFromFailure((event as any).runState?.failure) });
-              finish();
-              return;
-            }
-
-            default:
-              return;
-          }
-        };
 
         try {
+          const accepted = await (apiClient as any).conversation.sendMessage({
+            threadId,
+            content,
+            clientActionId,
+          });
+          runId = accepted.runId ?? crypto.randomUUID();
+          replyMessageId = `reply-${runId}`;
+          onRunStarted(runId);
+          push({ type: "RUN_STARTED", threadId, runId });
+
           sourceHandle = openIronclawEventSource({
             threadId,
-            onEvent: ({ event }) => {
+            afterCursor: accepted.eventCursor ?? undefined,
+            onEvent: (envelope) => {
+              const event = envelope.event as Record<string, unknown>;
               if (closed) return;
-              console.log("[createIronclawStream] SSE event", { type: event.type, cursor: (event as any).cursor });
-              if (sendCursor === undefined) {
-                preSendBuffer.push(event as unknown as Record<string, unknown>);
+
+              if (event.type === "message_added") {
+                const msg = (event as any).message;
+                if (msg?.role === "assistant" && msg?.text) {
+                  push({ type: "TEXT_MESSAGE_START", messageId: replyMessageId, role: "assistant" });
+                  push({ type: "TEXT_MESSAGE_CONTENT", messageId: replyMessageId, delta: msg.text, content: msg.text });
+                  push({ type: "TEXT_MESSAGE_END", messageId: replyMessageId });
+                }
                 return;
               }
-              processEvent(event as unknown as Record<string, unknown>);
+
+              if (event.type === "run_finished") {
+                push({ type: "RUN_FINISHED", runId, finishReason: "stop" });
+                finish();
+                return;
+              }
+
+              if (event.type === "error") {
+                console.error("[createIronclawStream] server error event", event);
+                fail(typeof (event as any).error === "string" ? (event as any).error : "Run failed");
+                return;
+              }
             },
             onError: (status) => {
               if (status === "disconnected") {
@@ -210,22 +115,6 @@ function createIronclawStream({
               }
             },
           });
-
-          const accepted = await apiClient.ironclaw.threads.sendMessage({
-            id: threadId,
-            content,
-            clientActionId,
-          });
-          runId = accepted.runId ?? accepted.activeRunId ?? crypto.randomUUID();
-          sendCursor = accepted.eventCursor != null ? Number(accepted.eventCursor) : 0;
-          replyMessageId = `reply-${runId}`;
-          onRunStarted(runId);
-          push({ type: "RUN_STARTED", threadId, runId });
-
-          for (const buffered of preSendBuffer) {
-            processEvent(buffered);
-          }
-          preSendBuffer.length = 0;
         } catch (error) {
           fail(error instanceof Error ? error.message : String(error));
         }
@@ -262,7 +151,8 @@ export function useIronclawChat(
   initialMessages: Array<UIMessage>,
 ) {
   const activeRunIdRef = useRef<string | null>(null);
-  const gateRunIdsRef = useRef(new Map<string, string>());
+
+  const initialMessagesRef = useRef(initialMessages);
 
   const chat = useChat({
     threadId,
@@ -280,9 +170,6 @@ export function useIronclawChat(
         onRunStarted: (runId) => {
           activeRunIdRef.current = runId;
         },
-        onGateSeen: (gateRef, runId) => {
-          gateRunIdsRef.current.set(gateRef, runId);
-        },
       });
     },
     onError: (error) => {
@@ -290,10 +177,20 @@ export function useIronclawChat(
     },
   });
 
+  useEffect(() => {
+    if (
+      initialMessages.length > 0 &&
+      initialMessages !== initialMessagesRef.current
+    ) {
+      initialMessagesRef.current = initialMessages;
+      chat.setMessages(initialMessages);
+    }
+  }, [initialMessages, chat]);
+
   const resolveGate = useCallback(
     async (gateRef: string, approved: boolean) => {
       chat.addToolApprovalResponse({ id: gateRef, approved });
-      const runId = gateRunIdsRef.current.get(gateRef) ?? activeRunIdRef.current;
+      const runId = activeRunIdRef.current;
       if (!runId) {
         throw new Error("Missing run ID for gate resolution");
       }
@@ -314,6 +211,7 @@ export function useIronclawChat(
     status: chat.status,
     error: chat.error,
     stop: chat.stop,
+    setMessages: chat.setMessages,
     resolveGate,
   };
 }

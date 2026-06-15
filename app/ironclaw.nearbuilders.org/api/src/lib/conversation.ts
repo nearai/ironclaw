@@ -31,6 +31,7 @@ export interface ConversationSendAck {
   acceptedMessageRef: string;
   pendingMessageId: string;
   submittedAt: string;
+  eventCursor?: string;
 }
 
 export type ConversationEventType =

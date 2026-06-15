@@ -53,9 +53,9 @@ test.describe("Navigation shell", () => {
     expect(pageErrors).toHaveLength(0);
   });
 
-  test("/ironclaw guide loads", async ({ page }) => {
+  test("/setup guide loads", async ({ page }) => {
     await loginAnonymously(page, app.baseUrl);
-    await page.goto(`${app.baseUrl}/ironclaw`, { waitUntil: "networkidle" });
+    await page.goto(`${app.baseUrl}/setup`, { waitUntil: "networkidle" });
     await expect(page.getByText("IronClaw Setup")).toBeVisible();
     await expect(page.getByText("Get Your NEAR AI API Key")).toBeVisible();
     expect(pageErrors).toHaveLength(0);

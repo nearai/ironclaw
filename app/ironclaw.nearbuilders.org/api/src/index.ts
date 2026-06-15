@@ -156,6 +156,13 @@ export default createPlugin.withPlugins<PluginsClient>()({
       })
       .optional(),
     organizationId: z.string().optional(),
+    apiKey: z
+      .object({
+        id: z.string(),
+        userId: z.string().optional(),
+        permissions: z.record(z.string(), z.array(z.string())).optional(),
+      })
+      .optional(),
     reqHeaders: z.custom<Headers>().optional(),
     getRawBody: z.custom<() => Promise<string>>().optional(),
   }),
@@ -196,14 +203,49 @@ export default createPlugin.withPlugins<PluginsClient>()({
 
     const resolveCredentials = builder.middleware(async ({ context, next }) => {
       const tenantId = context.organizationId ?? context.userId;
-      if (tenantId && s.db) {
-        if (s.secrets?.IRONCLAW_BASE_URL) {
-          return next({ context });
-        }
 
+      if (s.secrets?.IRONCLAW_BASE_URL) {
+        return next({ context });
+      }
+
+      // Hosted path: request has an API key — use shared binary config
+      if (context.apiKey) {
+        const baseUrl = s.secrets?.IRONCLAW_BASE_URL;
+        const apiToken = s.secrets?.IRONCLAW_API_TOKEN;
+        const apiKeyTenant = context.apiKey.userId ?? tenantId;
+        if (baseUrl && apiToken) {
+          let sessionToken = apiToken;
+          try {
+            const resp = await fetch(
+              `${baseUrl.replace(/\/+$/, "")}/api/webchat/v2/operator/access-sessions`,
+              {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${apiToken}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({ tenant_id: apiKeyTenant }),
+                signal: AbortSignal.timeout(10_000),
+              },
+            );
+            if (resp.ok) {
+              const data = (await resp.json()) as { token?: string };
+              if (data.token) sessionToken = data.token;
+            }
+          } catch {
+            // Session mint failed; fall back to operator token
+          }
+          return next({
+            context: { ...context, baseUrl, apiToken: sessionToken },
+          });
+        }
+        // No shared binary configured — API key can't be used
+        return next({ context });
+      }
+
+      // Local binary path: per-user DB lookup
+      if (tenantId && s.db) {
         try {
-          // Try new tables first (ironclaw_scope_bindings + ironclaw_connections),
-          // fall back to the legacy tenant_credentials table during migration.
           let tunnelUrl: string | undefined;
           let apiToken: string | undefined;
 
@@ -222,7 +264,6 @@ export default createPlugin.withPlugins<PluginsClient>()({
             }
           }
 
-          // Fallback: legacy tenant_credentials table
           if (!tunnelUrl || !apiToken) {
             const creds = await s.db
               .select()
@@ -235,9 +276,6 @@ export default createPlugin.withPlugins<PluginsClient>()({
           }
 
           if (tunnelUrl && apiToken) {
-            // Mint a tenant-scoped session token instead of forwarding
-            // the operator token directly. This ensures the upstream
-            // binary scopes every request to this specific tenant.
             let sessionToken = apiToken;
             try {
               const resp = await fetch(
@@ -248,9 +286,7 @@ export default createPlugin.withPlugins<PluginsClient>()({
                     Authorization: `Bearer ${apiToken}`,
                     "Content-Type": "application/json",
                   },
-                  body: JSON.stringify({
-                    tenant_id: tenantId,
-                  }),
+                  body: JSON.stringify({ tenant_id: tenantId }),
                   signal: AbortSignal.timeout(10_000),
                 },
               );
@@ -259,9 +295,7 @@ export default createPlugin.withPlugins<PluginsClient>()({
                 if (data.token) sessionToken = data.token;
               }
             } catch {
-              // Session mint failed; fall back to operator token.
-              // Downstream requests will still work but won't be
-              // tenant-scoped.
+              // Session mint failed; fall back to operator token
             }
             return next({
               context: {
@@ -697,6 +731,7 @@ export default createPlugin.withPlugins<PluginsClient>()({
               acceptedMessageRef: raw.acceptedMessageRef ?? "",
               pendingMessageId: `pending-${crypto.randomUUID()}`,
               submittedAt: new Date().toISOString(),
+              eventCursor: raw.eventCursor ?? undefined,
             };
           }),
 

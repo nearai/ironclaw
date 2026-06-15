@@ -1,5 +1,5 @@
 import { createFileRoute, Link, Outlet, useRouterState } from "@tanstack/react-router";
-import { BookOpen, Bot, MessageSquare, Puzzle } from "lucide-react";
+import { BookOpen, Bot, MessageSquare, Puzzle, Wrench } from "lucide-react";
 import { getAccount, getActiveRuntime, getAppName, sessionQueryOptions } from "@/app";
 import builtOn from "@/assets/built_on.png";
 import builtOnRev from "@/assets/built_on_rev.png";
@@ -49,7 +49,10 @@ function Layout() {
   const account = getAccount(runtimeConfig);
   const isAuthenticated = !!session?.user;
   const userRole = getUserRole(isAuthenticated, session?.user?.role === "admin");
+  const { status: connectionStatus } = useIronclawStatus();
+
   const ironclawSidebarItems: SidebarItem[] = [
+    ...(connectionStatus === "connected" ? [] : [{ icon: Wrench, label: "setup", to: "/setup" as const, roleRequired: "member" as const }]),
     { icon: MessageSquare, label: "chat", to: "/" as const, roleRequired: "anon" as const },
     { icon: Bot, label: "automations", to: "/automations" as const, roleRequired: "anon" as const },
     { icon: Puzzle, label: "extensions", to: "/extensions" as const, roleRequired: "anon" as const },
@@ -57,7 +60,6 @@ function Layout() {
   ];
   const visibleItems = filterSidebarByRole([...pluginSidebarItems, ...ironclawSidebarItems], userRole);
   const gatewayId = runtime?.gatewayId;
-  const { status: connectionStatus } = useIronclawStatus();
 
   const isActive = (item: SidebarItem) => {
     return pathname === item.to || (item.to !== "/" && pathname.startsWith(`${item.to}/`));
@@ -92,7 +94,7 @@ function Layout() {
               {visibleItems.map((item) => {
                 const Icon = item.icon;
                 const active = isActive(item);
-                const isIronclaw = item.to === "/ironclaw";
+                  const isIronclaw = item.to === "/setup";
                 const className = `relative flex items-center justify-center w-10 h-10 border-2 border-outset border-border-strong shadow-sm transition-all duration-200 ease-out hover:shadow-md ${active ? "bg-foreground text-background" : "bg-card text-foreground hover:bg-muted"}`;
 
                 const statusDotColor =
@@ -200,29 +202,31 @@ function Layout() {
             </div>
           </header>
 
-          <main className="flex-1 w-full min-h-0 overflow-y-auto animate-fade-in-up">
+          <main className="flex-1 w-full min-h-0 overflow-hidden flex flex-col">
             <Outlet />
           </main>
 
-          <footer className="shrink-0 flex justify-center py-6 pb-20 sm:pb-6">
-            <a
-              href="https://near.dev"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="relative h-6 w-[100px]"
-            >
-              <img
-                src={builtOn}
-                alt="Built on NEAR"
-                className="absolute inset-0 h-full w-full object-contain dark:hidden"
-              />
-              <img
-                src={builtOnRev}
-                alt="Built on NEAR"
-                className="absolute inset-0 hidden h-full w-full object-contain dark:block"
-              />
-            </a>
-          </footer>
+          {pathname !== "/" && (
+            <footer className="shrink-0 flex justify-center py-6 pb-20 sm:pb-6">
+              <a
+                href="https://near.dev"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="relative h-6 w-[100px]"
+              >
+                <img
+                  src={builtOn}
+                  alt="Built on NEAR"
+                  className="absolute inset-0 h-full w-full object-contain dark:hidden"
+                />
+                <img
+                  src={builtOnRev}
+                  alt="Built on NEAR"
+                  className="absolute inset-0 hidden h-full w-full object-contain dark:block"
+                />
+              </a>
+            </footer>
+          )}
 
           {!isAuthenticated && (
             <div className="fixed bottom-4 left-4 z-40">
@@ -239,7 +243,7 @@ function Layout() {
                 {visibleItems.map((item) => {
                   const Icon = item.icon;
                   const active = isActive(item);
-                  const isIronclaw = item.to === "/ironclaw";
+                const isIronclaw = item.to === "/setup";
                   const className = `flex flex-col items-center justify-center gap-0.5 p-1.5 transition-colors duration-200 ${active ? "text-foreground" : "text-muted-foreground"}`;
 
                   const statusDotColor =

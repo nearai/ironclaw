@@ -64,7 +64,7 @@ function SkillPage() {
   return (
     <div className="flex h-full flex-col overflow-hidden">
       <div className="flex-1 overflow-y-auto">
-        <div className="mx-auto w-full max-w-5xl space-y-4 px-4 py-6 sm:px-6 sm:py-10 animate-fade-in">
+        <div className="mx-auto w-full max-w-5xl space-y-4 px-4 py-6 sm:px-6 sm:py-10">
           <div className="rounded-[12px] border border-border bg-card p-6 space-y-4">
             <div className="flex items-start justify-between gap-4 flex-wrap">
               <div className="flex items-center gap-3 min-w-0">
@@ -105,7 +105,7 @@ function SkillPage() {
             </div>
 
             <div className="rounded-[8px] border border-border bg-muted px-3.5 py-3 text-sm text-muted-foreground">
-              Best entry points: `/skill.md`, the `/ironclaw` setup guide, and the chat dashboard at
+              Best entry points: `/skill.md`, the `/setup` guide, and the chat dashboard at
               `/`.
             </div>
           </div>

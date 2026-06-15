@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useRouter } from "@tanstack/react-router";
+import { Check, Cloud, Terminal } from "lucide-react";
 import { useMemo } from "react";
 import type { Organization } from "@/app";
 import { sessionQueryOptions, useAuthClient } from "@/app";
@@ -12,6 +13,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useConnectionMode } from "@/hooks/use-connection-mode";
 
 export function UserNav() {
   const auth = useAuthClient();
@@ -34,6 +36,8 @@ export function UserNav() {
   const activeOrg = useMemo(() => {
     return organizations?.find((org) => org.id === activeOrgId);
   }, [organizations, activeOrgId]);
+
+  const { connectionMode, switchMode } = useConnectionMode();
 
   const signOutMutation = useMutation({
     mutationFn: async () => {
@@ -110,6 +114,28 @@ export function UserNav() {
               </Link>
             </DropdownMenuItem>
           )}
+          <DropdownMenuSeparator />
+          <DropdownMenuLabel className="text-xs text-muted-foreground">connection</DropdownMenuLabel>
+          <DropdownMenuItem
+            onClick={() => switchMode("hosted")}
+            className="gap-2 text-xs cursor-pointer"
+          >
+            <div className="flex h-4 w-4 items-center justify-center">
+              {connectionMode === "hosted" && <Check size={12} className="text-[color:var(--near-green)]" />}
+            </div>
+            <Cloud size={12} className="shrink-0" />
+            Using hosted agent
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            onClick={() => switchMode("local")}
+            className="gap-2 text-xs cursor-pointer"
+          >
+            <div className="flex h-4 w-4 items-center justify-center">
+              {connectionMode === "local" && <Check size={12} className="text-[color:var(--near-green)]" />}
+            </div>
+            <Terminal size={12} className="shrink-0" />
+            Using my own binary
+          </DropdownMenuItem>
           <DropdownMenuItem asChild>
             <Link to="/settings">settings</Link>
           </DropdownMenuItem>

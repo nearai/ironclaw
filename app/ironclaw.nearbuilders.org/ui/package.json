@@ -39,6 +39,7 @@
     "@tanstack/ai": "catalog:",
     "@tanstack/ai-client": "catalog:",
     "@tanstack/ai-react": "catalog:",
+    "@tanstack/ai-react-ui": "catalog:",
     "@tanstack/react-devtools": "catalog:",
     "@tanstack/react-form": "catalog:",
     "@tanstack/react-query": "catalog:",

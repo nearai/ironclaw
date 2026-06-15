@@ -35,8 +35,8 @@ export function ChatInput({
   };
 
   return (
-    <div className="border-t border-border p-4">
-      <div className="mx-auto flex max-w-3xl items-center gap-2">
+    <div className="border-t border-border p-2 sm:p-4 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
+      <div className="mx-auto flex max-w-4xl items-center gap-2">
         <Input
           value={value}
           onChange={(e) => setValue(e.target.value)}

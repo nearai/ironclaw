@@ -1,5 +1,5 @@
-import { createFileRoute } from "@tanstack/react-router";
-import { Key, Loader2, Save, Terminal } from "lucide-react";
+import { createFileRoute, Link } from "@tanstack/react-router";
+import { Cloud, Key, Loader2, RefreshCw, Save, Terminal } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useApiClient } from "@/app";
@@ -7,6 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { getConnectionMode } from "@/hooks/use-connection-mode";
+import { useIronclawStatus } from "@/hooks/use-ironclaw-status";
 
 export const Route = createFileRoute("/_layout/_authenticated/settings/ironclaw")({
   component: IronclawSettings,
@@ -14,13 +16,23 @@ export const Route = createFileRoute("/_layout/_authenticated/settings/ironclaw"
 
 function IronclawSettings() {
   const apiClient = useApiClient();
+  const { status: connectionStatus, refetch: refetchStatus } = useIronclawStatus();
   const [tunnelUrl, setTunnelUrl] = useState("");
   const [apiToken, setApiToken] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [hasSettings, setHasSettings] = useState(false);
+  const [connectionMode, setConnectionMode] = useState<"local" | "hosted">(getConnectionMode());
 
   useEffect(() => {
+    setConnectionMode(getConnectionMode());
+  }, []);
+
+  useEffect(() => {
+    if (connectionMode === "hosted") {
+      setLoading(false);
+      return;
+    }
     apiClient.ironclaw.settings
       .get()
       .then((res) => {
@@ -32,7 +44,7 @@ function IronclawSettings() {
         setHasSettings(false);
       })
       .finally(() => setLoading(false));
-  }, [apiClient]);
+  }, [apiClient, connectionMode]);
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -51,16 +63,74 @@ function IronclawSettings() {
     }
   };
 
+  const isConnected = connectionStatus === "connected";
+
   return (
     <div className="space-y-6">
       <div className="space-y-1">
         <h2 className="text-lg font-semibold text-foreground">IronClaw Connection</h2>
         <p className="text-sm text-muted-foreground">
-          Configure how this dashboard connects to your ironclaw binary.
+          Configure how this dashboard connects to your ironclaw agent.
         </p>
       </div>
 
-      {loading ? (
+      <div className="flex items-center gap-3 rounded-lg border border-border bg-muted/50 px-4 py-3">
+        <div
+          className={`h-2 w-2 rounded-full shrink-0 ${
+            isConnected
+              ? "bg-[color:var(--near-green)]"
+              : connectionStatus === "disconnected"
+                ? "bg-destructive"
+                : "bg-muted-foreground"
+          }`}
+        />
+        <span className="text-xs text-muted-foreground flex-1">
+          {isConnected
+            ? `Connected via ${connectionMode === "hosted" ? "hosted agent" : "local binary"}`
+            : connectionStatus === "disconnected"
+              ? "Connection lost"
+              : "Not connected"}
+        </span>
+        <button
+          type="button"
+          onClick={() => { refetchStatus(); }}
+          className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+        >
+          <RefreshCw size={10} />
+          Refresh
+        </button>
+      </div>
+
+      {connectionMode === "hosted" ? (
+        <Card className="p-5 space-y-4">
+          <div className="flex items-start gap-3">
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-secondary">
+              <Cloud size={14} className="text-muted-foreground" />
+            </div>
+            <div>
+              <p className="text-sm font-semibold text-foreground">Hosted Agent Mode</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                You are connected through the shared hosted agent. No local binary configuration
+                needed. Generate or manage your API key from the{" "}
+                <Link
+                  to="/setup"
+                  className="text-primary underline underline-offset-2"
+                >
+                  setup page
+                </Link>{" "}
+                or{" "}
+                <Link
+                  to="/settings/api-keys"
+                  className="text-primary underline underline-offset-2"
+                >
+                  API keys settings
+                </Link>
+                .
+              </p>
+            </div>
+          </div>
+        </Card>
+      ) : loading ? (
         <div className="flex items-center justify-center py-12">
           <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
         </div>
@@ -130,6 +200,14 @@ function IronclawSettings() {
           Copy the ngrok URL into the Tunnel URL field above. The API Token must match
           the bearer token configured on your Reborn binary.
         </p>
+
+        <div className="pt-2 border-t border-border mt-3">
+          <p className="text-xs font-medium text-foreground">Connection mode</p>
+          <p className="text-xs text-muted-foreground mt-1">
+            Switch between using your own local binary or the shared hosted agent from the{" "}
+            <strong className="text-foreground">connection</strong> section in your profile menu.
+          </p>
+        </div>
       </div>
     </div>
   );

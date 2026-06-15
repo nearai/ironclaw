@@ -1,4 +1,5 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
+import { useMutation } from "@tanstack/react-query";
 import {
   Check,
   ChevronDown,
@@ -8,6 +9,7 @@ import {
   Key,
   MessageCircle,
   Package,
+  RefreshCw,
   Terminal,
   Upload,
   UserPlus,
@@ -15,18 +17,22 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
+import { useAuthClient } from "@/app";
+import { ApiKeyForm, type ApiKeyFormValues, ApiKeyReveal, type ApiKeyRevealProps, UnderConstruction } from "@/components";
 import { Button } from "@/components/ui/button";
 import { CommandCopy } from "@/components/ui/command-copy";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useConnectionMode } from "@/hooks/use-connection-mode";
+import { useIronclawStatus } from "@/hooks/use-ironclaw-status";
 
-export const Route = createFileRoute("/_layout/ironclaw")({
+export const Route = createFileRoute("/_layout/setup")({
   head: () => ({
     meta: [
       { title: "IronClaw Setup | NEAR Builders" },
       {
         name: "description",
         content:
-          "Set up IronClaw: get a NEAR AI API key, run the reborn binary with WebUI, install the hackathon skill, register, contribute, and submit.",
+          "Connect to IronClaw: use the hosted agent or run your own binary. Get a NEAR AI API key, build skills, and submit to the hackathon.",
       },
     ],
   }),
@@ -200,10 +206,6 @@ Setup guide: https://docs.near.ai/cloud/quickstart#setup`,
                 cargo build -p ironclaw_reborn_cli --bin ironclaw-reborn
               </code>
             </p>
-            <CommandCopy command='export IRONCLAW_REBORN_HOME="$HOME/.ironclaw-reborn-demo"' />
-            <p className="text-xs text-muted-foreground">
-              The home directory <strong>must not</strong> be inside the repo.
-            </p>
             <CommandCopy command='export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"' />
             <CommandCopy command='export IRONCLAW_REBORN_WEBUI_USER_ID="reborn-cli"' />
             <CommandCopy command="cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn -- serve" />
@@ -222,7 +224,7 @@ Setup guide: https://docs.near.ai/cloud/quickstart#setup`,
             </a>
           </Button>
           <Button size="sm" onClick={onNext}>
-            Next: Install skill
+            Next: NOVA account
             <ChevronDown size={12} className="-rotate-90" />
           </Button>
         </div>
@@ -244,14 +246,13 @@ Reborn binary docs: https://github.com/nearai/ironclaw/blob/main/docs/reborn-bin
     id: "skills",
     step: "2",
     icon: Package,
-    title: "Install the Hackathon Skill",
-    subtitle: "Equip your agent with nova-submit and the hackathon skill",
+    title: "Get a NOVA Account",
+    subtitle: "Create a NOVA account for encrypted submissions",
     content: ({ onNext }) => (
       <div className="space-y-4">
         <div className="rounded-lg border border-border bg-muted px-3.5 py-3 text-sm text-muted-foreground">
-          Your agent needs two things: the <strong>nova-submit</strong> Reborn extension (encrypts
-          and uploads files to a NOVA group) and the <strong>ironclaw-hackathon</strong> skill
-          (guides your agent through register and submit flows).
+          The hackathon skill and nova-submit extension are built into the agent.
+          You just need a NOVA account to submit your entry.
         </div>
 
         <p className="text-sm font-semibold text-foreground">Get a NOVA account</p>
@@ -265,48 +266,16 @@ Reborn binary docs: https://github.com/nearai/ironclaw/blob/main/docs/reborn-bin
           >
             nova-sdk.com
           </a>{" "}
-          for your NOVA account ID and API key.
+          for your NOVA account ID and API key. You will need these during registration and submission.
         </p>
-
-        <CommandCopy command='export IRONCLAW_REBORN_HOME="$HOME/.ironclaw-reborn-demo"' />
-        <p className="text-xs text-muted-foreground">
-          Make sure{" "}
-          <code className="rounded bg-secondary px-1 py-0.5 font-mono text-xs">
-            IRONCLAW_REBORN_HOME
-          </code>{" "}
-          matches what{" "}
-          <code className="rounded bg-secondary px-1 py-0.5 font-mono text-xs">
-            scripts/run-reborn-webui.sh
-          </code>{" "}
-          sets.
-        </p>
-        <CommandCopy command="cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- extension install nova-submit" />
-        <CommandCopy command="cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- extension activate nova-submit" />
-        <CommandCopy command="git clone https://github.com/jcarbonnell/ironclaw-hackathon.git" />
-        <CommandCopy command='mkdir -p "$IRONCLAW_REBORN_HOME/local-dev/tenants/default/users/reborn-cli/skills/ironclaw-hackathon"' />
-        <CommandCopy command='cp ironclaw-hackathon/skill/SKILL.md "$IRONCLAW_REBORN_HOME/local-dev/tenants/default/users/reborn-cli/skills/ironclaw-hackathon/"' />
-        <p className="text-sm text-muted-foreground">Verify everything is set up:</p>
-        <CommandCopy command='cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- extension search nova && cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- skills list | grep hackathon' />
 
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex flex-wrap gap-2">
-            <Button variant="outline" size="sm" asChild>
-              <a
-                href="https://github.com/nearai/ironclaw/blob/main/docs/reborn-binary.md#extension"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                <ExternalLink size={12} />
-                Nova-Submit docs
-              </a>
-            </Button>
-            <Button variant="outline" size="sm" asChild>
-              <a href="https://nova-sdk.com" target="_blank" rel="noopener noreferrer">
-                <ExternalLink size={12} />
-                nova-sdk.com
-              </a>
-            </Button>
-          </div>
+          <Button variant="outline" size="sm" asChild>
+            <a href="https://nova-sdk.com" target="_blank" rel="noopener noreferrer">
+              <ExternalLink size={12} />
+              nova-sdk.com
+            </a>
+          </Button>
           <Button size="sm" onClick={onNext}>
             Next: Register
             <ChevronDown size={12} className="-rotate-90" />
@@ -314,16 +283,9 @@ Reborn binary docs: https://github.com/nearai/ironclaw/blob/main/docs/reborn-bin
         </div>
       </div>
     ),
-    markdown: `## Step 2: Install the Hackathon Skill
+    markdown: `## Step 2: Get a NOVA Account
 
-\`\`\`bash
-export IRONCLAW_REBORN_HOME="$HOME/.ironclaw-reborn-demo"
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- extension install nova-submit
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- extension activate nova-submit
-git clone https://github.com/jcarbonnell/ironclaw-hackathon.git
-mkdir -p "$IRONCLAW_REBORN_HOME/local-dev/tenants/default/users/reborn-cli/skills/ironclaw-hackathon"
-cp ironclaw-hackathon/skill/SKILL.md "$IRONCLAW_REBORN_HOME/local-dev/tenants/default/users/reborn-cli/skills/ironclaw-hackathon/"
-\`\`\``,
+Sign up at https://nova-sdk.com for your NOVA account ID and API key.`,
   },
   {
     id: "register",
@@ -334,53 +296,30 @@ cp ironclaw-hackathon/skill/SKILL.md "$IRONCLAW_REBORN_HOME/local-dev/tenants/de
     content: ({ onNext }) => (
       <div className="space-y-4">
         <div className="rounded-lg border border-border bg-muted px-3.5 py-3 text-sm text-muted-foreground">
-          Tell your agent: &ldquo;Register me for the hackathon.&rdquo; The{" "}
-          <strong>register_competing_agent</strong> method records your intent to compete.
+          Tell your agent in the chat: &ldquo;Register me for the hackathon.&rdquo;<br />
+          Have your NOVA Account ID ready — the agent will ask for it.
         </div>
 
-        <div className="rounded-lg border border-border bg-muted px-3.5 py-3">
-          <p className="text-sm font-semibold text-foreground mb-2">What you need to provide</p>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm border-collapse">
-              <thead>
-                <tr className="bg-secondary">
-                  <th className="px-3 py-2 text-left text-xs font-semibold text-muted-foreground border-b border-border">Field</th>
-                  <th className="px-3 py-2 text-left text-xs font-semibold text-muted-foreground border-b border-border">Required</th>
-                  <th className="px-3 py-2 text-left text-xs font-semibold text-muted-foreground border-b border-border">Purpose</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr className="border-b border-border">
-                  <td className="px-3 py-2 font-mono text-xs text-foreground">Agent ID</td>
-                  <td className="px-3 py-2 text-xs text-foreground">Yes</td>
-                  <td className="px-3 py-2 text-xs text-muted-foreground">Short handle, no spaces/slashes/quotes</td>
-                </tr>
-                <tr className="border-b border-border">
-                  <td className="px-3 py-2 font-mono text-xs text-foreground">Participant Name</td>
-                  <td className="px-3 py-2 text-xs text-foreground">Yes</td>
-                  <td className="px-3 py-2 text-xs text-muted-foreground">Name or @handle for the leaderboard</td>
-                </tr>
-                <tr>
-                  <td className="px-3 py-2 font-mono text-xs text-foreground">NOVA Account ID</td>
-                  <td className="px-3 py-2 text-xs text-foreground">Yes</td>
-                  <td className="px-3 py-2 text-xs text-muted-foreground">
-                    Must match at submission time, e.g.{" "}
-                    <code className="rounded bg-secondary px-1 py-0.5 font-mono text-xs">alice.nova-sdk.near</code>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+        <Link
+          to="/"
+          className="group flex items-center gap-4 rounded-xl border-2 border-primary/30 bg-primary/5 px-5 py-4 hover:border-primary hover:bg-primary/10 transition-all duration-200"
+        >
+          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-primary/10">
+            <MessageCircle size={22} className="text-primary" />
           </div>
-        </div>
-
-        <p className="text-sm text-muted-foreground">
-          The skill prints a <strong>registration block</strong>. Copy it and send to hackathon
-          staff — they need your NOVA account ID to add you to the submission group.
-        </p>
-
-        <div className="rounded-md border border-border bg-muted/50 px-3.5 py-2.5 text-xs text-muted-foreground">
-          Until staff adds you, you <strong>cannot submit</strong> — the upload will fail.
-        </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-base font-semibold text-foreground group-hover:text-primary transition-colors">
+              Open Chat
+            </p>
+            <p className="text-sm text-muted-foreground mt-0.5">
+              Say: &ldquo;Register me for the hackathon&rdquo;
+            </p>
+          </div>
+          <ExternalLink
+            size={16}
+            className="shrink-0 text-muted-foreground group-hover:text-primary transition-colors"
+          />
+        </Link>
 
         <div className="flex justify-end">
           <Button size="sm" onClick={onNext}>
@@ -392,7 +331,9 @@ cp ironclaw-hackathon/skill/SKILL.md "$IRONCLAW_REBORN_HOME/local-dev/tenants/de
     ),
     markdown: `## Step 3: Register for the Hackathon
 
-Tell your agent: "Register me for the hackathon."`,
+Open the chat and tell your agent: "Register me for the hackathon."
+
+Have your NOVA Account ID ready.`,
   },
   {
     id: "contribute",
@@ -700,11 +641,42 @@ function StepProgressBar({
   );
 }
 
+type CreatedApiKey = ApiKeyRevealProps["apiKey"];
+
 function IronclawPage() {
+  const authClient = useAuthClient();
+  const { connectionMode, switchMode } = useConnectionMode();
+  const { status: connectionStatus, refetch: refetchStatus } = useIronclawStatus();
   const [completedSteps, setCompletedSteps] = useState<Set<StepId>>(new Set());
   const [activeStep, setActiveStep] = useState<StepId | null>("api-key");
   const [copied, setCopied] = useState(false);
-  const [activeTab, setActiveTab] = useState("reborn");
+  const [activeTab, setActiveTab] = useState(connectionMode === "hosted" ? "hosted" : "local");
+
+  const [createdKey, setCreatedKey] = useState<CreatedApiKey | null>(null);
+
+  const createKeyMutation = useMutation({
+    mutationFn: async (values: ApiKeyFormValues) => {
+      const { data, error } = await authClient.apiKey.create({
+        ...values,
+        configId: "user-keys",
+        metadata: { scope: "ironclaw" },
+      });
+      if (error) throw new Error(error.message ?? "Failed to create API key");
+      return data as unknown as CreatedApiKey;
+    },
+    onSuccess: (key) => {
+      setCreatedKey(key);
+      toast.success("API key created — copy it now, you won't see it again");
+    },
+    onError: (err: Error) => {
+      toast.error(err.message);
+    },
+  });
+
+  const handleTabChange = (tab: string) => {
+    setActiveTab(tab);
+    switchMode(tab === "hosted" ? "hosted" : "local");
+  };
 
   const toggleStep = (id: StepId) => {
     setActiveStep((prev) => (prev === id ? null : id));
@@ -730,10 +702,12 @@ function IronclawPage() {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const isConnected = connectionStatus === "connected";
+
   return (
     <div className="flex min-h-[calc(100dvh-4rem)] flex-col overflow-auto">
       <div className="flex-1">
-        <div className="mx-auto w-full max-w-4xl space-y-4 px-4 py-6 sm:px-6 sm:py-10 animate-fade-in">
+        <div className="mx-auto w-full max-w-4xl space-y-4 px-4 py-6 sm:px-6 sm:py-10">
           <div className="rounded-xl border border-border bg-card p-6">
             <div className="flex items-center gap-3">
               <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground">
@@ -746,103 +720,172 @@ function IronclawPage() {
                 </p>
               </div>
             </div>
+
+            {connectionStatus !== "checking" && (
+              <div className="mt-4 flex items-center gap-3 rounded-lg border border-border bg-muted/50 px-3.5 py-2.5">
+                <div
+                  className={`h-2 w-2 rounded-full shrink-0 ${
+                    isConnected
+                      ? "bg-[color:var(--near-green)]"
+                      : connectionStatus === "disconnected"
+                        ? "bg-destructive"
+                        : "bg-muted-foreground"
+                  }`}
+                />
+                <span className="text-xs text-muted-foreground flex-1">
+                  {isConnected
+                    ? `Connected via ${connectionMode === "hosted" ? "hosted agent" : "local binary"}`
+                    : connectionStatus === "disconnected"
+                      ? "Connection lost — check your agent and try refreshing"
+                      : "Not connected — configure your connection below"}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => { refetchStatus(); }}
+                  className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  <RefreshCw size={10} />
+                  Refresh
+                </button>
+              </div>
+            )}
           </div>
 
-          <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+          <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full">
             <TabsList className="w-full justify-start">
-              <TabsTrigger value="v1">IronClaw v1</TabsTrigger>
-              <TabsTrigger value="reborn">
-                IronClaw Reborn
+              <TabsTrigger value="hosted">
+                <Cloud size={12} className="mr-1.5" />
+                Hosted Agent
                 <span className="ml-1.5 rounded-full bg-primary/15 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
-                  connects here
+                  no binary needed
                 </span>
+              </TabsTrigger>
+              <TabsTrigger value="local">
+                <Terminal size={12} className="mr-1.5" />
+                Local Binary
+              
               </TabsTrigger>
             </TabsList>
 
-            <TabsContent value="v1" className="mt-4 space-y-4">
-              <div className="rounded-xl border border-border bg-card p-6 space-y-4">
-                <div className="flex items-start gap-3">
-                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-secondary">
-                    <Cloud size={14} className="text-muted-foreground" />
+            <TabsContent value="hosted" className="mt-4 space-y-4">
+              <div className="relative">
+                <div className="pointer-events-none select-none blur-sm">
+                  <div className="rounded-xl border border-border bg-card p-6 space-y-6">
+                    <div>
+                      <p className="text-sm font-semibold text-foreground">
+                        Connect to the shared agent
+                      </p>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        Generate an API key to access the hosted IronClaw agent. No local setup needed —
+                        just create a key and start chatting.
+                      </p>
+                    </div>
+
+                    {createdKey ? (
+                      <div className="space-y-4">
+                        <ApiKeyReveal apiKey={createdKey} onDismiss={() => setCreatedKey(null)} />
+
+                        <div className="flex items-center gap-2">
+                          <div
+                            className={`h-2 w-2 rounded-full shrink-0 ${
+                              isConnected ? "bg-[color:var(--near-green)]" : "bg-muted-foreground"
+                            }`}
+                          />
+                          <span className="text-sm text-muted-foreground">
+                            {isConnected
+                              ? "Connection verified — your API key is active"
+                              : "Pinging agent..."}
+                          </span>
+                          {!isConnected && (
+                            <button
+                              type="button"
+                              onClick={() => { refetchStatus(); }}
+                              className="text-xs text-primary underline underline-offset-2"
+                            >
+                              retry
+                            </button>
+                          )}
+                        </div>
+
+                        {isConnected && (
+                          <Link
+                            to="/"
+                            className="group flex items-center gap-4 rounded-xl border-2 border-[color:var(--near-green)]/30 bg-[color:var(--near-green)]/5 px-5 py-4 hover:border-[color:var(--near-green)] hover:bg-[color:var(--near-green)]/10 transition-all duration-200"
+                          >
+                            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-[color:var(--near-green)]/10">
+                              <MessageCircle size={22} className="text-[color:var(--near-green)]" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-base font-semibold text-foreground group-hover:text-[color:var(--near-green)] transition-colors">
+                                Start chatting
+                              </p>
+                              <p className="text-sm text-muted-foreground mt-0.5">
+                                Your agent is ready — open the chat and start building
+                              </p>
+                            </div>
+                            <ExternalLink
+                              size={16}
+                              className="shrink-0 text-muted-foreground group-hover:text-[color:var(--near-green)] transition-colors"
+                            />
+                          </Link>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="space-y-4">
+                        <div className="rounded-lg border border-border bg-muted/50 px-4 py-3">
+                          <p className="text-sm text-muted-foreground">
+                            Your API key grants access to the shared IronClaw agent. Each key is scoped
+                            to your account — you can revoke it anytime from your settings.
+                          </p>
+                        </div>
+
+                        <ApiKeyForm
+                          onCreate={(values) => createKeyMutation.mutate(values)}
+                          isPending={createKeyMutation.isPending}
+                        />
+
+                        <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                          <span>Already have a key?</span>
+                          <button
+                            type="button"
+                            onClick={() => { refetchStatus(); }}
+                            className="text-primary underline underline-offset-2 hover:text-primary/80 transition-colors"
+                          >
+                            Test connection
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
-                  <div>
-                    <p className="text-sm font-semibold text-foreground">
-                      IronClaw v1 (agent.near.ai)
+
+                  <div className="mt-4 rounded-xl border border-border bg-card p-6">
+                    <p className="text-sm font-semibold text-foreground mb-3">
+                      Switching between modes
                     </p>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                      The hosted service at{" "}
-                      <a
-                        href="https://agent.near.ai"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-primary underline underline-offset-4"
+                    <p className="text-sm text-muted-foreground">
+                      You can switch between the{" "}
+                      <strong className="text-foreground">hosted agent</strong> and your{" "}
+                      <strong className="text-foreground">own local binary</strong> anytime from the
+                      profile dropdown menu. The hackathon setup steps are available under the{" "}
+                      <button
+                        type="button"
+                        onClick={() => handleTabChange("local")}
+                        className="text-primary underline underline-offset-2"
                       >
-                        agent.near.ai
-                      </a>
-                      . This is the legacy architecture —{" "}
-                      <strong>it cannot connect to this dashboard</strong>. Use it directly in the
-                      browser or via the CLI.
+                        Local Binary
+                      </button>{" "}
+                      tab.
                     </p>
                   </div>
                 </div>
 
-                <div className="rounded-md border border-border bg-muted/50 px-3.5 py-2.5 text-xs text-muted-foreground">
-                  This version does not support the WebUI v2 gateway. To chat through this
-                  dashboard, you need the Reborn binary.
-                </div>
-
-                <div className="space-y-3">
-                  <p className="text-sm font-medium text-foreground">NOVA submission via ironhub</p>
-                  <p className="text-sm text-muted-foreground">
-                    IronClaw v1 uses the{" "}
-                    <code className="rounded bg-secondary px-1 py-0.5 font-mono text-xs">
-                      ironhub
-                    </code>{" "}
-                    CLI command for NOVA submit instead of the built-in extension:
-                  </p>
-                  <CommandCopy command="ironhub nova submit --file ./submission.json" />
-                  <p className="text-xs text-muted-foreground">
-                    See the{" "}
-                    <a
-                      href="https://github.com/nearai/ironhub"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-primary underline underline-offset-4"
-                    >
-                      ironhub repo
-                    </a>{" "}
-                    for full CLI reference.
-                  </p>
-                </div>
-
-                <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-border">
-                  <div className="flex flex-wrap gap-2">
-                    <Button variant="outline" size="sm" asChild>
-                      <a href="https://agent.near.ai" target="_blank" rel="noopener noreferrer">
-                        <ExternalLink size={12} />
-                        agent.near.ai
-                      </a>
-                    </Button>
-                    <Button variant="outline" size="sm" asChild>
-                      <a
-                        href="https://github.com/nearai/ironhub"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                      >
-                        <ExternalLink size={12} />
-                        ironhub repo
-                      </a>
-                    </Button>
-                  </div>
-                  <Button size="sm" onClick={() => setActiveTab("reborn")}>
-                    <Zap size={12} />
-                    Switch to Reborn
-                  </Button>
+                <div className="absolute inset-0 z-10 flex flex-col items-center justify-center">
+                  <UnderConstruction label="Hosted agent" skipNavigation />
                 </div>
               </div>
             </TabsContent>
 
-            <TabsContent value="reborn" className="mt-4 space-y-4">
+            <TabsContent value="local" className="mt-4 space-y-4">
               <div className="rounded-xl border border-border bg-card p-4 sm:p-6 space-y-4">
                 <div className="flex items-center justify-between gap-4 flex-wrap">
                   <p className="text-sm font-semibold text-foreground">

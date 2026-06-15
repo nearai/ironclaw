@@ -9,6 +9,7 @@ interface ChatMessageListProps {
   loading?: boolean;
   empty?: boolean;
   emptyMessage?: string;
+  streamLoading?: boolean;
 }
 
 const NEAR_BOTTOM_THRESHOLD = 200;
@@ -18,6 +19,7 @@ export function ChatMessageList({
   loading,
   empty,
   emptyMessage = "No messages yet",
+  streamLoading,
 }: ChatMessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -39,18 +41,45 @@ export function ChatMessageList({
     bottomRef.current?.scrollIntoView({ behavior });
   }, []);
 
-  const hasMountedRef = useRef(false);
+  const prevLoadingRef = useRef(loading);
+  const prevEmptyRef = useRef(empty);
+  const prevStreamLoadingRef = useRef(streamLoading);
+  const childCount = useRef(0);
 
   useEffect(() => {
-    if (!hasMountedRef.current) {
-      hasMountedRef.current = true;
+    const wasLoading = prevLoadingRef.current;
+    const wasEmpty = prevEmptyRef.current;
+    prevLoadingRef.current = loading;
+    prevEmptyRef.current = empty;
+
+    if (wasEmpty && !empty) {
+      requestAnimationFrame(() => scrollToBottom("instant"));
+      return;
+    }
+
+    if (wasLoading && !loading) {
       scrollToBottom("instant");
       return;
     }
-    if (isNearBottom()) {
+
+    const wasStreamLoading = prevStreamLoadingRef.current;
+    prevStreamLoadingRef.current = streamLoading;
+    if (wasStreamLoading && !streamLoading) {
+      requestAnimationFrame(() => scrollToBottom("smooth"));
+    }
+
+    if (!isNearBottom()) return;
+
+    const prevChildCount = childCount.current;
+    const currentChildCount = Array.isArray(children) ? children.length : children ? 1 : 0;
+    childCount.current = currentChildCount;
+
+    if (currentChildCount > prevChildCount) {
+      requestAnimationFrame(() => scrollToBottom("smooth"));
+    } else if (!loading && !empty) {
       scrollToBottom("smooth");
     }
-  }, [children, isNearBottom, scrollToBottom]);
+  }, [children, loading, empty, streamLoading, isNearBottom, scrollToBottom]);
 
   useEffect(() => {
     const vp = viewportRef.current;
@@ -67,7 +96,7 @@ export function ChatMessageList({
   if (loading) {
     return (
       <div className="flex-1 p-4">
-        <div className="mx-auto max-w-3xl space-y-4">
+        <div className="mx-auto max-w-4xl space-y-4">
           {Array.from({ length: 4 }).map((_, i) => (
             <div
               key={i}
@@ -98,9 +127,9 @@ export function ChatMessageList({
   }
 
   return (
-    <div ref={wrapperRef} className="relative flex-1 overflow-hidden">
+    <div ref={wrapperRef} className="relative min-h-0 flex-1 overflow-hidden">
       <ScrollArea className="h-full">
-        <div className="mx-auto max-w-3xl space-y-4 p-4">
+        <div className="mx-auto max-w-4xl space-y-4 p-2 sm:p-4">
           {children}
           <div ref={bottomRef} />
         </div>

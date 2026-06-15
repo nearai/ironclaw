@@ -296,9 +296,13 @@ function AutomationsPage() {
   );
 
   return (
-    <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 p-4 sm:p-6">
-      <div className="flex items-center justify-between gap-4">
-        <div className="space-y-1">
+    <div className="flex-1 overflow-y-auto">
+      <div className="space-y-6 p-6 max-w-5xl mx-auto">
+      <div className="flex items-center gap-3">
+        <div className="flex h-10 w-10 items-center justify-center rounded-full bg-primary/10">
+          <Activity className="h-5 w-5 text-primary" />
+        </div>
+        <div className="flex-1 space-y-0.5">
           <h1 className="text-lg font-semibold text-foreground">Automations</h1>
           <p className="text-sm text-muted-foreground">
             Scheduled tasks and outbound delivery configuration.
@@ -364,6 +368,7 @@ function AutomationsPage() {
           </div>
         )}
       </div>
+    </div>
     </div>
   );
 }

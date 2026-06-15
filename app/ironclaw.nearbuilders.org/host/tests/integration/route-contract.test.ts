@@ -57,8 +57,8 @@ describe("route-contract", () => {
     expect(fullPaths).toContain("/ironclaw/control");
   });
 
-  it("/ironclaw guide exists", () => {
-    expect(fullPaths).toContain("/ironclaw");
+  it("/setup guide exists", () => {
+    expect(fullPaths).toContain("/setup");
   });
 
   it("/home exists", () => {

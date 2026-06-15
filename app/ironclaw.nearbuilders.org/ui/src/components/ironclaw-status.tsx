@@ -13,14 +13,18 @@ import {
 } from "./ui/dropdown-menu";
 
 export function IronclawStatus() {
-  const { status, refetch, disconnect } = useIronclawStatus();
+  const { status, refetch, disconnect, connectionMode } = useIronclawStatus();
   const [isDisconnecting, setIsDisconnecting] = useState(false);
 
   const handleDisconnect = async () => {
     setIsDisconnecting(true);
     try {
       await disconnect();
-      toast.success("Disconnected from IronClaw");
+      toast.success(
+        connectionMode === "hosted"
+          ? "Access revoked. Generate a new API key to reconnect."
+          : "Disconnected from your local binary.",
+      );
     } catch {
       toast.error("Failed to disconnect");
     } finally {
@@ -40,7 +44,7 @@ export function IronclawStatus() {
   if (status === "never-connected") {
     return (
       <Link
-        to="/ironclaw"
+        to="/setup"
         className="flex h-8 items-center gap-1.5 rounded-full border border-primary/40 bg-primary/5 px-3 text-xs font-medium text-primary transition-colors hover:bg-primary/10 hover:border-primary/70"
       >
         <Zap size={10} className="shrink-0" />
@@ -59,7 +63,7 @@ export function IronclawStatus() {
             className="flex h-8 items-center gap-1.5 rounded-full border border-destructive/40 bg-destructive/5 px-3 text-xs font-medium text-destructive transition-colors hover:bg-destructive/10 hover:border-destructive/60 cursor-pointer"
           >
             <span className="h-1.5 w-1.5 rounded-full bg-destructive shrink-0" />
-            <span className="hidden sm:inline">Reconnect</span>
+            <span className="hidden sm:inline">{connectionMode === "hosted" ? "Connect" : "Reconnect"}</span>
             <span className="sm:hidden">
               <Unplug size={10} />
             </span>
@@ -67,7 +71,9 @@ export function IronclawStatus() {
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-52">
           <DropdownMenuLabel className="text-xs text-muted-foreground font-normal">
-            IronClaw binary unreachable
+            {connectionMode === "hosted"
+              ? "No API key configured"
+              : "IronClaw binary unreachable"}
           </DropdownMenuLabel>
           <DropdownMenuSeparator />
           <DropdownMenuItem
@@ -78,7 +84,7 @@ export function IronclawStatus() {
             Retry connection
           </DropdownMenuItem>
           <DropdownMenuItem asChild className="gap-2 text-xs cursor-pointer">
-            <Link to="/ironclaw">
+            <Link to="/setup">
               <Zap size={12} />
               Setup guide
             </Link>
@@ -101,7 +107,7 @@ export function IronclawStatus() {
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-52">
         <DropdownMenuLabel className="text-xs text-muted-foreground font-normal">
-          IronClaw binary connected
+          {connectionMode === "hosted" ? "IronClaw hosted agent" : "IronClaw binary connected"}
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
         <DropdownMenuItem
