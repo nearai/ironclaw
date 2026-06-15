@@ -1412,8 +1412,9 @@ struct ScriptedThreadService {
     list_requests: Mutex<Vec<ListThreadsForScopeRequest>>,
     list_responses: Mutex<Vec<ListThreadsForScopeResponse>>,
     /// Tracks `replay_accepted_inbound_message` call count; used by
-    /// `RejectedBusyMarkFails` to return `None` on the first (idempotency
-    /// probe) call and `Some(RejectedBusy)` on the second (reconcile) call.
+    /// `RejectedBusyMarkFails` (and `DeferredBusyMarkFails`) to return `None`
+    /// on the first two calls (idempotency probes) and `Some(…)` on the third
+    /// call (reconcile probe) onward.
     replay_call_count: Mutex<usize>,
 }
 
@@ -1471,9 +1472,10 @@ impl ScriptedThreadService {
     /// Scripted service for the mark-failure reconcile path:
     /// - `accept_inbound_message` accepts the message
     /// - `mark_message_rejected_busy` returns a backend error
-    /// - `replay_accepted_inbound_message` returns `None` on the first call
-    ///   (idempotency probe) and `Some(RejectedBusy)` on the second
-    ///   (reconcile), so `reconcile_terminal_duplicate` settles without error
+    /// - `replay_accepted_inbound_message` returns `None` on the first two
+    ///   calls (idempotency probes) and `Some(RejectedBusy)` on the third
+    ///   call (reconcile probe), so `reconcile_terminal_duplicate` settles
+    ///   without error
     fn rejected_busy_mark_fails() -> Self {
         Self {
             behavior: ScriptedThreadBehavior::RejectedBusyMarkFails {
