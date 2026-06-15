@@ -1,0 +1,190 @@
+---
+title: "WeCom"
+description: "Interact with your agent through WeCom"
+---
+
+Connect IronClaw to WeCom through a WeCom intelligent bot. The WeCom channel uses the WeCom AI Bot WebSocket long connection, so it does not require a public webhook URL or tunnel.
+
+<Note>
+If you haven't set up your agent yet, follow our [Quickstart guide](../quickstart)
+</Note>
+
+<Warning>
+The WeCom channel is scoped to the intelligent bot WebSocket flow. Self-built application callback URLs and Agent API proactive REST sends are not available yet.
+</Warning>
+
+---
+
+## Set up the WeCom channel
+
+<Steps>
+
+<Step title="Create a WeCom intelligent bot">
+
+Open the [WeCom admin console](https://work.weixin.qq.com/wework_admin), then go to **安全与管理** -> **管理工具** -> **智能机器人**.
+
+Create a robot, choose API mode, and select the long-connection transport. See the [WeCom AI Bot long-connection docs](https://developer.work.weixin.qq.com/document/path/101463) if you need the official API reference.
+
+After the robot is created, copy the **Bot ID** and **Secret** from the robot details page. Keep the Secret private. The long-connection flow connects to WeCom's OpenWS endpoint with these credentials.
+
+<Tip>
+Use the long-connection setup for this channel. Callback URL mode uses Token and EncodingAESKey, which are not needed for the WeCom channel setup.
+</Tip>
+
+</Step>
+
+<Step title="Install the WeCom channel">
+
+WeCom is distributed as a WASM channel. You can install it from the Web Gateway's Extensions view, or from the terminal:
+
+```bash
+ironclaw registry install wecom
+```
+
+The `ironclaw onboard --channels-only` wizard can also install the channel and prompt for the bot credentials.
+
+</Step>
+
+<Step title="Add the bot credentials">
+
+Enter the Bot ID and Secret when the installer or setup wizard asks for them. IronClaw stores them as the `wecom_bot_id` and `wecom_bot_secret` secrets.
+
+If you are using the Web Gateway, open **Settings** -> **Extensions**, find **WeCom Channel**, and click **Configure**.
+
+</Step>
+
+<Step title="Start IronClaw">
+
+Start the agent if it is not already running:
+
+```bash
+ironclaw
+```
+
+When the channel is enabled, IronClaw opens the WeCom WebSocket connection on startup.
+
+</Step>
+
+<Step title="Send a test message">
+
+Send a direct message to the WeCom intelligent bot. The default `dm_policy` is `pairing`, so the bot replies with a pairing code in direct messages.
+
+Approve the request from the terminal:
+
+```bash
+ironclaw pairing approve wecom <PAIRING_CODE>
+```
+
+After approval, send another message to verify that the agent responds in WeCom.
+
+</Step>
+
+</Steps>
+
+---
+
+## What the channel supports
+
+| Capability | Status |
+|------------|--------|
+| Direct-message text chat | Supported |
+| Group chat sessions | Supported |
+| Pairing approval | Supported |
+| Inbound text | Supported |
+| Inbound images | Supported |
+| Inbound voice | Supported |
+| Inbound videos | Supported |
+| Inbound mixed messages and quote context | Supported |
+| Outbound text replies | Supported |
+| Outbound images | Supported |
+| Outbound voice | Not supported yet |
+| Outbound videos | Not supported yet |
+| Outbound files | Not supported yet |
+| WebSocket long connection | Supported |
+| HTTP callback endpoint | Not supported |
+| Broadcast without an active WeCom chat route | Not supported |
+| Self-built app callback and Agent API send | Deferred |
+
+<Note>
+Outbound media is limited to images. Voice, video, and file sends are not available yet.
+</Note>
+
+<Note>
+If an unapproved user messages the bot in a group, IronClaw asks them to DM the bot instead of showing the pairing code in the group.
+</Note>
+
+---
+
+## Configuration Options
+
+You can configure the WeCom channel through `~/.ironclaw/channels/wecom.capabilities.json`, which is created when the channel is installed.
+
+<Accordion title="Options Overview">
+
+| Option | Values | Default | Description |
+|--------|--------|---------|-------------|
+| `dm_policy` | `pairing`, `open`, `allowlist` | `pairing` | Controls who can send direct messages to the bot |
+| `allow_from` | WeCom user IDs or `*` | `[]` | Users allowed to chat when `dm_policy` is `allowlist`, plus any users approved through pairing |
+| `owner_id` | WeCom user ID | `null` | If set, this user is always allowed |
+| `inbound_merge_window_ms` | number | `5000` | Window for merging closely related inbound message parts before emitting them to the agent |
+
+</Accordion>
+
+<Note>
+Restart IronClaw after changing the channel configuration file.
+</Note>
+
+### Direct Message Policy
+
+The `dm_policy` option controls access for private chats:
+
+- `pairing` **(default)**: unknown users receive a pairing code in direct messages and must be approved with `ironclaw pairing approve wecom <PAIRING_CODE>`
+- `open`: private chats can start without pairing
+- `allowlist`: only users listed in `allow_from` can chat
+
+Group messages are also checked against `allow_from` and pairing approvals. Group conversations are scoped by WeCom `chatid`, while private conversations are scoped by the sender's WeCom `userid`.
+
+### Media Merge Window
+
+WeCom may deliver media such as images, voice messages, or videos separately from nearby text. `inbound_merge_window_ms` lets IronClaw wait briefly so related message parts can become one agent turn.
+
+Set it to `0` if you prefer every inbound part to be emitted immediately.
+
+---
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="I don't see the WeCom channel">
+    Install it with `ironclaw registry install wecom`, then restart IronClaw and refresh the Web Gateway. The registry entry expects `channels-src/wecom/wecom.capabilities.json` to be available in the bundle.
+  </Accordion>
+
+  <Accordion title="The bot does not connect">
+    Confirm that the WeCom bot is configured for long-connection API mode, then re-enter the Bot ID and Secret. WeCom allows only one effective long connection for a bot, so stop duplicate local or server processes that may be using the same credentials.
+  </Accordion>
+
+  <Accordion title="I only have Token and EncodingAESKey">
+    Those fields belong to WeCom callback URL mode. The WeCom channel uses Bot ID and Secret for the WebSocket long connection instead.
+  </Accordion>
+
+  <Accordion title="The bot replies with a pairing code">
+    This is expected when `dm_policy` is `pairing`. Run `ironclaw pairing approve wecom <PAIRING_CODE>`, then send another message.
+  </Accordion>
+
+  <Accordion title="A group user cannot get approved">
+    Ask the user to DM the bot. The channel intentionally hides pairing codes in groups and only shows the code in direct messages.
+  </Accordion>
+
+  <Accordion title="Media messages are missing">
+    Check the IronClaw logs for WeCom media download or size-limit warnings. The channel can hydrate inbound media from WeCom OpenWS URLs and related object storage hosts, but oversized media is dropped.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Related References
+
+- [WeCom intelligent bot overview](https://developer.work.weixin.qq.com/document/path/101039)
+- [WeCom AI Bot long connection](https://developer.work.weixin.qq.com/document/path/101463)
+- [WeCom receive messages](https://developer.work.weixin.qq.com/document/path/100719)
+- [WeCom active reply messages](https://developer.work.weixin.qq.com/document/path/101138)

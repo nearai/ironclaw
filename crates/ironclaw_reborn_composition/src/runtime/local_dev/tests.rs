@@ -1044,6 +1044,7 @@ mod tests {
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("skill activation invokes");
@@ -1317,6 +1318,7 @@ mod tests {
                     .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
                 input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("read_file invocation"); // safety: test-only assertion in #[cfg(test)] module.
@@ -1349,6 +1351,7 @@ mod tests {
                     .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
                 input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("raw workspace read_file invocation"); // safety: test-only assertion in #[cfg(test)] module.
@@ -1430,6 +1433,7 @@ mod tests {
                     .expect("skill_install capability id"), // safety: built-in capability id is a valid literal.
                 input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("skill_install invocation"); // safety: test-only assertion in #[cfg(test)] module.
@@ -1570,6 +1574,7 @@ mod tests {
                     .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
                 input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("raw workspace read_file invocation"); // safety: test-only assertion in #[cfg(test)] module.
@@ -1742,18 +1747,6 @@ mod tests {
             .await
             .expect("activate github extension");
 
-        let staged_after_activation = port
-            .register_provider_tool_call(provider_tool_call_with_name(
-                "github__search_issues",
-                serde_json::json!({"query": "repo:nearai/ironclaw is:issue"}),
-            ))
-            .await
-            .expect("provider registration should refresh newly activated extension surface");
-        assert_eq!(
-            staged_after_activation.capability_id.as_str(),
-            "github.search_issues"
-        );
-
         let active_surface = port
             .visible_capabilities(VisibleCapabilityRequest {})
             .await
@@ -1767,6 +1760,18 @@ mod tests {
         assert!(active_capability_ids.contains(&"github.get_issue"));
         assert!(active_capability_ids.contains(&"github.comment_issue"));
 
+        let staged_after_activation = port
+            .register_provider_tool_call(provider_tool_call_with_name(
+                "github__search_issues",
+                serde_json::json!({"query": "repo:nearai/ironclaw is:issue"}),
+            ))
+            .await
+            .expect("provider registration resolves github after prompt-stage refresh");
+        assert_eq!(
+            staged_after_activation.capability_id.as_str(),
+            "github.search_issues"
+        );
+
         let tool_definitions = port.tool_definitions().expect("tool definitions");
         let tool_definition_ids = tool_definitions
             .iter()
@@ -1776,6 +1781,140 @@ mod tests {
             tool_definition_ids.contains(&"github.search_issues"),
             "refreshed provider tools should include github after activation"
         );
+    }
+
+    #[tokio::test]
+    async fn register_does_not_rebuild_surface_mid_response() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let services = crate::build_reborn_services(
+            crate::RebornBuildInput::local_dev_with_profile(
+                crate::RebornCompositionProfile::LocalDevYolo,
+                "local-dev-mid-response-owner",
+                storage_root,
+            )
+            .with_runtime_policy(local_dev_minimal_approval_policy()),
+        )
+        .await
+        .expect("local-dev services build");
+        let run_context = run_context("mid-response").await;
+        let thread_scope = ThreadScope {
+            tenant_id: run_context.scope.tenant_id.clone(),
+            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
+            project_id: run_context.scope.project_id.clone(),
+            owner_user_id: None,
+            mission_id: None,
+        };
+        let wiring = capability_wiring(
+            &services,
+            Arc::new(InMemorySessionThreadService::default()),
+            thread_scope,
+            UserId::new("local-dev-mid-response-user").expect("user id"),
+            Arc::new(
+                crate::local_dev_capability_policy::local_dev_capability_policy()
+                    .expect("policy parses"),
+            ),
+            Arc::new(UnavailableModelGateway),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
+        )
+        .expect("local-dev capability wiring");
+        let port = wiring
+            .capability_factory
+            .create_capability_port(&run_context)
+            .await
+            .expect("capability port");
+
+        port.visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("prompt-stage surface refresh");
+
+        let mut call1 = provider_tool_call_with_name(
+            "builtin__read_file",
+            serde_json::json!({"path": "/host/nonexistent.txt"}),
+        );
+        call1.id = "call-mid-response-1".to_string();
+        let candidate1 = port
+            .register_provider_tool_call(call1)
+            .await
+            .expect("first register");
+
+        let local_runtime = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management")
+            .clone();
+        let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
+            local_runtime.skill_management.clone(),
+        )
+        .with_extension_management(extension_management)
+        .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
+            .expect("valid github ref");
+        facade
+            .execute(
+                lifecycle_context("mid-response-install"),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("install github extension");
+        facade
+            .execute(
+                lifecycle_context("mid-response-activate"),
+                LifecycleProductAction::ExtensionActivate { package_ref },
+            )
+            .await
+            .expect("activate github extension");
+
+        let mut call2 = provider_tool_call_with_name(
+            "builtin__read_file",
+            serde_json::json!({"path": "/host/other.txt"}),
+        );
+        call2.id = "call-mid-response-2".to_string();
+        let candidate2 = port
+            .register_provider_tool_call(call2)
+            .await
+            .expect("second register after extension activation");
+
+        assert_eq!(
+            candidate1.surface_version, candidate2.surface_version,
+            "both candidates must carry the same surface version so invoke_capability_batch can serve them from one snapshot"
+        );
+
+        let batch_result = port
+            .invoke_capability_batch(ironclaw_turns::run_profile::CapabilityBatchInvocation {
+                invocations: vec![
+                    ironclaw_turns::run_profile::CapabilityInvocation {
+                        surface_version: candidate1.surface_version,
+                        capability_id: candidate1.capability_id,
+                        input_ref: candidate1.input_ref,
+                        approval_resume: None,
+                        auth_resume: None,
+                    },
+                    ironclaw_turns::run_profile::CapabilityInvocation {
+                        surface_version: candidate2.surface_version,
+                        capability_id: candidate2.capability_id,
+                        input_ref: candidate2.input_ref,
+                        approval_resume: None,
+                        auth_resume: None,
+                    },
+                ],
+                stop_on_first_suspension: false,
+            })
+            .await;
+        if let Err(ref error) = batch_result {
+            assert_ne!(
+                error.kind,
+                ironclaw_turns::run_profile::AgentLoopHostErrorKind::StaleSurface,
+                "invoke_capability_batch must not fail with StaleSurface: {error:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1836,6 +1975,7 @@ mod tests {
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("gmail provider tool call invokes");

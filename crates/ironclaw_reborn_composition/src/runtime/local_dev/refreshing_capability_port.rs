@@ -208,9 +208,8 @@ impl LoopCapabilityPort for RefreshingLocalDevCapabilityPort {
         &self,
         tool_call: ProviderToolCall,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        self.refresh_current(VisibleCapabilityRequest {})
+        self.current_or_refresh()
             .await?
-            .0
             .register_provider_tool_call(tool_call)
             .await
     }

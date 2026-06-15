@@ -109,7 +109,7 @@ fn service_unavailable_error(retryable: bool) -> RebornServicesError {
 
 type OperatorSetupCall = (Option<String>, Option<String>, bool, bool);
 type OperatorConfigSetCall = (String, Value);
-type OperatorLogsCall = (Option<u32>, Option<String>);
+type OperatorLogsCall = RebornOperatorLogsQuery;
 
 fn operator_config_surface_not_wired_diagnostic() -> RebornOperatorConfigDiagnostic {
     RebornOperatorConfigDiagnostic {
@@ -753,7 +753,7 @@ impl RebornServicesApi for StubServices {
         self.query_operator_logs_calls
             .lock()
             .expect("lock")
-            .push((query.limit, query.cursor));
+            .push(query);
         Ok(operator_command_response(RebornOperatorArea::Logs))
     }
 
@@ -1795,6 +1795,55 @@ async fn get_session_returns_caller_identity_and_capabilities() {
     assert_eq!(body["tenant_id"], "tenant-alpha");
     assert_eq!(body["user_id"], "user-alpha");
     assert_eq!(body["capabilities"]["operator_webui_config"], true);
+
+    // The session advertises the inline-attachment contract so the browser
+    // file picker derives its `accept` set and size budgets from the server
+    // rather than a static frontend list that can drift. The `accept` tokens
+    // must be exactly the shared format registry's output (drift kill), and
+    // the budgets must match what `decode_attachments` enforces.
+    let expected = ironclaw_product_workflow::webui_attachment_capabilities();
+    let accept: Vec<String> = body["attachments"]["accept"]
+        .as_array()
+        .expect("attachments.accept is an array")
+        .iter()
+        .map(|token| {
+            token
+                .as_str()
+                .expect("accept token is a string")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(accept, expected.accept);
+    // The registry emits exact MIME types *and* canonical extensions (only the
+    // supported formats), never broad `image/*` wildcards that would admit
+    // unsupported ones. The MIME types keep folder navigation working in the
+    // native macOS picker — an extension-only `accept` makes a folder
+    // double-click dismiss the dialog instead of opening it.
+    assert!(
+        accept.iter().any(|t| t == ".png"),
+        "registry-derived accept must include an image extension: {accept:?}"
+    );
+    assert!(
+        accept.iter().any(|t| t == "image/png"),
+        "registry-derived accept must include the exact image MIME: {accept:?}"
+    );
+    assert!(
+        accept.iter().any(|t| t == ".pdf"),
+        "registry-derived accept must include .pdf: {accept:?}"
+    );
+    assert!(
+        !accept.iter().any(|t| t.contains('*')),
+        "accept must not advertise wildcards: {accept:?}"
+    );
+    assert_eq!(body["attachments"]["max_count"], expected.max_count);
+    assert_eq!(
+        body["attachments"]["max_file_bytes"],
+        expected.max_file_bytes
+    );
+    assert_eq!(
+        body["attachments"]["max_total_bytes"],
+        expected.max_total_bytes
+    );
 }
 
 #[tokio::test]
@@ -1919,7 +1968,7 @@ async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/api/webchat/v2/operator/logs?limit=25&cursor=after-1")
+                .uri("/api/webchat/v2/operator/logs?limit=25&cursor=after-1&thread_id=thread-a&run_id=run-a&turn_id=turn-a&tool_call_id=tool-a&tool_name=shell&source=slack")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -1976,14 +2025,20 @@ async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
             .expect("lock"),
         1
     );
+    let operator_log_calls = services.query_operator_logs_calls.lock().expect("lock");
+    assert_eq!(operator_log_calls.len(), 1);
+    assert_eq!(operator_log_calls[0].limit, Some(25));
+    assert_eq!(operator_log_calls[0].cursor.as_deref(), Some("after-1"));
+    assert_eq!(operator_log_calls[0].thread_id.as_deref(), Some("thread-a"));
+    assert_eq!(operator_log_calls[0].run_id.as_deref(), Some("run-a"));
+    assert_eq!(operator_log_calls[0].turn_id.as_deref(), Some("turn-a"));
     assert_eq!(
-        services
-            .query_operator_logs_calls
-            .lock()
-            .expect("lock")
-            .as_slice(),
-        [(Some(25), Some("after-1".to_string()))]
+        operator_log_calls[0].tool_call_id.as_deref(),
+        Some("tool-a")
     );
+    assert_eq!(operator_log_calls[0].tool_name.as_deref(), Some("shell"));
+    assert_eq!(operator_log_calls[0].source.as_deref(), Some("slack"));
+    drop(operator_log_calls);
     assert_eq!(
         services
             .run_operator_service_lifecycle_calls

@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use thiserror::Error;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -274,6 +274,42 @@ impl AssistantReply {
     pub fn is_successful_final_reply(&self) -> bool {
         self.status == TurnStatus::Completed && self.text.is_some()
     }
+}
+
+/// Accepted-turn handle returned by `RebornRuntime::submit_user_turn`. Holds
+/// the per-conversation send lock for its lifetime so the caller's wait phase
+/// retains the same mutual exclusion the inline submit path used to.
+struct SubmittedTurn {
+    _send_guard: OwnedMutexGuard<()>,
+    scope: TurnScope,
+    run_id: TurnRunId,
+    accepted_message_ref: AcceptedMessageRef,
+}
+
+/// Outcome of driving a single turn that may pause on a gate.
+///
+/// Test/recording-support only — produced by
+/// [`RebornRuntime::send_user_message_until_gate`], which mirrors the
+/// production [`RebornRuntime::send_user_message`] submit path but returns when
+/// the run first reaches a terminal status *or* parks on a `Blocked*` gate,
+/// instead of waiting only for a terminal status. Gate *resolution* stays on
+/// the WebUI `RebornServicesApi` facade (`resolve_gate`) per the #3094 seam;
+/// this type only observes where a run paused.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone)]
+pub enum RebornTurnDriveOutcome {
+    /// The run reached a terminal status without pausing on a gate.
+    Terminal(AssistantReply),
+    /// The run parked on a user-resolvable gate (auth/approval/resource) and is
+    /// awaiting resolution through the facade. `gate_ref` is required: the
+    /// blocked-reason contract carries a `GateRef` for every such block, so its
+    /// absence is an invariant violation, not a valid recorder outcome.
+    BlockedOnGate {
+        run_id: TurnRunId,
+        status: TurnStatus,
+        gate_ref: ironclaw_turns::GateRef,
+        partial_text: Option<String>,
+    },
 }
 
 /// Errors returned by `RebornRuntime` methods.
@@ -1079,6 +1115,29 @@ impl RebornRuntime {
         self.skill_activation_source.clone()
     }
 
+    /// Read-write project-scoped workspace filesystem for landing inbound
+    /// attachment bytes at paths the agent's file tools can later read back.
+    /// `None` when no local runtime is composed.
+    ///
+    /// This deliberately does NOT reuse `rt.workspace_filesystem`: that handle
+    /// is intentionally read-only (it backs setup-marker reads — see
+    /// `local_dev_setup_marker_workspace_filesystem_is_read_only`), so writing
+    /// an attachment through it fails closed with `PermissionDenied`. Build a
+    /// read-write view over the same root using the read-write `workspace_mounts`
+    /// the agent's `file_write`/`file_read` tools resolve through, so a landed
+    /// attachment is addressable at its recorded `storage_key`.
+    pub(crate) fn webui_workspace_filesystem(
+        &self,
+    ) -> Option<Arc<ironclaw_filesystem::ScopedFilesystem<crate::factory::LocalDevRootFilesystem>>>
+    {
+        self.services.local_runtime.as_ref().map(|rt| {
+            Arc::new(ironclaw_filesystem::ScopedFilesystem::with_fixed_view(
+                Arc::clone(&rt.extension_filesystem),
+                rt.workspace_mounts.clone(),
+            ))
+        })
+    }
+
     /// Test-only handle on the resource governor backing the budget
     /// accountant. Exposed under `test-support` so integration tests can
     /// assert ledger state after a `send_user_message` round-trip.
@@ -1211,6 +1270,12 @@ impl RebornRuntime {
     /// without the `root-llm-provider` feature or an LLM config is not
     /// provided), the run will fail and the returned reply will surface
     /// that failure via `status = Failed` and `text = None`.
+    ///
+    /// **WebUI-only origin contract**: this task-level send path resolves
+    /// the turn's product-context origin as WebUI chat (`resolve_web_ui`).
+    /// A non-WebUI ingress (e.g. a future channel adapter) must not reuse
+    /// this method for its submissions; it must resolve its own origin at
+    /// that ingress instead.
     pub async fn send_user_message(
         &self,
         conversation: &ConversationId,
@@ -1240,8 +1305,72 @@ impl RebornRuntime {
         cancellation: CancellationToken,
         capture_skill_execution_plan: bool,
     ) -> Result<AssistantReply, RebornRuntimeError> {
+        let submitted = self
+            .submit_user_turn(
+                conversation,
+                text,
+                &cancellation,
+                capture_skill_execution_plan,
+            )
+            .await?;
+
+        let reply = async {
+            let terminal_state = self
+                .wait_for_terminal(&submitted.scope, submitted.run_id, &cancellation)
+                .await?;
+            let assistant_text = self
+                .read_latest_assistant_text(&conversation.0, submitted.run_id)
+                .await?;
+
+            Ok(AssistantReply {
+                conversation: conversation.clone(),
+                run_id: submitted.run_id,
+                status: terminal_state.status,
+                failure_category: terminal_state
+                    .failure
+                    .as_ref()
+                    .map(|failure| failure.category().to_string()),
+                text: assistant_text,
+            })
+        }
+        .await;
+
+        if let Some(skill_activation_source) = &self.skill_activation_source
+            && let Err(clear_error) = skill_activation_source
+                .clear_accepted_message(&submitted.scope, &submitted.accepted_message_ref)
+        {
+            if reply.is_ok() {
+                // Primary turn succeeded, so the cleanup failure is the only
+                // error to surface.
+                return Err(RebornRuntimeError::TurnSubmission(clear_error.to_string()));
+            }
+            // Primary turn already failed: don't mask it with the cleanup
+            // error — log the secondary (sanitized id only) and return the
+            // primary. See error-handling.md.
+            tracing::debug!(
+                accepted_message_ref = submitted.accepted_message_ref.as_str(),
+                "failed to clear accepted message after primary turn failure"
+            );
+        }
+
+        reply
+    }
+
+    /// Submit a user message turn and return once the run is accepted, holding
+    /// the per-conversation send lock for the returned `SubmittedTurn`'s
+    /// lifetime. Shared by [`Self::send_user_message_internal`] and the
+    /// test-support [`Self::send_user_message_until_gate`] so both drive an
+    /// identical accept/submit path and differ only in how they wait for the
+    /// run to settle.
+    async fn submit_user_turn(
+        &self,
+        conversation: &ConversationId,
+        text: &str,
+        cancellation: &CancellationToken,
+        capture_skill_execution_plan: bool,
+    ) -> Result<SubmittedTurn, RebornRuntimeError> {
         let send_lock = self.send_lock_for(conversation).await;
-        let _send_guard = send_lock.lock().await;
+        let _send_guard = send_lock.lock_owned().await;
         if self.worker_handle.is_finished() {
             return Err(RebornRuntimeError::WorkerStopped);
         }
@@ -1309,6 +1438,9 @@ impl RebornRuntime {
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
+                product_context: Some(ironclaw_product_context::resolve_web_ui(
+                    scope.product_owner(&TurnActor::new(self.actor_user_id.clone())),
+                )),
             })
             .await
         {
@@ -1343,34 +1475,12 @@ impl RebornRuntime {
         }
         self.wake_sender.wake();
 
-        let reply = async {
-            let terminal_state = self
-                .wait_for_terminal(&scope, run_id, &cancellation)
-                .await?;
-            let assistant_text = self
-                .read_latest_assistant_text(&conversation.0, run_id)
-                .await?;
-
-            Ok(AssistantReply {
-                conversation: conversation.clone(),
-                run_id,
-                status: terminal_state.status,
-                failure_category: terminal_state
-                    .failure
-                    .as_ref()
-                    .map(|failure| failure.category().to_string()),
-                text: assistant_text,
-            })
-        }
-        .await;
-
-        if let Some(skill_activation_source) = &self.skill_activation_source {
-            skill_activation_source
-                .clear_accepted_message(&scope, &accepted_message_ref)
-                .map_err(|error| RebornRuntimeError::TurnSubmission(error.to_string()))?;
-        }
-
-        reply
+        Ok(SubmittedTurn {
+            _send_guard,
+            scope,
+            run_id,
+            accepted_message_ref,
+        })
     }
 
     /// Submit a skill-aware message through the normal Reborn loop and return
@@ -1446,11 +1556,16 @@ impl RebornRuntime {
     }
 
     fn turn_scope_for(&self, thread_id: &ThreadId) -> TurnScope {
-        TurnScope::new(
+        // RebornRuntime is bound to a single actor user, so its turns are
+        // owned by that user (not the shared agent).  Passing the explicit
+        // owner here makes `TurnScope::product_owner` resolve to
+        // `TurnOwner::Personal` instead of `TurnOwner::SharedAgent`.
+        TurnScope::new_with_owner(
             self.thread_scope.tenant_id.clone(),
             Some(self.thread_scope.agent_id.clone()),
             self.thread_scope.project_id.clone(),
             thread_id.clone(),
+            Some(self.actor_user_id.clone()),
         )
     }
 
@@ -1527,6 +1642,190 @@ impl RebornRuntime {
                 _ = tokio::time::sleep(self.poll_settings.interval) => {}
             }
         }
+    }
+
+    /// Like [`Self::wait_for_terminal`], but also returns when the run parks on
+    /// a user-resolvable gate (auth/approval/resource) instead of polling until
+    /// those non-terminal states either resolve or hit `RunTimeout`.
+    /// `BlockedDependentRun` is deliberately excluded — it is an internal wait
+    /// on a child run, not facade-resolvable, so it keeps polling. The returned
+    /// state carries the `Blocked*` status and
+    /// `gate_ref`; the caller decides whether to resolve (through the WebUI
+    /// facade) or stop. Test/recording-support only.
+    #[cfg(any(test, feature = "test-support"))]
+    async fn wait_for_terminal_or_gate(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        cancellation: &CancellationToken,
+    ) -> Result<TurnRunState, RebornRuntimeError> {
+        let start = std::time::Instant::now();
+        loop {
+            if self.worker_handle.is_finished() {
+                return Err(RebornRuntimeError::WorkerStopped);
+            }
+            let state = self
+                .turn_coordinator
+                .get_run_state(GetRunStateRequest {
+                    scope: scope.clone(),
+                    run_id,
+                })
+                .await?;
+            // Exhaustive on purpose: a new `TurnStatus` variant must force a
+            // compile error here rather than silently defaulting to "not a
+            // gate". Only the user-resolvable gates short-circuit recording.
+            // `BlockedDependentRun` is an internal wait on a child run (the
+            // upstream contract names it `AwaitDependentRun`) — it is not
+            // resolvable through the gate facade, so it keeps polling like
+            // `Queued`/`Running` until the dependent run completes or the poll
+            // budget expires.
+            let blocked_on_gate = match state.status {
+                TurnStatus::BlockedApproval
+                | TurnStatus::BlockedAuth
+                | TurnStatus::BlockedResource => true,
+                TurnStatus::BlockedDependentRun
+                | TurnStatus::Queued
+                | TurnStatus::Running
+                | TurnStatus::CancelRequested
+                | TurnStatus::Cancelled
+                | TurnStatus::Completed
+                | TurnStatus::Failed
+                | TurnStatus::RecoveryRequired => false,
+            };
+            if state.status.is_terminal() || blocked_on_gate {
+                return Ok(state);
+            }
+            if start.elapsed() > self.poll_settings.max_total {
+                // Surface the primary `RunTimeout`; a failure of the secondary
+                // cancel is logged with a sanitized id only and must not mask
+                // it (see error-handling.md). `debug!` not `warn!` per the
+                // logging rule — this runtime is REPL/TUI-reachable.
+                if self
+                    .cancel_run(
+                        scope,
+                        run_id,
+                        SanitizedCancelReason::Timeout,
+                        "timeout-cancel",
+                    )
+                    .await
+                    .is_err()
+                {
+                    tracing::debug!(run_id = %run_id, "failed to cancel run after recorder timeout");
+                }
+                return Err(RebornRuntimeError::RunTimeout {
+                    timeout: self.poll_settings.max_total,
+                });
+            }
+            tokio::select! {
+                _ = cancellation.cancelled() => {
+                    if self
+                        .cancel_run(
+                            scope,
+                            run_id,
+                            SanitizedCancelReason::UserRequested,
+                            "caller-cancel",
+                        )
+                        .await
+                        .is_err()
+                    {
+                        tracing::debug!(run_id = %run_id, "failed to cancel run after caller cancellation");
+                    }
+                    return Err(RebornRuntimeError::OperationCancelled);
+                }
+                _ = tokio::time::sleep(self.poll_settings.interval) => {}
+            }
+        }
+    }
+
+    /// Test/recording-support sibling of [`Self::send_user_message`] that
+    /// returns when the run first reaches a terminal status *or* parks on a
+    /// `Blocked*` gate, rather than waiting only for a terminal status.
+    ///
+    /// The QA-trace recorder (`tests/support/reborn/qa_trace.rs`) uses this so
+    /// an OAuth/approval-gated phrase records the agent's decisions up to the
+    /// gate and reports the pause, instead of sitting in the non-terminal
+    /// `BlockedAuth` state until `RunTimeout` (a real recorder hang this method
+    /// exists to eliminate). This method only *observes* where the run paused;
+    /// gate *resolution* stays on the WebUI `RebornServicesApi` facade
+    /// (`resolve_gate`) per the #3094 seam — do not add a resolution path here.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn send_user_message_until_gate(
+        &self,
+        conversation: &ConversationId,
+        text: &str,
+    ) -> Result<RebornTurnDriveOutcome, RebornRuntimeError> {
+        let cancellation = CancellationToken::new();
+        let submitted = self
+            .submit_user_turn(conversation, text, &cancellation, false)
+            .await?;
+
+        let outcome = async {
+            let state = self
+                .wait_for_terminal_or_gate(&submitted.scope, submitted.run_id, &cancellation)
+                .await?;
+            let assistant_text = self
+                .read_latest_assistant_text(&conversation.0, submitted.run_id)
+                .await?;
+
+            if state.status.is_terminal() {
+                Ok(RebornTurnDriveOutcome::Terminal(AssistantReply {
+                    conversation: conversation.clone(),
+                    run_id: submitted.run_id,
+                    status: state.status,
+                    failure_category: state
+                        .failure
+                        .as_ref()
+                        .map(|failure| failure.category().to_string()),
+                    text: assistant_text,
+                }))
+            } else {
+                // `wait_for_terminal_or_gate` only returns terminal or a
+                // user-resolvable gate (auth/approval/resource). The
+                // blocked-reason contract guarantees a `gate_ref` for those, so
+                // a missing one is an invariant violation — surface it as an
+                // error rather than letting it look like a valid outcome.
+                let gate_ref = state.gate_ref.clone().ok_or_else(|| {
+                    RebornRuntimeError::TurnSubmission(format!(
+                        "run parked on {:?} without a gate ref",
+                        state.status
+                    ))
+                })?;
+                Ok(RebornTurnDriveOutcome::BlockedOnGate {
+                    run_id: submitted.run_id,
+                    status: state.status,
+                    gate_ref,
+                    partial_text: assistant_text,
+                })
+            }
+        }
+        .await;
+
+        // Clearing the accepted message is safe even on the `BlockedOnGate`
+        // path, where the run is still live and resumable: the inbound message
+        // is already consumed during the first prompt build (the skill-context
+        // source `take`s it), so this is idempotent cleanup of an
+        // already-taken entry, and a later gate-resume rebuilds from the active
+        // plan candidates rather than this entry. The QA recorder also discards
+        // the runtime immediately after, so nothing resumes here in practice.
+        if let Some(skill_activation_source) = &self.skill_activation_source
+            && let Err(clear_error) = skill_activation_source
+                .clear_accepted_message(&submitted.scope, &submitted.accepted_message_ref)
+        {
+            if outcome.is_ok() {
+                // Primary turn succeeded, so the cleanup failure is the only
+                // error to surface.
+                return Err(RebornRuntimeError::TurnSubmission(clear_error.to_string()));
+            }
+            // Primary turn already failed: don't mask it with the cleanup
+            // error — log the secondary (sanitized id only) and return the
+            // primary. See error-handling.md.
+            tracing::debug!(
+                accepted_message_ref = submitted.accepted_message_ref.as_str(),
+                "failed to clear accepted message after primary turn failure"
+            );
+        }
+
+        outcome
     }
 
     async fn cancel_run(
@@ -2146,6 +2445,31 @@ pub async fn build_reborn_runtime(
         None
     };
 
+    let communication_context_provider: Option<
+        Arc<dyn ironclaw_turns::run_profile::CommunicationContextProvider>,
+    > = local_runtime.map(|local_runtime| {
+        let mut lifecycle_facade = crate::lifecycle::RebornLocalLifecycleFacade::new(Arc::clone(
+            &local_runtime.skill_management,
+        ));
+        if let Some(extension_management) = &local_runtime.extension_management {
+            lifecycle_facade =
+                lifecycle_facade.with_extension_management(Arc::clone(extension_management));
+        }
+        Arc::new(
+                crate::communication_context::RuntimeCommunicationContextProvider::new(Arc::new(
+                    crate::outbound_preferences::RebornOutboundPreferencesFacade::new(
+                        Arc::clone(&local_runtime.outbound_preferences),
+                        Arc::new(
+                            crate::outbound_preferences::OutboundDeliveryTargetRegistry::new(
+                                Vec::new(),
+                            ),
+                        ),
+                    ),
+                ))
+                .with_lifecycle_facade(Arc::new(lifecycle_facade)),
+            ) as Arc<dyn ironclaw_turns::run_profile::CommunicationContextProvider>
+    });
+
     let planned_runtime_parts = DefaultPlannedRuntimeParts {
         turn_state: Arc::clone(&turn_state_store),
         thread_service: Arc::clone(&thread_service),
@@ -2199,6 +2523,7 @@ pub async fn build_reborn_runtime(
         hook_security_audit_sink: Some(Arc::new(ironclaw_events::TracingSecurityAuditSink)),
         turn_event_sink: None,
         hook_dispatcher_builder_factory,
+        communication_context_provider,
     };
     let composition = match planned_runtime_wake_channel {
         Some(wake_channel) => {
@@ -3053,6 +3378,7 @@ mod tests {
     use crate::webui::build_webui_services;
     use crate::{
         RebornCompositionProfile, RebornReadiness, RebornReadinessState, RebornRuntimeError,
+        extension_lifecycle::ExtensionActivationMode,
     };
 
     use super::{
@@ -3103,6 +3429,11 @@ mod tests {
     struct ToolCallingGateway {
         calls: StdMutex<usize>,
         stream_model_calls: StdMutex<usize>,
+        requests: StdMutex<Vec<HostManagedModelRequest>>,
+    }
+
+    #[derive(Debug, Default)]
+    struct AuthGateToolCallingGateway {
         requests: StdMutex<Vec<HostManagedModelRequest>>,
     }
 
@@ -3256,6 +3587,60 @@ mod tests {
                     id: "call-1".to_string(),
                     name: echo_tool.name,
                     arguments: serde_json::json!({"message": "hello from tool"}),
+                    response_reasoning: None,
+                    reasoning: None,
+                    signature: None,
+                })
+                .await
+                .map_err(model_capability_error)?;
+            Ok(HostManagedModelResponse::capability_calls(
+                vec![candidate],
+                "",
+            ))
+        }
+    }
+
+    #[async_trait]
+    impl HostManagedModelGateway for AuthGateToolCallingGateway {
+        async fn stream_model(
+            &self,
+            request: HostManagedModelRequest,
+        ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+            self.requests
+                .lock()
+                .expect("auth-gate gateway requests lock poisoned")
+                .push(request);
+            Err(HostManagedModelError::safe(
+                HostManagedModelErrorKind::InvalidRequest,
+                "expected capability-aware model path",
+            ))
+        }
+
+        async fn stream_model_with_capabilities(
+            &self,
+            request: HostManagedModelRequest,
+            capabilities: Arc<dyn LoopCapabilityPort>,
+        ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+            self.requests
+                .lock()
+                .expect("auth-gate gateway requests lock poisoned")
+                .push(request);
+            let notion_search_id =
+                CapabilityId::new("notion.notion-search").expect("notion search id");
+            let notion_tool = capabilities
+                .tool_definitions()
+                .map_err(model_capability_error)?
+                .into_iter()
+                .find(|definition| definition.capability_id == notion_search_id)
+                .expect("activated Notion capability should be visible");
+            let candidate = capabilities
+                .register_provider_tool_call(ProviderToolCall {
+                    provider_id: "test-provider".to_string(),
+                    provider_model_id: "test-model".to_string(),
+                    turn_id: Some("provider-turn-auth-gate".to_string()),
+                    id: "call-auth-gate".to_string(),
+                    name: notion_tool.name,
+                    arguments: serde_json::json!({ "query": "project notes" }),
                     response_reasoning: None,
                     reasoning: None,
                     signature: None,
@@ -4356,6 +4741,259 @@ mod tests {
         runtime.shutdown().await.expect("runtime shutdown");
     }
 
+    /// Regression guard: `send_user_message` must persist a
+    /// `TurnOwner::Personal` (the bound actor user) in `product_context`,
+    /// not a `TurnOwner::SharedAgent`.  Before the fix, `turn_scope_for`
+    /// built an ownerless scope whose `product_owner` resolved to
+    /// `SharedAgent` because `agent_id` was set and no explicit owner was
+    /// carried.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn send_user_message_persists_personal_owner_for_webui() {
+        use ironclaw_turns::TurnOwner;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let actor_owner_id = "runtime-personal-owner-user";
+        let gateway = Arc::new(RecordingGateway {
+            reply: "owner-check reply".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(actor_owner_id, root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-personal-owner-tenant".to_string(),
+            agent_id: "runtime-personal-owner-agent".to_string(),
+            source_binding_id: "runtime-personal-owner-source".to_string(),
+            reply_target_binding_id: "runtime-personal-owner-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: RUNTIME_SEND_TIMEOUT,
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            RUNTIME_SEND_TIMEOUT,
+            runtime.send_user_message(&conversation, "ping"),
+        )
+        .await
+        .expect("runtime send should finish within timeout")
+        .expect("runtime send should succeed");
+
+        assert_eq!(reply.status, TurnStatus::Completed);
+
+        // Verify the persisted product_context carries Personal{user: actor_user_id},
+        // not SharedAgent.
+        let scope = runtime.turn_scope_for(&conversation.0);
+        let run_state = runtime
+            .turn_coordinator
+            .get_run_state(GetRunStateRequest {
+                scope,
+                run_id: reply.run_id,
+            })
+            .await
+            .expect("get_run_state should succeed");
+
+        let product_context = run_state
+            .product_context
+            .expect("product_context must be set by send_user_message");
+        let expected_user_id = UserId::new(actor_owner_id).expect("actor user id should be valid");
+        assert!(
+            matches!(
+                &product_context.owner,
+                TurnOwner::Personal { user } if user == &expected_user_id
+            ),
+            "send_user_message must persist TurnOwner::Personal{{user: actor_user_id}}, \
+             got {:?}",
+            product_context.owner
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    /// Regression guard: `send_user_message` resolves product context via
+    /// `resolve_web_ui`, which sets `TurnOriginKind::WebUi`.  The runtime
+    /// context section rendered into the model request must therefore contain
+    /// the WebUI origin line produced by
+    /// `LoopRuntimeContext::render_model_content`.  Previously, only the
+    /// persisted `product_context` owner was asserted; this test closes the
+    /// gap by asserting the *rendered* origin appears in the captured model
+    /// request.
+    #[tokio::test]
+    async fn send_user_message_renders_webui_origin_in_model_request() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let gateway = Arc::new(RecordingGateway {
+            reply: "webui-origin-check reply".to_string(),
+            requests: Arc::clone(&requests),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-webui-origin-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-webui-origin-tenant".to_string(),
+            agent_id: "runtime-webui-origin-agent".to_string(),
+            source_binding_id: "runtime-webui-origin-source".to_string(),
+            reply_target_binding_id: "runtime-webui-origin-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: RUNTIME_SEND_TIMEOUT,
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            RUNTIME_SEND_TIMEOUT,
+            runtime.send_user_message(&conversation, "ping"),
+        )
+        .await
+        .expect("runtime send should finish within timeout")
+        .expect("runtime send should succeed");
+
+        assert_eq!(reply.status, TurnStatus::Completed);
+
+        // The runtime-context system message carries the rendered
+        // `LoopRuntimeContext` — its content_ref uses the "runtime" section
+        // prefix stamped by `push_runtime_context`.
+        let runtime_context_content = {
+            let requests = requests
+                .lock()
+                .expect("recording gateway requests lock poisoned");
+            requests[0]
+                .messages
+                .iter()
+                .find(|message| {
+                    message.role == HostManagedModelMessageRole::System
+                        && message
+                            .content_ref
+                            .as_str()
+                            .starts_with("msg:runtime.loop-start.")
+                })
+                .expect(
+                    "model request must include a runtime-context system message \
+                     (content_ref starts with msg:runtime.loop-start.)",
+                )
+                .content
+                .clone()
+        };
+
+        // Exact string produced by LoopRuntimeContext::render_model_content
+        // for TurnOriginKind::WebUi (runtime_context.rs line 225).
+        assert!(
+            runtime_context_content
+                .contains("Run origin: WebUI chat; replies render in this chat."),
+            "runtime-context system message must contain the WebUI origin line, \
+             got: {runtime_context_content:?}"
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn send_user_message_until_gate_returns_blocked_on_auth_gate() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let host_home = root.path().join("host-home");
+        std::fs::create_dir_all(&host_home).expect("host home");
+        let gateway = Arc::new(AuthGateToolCallingGateway::default());
+        let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev_with_profile(
+                RebornCompositionProfile::LocalDevYolo,
+                "runtime-auth-gate-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(
+                crate::local_dev_yolo_runtime_policy(true).expect("local-yolo policy resolves"),
+            )
+            .with_local_dev_confirmed_host_home_root(host_home),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-auth-gate-tenant".to_string(),
+            agent_id: "runtime-auth-gate-agent".to_string(),
+            source_binding_id: "runtime-auth-gate-source".to_string(),
+            reply_target_binding_id: "runtime-auth-gate-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(10),
+        })
+        .with_model_gateway_override(gateway_for_runtime);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let local_runtime = runtime
+            .services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime services");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management");
+        let notion_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion")
+            .expect("valid notion ref");
+        extension_management
+            .install(notion_ref.clone())
+            .await
+            .expect("install Notion MCP");
+        extension_management
+            .activate_with_prechecked_credentials_for_test(
+                notion_ref,
+                ExtensionActivationMode::Static,
+            )
+            .await
+            .expect("activate Notion MCP");
+
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let outcome = tokio::time::timeout(
+            RUNTIME_SEND_TIMEOUT,
+            runtime.send_user_message_until_gate(&conversation, "search Notion"),
+        )
+        .await
+        .expect("gate-aware send should return before timeout")
+        .expect("gate-aware send should succeed");
+
+        let (run_id, gate_ref) = match outcome {
+            super::RebornTurnDriveOutcome::BlockedOnGate {
+                run_id,
+                status,
+                gate_ref,
+                ..
+            } => {
+                assert_eq!(status, TurnStatus::BlockedAuth);
+                assert!(
+                    gate_ref.as_str().starts_with("gate:auth-"),
+                    "auth gate ref should carry the auth prefix, got {}",
+                    gate_ref.as_str()
+                );
+                (run_id, gate_ref)
+            }
+            super::RebornTurnDriveOutcome::Terminal(reply) => {
+                panic!("auth-gated turn should pause before terminal reply, got {reply:?}");
+            }
+        };
+        let state = runtime
+            .turn_coordinator
+            .get_run_state(GetRunStateRequest {
+                scope: runtime.turn_scope_for(&conversation.0),
+                run_id,
+            })
+            .await
+            .expect("blocked run state");
+        assert_eq!(state.status, TurnStatus::BlockedAuth);
+        assert_eq!(state.gate_ref.as_ref(), Some(&gate_ref));
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
     #[tokio::test]
     async fn cancel_run_propagates_to_subagent_children() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -4399,6 +5037,7 @@ mod tests {
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
+                product_context: None,
             })
             .await
             .expect("parent submitted");
@@ -5519,6 +6158,7 @@ mod tests {
                     client_action_id: Some("send-webui-stream-message".to_string()),
                     thread_id: Some(created.thread.thread_id.to_string()),
                     content: Some("hello webui stream".to_string()),
+                    attachments: Vec::new(),
                 },
             )
             .await
@@ -6344,6 +6984,7 @@ mod tests {
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
+                product_context: None,
             })
             .await
             .expect("submit turn");
@@ -6559,6 +7200,7 @@ mod tests {
                     client_action_id: Some("send-webui-skill-message".to_string()),
                     thread_id: Some(created.thread.thread_id.to_string()),
                     content: Some("$webui-helper please help".to_string()),
+                    attachments: Vec::new(),
                 },
             )
             .await
@@ -6607,5 +7249,265 @@ mod tests {
         assert!(combined_skill_context.contains("WEBUI_HELPER_PROMPT_SENTINEL"));
 
         runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    /// Multi-call model response with a mid-register surface change must not kill the run.
+    ///
+    /// Scenario: the scripted gateway (a) registers tool call #1, (b) activates an extension
+    /// (deterministic surface-content change), (c) registers tool call #2, then returns both
+    /// candidates together.  Before the fix, register #2 rebuilt the inner port, wiping the
+    /// snapshot that candidate #1 referred to; the executor hit StaleSurface on the first
+    /// candidate and collapsed to a terminal HostUnavailable failure.  After the fix, both
+    /// candidates carry the same (prompt-stage) surface version and the run completes.
+    #[tokio::test]
+    async fn multi_tool_call_response_survives_surface_change_mid_register() {
+        use ironclaw_product_workflow::{
+            LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
+            LifecycleProductSurfaceContext,
+        };
+        use std::sync::OnceLock;
+
+        // Gateway state seeded after runtime build.
+        struct LifecycleFacadeHandle {
+            facade: crate::lifecycle::RebornLocalLifecycleFacade,
+        }
+
+        impl std::fmt::Debug for LifecycleFacadeHandle {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("LifecycleFacadeHandle").finish()
+            }
+        }
+
+        struct MultiToolCallGateway {
+            calls: StdMutex<usize>,
+            facade_slot: Arc<OnceLock<LifecycleFacadeHandle>>,
+        }
+
+        #[async_trait]
+        impl HostManagedModelGateway for MultiToolCallGateway {
+            async fn stream_model(
+                &self,
+                _request: HostManagedModelRequest,
+            ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+                Err(HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    "expected capability-aware model path",
+                ))
+            }
+
+            async fn stream_model_with_capabilities(
+                &self,
+                _request: HostManagedModelRequest,
+                capabilities: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+            ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+                let call_index = {
+                    let mut calls = self.calls.lock().expect("multi-tool gateway lock poisoned");
+                    let idx = *calls;
+                    *calls += 1;
+                    idx
+                };
+
+                if call_index > 0 {
+                    // Second model call: capability results have been fed back — finish the run.
+                    return Ok(HostManagedModelResponse::assistant_reply(
+                        "multi-tool surface-change ok",
+                    ));
+                }
+
+                // ── First model call ──────────────────────────────────────────────────
+                // Trigger prompt-stage surface snapshot (establishes V1).
+                capabilities
+                    .visible_capabilities(VisibleCapabilityRequest)
+                    .await
+                    .map_err(model_capability_error)?;
+
+                // Find the builtin echo tool.
+                let echo_id =
+                    ironclaw_host_api::CapabilityId::new("builtin.echo").expect("echo id");
+                let echo_tool = capabilities
+                    .tool_definitions()
+                    .map_err(model_capability_error)?
+                    .into_iter()
+                    .find(|def| def.capability_id == echo_id)
+                    .expect("echo provider tool definition");
+
+                // Register call #1 — candidate carries surface version V1.
+                let mut call1 = ProviderToolCall {
+                    provider_id: "test-provider".to_string(),
+                    provider_model_id: "test-model".to_string(),
+                    turn_id: Some("provider-turn-multi".to_string()),
+                    id: "call-multi-1".to_string(),
+                    name: echo_tool.name.clone(),
+                    arguments: serde_json::json!({"message": "hello from call 1"}),
+                    response_reasoning: None,
+                    reasoning: None,
+                    signature: None,
+                };
+                let candidate1 = capabilities
+                    .register_provider_tool_call(call1.clone())
+                    .await
+                    .map_err(model_capability_error)?;
+
+                // Activate the github extension — deterministic surface-content change.
+                // Pre-fix: this rebuilds the inner port, wiping candidate1's snapshot.
+                let facade_handle = self
+                    .facade_slot
+                    .get()
+                    .expect("lifecycle facade must be seeded before send_user_message");
+                let package_ref =
+                    LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
+                        .expect("valid github ref");
+                let ctx = LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
+                    tenant_id: TenantId::new("tenant-multi-tool-surface").expect("tenant id"),
+                    user_id: UserId::new("user-multi-tool-surface").expect("user id"),
+                    agent_id: None,
+                    project_id: None,
+                });
+                facade_handle
+                    .facade
+                    .execute(
+                        ctx.clone(),
+                        LifecycleProductAction::ExtensionInstall {
+                            package_ref: package_ref.clone(),
+                        },
+                    )
+                    .await
+                    .expect("install github extension");
+                facade_handle
+                    .facade
+                    .execute(
+                        ctx,
+                        LifecycleProductAction::ExtensionActivate { package_ref },
+                    )
+                    .await
+                    .expect("activate github extension");
+
+                // Register call #2 — after surface change.
+                // Post-fix: reuses current port, so both candidates carry the same surface version.
+                call1.id = "call-multi-2".to_string();
+                call1.arguments = serde_json::json!({"message": "hello from call 2"});
+                let candidate2 = capabilities
+                    .register_provider_tool_call(call1)
+                    .await
+                    .map_err(model_capability_error)?;
+
+                // Both candidates must carry the same surface version after the fix.
+                // (We cannot assert this here without breaking the pre-fix path,
+                //  so we rely on the run-completion assertion in the test body.)
+                Ok(HostManagedModelResponse::capability_calls(
+                    vec![candidate1, candidate2],
+                    "",
+                ))
+            }
+        }
+
+        // ── Test body ──────────────────────────────────────────────────────────────
+        let root = tempfile::tempdir().expect("tempdir");
+        let facade_slot: Arc<OnceLock<LifecycleFacadeHandle>> = Arc::new(OnceLock::new());
+        let gateway = Arc::new(MultiToolCallGateway {
+            calls: StdMutex::new(0),
+            facade_slot: Arc::clone(&facade_slot),
+        });
+        let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway;
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-multi-tool-surface-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-multi-tool-surface-tenant".to_string(),
+            agent_id: "runtime-multi-tool-surface-agent".to_string(),
+            source_binding_id: "runtime-multi-tool-surface-source".to_string(),
+            reply_target_binding_id: "runtime-multi-tool-surface-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(10),
+        })
+        .with_model_gateway_override(gateway_for_runtime);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+
+        // Seed the lifecycle facade before the model gateway runs.
+        let local_runtime = runtime
+            .services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management")
+            .clone();
+        let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
+            local_runtime.skill_management.clone(),
+        )
+        .with_extension_management(extension_management)
+        .with_runtime_credential_accounts(Arc::new(MultiToolConfiguredCredentials));
+        facade_slot
+            .set(LifecycleFacadeHandle { facade })
+            .expect("facade slot should be empty before seeding");
+
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            RUNTIME_SEND_TIMEOUT,
+            runtime.send_user_message(&conversation, "use echo tool twice"),
+        )
+        .await
+        .expect("runtime send should finish within timeout")
+        .expect("runtime send should succeed");
+
+        assert_eq!(
+            reply.status,
+            TurnStatus::Completed,
+            "multi-tool response with mid-register surface change must not produce terminal failure; status={:?} text={:?}",
+            reply.status,
+            reply.text,
+        );
+        assert_eq!(reply.text.as_deref(), Some("multi-tool surface-change ok"));
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    struct MultiToolConfiguredCredentials;
+
+    #[async_trait]
+    impl crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionService
+        for MultiToolConfiguredCredentials
+    {
+        async fn select_unique_configured_runtime_account(
+            &self,
+            _request: crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest,
+        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            let now = chrono::Utc::now();
+            Ok(ironclaw_auth::CredentialAccount {
+                id: ironclaw_auth::CredentialAccountId::new(),
+                scope: ironclaw_auth::AuthProductScope::new(
+                    ironclaw_host_api::ResourceScope::local_default(
+                        UserId::new("multi-tool-credential-user").expect("user id"),
+                        ironclaw_host_api::InvocationId::new(),
+                    )
+                    .expect("resource scope"),
+                    ironclaw_auth::AuthSurface::Api,
+                ),
+                provider: ironclaw_auth::AuthProviderId::new("test-provider").expect("provider id"),
+                label: ironclaw_auth::CredentialAccountLabel::new("test-provider")
+                    .expect("account label"),
+                status: ironclaw_auth::CredentialAccountStatus::Configured,
+                ownership: ironclaw_auth::CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(
+                    ironclaw_host_api::SecretHandle::new("test-secret").expect("secret handle"),
+                ),
+                refresh_secret: None,
+                scopes: Vec::new(),
+                created_at: now,
+                updated_at: now,
+            })
+        }
     }
 }

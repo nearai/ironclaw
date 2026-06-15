@@ -414,6 +414,53 @@ impl RuntimeCapabilityResumeRequest {
     }
 }
 
+/// Auth-gate resume request.
+///
+/// Re-dispatches a capability that was previously blocked by an auth gate,
+/// reusing the original `invocation_id` encoded in the `context`. When the
+/// invocation also passed a prior approval gate, `approval_request_id` is set
+/// so the host can locate and claim the matching fingerprinted lease.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct RuntimeCapabilityAuthResumeRequest {
+    pub context: ExecutionContext,
+    pub capability_id: CapabilityId,
+    pub estimate: ResourceEstimate,
+    pub input: Value,
+    pub idempotency_key: Option<IdempotencyKey>,
+    pub trust_decision: TrustDecision,
+    /// Present when the invocation previously passed an approval gate.
+    /// Used to locate and claim the matching fingerprinted approval lease
+    /// so the re-dispatch does not require a second approval.
+    pub approval_request_id: Option<ApprovalRequestId>,
+}
+
+impl RuntimeCapabilityAuthResumeRequest {
+    pub fn new(
+        context: ExecutionContext,
+        capability_id: CapabilityId,
+        estimate: ResourceEstimate,
+        input: Value,
+        trust_decision: TrustDecision,
+        approval_request_id: Option<ApprovalRequestId>,
+    ) -> Self {
+        Self {
+            context,
+            capability_id,
+            estimate,
+            input,
+            idempotency_key: None,
+            trust_decision,
+            approval_request_id,
+        }
+    }
+
+    pub fn with_idempotency_key(mut self, key: IdempotencyKey) -> Self {
+        self.idempotency_key = Some(key);
+        self
+    }
+}
+
 /// Request to list host-filtered visible capabilities.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -893,6 +940,31 @@ pub trait HostRuntime: Send + Sync {
         &self,
         request: RuntimeCapabilityResumeRequest,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError>;
+
+    /// Re-dispatch after an auth gate has been resolved.
+    ///
+    /// Production hosts override this to route through
+    /// `CapabilityHost::auth_resume_json` which handles the `BlockedAuth`
+    /// run-state and optionally claims the prior approval lease.
+    ///
+    /// The default implementation returns an explicit `Failed` outcome so that
+    /// test stubs that do not override this method fail loudly instead of
+    /// silently falling back to a fresh `invoke_capability` call (which would
+    /// bypass run-state validation and the approval-lease-claim path).  Any
+    /// `HostRuntime` implementation that participates in auth-resume flows must
+    /// provide an explicit override.
+    async fn auth_resume_capability(
+        &self,
+        request: RuntimeCapabilityAuthResumeRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        Ok(RuntimeCapabilityOutcome::Failed(
+            RuntimeCapabilityFailure::new(
+                request.capability_id,
+                RuntimeFailureKind::Unavailable,
+                Some("capability auth-resume is unsupported by this host runtime".to_string()),
+            ),
+        ))
+    }
 
     async fn resume_spawn_capability(
         &self,
