@@ -39,12 +39,15 @@ export function AutomationsSummaryStrip({ summary }) {
       value: summary?.nextRun || t("automations.summary.none"),
       tone: "info",
       detail: t("automations.summary.nextRunDetail"),
+      // NEXT RUN is a date string, not a count — use a smaller size so it isn't
+      // truncated to "Jun…" inside a narrow card.
+      valueClassName: "text-lg md:text-xl",
     },
   ];
 
   return html`
     <${Panel} className="p-4 sm:p-5">
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         ${cards.map((card) => html`
           <div
             key=${card.key}
@@ -55,6 +58,7 @@ export function AutomationsSummaryStrip({ summary }) {
               value=${card.value}
               tone=${card.tone}
               detail=${card.detail}
+              valueClassName=${card.valueClassName}
               showDivider=${false}
               className="px-0 py-0"
             />

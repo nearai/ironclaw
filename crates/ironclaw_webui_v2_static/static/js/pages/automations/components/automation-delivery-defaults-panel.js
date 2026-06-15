@@ -64,23 +64,32 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
       opt?.capabilities?.final_replies &&
       opt?.target?.status === "unavailable",
   );
+  // The Slack approval footnote only makes sense when an external (Slack-style)
+  // target exists at all — paired or not. Web-only deployments shouldn't see a
+  // "reply in Slack" hint.
+  const hasExternalTargets = hasTargets || hasUnpairedTargets;
 
-  const handleSave = () => {
-    if (!canSave) return;
-    deliveryState
-      .saveFinalReplyTarget(draftTargetId || null)
+  // Flash the "Saved" confirmation; the mutation's rejection is reflected
+  // through `deliveryState.saveError` (rendered below), so the catch here only
+  // prevents an unhandled promise rejection.
+  const flashSavedOnSuccess = (promise) =>
+    promise
       .then(() => {
         if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
         setShowSaved(true);
         savedTimerRef.current = setTimeout(() => setShowSaved(false), 2200);
       })
       .catch(() => {});
+
+  const handleSave = () => {
+    if (!canSave) return;
+    flashSavedOnSuccess(deliveryState.saveFinalReplyTarget(draftTargetId || null));
   };
 
   const handleClear = () => {
     if (!canClear) return;
     setDraftTargetId("");
-    deliveryState.saveFinalReplyTarget(null).catch(() => {});
+    flashSavedOnSuccess(deliveryState.saveFinalReplyTarget(null));
   };
 
   // ── Derived display values ──────────────────────────────────────────
@@ -314,14 +323,28 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
               ${t("automations.delivery.saved")}
             </span>
           `}
+          ${deliveryState.saveError &&
+          !showSaved &&
+          html`
+            <span
+              role="alert"
+              className="flex items-center gap-1.5 text-xs font-semibold text-red-300"
+            >
+              <${Icon} name="close" className="h-3 w-3" />
+              ${t("automations.delivery.saveFailed")}
+            </span>
+          `}
         </div>
 
-        <!-- ── Footnote ─────────────────────────────────────────────── -->
-        <div
-          className="rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3 text-xs leading-relaxed text-[var(--v2-text-faint)]"
-        >
-          ${footnoteSegments}
-        </div>
+        <!-- ── Footnote (only when an external Slack-style target exists) ── -->
+        ${hasExternalTargets &&
+        html`
+          <div
+            className="rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3 text-xs leading-relaxed text-[var(--v2-text-faint)]"
+          >
+            ${footnoteSegments}
+          </div>
+        `}
 
       </div>
     <//>

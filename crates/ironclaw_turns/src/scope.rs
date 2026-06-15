@@ -87,6 +87,22 @@ impl TurnScope {
         self.thread_owner.is_explicit()
     }
 
+    /// Owner for product-context: explicit thread owner → Personal, else agent-scoped, else actor.
+    pub fn product_owner(&self, actor: &TurnActor) -> crate::TurnOwner {
+        if let Some(user) = self.explicit_owner_user_id() {
+            crate::TurnOwner::Personal { user: user.clone() }
+        } else if let Some(agent) = &self.agent_id {
+            crate::TurnOwner::SharedAgent {
+                agent: agent.clone(),
+                project: self.project_id.clone(),
+            }
+        } else {
+            crate::TurnOwner::Personal {
+                user: actor.user_id.clone(),
+            }
+        }
+    }
+
     /// Convert into a [`ironclaw_host_api::ResourceScope`] for filesystem
     /// resolver lookup. `user_id` falls back to the system sentinel when
     /// the turn scope is anchored at tenant level without a specific owner.
@@ -122,6 +138,68 @@ impl TurnActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_actor(user: &str) -> TurnActor {
+        TurnActor::new(UserId::from_trusted(user.to_string()))
+    }
+
+    fn make_scope_with_explicit_owner(owner: Option<UserId>) -> TurnScope {
+        TurnScope::new_with_owner(
+            ironclaw_host_api::TenantId::from_trusted("tenant:t".to_string()),
+            None,
+            None,
+            ironclaw_host_api::ThreadId::from_trusted("thread:t".to_string()),
+            owner,
+        )
+    }
+
+    fn make_scope_with_agent(
+        agent_id: ironclaw_host_api::AgentId,
+        project_id: Option<ironclaw_host_api::ProjectId>,
+    ) -> TurnScope {
+        TurnScope::new(
+            ironclaw_host_api::TenantId::from_trusted("tenant:t".to_string()),
+            Some(agent_id),
+            project_id,
+            ironclaw_host_api::ThreadId::from_trusted("thread:t".to_string()),
+        )
+    }
+
+    #[test]
+    fn product_owner_prefers_explicit_then_agent_then_actor() {
+        let actor = make_actor("user:actor");
+
+        // Branch 1: explicit owner user wins.
+        let explicit_owner = UserId::from_trusted("user:explicit".to_string());
+        let scope = make_scope_with_explicit_owner(Some(explicit_owner.clone()));
+        assert_eq!(
+            scope.product_owner(&actor),
+            crate::TurnOwner::Personal {
+                user: explicit_owner
+            }
+        );
+
+        // Branch 2: no explicit owner but agent_id → SharedAgent.
+        let agent = ironclaw_host_api::AgentId::from_trusted("agent:bot".to_string());
+        let project = ironclaw_host_api::ProjectId::from_trusted("project:p".to_string());
+        let scope = make_scope_with_agent(agent.clone(), Some(project.clone()));
+        assert_eq!(
+            scope.product_owner(&actor),
+            crate::TurnOwner::SharedAgent {
+                agent,
+                project: Some(project)
+            }
+        );
+
+        // Branch 3: no explicit owner, no agent → fallback to actor.
+        let scope = make_scope_with_explicit_owner(None);
+        assert_eq!(
+            scope.product_owner(&actor),
+            crate::TurnOwner::Personal {
+                user: actor.user_id.clone()
+            }
+        );
+    }
 
     #[test]
     fn turn_scope_accepts_legacy_explicit_thread_owner_mode() {

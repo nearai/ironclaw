@@ -349,10 +349,21 @@ impl LoopCapabilityPort for LocalDevSyntheticCapabilityPort {
                 "synthetic capability call cites a stale capability surface",
             ));
         }
-        let input = self
-            .input_resolver
-            .resolve_capability_input(&self.run_context, &request.input_ref)
-            .await?;
+        if request.approval_resume.is_some() && request.auth_resume.is_some() {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "capability invocation has both approval_resume and auth_resume set; \
+                 these resume modes are mutually exclusive",
+            ));
+        }
+        let input = match request.approval_resume.as_ref() {
+            Some(resume) => resume.input.clone(),
+            None => {
+                self.input_resolver
+                    .resolve_capability_input(&self.run_context, &request.input_ref)
+                    .await?
+            }
+        };
         // The inner port's input hook is bypassed for synthetic capabilities, so
         // emit the input event here — otherwise `LocalDevCapabilityIo` would stage
         // a result with no matching input and consumers would see an unpaired

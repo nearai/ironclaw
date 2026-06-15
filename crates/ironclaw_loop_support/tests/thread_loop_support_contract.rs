@@ -2753,6 +2753,7 @@ async fn empty_capability_port_exposes_empty_surface_and_rejects_invocations() {
             capability_id: CapabilityId::new("demo.echo").unwrap(),
             input_ref: CapabilityInputRef::new("input:opaque").unwrap(),
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap_err();
@@ -2772,6 +2773,7 @@ async fn empty_capability_batch_returns_typed_denial_reason() {
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
                 input_ref: CapabilityInputRef::new("input:opaque").unwrap(),
                 approval_resume: None,
+                auth_resume: None,
             }],
             stop_on_first_suspension: true,
         })
@@ -2796,6 +2798,7 @@ async fn empty_capability_batch_rejects_stale_surface() {
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
                 input_ref: CapabilityInputRef::new("input:opaque").unwrap(),
                 approval_resume: None,
+                auth_resume: None,
             }],
             stop_on_first_suspension: true,
         })
@@ -3953,14 +3956,14 @@ impl SessionThreadService for GatedFinalizeThreadService {
             .await
     }
 
-    async fn mark_message_deferred_busy(
+    async fn mark_message_rejected_busy(
         &self,
         scope: &ThreadScope,
         thread_id: &ThreadId,
         message_id: ThreadMessageId,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         self.inner
-            .mark_message_deferred_busy(scope, thread_id, message_id)
+            .mark_message_rejected_busy(scope, thread_id, message_id)
             .await
     }
 
@@ -4134,13 +4137,13 @@ impl SessionThreadService for StaticContextThreadService {
         panic!("static context service does not mark submitted")
     }
 
-    async fn mark_message_deferred_busy(
+    async fn mark_message_rejected_busy(
         &self,
         _scope: &ThreadScope,
         _thread_id: &ThreadId,
         _message_id: ThreadMessageId,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        panic!("static context service does not defer messages")
+        panic!("static context service does not reject messages")
     }
 
     async fn append_assistant_draft(

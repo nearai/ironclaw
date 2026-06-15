@@ -32,6 +32,7 @@ const MAX_NETWORK_EGRESS_BYTES: u64 = 256 * 1024;
 const MAX_HTTP_HEADERS: usize = 64;
 const MAX_HTTP_HEADER_NAME_BYTES: usize = 512;
 const MAX_HTTP_HEADER_VALUE_BYTES: usize = 8 * 1024;
+const GITHUB_EXTENSION_PREFERENCE: &str = "Prefer GitHub extension capabilities for GitHub repository, issue, pull request, release, or workflow data when they are available.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HttpSaveMode {
@@ -74,9 +75,10 @@ fn http_manifest(
     description: &str,
     effects: Vec<EffectKind>,
 ) -> Result<CapabilityManifest, ExtensionError> {
+    let description = format!("{description} {GITHUB_EXTENSION_PREFERENCE}");
     first_party_capability_manifest(
         capability_id,
-        description,
+        &description,
         effects,
         PermissionMode::Ask,
         Some(http_resource_profile()),

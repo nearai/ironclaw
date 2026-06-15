@@ -3998,6 +3998,7 @@ dependencies = [
  "ironclaw_embeddings",
  "ironclaw_engine",
  "ironclaw_extensions",
+ "ironclaw_extractors",
  "ironclaw_filesystem",
  "ironclaw_gateway",
  "ironclaw_host_api",
@@ -4033,7 +4034,6 @@ dependencies = [
  "md-5 0.10.6",
  "mime_guess",
  "open",
- "pdf-extract",
  "pgvector",
  "postgres-types",
  "pretty_assertions",
@@ -4134,6 +4134,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_attachments"
+version = "0.1.0"
+dependencies = [
+ "ironclaw_common",
+ "ironclaw_extractors",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ironclaw_auth"
 version = "0.1.0"
 dependencies = [
@@ -4215,6 +4228,7 @@ dependencies = [
  "chrono",
  "ironclaw_filesystem",
  "ironclaw_host_api",
+ "ironclaw_product_context",
  "ironclaw_safety",
  "ironclaw_triggers",
  "ironclaw_turns",
@@ -4359,6 +4373,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_extractors"
+version = "0.1.0"
+dependencies = [
+ "ironclaw_common",
+ "pdf-extract",
+ "thiserror 2.0.18",
+ "zip",
+]
+
+[[package]]
 name = "ironclaw_filesystem"
 version = "0.1.0"
 dependencies = [
@@ -4412,6 +4436,7 @@ dependencies = [
  "regex",
  "serde_json",
  "similar",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -4808,13 +4833,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_product_context"
+version = "0.1.0"
+dependencies = [
+ "ironclaw_host_api",
+ "ironclaw_turns",
+]
+
+[[package]]
 name = "ironclaw_product_workflow"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "futures",
  "ironclaw_approvals",
+ "ironclaw_attachments",
  "ironclaw_auth",
  "ironclaw_authorization",
  "ironclaw_common",
@@ -4826,6 +4861,7 @@ dependencies = [
  "ironclaw_loop_support",
  "ironclaw_outbound",
  "ironclaw_product_adapters",
+ "ironclaw_product_context",
  "ironclaw_product_workflow",
  "ironclaw_reborn",
  "ironclaw_reborn_composition",
@@ -4895,6 +4931,7 @@ dependencies = [
  "ironclaw_processes",
  "ironclaw_reborn_event_store",
  "ironclaw_resources",
+ "ironclaw_safety",
  "ironclaw_scripts",
  "ironclaw_secrets",
  "ironclaw_skills",
@@ -4959,6 +4996,7 @@ dependencies = [
  "http 1.4.1",
  "http-body-util",
  "ironclaw_approvals",
+ "ironclaw_attachments",
  "ironclaw_auth",
  "ironclaw_authorization",
  "ironclaw_capabilities",
@@ -4980,7 +5018,9 @@ dependencies = [
  "ironclaw_network",
  "ironclaw_outbound",
  "ironclaw_processes",
+ "ironclaw_product_adapter_registry",
  "ironclaw_product_adapters",
+ "ironclaw_product_context",
  "ironclaw_product_workflow",
  "ironclaw_product_workflow_storage",
  "ironclaw_reborn",
@@ -5360,9 +5400,11 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "ironclaw_common",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_safety",
+ "ironclaw_threads",
  "serde",
  "serde_json",
  "sha2 0.10.9",

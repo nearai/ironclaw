@@ -1,10 +1,13 @@
 use std::sync::{Arc, Mutex as StdMutex};
 
+use ironclaw_authorization::CapabilityLeaseStore;
 use ironclaw_host_api::{MountView, UserId};
 use ironclaw_host_runtime::HostRuntime;
 use ironclaw_loop_support::{
     HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
 };
+use ironclaw_product_workflow::OutboundPreferencesProductFacade;
+use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityBatchOutcome,
     CapabilityCallCandidate, CapabilityInvocation, CapabilityOutcome, LoopCapabilityPort,
@@ -16,6 +19,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::local_dev_capability_policy::LocalDevCapabilityPolicy;
 use crate::runtime::LocalDevSelectableSkillContextSource;
 use crate::runtime::local_dev::extension_surface::LocalDevExtensionSurfaceSource;
+use crate::runtime::local_dev::outbound_delivery::outbound_delivery_capabilities;
 use crate::runtime::local_dev::skill_activation::skill_activation_capability;
 use crate::runtime::local_dev::surface_disclosure::wrap_local_dev_surface_disclosure;
 use crate::runtime::local_dev::synthetic_capability::wrap_local_dev_synthetic_capabilities;
@@ -36,6 +40,10 @@ pub(super) struct RefreshingLocalDevCapabilityPortConfig {
     pub(super) milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     pub(super) skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
     pub(super) trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
+    pub(super) outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
+    pub(super) outbound_delivery_target_set_requires_approval: bool,
+    pub(super) approval_requests: Arc<dyn ApprovalRequestStore>,
+    pub(super) capability_leases: Arc<dyn CapabilityLeaseStore>,
 }
 
 pub(super) async fn create_refreshing_local_dev_capability_port(
@@ -55,6 +63,11 @@ pub(super) async fn create_refreshing_local_dev_capability_port(
         milestone_sink: config.milestone_sink,
         skill_activation_source: config.skill_activation_source,
         trajectory_observer: config.trajectory_observer,
+        outbound_preferences_facade: config.outbound_preferences_facade,
+        outbound_delivery_target_set_requires_approval: config
+            .outbound_delivery_target_set_requires_approval,
+        approval_requests: config.approval_requests,
+        capability_leases: config.capability_leases,
         current: StdMutex::new(None),
         refresh_lock: AsyncMutex::new(()),
     });
@@ -79,6 +92,10 @@ struct RefreshingLocalDevCapabilityPort {
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
+    outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
+    outbound_delivery_target_set_requires_approval: bool,
+    approval_requests: Arc<dyn ApprovalRequestStore>,
+    capability_leases: Arc<dyn CapabilityLeaseStore>,
     current: StdMutex<Option<Arc<dyn LoopCapabilityPort>>>,
     refresh_lock: AsyncMutex<()>,
 }
@@ -124,7 +141,7 @@ impl RefreshingLocalDevCapabilityPort {
                 .with_capability_execution_mount(capability_id.clone(), self.memory_mounts.clone());
         }
         let port = factory.for_run_context(self.run_context.clone());
-        let synthetic_capabilities = match &self.skill_activation_source {
+        let mut synthetic_capabilities = match &self.skill_activation_source {
             Some(skill_activation_source) => {
                 vec![skill_activation_capability(Arc::clone(
                     skill_activation_source,
@@ -132,6 +149,15 @@ impl RefreshingLocalDevCapabilityPort {
             }
             None => Vec::new(),
         };
+        if let Some(outbound_preferences_facade) = &self.outbound_preferences_facade {
+            synthetic_capabilities.extend(outbound_delivery_capabilities(
+                Arc::clone(outbound_preferences_facade),
+                self.fallback_user_id.clone(),
+                Arc::clone(&self.approval_requests),
+                Arc::clone(&self.capability_leases),
+                self.outbound_delivery_target_set_requires_approval,
+            )?);
+        }
         let port = wrap_local_dev_synthetic_capabilities(
             port,
             synthetic_capabilities,

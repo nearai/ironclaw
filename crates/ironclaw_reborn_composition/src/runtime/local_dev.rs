@@ -6,9 +6,10 @@ use std::{
 use chrono::Utc;
 use uuid::Uuid;
 
+use ironclaw_authorization::CapabilityLeaseStore;
 use ironclaw_host_api::{
-    CapabilityId, ExecutionContext, ExtensionId, InvocationId, MountView, ResourceScope,
-    RuntimeKind, TrustClass, UserId,
+    CapabilityId, EffectKind, ExecutionContext, ExtensionId, InvocationId, MountView,
+    ResourceScope, RuntimeKind, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, HostRuntime, SurfaceKind,
@@ -20,6 +21,8 @@ use ironclaw_loop_support::{
     HostManagedModelResponse, HostManagedToolResultContent, LoopCapabilityInputResolver,
     LoopCapabilityPortFactory, LoopCapabilityResultWriter, loop_driver_execution_extension_id,
 };
+use ironclaw_product_workflow::OutboundPreferencesProductFacade;
+use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_threads::{
     AppendCapabilityDisplayPreviewRequest, CapabilityDisplayPreviewEnvelope,
     CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus, SessionThreadService,
@@ -34,6 +37,7 @@ use ironclaw_turns::{
     },
 };
 
+use crate::local_dev_authorization::local_dev_effects_require_approval;
 use crate::local_dev_capability_policy::LocalDevCapabilityPolicy;
 use crate::local_dev_mounts::scoped_skill_management_mount_view;
 use crate::{
@@ -43,6 +47,7 @@ use crate::{
 };
 
 pub(super) mod extension_surface;
+mod outbound_delivery;
 mod refreshing_capability_port;
 #[cfg(test)]
 mod shell_tests;
@@ -51,6 +56,10 @@ mod surface_disclosure;
 mod synthetic_capability;
 
 use extension_surface::{LocalDevExtensionSurface, LocalDevExtensionSurfaceSource};
+#[cfg(test)]
+pub(crate) use outbound_delivery::{
+    OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
+};
 use refreshing_capability_port::{
     RefreshingLocalDevCapabilityPortConfig, create_refreshing_local_dev_capability_port,
 };
@@ -75,12 +84,20 @@ pub(super) fn capability_wiring(
     model_gateway: Arc<dyn HostManagedModelGateway>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
+    outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
 ) -> Option<LocalDevCapabilityWiring> {
     let runtime = services.host_runtime.clone()?;
     let local_runtime = services.local_runtime.as_ref()?;
     let workspace_mounts = local_runtime.workspace_mounts.clone();
     let memory_mounts = local_runtime.memory_mounts.clone();
+    let approval_requests: Arc<dyn ApprovalRequestStore> = local_runtime.approval_requests.clone();
+    let capability_leases: Arc<dyn CapabilityLeaseStore> = local_runtime.capability_leases.clone();
+    let outbound_delivery_target_set_requires_approval = local_dev_effects_require_approval(
+        local_runtime.runtime_policy.as_ref(),
+        policy.as_ref(),
+        &[EffectKind::ExternalWrite],
+    );
     let extension_surface_source =
         LocalDevExtensionSurfaceSource::new(local_runtime.extension_management.clone());
     let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
@@ -107,6 +124,10 @@ pub(super) fn capability_wiring(
             milestone_sink,
             skill_activation_source,
             trajectory_observer,
+            outbound_preferences_facade,
+            outbound_delivery_target_set_requires_approval,
+            approval_requests,
+            capability_leases,
         });
     let model_gateway: Arc<dyn HostManagedModelGateway> = Arc::new(
         LocalDevResultHydratingModelGateway::new(model_gateway, capability_io),
@@ -134,6 +155,10 @@ struct LocalDevLoopCapabilityPortFactory {
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
+    outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
+    outbound_delivery_target_set_requires_approval: bool,
+    approval_requests: Arc<dyn ApprovalRequestStore>,
+    capability_leases: Arc<dyn CapabilityLeaseStore>,
 }
 
 #[async_trait::async_trait]
@@ -164,6 +189,11 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             // refreshing helper builds) and the result hook (on `LocalDevCapabilityIo`),
             // so the two callbacks correlate by `call_id` for one tool call.
             trajectory_observer: self.trajectory_observer.clone(),
+            outbound_preferences_facade: self.outbound_preferences_facade.clone(),
+            outbound_delivery_target_set_requires_approval: self
+                .outbound_delivery_target_set_requires_approval,
+            approval_requests: Arc::clone(&self.approval_requests),
+            capability_leases: Arc::clone(&self.capability_leases),
         })
         .await
     }

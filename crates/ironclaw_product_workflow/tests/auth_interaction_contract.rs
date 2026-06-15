@@ -317,6 +317,7 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(47),
+            product_context: None,
         })
     }
 }
@@ -1039,6 +1040,92 @@ async fn auth_resolution_rejects_run_state_actor_mismatch() {
     ));
     assert!(coordinator.resumes().is_empty());
     assert!(coordinator.cancellations().is_empty());
+}
+
+/// WebUI-path parity test (deliverable 3).
+///
+/// After a capability round-trips through approval and then hits an auth gate,
+/// the `AuthInteractionService` must resume with `BlockedAuthGate` — not
+/// `BlockedApproval`. Using the wrong precondition would bypass the
+/// executor-level guard and could allow a second re-dispatch loop.
+///
+/// Harness limitation: `auth_interaction_contract.rs` and
+/// `approval_interaction_contract.rs` are separate Rust test binaries and
+/// cannot share fakes. This test therefore cannot drive the full
+/// approval → auth two-service flow in a single binary. The cross-service
+/// loop is validated at the executor tier in
+/// `ironclaw_agent_loop::executor::tests::
+///  auth_resume_after_approval_carries_resume_token_and_approval_request_id`.
+///
+/// The strongest assertion available at THIS tier: verify that
+/// `AuthInteractionService` always emits `BlockedAuthGate` — regardless of
+/// what the run's prior approval state was — and calls the coordinator
+/// exactly once with that precondition.
+#[tokio::test]
+async fn auth_resume_after_approval_uses_blocked_auth_gate_precondition() {
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let scope = turn_scope("alice", "thread-approval-auth");
+    let run_id = TurnRunId::new();
+    let gate_ref = make_gate_ref("gate:auth-after-approval");
+    let account_id = CredentialAccountId::new();
+
+    // Simulate the state AFTER approval resolved: the run is now BlockedAuth.
+    // `service_parts` wires `RecordingTurnCoordinator::blocked_auth`, which
+    // returns `TurnStatus::BlockedAuth` from `get_run_state`.
+    let flow = auth_flow(
+        AuthFlowStatus::Completed,
+        &scope,
+        &actor,
+        run_id,
+        &gate_ref,
+        Some(account_id),
+        setup_challenge(),
+    );
+    let (service, flow_manager, coordinator) =
+        service_parts(flow.clone(), vec![flow], actor.clone(), gate_ref.clone());
+
+    let response = service
+        .resolve(ResolveAuthInteractionRequest {
+            scope,
+            actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: AuthInteractionDecision::CredentialProvided {
+                credential_ref: account_id,
+            },
+            idempotency_key: IdempotencyKey::new("auth-after-approval-1").unwrap(),
+        })
+        .await
+        .expect("auth resolve after approval");
+
+    // Auth resolution must succeed and resume the run.
+    assert!(matches!(
+        response,
+        ResolveAuthInteractionResponse::Resumed(_)
+    ));
+
+    // Coordinator must be called exactly ONCE with BlockedAuthGate.
+    // Any other precondition (e.g. BlockedApproval) would bypass the
+    // executor guard that breaks the re-approval loop.
+    let resumes = coordinator.resumes();
+    assert_eq!(resumes.len(), 1, "resume must be called exactly once");
+    assert_eq!(
+        resumes[0].precondition,
+        ResumeTurnPrecondition::BlockedAuthGate,
+        "auth resume must use BlockedAuthGate, not BlockedApproval"
+    );
+
+    // Auth resolution must not cancel the run.
+    assert!(
+        coordinator.cancellations().is_empty(),
+        "auth resume must not cancel the run"
+    );
+
+    // Auth resolution must not touch the flow's cancel path.
+    assert!(
+        flow_manager.cancellations().is_empty(),
+        "auth resume must not cancel the auth flow"
+    );
 }
 
 #[test]
