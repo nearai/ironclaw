@@ -172,7 +172,7 @@ mod tests {
         assert!(styles.contains("border-radius: 8px; box-sizing: border-box; width: 100%;"));
         assert!(styles.contains("overflow-x: auto; white-space: pre; margin-bottom: 0.75em;"));
         assert!(styles.contains("display: inline; background: transparent; padding: 0;"));
-        assert!(styles.contains("font-size: 0.8125em; line-height: 1.65; white-space: inherit;"));
+        assert!(styles.contains("font-size: 0.9em; line-height: 1.65; white-space: inherit;"));
         assert!(!styles.contains("width: max-content"));
 
         let message_list = asset_text("js/pages/chat/components/message-list.js");

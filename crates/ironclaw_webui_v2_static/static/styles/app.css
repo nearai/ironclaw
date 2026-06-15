@@ -396,7 +396,7 @@ input:focus, select:focus, textarea:focus {
 }
 .markdown-body pre code {
   display: inline; background: transparent; padding: 0; border-radius: 0;
-  font-size: 0.8125em; line-height: 1.65; white-space: inherit;
+  font-size: 0.9em; line-height: 1.65; white-space: inherit;
 }
 .markdown-body blockquote {
   border-left: 3px solid var(--v2-panel-border); padding-left: 1em;
