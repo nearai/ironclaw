@@ -363,6 +363,7 @@ pub(crate) fn build_runtime_input_with_options(
         .with_runner_settings(runner_settings(runtime_services.config_file.as_ref())?)
         .with_trigger_poller_settings(trigger_poller_settings(
             runtime_services.config_file.as_ref(),
+            caller,
         )?)
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(200),

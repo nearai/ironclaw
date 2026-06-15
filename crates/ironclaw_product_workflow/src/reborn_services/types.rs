@@ -391,6 +391,16 @@ pub struct RebornListThreadsResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornListAutomationsResponse {
     pub automations: Vec<RebornAutomationInfo>,
+    /// Whether the background trigger poller (scheduler) is running. When
+    /// `false`, listed schedule automations will never actually fire, and the
+    /// browser surfaces a "scheduling is off" notice. Defaults to `true` on the
+    /// wire so an older payload without the field is not misreported as off.
+    #[serde(default = "default_scheduler_enabled")]
+    pub scheduler_enabled: bool,
+}
+
+fn default_scheduler_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

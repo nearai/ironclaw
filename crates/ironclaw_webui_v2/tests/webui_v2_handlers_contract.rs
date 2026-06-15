@@ -518,6 +518,7 @@ impl RebornServicesApi for StubServices {
                 "Daily status",
                 "0 9 * * *",
             )],
+            scheduler_enabled: true,
         })
     }
 
