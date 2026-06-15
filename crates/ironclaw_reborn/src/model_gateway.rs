@@ -364,6 +364,16 @@ where
         )
         .await
     }
+
+    fn route_accepts_images(&self, _route: Option<&HostManagedModelRouteSnapshot>) -> bool {
+        // This gateway sends to the route's `model_override`, defaulting to the
+        // provider's active model (see `request_model_override`). The wired
+        // policy uses no per-profile override, so the active model is the exact
+        // model `convert_messages` gates on — answer about that, keeping the
+        // read-gate consistent with the send-gate. (A future per-profile vision
+        // override would need this to resolve the profile route instead.)
+        is_vision_model(&self.provider.active_model_name())
+    }
 }
 
 #[async_trait]
@@ -562,6 +572,13 @@ where
             replay_identity,
         )
         .await
+    }
+
+    fn route_accepts_images(&self, route: Option<&HostManagedModelRouteSnapshot>) -> bool {
+        // This gateway builds its `replay_identity` from the route snapshot's
+        // `model_id`, so the same id decides image support — the read-gate and
+        // `convert_messages`'s send-gate share one model identity.
+        route.is_some_and(|route| is_vision_model(&route.model_id))
     }
 }
 

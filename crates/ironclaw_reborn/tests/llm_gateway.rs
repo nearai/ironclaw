@@ -93,6 +93,34 @@ async fn gateway_calls_llm_provider_for_allowed_model_profile() {
     assert_eq!(requests[0].messages[1].content, "hello model");
 }
 
+/// `LlmProviderModelGateway` (the live gateway) answers `route_accepts_images`
+/// from the provider's active model — the same model `convert_messages` gates
+/// the send on — so the loop's image read-gate matches the send-gate. This is
+/// the seam the read short-circuit depends on; cover it directly.
+#[test]
+fn gateway_reports_image_support_from_provider_active_model() {
+    let policy = LlmModelProfilePolicy::new().allow_model_profile(interactive_model(), None);
+
+    let vision = Arc::new(IgnoresModelOverrideProvider::new("gpt-4o", "x"));
+    let vision_gateway =
+        LlmProviderModelGateway::with_provider_identity(STATIC_PROVIDER_ID, vision, policy.clone());
+    assert!(
+        vision_gateway.route_accepts_images(None),
+        "a vision active model must accept images"
+    );
+
+    let text = Arc::new(IgnoresModelOverrideProvider::new(
+        "mistral-7b-instruct",
+        "x",
+    ));
+    let text_gateway =
+        LlmProviderModelGateway::with_provider_identity(STATIC_PROVIDER_ID, text, policy);
+    assert!(
+        !text_gateway.route_accepts_images(None),
+        "a text-only active model must not accept images"
+    );
+}
+
 #[tokio::test]
 async fn gateway_coalesces_late_system_messages_before_provider_call() {
     let provider = Arc::new(RecordingLlmProvider::reply("assistant response"));

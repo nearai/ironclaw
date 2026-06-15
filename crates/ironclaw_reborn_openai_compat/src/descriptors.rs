@@ -8,6 +8,12 @@ use ironclaw_host_api::ingress::{
     WebSocketOriginPolicy,
 };
 
+/// Maximum accepted chat-completion request body. Sized to admit base64-inline
+/// images (vision, #4644). Single source of truth for both the route
+/// descriptor's ingress `body_limit` (below) and the in-workflow body check in
+/// `chat_workflow.rs`, so the two can never drift apart.
+pub(crate) const MAX_CHAT_BODY_BYTES: usize = 14 * 1024 * 1024;
+
 pub const OPENAI_COMPAT_ROUTE_CHAT_COMPLETIONS: &str = "openai.compat.chat_completions";
 pub const OPENAI_COMPAT_ROUTE_RESPONSES_API_CREATE: &str = "openai.compat.responses_api.create";
 pub const OPENAI_COMPAT_ROUTE_RESPONSES_V1_CREATE: &str = "openai.compat.responses_v1.create";
@@ -43,9 +49,11 @@ fn chat_completions_descriptor() -> IngressRouteDescriptor {
         OPENAI_COMPAT_ROUTE_CHAT_COMPLETIONS,
         NetworkMethod::Post,
         OPENAI_COMPAT_PATTERN_CHAT_COMPLETIONS,
-        // 14 MiB to admit base64-inline images (vision, #4644); the per-image
-        // decoded ceiling is enforced in the workflow.
-        create_policy(body_limit_kib(14 * 1024)),
+        // Admits base64-inline images (vision, #4644); the per-image decoded
+        // ceiling is enforced in the workflow. Both this ingress cap and the
+        // in-workflow body check read the single `MAX_CHAT_BODY_BYTES` source of
+        // truth so they can't drift apart.
+        create_policy(body_limit_kib((MAX_CHAT_BODY_BYTES / 1024) as u64)),
     )
 }
 

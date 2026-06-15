@@ -13,6 +13,7 @@ use crate::content_parts::{
     DecodedInlineImage, content_value_to_text_and_images, image_mime_extension,
     sanitize_product_text_fragment,
 };
+use crate::descriptors::MAX_CHAT_BODY_BYTES;
 use crate::error::product_rejection_to_openai_error;
 use crate::identity::{
     OPENAI_COMPAT_ACTOR_KIND, OPENAI_COMPAT_ADAPTER_ID, OPENAI_COMPAT_INSTALLATION_ID,
@@ -64,7 +65,6 @@ pub trait OpenAiCompatInboundAttachmentSubmit: Send + Sync {
 
 const DEFAULT_CHAT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_BIND_INTERNAL_REFS_TIMEOUT: Duration = Duration::from_secs(2);
-const MAX_CHAT_BODY_BYTES: usize = 14 * 1024 * 1024;
 const MAX_CHAT_COMPLETION_MESSAGES: usize = 1_000;
 pub const OPENAI_COMPAT_CONVERSATION_PREFIX: &str = "chat_completion";
 

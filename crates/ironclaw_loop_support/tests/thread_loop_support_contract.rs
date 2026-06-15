@@ -2954,6 +2954,80 @@ async fn model_port_reads_image_attachment_bytes_into_model_image_parts() {
     assert_eq!(image_parts[0].data_base64, "AQIDBA==");
 }
 
+/// A text-only (non-vision) model must never trigger the attachment read: the
+/// gateway would only discard the parts, so the bytes are never touched.
+/// Mirrors the vision case above but declares the model non-vision-capable and
+/// asserts zero reads and zero image parts (the textual `<attachments>` pointer
+/// is the model's fallback).
+#[tokio::test]
+async fn model_port_skips_image_read_for_non_vision_model() {
+    let fixture = ThreadFixture::new().await;
+    let image = AttachmentRef {
+        id: "att-img-0".to_string(),
+        kind: AttachmentKind::Image,
+        mime_type: "image/png".to_string(),
+        filename: Some("diagram.png".to_string()),
+        size_bytes: Some(4),
+        storage_key: Some("/workspace/attachments/2026-06-14/m1-0-diagram.png".to_string()),
+        extracted_text: None,
+    };
+    let accepted = fixture
+        .thread_service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+            actor_id: "user-loop-support".to_string(),
+            source_binding_id: Some("source-web".to_string()),
+            reply_target_binding_id: Some("reply-web".to_string()),
+            external_event_id: Some("event-image".to_string()),
+            content: MessageContent::with_attachments("look at this", vec![image]),
+        })
+        .await
+        .unwrap();
+
+    let reader = Arc::new(StubImageReader {
+        bytes: vec![1, 2, 3, 4],
+        reads: Mutex::new(Vec::new()),
+    });
+    let gateway = Arc::new(RecordingGateway::reply("text only"));
+    let port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    )
+    .with_attachment_read_port(reader.clone())
+    .with_model_vision_capability(false);
+
+    let messages = vec![LoopModelMessage {
+        role: "user".to_string(),
+        content_ref: LoopMessageRef::new(format!("msg:{}", accepted.message_id)).unwrap(),
+    }];
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    port.stream_model(LoopModelRequest {
+        messages,
+        surface_version: None,
+        model_preference: None,
+        capability_view: None,
+    })
+    .await
+    .unwrap();
+
+    // The read port must never be consulted for a non-vision model.
+    assert!(
+        reader.reads.lock().unwrap().is_empty(),
+        "a non-vision model must not read image bytes"
+    );
+    let calls = gateway.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        calls[0].messages[0].image_parts.is_empty(),
+        "a non-vision model carries no image parts"
+    );
+}
+
 #[tokio::test]
 async fn model_port_threads_resolved_model_route_snapshot_to_gateway() {
     let fixture = ThreadFixture::new().await;

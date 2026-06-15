@@ -163,16 +163,25 @@ pub trait InboundTurnService: Send + Sync {
     /// `attachments` carries decoded bytes a synchronous host surface (e.g. the
     /// OpenAI-compatible API) received inline — never serialized into the
     /// bytes-free [`ProductInboundEnvelope`]. The implementation lands them into
-    /// project storage before message acceptance. The default ignores
-    /// attachments and delegates to [`Self::accept_user_message_with_before_policy`],
-    /// so adapters without an inline-bytes surface are unaffected.
+    /// project storage before message acceptance.
+    ///
+    /// The default supports only the no-attachment case: with no attachments it
+    /// delegates to [`Self::accept_user_message_with_before_policy`], but a
+    /// non-empty `attachments` list is **rejected** rather than silently
+    /// dropped — an implementation that has no landing path must fail closed so
+    /// a user's files never vanish. Implementations with an inline-bytes surface
+    /// override this.
     async fn accept_user_message_with_before_policy_and_attachments(
         &self,
         envelope: &ProductInboundEnvelope,
         before_inbound_policy: &dyn BeforeInboundPolicy,
         attachments: Vec<InboundAttachment>,
     ) -> Result<InboundUserMessageDispatch, ProductWorkflowError> {
-        let _ = attachments;
+        if !attachments.is_empty() {
+            return Err(ProductWorkflowError::TurnSubmissionRejected {
+                reason: "inbound attachments are not supported by this turn service".into(),
+            });
+        }
         self.accept_user_message_with_before_policy(envelope, before_inbound_policy)
             .await
     }
@@ -1660,6 +1669,82 @@ mod tests {
                 Err(ProductWorkflowError::TurnSubmissionRejected { .. })
             ),
             "a missing lander must reject the turn, never silently drop the attachment"
+        );
+    }
+
+    /// A turn service that does not override the attachments method, exercising
+    /// the trait default. Its `accept_user_message_with_before_policy` returns a
+    /// distinct `Transient` error so a test can tell "the default delegated"
+    /// (Transient) apart from "the default rejected" (TurnSubmissionRejected).
+    struct DefaultAttachmentsTurnService;
+
+    #[async_trait]
+    impl InboundTurnService for DefaultAttachmentsTurnService {
+        async fn replay_accepted_user_message(
+            &self,
+            _envelope: &ProductInboundEnvelope,
+        ) -> Result<Option<InboundTurnOutcome>, ProductWorkflowError> {
+            Ok(None)
+        }
+
+        async fn accept_user_message(
+            &self,
+            _envelope: &ProductInboundEnvelope,
+        ) -> Result<InboundTurnOutcome, ProductWorkflowError> {
+            Err(ProductWorkflowError::Transient {
+                reason: "delegated".into(),
+            })
+        }
+
+        async fn accept_user_message_with_before_policy(
+            &self,
+            _envelope: &ProductInboundEnvelope,
+            _before_inbound_policy: &dyn BeforeInboundPolicy,
+        ) -> Result<InboundUserMessageDispatch, ProductWorkflowError> {
+            Err(ProductWorkflowError::Transient {
+                reason: "delegated".into(),
+            })
+        }
+    }
+
+    /// The trait default must reject a turn carrying inline bytes rather than
+    /// silently dropping them, but still pass an attachment-free turn straight
+    /// through to the underlying acceptance path.
+    #[tokio::test]
+    async fn default_attachments_impl_rejects_bytes_but_passes_empty_through() {
+        let service = DefaultAttachmentsTurnService;
+        let envelope = user_message_envelope();
+
+        let rejected = service
+            .accept_user_message_with_before_policy_and_attachments(
+                &envelope,
+                &NoopBeforeInboundPolicy,
+                vec![InboundAttachment {
+                    id: "openai-image-0".to_string(),
+                    mime_type: "image/png".to_string(),
+                    filename: Some("image-0.png".to_string()),
+                    bytes: vec![0x89, b'P', b'N', b'G'],
+                }],
+            )
+            .await;
+        assert!(
+            matches!(
+                rejected,
+                Err(ProductWorkflowError::TurnSubmissionRejected { .. })
+            ),
+            "the default must fail closed on inline bytes, never silently drop them"
+        );
+
+        let delegated = service
+            .accept_user_message_with_before_policy_and_attachments(
+                &envelope,
+                &NoopBeforeInboundPolicy,
+                Vec::new(),
+            )
+            .await;
+        assert!(
+            matches!(delegated, Err(ProductWorkflowError::Transient { .. })),
+            "with no attachments the default must delegate to the normal path"
         );
     }
 }
