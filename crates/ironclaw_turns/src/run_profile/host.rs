@@ -1482,6 +1482,20 @@ pub struct CapabilityAuthResume {
     /// The two sub-fields are always set together; see [`AuthResumeApprovalIdentity`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prior_approval: Option<AuthResumeApprovalIdentity>,
+    /// Original runtime input captured when the auth gate was produced.
+    ///
+    /// Capability input refs are scoped to a loop run and may be consumed by the
+    /// first dispatch before the auth gate is resolved. When present, this
+    /// replay payload lets auth-resume re-dispatch without resolving a stale or
+    /// already-consumed input ref.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<CapabilityAuthResumeReplay>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityAuthResumeReplay {
+    pub input: serde_json::Value,
+    pub estimate: ResourceEstimate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1511,6 +1525,8 @@ pub enum CapabilityOutcome {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
         safe_summary: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth_resume: Option<CapabilityAuthResume>,
     },
     ResourceBlocked {
         gate_ref: LoopGateRef,

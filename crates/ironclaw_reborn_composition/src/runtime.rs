@@ -1115,17 +1115,27 @@ impl RebornRuntime {
         self.skill_activation_source.clone()
     }
 
-    /// Project-scoped workspace filesystem the agent's file tools resolve
-    /// through. Used to land inbound attachment bytes at paths the agent can
-    /// later read back. `None` when no local runtime is composed.
+    /// Read-write project-scoped workspace filesystem for landing inbound
+    /// attachment bytes at paths the agent's file tools can later read back.
+    /// `None` when no local runtime is composed.
+    ///
+    /// This deliberately does NOT reuse `rt.workspace_filesystem`: that handle
+    /// is intentionally read-only (it backs setup-marker reads — see
+    /// `local_dev_setup_marker_workspace_filesystem_is_read_only`), so writing
+    /// an attachment through it fails closed with `PermissionDenied`. Build a
+    /// read-write view over the same root using the read-write `workspace_mounts`
+    /// the agent's `file_write`/`file_read` tools resolve through, so a landed
+    /// attachment is addressable at its recorded `storage_key`.
     pub(crate) fn webui_workspace_filesystem(
         &self,
     ) -> Option<Arc<ironclaw_filesystem::ScopedFilesystem<crate::factory::LocalDevRootFilesystem>>>
     {
-        self.services
-            .local_runtime
-            .as_ref()
-            .map(|rt| Arc::clone(&rt.workspace_filesystem))
+        self.services.local_runtime.as_ref().map(|rt| {
+            Arc::new(ironclaw_filesystem::ScopedFilesystem::with_fixed_view(
+                Arc::clone(&rt.extension_filesystem),
+                rt.workspace_mounts.clone(),
+            ))
+        })
     }
 
     /// Test-only handle on the resource governor backing the budget

@@ -45,6 +45,7 @@ use ironclaw_processes::{
 use ironclaw_run_state::{
     ApprovalRequestStore, RunStateApprovalStore, RunStateError, RunStateStore, RunStatus,
 };
+use ironclaw_secrets::SecretStore;
 use ironclaw_trust::{HostTrustPolicy, TrustDecision, TrustError, TrustPolicy, TrustProvenance};
 use ironclaw_turns::run_profile::LoopSafeSummary;
 
@@ -56,7 +57,8 @@ use crate::{
     RuntimeCapabilityCompleted, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
     RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeGateId,
     RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest,
-    VisibleCapabilitySurface, plan_capability, surface::CapabilityCatalog,
+    VisibleCapabilitySurface, obligations::secret_present, plan_capability,
+    surface::CapabilityCatalog,
 };
 
 /// Default production wiring for [`HostRuntime`].
@@ -80,6 +82,19 @@ pub struct DefaultHostRuntime {
     surface_filesystem: Option<Arc<dyn RootFilesystem>>,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
     obligation_handler: Option<Arc<dyn CapabilityObligationHandler>>,
+    /// Optional secret store used for pre-flight credential presence checks.
+    ///
+    /// When present, capability dispatch (both `invoke_capability` and
+    /// `spawn_capability`) checks whether all required credentials declared in the
+    /// capability manifest are present before the authorization step. This surfaces
+    /// `AuthRequired` ahead of the approval gate so users are never asked to
+    /// approve an action that cannot yet execute.
+    ///
+    /// When absent the pre-flight is skipped; the dispatch-time obligation check
+    /// remains the enforcement backstop regardless.
+    // arch-exempt: optional_arc, credential pre-flight is disabled in minimal/test
+    // host-runtime graphs that do not wire a secret store, plan #4539 (Fix B)
+    credential_preflight_store: Option<Arc<dyn SecretStore>>,
     surface_version: CapabilitySurfaceVersion,
     runtime_policy: EffectiveRuntimePolicy,
 }
@@ -145,6 +160,7 @@ impl DefaultHostRuntime {
             surface_filesystem: None,
             runtime_health: None,
             obligation_handler: None,
+            credential_preflight_store: None,
             surface_version,
             runtime_policy,
         }
@@ -298,6 +314,30 @@ impl DefaultHostRuntime {
         self.with_obligation_handler(Arc::new(BuiltinObligationHandler::new()))
     }
 
+    /// Attaches the secret store used for credential pre-flight checks.
+    ///
+    /// When set, `invoke_capability` and `spawn_capability` query secret presence
+    /// for all required credentials declared in the capability manifest *before*
+    /// the approval gate fires. This prevents burning a human approval on an
+    /// invocation that cannot yet succeed because a credential is missing.
+    ///
+    /// The dispatch-time obligation check remains the enforcement backstop
+    /// regardless of whether this store is set.
+    ///
+    /// Production code must use `HostRuntimeServices::build_host_runtime()` which
+    /// wires the secret store automatically. This setter is `pub(crate)` to prevent
+    /// a second public seam for secret-store configuration on the production facade.
+    // arch-exempt: optional_arc, genuinely optional — minimal/test graphs that
+    // never need pre-flight skip this; production wires it from HostRuntimeServices,
+    // plan #4539 (Fix B)
+    pub(crate) fn with_credential_preflight_store(
+        mut self,
+        secret_store: Arc<dyn SecretStore>,
+    ) -> Self {
+        self.credential_preflight_store = Some(secret_store);
+        self
+    }
+
     /// Spawns an already-authorized process request through the configured
     /// process manager.
     pub async fn spawn_process(
@@ -372,6 +412,30 @@ impl HostRuntime for DefaultHostRuntime {
         context.trust = trust_decision.effective_trust.class();
 
         let registry = self.registry.snapshot();
+
+        // Validate the execution context before the credential pre-flight queries
+        // the secret store. Without this guard a malformed RuntimeCapabilityRequest
+        // could probe secret-store presence under a forged resource_scope that does
+        // not match the top-level tenant/user/agent/project fields.
+        if let Err(error) = context.validate() {
+            return Err(HostRuntimeError::invalid_request(error.to_string()));
+        }
+
+        // Pre-flight credential check: surface AuthRequired BEFORE the approval
+        // gate fires. This prevents a human approval being consumed for an action
+        // that cannot yet succeed because a required credential is missing.
+        //
+        // Design note: the pre-flight is trust-class-agnostic by design — it runs
+        // before the authorizer and trust/authorization checks. The dispatch-time
+        // obligation check (which runs after those checks) is the enforcing layer.
+        // The pre-flight provides ordering only (credentials before approval gate).
+        if let Some(auth_required) = self
+            .credential_preflight_check(&capability_id, &scope, &registry)
+            .await
+        {
+            return Ok(auth_required);
+        }
+
         self.apply_persistent_approval_policy(
             &mut context,
             &registry,
@@ -455,6 +519,26 @@ impl HostRuntime for DefaultHostRuntime {
         context.trust = trust_decision.effective_trust.class();
 
         let registry = self.registry.snapshot();
+
+        // Validate the execution context before the credential pre-flight queries
+        // the secret store. Without this guard a malformed RuntimeCapabilityRequest
+        // could probe secret-store presence under a forged resource_scope that does
+        // not match the top-level tenant/user/agent/project fields.
+        if let Err(error) = context.validate() {
+            return Err(HostRuntimeError::invalid_request(error.to_string()));
+        }
+
+        // Pre-flight credential check: surface AuthRequired BEFORE the approval
+        // gate fires. The pre-flight is trust-class-agnostic by design — the
+        // dispatch-time obligation check (which runs after trust/authorization)
+        // is the enforcing layer.
+        if let Some(auth_required) = self
+            .credential_preflight_check(&capability_id, &scope, &registry)
+            .await
+        {
+            return Ok(auth_required);
+        }
+
         self.apply_persistent_approval_policy(
             &mut context,
             &registry,
@@ -1385,6 +1469,88 @@ impl DefaultHostRuntime {
             .map_err(unavailable_from_run_state)?;
         Ok(record.and_then(|record| record.approval_request_id))
     }
+
+    /// Checks whether all required credentials declared in the capability
+    /// manifest are present in the secret store.
+    ///
+    /// `registry` is the already-snapshotted registry from the caller; the
+    /// caller is responsible for taking a single snapshot and passing it here
+    /// to avoid a redundant `registry.snapshot()` inside this method.
+    ///
+    /// Returns `Some(RuntimeCapabilityOutcome::AuthRequired)` if any required
+    /// secret is absent, or `None` when all secrets are present (or when no
+    /// secret store is wired, i.e. pre-flight is disabled).
+    ///
+    /// The dispatch-time obligation check remains the enforcement backstop —
+    /// this method provides ordering only (credentials before approval gate).
+    ///
+    /// ## Failure handling
+    ///
+    /// On a transient secret-store `Err`, the pre-flight is skipped entirely
+    /// (returns `None`) rather than treating the error as "credential absent"
+    /// and firing `AuthRequired`. A backend failure must not burn a user auth
+    /// interaction — the dispatch-time obligation check enforces the credential
+    /// requirement and will catch genuine absences at execution time.
+    async fn credential_preflight_check(
+        &self,
+        capability_id: &CapabilityId,
+        scope: &ResourceScope,
+        registry: &ExtensionRegistry,
+    ) -> Option<RuntimeCapabilityOutcome> {
+        let secret_store = self.credential_preflight_store.as_ref()?;
+
+        let descriptor = registry.get_capability(capability_id)?;
+
+        let (required_secrets, credential_requirements) =
+            capability_credential_requirements(descriptor);
+
+        if required_secrets.is_empty() {
+            return None;
+        }
+
+        for handle in &required_secrets {
+            // `secret_present` is the single owner of the presence rule, shared with
+            // the dispatch-time obligation backstop (obligations::preflight_secret_injection)
+            // so the two paths cannot drift on "what counts as a present credential".
+            // The happy path intentionally re-checks at dispatch time; this pre-flight
+            // read is only for gate ordering. (Accepted double-read; the backstop is the
+            // authority — see the thread on collapsing it.)
+            match secret_present(secret_store.as_ref(), scope, handle).await {
+                Ok(true) => {
+                    // Secret present — continue checking.
+                }
+                Ok(false) => {
+                    tracing::debug!(
+                        capability_id = %capability_id,
+                        secret_handle = handle.as_str(),
+                        "credential pre-flight: required secret absent; surfacing AuthRequired before approval gate"
+                    );
+                    return Some(auth_required_outcome(
+                        capability_id.clone(),
+                        required_secrets,
+                        credential_requirements,
+                    ));
+                }
+                Err(error) => {
+                    // Fail-open: a transient store error must not masquerade as a
+                    // missing credential and burn a user auth interaction. Skip the
+                    // pre-flight entirely — the dispatch-time obligation check is the
+                    // enforcement backstop and will catch genuine absences at execution
+                    // time. The cause is logged (sanitized; SecretStoreError carries no
+                    // raw secret material) so a backend outage still leaves a trail.
+                    tracing::debug!(
+                        capability_id = %capability_id,
+                        secret_handle = handle.as_str(),
+                        error = %error,
+                        "credential pre-flight: secret store metadata query failed; skipping pre-flight (dispatch-time check enforces)"
+                    );
+                    return None; // silent-ok: transient store error must not burn a user auth interaction; dispatch-time obligation check is the backstop
+                }
+            }
+        }
+
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1633,6 +1799,64 @@ fn completed_outcome_from(
         display_preview: result.dispatch.display_preview,
         usage: result.dispatch.usage,
     }
+}
+
+/// Returns the required secrets and OAuth credential requirements declared in
+/// the capability descriptor.
+///
+/// This is the canonical extraction used by the **pre-flight credential
+/// presence check** (before the approval gate). The dispatch-time obligation
+/// check remains the enforcement backstop; it derives the same handles through
+/// the obligation-handler iteration over `descriptor.runtime_credentials`
+/// (same source, different code path — both iterate `required == true` entries).
+/// The two paths agree on which handles are required; the pre-flight additionally
+/// computes `credential_requirements` for the auth-gate payload.
+///
+/// Callers outside the pre-flight check must not recompute the requirement set
+/// independently — call this function instead.
+///
+/// Only entries with `required == true` **and** `source == SecretHandle` are
+/// included in `required_secrets`. `ProductAuthAccount`-source credentials are
+/// staged by the credential-account resolver at dispatch time (not via
+/// `secret_store.metadata`), so including their slot handle here would produce
+/// a false-positive `AuthRequired` for capabilities whose product-auth account
+/// is already connected.
+pub(crate) fn capability_credential_requirements(
+    descriptor: &ironclaw_host_api::CapabilityDescriptor,
+) -> (
+    Vec<SecretHandle>,
+    Vec<ironclaw_host_api::RuntimeCredentialAuthRequirement>,
+) {
+    let provider = descriptor.provider.clone();
+    let mut required_secrets = Vec::new();
+    let mut credential_requirements = Vec::new();
+
+    // Double-read accepted: the dispatch-time obligation path (in
+    // ironclaw_host_runtime::obligations) will re-check each handle's presence via
+    // the same secret_store when the capability executes. Threading the pre-flight
+    // result into the obligation path would cross crate-boundary constraints (per
+    // CLAUDE.md) without meaningful gain; the ordering guarantee (auth before
+    // approval gate) is the pre-flight's sole purpose.
+    for cred in &descriptor.runtime_credentials {
+        if !cred.required {
+            continue;
+        }
+        // Only SecretHandle-source credentials are presence-checkable in the
+        // secret store. ProductAuthAccount credentials are staged by the
+        // credential-account resolver at dispatch time (not via secret_store.metadata),
+        // so including their slot handle here would produce a false-positive AuthRequired
+        // for capabilities whose product-auth account is already connected.
+        if matches!(
+            cred.source,
+            ironclaw_host_api::RuntimeCredentialRequirementSource::SecretHandle
+        ) {
+            required_secrets.push(cred.handle.clone());
+        }
+        if let Some(auth_req) = cred.product_auth_requirement_for(provider.clone()) {
+            credential_requirements.push(auth_req);
+        }
+    }
+    (required_secrets, credential_requirements)
 }
 
 fn auth_required_outcome(
@@ -1915,7 +2139,9 @@ mod tests {
 
     use super::*;
     use ironclaw_capabilities::CapabilityInvocationError;
-    use ironclaw_extensions::{ExtensionManifest, ManifestSource};
+    use ironclaw_extensions::{
+        ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
+    };
     use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
     use ironclaw_host_api::{
         CapabilityId, DispatchFailureKind, ExtensionId, HostPortCatalog, PackageSource,
@@ -2322,6 +2548,211 @@ output_schema_ref = "schemas/test.output.json"
                 "{kind:?}"
             );
         }
+    }
+
+    // ─── capability_credential_requirements unit tests ──────────────────────────
+    //
+    // These were previously integration tests in host_runtime_services_contract.rs
+    // that called the function via `ironclaw_host_runtime::capability_credential_requirements`.
+    // They are kept here as unit tests because the function is now `pub(crate)`,
+    // making it invisible to external test binaries. Coverage is equivalent.
+
+    fn build_descriptor_for_manifest(
+        manifest_toml: &str,
+    ) -> ironclaw_host_api::CapabilityDescriptor {
+        let manifest = ExtensionManifest::parse(
+            manifest_toml,
+            ManifestSource::InstalledLocal,
+            &HostPortCatalog::empty(),
+        )
+        .expect("manifest must parse");
+        let cap_id = manifest.capabilities[0].id.clone();
+        let root =
+            VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
+        let package = ExtensionPackage::from_manifest(manifest, root).expect("package must build");
+        let mut registry = ExtensionRegistry::new();
+        registry.insert(package).unwrap();
+        registry.get_capability(&cap_id).unwrap().clone()
+    }
+
+    /// `capability_credential_requirements` must return exactly the required
+    /// `SecretHandle`-source handles declared in the descriptor, filtered to
+    /// `required == true`, and must not include `ProductAuthAccount`-source handles.
+    ///
+    /// Previously `credential_requirements_extraction_matches_descriptor_required_credentials`
+    /// in host_runtime_services_contract.rs (moved here because the function is
+    /// now `pub(crate)`; coverage is identical).
+    #[test]
+    fn credential_requirements_extraction_matches_descriptor_required_credentials() {
+        const MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "script"
+name = "Script With Credential"
+version = "0.1.0"
+description = "Script extension that requires a runtime credential"
+trust = "untrusted"
+
+[runtime]
+kind = "script"
+runner = "sandboxed_process"
+command = "echo"
+args = []
+
+[[capabilities]]
+id = "script.echo"
+description = "Echo through Script"
+effects = ["dispatch_capability", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/test/input.v1.json"
+output_schema_ref = "schemas/test/output.v1.json"
+prompt_doc_ref = "prompts/test.md"
+
+[[capabilities.runtime_credentials]]
+handle = "script_api_token"
+source = { type = "secret_handle" }
+audience = { scheme = "https", host_pattern = "api.example.com" }
+target = { type = "header", name = "x-api-key" }
+required = true
+"#;
+        let descriptor = build_descriptor_for_manifest(MANIFEST);
+
+        let (preflight_handles, preflight_reqs) = capability_credential_requirements(&descriptor);
+
+        // The obligation handler iterates `descriptor.runtime_credentials` filtered
+        // to `required == true` — verify `capability_credential_requirements` produces
+        // the same handles from the same source.
+        let expected_handles: Vec<SecretHandle> = descriptor
+            .runtime_credentials
+            .iter()
+            .filter(|cred| cred.required)
+            .map(|cred| cred.handle.clone())
+            .collect();
+
+        assert_eq!(
+            preflight_handles, expected_handles,
+            "capability_credential_requirements must return exactly the required handles from the descriptor"
+        );
+        assert_eq!(preflight_handles.len(), 1, "expected one required handle");
+        assert_eq!(
+            preflight_handles[0].as_str(),
+            "script_api_token",
+            "required handle must be script_api_token"
+        );
+        // The manifest source is `secret_handle` (not `product_auth_account`), so
+        // `product_auth_requirement_for` returns None — credential_requirements is empty.
+        assert!(
+            preflight_reqs.is_empty(),
+            "credential_requirements must be empty for secret_handle source (no product_auth_account)"
+        );
+    }
+
+    /// A capability descriptor with only `required = false` credentials must
+    /// produce empty `required_secrets` and `credential_requirements`.
+    ///
+    /// Previously `credential_requirements_extraction_returns_empty_for_all_optional_credentials`
+    /// in host_runtime_services_contract.rs (moved here because the function is now
+    /// `pub(crate)`; coverage is identical).
+    #[test]
+    fn credential_requirements_extraction_returns_empty_for_all_optional_credentials() {
+        const MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "script"
+name = "Script With Optional Credential"
+version = "0.1.0"
+description = "Script extension with an optional runtime credential"
+trust = "untrusted"
+
+[runtime]
+kind = "script"
+runner = "sandboxed_process"
+command = "echo"
+args = []
+
+[[capabilities]]
+id = "script.echo"
+description = "Echo through Script"
+effects = ["dispatch_capability", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/test/input.v1.json"
+output_schema_ref = "schemas/test/output.v1.json"
+prompt_doc_ref = "prompts/test.md"
+
+[[capabilities.runtime_credentials]]
+handle = "optional_api_token"
+source = { type = "secret_handle" }
+audience = { scheme = "https", host_pattern = "api.example.com" }
+target = { type = "header", name = "x-api-key" }
+required = false
+"#;
+        let descriptor = build_descriptor_for_manifest(MANIFEST);
+
+        let (required_secrets, credential_requirements) =
+            capability_credential_requirements(&descriptor);
+
+        assert!(
+            required_secrets.is_empty(),
+            "capability with only optional credentials must produce empty required_secrets; got {required_secrets:?}"
+        );
+        assert!(
+            credential_requirements.is_empty(),
+            "capability with only optional credentials must produce empty credential_requirements; got {credential_requirements:?}"
+        );
+    }
+
+    /// A REQUIRED `product_auth_account`-source credential must NOT be pushed into
+    /// `required_secrets` (its handle is only an injection slot that the account
+    /// resolver stages later, so a pre-flight `metadata()` probe would false-positive
+    /// `AuthRequired` for an already-connected account). It MUST still surface in
+    /// `credential_requirements` so the auth payload can describe the product-auth need.
+    #[test]
+    fn credential_requirements_extraction_excludes_required_product_auth_account() {
+        const MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "script"
+name = "Script With Product-Auth Credential"
+version = "0.1.0"
+description = "Script extension that requires a product-auth account credential"
+trust = "untrusted"
+
+[runtime]
+kind = "script"
+runner = "sandboxed_process"
+command = "echo"
+args = []
+
+[[capabilities]]
+id = "script.echo"
+description = "Echo through Script"
+effects = ["dispatch_capability", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/test/input.v1.json"
+output_schema_ref = "schemas/test/output.v1.json"
+prompt_doc_ref = "prompts/test.md"
+
+[[capabilities.runtime_credentials]]
+handle = "github_runtime_token"
+source = { type = "product_auth_account", provider = "github" }
+audience = { scheme = "https", host_pattern = "api.github.com" }
+target = { type = "header", name = "authorization", prefix = "Bearer " }
+required = true
+"#;
+        let descriptor = build_descriptor_for_manifest(MANIFEST);
+
+        let (required_secrets, credential_requirements) =
+            capability_credential_requirements(&descriptor);
+
+        assert!(
+            required_secrets.is_empty(),
+            "a required product_auth_account credential must be excluded from required_secrets \
+             (the slot handle is not a presence-checkable secret); got {required_secrets:?}"
+        );
+        assert!(
+            !credential_requirements.is_empty(),
+            "a required product_auth_account credential must still surface in credential_requirements"
+        );
     }
 
     #[test]

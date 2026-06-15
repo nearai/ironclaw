@@ -1211,11 +1211,28 @@ impl BuiltinObligationHandler {
             return Err(secret_obligation_failed());
         }
         for handle in handles {
-            let exists = secret_store
-                .metadata(&request.context.resource_scope, handle)
-                .await
-                .map_err(|_| secret_obligation_failed())?
-                .is_some();
+            // Fail closed on a store error: the dispatch-time backstop must never
+            // let an uncredentialed call through on a transient failure. Preserve the
+            // cause as a server-side trail (`SecretStoreError` Display carries no raw
+            // secret material — handles/reasons only); the caller still receives the
+            // opaque, sanitized secret-obligation failure.
+            let exists = match secret_present(
+                secret_store.as_ref(),
+                &request.context.resource_scope,
+                handle,
+            )
+            .await
+            {
+                Ok(exists) => exists,
+                Err(error) => {
+                    tracing::debug!(
+                        secret_handle = handle.as_str(),
+                        error = %error,
+                        "dispatch-time secret presence probe failed; failing closed at the obligation backstop"
+                    );
+                    return Err(secret_obligation_failed());
+                }
+            };
             if !exists {
                 return Err(CapabilityObligationError::AuthRequired {
                     credential_requirements: Vec::new(),
@@ -2016,6 +2033,22 @@ fn secret_obligation_failed() -> CapabilityObligationError {
     CapabilityObligationError::Failed {
         kind: CapabilityObligationFailureKind::Secret,
     }
+}
+
+/// Single source of truth for "is this required secret present in `scope`".
+///
+/// Both the credential pre-flight (ordering — `DefaultHostRuntime::
+/// credential_preflight_check`) and the dispatch-time obligation backstop
+/// (enforcement — [`BuiltinObligationHandler::preflight_secret_injection`])
+/// consult this one rule so "what counts as a present credential" cannot drift
+/// between the two call sites. Each caller decides how to treat a store `Err`
+/// (the pre-flight fails open and skips; the obligation backstop fails closed).
+pub(crate) async fn secret_present(
+    store: &dyn SecretStore,
+    scope: &ResourceScope,
+    handle: &SecretHandle,
+) -> Result<bool, SecretStoreError> {
+    Ok(store.metadata(scope, handle).await?.is_some())
 }
 
 fn resource_obligation_failed() -> CapabilityObligationError {

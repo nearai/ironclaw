@@ -63,12 +63,13 @@ impl<F: RootFilesystem> InboundAttachmentLander for ProjectScopedAttachmentLande
             self.max_attachment_bytes,
         )
         .await
+        // The user-facing error stays a sanitized 500; `internal_from` logs the
+        // underlying landing failure (invalid mount path vs. write/permission
+        // denied) so an operator can tell a misconfigured mount from a full disk.
         .map_err(|error| {
-            // The user-facing error stays a sanitized 500; log the underlying
-            // landing failure (invalid mount path vs. write/permission denied)
-            // so an operator can tell a misconfigured mount from a full disk.
-            tracing::warn!(%error, message_id, "failed to land inbound attachments");
-            RebornServicesError::internal()
+            RebornServicesError::internal_from(format!(
+                "land inbound attachments for message {message_id}: {error}"
+            ))
         })
     }
 }

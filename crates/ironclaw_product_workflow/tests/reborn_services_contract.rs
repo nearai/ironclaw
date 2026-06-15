@@ -8103,6 +8103,70 @@ async fn submit_turn_lands_attachments_and_persists_refs_on_the_user_message() {
 }
 
 #[tokio::test]
+async fn get_timeline_returns_attachment_refs_on_the_user_message() {
+    use base64::Engine;
+
+    // The browser renders attachment cards from the timeline, and they must
+    // survive a page refresh. The browser's surface is `get_timeline`, not
+    // `list_thread_history`, so drive that path (test through the caller) and
+    // assert the projected `ThreadMessageRecord` still carries the refs.
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let lander = Arc::new(RecordingLander::default());
+    let services = RebornServices::new(Arc::clone(&threads), coordinator.clone())
+        .with_inbound_attachments(lander.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let csv_b64 = base64::engine::general_purpose::STANDARD.encode(b"a,b\n1,2\n");
+    services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-att",
+                "thread_id": "thread-alpha",
+                "content": "spreadsheet attached",
+                "attachments": [{
+                    "mime_type": "text/csv",
+                    "filename": "data.csv",
+                    "data_base64": csv_b64,
+                }],
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("submit succeeds");
+
+    let timeline = services
+        .get_timeline(
+            caller(),
+            RebornTimelineRequest {
+                thread_id: "thread-alpha".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("timeline");
+
+    let user_message = timeline
+        .messages
+        .iter()
+        .find(|message| message.kind == MessageKind::User)
+        .expect("user message present in timeline");
+    assert_eq!(user_message.attachments.len(), 1);
+    let attachment_ref = &user_message.attachments[0];
+    assert_eq!(attachment_ref.kind, AttachmentKind::Document);
+    assert_eq!(attachment_ref.mime_type, "text/csv");
+    assert_eq!(attachment_ref.filename.as_deref(), Some("data.csv"));
+    assert!(
+        attachment_ref
+            .storage_key
+            .as_deref()
+            .is_some_and(|key| !key.is_empty()),
+        "timeline ref must carry a non-empty storage_key so the agent can re-read it later"
+    );
+}
+
+#[tokio::test]
 async fn submit_turn_rejects_attachments_when_no_lander_is_wired() {
     use base64::Engine;
 
