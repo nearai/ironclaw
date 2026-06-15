@@ -96,6 +96,7 @@ export!(GitHubTool);
 #[cfg(test)]
 mod tests {
     use super::GitHubTool;
+    use crate::api::filter_pull_requests_from_issues;
     use crate::dispatch::{action_from_context, execute_inner};
     use crate::exports::near::agent::tool::Guest;
     use crate::request::sanitize_host_error;
@@ -210,6 +211,47 @@ mod tests {
         assert_eq!(
             sanitize_host_error("connection reset with token ghp_secret_value"),
             "AuthRequired"
+        );
+    }
+
+    #[test]
+    fn list_issues_filters_pull_requests_before_applying_limit() {
+        let response = json!([
+            {
+                "number": 4806,
+                "title": "issue one"
+            },
+            {
+                "number": 4805,
+                "title": "pull request",
+                "pull_request": {
+                    "url": "https://api.github.com/repos/nearai/ironclaw/pulls/4805"
+                }
+            },
+            {
+                "number": 4804,
+                "title": "issue two"
+            }
+        ])
+        .to_string();
+
+        let filtered = filter_pull_requests_from_issues(&response, 2)
+            .expect("GitHub issue list response should filter");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&filtered).expect("filtered response should be JSON");
+
+        assert_eq!(
+            parsed,
+            json!([
+                {
+                    "number": 4806,
+                    "title": "issue one"
+                },
+                {
+                    "number": 4804,
+                    "title": "issue two"
+                }
+            ])
         );
     }
 

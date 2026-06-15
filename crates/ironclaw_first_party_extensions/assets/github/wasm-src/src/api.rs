@@ -5,6 +5,8 @@ use crate::request::github_request;
 use crate::types::{GitCommitIdentity, MergeMethod, PrReviewEvent};
 use crate::validation::*;
 
+const LIST_ISSUES_FETCH_LIMIT: u32 = 100;
+
 pub(crate) fn get_repo(owner: &str, repo: &str) -> Result<String, String> {
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
         return Err("Invalid owner or repo name".into());
@@ -131,13 +133,25 @@ pub(crate) fn list_issues(
 
     let mut path = format!(
         "/repos/{}/{}/issues?state={}&per_page={}",
-        encoded_owner, encoded_repo, encoded_state, limit
+        encoded_owner, encoded_repo, encoded_state, LIST_ISSUES_FETCH_LIMIT
     );
     if let Some(p) = page {
         path.push_str(&format!("&page={}", p));
     }
 
-    github_request("GET", &path, None)
+    let response = github_request("GET", &path, None)?;
+    filter_pull_requests_from_issues(&response, limit)
+}
+
+pub(crate) fn filter_pull_requests_from_issues(
+    response: &str,
+    limit: u32,
+) -> Result<String, String> {
+    let mut issues: Vec<serde_json::Value> =
+        serde_json::from_str(response).map_err(|_| "github_api_invalid_json".to_string())?;
+    issues.retain(|issue| issue.get("pull_request").is_none());
+    issues.truncate(limit as usize);
+    serde_json::to_string(&issues).map_err(|_| "github_api_invalid_json".to_string())
 }
 
 pub(crate) fn create_issue(
