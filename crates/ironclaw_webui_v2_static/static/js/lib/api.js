@@ -293,12 +293,25 @@ export function attachmentUrl({ threadId, messageId, attachmentId } = {}) {
 // blob URL for PDF frames, text for text). Throws on a non-OK response so the
 // caller can fall back to a placeholder.
 export async function fetchAttachmentBlob(path) {
+  // The bearer is a critical sink: never attach it to an off-origin URL. The
+  // caller always passes a relative same-origin path (`attachmentUrl(...)`);
+  // reject anything that resolves cross-origin before sending the token.
+  const url = new URL(path, window.location.origin);
+  if (url.origin !== window.location.origin) {
+    throw new ApiError("Invalid attachment URL.", {
+      status: 400,
+      statusText: "Bad Request",
+    });
+  }
   const token = readStoredToken();
   const headers = new Headers();
   if (token) {
     headers.set("Authorization", `Bearer ${token}`);
   }
-  const response = await fetch(path, { credentials: "same-origin", headers });
+  const response = await fetch(url.pathname + url.search, {
+    credentials: "same-origin",
+    headers,
+  });
   if (!response.ok) {
     const { text, payload } = await parseErrorBody(response);
     throw new ApiError(

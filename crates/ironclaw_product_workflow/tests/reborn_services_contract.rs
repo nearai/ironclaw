@@ -5651,11 +5651,12 @@ async fn get_timeline_succeeds_for_own_automation_trigger_thread() {
     assert_eq!(response.thread.thread_id, trigger_thread_id);
 }
 
-/// Records the scope each byte read is issued under so a test can assert the
-/// reader addressed the right project mount.
+/// Records the scope and storage key each byte read is issued under so a test
+/// can assert the reader addressed the right project mount AND resolved the
+/// right attachment key.
 struct RecordingAttachmentReader {
     bytes: Vec<u8>,
-    scopes: Mutex<Vec<ThreadScope>>,
+    reads: Mutex<Vec<(ThreadScope, String)>>,
 }
 
 #[async_trait]
@@ -5663,9 +5664,12 @@ impl InboundAttachmentReader for RecordingAttachmentReader {
     async fn read(
         &self,
         thread_scope: &ThreadScope,
-        _storage_key: &str,
+        storage_key: &str,
     ) -> Result<Vec<u8>, RebornServicesError> {
-        self.scopes.lock().expect("lock").push(thread_scope.clone());
+        self.reads
+            .lock()
+            .expect("lock")
+            .push((thread_scope.clone(), storage_key.to_string()));
         Ok(self.bytes.clone())
     }
 }
@@ -5749,7 +5753,7 @@ async fn read_attachment_reads_trigger_thread_bytes_under_creator_scope() {
 
     let reader = Arc::new(RecordingAttachmentReader {
         bytes: vec![1, 2, 3, 4],
-        scopes: Mutex::new(Vec::new()),
+        reads: Mutex::new(Vec::new()),
     });
     let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
         .with_automation_product_facade(automation_facade)
@@ -5770,14 +5774,16 @@ async fn read_attachment_reads_trigger_thread_bytes_under_creator_scope() {
     assert_eq!(result.bytes, vec![1, 2, 3, 4]);
     assert_eq!(result.mime_type, "image/png");
 
-    // The fix: the read was issued under the trigger creator's scope, not the
-    // caller's session scope.
-    let scopes = reader.scopes.lock().expect("lock");
-    assert_eq!(scopes.len(), 1);
+    // The fix: the read was issued under the trigger creator's scope (not the
+    // caller's session scope) and for the landed attachment's own storage key.
+    let reads = reader.reads.lock().expect("lock");
+    assert_eq!(reads.len(), 1);
+    let (scope, storage_key) = &reads[0];
     assert_eq!(
-        scopes[0].owner_user_id,
+        scope.owner_user_id,
         Some(UserId::new(TRIGGER_CREATOR_USER_ID).expect("trigger creator user id")),
     );
+    assert_eq!(storage_key, "/workspace/attachments/2026-06-14/m-0-p.png");
 }
 
 #[tokio::test]

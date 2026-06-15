@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   attachmentUrl,
   deleteThread,
+  fetchAttachmentBlob,
   fetchAttachmentDataUrl,
   listAutomations,
 } from "./api.js";
@@ -113,6 +114,7 @@ test("attachmentUrl encodes the (thread, message, attachment) triple", () => {
 // The SPA's CSP is `img-src 'self' data:`, so a blob URL was refused and the
 // thumbnail never rendered. Reverting to `URL.createObjectURL` would throw here.
 test("fetchAttachmentDataUrl returns a data URL and never mints a blob URL", async () => {
+  globalThis.window = { location: { origin: "https://app.test" } };
   globalThis.sessionStorage = {
     getItem: () => "token-1",
     setItem: () => {},
@@ -123,10 +125,10 @@ test("fetchAttachmentDataUrl returns a data URL and never mints a blob URL", asy
       status: 200,
       headers: { "content-type": "image/png" },
     });
-  globalThis.URL = {
-    createObjectURL: () => {
-      throw new Error("blob: URLs violate the SPA CSP img-src 'self' data:");
-    },
+  // Keep the real `URL` constructor (the same-origin guard needs `new URL`);
+  // only poison `createObjectURL` so a blob-URL regression fails the test.
+  globalThis.URL.createObjectURL = () => {
+    throw new Error("blob: URLs violate the SPA CSP img-src 'self' data:");
   };
   globalThis.FileReader = class {
     readAsDataURL() {
@@ -140,4 +142,27 @@ test("fetchAttachmentDataUrl returns a data URL and never mints a blob URL", asy
   );
 
   assert.ok(url.startsWith("data:"), `expected a data URL, got ${url}`);
+  delete globalThis.URL.createObjectURL;
+});
+
+// The bearer is a critical sink: an off-origin attachment URL must be rejected
+// before the token is attached.
+test("fetchAttachmentBlob rejects an off-origin URL before sending the bearer", async () => {
+  globalThis.window = { location: { origin: "https://app.test" } };
+  globalThis.sessionStorage = {
+    getItem: () => "token-1",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  let fetchCalled = false;
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    throw new Error("fetch should not be reached for an off-origin URL");
+  };
+
+  await assert.rejects(
+    fetchAttachmentBlob("https://evil.example/steal"),
+    (error) => error.name === "ApiError" && error.status === 400,
+  );
+  assert.equal(fetchCalled, false);
 });

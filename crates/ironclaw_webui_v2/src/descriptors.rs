@@ -303,7 +303,10 @@ fn get_attachment_descriptor() -> IngressRouteDescriptor {
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProjectionOnly,
+            // Reads workspace-backed attachment bytes through the product
+            // facade — more than a projection read, so the effect path is
+            // ProductWorkflow to keep the fail-closed ingress boundary honest.
+            AllowedEffectPath::ProductWorkflow,
             StreamingMode::None,
         ),
     )

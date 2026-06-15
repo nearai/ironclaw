@@ -2041,15 +2041,6 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         request: RebornAttachmentRequest,
     ) -> Result<RebornAttachmentBytes, RebornServicesError> {
-        let Some(reader) = self.inbound_attachment_reader.as_ref() else {
-            // No byte-read port wired (e.g. a non-local composition with no
-            // workspace filesystem): the bytes simply aren't available.
-            return Err(RebornServicesError::from_status(
-                RebornServicesErrorCode::NotFound,
-                404,
-                false,
-            ));
-        };
         let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
         let message_id = ThreadMessageId::parse(&request.message_id).map_err(|_| {
             RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false)
@@ -2087,6 +2078,17 @@ impl RebornServicesApi for RebornServices {
             // An attachment that never landed has no bytes to serve.
             RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false)
         })?;
+
+        // The ref landed (it has a storage_key) but no read port is wired: that
+        // is a composition fault, not an absent file. Surface a retryable 503
+        // rather than a 404 that would make real bytes look gone. (In the
+        // shipped composition the reader and lander are wired together, so this
+        // only trips a misconfigured custom host.)
+        let Some(reader) = self.inbound_attachment_reader.as_ref() else {
+            // Not retryable: a missing port won't appear on a retry, it needs
+            // composition wiring.
+            return Err(RebornServicesError::service_unavailable(false));
+        };
 
         let bytes = reader.read(&thread_scope, storage_key).await?;
         Ok(RebornAttachmentBytes {

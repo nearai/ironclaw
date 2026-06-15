@@ -334,7 +334,8 @@ fn strip_tool_blocks(messages: &mut [crate::provider::ChatMessage]) {
 /// these four; an unsupported type yields `None` so the image is skipped (the
 /// text still reaches the model) rather than failing the turn.
 fn bedrock_image_format(mime_type: &str) -> Option<ImageFormat> {
-    match mime_type {
+    // MIME types are case-insensitive; normalize before matching.
+    match mime_type.to_ascii_lowercase().as_str() {
         "image/png" => Some(ImageFormat::Png),
         "image/jpeg" | "image/jpg" => Some(ImageFormat::Jpeg),
         "image/gif" => Some(ImageFormat::Gif),
@@ -350,14 +351,28 @@ fn bedrock_image_block(image_url: &crate::provider::ImageUrl) -> Option<ContentB
     use base64::Engine;
     let (mime_type, data) = image_url.decode_data_url()?;
     let format = bedrock_image_format(mime_type)?;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(data)
-        .ok()?;
-    let block = ImageBlock::builder()
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(data) {
+        Ok(bytes) => bytes,
+        // silent-ok: a malformed inline image payload shouldn't fail the turn —
+        // the text still goes through; log the cause so the drop is diagnosable.
+        Err(error) => {
+            tracing::debug!(%error, "dropping malformed inline image data URL for Bedrock");
+            return None;
+        }
+    };
+    let block = match ImageBlock::builder()
         .format(format)
         .source(ImageSource::Bytes(Blob::new(bytes)))
         .build()
-        .ok()?;
+    {
+        Ok(block) => block,
+        // silent-ok: an image the Bedrock builder rejects shouldn't fail the
+        // turn; log the cause and drop just the image.
+        Err(error) => {
+            tracing::debug!(%error, "dropping inline image rejected by the Bedrock block builder");
+            return None;
+        }
+    };
     Some(ContentBlock::Image(block))
 }
 

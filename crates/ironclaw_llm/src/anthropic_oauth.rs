@@ -661,12 +661,18 @@ fn convert_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<Anthropi
                     tool_use_id: tool_call_id,
                     content: msg.content,
                 };
-                // If the last message is already a user message with blocks,
-                // append to it (Anthropic requires consecutive tool results
-                // in one user message).
+                // If the last message is already a user message of *only*
+                // tool-result blocks, append to it (Anthropic requires
+                // consecutive tool results in one user message). Crucially, do
+                // not merge into a multimodal user prompt (text + image
+                // blocks) — that would fold a tool result into a different
+                // conversational turn.
                 if let Some(last) = anthropic_msgs.last_mut()
                     && last.role == "user"
                     && let AnthropicContent::Blocks(ref mut blocks) = last.content
+                    && blocks
+                        .iter()
+                        .all(|b| matches!(b, AnthropicContentBlock::ToolResult { .. }))
                 {
                     blocks.push(block);
                     continue;

@@ -15,12 +15,20 @@ import { AttachmentPreviewModal } from "./attachment-preview.js";
    (the SPA's CSP allows `data:` images, not `blob:`). Anything else —
    non-images, unlanded refs, or a failed fetch — falls back to the file icon. */
 function AttachmentThumbnail({ att }) {
-  const [resolvedUrl, setResolvedUrl] = React.useState(att.preview_url || null);
+  // Only images get a rendered thumbnail. Every landed attachment carries a
+  // `fetch_url` (for click-to-preview of any kind), so the thumbnail must gate
+  // on kind — otherwise a PDF/text would be fetched and shown as a broken
+  // `<img>`. Non-images keep the file icon.
+  const isImage =
+    att.kind === "image" || (att.mime_type || "").toLowerCase().startsWith("image/");
+  const [resolvedUrl, setResolvedUrl] = React.useState(
+    isImage ? att.preview_url || null : null,
+  );
 
   React.useEffect(() => {
+    if (!isImage || att.preview_url || !att.fetch_url) return undefined;
     // The local data URL is already renderable; only a persisted image needs
     // the authenticated byte fetch.
-    if (att.preview_url || !att.fetch_url) return undefined;
     let cancelled = false;
     fetchAttachmentDataUrl(att.fetch_url)
       .then((url) => {
@@ -32,9 +40,9 @@ function AttachmentThumbnail({ att }) {
     return () => {
       cancelled = true;
     };
-  }, [att.preview_url, att.fetch_url]);
+  }, [isImage, att.preview_url, att.fetch_url]);
 
-  if (resolvedUrl) {
+  if (isImage && resolvedUrl) {
     return html`<img
       src=${resolvedUrl}
       alt=${att.filename || "attachment"}

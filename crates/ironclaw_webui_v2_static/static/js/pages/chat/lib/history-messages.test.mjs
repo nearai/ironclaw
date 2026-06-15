@@ -199,9 +199,11 @@ test("messagesFromTimeline: projects attachment refs into render cards", () => {
   ]);
 
   assert.equal(messages.length, 1);
-  // The timeline carries refs only — bytes stay behind the project mount —
-  // so `preview_url` is null and the card renders from metadata. A document
-  // gets no `fetch_url` (only landed images are worth a thumbnail fetch).
+  // The timeline carries refs only — bytes stay behind the project mount — so
+  // `preview_url` is null and the card renders from metadata. `fetch_url` is
+  // null here because this call passes no `threadId` (not because it's a
+  // document); a landed attachment with a threadId gets one regardless of kind
+  // (covered below).
   assert.deepEqual(messages[0].attachments, [
     {
       id: "att-1",

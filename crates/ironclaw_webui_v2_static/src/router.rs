@@ -406,15 +406,30 @@ mod tests {
             "document CSP must keep `object-src 'none'`; got `{csp}`",
         );
         // Attachment preview needs inline audio (`media-src data:`) and inline
-        // PDF via blob iframes (`frame-src blob:`). Lock the exact, narrow
-        // values so a regression can't widen them to `*`/`https:`/`data:` frames.
-        assert!(
-            csp.contains("media-src 'self' data:"),
-            "document CSP must allow inline media data URLs for attachment preview; got `{csp}`",
+        // PDF via blob iframes (`frame-src blob:`). Assert the EXACT source
+        // list per directive (not a substring) so a regression that widens them
+        // — e.g. `media-src 'self' data: https://evil` — fails here.
+        let directives: std::collections::HashMap<_, _> = csp
+            .split(';')
+            .map(str::trim)
+            .filter(|directive| !directive.is_empty())
+            .filter_map(|directive| directive.split_once(' '))
+            .map(|(name, sources)| (name, sources.trim()))
+            .collect();
+        assert_eq!(
+            directives.get("media-src").copied(),
+            Some("'self' data:"),
+            "document CSP must keep the exact media-src allowlist; got `{csp}`",
         );
-        assert!(
-            csp.contains("frame-src 'self' blob:"),
-            "document CSP must allow blob iframes for inline PDF preview; got `{csp}`",
+        assert_eq!(
+            directives.get("frame-src").copied(),
+            Some("'self' blob:"),
+            "document CSP must keep the exact frame-src allowlist; got `{csp}`",
+        );
+        assert_eq!(
+            directives.get("img-src").copied(),
+            Some("'self' data:"),
+            "document CSP must keep the exact img-src allowlist; got `{csp}`",
         );
         // Scripts must NOT be executable via eval or arbitrary inline —
         // the document relies on the nonce, not `'unsafe-inline'`.
