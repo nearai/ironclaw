@@ -472,6 +472,9 @@ pub(crate) fn build_services_input_with_options(
     {
         services_input = services_input.with_google_oauth_backend(client);
     }
+    let identity = runtime_identity(config_file.as_ref());
+    services_input =
+        services_input.with_local_runtime_identity(identity.tenant_id, identity.agent_id);
 
     Ok(RuntimeServicesInput {
         services_input,

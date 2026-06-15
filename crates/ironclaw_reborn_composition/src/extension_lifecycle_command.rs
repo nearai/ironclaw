@@ -220,10 +220,13 @@ mod tests {
     #[tokio::test]
     async fn extension_lifecycle_command_activates_credentialed_extension_with_product_auth() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
-            "extension-lifecycle-command-owner",
-            dir.path().join("local-dev"),
-        ))
+        let owner = "extension-lifecycle-command-owner";
+        let tenant = "extension-lifecycle-command-tenant";
+        let agent = "extension-lifecycle-command-agent";
+        let services = build_reborn_services(
+            RebornBuildInput::local_dev(owner, dir.path().join("local-dev"))
+                .with_local_runtime_identity(tenant, agent),
+        )
         .await
         .expect("local-dev services build");
         let product_auth = services
@@ -232,9 +235,9 @@ mod tests {
             .expect("local-dev composes product auth");
         let scope = AuthProductScope::new(
             ResourceScope {
-                tenant_id: TenantId::new("reborn-cli").expect("tenant"),
-                user_id: UserId::new("extension-lifecycle-command-owner").expect("user"),
-                agent_id: Some(AgentId::new("reborn-cli-agent").expect("agent")),
+                tenant_id: TenantId::new(tenant).expect("tenant"),
+                user_id: UserId::new(owner).expect("user"),
+                agent_id: Some(AgentId::new(agent).expect("agent")),
                 project_id: None,
                 mission_id: None,
                 thread_id: None,

@@ -2080,6 +2080,11 @@ pub async fn build_reborn_runtime(
         None
     };
 
+    let validated_identity = validate_runtime_identity(identity)?;
+    services_input = services_input.with_local_runtime_identity(
+        validated_identity.tenant_id.as_str(),
+        validated_identity.agent_id.as_str(),
+    );
     let trusted_laptop_access = services_input.grants_trusted_laptop_access();
     let owner_id = services_input.owner_id().to_string();
     let mut services = build_reborn_services(services_input).await?;
@@ -2143,7 +2148,6 @@ pub async fn build_reborn_runtime(
         subagent_goal_store,
         trigger_repository: _trigger_repository,
     } = runtime_parts;
-    let validated_identity = validate_runtime_identity(identity)?;
     let (skill_context_source, skill_activation_source, skill_execution_adapter) =
         match (configured_skill_context_source, local_runtime) {
             (Some(source), _) => (Some(source), None, None),

@@ -112,7 +112,7 @@ use ironclaw_turns::{
 
 use crate::RebornProductAuthServicePorts;
 use crate::default_system_prompt::seed_default_system_prompt;
-use crate::input::{RebornRuntimeProcessBinding, RebornStorageInput};
+use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
 use crate::local_dev_authorization::local_dev_authorizer;
 use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
@@ -571,6 +571,7 @@ struct RebornLocalDevStoreGraph {
 struct RebornLocalDevStoreGraphInput {
     filesystem: Arc<LocalDevRootFilesystem>,
     owner_user_id: UserId,
+    local_runtime_identity: Option<RebornLocalRuntimeIdentity>,
     skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     workspace_mounts: MountView,
@@ -693,6 +694,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         oauth_dcr_provider_configs,
         nearai_mcp_bootstrap_config,
         owner_id,
+        local_runtime_identity,
         ..
     } = input;
     let RebornStorageInput::LocalDev {
@@ -789,6 +791,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let mut store_graph = build_local_dev_store_graph(RebornLocalDevStoreGraphInput {
         filesystem: Arc::clone(&filesystem),
         owner_user_id,
+        local_runtime_identity,
         skill_filesystem,
         workspace_filesystem,
         workspace_mounts: runtime_workspace_mounts,
@@ -1207,16 +1210,21 @@ fn copy_local_dev_legacy_skill_entry(
 
 fn local_dev_extension_lifecycle_surface_context(
     owner_user_id: UserId,
+    local_runtime_identity: Option<&RebornLocalRuntimeIdentity>,
 ) -> Result<LifecycleProductSurfaceContext, RebornBuildError> {
-    let identity = RebornRuntimeIdentity::reborn_cli();
-    let tenant_id =
-        TenantId::new(identity.tenant_id).map_err(|error| RebornBuildError::InvalidConfig {
-            reason: error.to_string(),
-        })?;
-    let agent_id =
-        AgentId::new(identity.agent_id).map_err(|error| RebornBuildError::InvalidConfig {
-            reason: error.to_string(),
-        })?;
+    let default_identity = RebornRuntimeIdentity::reborn_cli();
+    let tenant_id = local_runtime_identity
+        .map(|identity| identity.tenant_id.as_str())
+        .unwrap_or(default_identity.tenant_id.as_str());
+    let agent_id = local_runtime_identity
+        .map(|identity| identity.agent_id.as_str())
+        .unwrap_or(default_identity.agent_id.as_str());
+    let tenant_id = TenantId::new(tenant_id).map_err(|error| RebornBuildError::InvalidConfig {
+        reason: error.to_string(),
+    })?;
+    let agent_id = AgentId::new(agent_id).map_err(|error| RebornBuildError::InvalidConfig {
+        reason: error.to_string(),
+    })?;
     Ok(LifecycleProductSurfaceContext {
         tenant_id,
         user_id: owner_user_id,
@@ -1232,6 +1240,7 @@ fn build_local_dev_store_graph(
     let RebornLocalDevStoreGraphInput {
         filesystem,
         owner_user_id,
+        local_runtime_identity,
         skill_filesystem,
         workspace_filesystem,
         workspace_mounts,
@@ -1292,8 +1301,10 @@ fn build_local_dev_store_graph(
         })?;
     #[cfg(feature = "slack-v2-host-beta")]
     let host_state_filesystem = local_dev_slack_host_state_filesystem(Arc::clone(&filesystem));
-    let extension_lifecycle_surface_context =
-        local_dev_extension_lifecycle_surface_context(owner_user_id.clone())?;
+    let extension_lifecycle_surface_context = local_dev_extension_lifecycle_surface_context(
+        owner_user_id.clone(),
+        local_runtime_identity.as_ref(),
+    )?;
     let skill_management =
         build_local_skill_management_port(owner_user_id, Arc::clone(&filesystem))?;
     let outbound_stores = local_dev_outbound_store(Arc::clone(&filesystem));
@@ -1368,6 +1379,7 @@ fn build_local_dev_store_graph(
     let RebornLocalDevStoreGraphInput {
         filesystem,
         owner_user_id,
+        local_runtime_identity,
         skill_filesystem,
         workspace_filesystem,
         workspace_mounts,
@@ -1415,8 +1427,10 @@ fn build_local_dev_store_graph(
         })?;
     #[cfg(all(feature = "postgres", feature = "slack-v2-host-beta"))]
     let host_state_filesystem = local_dev_slack_host_state_filesystem(Arc::clone(&filesystem));
-    let extension_lifecycle_surface_context =
-        local_dev_extension_lifecycle_surface_context(owner_user_id.clone())?;
+    let extension_lifecycle_surface_context = local_dev_extension_lifecycle_surface_context(
+        owner_user_id.clone(),
+        local_runtime_identity.as_ref(),
+    )?;
     let skill_management =
         build_local_skill_management_port(owner_user_id, Arc::clone(&filesystem))?;
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
@@ -2445,6 +2459,7 @@ async fn build_production_shaped(
     let RebornBuildInput {
         profile,
         owner_id,
+        local_runtime_identity: _,
         storage,
         production_trust_policy,
         runtime_policy,
