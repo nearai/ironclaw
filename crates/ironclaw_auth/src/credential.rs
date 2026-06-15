@@ -591,9 +591,7 @@ impl CredentialAccountOwnerScope {
 /// `invocation_id`/`thread_id`/`mission_id`. Requester authorization is enforced
 /// separately by the callers; this is only the owner-boundary check.
 pub fn binding_scope_owns_account(scope: &AuthProductScope, account: &CredentialAccount) -> bool {
-    let mut owner = scope.clone();
-    owner.resource = owner.resource.credential_owner_scope();
-    CredentialAccountOwnerScope::from_scope(&owner).matches(account)
+    CredentialAccountOwnerScope::from_scope(&scope.to_credential_owner()).matches(account)
 }
 
 /// Read-only credential-account projection source for account owner queries.

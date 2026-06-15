@@ -880,13 +880,7 @@ pub(super) async fn scoped_update_binding_for_requester(
     // forked a duplicate `UserReusable` account on every flow. `session_id` IS
     // path-segmenting (paths.rs), so it stays matched; the update path reads at
     // the flow's stored scope and would orphan across a different session.
-    let owner_scope = {
-        let owner = AuthProductScope::new(scope.resource.credential_owner_scope(), scope.surface);
-        match scope.session_id.clone() {
-            Some(session_id) => owner.with_session_id(session_id),
-            None => owner,
-        }
-    };
+    let owner_scope = scope.to_credential_owner();
     // Scope-agnostic on purpose: a reconnect that grants a NEW provider scope
     // must still bind to (and update) the existing account that lacks it.
     let account = state

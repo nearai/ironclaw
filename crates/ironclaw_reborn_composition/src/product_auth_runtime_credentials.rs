@@ -56,15 +56,16 @@ pub(crate) trait RuntimeCredentialAccountSelectionService: Send + Sync {
     /// that adds a new scope must still find (and bind to) the existing
     /// account that lacks that scope, instead of forking a duplicate. Callers
     /// are responsible for passing an owner-granularity scope (thread/mission
-    /// stripped). The default returns `CredentialMissing` so test mocks inherit
-    /// a no-bind behavior unchanged.
+    /// stripped).
+    ///
+    /// Required (no default): an unwired binding path must fail at the type
+    /// level, not silently no-op. Test doubles that do not exercise binding
+    /// return `CredentialMissing` explicitly.
     async fn select_configured_account_for_binding(
         &self,
-        _lookup: CredentialAccountSelectionRequest,
-        _runtime_scope: AuthProductScope,
-    ) -> Result<CredentialAccount, AuthProductError> {
-        Err(AuthProductError::CredentialMissing)
-    }
+        lookup: CredentialAccountSelectionRequest,
+        runtime_scope: AuthProductScope,
+    ) -> Result<CredentialAccount, AuthProductError>;
 }
 
 #[async_trait]
@@ -235,20 +236,35 @@ impl std::fmt::Debug for ProductAuthRuntimeCredentialAccountSelector {
     }
 }
 
+/// Why the owner pre-filter is running, which decides whether the provider
+/// scope gate applies.
+///
+/// The two modes are materially different and must not collapse into a nullable
+/// flag: runtime resolution requires the account to already carry the requested
+/// provider scopes; binding deliberately skips that gate so an OAuth reconnect
+/// that adds a new scope still finds (and updates) the existing account instead
+/// of forking a duplicate.
+enum AccountSelectionPurpose<'a> {
+    /// Runtime resolution — the account must already hold `provider_scopes`.
+    Runtime {
+        setup: &'a RuntimeCredentialAccountSetup,
+        provider_scopes: &'a [ProviderScope],
+    },
+    /// OAuth bind — match the owner's existing account regardless of scopes.
+    Binding,
+}
+
 impl ProductAuthRuntimeCredentialAccountSelector {
     /// Owner-scoped pre-filter shared by runtime resolution and OAuth binding.
     ///
-    /// `scope_gate` is `Some((setup, scopes))` for runtime resolution (the
-    /// account must already carry the requested provider scopes) and `None`
-    /// for binding (find the existing account regardless of which scopes it
-    /// currently holds, so a reconnect updates it instead of forking a
-    /// duplicate). Requester authorization is NOT applied here — that is the
-    /// caller's `finalize_selection` stage.
+    /// `purpose` selects whether the provider-scope gate applies (see
+    /// [`AccountSelectionPurpose`]). Requester authorization is NOT applied
+    /// here — that is the caller's `finalize_selection` stage.
     async fn configured_accounts_for_requester(
         &self,
         lookup: &CredentialAccountSelectionRequest,
         runtime_scope: &AuthProductScope,
-        scope_gate: Option<(&RuntimeCredentialAccountSetup, &[ProviderScope])>,
+        purpose: AccountSelectionPurpose<'_>,
     ) -> Result<Vec<CredentialAccount>, AuthProductError> {
         Ok(self
             .accounts
@@ -258,9 +274,13 @@ impl ProductAuthRuntimeCredentialAccountSelector {
             .filter(|account| {
                 account.provider == lookup.provider
                     && account.status == CredentialAccountStatus::Configured
-                    && scope_gate.is_none_or(|(setup, scopes)| {
-                        account_has_provider_scopes(account, setup, scopes)
-                    })
+                    && match &purpose {
+                        AccountSelectionPurpose::Runtime {
+                            setup,
+                            provider_scopes,
+                        } => account_has_provider_scopes(account, setup, provider_scopes),
+                        AccountSelectionPurpose::Binding => true,
+                    }
                     && account_visible_from_runtime_scope(account, runtime_scope)
             })
             .collect())
@@ -303,7 +323,10 @@ impl RuntimeCredentialAccountSelectionService for ProductAuthRuntimeCredentialAc
             .configured_accounts_for_requester(
                 &request.lookup,
                 &request.runtime_scope,
-                Some((&request.setup, &request.provider_scopes)),
+                AccountSelectionPurpose::Runtime {
+                    setup: &request.setup,
+                    provider_scopes: &request.provider_scopes,
+                },
             )
             .await?;
         self.finalize_selection(configured, &request.lookup)
@@ -315,7 +338,11 @@ impl RuntimeCredentialAccountSelectionService for ProductAuthRuntimeCredentialAc
         runtime_scope: AuthProductScope,
     ) -> Result<CredentialAccount, AuthProductError> {
         let configured = self
-            .configured_accounts_for_requester(&lookup, &runtime_scope, None)
+            .configured_accounts_for_requester(
+                &lookup,
+                &runtime_scope,
+                AccountSelectionPurpose::Binding,
+            )
             .await?;
         self.finalize_selection(configured, &lookup)
     }
@@ -520,7 +547,7 @@ fn account_visible_from_runtime_scope(
 pub(crate) fn runtime_account_owner_scope(
     scope: &ironclaw_host_api::ResourceScope,
 ) -> ironclaw_host_api::ResourceScope {
-    scope.credential_owner_scope()
+    scope.without_thread_and_mission()
 }
 
 fn map_account_error(error: AuthProductError) -> CredentialStageError {

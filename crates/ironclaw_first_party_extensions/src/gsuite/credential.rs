@@ -64,7 +64,7 @@ impl GoogleCredentialResolver {
         // mission sub-scope must be stripped or the account authorized in one
         // thread is invisible in the next. Staging still uses the real runtime
         // scope via `credential.access_secret_scope` / `request.scope`.
-        let auth_scope = AuthProductScope::new(scope.credential_owner_scope(), AuthSurface::Api);
+        let auth_scope = AuthProductScope::credential_owner(scope, AuthSurface::Api);
         let provider = google_provider_id()?;
         let account = match self
             .select_configured_account_for_gsuite_requester(
@@ -213,8 +213,10 @@ impl GoogleCredentialResolver {
     ) -> Result<Option<CredentialAccount>, AuthProductError> {
         // Owner-scope the read so a known account is found from any thread of
         // the same owner, not just the thread/session it was authorized in.
+        // `AuthProductScope::new` drops `session_id` on purpose here (a known
+        // account id is looked up across the owner, session-agnostic).
         let owner_scope =
-            AuthProductScope::new(scope.resource.credential_owner_scope(), scope.surface);
+            AuthProductScope::new(scope.resource.without_thread_and_mission(), scope.surface);
         let account = self
             .account_records
             .accounts_for_owner(&owner_scope)
@@ -342,7 +344,7 @@ impl GoogleCredentialResolver {
         self.accounts
             .project_credential_recovery(
                 ironclaw_auth::CredentialRecoveryRequest::new(
-                    AuthProductScope::new(scope.credential_owner_scope(), AuthSurface::Api),
+                    AuthProductScope::credential_owner(scope, AuthSurface::Api),
                     provider,
                 )
                 .for_extension(requester_extension.clone()),

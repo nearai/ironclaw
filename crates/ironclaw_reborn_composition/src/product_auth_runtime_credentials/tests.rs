@@ -60,6 +60,85 @@ fn selector_for(
     )
 }
 
+/// Owner-level (`Api` surface) auth scope for `user` with a fresh invocation.
+fn owner_auth_scope(user: &str) -> AuthProductScope {
+    AuthProductScope::new(
+        ResourceScope::local_default(UserId::new(user).unwrap(), InvocationId::new()).unwrap(),
+        AuthSurface::Api,
+    )
+}
+
+/// Fixture builder for a configured `NewCredentialAccount`, collapsing the
+/// ten-field literal these tests would otherwise repeat verbatim. Defaults to a
+/// `Configured`/`UserReusable` account with an access secret and no scopes;
+/// setters override only what a case actually exercises.
+struct ConfiguredAccount {
+    inner: NewCredentialAccount,
+}
+
+impl ConfiguredAccount {
+    fn new(scope: AuthProductScope, provider: &str) -> Self {
+        Self {
+            inner: NewCredentialAccount {
+                scope,
+                provider: AuthProviderId::new(provider).unwrap(),
+                label: CredentialAccountLabel::new(format!("{provider} account")).unwrap(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(SecretHandle::new(format!("{provider}_access")).unwrap()),
+                refresh_secret: None,
+                scopes: Vec::new(),
+            },
+        }
+    }
+
+    fn status(mut self, status: CredentialAccountStatus) -> Self {
+        self.inner.status = status;
+        self
+    }
+
+    fn ownership(mut self, ownership: CredentialOwnership) -> Self {
+        self.inner.ownership = ownership;
+        self
+    }
+
+    fn owner_extension(mut self, extension: &str) -> Self {
+        self.inner.owner_extension = Some(ExtensionId::new(extension).unwrap());
+        self
+    }
+
+    fn granted_extensions(mut self, extensions: Vec<ExtensionId>) -> Self {
+        self.inner.granted_extensions = extensions;
+        self
+    }
+
+    /// Override the default `<provider>_access` access secret. Pass `None` to
+    /// model a `Configured`-but-secretless (corrupt) account.
+    fn access_secret(mut self, handle: Option<SecretHandle>) -> Self {
+        self.inner.access_secret = handle;
+        self
+    }
+
+    fn refresh_secret(mut self, handle: SecretHandle) -> Self {
+        self.inner.refresh_secret = Some(handle);
+        self
+    }
+
+    fn scopes(mut self, scopes: &[&str]) -> Self {
+        self.inner.scopes = scopes
+            .iter()
+            .map(|scope| ProviderScope::new(*scope).unwrap())
+            .collect();
+        self
+    }
+
+    async fn create(self, accounts: &InMemoryAuthProductServices) -> CredentialAccount {
+        accounts.create_account(self.inner).await.unwrap()
+    }
+}
+
 #[tokio::test]
 async fn binding_selection_ignores_provider_scope_gate() {
     // Defect A (A1): the OAuth bind lookup must find the owner's existing
@@ -67,24 +146,11 @@ async fn binding_selection_ignores_provider_scope_gate() {
     // reconnect that grants a new scope UPDATES the existing account instead of
     // forking a duplicate.
     let accounts = Arc::new(InMemoryAuthProductServices::new());
-    let scope =
-        ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
-    let auth_scope = AuthProductScope::new(scope, AuthSurface::Api);
-    let created = accounts
-        .create_account(NewCredentialAccount {
-            scope: auth_scope.clone(),
-            provider: AuthProviderId::new("google").unwrap(),
-            label: CredentialAccountLabel::new("work google").unwrap(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(SecretHandle::new("google_access").unwrap()),
-            refresh_secret: None,
-            scopes: vec![ProviderScope::new("https://www.googleapis.com/auth/gmail.send").unwrap()],
-        })
-        .await
-        .unwrap();
+    let auth_scope = owner_auth_scope("alice");
+    let created = ConfiguredAccount::new(auth_scope.clone(), "google")
+        .scopes(&["https://www.googleapis.com/auth/gmail.send"])
+        .create(&accounts)
+        .await;
     let selector = selector_for(accounts);
 
     // Lookup for a calendar reconnect — the account holds only gmail.send.
@@ -109,24 +175,11 @@ async fn runtime_selection_still_enforces_provider_scope_gate() {
     // resolution keeps the gate, so an account lacking the requested scope is
     // CredentialMissing (never serves a token for a scope it does not hold).
     let accounts = Arc::new(InMemoryAuthProductServices::new());
-    let scope =
-        ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
-    let auth_scope = AuthProductScope::new(scope, AuthSurface::Api);
-    accounts
-        .create_account(NewCredentialAccount {
-            scope: auth_scope.clone(),
-            provider: AuthProviderId::new("google").unwrap(),
-            label: CredentialAccountLabel::new("work google").unwrap(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(SecretHandle::new("google_access").unwrap()),
-            refresh_secret: None,
-            scopes: vec![ProviderScope::new("https://www.googleapis.com/auth/gmail.send").unwrap()],
-        })
-        .await
-        .unwrap();
+    let auth_scope = owner_auth_scope("alice");
+    ConfiguredAccount::new(auth_scope.clone(), "google")
+        .scopes(&["https://www.googleapis.com/auth/gmail.send"])
+        .create(&accounts)
+        .await;
     let selector = selector_for(accounts);
 
     let error = selector
@@ -153,21 +206,10 @@ async fn resolver_returns_configured_product_auth_access_secret() {
         ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
     let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
     let access_secret = SecretHandle::new("github_manual_access").unwrap();
-    accounts
-        .create_account(NewCredentialAccount {
-            scope: auth_scope,
-            provider: AuthProviderId::new("github").unwrap(),
-            label: CredentialAccountLabel::new("work github").unwrap(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(access_secret.clone()),
-            refresh_secret: None,
-            scopes: Vec::new(),
-        })
-        .await
-        .unwrap();
+    ConfiguredAccount::new(auth_scope, "github")
+        .access_secret(Some(access_secret.clone()))
+        .create(&accounts)
+        .await;
     let resolver = resolver_with_accounts(accounts);
 
     let resolved = resolver
@@ -193,21 +235,12 @@ async fn resolver_refreshes_oauth_account_before_staging_access_secret() {
     let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
     let stale_access = SecretHandle::new("google_stale_access").unwrap();
     let drive_scope = ProviderScope::new("https://www.googleapis.com/auth/drive.readonly").unwrap();
-    accounts
-        .create_account(NewCredentialAccount {
-            scope: auth_scope,
-            provider: AuthProviderId::new("google").unwrap(),
-            label: CredentialAccountLabel::new("google").unwrap(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(stale_access.clone()),
-            refresh_secret: Some(SecretHandle::new("google_refresh").unwrap()),
-            scopes: vec![drive_scope.clone()],
-        })
-        .await
-        .unwrap();
+    ConfiguredAccount::new(auth_scope, "google")
+        .access_secret(Some(stale_access.clone()))
+        .refresh_secret(SecretHandle::new("google_refresh").unwrap())
+        .scopes(&["https://www.googleapis.com/auth/drive.readonly"])
+        .create(&accounts)
+        .await;
     let resolver = resolver_with_refresh(accounts.clone());
 
     let resolved = resolver
@@ -240,21 +273,14 @@ async fn resolver_refreshes_gsuite_owned_account_with_owner_authority_for_siblin
     let stale_access = SecretHandle::new("google_stale_gsuite_access").unwrap();
     let calendar_scope =
         ProviderScope::new("https://www.googleapis.com/auth/calendar.readonly").unwrap();
-    accounts
-        .create_account(NewCredentialAccount {
-            scope: auth_scope,
-            provider: AuthProviderId::new("google").unwrap(),
-            label: CredentialAccountLabel::new("google").unwrap(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::ExtensionOwned,
-            owner_extension: Some(ExtensionId::new("google-drive").unwrap()),
-            granted_extensions: Vec::new(),
-            access_secret: Some(stale_access.clone()),
-            refresh_secret: Some(SecretHandle::new("google_gsuite_refresh").unwrap()),
-            scopes: vec![calendar_scope.clone()],
-        })
-        .await
-        .unwrap();
+    ConfiguredAccount::new(auth_scope, "google")
+        .ownership(CredentialOwnership::ExtensionOwned)
+        .owner_extension("google-drive")
+        .access_secret(Some(stale_access.clone()))
+        .refresh_secret(SecretHandle::new("google_gsuite_refresh").unwrap())
+        .scopes(&["https://www.googleapis.com/auth/calendar.readonly"])
+        .create(&accounts)
+        .await;
     let resolver = resolver_with_refresh(accounts.clone());
 
     let resolved = resolver
@@ -284,21 +310,12 @@ async fn resolver_does_not_refresh_same_oauth_account_twice_during_runtime_stagi
         ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
     let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
     let drive_scope = ProviderScope::new("https://www.googleapis.com/auth/drive.readonly").unwrap();
-    accounts
-        .create_account(NewCredentialAccount {
-            scope: auth_scope,
-            provider: AuthProviderId::new("google").unwrap(),
-            label: CredentialAccountLabel::new("google").unwrap(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(SecretHandle::new("google_stale_access_once").unwrap()),
-            refresh_secret: Some(SecretHandle::new("google_refresh_once").unwrap()),
-            scopes: vec![drive_scope.clone()],
-        })
-        .await
-        .unwrap();
+    ConfiguredAccount::new(auth_scope, "google")
+        .access_secret(Some(SecretHandle::new("google_stale_access_once").unwrap()))
+        .refresh_secret(SecretHandle::new("google_refresh_once").unwrap())
+        .scopes(&["https://www.googleapis.com/auth/drive.readonly"])
+        .create(&accounts)
+        .await;
     let resolver = resolver_with_refresh(accounts.clone());
     let provider = RuntimeCredentialAccountProviderId::new("google").unwrap();
     let setup = RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() };
@@ -337,21 +354,11 @@ async fn resolver_stages_oauth_access_secret_when_refresh_secret_is_absent() {
     let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
     let access_secret = SecretHandle::new("google_access_without_refresh").unwrap();
     let drive_scope = ProviderScope::new("https://www.googleapis.com/auth/drive.readonly").unwrap();
-    accounts
-        .create_account(NewCredentialAccount {
-            scope: auth_scope,
-            provider: AuthProviderId::new("google").unwrap(),
-            label: CredentialAccountLabel::new("google").unwrap(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(access_secret.clone()),
-            refresh_secret: None,
-            scopes: vec![drive_scope.clone()],
-        })
-        .await
-        .unwrap();
+    ConfiguredAccount::new(auth_scope, "google")
+        .access_secret(Some(access_secret.clone()))
+        .scopes(&["https://www.googleapis.com/auth/drive.readonly"])
+        .create(&accounts)
+        .await;
     let resolver = resolver_with_refresh(accounts.clone());
 
     let resolved = resolver
@@ -377,21 +384,12 @@ async fn resolver_stages_oauth_access_secret_when_proactive_refresh_backend_is_u
     let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
     let access_secret = SecretHandle::new("google_access_refresh_backend_down").unwrap();
     let drive_scope = ProviderScope::new("https://www.googleapis.com/auth/drive.readonly").unwrap();
-    let account = accounts
-        .create_account(NewCredentialAccount {
-            scope: auth_scope,
-            provider: AuthProviderId::new("google").unwrap(),
-            label: CredentialAccountLabel::new("google").unwrap(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(access_secret.clone()),
-            refresh_secret: Some(SecretHandle::new("google_refresh").unwrap()),
-            scopes: vec![drive_scope.clone()],
-        })
-        .await
-        .unwrap();
+    let account = ConfiguredAccount::new(auth_scope, "google")
+        .access_secret(Some(access_secret.clone()))
+        .refresh_secret(SecretHandle::new("google_refresh").unwrap())
+        .scopes(&["https://www.googleapis.com/auth/drive.readonly"])
+        .create(&accounts)
+        .await;
     accounts.fail_next_refresh_backend_for_tests(account.id);
     let resolver = resolver_with_refresh(accounts.clone());
 
@@ -417,21 +415,12 @@ async fn resolver_maps_oauth_refresh_failure_to_auth_required() {
         ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
     let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
     let drive_scope = ProviderScope::new("https://www.googleapis.com/auth/drive.readonly").unwrap();
-    let account = accounts
-        .create_account(NewCredentialAccount {
-            scope: auth_scope,
-            provider: AuthProviderId::new("google").unwrap(),
-            label: CredentialAccountLabel::new("google").unwrap(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(SecretHandle::new("google_stale_access").unwrap()),
-            refresh_secret: Some(SecretHandle::new("google_refresh").unwrap()),
-            scopes: vec![drive_scope.clone()],
-        })
-        .await
-        .unwrap();
+    let account = ConfiguredAccount::new(auth_scope, "google")
+        .access_secret(Some(SecretHandle::new("google_stale_access").unwrap()))
+        .refresh_secret(SecretHandle::new("google_refresh").unwrap())
+        .scopes(&["https://www.googleapis.com/auth/drive.readonly"])
+        .create(&accounts)
+        .await;
     accounts.fail_next_refresh_for_tests(account.id);
     let resolver = resolver_with_refresh(accounts.clone());
 
@@ -456,21 +445,10 @@ async fn resolver_accepts_unscoped_github_manual_token_for_scoped_runtime_reques
         ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
     let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
     let access_secret = SecretHandle::new("github_manual_access").unwrap();
-    accounts
-        .create_account(NewCredentialAccount {
-            scope: auth_scope,
-            provider: AuthProviderId::new("github").unwrap(),
-            label: CredentialAccountLabel::new("work github").unwrap(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(access_secret.clone()),
-            refresh_secret: None,
-            scopes: Vec::new(),
-        })
-        .await
-        .unwrap();
+    ConfiguredAccount::new(auth_scope, "github")
+        .access_secret(Some(access_secret.clone()))
+        .create(&accounts)
+        .await;
     let resolver = resolver_with_accounts(accounts);
     let required_scopes = vec!["repo".to_string()];
 
@@ -496,21 +474,13 @@ async fn resolver_does_not_use_reusable_account_from_different_user() {
         ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
     let admin_scope =
         ResourceScope::local_default(UserId::new("admin").unwrap(), InvocationId::new()).unwrap();
-    accounts
-        .create_account(NewCredentialAccount {
-            scope: AuthProductScope::new(alice_scope, AuthSurface::Api),
-            provider: AuthProviderId::new("google").unwrap(),
-            label: CredentialAccountLabel::new("alice google").unwrap(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(SecretHandle::new("alice-google-access").unwrap()),
-            refresh_secret: None,
-            scopes: Vec::new(),
-        })
-        .await
-        .unwrap();
+    ConfiguredAccount::new(
+        AuthProductScope::new(alice_scope, AuthSurface::Api),
+        "google",
+    )
+    .access_secret(Some(SecretHandle::new("alice-google-access").unwrap()))
+    .create(&accounts)
+    .await;
     let resolver = resolver_with_accounts(accounts);
 
     let error = resolver
@@ -536,21 +506,13 @@ async fn resolver_matches_callback_setup_account_from_runtime_invocation() {
     let mut runtime_scope = setup_scope.clone();
     runtime_scope.invocation_id = InvocationId::new();
     let access_secret = SecretHandle::new("github_manual_access").unwrap();
-    accounts
-        .create_account(NewCredentialAccount {
-            scope: AuthProductScope::new(setup_scope.clone(), AuthSurface::Callback),
-            provider: AuthProviderId::new("github").unwrap(),
-            label: CredentialAccountLabel::new("work github").unwrap(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(access_secret.clone()),
-            refresh_secret: None,
-            scopes: Vec::new(),
-        })
-        .await
-        .unwrap();
+    ConfiguredAccount::new(
+        AuthProductScope::new(setup_scope.clone(), AuthSurface::Callback),
+        "github",
+    )
+    .access_secret(Some(access_secret.clone()))
+    .create(&accounts)
+    .await;
     let resolver = resolver_with_accounts(accounts);
 
     let resolved = resolver
@@ -578,21 +540,13 @@ async fn resolver_matches_reusable_setup_account_from_new_thread() {
     runtime_scope.thread_id = Some(ThreadId::new("thread-auth-2").unwrap());
     runtime_scope.invocation_id = InvocationId::new();
     let access_secret = SecretHandle::new("github_manual_access").unwrap();
-    accounts
-        .create_account(NewCredentialAccount {
-            scope: AuthProductScope::new(setup_scope.clone(), AuthSurface::Callback),
-            provider: AuthProviderId::new("github").unwrap(),
-            label: CredentialAccountLabel::new("work github").unwrap(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(access_secret.clone()),
-            refresh_secret: None,
-            scopes: Vec::new(),
-        })
-        .await
-        .unwrap();
+    ConfiguredAccount::new(
+        AuthProductScope::new(setup_scope.clone(), AuthSurface::Callback),
+        "github",
+    )
+    .access_secret(Some(access_secret.clone()))
+    .create(&accounts)
+    .await;
     let resolver = resolver_with_accounts(accounts);
 
     let resolved = resolver
@@ -620,21 +574,13 @@ async fn resolver_matches_reusable_setup_account_from_new_mission() {
     runtime_scope.mission_id = Some(MissionId::new("mission-auth-2").unwrap());
     runtime_scope.invocation_id = InvocationId::new();
     let access_secret = SecretHandle::new("github_manual_access").unwrap();
-    accounts
-        .create_account(NewCredentialAccount {
-            scope: AuthProductScope::new(setup_scope.clone(), AuthSurface::Callback),
-            provider: AuthProviderId::new("github").unwrap(),
-            label: CredentialAccountLabel::new("work github").unwrap(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(access_secret.clone()),
-            refresh_secret: None,
-            scopes: Vec::new(),
-        })
-        .await
-        .unwrap();
+    ConfiguredAccount::new(
+        AuthProductScope::new(setup_scope.clone(), AuthSurface::Callback),
+        "github",
+    )
+    .access_secret(Some(access_secret.clone()))
+    .create(&accounts)
+    .await;
     let resolver = resolver_with_accounts(accounts);
 
     let resolved = resolver
@@ -670,22 +616,14 @@ async fn resolver_resolves_extension_owned_account_from_new_thread() {
     runtime_scope.thread_id = Some(ThreadId::new("thread-auth-2").unwrap());
     runtime_scope.mission_id = Some(MissionId::new("mission-auth-2").unwrap());
     runtime_scope.invocation_id = InvocationId::new();
-    let access_secret = SecretHandle::new("github_manual_access").unwrap();
-    accounts
-        .create_account(NewCredentialAccount {
-            scope: AuthProductScope::new(setup_scope, AuthSurface::Callback),
-            provider: AuthProviderId::new("github").unwrap(),
-            label: CredentialAccountLabel::new("work github").unwrap(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::ExtensionOwned,
-            owner_extension: Some(ExtensionId::new("github").unwrap()),
-            granted_extensions: Vec::new(),
-            access_secret: Some(access_secret.clone()),
-            refresh_secret: None,
-            scopes: Vec::new(),
-        })
-        .await
-        .unwrap();
+    let created = ConfiguredAccount::new(
+        AuthProductScope::new(setup_scope, AuthSurface::Callback),
+        "github",
+    )
+    .ownership(CredentialOwnership::ExtensionOwned)
+    .owner_extension("github")
+    .create(&accounts)
+    .await;
     let resolver = resolver_with_accounts(accounts);
 
     let resolved = resolver
@@ -699,7 +637,7 @@ async fn resolver_resolves_extension_owned_account_from_new_thread() {
         .await
         .expect("extension-owned credential must resolve from a new thread");
 
-    assert_eq!(resolved.handle, access_secret);
+    assert_eq!(Some(resolved.handle), created.access_secret);
 }
 
 #[tokio::test]
@@ -729,21 +667,11 @@ async fn resolver_requires_requested_provider_scopes() {
     let scope =
         ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
     let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
-    accounts
-        .create_account(NewCredentialAccount {
-            scope: auth_scope,
-            provider: AuthProviderId::new("google").unwrap(),
-            label: CredentialAccountLabel::new("work google").unwrap(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(SecretHandle::new("google_manual_access").unwrap()),
-            refresh_secret: None,
-            scopes: vec![ProviderScope::new("https://www.googleapis.com/auth/gmail.send").unwrap()],
-        })
-        .await
-        .unwrap();
+    ConfiguredAccount::new(auth_scope, "google")
+        .access_secret(Some(SecretHandle::new("google_manual_access").unwrap()))
+        .scopes(&["https://www.googleapis.com/auth/gmail.send"])
+        .create(&accounts)
+        .await;
     let resolver = resolver_with_accounts(accounts);
     let required_scopes = vec!["https://www.googleapis.com/auth/drive".to_string()];
 
@@ -767,21 +695,10 @@ async fn resolver_does_not_treat_unscoped_google_account_as_scoped() {
     let scope =
         ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
     let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
-    accounts
-        .create_account(NewCredentialAccount {
-            scope: auth_scope,
-            provider: AuthProviderId::new("google").unwrap(),
-            label: CredentialAccountLabel::new("work google").unwrap(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(SecretHandle::new("google_manual_access").unwrap()),
-            refresh_secret: None,
-            scopes: Vec::new(),
-        })
-        .await
-        .unwrap();
+    ConfiguredAccount::new(auth_scope, "google")
+        .access_secret(Some(SecretHandle::new("google_manual_access").unwrap()))
+        .create(&accounts)
+        .await;
     let resolver = resolver_with_accounts(accounts);
     let required_scopes = vec!["https://www.googleapis.com/auth/drive".to_string()];
 
@@ -810,21 +727,13 @@ async fn resolver_reuses_gsuite_owned_google_account_for_gsuite_requester() {
     let access_secret = SecretHandle::new("google-drive-access").unwrap();
     let calendar_scope =
         ProviderScope::new("https://www.googleapis.com/auth/calendar.readonly").unwrap();
-    accounts
-        .create_account(NewCredentialAccount {
-            scope: auth_scope,
-            provider: AuthProviderId::new("google").unwrap(),
-            label: CredentialAccountLabel::new("drive google").unwrap(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::ExtensionOwned,
-            owner_extension: Some(ExtensionId::new("google-drive").unwrap()),
-            granted_extensions: Vec::new(),
-            access_secret: Some(access_secret.clone()),
-            refresh_secret: None,
-            scopes: vec![calendar_scope.clone()],
-        })
-        .await
-        .unwrap();
+    ConfiguredAccount::new(auth_scope, "google")
+        .ownership(CredentialOwnership::ExtensionOwned)
+        .owner_extension("google-drive")
+        .access_secret(Some(access_secret.clone()))
+        .scopes(&["https://www.googleapis.com/auth/calendar.readonly"])
+        .create(&accounts)
+        .await;
     let resolver = resolver_with_accounts(accounts);
 
     let resolved = resolver
@@ -849,21 +758,11 @@ async fn resolver_does_not_share_unbound_google_account_with_third_party_request
     let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
     let google_scope =
         ProviderScope::new("https://www.googleapis.com/auth/gmail.readonly").unwrap();
-    accounts
-        .create_account(NewCredentialAccount {
-            scope: auth_scope,
-            provider: AuthProviderId::new("google").unwrap(),
-            label: CredentialAccountLabel::new("work google").unwrap(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(SecretHandle::new("google-access").unwrap()),
-            refresh_secret: None,
-            scopes: vec![google_scope.clone()],
-        })
-        .await
-        .unwrap();
+    ConfiguredAccount::new(auth_scope, "google")
+        .access_secret(Some(SecretHandle::new("google-access").unwrap()))
+        .scopes(&["https://www.googleapis.com/auth/gmail.readonly"])
+        .create(&accounts)
+        .await;
     let resolver = resolver_with_accounts(accounts);
 
     let error = resolver
@@ -890,21 +789,13 @@ async fn resolver_allows_google_account_explicitly_granted_to_third_party_reques
     let access_secret = SecretHandle::new("granted-google-access").unwrap();
     let google_scope =
         ProviderScope::new("https://www.googleapis.com/auth/gmail.readonly").unwrap();
-    accounts
-        .create_account(NewCredentialAccount {
-            scope: auth_scope,
-            provider: AuthProviderId::new("google").unwrap(),
-            label: CredentialAccountLabel::new("shared google").unwrap(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::SharedAdminManaged,
-            owner_extension: None,
-            granted_extensions: vec![requester.clone()],
-            access_secret: Some(access_secret.clone()),
-            refresh_secret: None,
-            scopes: vec![google_scope.clone()],
-        })
-        .await
-        .unwrap();
+    ConfiguredAccount::new(auth_scope, "google")
+        .ownership(CredentialOwnership::SharedAdminManaged)
+        .granted_extensions(vec![requester.clone()])
+        .access_secret(Some(access_secret.clone()))
+        .scopes(&["https://www.googleapis.com/auth/gmail.readonly"])
+        .create(&accounts)
+        .await;
     let resolver = resolver_with_accounts(accounts);
 
     let resolved = resolver
@@ -927,21 +818,11 @@ async fn resolver_maps_unconfigured_account_status_to_auth_required() {
     let scope =
         ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
     let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
-    accounts
-        .create_account(NewCredentialAccount {
-            scope: auth_scope,
-            provider: AuthProviderId::new("github").unwrap(),
-            label: CredentialAccountLabel::new("work github").unwrap(),
-            status: CredentialAccountStatus::PendingSetup,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: None,
-            refresh_secret: None,
-            scopes: Vec::new(),
-        })
-        .await
-        .unwrap();
+    ConfiguredAccount::new(auth_scope, "github")
+        .status(CredentialAccountStatus::PendingSetup)
+        .access_secret(None)
+        .create(&accounts)
+        .await;
     let resolver = resolver_with_accounts(accounts);
 
     let error = resolver
@@ -964,21 +845,11 @@ async fn resolver_maps_configured_account_without_access_secret_to_backend() {
     let scope =
         ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
     let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
-    accounts
-        .create_account(NewCredentialAccount {
-            scope: auth_scope,
-            provider: AuthProviderId::new("github").unwrap(),
-            label: CredentialAccountLabel::new("work github").unwrap(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: None, // Configured but missing secret — data corruption
-            refresh_secret: None,
-            scopes: Vec::new(),
-        })
-        .await
-        .unwrap();
+    ConfiguredAccount::new(auth_scope, "github")
+        // Configured but missing secret — data corruption
+        .access_secret(None)
+        .create(&accounts)
+        .await;
     let resolver = resolver_with_accounts(accounts);
 
     let error = resolver
@@ -1004,21 +875,10 @@ async fn activation_preflight_maps_configured_account_without_access_secret_to_b
     let scope =
         ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
     let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
-    accounts
-        .create_account(NewCredentialAccount {
-            scope: auth_scope,
-            provider: AuthProviderId::new("github").unwrap(),
-            label: CredentialAccountLabel::new("corrupt github").unwrap(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: None,
-            refresh_secret: None,
-            scopes: Vec::new(),
-        })
-        .await
-        .unwrap();
+    ConfiguredAccount::new(auth_scope, "github")
+        .access_secret(None)
+        .create(&accounts)
+        .await;
     let selector = ProductAuthRuntimeCredentialAccountSelector::new(accounts);
 
     let error = missing_runtime_credential_auth_requirements(
@@ -1052,37 +912,15 @@ async fn resolver_uses_most_recent_account_across_multiple_reusable_logins() {
     let latest_secret = SecretHandle::new("work-token").unwrap();
     // Two reusable accounts for the same provider under distinct labels.
     // The second one is created later, so it is the most-recently-used.
-    accounts
-        .create_account(NewCredentialAccount {
-            scope: auth_scope.clone(),
-            provider: AuthProviderId::new("github").unwrap(),
-            label: CredentialAccountLabel::new("personal github").unwrap(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(SecretHandle::new("personal-token").unwrap()),
-            refresh_secret: None,
-            scopes: Vec::new(),
-        })
-        .await
-        .unwrap();
+    ConfiguredAccount::new(auth_scope.clone(), "github")
+        .access_secret(Some(SecretHandle::new("personal-token").unwrap()))
+        .create(&accounts)
+        .await;
     tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-    accounts
-        .create_account(NewCredentialAccount {
-            scope: auth_scope,
-            provider: AuthProviderId::new("github").unwrap(),
-            label: CredentialAccountLabel::new("work github").unwrap(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(latest_secret.clone()),
-            refresh_secret: None,
-            scopes: Vec::new(),
-        })
-        .await
-        .unwrap();
+    ConfiguredAccount::new(auth_scope, "github")
+        .access_secret(Some(latest_secret.clone()))
+        .create(&accounts)
+        .await;
     let resolver = resolver_with_accounts(accounts);
 
     let resolved = resolver
