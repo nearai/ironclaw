@@ -34,6 +34,7 @@ use ironclaw_wasm_product_adapters::{
     WebhookAuth,
 };
 use secrecy::{ExposeSecret, SecretString};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::RebornRuntime;
@@ -78,6 +79,7 @@ const SLACK_WEBHOOK_WORKFLOW_TIMEOUT: Duration = Duration::from_secs(2);
 const SLACK_MAX_IN_FLIGHT_WEBHOOKS: usize = 64;
 const SLACK_IDEMPOTENCY_LEDGER_SETTLED_LIMIT: usize = 10_000;
 const SLACK_IDEMPOTENCY_LEDGER_PRUNE_INTERVAL: usize = 1_000;
+const SLACK_OUTBOUND_PROVIDER_KEY_PREFIX: &str = "slack-v2-host-beta";
 
 struct NoopSlackDeliverySink;
 
@@ -235,6 +237,103 @@ impl std::fmt::Debug for SlackHostBetaConfig {
             .field("bot_token", &"[REDACTED]")
             .finish()
     }
+}
+
+fn slack_outbound_delivery_target_provider_key(config: &SlackHostBetaConfig) -> String {
+    let mut hasher = Sha256::new();
+    hash_slack_mount_field(&mut hasher, config.tenant_id.as_str());
+    hash_slack_mount_field(&mut hasher, config.agent_id.as_str());
+    hash_slack_mount_field(
+        &mut hasher,
+        config.project_id.as_ref().map_or("", ProjectId::as_str),
+    );
+    hash_slack_mount_field(&mut hasher, config.installation_id.as_str());
+    hash_slack_mount_field(&mut hasher, config.team_id.as_str());
+    hash_slack_installation_selector(&mut hasher, &config.installation_selector);
+    hash_slack_mount_field(
+        &mut hasher,
+        config.slack_actor.as_ref().map_or("", ExternalActorRef::id),
+    );
+    hash_slack_mount_field(&mut hasher, config.user_id.as_str());
+    hash_slack_mount_field(
+        &mut hasher,
+        config
+            .shared_subject_user_id
+            .as_ref()
+            .map_or("", UserId::as_str),
+    );
+    for route in &config.channel_routes {
+        hash_slack_mount_field(&mut hasher, &route.channel_id);
+        hash_slack_mount_field(&mut hasher, route.subject_user_id.as_str());
+    }
+    hash_slack_mount_field(&mut hasher, config.signing_secret.expose_secret());
+    hash_slack_mount_field(&mut hasher, config.bot_token.expose_secret());
+
+    let digest = hasher.finalize();
+    let mut suffix = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut suffix, "{byte:02x}");
+    }
+    format!("{SLACK_OUTBOUND_PROVIDER_KEY_PREFIX}:{suffix}")
+}
+
+fn hash_slack_installation_selector(hasher: &mut Sha256, selector: &SlackInstallationSelector) {
+    match selector {
+        SlackInstallationSelector::Team { team_id } => {
+            hash_slack_mount_field(hasher, "team");
+            hash_slack_mount_field(hasher, team_id.as_str());
+        }
+        SlackInstallationSelector::AppTeam {
+            api_app_id,
+            team_id,
+        } => {
+            hash_slack_mount_field(hasher, "app_team");
+            hash_slack_mount_field(hasher, api_app_id.as_str());
+            hash_slack_mount_field(hasher, team_id.as_str());
+        }
+        SlackInstallationSelector::EnterpriseTeam {
+            enterprise_id,
+            team_id,
+        } => {
+            hash_slack_mount_field(hasher, "enterprise_team");
+            hash_slack_mount_field(hasher, enterprise_id.as_str());
+            hash_slack_mount_field(hasher, team_id.as_str());
+        }
+        SlackInstallationSelector::InstallUser {
+            team_id,
+            install_user_id,
+        } => {
+            hash_slack_mount_field(hasher, "install_user");
+            hash_slack_mount_field(hasher, team_id.as_str());
+            hash_slack_mount_field(hasher, install_user_id.as_str());
+        }
+        SlackInstallationSelector::EnterpriseInstallUser {
+            enterprise_id,
+            team_id,
+            install_user_id,
+        } => {
+            hash_slack_mount_field(hasher, "enterprise_install_user");
+            hash_slack_mount_field(hasher, enterprise_id.as_str());
+            hash_slack_mount_field(hasher, team_id.as_str());
+            hash_slack_mount_field(hasher, install_user_id.as_str());
+        }
+        SlackInstallationSelector::AppInstallUser {
+            api_app_id,
+            team_id,
+            install_user_id,
+        } => {
+            hash_slack_mount_field(hasher, "app_install_user");
+            hash_slack_mount_field(hasher, api_app_id.as_str());
+            hash_slack_mount_field(hasher, team_id.as_str());
+            hash_slack_mount_field(hasher, install_user_id.as_str());
+        }
+    }
+}
+
+fn hash_slack_mount_field(hasher: &mut Sha256, value: &str) {
+    hasher.update(value.len().to_le_bytes());
+    hasher.update(value.as_bytes());
 }
 
 #[derive(Debug, Error)]
@@ -422,6 +521,15 @@ pub fn build_slack_host_beta_mounts(
     )
     .with_allowed_subject_user_ids(allowed_route_subjects);
 
+    let outbound_delivery_provider_key = slack_outbound_delivery_target_provider_key(&config);
+    let outbound_delivery_provider_already_registered = runtime
+        .outbound_delivery_target_provider_key_registered(&outbound_delivery_provider_key)
+        .map_err(
+            |error| SlackHostBetaBuildError::OutboundDeliveryTargetRegistration {
+                reason: error.to_string(),
+            },
+        )?;
+
     // Wire the triggered-run delivery hook. The delivery store comes from the
     // composition-owned outbound store, shared with preferences so the same
     // backing tree is used for all outbound roles. `set_trigger_post_submit_hook`
@@ -432,7 +540,15 @@ pub fn build_slack_host_beta_mounts(
             Arc::clone(&local_runtime.triggered_run_delivery);
         match build_triggered_run_delivery_hook(runtime, &config, delivery_store) {
             Ok(hook) => {
-                runtime.set_trigger_post_submit_hook(hook);
+                let hook_set = runtime.set_trigger_post_submit_hook(hook);
+                if !hook_set
+                    && runtime.trigger_post_submit_hook_is_set()
+                    && !outbound_delivery_provider_already_registered
+                {
+                    return Err(SlackHostBetaBuildError::OutboundDeliveryTargetRegistration {
+                        reason: "Slack triggered delivery hook is already wired for a different Slack host config".to_string(),
+                    });
+                }
             }
             Err(err) => {
                 tracing::warn!(
@@ -466,9 +582,16 @@ pub fn build_slack_host_beta_mounts(
             channel_route_store,
             Arc::clone(&personal_dm_target_store),
         ));
+    if outbound_delivery_provider_already_registered {
+        return Ok(SlackHostBetaMounts {
+            events,
+            personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
+            channel_routes,
+        });
+    }
     match runtime
         .register_outbound_delivery_target_provider(
-            SLACK_V2_ADAPTER_ID,
+            outbound_delivery_provider_key,
             Arc::clone(&outbound_delivery_target_provider),
         )
         .map_err(
@@ -479,7 +602,7 @@ pub fn build_slack_host_beta_mounts(
         OutboundDeliveryTargetRegistrationOutcome::Registered => {}
         OutboundDeliveryTargetRegistrationOutcome::Replaced => {
             return Err(SlackHostBetaBuildError::OutboundDeliveryTargetRegistration {
-                reason: "Slack outbound delivery target provider is already registered; replacement would diverge from the first-writer trigger delivery hook".to_string(),
+                reason: "Slack outbound delivery target provider was concurrently registered; replacement would diverge from the first-writer trigger delivery hook".to_string(),
             });
         }
     }
@@ -1891,12 +2014,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_slack_host_beta_mounts_rejects_outbound_target_provider_replacement() {
+    async fn build_slack_host_beta_mounts_allows_same_config_rebuild_without_replacement() {
         let (runtime, _root) = runtime().await;
         let _mounts = build_slack_host_beta_mounts(&runtime, config()).expect("first mount builds");
 
-        let error = match build_slack_host_beta_mounts(&runtime, config()) {
-            Ok(_) => panic!("second Slack mount must not replace outbound provider"),
+        build_slack_host_beta_mounts(&runtime, config()).expect("same-config rebuild builds");
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
+    async fn build_slack_host_beta_mounts_rejects_different_config_after_trigger_hook_wired() {
+        let (runtime, _root) = runtime_with_trigger_poller().await;
+        let _mounts = build_slack_host_beta_mounts(&runtime, config()).expect("first mount builds");
+        let mut different_config = config();
+        different_config.channel_routes = vec![SlackHostBetaChannelRoute::new(
+            "C1HOST",
+            UserId::new(SHARED_SUBJECT).expect("shared subject"),
+        )];
+
+        let error = match build_slack_host_beta_mounts(&runtime, different_config) {
+            Ok(_) => panic!("different Slack mount must not replace outbound provider"),
             Err(error) => error,
         };
 
@@ -1904,7 +2042,7 @@ mod tests {
             matches!(
                 error,
                 SlackHostBetaBuildError::OutboundDeliveryTargetRegistration { ref reason }
-                    if reason.contains("already registered")
+                    if reason.contains("different Slack host config")
             ),
             "unexpected replacement error: {error:?}"
         );

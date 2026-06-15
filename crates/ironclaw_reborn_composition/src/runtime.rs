@@ -1110,6 +1110,24 @@ impl RebornRuntime {
             })
     }
 
+    #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(dead_code))]
+    pub(crate) fn outbound_delivery_target_provider_key_registered(
+        &self,
+        provider_key: &str,
+    ) -> Result<bool, RebornRuntimeError> {
+        let Some(registry) = self.outbound_delivery_target_registry.as_ref() else {
+            return Err(RebornRuntimeError::InvalidArgument {
+                reason: "outbound delivery target registry unavailable for this runtime"
+                    .to_string(),
+            });
+        };
+        registry
+            .contains_provider_key(provider_key)
+            .map_err(|error| RebornRuntimeError::InvalidArgument {
+                reason: format!("outbound delivery target provider lookup failed: {error}"),
+            })
+    }
+
     #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) fn auth_challenge_provider(&self) -> Option<Arc<dyn crate::AuthChallengeProvider>> {
         self.services
@@ -1143,6 +1161,13 @@ impl RebornRuntime {
                 false
             }
         }
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) fn trigger_post_submit_hook_is_set(&self) -> bool {
+        self.post_submit_hook_slot
+            .as_ref()
+            .is_some_and(|slot| slot.get().is_some())
     }
 
     #[cfg(test)]
