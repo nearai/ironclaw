@@ -118,42 +118,34 @@ fn onboarding(package_id: &str) -> Option<LifecycleExtensionOnboarding> {
         "github" => Some(onboarding_message(
             "GitHub needs a personal access token before its repository and pull request tools can run.",
             Some(
-                "Install GitHub first. Activation will open the secure credential prompt for a GitHub personal access token with the repository permissions you want IronClaw to use.",
+                "Create a GitHub personal access token with the repository permissions you want IronClaw to use, then paste it here.",
             ),
             Some("https://github.com/settings/personal-access-tokens/new"),
-            "Install GitHub, then activate it to open the token prompt and publish its tools.",
+            "After saving the token, activate GitHub to publish its tools.",
         )),
         "gmail" => Some(onboarding_message(
             "Gmail needs Google OAuth authorization before mail tools can run.",
-            Some(
-                "Install Gmail first. Activation will open the Google OAuth prompt for the account IronClaw should use.",
-            ),
+            Some("Authorize the Google account that IronClaw should use for Gmail."),
             None,
-            "Install Gmail, then activate it to open OAuth and publish its tools.",
+            "After authorization completes, activate Gmail to publish its tools.",
         )),
         "google-calendar" => Some(onboarding_message(
             "Google Calendar needs Google OAuth authorization before calendar tools can run.",
-            Some(
-                "Install Google Calendar first. Activation will open the Google OAuth prompt for calendar access.",
-            ),
+            Some("Authorize the Google account that IronClaw should use for Google Calendar."),
             None,
-            "Install Google Calendar, then activate it to open OAuth and publish its tools.",
+            "After authorization completes, activate Google Calendar to publish its tools.",
         )),
         "notion" => Some(onboarding_message(
             "Notion needs OAuth authorization before MCP tools can run.",
-            Some(
-                "Install Notion first. Activation will open the OAuth prompt for the workspace IronClaw should access.",
-            ),
+            Some("Authorize the Notion workspace that IronClaw should access."),
             None,
-            "Install Notion, then activate it to open OAuth and publish its MCP tools.",
+            "After authorization completes, activate Notion to publish its MCP tools.",
         )),
         "nearai" => Some(onboarding_message(
             "NEAR AI needs an API key before its MCP tools can run.",
-            Some(
-                "Install NEAR AI first. Activation will open the secure credential prompt for the API key IronClaw should use.",
-            ),
+            Some("Paste the NEAR AI API key IronClaw should use."),
             None,
-            "Install NEAR AI, then activate it to open the API key prompt and publish its MCP tools.",
+            "After saving the API key, activate NEAR AI to publish its MCP tools.",
         )),
         "web-access" => Some(onboarding_message(
             "Web Access does not need credentials. Activate it to make web search and saved-result retrieval tools available.",
@@ -1660,6 +1652,41 @@ mod tests {
     }
 
     #[test]
+    fn bundled_web_access_defers_github_repository_tasks_to_github_extension() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "web-access").unwrap();
+        let package = catalog.resolve(&package_ref).unwrap();
+        let search = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "web-access.search")
+            .expect("web access search capability");
+        assert!(
+            search
+                .description
+                .contains("Prefer GitHub extension capabilities"),
+            "web-access.search description should route GitHub repository data to GitHub tools"
+        );
+
+        let prompt_asset = package
+            .assets
+            .iter()
+            .find(|asset| asset.path == "prompts/web-access/search.md")
+            .expect("web access search prompt");
+        let AvailableExtensionAssetContent::Bytes(bytes) = &prompt_asset.content else {
+            panic!("web access prompt should be bundled bytes");
+        };
+        let prompt = std::str::from_utf8(bytes).expect("prompt should be UTF-8");
+        assert!(
+            prompt.contains("prefer the GitHub extension capabilities"),
+            "web-access.search prompt should route GitHub repository data to GitHub tools"
+        );
+    }
+
+    #[test]
     fn bundled_extension_summaries_include_onboarding_messages() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
 
@@ -1691,13 +1718,59 @@ mod tests {
                 onboarding.credential_next_step.is_some(),
                 "{extension_id} must include the next user step"
             );
-            assert!(
-                onboarding
-                    .credential_next_step
-                    .as_deref()
-                    .is_some_and(|step| step.contains("Install") && step.contains("activate")),
-                "{extension_id} onboarding should preserve install-then-activate ordering"
-            );
+            if matches!(extension_id, "gmail" | "google-calendar" | "notion") {
+                assert!(
+                    onboarding
+                        .credential_instructions
+                        .as_deref()
+                        .is_some_and(|instructions| {
+                            instructions.starts_with("Authorize ")
+                                && !instructions.contains("Install")
+                        }),
+                    "{extension_id} configure onboarding should not repeat install-first copy"
+                );
+                assert!(
+                    onboarding
+                        .credential_next_step
+                        .as_deref()
+                        .is_some_and(|step| {
+                            step.starts_with("After authorization completes")
+                                && step.contains("activate")
+                                && !step.contains("Install")
+                        }),
+                    "{extension_id} configure next step should describe post-authorization activation"
+                );
+            } else if matches!(extension_id, "github" | "nearai") {
+                assert!(
+                    onboarding
+                        .credential_instructions
+                        .as_deref()
+                        .is_some_and(|instructions| {
+                            (instructions.contains("Paste") || instructions.contains("paste"))
+                                && !instructions.contains("Install")
+                        }),
+                    "{extension_id} configure onboarding should describe token entry without install-first copy"
+                );
+                assert!(
+                    onboarding
+                        .credential_next_step
+                        .as_deref()
+                        .is_some_and(|step| {
+                            step.starts_with("After saving")
+                                && step.contains("activate")
+                                && !step.contains("Install")
+                        }),
+                    "{extension_id} configure next step should describe activation after saving credentials"
+                );
+            } else {
+                assert!(
+                    onboarding
+                        .credential_next_step
+                        .as_deref()
+                        .is_some_and(|step| step.contains("Install") && step.contains("activate")),
+                    "{extension_id} onboarding should preserve install-then-activate ordering"
+                );
+            }
         }
     }
 

@@ -79,6 +79,7 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
     setShowSaved(false);
     return promise
       .then(() => {
+        if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
         setShowSaved(true);
         savedTimerRef.current = setTimeout(() => setShowSaved(false), 2200);
       })

@@ -227,6 +227,10 @@ async fn filesystem_store_persists_preview_history_while_hiding_it_from_context(
         .unwrap();
     assert_eq!(first.message_id, duplicate.message_id);
 
+    // A summary whose range contains only a CapabilityDisplayPreview (permanent
+    // non-visible, never resurfaces) IS now applied: the preview kind is safe
+    // to span.  The summary replaces seq 1 (User) through seq 2 (Preview) in
+    // the model context; the preview itself remains absent from context.
     service
         .create_summary_artifact(CreateSummaryArtifactRequest {
             scope: scope.clone(),
@@ -234,7 +238,7 @@ async fn filesystem_store_persists_preview_history_while_hiding_it_from_context(
             start_sequence: 1,
             end_sequence: 2,
             summary_kind: SummaryKind::Compaction,
-            content: MessageContent::text("summary must not replace preview range"),
+            content: MessageContent::text("run a tool summarized"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await
@@ -264,8 +268,11 @@ async fn filesystem_store_persists_preview_history_while_hiding_it_from_context(
         })
         .await
         .unwrap();
+    // Summary is now applied (CapabilityDisplayPreview is safe to span — permanent
+    // non-visible, never resurfaces).  Context shows the summary, not the raw User
+    // or the Preview.
     assert_eq!(context.messages.len(), 1);
-    assert_eq!(context.messages[0].kind, MessageKind::User);
+    assert_eq!(context.messages[0].kind, MessageKind::Summary);
 
     let direct_context = service
         .load_context_messages(LoadContextMessagesRequest {
@@ -1064,6 +1071,299 @@ async fn filesystem_list_threads_for_scope_derives_title_from_first_user_message
     );
 }
 
+// ---------------------------------------------------------------------------
+// mark_message_rejected_busy — filesystem backend coverage
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn filesystem_rejected_busy_marks_user_message_and_persists_status() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-rb-ok", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("rb-ok");
+
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("arrived while busy"),
+        })
+        .await
+        .unwrap();
+    let rejected = service
+        .mark_message_rejected_busy(&scope, &thread.thread_id, accepted.message_id)
+        .await
+        .unwrap();
+    assert_eq!(rejected.status, MessageStatus::RejectedBusy);
+    assert!(rejected.turn_run_id.is_none());
+
+    // Re-list to confirm the status was persisted to the filesystem store.
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.messages.len(), 1);
+    assert_eq!(history.messages[0].status, MessageStatus::RejectedBusy);
+    assert!(history.messages[0].turn_run_id.is_none());
+}
+
+#[tokio::test]
+async fn filesystem_rejected_busy_rejects_non_user_message() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-rb-non-user", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("rb-non-user");
+
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    // An assistant draft is not a user message — the transition must be rejected.
+    let draft = service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            content: MessageContent::text("partial"),
+        })
+        .await
+        .unwrap();
+
+    let result = service
+        .mark_message_rejected_busy(&scope, &thread.thread_id, draft.message_id)
+        .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(SessionThreadError::InvalidMessageTransition { .. })
+        ),
+        "mark_message_rejected_busy must return InvalidMessageTransition for a non-user (assistant draft) message, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_rejected_busy_rejects_already_submitted_user_message() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-rb-submitted", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("rb-submitted");
+
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("already submitted"),
+        })
+        .await
+        .unwrap();
+
+    // Advance past Accepted → Submitted so the message is finalized.
+    service
+        .mark_message_submitted(
+            &scope,
+            &thread.thread_id,
+            accepted.message_id,
+            "turn-id-x".into(),
+            "run-id-x".into(),
+        )
+        .await
+        .unwrap();
+
+    let result = service
+        .mark_message_rejected_busy(&scope, &thread.thread_id, accepted.message_id)
+        .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(SessionThreadError::InvalidMessageTransition { .. })
+        ),
+        "mark_message_rejected_busy must return InvalidMessageTransition on an already-submitted user message, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_rejected_busy_cannot_be_marked_submitted_is_terminal() {
+    // RejectedBusy is a durable terminal state — the stored row must never
+    // transition to Submitted.  ensure_user_accepted no longer admits
+    // RejectedBusy, so mark_message_submitted must return
+    // InvalidMessageTransition and the persisted status must remain RejectedBusy.
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-rb-terminal", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("rb-terminal");
+
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("resend after busy"),
+        })
+        .await
+        .unwrap();
+
+    // Drive the message into RejectedBusy.
+    service
+        .mark_message_rejected_busy(&scope, &thread.thread_id, accepted.message_id)
+        .await
+        .unwrap();
+
+    // Attempting to submit the rejected row must fail — RejectedBusy is terminal.
+    let result = service
+        .mark_message_submitted(
+            &scope,
+            &thread.thread_id,
+            accepted.message_id,
+            "turn-id-resend".into(),
+            "run-id-resend".into(),
+        )
+        .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(SessionThreadError::InvalidMessageTransition { .. })
+        ),
+        "mark_message_submitted must fail with InvalidMessageTransition on a RejectedBusy message (terminal state), got {result:?}"
+    );
+
+    // Re-list to confirm the status was NOT mutated in the filesystem store.
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        history.messages[0].status,
+        MessageStatus::RejectedBusy,
+        "persisted status must remain RejectedBusy after the failed Submitted transition"
+    );
+}
+
+#[tokio::test]
+async fn legacy_deferred_busy_message_round_trips_through_filesystem_store() {
+    // Regression guard for the on-disk legacy `deferred_busy` status.
+    // `DeferredBusy` is no longer written by new code but may exist in older
+    // transcripts. This test proves that a row injected with that status
+    // survives the JSON serialize → filesystem store → deserialize round-trip
+    // with the status preserved and still appears in history.
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-legacy-db", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("legacy-deferred-busy");
+
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("arrived while busy"),
+        })
+        .await
+        .unwrap();
+
+    // Inject a legacy DeferredBusy row directly — the mark_message_deferred_busy
+    // writer has been retired; this back-door preserves read/replay coverage.
+    service
+        .inject_legacy_deferred_busy_for_test(&scope, &thread.thread_id, accepted.message_id)
+        .await
+        .unwrap();
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        history.messages.len(),
+        1,
+        "legacy DeferredBusy message must appear in history"
+    );
+    assert_eq!(
+        history.messages[0].status,
+        MessageStatus::DeferredBusy,
+        "on-disk legacy deferred_busy status must round-trip without mutation"
+    );
+    assert!(
+        history.messages[0].turn_run_id.is_none(),
+        "legacy DeferredBusy message must have no turn_run_id"
+    );
+}
+
 fn scope(label: &str) -> ThreadScope {
     ThreadScope {
         tenant_id: TenantId::new(format!("tenant-{label}")).unwrap(),
@@ -1325,4 +1625,192 @@ async fn filesystem_accept_rejects_duplicate_attachment_ids() {
         .await
         .unwrap();
     assert!(history.messages.is_empty());
+}
+
+/// Mirrors `summary_spanning_interior_rejected_busy_is_applied` from the
+/// in-memory contract suite.  A compaction summary whose span contains an
+/// interior RejectedBusy message (permanently-terminal, never resurfaces)
+/// MUST be applied by the filesystem backend.
+#[tokio::test]
+async fn filesystem_summary_spanning_interior_rejected_busy_is_applied() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-rej-busy-sum", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("rej-busy-sum");
+
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-rej-busy-sum").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    // seq 1: visible user message
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("first"),
+        })
+        .await
+        .unwrap();
+
+    // seq 2: accepted then rejected-busy (permanently terminal, never resurfaces)
+    let second = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("rejected busy interior"),
+        })
+        .await
+        .unwrap();
+    service
+        .mark_message_rejected_busy(&scope, &thread.thread_id, second.message_id)
+        .await
+        .unwrap();
+
+    // seq 3: visible user message
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("third"),
+        })
+        .await
+        .unwrap();
+
+    // Summary spans [1..3] covering the interior RejectedBusy.  Must be applied.
+    service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 3,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("first and third summarized"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await
+        .unwrap();
+
+    let context = service
+        .load_context_window(LoadContextWindowRequest {
+            scope,
+            thread_id: thread.thread_id,
+            max_messages: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(context.messages.len(), 1, "summary must be applied");
+    assert_eq!(context.messages[0].kind, MessageKind::Summary);
+    assert_eq!(context.messages[0].content, "first and third summarized");
+}
+
+/// Mirrors `summary_spanning_interior_draft_is_not_applied` from the
+/// in-memory contract suite.  A compaction summary spanning a Draft
+/// (resurfaceable) message must still be suppressed by the filesystem backend.
+#[tokio::test]
+async fn filesystem_summary_spanning_interior_draft_is_not_applied() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-draft-sum", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("draft-sum");
+
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-draft-sum").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    // seq 1: visible user message
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("first"),
+        })
+        .await
+        .unwrap();
+
+    // seq 2: assistant Draft — resurfaceable, must block the summary.
+    service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-draft-sum".into(),
+            content: MessageContent::text("draft interior"),
+        })
+        .await
+        .unwrap();
+
+    // seq 3: visible user message
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("third"),
+        })
+        .await
+        .unwrap();
+
+    // Summary spans [1..3] covering the Draft at seq 2.  Must be suppressed.
+    service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 3,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("should not appear"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await
+        .unwrap();
+
+    let context = service
+        .load_context_window(LoadContextWindowRequest {
+            scope,
+            thread_id: thread.thread_id,
+            max_messages: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        context.messages.len(),
+        2,
+        "summary must be suppressed for draft-spanning range"
+    );
+    assert_eq!(context.messages[0].content, "first");
+    assert_eq!(context.messages[1].content, "third");
 }

@@ -43,9 +43,9 @@ use ironclaw_filesystem::{
     MountDescriptor, RootFilesystem, StorageClass,
 };
 use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
-use ironclaw_host_api::runtime_policy::{FilesystemBackendKind, ProcessBackendKind, SecretMode};
+use ironclaw_host_api::runtime_policy::{
+    EffectiveRuntimePolicy, FilesystemBackendKind, ProcessBackendKind, SecretMode,
+};
 use ironclaw_host_api::{
     EffectKind, ExtensionId, HostPath, MountPermissions, MountView, PackageId, RuntimeHttpEgress,
     UserId, VirtualPath,
@@ -396,6 +396,7 @@ pub struct RebornLocalDevApprovalTestParts {
 pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) approval_requests: Arc<LocalDevApprovalRequestStore>,
     pub(crate) capability_leases: Arc<LocalDevCapabilityLeaseStore>,
+    pub(crate) runtime_policy: Option<EffectiveRuntimePolicy>,
     // Used in approval_test_support (cfg(test) only); suppress the dead-code
     // lint on non-test builds where that module is not compiled in.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -569,6 +570,7 @@ struct RebornLocalDevStoreGraph {
 struct RebornLocalDevStoreGraphInput {
     filesystem: Arc<LocalDevRootFilesystem>,
     owner_user_id: UserId,
+    runtime_policy: Option<EffectiveRuntimePolicy>,
     skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     workspace_mounts: MountView,
@@ -787,6 +789,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let mut store_graph = build_local_dev_store_graph(RebornLocalDevStoreGraphInput {
         filesystem: Arc::clone(&filesystem),
         owner_user_id,
+        runtime_policy: runtime_policy.clone(),
         skill_filesystem,
         workspace_filesystem,
         workspace_mounts: runtime_workspace_mounts,
@@ -1210,6 +1213,7 @@ fn build_local_dev_store_graph(
     let RebornLocalDevStoreGraphInput {
         filesystem,
         owner_user_id,
+        runtime_policy,
         skill_filesystem,
         workspace_filesystem,
         workspace_mounts,
@@ -1276,6 +1280,7 @@ fn build_local_dev_store_graph(
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
+        runtime_policy,
         capability_policy: Arc::clone(&capability_policy),
         persistent_approval_policies: Arc::clone(&persistent_approval_policies),
         turn_state: Arc::clone(&turn_state),
@@ -1343,6 +1348,7 @@ fn build_local_dev_store_graph(
     let RebornLocalDevStoreGraphInput {
         filesystem,
         owner_user_id,
+        runtime_policy,
         skill_filesystem,
         workspace_filesystem,
         workspace_mounts,
@@ -1398,6 +1404,7 @@ fn build_local_dev_store_graph(
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
+        runtime_policy,
         capability_policy: Arc::clone(&capability_policy),
         persistent_approval_policies: Arc::clone(&persistent_approval_policies),
         turn_state: Arc::clone(&turn_state),
@@ -3330,6 +3337,7 @@ mod tests {
         Arc::new(RebornLocalRuntimeServices {
             approval_requests: Arc::clone(&base_runtime.approval_requests),
             capability_leases: Arc::clone(&base_runtime.capability_leases),
+            runtime_policy: base_runtime.runtime_policy.clone(),
             capability_policy: Arc::clone(&base_runtime.capability_policy),
             persistent_approval_policies: Arc::clone(&base_runtime.persistent_approval_policies),
             turn_state: Arc::clone(&base_runtime.turn_state),

@@ -30,7 +30,7 @@ protocol event (webhook / cookie / bearer / cli)
        -> ProductInboundEnvelope (or None for ambient/no-op events)
   -> ProductWorkflow::submit_inbound(envelope)
        -> ConversationBindingService -> SessionThreadService -> TurnCoordinator
-  -> ProductInboundAck (Accepted / DeferredBusy / Rejected / Duplicate / NoOp)
+  -> ProductInboundAck (Accepted / RejectedBusy / DeferredBusy / Rejected / Duplicate / NoOp)
   -> protocol layer maps ack to status code
 
 projection read / fetch
@@ -131,7 +131,13 @@ inside `ironclaw_conversations` and are not constructible by product adapters.
 `ProductInboundAck` outcomes:
 
 - `Accepted { accepted_message_ref, submitted_run_id }`
-- `DeferredBusy { accepted_message_ref, active_run_id }`
+- `RejectedBusy { accepted_message_ref, active_run_id: Option<TurnRunId> }` — busy-thread
+  rejection; terminal/settled. The thread was occupied when the message arrived and the message
+  was not queued. The user must resend a new message. `active_run_id` is the blocking run when
+  known; `None` on idempotent replay of a previously settled `RejectedBusy` record.
+- `DeferredBusy { accepted_message_ref, active_run_id }` — **legacy** (no longer emitted for
+  new busy user-message arrivals; retained for old persisted rows and idempotent replay of
+  existing `DeferredBusy` records).
 - `Rejected(ProductRejection { kind, reason })`
 - `Duplicate { prior: Box<ProductInboundAck> }`
 - `NoOp`
@@ -140,7 +146,7 @@ Webhook ack semantics:
 
 | Outcome | Protocol response |
 |--------|-------------------|
-| `Accepted` / `DeferredBusy` / `Duplicate` / `NoOp` | 200 OK |
+| `Accepted` / `RejectedBusy` / `DeferredBusy` / `Duplicate` / `NoOp` | 200 OK |
 | `Rejected { BindingRequired \| AccessDenied \| UnknownInstallation }` | 403 |
 | `Rejected { PolicyDenied }` | 403/422 (protocol-specific) |
 | `Authentication` failure (host-side) | 401/403 |

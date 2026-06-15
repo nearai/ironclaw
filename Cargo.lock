@@ -5404,6 +5404,7 @@ dependencies = [
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_safety",
+ "ironclaw_threads",
  "serde",
  "serde_json",
  "sha2 0.10.9",

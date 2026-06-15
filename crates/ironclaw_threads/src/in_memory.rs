@@ -237,7 +237,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         Ok(message.clone())
     }
 
-    async fn mark_message_deferred_busy(
+    async fn mark_message_rejected_busy(
         &self,
         scope: &ThreadScope,
         thread_id: &ThreadId,
@@ -245,8 +245,8 @@ impl SessionThreadService for InMemorySessionThreadService {
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         let mut state = self.state.lock().await;
         let message = get_message_mut(&mut state, scope, thread_id, message_id)?;
-        ensure_user_accepted(message, "mark_message_deferred_busy")?;
-        message.status = MessageStatus::DeferredBusy;
+        ensure_user_accepted(message, "mark_message_rejected_busy")?;
+        message.status = MessageStatus::RejectedBusy;
         message.turn_id = None;
         message.turn_run_id = None;
         Ok(message.clone())
@@ -799,6 +799,31 @@ impl SessionThreadService for InMemorySessionThreadService {
     }
 }
 
+impl InMemorySessionThreadService {
+    /// Test-only back-door: force a message's status to `DeferredBusy` so
+    /// that legacy-row read/replay tests can construct pre-existing
+    /// `DeferredBusy` rows without going through the now-retired
+    /// `mark_message_deferred_busy` writer.  Never call from production code.
+    ///
+    /// Gated behind `#[cfg(any(test, feature = "test-support"))]` so it is
+    /// absent from production builds. Integration tests in a separate
+    /// compilation unit must enable the `test-support` feature.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn inject_legacy_deferred_busy_for_test(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let mut state = self.state.lock().await;
+        let message = get_message_mut(&mut state, scope, thread_id, message_id)?;
+        message.status = MessageStatus::DeferredBusy;
+        message.turn_id = None;
+        message.turn_run_id = None;
+        Ok(message.clone())
+    }
+}
+
 /// Default page size when the caller omits `limit`.
 const LIST_THREADS_DEFAULT_PAGE_SIZE: usize = 50;
 /// Maximum page size — caller-supplied `limit` is clamped here so a
@@ -1023,11 +1048,41 @@ fn history_message(message: &ThreadMessageRecord) -> ThreadMessageRecord {
     }
 }
 
+/// Returns true when a non-model-context-visible message within the summary
+/// span could later become model-visible (i.e. it is in a resurfaceable pending
+/// state).  Permanently-terminal non-visible messages (RejectedBusy, capability
+/// previews) never resurface, so a compaction summary spanning them is safe to
+/// apply — blocking it would silently drop a legitimate compacted range.
+///
+/// Resurfaceable statuses (must still block the summary):
+///   Draft | Interrupted | Superseded | DeferredBusy
+/// Permanent non-visible (must NOT block):
+///   RejectedBusy (terminal, user must explicitly resend)
+///   CapabilityDisplayPreview kind (never model-visible regardless of status)
+///
+/// Note: Redacted/Deleted keep their blocking role here — they were never
+/// model-visible and the separate `summary_covers_redacted_or_deleted_content`
+/// guard (used for history display) doesn't cover the context-build path.
+fn can_resurface_as_model_visible(message: &ThreadMessageRecord) -> bool {
+    matches!(
+        message.status,
+        MessageStatus::Draft
+            | MessageStatus::Interrupted
+            | MessageStatus::Superseded
+            | MessageStatus::DeferredBusy
+    )
+}
+
 fn summary_covers_hidden_content(thread: &StoredThread, summary: &SummaryArtifact) -> bool {
     thread.messages.iter().any(|message| {
         summary.start_sequence <= message.sequence
             && message.sequence <= summary.end_sequence
             && !is_model_context_visible(message)
+            && (can_resurface_as_model_visible(message)
+                || matches!(
+                    message.status,
+                    MessageStatus::Redacted | MessageStatus::Deleted
+                ))
     })
 }
 

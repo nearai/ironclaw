@@ -121,6 +121,18 @@ const OPERATOR_LOGS_TARGET_MAX_BYTES: usize = 256;
 const OPERATOR_LOGS_CONTEXT_MAX_BYTES: usize = 256;
 const OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX: &str = " ... [truncated]";
 
+const NOTICE_BLOCKED_APPROVAL: &str = "An approval gate is open on this thread — resolve it (approve or deny) before continuing, then resend your message.";
+const NOTICE_BLOCKED_AUTH: &str = "An authentication gate is open on this thread — complete authentication before continuing, then resend your message.";
+const NOTICE_BUSY_GENERIC: &str = "Ironclaw is still working on a previous message — resend yours once the current task finishes.";
+
+fn rejected_busy_notice(status: TurnStatus) -> String {
+    match status {
+        TurnStatus::BlockedApproval => NOTICE_BLOCKED_APPROVAL.to_string(),
+        TurnStatus::BlockedAuth => NOTICE_BLOCKED_AUTH.to_string(),
+        _ => NOTICE_BUSY_GENERIC.to_string(),
+    }
+}
+
 #[async_trait]
 pub trait ConnectableChannelsProductFacade: Send + Sync {
     async fn list_connectable_channels(
@@ -1709,6 +1721,23 @@ impl RebornServicesApi for RebornServices {
                         event_cursor: state.event_cursor,
                     });
                 }
+                MessageStatus::RejectedBusy => {
+                    // Idempotent re-rejection: the original busy rejection was
+                    // lost before it reached the client.  The blocking run may
+                    // already be finished, so we cannot recover its run-id or
+                    // cursor.  Return a RejectedBusy with None run metadata so
+                    // the client knows to resend rather than treating this as
+                    // a new submission.  Fabricating a run-id or status here
+                    // would give the client a reference it cannot query.
+                    return Ok(RebornSubmitTurnResponse::RejectedBusy {
+                        thread_id: replay.thread_id,
+                        accepted_message_ref: accepted_message_ref(replay.message_id.to_string())?,
+                        active_run_id: None,
+                        status: None,
+                        event_cursor: None,
+                        notice: NOTICE_BUSY_GENERIC.to_string(),
+                    });
+                }
                 MessageStatus::Accepted | MessageStatus::DeferredBusy => AcceptedWebUiMessage {
                     thread_id: replay.thread_id,
                     message_id: replay.message_id,
@@ -1829,20 +1858,21 @@ impl RebornServicesApi for RebornServices {
             }
             Err(TurnError::ThreadBusy(busy)) => {
                 self.clear_skill_activation_message(&scope, &accepted_message_ref)?;
-                mark_message_deferred_busy_or_replay(
+                mark_message_rejected_busy_or_replay(
                     &*self.thread_service,
                     &thread_scope,
                     &handoff,
                     &client_action_id,
                 )
                 .await?;
-
-                Ok(RebornSubmitTurnResponse::DeferredBusy {
+                let notice = rejected_busy_notice(busy.status);
+                Ok(RebornSubmitTurnResponse::RejectedBusy {
                     thread_id: handoff.thread_id,
                     accepted_message_ref,
-                    active_run_id: busy.active_run_id,
-                    status: busy.status,
-                    event_cursor: busy.event_cursor,
+                    active_run_id: Some(busy.active_run_id),
+                    status: Some(busy.status),
+                    event_cursor: Some(busy.event_cursor),
+                    notice,
                 })
             }
             Err(error) => {
@@ -2727,24 +2757,30 @@ async fn mark_message_submitted_or_replay(
     }
 }
 
-async fn mark_message_deferred_busy_or_replay(
+async fn mark_message_rejected_busy_or_replay(
     thread_service: &dyn SessionThreadService,
     thread_scope: &ThreadScope,
     handoff: &AcceptedWebUiMessage,
     client_action_id: &IdempotencyKey,
 ) -> Result<(), RebornServicesError> {
     match thread_service
-        .mark_message_deferred_busy(thread_scope, &handoff.thread_id, handoff.message_id)
+        .mark_message_rejected_busy(thread_scope, &handoff.thread_id, handoff.message_id)
         .await
     {
         Ok(_) => Ok(()),
         Err(error) => {
+            // Only RejectedBusy is the terminal settled state here.
+            // DeferredBusy is non-terminal legacy — a later replay may
+            // resubmit it, so claiming it settled would violate the
+            // no-resubmit guarantee. Let a DeferredBusy replay fall
+            // through to the `_` arm so the original mark failure
+            // surfaces honestly instead of being masked as settled.
             reconcile_terminal_duplicate(
                 thread_service,
                 thread_scope,
                 handoff,
                 client_action_id,
-                |replay| replay.status == MessageStatus::DeferredBusy,
+                |replay| matches!(replay.status, MessageStatus::RejectedBusy),
                 error,
             )
             .await

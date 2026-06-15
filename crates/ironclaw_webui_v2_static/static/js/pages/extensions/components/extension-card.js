@@ -247,18 +247,22 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   `;
 }
 
-export function RegistryCard({ entry, onInstall, isBusy }) {
+export function RegistryCard({ entry, onInstall, isBusy, statusLabel }) {
   const t = useT();
   const kindLabel = t(`extensions.kind.${entry.kind}`) || KIND_LABELS[entry.kind] || entry.kind;
   const displayName = entry.display_name || packageId(entry);
-  const canInstall = Boolean(entry.package_ref);
+  const canInstall = Boolean(entry.package_ref && onInstall);
   const keywords = entry.keywords || [];
   const [kwOpen, setKwOpen] = React.useState(false);
 
   return html`
     <div className=${CARD}>
       <div className="flex items-start gap-2">
-        <${Badge} tone="muted" label=${t("extensions.state.available") || "available"} size="sm" />
+        <${Badge}
+          tone="muted"
+          label=${statusLabel || t("extensions.state.available") || "available"}
+          size="sm"
+        />
         <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--v2-text-strong)]">
           ${displayName}
         </span>
