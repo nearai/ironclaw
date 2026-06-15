@@ -64,6 +64,7 @@ mod extension_setup_credentials;
 mod extensions;
 mod lifecycle_setup;
 mod llm_config;
+mod project_fs;
 mod types;
 
 pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
@@ -72,6 +73,11 @@ pub use llm_config::{
     LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
     NearAiAuthProvider, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
     NearAiWalletLoginResult, SetActiveLlmRequest, UpsertLlmProviderRequest,
+};
+pub use project_fs::{
+    ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
+    ProjectFsStat, RebornProjectFsListRequest, RebornProjectFsListResponse,
+    RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
 };
 pub use types::{
     RebornAutomationInfo, RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus,
@@ -933,6 +939,43 @@ pub trait RebornServicesApi: Send + Sync {
         request: RebornGetRunStateRequest,
     ) -> Result<RebornGetRunStateResponse, RebornServicesError>;
 
+    /// List a directory under the thread's project workspace.
+    ///
+    /// Read-only navigation surface over the same `/workspace` mount the agent's
+    /// file tools and inbound-attachment landing use. Default body reports the
+    /// service unavailable so implementors without a wired project filesystem
+    /// (and existing fakes) compile untouched.
+    async fn list_project_dir(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornProjectFsListRequest,
+    ) -> Result<RebornProjectFsListResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Stat a path under the thread's project workspace.
+    async fn stat_project_path(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornProjectFsStatRequest,
+    ) -> Result<RebornProjectFsStatResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Read (download) a file under the thread's project workspace. The returned
+    /// [`ProjectFsFile`] carries the bytes the HTTP layer streams as the body;
+    /// they are never embedded in a JSON envelope.
+    async fn read_project_file(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornProjectFsReadRequest,
+    ) -> Result<ProjectFsFile, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
     /// List the caller-scoped threads. Pagination is opaque: callers
     /// echo back the `next_cursor` from a prior response to retrieve
     /// the next page; the cursor encoding is implementation-defined.
@@ -1297,6 +1340,7 @@ pub struct RebornServices {
     thread_service: Arc<dyn SessionThreadService>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     inbound_attachments: Option<Arc<dyn InboundAttachmentLander>>,
+    project_filesystem: Option<Arc<dyn ProjectFilesystemReader>>,
     event_stream: Option<Arc<dyn ProjectionStream>>,
     lifecycle_facade: Arc<dyn LifecycleProductFacade>,
     automation_facade: Arc<dyn AutomationProductFacade>,
@@ -1324,6 +1368,7 @@ impl RebornServices {
             thread_service,
             turn_coordinator,
             inbound_attachments: None,
+            project_filesystem: None,
             event_stream: None,
             lifecycle_facade: Arc::new(UnsupportedLifecycleProductFacade::new_static(
                 "reborn_lifecycle_facade_unwired",
@@ -1360,6 +1405,17 @@ impl RebornServices {
         inbound_attachments: Arc<dyn InboundAttachmentLander>,
     ) -> Self {
         self.inbound_attachments = Some(inbound_attachments);
+        self
+    }
+
+    /// Wire the read-only project-filesystem port backing directory listing and
+    /// file download. Without it, the `list_project_dir` / `stat_project_path` /
+    /// `read_project_file` methods report the service unavailable.
+    pub fn with_project_filesystem_reader(
+        mut self,
+        project_filesystem: Arc<dyn ProjectFilesystemReader>,
+    ) -> Self {
+        self.project_filesystem = Some(project_filesystem);
         self
     }
 
@@ -1916,6 +1972,53 @@ impl RebornServicesApi for RebornServices {
             summary_artifacts,
             next_cursor,
         })
+    }
+
+    async fn list_project_dir(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornProjectFsListRequest,
+    ) -> Result<RebornProjectFsListResponse, RebornServicesError> {
+        let reader = self.require_project_filesystem()?;
+        let thread_scope = self
+            .authorize_project_fs_access(caller, request.thread_id)
+            .await?;
+        let entries = reader
+            .list_dir(&thread_scope, &request.path)
+            .await
+            .map_err(map_project_fs_error)?;
+        Ok(RebornProjectFsListResponse { entries })
+    }
+
+    async fn stat_project_path(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornProjectFsStatRequest,
+    ) -> Result<RebornProjectFsStatResponse, RebornServicesError> {
+        let reader = self.require_project_filesystem()?;
+        let thread_scope = self
+            .authorize_project_fs_access(caller, request.thread_id)
+            .await?;
+        let stat = reader
+            .stat(&thread_scope, &request.path)
+            .await
+            .map_err(map_project_fs_error)?;
+        Ok(RebornProjectFsStatResponse { stat })
+    }
+
+    async fn read_project_file(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornProjectFsReadRequest,
+    ) -> Result<ProjectFsFile, RebornServicesError> {
+        let reader = self.require_project_filesystem()?;
+        let thread_scope = self
+            .authorize_project_fs_access(caller, request.thread_id)
+            .await?;
+        reader
+            .read_file(&thread_scope, &request.path)
+            .await
+            .map_err(map_project_fs_error)
     }
 
     async fn stream_events(
@@ -3009,6 +3112,32 @@ impl RebornServices {
         }
     }
 
+    fn require_project_filesystem(
+        &self,
+    ) -> Result<&Arc<dyn ProjectFilesystemReader>, RebornServicesError> {
+        self.project_filesystem
+            .as_ref()
+            .ok_or_else(|| RebornServicesError::service_unavailable(false))
+    }
+
+    /// Verify the caller may access the thread and return the project-scoped
+    /// [`ThreadScope`] its workspace files resolve under. Reuses the same
+    /// ownership + automation-trigger fallback probe as event streaming, so a
+    /// caller sharing (tenant, agent, project) cannot read another user's
+    /// project files by guessing a thread id.
+    async fn authorize_project_fs_access(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        thread_id: String,
+    ) -> Result<ThreadScope, RebornServicesError> {
+        let thread_id = parse_thread_id_field("thread_id", thread_id)?;
+        let actor = caller.actor();
+        let access = self
+            .resolve_thread_access_for_caller(caller.clone(), caller.turn_scope(thread_id), &actor)
+            .await?;
+        thread_scope_from_turn_scope(&access.scope, Some(access.run_actor.user_id.clone()))
+    }
+
     /// Ownership probe for `submit_turn` and `delete_thread` — these only
     /// operate on session-owned threads (not trigger threads), so the probe
     /// is user-scoped with no automation fallback.
@@ -3246,6 +3375,26 @@ fn map_ownership_probe_error(error: SessionThreadError) -> RebornServicesError {
             RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false)
         }
         _ => map_thread_error(error),
+    }
+}
+
+/// Map a project-filesystem read error to the sanitized facade error taxonomy.
+/// No host paths or backend strings cross this boundary — only coarse
+/// transport/status shape.
+fn map_project_fs_error(error: ProjectFsError) -> RebornServicesError {
+    match error {
+        ProjectFsError::NotFound => {
+            RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false)
+        }
+        ProjectFsError::NotAFile | ProjectFsError::NotADirectory | ProjectFsError::InvalidPath => {
+            RebornServicesError::from_status(RebornServicesErrorCode::InvalidRequest, 400, false)
+        }
+        ProjectFsError::Denied => participant_denied(),
+        ProjectFsError::TooLarge { .. } => {
+            RebornServicesError::from_status(RebornServicesErrorCode::InvalidRequest, 413, false)
+        }
+        ProjectFsError::Unavailable => RebornServicesError::service_unavailable(true),
+        ProjectFsError::Internal => RebornServicesError::internal(),
     }
 }
 

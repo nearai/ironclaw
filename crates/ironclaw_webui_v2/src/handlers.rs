@@ -16,8 +16,10 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use axum::Json;
+use axum::body::Body;
 use axum::extract::{Extension, Path, Query, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::Response;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::SinkExt;
 use futures::stream::Stream;
@@ -33,12 +35,13 @@ use ironclaw_product_workflow::{
     RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
     RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
     RebornOperatorSetupResponse, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundPreferencesResponse, RebornResolveGateResponse, RebornServicesApi,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    RebornOutboundPreferencesResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
+    RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
+    RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
     WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
@@ -141,6 +144,110 @@ pub struct TimelineQuery {
     pub limit: Option<u32>,
     #[serde(default)]
     pub cursor: Option<String>,
+}
+
+/// Default workspace root listed when a `list_project_files` request omits
+/// `?path=`. The facade confines all paths to this alias regardless.
+const PROJECT_FS_ROOT: &str = "/workspace";
+
+/// Query parameters for the project-filesystem read routes. `path` is a scoped
+/// path under `/workspace`; optional only for directory listing (defaults to
+/// the workspace root).
+#[derive(Debug, Default, Deserialize)]
+pub struct ProjectFsQuery {
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// `GET /api/webchat/v2/threads/{thread_id}/files`
+///
+/// List a directory under the thread's project workspace. Generic filesystem
+/// navigation — also the listing surface a future file browser consumes.
+pub async fn list_project_files(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(thread_id): Path<String>,
+    Query(query): Query<ProjectFsQuery>,
+) -> Result<Json<RebornProjectFsListResponse>, WebUiV2HttpError> {
+    let request = RebornProjectFsListRequest {
+        thread_id,
+        path: query
+            .path
+            .filter(|path| !path.is_empty())
+            .unwrap_or_else(|| PROJECT_FS_ROOT.to_string()),
+    };
+    let response = state.services().list_project_dir(caller, request).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/threads/{thread_id}/files/stat`
+///
+/// Return metadata for a path under the thread's project workspace.
+pub async fn stat_project_file(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(thread_id): Path<String>,
+    Query(query): Query<ProjectFsQuery>,
+) -> Result<Json<RebornProjectFsStatResponse>, WebUiV2HttpError> {
+    let request = RebornProjectFsStatRequest {
+        thread_id,
+        path: query.path.unwrap_or_default(),
+    };
+    let response = state.services().stat_project_path(caller, request).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/threads/{thread_id}/files/content`
+///
+/// Download a file's bytes from the thread's project workspace. This is the
+/// retrieval path for agent-produced attachments (an `AttachmentRef`'s
+/// `storage_key` is passed as `?path=`).
+///
+/// The response is always served as an attachment with `nosniff` so a generated
+/// `.html`/`.svg` cannot execute in the app origin.
+pub async fn read_project_file(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(thread_id): Path<String>,
+    Query(query): Query<ProjectFsQuery>,
+) -> Result<Response, WebUiV2HttpError> {
+    let request = RebornProjectFsReadRequest {
+        thread_id,
+        path: query.path.unwrap_or_default(),
+    };
+    let file = state.services().read_project_file(caller, request).await?;
+    let filename = sanitized_download_filename(file.filename.as_deref());
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, file.mime_type)
+        .header(header::CONTENT_LENGTH, file.size_bytes)
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{filename}\""),
+        )
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .body(Body::from(file.bytes))
+        .map_err(|_| WebUiV2HttpError::from(RebornServicesError::internal()))
+}
+
+/// Produce a `Content-Disposition` filename that cannot inject header bytes or
+/// path separators. Keeps a conservative set of characters and falls back to a
+/// neutral name when nothing safe survives.
+fn sanitized_download_filename(filename: Option<&str>) -> String {
+    let candidate: String = filename
+        .unwrap_or("download")
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_' | ' ' => c,
+            _ => '_',
+        })
+        .collect();
+    let trimmed = candidate.trim_matches([' ', '.']).to_string();
+    if trimmed.is_empty() {
+        "download".to_string()
+    } else {
+        trimmed
+    }
 }
 
 /// SSE polling cadence for `stream_events`. The facade only exposes a

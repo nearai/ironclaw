@@ -11,6 +11,7 @@ export function MessageList({
   hasMore,
   onLoadMore,
   onRetryMessage,
+  threadId,
   pending = false,
   children,
 }) {
@@ -86,6 +87,7 @@ export function MessageList({
                 key=${item.id}
                 message=${item.message}
                 onRetry=${onRetryMessage}
+                threadId=${threadId}
               />`
         )}
         ${children}

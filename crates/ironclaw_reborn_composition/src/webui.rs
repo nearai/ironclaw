@@ -88,7 +88,14 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     .with_auth_interactions(runtime.webui_auth_interaction_service());
     if let Some(workspace_filesystem) = runtime.webui_workspace_filesystem() {
         api = api.with_inbound_attachments(Arc::new(
-            crate::attachment_landing::ProjectScopedAttachmentLander::new(workspace_filesystem),
+            crate::attachment_landing::ProjectScopedAttachmentLander::new(Arc::clone(
+                &workspace_filesystem,
+            )),
+        ));
+        api = api.with_project_filesystem_reader(Arc::new(
+            crate::project_filesystem_reader::ProjectScopedFilesystemReader::new(
+                workspace_filesystem,
+            ),
         ));
     }
     if let Some(skill_activation_source) = runtime.webui_skill_activation_source() {

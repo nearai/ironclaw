@@ -45,6 +45,40 @@ mod tests {
     }
 
     #[test]
+    fn project_file_download_chips_are_wired() {
+        // The download UI: message bubble renders chips fed by extracted
+        // workspace paths, which fetch bytes through the bearer-authenticated
+        // api helper against the v2 `/files/content` endpoint.
+        let chips = asset_text("js/pages/chat/components/project-file-chips.js");
+        assert!(chips.contains("extractWorkspaceFilePaths"));
+        assert!(chips.contains("fetchProjectFileBlob"));
+        assert!(chips.contains("saveBlob"));
+        assert!(chips.contains("statProjectFile"));
+
+        let bubble = asset_text("js/pages/chat/components/message-bubble.js");
+        assert!(bubble.contains("ProjectFileChips"));
+        assert!(bubble.contains("threadId"));
+
+        // The data client fetches the blob (bearer-authenticated) but does no
+        // DOM — the object-URL save lives in the shared `download.js` helper.
+        let api = asset_text("js/lib/api.js");
+        assert!(api.contains("projectFilesBase"));
+        assert!(api.contains("/content"));
+        assert!(api.contains("fetchProjectFileBlob"));
+        assert!(api.contains("Authorization"));
+        assert!(!api.contains("createObjectURL"));
+
+        let download = asset_text("js/lib/download.js");
+        assert!(download.contains("saveBlob"));
+        assert!(download.contains("URL.createObjectURL"));
+        assert!(download.contains("URL.revokeObjectURL"));
+
+        // The pure extraction module is served; its test sibling is not.
+        assert!(lookup("js/pages/chat/lib/project-file-paths.js").is_some());
+        assert!(lookup("js/pages/chat/lib/project-file-paths.test.js").is_none());
+    }
+
+    #[test]
     fn chat_auth_gate_assets_submit_manual_token_then_resolve_gate() {
         let auth_card = asset_text("js/pages/chat/components/auth-token-card.js");
         assert!(auth_card.contains("await onSubmit(value);"));

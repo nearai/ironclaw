@@ -451,6 +451,24 @@ pub fn canonical_extension(mime: &str) -> Option<&'static str> {
     lookup(mime).map(|format| format.canonical_ext)
 }
 
+/// The canonical MIME type for a filename extension (without the leading dot),
+/// matched case-insensitively against each format's canonical and alias
+/// extensions. Returns `None` for an unknown extension; download callers should
+/// fall back to `application/octet-stream`.
+pub fn mime_for_extension(ext: &str) -> Option<&'static str> {
+    let ext = ext.trim_start_matches('.').to_ascii_lowercase();
+    FORMATS
+        .iter()
+        .find(|format| {
+            format.canonical_ext.eq_ignore_ascii_case(&ext)
+                || format
+                    .ext_aliases
+                    .iter()
+                    .any(|alias| alias.eq_ignore_ascii_case(&ext))
+        })
+        .map(|format| format.mime)
+}
+
 /// The attachment kind for a MIME type.
 ///
 /// The registry is authoritative for supported formats. For unsupported MIME

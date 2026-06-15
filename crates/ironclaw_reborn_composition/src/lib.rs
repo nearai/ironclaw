@@ -84,6 +84,7 @@ mod product_live_adapters;
 mod production_runtime_policy;
 mod profile;
 mod profile_approval_authorization;
+mod project_filesystem_reader;
 mod projection;
 pub use auth_prompt::{AuthChallengeProvider, AuthChallengeView};
 #[cfg(feature = "slack-v2-host-beta")]

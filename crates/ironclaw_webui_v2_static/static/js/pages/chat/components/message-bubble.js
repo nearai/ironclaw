@@ -5,6 +5,7 @@ import { Avatar } from "./avatar.js";
 import { Icon } from "../../../design-system/icons.js";
 import { useT } from "../../../lib/i18n.js";
 import { toast } from "../../../lib/toast.js";
+import { ProjectFileChips } from "./project-file-chips.js";
 
 /* User keeps a tinted bubble; assistant is borderless (document-like);
    system / error stay as centered tinted notices. Reasoning ("thinking")
@@ -54,7 +55,7 @@ function ThinkingDisclosure({ content }) {
   `;
 }
 
-function MessageBubbleImpl({ message, onRetry }) {
+function MessageBubbleImpl({ message, onRetry, threadId }) {
   const { role, content, images, attachments, generatedImages, isOptimistic, status, error, toolCalls, timestamp } = message;
   const isUser = role === "user";
   const t = useT();
@@ -173,6 +174,12 @@ function MessageBubbleImpl({ message, onRetry }) {
               `)}
             </div>
           `}
+
+          ${(role === "assistant" || role === "user") &&
+          html`<${ProjectFileChips}
+            threadId=${threadId}
+            content=${typeof content === "string" ? content : ""}
+          />`}
         </div>
 
         ${(showActions || status === "error" || timeLabel) && html`
