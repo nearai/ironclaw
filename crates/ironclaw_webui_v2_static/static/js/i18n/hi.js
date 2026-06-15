@@ -632,9 +632,9 @@ registerPack("hi", {
   "automations.filter.paused": "रोका गया",
   "automations.refresh": "ऑटोमेशन ताज़ा करें",
   "automations.error.loadFailed": "ऑटोमेशन लोड करने में असमर्थ",
-  "automations.schedulerOff.title": "Scheduling is turned off",
+  "automations.schedulerOff.title": "शेड्यूलिंग बंद है",
   "automations.schedulerOff.description":
-    "These automations are saved but won't run until the scheduler is enabled.",
+    "ये ऑटोमेशन सहेजे गए हैं लेकिन शेड्यूलर सक्षम होने तक नहीं चलेंगे।",
   "automations.delivery.eyebrow": "Delivery defaults",
   "automations.delivery.title": "Where triggered results are sent",
   "automations.delivery.explainer": "Choose where automation results are delivered when a triggered run finishes.",

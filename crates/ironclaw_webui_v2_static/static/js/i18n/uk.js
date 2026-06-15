@@ -632,9 +632,9 @@ registerPack("uk", {
   "automations.filter.paused": "Призупинено",
   "automations.refresh": "Оновити автоматизації",
   "automations.error.loadFailed": "Неможливо завантажити автоматизації",
-  "automations.schedulerOff.title": "Scheduling is turned off",
+  "automations.schedulerOff.title": "Планування вимкнено",
   "automations.schedulerOff.description":
-    "These automations are saved but won't run until the scheduler is enabled.",
+    "Ці автоматизації збережено, але вони не запускатимуться, доки не ввімкнено планувальник.",
   "automations.delivery.eyebrow": "Delivery defaults",
   "automations.delivery.title": "Where triggered results are sent",
   "automations.delivery.explainer": "Choose where automation results are delivered when a triggered run finishes.",

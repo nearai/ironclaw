@@ -632,9 +632,9 @@ registerPack("ar", {
   "automations.filter.paused": "متوقف مؤقتًا",
   "automations.refresh": "تحديث عمليات الأتمتة",
   "automations.error.loadFailed": "غير قادر على تحميل عمليات الأتمتة",
-  "automations.schedulerOff.title": "Scheduling is turned off",
+  "automations.schedulerOff.title": "تم إيقاف الجدولة",
   "automations.schedulerOff.description":
-    "These automations are saved but won't run until the scheduler is enabled.",
+    "هذه الأتمتة محفوظة لكنها لن تعمل حتى يتم تفعيل المجدول.",
   "automations.delivery.eyebrow": "Delivery defaults",
   "automations.delivery.title": "Where triggered results are sent",
   "automations.delivery.explainer": "Choose where automation results are delivered when a triggered run finishes.",

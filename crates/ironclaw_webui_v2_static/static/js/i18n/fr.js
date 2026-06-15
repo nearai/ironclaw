@@ -632,9 +632,9 @@ registerPack("fr", {
   "automations.filter.paused": "En pause",
   "automations.refresh": "Actualiser les automatisations",
   "automations.error.loadFailed": "Impossible de charger les automatisations",
-  "automations.schedulerOff.title": "Scheduling is turned off",
+  "automations.schedulerOff.title": "La planification est désactivée",
   "automations.schedulerOff.description":
-    "These automations are saved but won't run until the scheduler is enabled.",
+    "Ces automatisations sont enregistrées mais ne s'exécuteront pas tant que la planification n'est pas activée.",
   "automations.delivery.eyebrow": "Delivery defaults",
   "automations.delivery.title": "Where triggered results are sent",
   "automations.delivery.explainer": "Choose where automation results are delivered when a triggered run finishes.",

@@ -632,9 +632,9 @@ registerPack("ja", {
   "automations.filter.paused": "一時停止",
   "automations.refresh": "自動化の更新",
   "automations.error.loadFailed": "自動化をロードできません",
-  "automations.schedulerOff.title": "Scheduling is turned off",
+  "automations.schedulerOff.title": "スケジュールは無効です",
   "automations.schedulerOff.description":
-    "These automations are saved but won't run until the scheduler is enabled.",
+    "これらのオートメーションは保存されていますが、スケジューラーを有効にするまで実行されません。",
   "automations.delivery.eyebrow": "Delivery defaults",
   "automations.delivery.title": "Where triggered results are sent",
   "automations.delivery.explainer": "Choose where automation results are delivered when a triggered run finishes.",
