@@ -40,6 +40,8 @@ mod extension_credential_requirements;
 mod extension_installation_store;
 mod extension_lifecycle;
 mod extension_lifecycle_capabilities;
+#[cfg(test)]
+mod extension_lifecycle_capabilities_auth_tests;
 mod extension_lifecycle_command;
 mod factory;
 mod failure_summary;
