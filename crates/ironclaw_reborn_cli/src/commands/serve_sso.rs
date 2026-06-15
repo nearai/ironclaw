@@ -28,6 +28,9 @@ use secrecy::SecretString;
 
 const WEBUI_BASE_URL_ENV: &str = "IRONCLAW_REBORN_WEBUI_BASE_URL";
 
+#[cfg(test)]
+pub(crate) static WEBUI_BASE_URL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Resolved SSO startup config: the providers to mount plus the public
 /// base URL their callback URLs are built from. Constructed by
 /// [`sso_startup_config_from_env`]; consumed by `serve.rs`, which adds
@@ -94,6 +97,22 @@ pub(crate) fn webui_public_base_url_from_env() -> anyhow::Result<Option<String>>
     Ok(None)
 }
 
+/// Validate the hosted WebUI OAuth base URL against the current listen address.
+///
+/// This keeps the cleartext-OAuth policy local to the reborn CLI command
+/// module while letting `serve.rs` fail startup instead of silently skipping
+/// product-auth wiring when an explicit public `http://` base URL is bound to a
+/// non-loopback interface.
+pub(crate) fn validate_webui_public_base_url(
+    public_base_url: Option<&str>,
+    listen_addr: SocketAddr,
+) -> anyhow::Result<()> {
+    if let Some(base_url) = public_base_url {
+        reject_cleartext_oauth(base_url, listen_addr)?;
+    }
+    Ok(())
+}
+
 fn normalize_base_url(env_var: &'static str, raw: impl AsRef<str>) -> anyhow::Result<String> {
     let normalized = raw.as_ref().trim().trim_end_matches('/');
     if normalized.is_empty() {
@@ -137,7 +156,7 @@ fn require_admission_allowlist(allowed_email_domains: &[String]) -> anyhow::Resu
 fn reject_cleartext_oauth(base_url: &str, listen_addr: SocketAddr) -> anyhow::Result<()> {
     if is_cleartext_http_scheme(base_url) && !listen_addr.ip().is_loopback() {
         anyhow::bail!(
-            "WebChat v2 SSO base URL `{base_url}` uses http:// on a non-loopback interface, \
+            "hosted WebUI OAuth base URL `{base_url}` uses http:// on a non-loopback interface, \
              which would transmit OAuth authorization codes in cleartext. Set \
              IRONCLAW_REBORN_WEBUI_BASE_URL to an https:// URL."
         );
@@ -151,7 +170,7 @@ fn reject_cleartext_oauth(base_url: &str, listen_addr: SocketAddr) -> anyhow::Re
 /// `IRONCLAW_REBORN_WEBUI_BASE_URL=HTTP://example.com` slip past the
 /// non-loopback guard while still building a cleartext callback URL —
 /// comparing the scheme case-insensitively closes that bypass.
-fn is_cleartext_http_scheme(base_url: &str) -> bool {
+pub(crate) fn is_cleartext_http_scheme(base_url: &str) -> bool {
     base_url
         .split_once("://")
         .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("http"))
@@ -324,6 +343,29 @@ mod tests {
     }
 
     #[test]
+    fn hosted_webui_public_base_url_validation_fails_closed_for_public_cleartext() {
+        let public = addr("203.0.113.1:3000");
+        let error = validate_webui_public_base_url(Some("http://example.com"), public)
+            .expect_err("public cleartext base URL must abort startup");
+        let message = error.to_string();
+        assert!(
+            message.contains(WEBUI_BASE_URL_ENV),
+            "message should name {WEBUI_BASE_URL_ENV}, got: {message}"
+        );
+        assert!(
+            message.contains("hosted WebUI OAuth base URL"),
+            "message should mention hosted WebUI OAuth base URL, got: {message}"
+        );
+    }
+
+    #[test]
+    fn hosted_webui_public_base_url_validation_allows_loopback_cleartext() {
+        let loopback = addr("127.0.0.1:3000");
+        assert!(validate_webui_public_base_url(Some("http://127.0.0.1:3000"), loopback).is_ok());
+        assert!(validate_webui_public_base_url(None, loopback).is_ok());
+    }
+
+    #[test]
     fn allowed_email_domains_are_trimmed_lowercased_and_deblanked() {
         assert_eq!(
             parse_allowed_email_domains(" Example.com , ,team.EXAMPLE.org ,"),
@@ -341,11 +383,6 @@ mod tests {
         assert!(require_admission_allowlist(&["example.com".to_string()]).is_ok());
     }
 
-    /// Serializes the env-mutating tests below: `sso_startup_config_from_env`
-    /// reads process-global env vars, so two of these running concurrently
-    /// would clobber each other.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     const SSO_ENV_VARS: &[&str] = &[
         "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID",
         "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET",
@@ -358,7 +395,7 @@ mod tests {
 
     fn clear_sso_env() {
         for var in SSO_ENV_VARS {
-            // SAFETY: tests are serialized by `ENV_LOCK`; no other thread
+            // SAFETY: tests are serialized by `WEBUI_BASE_URL_ENV_LOCK`; no other thread
             // reads or writes these vars while the guard is held.
             unsafe { std::env::remove_var(var) };
         }
@@ -372,9 +409,9 @@ mod tests {
     /// same caller succeeds once the allowlist is supplied.
     #[test]
     fn startup_fails_closed_when_providers_set_but_allowlist_missing() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = WEBUI_BASE_URL_ENV_LOCK.lock().expect("env lock");
         clear_sso_env();
-        // SAFETY: serialized by ENV_LOCK; cleaned up before the guard drops.
+        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleaned up before the guard drops.
         unsafe {
             std::env::set_var("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID", "client-id");
             std::env::set_var(
@@ -391,7 +428,7 @@ mod tests {
         );
 
         // Blank allowlist → same fail-closed result.
-        // SAFETY: serialized by ENV_LOCK.
+        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK.
         unsafe {
             std::env::set_var("IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS", "  , ,");
         }
@@ -401,7 +438,7 @@ mod tests {
         );
 
         // Supplying the allowlist makes the same caller succeed.
-        // SAFETY: serialized by ENV_LOCK.
+        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK.
         unsafe {
             std::env::set_var("IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS", "example.com");
         }
@@ -422,14 +459,14 @@ mod tests {
     /// caller `sso_startup_config_from_env`, since the helper is private.
     #[test]
     fn client_id_without_secret_fails_startup() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = WEBUI_BASE_URL_ENV_LOCK.lock().expect("env lock");
 
         for id_var in [
             "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID",
             "IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_ID",
         ] {
             clear_sso_env();
-            // SAFETY: serialized by ENV_LOCK; cleared before/after.
+            // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleared before/after.
             unsafe { std::env::set_var(id_var, "client-id") };
             assert!(
                 sso_startup_config_from_env(addr("127.0.0.1:3000")).is_err(),
@@ -445,7 +482,7 @@ mod tests {
     /// since the allowlist gate only fires once a provider is configured.)
     #[test]
     fn no_provider_configured_returns_none() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = WEBUI_BASE_URL_ENV_LOCK.lock().expect("env lock");
         clear_sso_env();
         let resolved = sso_startup_config_from_env(addr("127.0.0.1:3000"))
             .expect("no provider configured is not an error");
@@ -454,9 +491,9 @@ mod tests {
 
     #[test]
     fn webui_oauth_base_url_prefers_explicit_reborn_env() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = WEBUI_BASE_URL_ENV_LOCK.lock().expect("env lock");
         clear_sso_env();
-        // SAFETY: serialized by ENV_LOCK; cleaned up before the guard drops.
+        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleaned up before the guard drops.
         unsafe {
             std::env::set_var(WEBUI_BASE_URL_ENV, " https://configured.example/ ");
         }
@@ -471,9 +508,9 @@ mod tests {
 
     #[test]
     fn webui_public_base_url_from_env_rejects_blank_normalized_values() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = WEBUI_BASE_URL_ENV_LOCK.lock().expect("env lock");
         clear_sso_env();
-        // SAFETY: serialized by ENV_LOCK; cleaned up before the guard drops.
+        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleaned up before the guard drops.
         unsafe {
             std::env::set_var(WEBUI_BASE_URL_ENV, "/");
         }
@@ -484,7 +521,7 @@ mod tests {
             "error should name env var, got: {error}"
         );
 
-        // SAFETY: serialized by ENV_LOCK; cleaned up before the guard drops.
+        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleaned up before the guard drops.
         unsafe {
             std::env::set_var(WEBUI_BASE_URL_ENV, " / ");
         }
@@ -498,9 +535,9 @@ mod tests {
 
     #[test]
     fn sso_startup_config_uses_explicit_webui_base_url() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = WEBUI_BASE_URL_ENV_LOCK.lock().expect("env lock");
         clear_sso_env();
-        // SAFETY: serialized by ENV_LOCK; cleaned up before the guard drops.
+        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleaned up before the guard drops.
         unsafe {
             std::env::set_var("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID", "client-id");
             std::env::set_var(
@@ -525,7 +562,7 @@ mod tests {
 
     #[test]
     fn webui_oauth_base_url_falls_back_to_listener() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = WEBUI_BASE_URL_ENV_LOCK.lock().expect("env lock");
         clear_sso_env();
 
         assert_eq!(

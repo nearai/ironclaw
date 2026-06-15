@@ -241,13 +241,9 @@ impl ServeCommand {
 
         let listen_addr = SocketAddr::new(host, port);
         reject_non_loopback_privileged_local_runtime(host, &runtime_input)?;
-        let public_base_url = crate::commands::serve_sso::webui_public_base_url_from_env()
-            .context("invalid hosted WebUI OAuth base URL")?;
-        if let Some(callback_origin) = webui_oauth_callback_origin(
-            listen_addr,
-            public_base_url.as_deref(),
-            canonical_host.as_deref(),
-        ) {
+        let callback_origin =
+            webui_notion_dcr_callback_origin(listen_addr, canonical_host.as_deref())?;
+        if let Some(callback_origin) = callback_origin {
             let services = runtime_input.services.take().ok_or_else(|| {
                 anyhow!("WebChat v2 serve requires Reborn runtime services before OAuth wiring")
             })?;
@@ -569,6 +565,24 @@ fn with_notion_dcr_oauth_backend(
         .map_err(|error| anyhow!("Notion DCR OAuth backend rejected callback origin: {error}"))
 }
 
+fn webui_notion_dcr_callback_origin(
+    listen_addr: SocketAddr,
+    canonical_host: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    let public_base_url = crate::commands::serve_sso::webui_public_base_url_from_env()
+        .context("invalid hosted WebUI OAuth base URL from IRONCLAW_REBORN_WEBUI_BASE_URL")?;
+    crate::commands::serve_sso::validate_webui_public_base_url(
+        public_base_url.as_deref(),
+        listen_addr,
+    )
+    .context("invalid hosted WebUI OAuth base URL from IRONCLAW_REBORN_WEBUI_BASE_URL")?;
+    Ok(webui_oauth_callback_origin(
+        listen_addr,
+        public_base_url.as_deref(),
+        canonical_host,
+    ))
+}
+
 fn webui_oauth_callback_origin(
     listen_addr: SocketAddr,
     public_base_url: Option<&str>,
@@ -579,7 +593,9 @@ fn webui_oauth_callback_origin(
         if base_url.is_empty() {
             return None;
         }
-        if is_cleartext_http_scheme(base_url) && !listen_addr.ip().is_loopback() {
+        if crate::commands::serve_sso::is_cleartext_http_scheme(base_url)
+            && !listen_addr.ip().is_loopback()
+        {
             return None;
         }
         return Some(base_url.to_string());
@@ -603,12 +619,6 @@ fn webui_oauth_callback_origin(
         IpAddr::V6(host) if host.is_loopback() => Some(format!("http://[{host}]:{port}")),
         _ => None,
     }
-}
-
-fn is_cleartext_http_scheme(base_url: &str) -> bool {
-    base_url
-        .split_once("://")
-        .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("http"))
 }
 
 fn callback_origin_scheme(host: &str) -> &'static str {
@@ -747,6 +757,14 @@ fn print_serve_banner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const WEBUI_BASE_URL_ENV: &str = "IRONCLAW_REBORN_WEBUI_BASE_URL";
+
+    fn clear_webui_env() {
+        // SAFETY: tests are serialized by `WEBUI_BASE_URL_ENV_LOCK`; no other
+        // thread reads or writes this env var while the guard is held.
+        unsafe { std::env::remove_var(WEBUI_BASE_URL_ENV) };
+    }
 
     #[test]
     fn webui_default_agent_falls_back_to_runtime_identity() {
@@ -1165,17 +1183,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn webui_serve_wires_notion_dcr_with_public_base_url_origin() {
+    async fn webui_serve_wires_notion_dcr_with_public_base_url_env_origin() {
+        let callback_origin = {
+            let _guard = crate::commands::serve_sso::WEBUI_BASE_URL_ENV_LOCK
+                .lock()
+                .expect("env lock");
+            clear_webui_env();
+            // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleaned up before the guard drops.
+            unsafe {
+                std::env::set_var(WEBUI_BASE_URL_ENV, " https://configured.example/ ");
+            }
+
+            let callback_origin =
+                webui_notion_dcr_callback_origin(SocketAddr::from(([0, 0, 0, 0], 8080)), None)
+                    .expect("resolve callback origin from env")
+                    .expect("public base url env should enable DCR wiring");
+            assert_eq!(callback_origin, "https://configured.example");
+            clear_webui_env();
+            callback_origin
+        };
+
         let dir = tempfile::tempdir().expect("tempdir");
         let services_input = with_notion_dcr_oauth_backend(
             RebornBuildInput::local_dev("notion-dcr-owner", dir.path().join("local-dev")),
-            webui_oauth_callback_origin(
-                SocketAddr::from(([0, 0, 0, 0], 8080)),
-                Some("https://app.example.com/"),
-                None,
-            )
-            .as_deref()
-            .expect("public callback origin"),
+            &callback_origin,
         )
         .expect("notion dcr wiring");
         let services = ironclaw_reborn_composition::build_reborn_services(services_input)
@@ -1190,5 +1221,52 @@ mod tests {
                 .is_some(),
             "serve wiring must expose the DCR-backed auth challenge provider"
         );
+    }
+
+    #[test]
+    fn webui_notion_dcr_callback_origin_rejects_slash_only_public_base_url_env() {
+        let _guard = crate::commands::serve_sso::WEBUI_BASE_URL_ENV_LOCK
+            .lock()
+            .expect("env lock");
+        clear_webui_env();
+        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleaned up before the guard drops.
+        unsafe {
+            std::env::set_var(WEBUI_BASE_URL_ENV, "/");
+        }
+
+        let error = webui_notion_dcr_callback_origin(SocketAddr::from(([0, 0, 0, 0], 8080)), None)
+            .expect_err("slash-only base URL must fail closed");
+        assert!(
+            error.to_string().contains(WEBUI_BASE_URL_ENV),
+            "error should name the invalid env var, got: {error}"
+        );
+
+        clear_webui_env();
+    }
+
+    #[test]
+    fn webui_notion_dcr_callback_origin_rejects_public_cleartext_base_url_env() {
+        let _guard = crate::commands::serve_sso::WEBUI_BASE_URL_ENV_LOCK
+            .lock()
+            .expect("env lock");
+        clear_webui_env();
+        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleaned up before the guard drops.
+        unsafe {
+            std::env::set_var(WEBUI_BASE_URL_ENV, "http://configured.example");
+        }
+
+        let error = webui_notion_dcr_callback_origin(SocketAddr::from(([0, 0, 0, 0], 8080)), None)
+            .expect_err("public cleartext base URL must fail closed");
+        let message = error.to_string();
+        assert!(
+            message.contains(WEBUI_BASE_URL_ENV),
+            "error should name the invalid env var, got: {message}"
+        );
+        assert!(
+            message.contains("hosted WebUI OAuth base URL"),
+            "error should describe the hosted WebUI OAuth URL, got: {message}"
+        );
+
+        clear_webui_env();
     }
 }
