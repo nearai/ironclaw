@@ -6,9 +6,9 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
-    ExternalEventId, InboundCommandPayload, ProductAdapterId, ProductInboundAck,
-    ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason, ProductWorkflow,
-    ProtocolAuthEvidence, TrustedInboundContext,
+    ExternalEventId, InboundCommandPayload, ProductAdapterError, ProductAdapterId,
+    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason,
+    ProductWorkflow, ProtocolAuthEvidence, TrustedInboundContext,
 };
 use ironclaw_product_workflow::{
     ActionDispatchKind, DefaultProductWorkflow, FakeConversationBindingService,
@@ -582,10 +582,14 @@ async fn command_service_rejected_busy_ack_yields_unsupported_action_kind_error(
         .with_product_command_service(command_service);
     let envelope = sample_command_envelope("command-rejected-busy", "status", "");
 
-    workflow
+    let err = workflow
         .accept_inbound(envelope)
         .await
         .expect_err("RejectedBusy from command service must yield UnsupportedActionKind error");
+    assert!(
+        matches!(err, ProductAdapterError::Internal { .. }),
+        "expected ProductAdapterError::Internal (from UnsupportedActionKind), got {err:?}"
+    );
 
     assert_eq!(inbound.accepted_count(), 0);
     assert_eq!(ledger.released_count(), 0);
