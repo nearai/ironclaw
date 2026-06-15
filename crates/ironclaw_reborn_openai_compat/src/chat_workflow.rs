@@ -9,6 +9,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::ack_helpers::internal_refs_from_ack;
+use crate::content_parts::{
+    content_array_item_text, non_text_part_marker, sanitize_product_text_fragment,
+};
 use crate::error::product_rejection_to_openai_error;
 use crate::identity::{
     OPENAI_COMPAT_ACTOR_KIND, OPENAI_COMPAT_ADAPTER_ID, OPENAI_COMPAT_INSTALLATION_ID,
@@ -692,22 +695,13 @@ fn content_value_to_text(content: Option<&serde_json::Value>) -> String {
             .filter_map(content_array_item_text)
             .collect::<Vec<_>>()
             .join(" "),
-        Some(value) if !value.is_null() => "[non_text_content]".to_string(),
+        // A bare object-form part (non-standard, but tolerated): run it through
+        // the same per-part logic so a typed part gets its specific marker (or
+        // text) instead of discarding the type for the generic marker.
+        Some(value @ serde_json::Value::Object(_)) => {
+            content_array_item_text(value).unwrap_or_else(|| non_text_part_marker(None).to_string())
+        }
+        Some(value) if !value.is_null() => non_text_part_marker(None).to_string(),
         _ => String::new(),
     }
-}
-
-fn content_array_item_text(value: &serde_json::Value) -> Option<String> {
-    let object = value.as_object()?;
-    match object.get("type").and_then(serde_json::Value::as_str) {
-        Some("text" | "input_text" | "output_text") => object
-            .get("text")
-            .and_then(serde_json::Value::as_str)
-            .map(sanitize_product_text_fragment),
-        _ => Some("[non_text_content]".to_string()),
-    }
-}
-
-fn sanitize_product_text_fragment(value: &str) -> String {
-    value.replace(['\n', '\r', '\u{2028}', '\u{2029}'], " ")
 }

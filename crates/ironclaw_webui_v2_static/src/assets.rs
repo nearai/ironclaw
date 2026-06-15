@@ -30,6 +30,15 @@ mod tests {
         std::str::from_utf8(lookup(path).expect("asset exists").bytes).expect("asset is utf-8")
     }
 
+    /// Read a source file straight from `static/` on disk. Used for fixtures
+    /// that are deliberately *not* embedded/served — e.g. `*.test.mjs` Node
+    /// unit tests — so a caller-level JS regression can still assert their
+    /// content without shipping them to clients.
+    fn source_text(path: &str) -> String {
+        let full = format!("{}/static/{path}", env!("CARGO_MANIFEST_DIR"));
+        std::fs::read_to_string(&full).unwrap_or_else(|e| panic!("read {full}: {e}"))
+    }
+
     #[test]
     fn lookup_returns_none_for_unknown_path() {
         // Direct coverage of the `None` arm. The router-level tests
@@ -79,6 +88,29 @@ mod tests {
     }
 
     #[test]
+    fn chat_input_persists_staged_attachments_across_navigation() {
+        // The composer keeps a text draft across navigation; staged attachments
+        // must follow a parallel per-key store so they are not silently dropped
+        // when the composer unmounts and remounts (e.g. leaving the new-chat
+        // screen and returning). The store is in-memory because the files carry
+        // base64 bytes that would blow localStorage's quota.
+        let store = asset_text("js/pages/chat/lib/draft-store.js");
+        assert!(store.contains("export function getStagedAttachments"));
+        assert!(store.contains("export function setStagedAttachments"));
+        assert!(store.contains("export function clearStagedAttachments"));
+        // Sign-out drops the in-memory staged files too, so they can't resurface
+        // for the next user on the same browser.
+        assert!(store.contains("stagedAttachments.clear()"));
+
+        let input = asset_text("js/pages/chat/components/chat-input.js");
+        // Initialized from the store (not a bare `[]`), persisted on change, and
+        // cleared on a successful send.
+        assert!(input.contains("getStagedAttachments(draftKey)"));
+        assert!(input.contains("setStagedAttachments(draftKey"));
+        assert!(input.contains("clearStagedAttachments(draftKey)"));
+    }
+
+    #[test]
     fn chat_cancelled_gate_resolution_exits_processing_state() {
         let use_chat = asset_text("js/pages/chat/hooks/useChat.js");
         assert!(
@@ -109,13 +141,13 @@ mod tests {
                 .contains("return ref.startsWith(\"msg:\") ? ref.slice(\"msg:\".length) : null;")
         );
 
-        let regression = asset_text("js/pages/chat/lib/useChat-send.test.mjs");
+        let regression = source_text("js/pages/chat/lib/useChat-send.test.mjs");
         assert!(regression.contains("useChat.send: accepted ref reconciles"));
         assert!(regression.contains("accepted_message_ref: \"msg:message-1\""));
         assert!(regression.contains("await loadHistory();"));
         assert!(regression.contains("[\"msg-message-1\"]"));
 
-        let pending_regression = asset_text("js/pages/chat/lib/pending-messages.test.mjs");
+        let pending_regression = source_text("js/pages/chat/lib/pending-messages.test.mjs");
         assert!(pending_regression.contains(
             "recordAcceptedMessageRef: null and non-msg refs leave pending record unchanged"
         ));
@@ -149,7 +181,7 @@ mod tests {
         assert!(channels_tab.contains("slackConnectActions"));
         assert!(channels_tab.contains("action=${action.action}"));
 
-        let regression = asset_text("js/pages/chat/lib/useChat-send.test.mjs");
+        let regression = source_text("js/pages/chat/lib/useChat-send.test.mjs");
         assert!(regression.contains("channel connect requests return an action"));
         assert!(regression.contains("without submitting a prompt"));
         assert!(regression.contains("unmatched channel connect requests submit the prompt"));

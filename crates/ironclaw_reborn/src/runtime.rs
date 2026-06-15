@@ -23,8 +23,9 @@ use ironclaw_turns::{
     TurnStateStore,
     loop_exit::LoopExitEvidencePort,
     run_profile::{
-        AgentLoopHostError, InstructionSafetyContext, LoopCapabilityPort, LoopHostMilestoneSink,
-        LoopModelBudgetAccountant, LoopModelPolicyGuard, LoopRunContext,
+        AgentLoopHostError, CommunicationContextProvider, InstructionSafetyContext,
+        LoopCapabilityPort, LoopHostMilestoneSink, LoopModelBudgetAccountant, LoopModelPolicyGuard,
+        LoopRunContext,
     },
     runner::TurnRunTransitionPort,
 };
@@ -123,6 +124,7 @@ where
     /// the hook framework dormant: no dispatcher is composed and the runtime
     /// behaves exactly as it did before hooks existed.
     pub hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
+    pub communication_context_provider: Option<Arc<dyn CommunicationContextProvider>>,
 }
 
 pub trait RuntimeSubagentGoalStore:
@@ -505,6 +507,9 @@ where
     }
     if let Some(factory) = parts.hook_dispatcher_builder_factory {
         host_factory = host_factory.with_hook_dispatcher_builder_factory(move || factory());
+    }
+    if let Some(provider) = parts.communication_context_provider {
+        host_factory = host_factory.with_communication_context_provider(provider);
     }
     if let Some(sink) = parts.hook_security_audit_sink {
         host_factory = host_factory.with_hook_security_audit_sink(sink);

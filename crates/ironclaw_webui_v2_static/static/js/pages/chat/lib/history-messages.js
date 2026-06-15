@@ -1,7 +1,29 @@
 // Map v2 `ThreadMessageRecord[]` from RebornTimelineResponse into
-// the message shape the UI components render. Kept narrow: the v2
-// timeline contract has no attachments or generated images; turn grouping
-// consumes the normalized `turnRunId` carried by records and previews.
+// the message shape the UI components render. Turn grouping consumes the
+// normalized `turnRunId` carried by records and previews. Records carry
+// `attachments: AttachmentRef[]`; we project them into the render shape
+// `MessageBubble` expects so attachment cards survive a page refresh and a
+// thread switch (the timeline is the source of truth — the bytes stay
+// behind the project mount, the cards render from the refs).
+
+import { attachmentKindFromMime, formatBytes } from "./attachments.js";
+
+// Project a stored `AttachmentRef` (snake_case wire shape) into the
+// render shape `MessageBubble` consumes. The timeline never carries bytes,
+// so `preview_url` is null here; inline image thumbnails only appear on the
+// just-sent optimistic message (which has the local data URL).
+function attachmentsFromRecord(record) {
+  const refs = record.attachments;
+  if (!Array.isArray(refs) || refs.length === 0) return undefined;
+  return refs.map((ref) => ({
+    id: ref.id,
+    filename: ref.filename || "attachment",
+    mime_type: ref.mime_type || "",
+    kind: ref.kind || attachmentKindFromMime(ref.mime_type),
+    size_label: Number.isFinite(ref.size_bytes) ? formatBytes(ref.size_bytes) : "",
+    preview_url: null,
+  }));
+}
 
 export function messagesFromTimeline(records, pendingMessages = []) {
   const seen = new Set();
@@ -40,6 +62,7 @@ export function messagesFromTimeline(records, pendingMessages = []) {
       id,
       role,
       content: record.content || "",
+      attachments: attachmentsFromRecord(record),
       timestamp: timestampForRecord(record),
       kind: record.kind,
       status: record.status,

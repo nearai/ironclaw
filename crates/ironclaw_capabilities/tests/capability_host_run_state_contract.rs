@@ -1910,6 +1910,25 @@ impl CapabilityLeaseStore for CoordinatedClaimConflictLeaseStore {
         self.inner.consume(scope, lease_id).await
     }
 
+    async fn begin_dispatch_claimed(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        self.inner
+            .begin_dispatch_claimed(scope, lease_id, invocation_fingerprint)
+            .await
+    }
+
+    async fn abort_dispatch_claimed(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        self.inner.abort_dispatch_claimed(scope, lease_id).await
+    }
+
     async fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease> {
         self.inner.leases_for_scope(scope).await
     }
@@ -1972,6 +1991,25 @@ impl CapabilityLeaseStore for ConsumeFailingLeaseStore {
         Err(CapabilityLeaseError::Persistence {
             reason: format!("consume failed for {lease_id}"),
         })
+    }
+
+    async fn begin_dispatch_claimed(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        self.inner
+            .begin_dispatch_claimed(scope, lease_id, invocation_fingerprint)
+            .await
+    }
+
+    async fn abort_dispatch_claimed(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        self.inner.abort_dispatch_claimed(scope, lease_id).await
     }
 
     async fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease> {

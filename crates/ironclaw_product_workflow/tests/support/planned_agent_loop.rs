@@ -302,6 +302,7 @@ impl ProductLiveAgentLoopHarness {
             model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
             safety_context: Some(test_safety_context()),
             hook_dispatcher_builder_factory: None,
+            communication_context_provider: None,
             hook_security_audit_sink: None,
             turn_event_sink: None,
         })
