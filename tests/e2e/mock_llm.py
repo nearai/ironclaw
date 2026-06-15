@@ -25,6 +25,15 @@ CANNED_RESPONSES = [
     # The renderer must add target=_blank to the rendered anchor.
     (re.compile(r"link test", re.IGNORECASE),
      "See [the pull request](https://example.com/pr/1) for details."),
+    # Reborn v2 download chips: after the agent writes a CSV and a PDF (the
+    # write_file dispatch lives in TOOL_CALL_PATTERNS), it replies referencing
+    # their /workspace paths so the WebUI renders downloadable file chips. Fires
+    # after the tool calls run (match_tool_call dedups the already-run writes).
+    (
+        re.compile(r"produce a downloadable csv and pdf", re.IGNORECASE),
+        "Done — I saved /workspace/report.csv and /workspace/report.pdf. "
+        "Both are ready to download.",
+    ),
     (re.compile(r"\bhello\b|\bhi\b|\bhey\b", re.IGNORECASE), "Hello! How can I help you today?"),
     (re.compile(r"2\s*\+\s*2|two plus two", re.IGNORECASE), "The answer is 4."),
     (
@@ -123,6 +132,33 @@ TOOL_CALL_PATTERNS = [
         ],
     ),
     (re.compile(r"echo (.+)", re.IGNORECASE), "echo", lambda m: {"message": m.group(1)}),
+    # Reborn v2 download chips: one assistant turn writes a CSV and a PDF into
+    # the project workspace. After both results land, match_tool_call dedups
+    # write_file and the conversation falls through to the CANNED_RESPONSES
+    # reply that references the two paths.
+    (
+        re.compile(r"produce a downloadable csv and pdf", re.IGNORECASE),
+        "write_file",
+        lambda _: [
+            {
+                "tool_name": "write_file",
+                "arguments": {
+                    "path": "/workspace/report.csv",
+                    "content": "name,score\nalice,90\nbob,85\n",
+                },
+            },
+            {
+                "tool_name": "write_file",
+                "arguments": {
+                    "path": "/workspace/report.pdf",
+                    "content": (
+                        "%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\n"
+                        "trailer<</Root 1 0 R>>\n%%EOF\n"
+                    ),
+                },
+            },
+        ],
+    ),
     (
         re.compile(
             r"install https://github\.com/Pika-Labs/Pika-Skills/?(?=$|\s)",

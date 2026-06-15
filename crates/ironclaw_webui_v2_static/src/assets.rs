@@ -54,6 +54,9 @@ mod tests {
         assert!(chips.contains("fetchProjectFileBlob"));
         assert!(chips.contains("saveBlob"));
         assert!(chips.contains("statProjectFile"));
+        // Stable hooks the e2e download test selects on.
+        assert!(chips.contains("data-testid=\"project-file-chip\""));
+        assert!(chips.contains("data-file-path"));
 
         let bubble = asset_text("js/pages/chat/components/message-bubble.js");
         assert!(bubble.contains("ProjectFileChips"));

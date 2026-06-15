@@ -229,6 +229,9 @@ SEL_V2 = {
     "chat_composer":  "[data-testid='chat-composer']",  # message textarea on /chat
     "msg_user":       "[data-testid='msg-user']",       # user message bubble
     "msg_assistant":  "[data-testid='msg-assistant']",  # assistant message bubble
+    # Download chip for an agent-produced workspace file; `{path}` selects one.
+    "project_file_chip": "[data-testid='project-file-chip']",
+    "project_file_chip_for": "[data-testid='project-file-chip'][data-file-path='{path}']",
     "logs_scope_toolbar": "[data-testid='logs-scope-toolbar']",
     "logs_scope_chip": "[data-testid='logs-scope-chip'][data-scope-key='{key}']",
     "logs_entry": "[data-testid='logs-entry']",

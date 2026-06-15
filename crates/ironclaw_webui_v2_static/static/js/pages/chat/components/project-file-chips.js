@@ -46,6 +46,8 @@ function ProjectFileChip({ threadId, path }) {
   return html`
     <button
       type="button"
+      data-testid="project-file-chip"
+      data-file-path=${path}
       onClick=${onDownload}
       disabled=${downloading}
       title=${path}
