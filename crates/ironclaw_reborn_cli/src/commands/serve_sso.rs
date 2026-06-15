@@ -27,7 +27,6 @@ use ironclaw_reborn_webui_ingress::{
 use secrecy::SecretString;
 
 const WEBUI_BASE_URL_ENV: &str = "IRONCLAW_REBORN_WEBUI_BASE_URL";
-const RAILWAY_PUBLIC_DOMAIN_ENV: &str = "RAILWAY_PUBLIC_DOMAIN";
 
 /// Resolved SSO startup config: the providers to mount plus the public
 /// base URL their callback URLs are built from. Constructed by
@@ -60,7 +59,7 @@ pub(crate) fn sso_startup_config_from_env(
         return Ok(None);
     }
 
-    let base_url = webui_oauth_base_url_from_env(listen_addr);
+    let base_url = webui_oauth_base_url_from_env(listen_addr)?;
     reject_cleartext_oauth(&base_url, listen_addr)?;
 
     let allowed_email_domains = parse_allowed_email_domains(
@@ -79,31 +78,28 @@ pub(crate) fn sso_startup_config_from_env(
 
 /// Resolve the externally visible WebUI base URL used for OAuth redirects.
 ///
-/// Precedence stays Reborn-scoped: explicit Reborn env first, then Railway's
-/// hosted-domain env, then the bound listener address for local development.
-pub(crate) fn webui_oauth_base_url_from_env(listen_addr: SocketAddr) -> String {
-    webui_public_base_url_from_env().unwrap_or_else(|| format!("http://{listen_addr}"))
+/// Precedence stays Reborn-scoped: explicit Reborn env first, then the bound
+/// listener address for local development.
+pub(crate) fn webui_oauth_base_url_from_env(listen_addr: SocketAddr) -> anyhow::Result<String> {
+    Ok(webui_public_base_url_from_env()?.unwrap_or_else(|| format!("http://{listen_addr}")))
 }
 
 /// Resolve a hosted WebUI base URL from deployment env without falling back to
 /// the listener address. Product-auth uses this to avoid turning `0.0.0.0`
 /// hosted deployments into provider-visible `localhost` callbacks.
-pub(crate) fn webui_public_base_url_from_env() -> Option<String> {
-    non_empty_env(WEBUI_BASE_URL_ENV)
-        .map(normalize_base_url)
-        .or_else(|| non_empty_env(RAILWAY_PUBLIC_DOMAIN_ENV).map(railway_public_domain_base_url))
+pub(crate) fn webui_public_base_url_from_env() -> anyhow::Result<Option<String>> {
+    if let Some(raw) = non_empty_env(WEBUI_BASE_URL_ENV) {
+        return Ok(Some(normalize_base_url(WEBUI_BASE_URL_ENV, raw)?));
+    }
+    Ok(None)
 }
 
-fn normalize_base_url(raw: impl AsRef<str>) -> String {
-    raw.as_ref().trim().trim_end_matches('/').to_string()
-}
-
-fn railway_public_domain_base_url(raw: impl AsRef<str>) -> String {
-    let domain = normalize_base_url(raw);
-    if domain.contains("://") {
-        domain
+fn normalize_base_url(env_var: &'static str, raw: impl AsRef<str>) -> anyhow::Result<String> {
+    let normalized = raw.as_ref().trim().trim_end_matches('/');
+    if normalized.is_empty() {
+        anyhow::bail!("{env_var} must not be empty after trimming whitespace and trailing slashes")
     } else {
-        format!("https://{domain}")
+        Ok(normalized.to_string())
     }
 }
 
@@ -357,7 +353,6 @@ mod tests {
         "IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_ID",
         "IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_SECRET",
         WEBUI_BASE_URL_ENV,
-        RAILWAY_PUBLIC_DOMAIN_ENV,
         "IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS",
     ];
 
@@ -464,11 +459,10 @@ mod tests {
         // SAFETY: serialized by ENV_LOCK; cleaned up before the guard drops.
         unsafe {
             std::env::set_var(WEBUI_BASE_URL_ENV, " https://configured.example/ ");
-            std::env::set_var(RAILWAY_PUBLIC_DOMAIN_ENV, "railway.example");
         }
 
         assert_eq!(
-            webui_oauth_base_url_from_env(addr("0.0.0.0:8080")),
+            webui_oauth_base_url_from_env(addr("0.0.0.0:8080")).expect("base url"),
             "https://configured.example"
         );
 
@@ -476,17 +470,54 @@ mod tests {
     }
 
     #[test]
-    fn webui_oauth_base_url_uses_railway_public_domain() {
+    fn webui_public_base_url_from_env_rejects_blank_normalized_values() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         clear_sso_env();
         // SAFETY: serialized by ENV_LOCK; cleaned up before the guard drops.
         unsafe {
-            std::env::set_var(RAILWAY_PUBLIC_DOMAIN_ENV, "qa-ironclaw.up.railway.app");
+            std::env::set_var(WEBUI_BASE_URL_ENV, "/");
+        }
+        let error = webui_public_base_url_from_env()
+            .expect_err("slash-only explicit base URL must fail closed");
+        assert!(
+            error.to_string().contains(WEBUI_BASE_URL_ENV),
+            "error should name env var, got: {error}"
+        );
+
+        // SAFETY: serialized by ENV_LOCK; cleaned up before the guard drops.
+        unsafe {
+            std::env::set_var(WEBUI_BASE_URL_ENV, " / ");
+        }
+        assert!(
+            webui_public_base_url_from_env().is_err(),
+            "normalized-empty explicit base URL must fail closed"
+        );
+
+        clear_sso_env();
+    }
+
+    #[test]
+    fn sso_startup_config_uses_explicit_webui_base_url() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_sso_env();
+        // SAFETY: serialized by ENV_LOCK; cleaned up before the guard drops.
+        unsafe {
+            std::env::set_var("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID", "client-id");
+            std::env::set_var(
+                "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET",
+                "client-secret",
+            );
+            std::env::set_var("IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS", "example.com");
+            std::env::set_var(WEBUI_BASE_URL_ENV, " https://configured.example/ ");
         }
 
+        let resolved = sso_startup_config_from_env(addr("0.0.0.0:8080"))
+            .expect("configured provider and allowlist should start")
+            .expect("providers configured → Some(config)");
+
         assert_eq!(
-            webui_oauth_base_url_from_env(addr("0.0.0.0:8080")),
-            "https://qa-ironclaw.up.railway.app"
+            resolved.base_url, "https://configured.example",
+            "explicit WebUI base URL must become the SSO callback base URL"
         );
 
         clear_sso_env();
@@ -498,7 +529,7 @@ mod tests {
         clear_sso_env();
 
         assert_eq!(
-            webui_oauth_base_url_from_env(addr("127.0.0.1:3000")),
+            webui_oauth_base_url_from_env(addr("127.0.0.1:3000")).expect("base url"),
             "http://127.0.0.1:3000"
         );
     }

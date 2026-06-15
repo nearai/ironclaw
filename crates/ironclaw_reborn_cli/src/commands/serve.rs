@@ -241,7 +241,8 @@ impl ServeCommand {
 
         let listen_addr = SocketAddr::new(host, port);
         reject_non_loopback_privileged_local_runtime(host, &runtime_input)?;
-        let public_base_url = crate::commands::serve_sso::webui_public_base_url_from_env();
+        let public_base_url = crate::commands::serve_sso::webui_public_base_url_from_env()
+            .context("invalid hosted WebUI OAuth base URL")?;
         if let Some(callback_origin) = webui_oauth_callback_origin(
             listen_addr,
             public_base_url.as_deref(),
@@ -574,7 +575,14 @@ fn webui_oauth_callback_origin(
     canonical_host: Option<&str>,
 ) -> Option<String> {
     if let Some(base_url) = public_base_url {
-        return Some(base_url.trim_end_matches('/').to_string());
+        let base_url = base_url.trim().trim_end_matches('/');
+        if base_url.is_empty() {
+            return None;
+        }
+        if is_cleartext_http_scheme(base_url) && !listen_addr.ip().is_loopback() {
+            return None;
+        }
+        return Some(base_url.to_string());
     }
     if let Some(host) = canonical_host {
         return Some(format!(
@@ -595,6 +603,12 @@ fn webui_oauth_callback_origin(
         IpAddr::V6(host) if host.is_loopback() => Some(format!("http://[{host}]:{port}")),
         _ => None,
     }
+}
+
+fn is_cleartext_http_scheme(base_url: &str) -> bool {
+    base_url
+        .split_once("://")
+        .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("http"))
 }
 
 fn callback_origin_scheme(host: &str) -> &'static str {
@@ -1067,11 +1081,36 @@ mod tests {
         assert_eq!(
             webui_oauth_callback_origin(
                 SocketAddr::from(([0, 0, 0, 0], 8080)),
-                Some("https://qa-ironclaw.up.railway.app/"),
+                Some("https://app.example.com/"),
                 Some("internal.example.com"),
             )
             .as_deref(),
-            Some("https://qa-ironclaw.up.railway.app")
+            Some("https://app.example.com")
+        );
+    }
+
+    #[test]
+    fn webui_oauth_callback_origin_rejects_cleartext_public_origin_on_non_loopback() {
+        assert_eq!(
+            webui_oauth_callback_origin(
+                SocketAddr::from(([192, 168, 1, 42], 8080)),
+                Some("http://app.example.com/"),
+                None,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn webui_oauth_callback_origin_keeps_loopback_http_public_origin() {
+        assert_eq!(
+            webui_oauth_callback_origin(
+                SocketAddr::from(([127, 0, 0, 1], 8080)),
+                Some("http://127.0.0.1:8080/"),
+                None,
+            )
+            .as_deref(),
+            Some("http://127.0.0.1:8080")
         );
     }
 
@@ -1132,7 +1171,7 @@ mod tests {
             RebornBuildInput::local_dev("notion-dcr-owner", dir.path().join("local-dev")),
             webui_oauth_callback_origin(
                 SocketAddr::from(([0, 0, 0, 0], 8080)),
-                Some("https://qa-ironclaw.up.railway.app/"),
+                Some("https://app.example.com/"),
                 None,
             )
             .as_deref()
