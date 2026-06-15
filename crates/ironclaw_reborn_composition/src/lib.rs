@@ -32,6 +32,7 @@ mod available_extensions;
 mod budget;
 mod budget_events;
 mod bundled_skills;
+mod communication_context;
 mod default_system_prompt;
 mod error;
 mod extension_activation_credentials;
@@ -86,6 +87,7 @@ mod profile;
 mod profile_approval_authorization;
 mod project_filesystem_reader;
 mod projection;
+mod trajectory_observer;
 pub use auth_prompt::{AuthChallengeProvider, AuthChallengeView};
 #[cfg(feature = "slack-v2-host-beta")]
 mod delivered_gate_routing;
@@ -132,6 +134,7 @@ mod slack_personal_binding_serve;
 pub mod slack_serve;
 #[cfg(feature = "test-support")]
 pub mod test_support;
+mod trace_capture;
 mod trigger_poller;
 mod trigger_poller_trusted_submit;
 mod web_access;
@@ -245,13 +248,13 @@ pub use runtime::{
     RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle, RebornSkillExecutionPlan,
     RebornSkillExecutionResult, RebornSkillSourceKind, build_reborn_runtime,
 };
-#[cfg(feature = "root-llm-provider")]
-pub use runtime_input::ResolvedRebornLlm;
 pub use runtime_input::{
     DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL, DEFAULT_TURN_RUNNER_POLL_INTERVAL, PollSettings,
     RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessCheck, TriggerFireAccessChecker,
     TriggerFireAccessDecision, TriggerFireAccessError, TriggerPollerSettings, TurnRunnerSettings,
 };
+#[cfg(feature = "root-llm-provider")]
+pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
 pub use skill_listing::{RebornSkillListError, list_reborn_local_skills};
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_actor_identity::{
@@ -322,6 +325,7 @@ pub use slack_serve::{
     SlackInstallationSelector, SlackTeamId, slack_events_route_descriptors,
     slack_events_route_mount,
 };
+pub use trajectory_observer::RebornTrajectoryObserver;
 pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
 pub use webui_rate_limit::RateLimitConfigError;

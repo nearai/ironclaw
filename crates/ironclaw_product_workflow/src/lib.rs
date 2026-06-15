@@ -110,12 +110,12 @@ pub use ledger::{IdempotencyDecision, IdempotencyLedger};
 pub use lifecycle::{
     LifecycleBlockerRef, LifecycleCommandKind, LifecycleExtensionCredentialRequirement,
     LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
-    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
-    LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
-    LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-    LifecycleProductPayload, LifecycleProductResponse, LifecycleProductSurfaceContext,
-    LifecycleReadinessBlocker, LifecycleSkillSource, LifecycleSkillSummary,
-    UnsupportedLifecycleProductFacade,
+    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleExtensionSurfaceKind,
+    LifecycleInstalledExtensionSummary, LifecyclePackageId, LifecyclePackageKind,
+    LifecyclePackageRef, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
+    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleProductSurfaceContext, LifecycleReadinessBlocker, LifecycleSkillSource,
+    LifecycleSkillSummary, UnsupportedLifecycleProductFacade,
 };
 // Product hosts use this outbound orchestration seam to wire outbound policy
 // decisions to adapter rendering without reaching into module internals.
@@ -185,7 +185,8 @@ pub use reborn_services::{
     RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
     RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
     RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest, SkillsProductFacade,
+    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
+    RebornTraceHoldAuthorizeResponse, SetActiveLlmRequest, SkillsProductFacade,
     StaticConnectableChannelsProductFacade, StaticOperatorStatusService, TriggerRunThreadScope,
     UnsupportedAutomationProductFacade, UnsupportedOperatorLogsService,
     UnsupportedOperatorServiceLifecycleService, UnsupportedOperatorStatusService,
@@ -194,9 +195,10 @@ pub use reborn_services::{
 };
 
 pub use webui_inbound::{
-    WebUiAuthenticatedCaller, WebUiCancelReason, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiGateResolution, WebUiInboundAttachment, WebUiInboundCommand, WebUiInboundValidationCode,
-    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    WebUiAttachmentCapabilities, WebUiAuthenticatedCaller, WebUiCancelReason,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundAttachment,
+    WebUiInboundCommand, WebUiInboundValidationCode, WebUiInboundValidationError,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, webui_attachment_capabilities,
 };
 pub use workflow::DefaultProductWorkflow;

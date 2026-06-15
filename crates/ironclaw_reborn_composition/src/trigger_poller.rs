@@ -645,6 +645,7 @@ mod tests {
             parent_run_id: None,
             subagent_depth: 0,
             spawn_tree_root_run_id: None,
+            product_context: None,
         }
     }
 

@@ -61,6 +61,7 @@ pub(super) fn capability_invocation_from_auth_resume_candidate(
                     correlation_id: pa.correlation_id,
                 }
             }),
+            replay: pending_auth.replay.clone(),
         });
     CapabilityInvocation {
         surface_version: call.surface_version,
@@ -568,6 +569,7 @@ mod tests {
             provider_replay: None,
             resume_token: None,
             prior_approval: None,
+            replay: None,
         };
         let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
 
@@ -612,6 +614,7 @@ mod tests {
                 approval_request_id,
                 correlation_id,
             }),
+            replay: None,
         };
         let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
         let call = CapabilityCallCandidate {
@@ -675,6 +678,7 @@ mod tests {
             provider_replay: None,
             resume_token: None, // no prior approval — the key precondition
             prior_approval: None,
+            replay: None,
         };
         let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
         let call = CapabilityCallCandidate {

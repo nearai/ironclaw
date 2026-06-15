@@ -113,6 +113,11 @@ pub struct TraceQueueFlushQuery {
 
 #[derive(Debug, Serialize)]
 pub struct TraceCreditResponse {
+    /// Whether the user's standing trace-contribution policy is enabled. Lets
+    /// the UI distinguish an enrolled-but-zero-submission account (show the
+    /// zero-credit view) from a genuinely not-enrolled one (show the empty
+    /// opt-in prompt) — `submissions_total == 0` alone cannot tell them apart.
+    pub enrolled: bool,
     pub summary: CreditSummary,
     pub report: TraceCreditReport,
     pub records: Vec<LocalTraceSubmissionRecord>,
@@ -357,9 +362,15 @@ pub async fn traces_credit_handler(
     let records = trace_host
         .read_local_records_for_scope(&trace_scope)
         .map_err(internal_error)?;
+    // Read enrollment so the UI can show the zero-credit view (not the
+    // not-enrolled empty state) for an enrolled user with no submissions yet.
+    let enrolled = read_trace_policy_for_scope(Some(user.user_id.as_str()))
+        .map_err(internal_error)?
+        .enabled;
     let summary = trace_credit_summary(&records);
     let report = trace_credit_report(&records);
     Ok(Json(TraceCreditResponse {
+        enrolled,
         summary,
         report,
         records,

@@ -65,9 +65,12 @@ mod extensions;
 mod lifecycle_setup;
 mod llm_config;
 mod project_fs;
+mod trace_credits;
 mod types;
 
 pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
+pub use trace_credits::{RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse};
+
 pub use llm_config::{
     CodexLoginStart, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,
     LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
@@ -126,6 +129,18 @@ const OPERATOR_LOGS_CURSOR_MAX_BYTES: usize = 512;
 const OPERATOR_LOGS_TARGET_MAX_BYTES: usize = 256;
 const OPERATOR_LOGS_CONTEXT_MAX_BYTES: usize = 256;
 const OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX: &str = " ... [truncated]";
+
+const NOTICE_BLOCKED_APPROVAL: &str = "An approval gate is open on this thread — resolve it (approve or deny) before continuing, then resend your message.";
+const NOTICE_BLOCKED_AUTH: &str = "An authentication gate is open on this thread — complete authentication before continuing, then resend your message.";
+const NOTICE_BUSY_GENERIC: &str = "Ironclaw is still working on a previous message — resend yours once the current task finishes.";
+
+fn rejected_busy_notice(status: TurnStatus) -> String {
+    match status {
+        TurnStatus::BlockedApproval => NOTICE_BLOCKED_APPROVAL.to_string(),
+        TurnStatus::BlockedAuth => NOTICE_BLOCKED_AUTH.to_string(),
+        _ => NOTICE_BUSY_GENERIC.to_string(),
+    }
+}
 
 #[async_trait]
 pub trait ConnectableChannelsProductFacade: Send + Sync {
@@ -489,6 +504,16 @@ pub trait AutomationProductFacade: Send + Sync {
         caller: ProductAgentBoundCaller,
         request: AutomationListRequest,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError>;
+
+    /// Whether the background trigger poller (scheduler) is running.
+    ///
+    /// Surfaced to the browser so the panel can warn that listed automations
+    /// will not fire while scheduling is off. Defaults to `true` so a facade
+    /// that does not know its scheduler state never produces a false "off"
+    /// notice; the production facade overrides this with the real value.
+    fn scheduler_enabled(&self) -> bool {
+        true
+    }
 
     /// Looks up the stored trigger-thread scope for a given `thread_id`.
     ///
@@ -993,6 +1018,67 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         request: WebUiListAutomationsRequest,
     ) -> Result<RebornListAutomationsResponse, RebornServicesError>;
+
+    /// Read-only Trace Commons credit summary for the authenticated
+    /// caller.
+    ///
+    /// The trace scope derives from the caller's user id only — never
+    /// from request input. Missing or unreadable contributor-local
+    /// state is the normal "not enrolled / nothing submitted yet"
+    /// zero response, never an error. The aggregates are a local view
+    /// as of the last credit sync; the authoritative ledger is
+    /// server-side.
+    ///
+    /// The default body is the production implementation: every facade
+    /// reads the same caller-scoped contributor-local state through
+    /// `ironclaw_reborn_traces`, so impls (including test fakes) only
+    /// override this when they need a non-local credits source.
+    async fn trace_credits(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornTraceCreditsResponse, RebornServicesError> {
+        let actor = caller.actor();
+        // Tenant-scope the local state key so the same user id in two tenants
+        // does not share Trace Commons credit/hold state.
+        let scope = ironclaw_reborn_traces::contribution::trace_scope_key(
+            caller.tenant_id.as_str(),
+            actor.user_id.as_str(),
+        );
+        // A genuine local-state read failure must surface as a sanitized 500,
+        // not a misleading zero/not-enrolled view (carry the cause for the
+        // server-side trail per error-handling.md).
+        trace_credits::local_trace_credits_for_user(&scope)
+            .map_err(RebornServicesError::internal_from)
+    }
+
+    /// Authorize the caller's held manual-review trace for submission
+    /// (promote-as-is). The scope is always the authenticated caller's user
+    /// id; the submission id from the request path is never authority to
+    /// cross scopes. A missing/already-resolved hold returns
+    /// `authorized: false`, not an error.
+    async fn authorize_trace_hold(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        submission_id: String,
+    ) -> Result<RebornTraceHoldAuthorizeResponse, RebornServicesError> {
+        let actor = caller.actor();
+        let submission = uuid::Uuid::parse_str(submission_id.trim()).map_err(|_| {
+            RebornServicesError::validation(WebUiInboundValidationError::new(
+                "submission_id",
+                WebUiInboundValidationCode::InvalidId,
+            ))
+        })?;
+        let scope = ironclaw_reborn_traces::contribution::trace_scope_key(
+            caller.tenant_id.as_str(),
+            actor.user_id.as_str(),
+        );
+        let authorized =
+            trace_credits::authorize_trace_hold_for_user(&scope, submission).map_err(|error| {
+                tracing::debug!(%error, "failed to authorize Trace Commons held trace");
+                RebornServicesError::internal_invariant()
+            })?;
+        Ok(RebornTraceHoldAuthorizeResponse { authorized })
+    }
 
     async fn list_connectable_channels(
         &self,
@@ -1755,6 +1841,23 @@ impl RebornServicesApi for RebornServices {
                         event_cursor: state.event_cursor,
                     });
                 }
+                MessageStatus::RejectedBusy => {
+                    // Idempotent re-rejection: the original busy rejection was
+                    // lost before it reached the client.  The blocking run may
+                    // already be finished, so we cannot recover its run-id or
+                    // cursor.  Return a RejectedBusy with None run metadata so
+                    // the client knows to resend rather than treating this as
+                    // a new submission.  Fabricating a run-id or status here
+                    // would give the client a reference it cannot query.
+                    return Ok(RebornSubmitTurnResponse::RejectedBusy {
+                        thread_id: replay.thread_id,
+                        accepted_message_ref: accepted_message_ref(replay.message_id.to_string())?,
+                        active_run_id: None,
+                        status: None,
+                        event_cursor: None,
+                        notice: NOTICE_BUSY_GENERIC.to_string(),
+                    });
+                }
                 MessageStatus::Accepted | MessageStatus::DeferredBusy => AcceptedWebUiMessage {
                     thread_id: replay.thread_id,
                     message_id: replay.message_id,
@@ -1824,6 +1927,7 @@ impl RebornServicesApi for RebornServices {
             "webui-reply",
             &handoff.reply_target_binding_id,
         )?;
+        let product_context = ironclaw_product_context::resolve_web_ui(scope.product_owner(&actor));
         let submit = SubmitTurnRequest {
             scope: scope.clone(),
             actor,
@@ -1837,6 +1941,7 @@ impl RebornServicesApi for RebornServices {
             parent_run_id: None,
             subagent_depth: 0,
             spawn_tree_root_run_id: None,
+            product_context: Some(product_context),
         };
 
         self.record_skill_activation_message(&scope, &accepted_message_ref, &content)?;
@@ -1873,20 +1978,21 @@ impl RebornServicesApi for RebornServices {
             }
             Err(TurnError::ThreadBusy(busy)) => {
                 self.clear_skill_activation_message(&scope, &accepted_message_ref)?;
-                mark_message_deferred_busy_or_replay(
+                mark_message_rejected_busy_or_replay(
                     &*self.thread_service,
                     &thread_scope,
                     &handoff,
                     &client_action_id,
                 )
                 .await?;
-
-                Ok(RebornSubmitTurnResponse::DeferredBusy {
+                let notice = rejected_busy_notice(busy.status);
+                Ok(RebornSubmitTurnResponse::RejectedBusy {
                     thread_id: handoff.thread_id,
                     accepted_message_ref,
-                    active_run_id: busy.active_run_id,
-                    status: busy.status,
-                    event_cursor: busy.event_cursor,
+                    active_run_id: Some(busy.active_run_id),
+                    status: Some(busy.status),
+                    event_cursor: Some(busy.event_cursor),
+                    notice,
                 })
             }
             Err(error) => {
@@ -2241,11 +2347,15 @@ impl RebornServicesApi for RebornServices {
         };
         let limit = clamp_automation_list_limit(request.limit);
         let run_limit = clamp_automation_run_limit(request.run_limit);
+        let scheduler_enabled = self.automation_facade.scheduler_enabled();
         let automations = self
             .automation_facade
             .list_automations(caller, AutomationListRequest { limit, run_limit })
             .await?;
-        Ok(RebornListAutomationsResponse { automations })
+        Ok(RebornListAutomationsResponse {
+            automations,
+            scheduler_enabled,
+        })
     }
 
     async fn list_connectable_channels(
@@ -2814,24 +2924,30 @@ async fn mark_message_submitted_or_replay(
     }
 }
 
-async fn mark_message_deferred_busy_or_replay(
+async fn mark_message_rejected_busy_or_replay(
     thread_service: &dyn SessionThreadService,
     thread_scope: &ThreadScope,
     handoff: &AcceptedWebUiMessage,
     client_action_id: &IdempotencyKey,
 ) -> Result<(), RebornServicesError> {
     match thread_service
-        .mark_message_deferred_busy(thread_scope, &handoff.thread_id, handoff.message_id)
+        .mark_message_rejected_busy(thread_scope, &handoff.thread_id, handoff.message_id)
         .await
     {
         Ok(_) => Ok(()),
         Err(error) => {
+            // Only RejectedBusy is the terminal settled state here.
+            // DeferredBusy is non-terminal legacy — a later replay may
+            // resubmit it, so claiming it settled would violate the
+            // no-resubmit guarantee. Let a DeferredBusy replay fall
+            // through to the `_` arm so the original mark failure
+            // surfaces honestly instead of being masked as settled.
             reconcile_terminal_duplicate(
                 thread_service,
                 thread_scope,
                 handoff,
                 client_action_id,
-                |replay| replay.status == MessageStatus::DeferredBusy,
+                |replay| matches!(replay.status, MessageStatus::RejectedBusy),
                 error,
             )
             .await

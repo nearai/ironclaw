@@ -376,6 +376,7 @@ pub struct RebornRuntime {
     worker_handle: JoinHandle<()>,
     worker_cancel: CancellationToken,
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
+    trace_flush_worker: crate::trace_capture::TraceQueueFlushWorkerHandle,
     /// Late-binding slot shared with the poller's `PostSubmitHookWrappedSubmitter`.
     /// `set_trigger_post_submit_hook` fills this after `build_reborn_runtime` returns.
     /// `None` when the trigger poller is not enabled.
@@ -1115,17 +1116,27 @@ impl RebornRuntime {
         self.skill_activation_source.clone()
     }
 
-    /// Project-scoped workspace filesystem the agent's file tools resolve
-    /// through. Used to land inbound attachment bytes at paths the agent can
-    /// later read back. `None` when no local runtime is composed.
+    /// Read-write project-scoped workspace filesystem for landing inbound
+    /// attachment bytes at paths the agent's file tools can later read back.
+    /// `None` when no local runtime is composed.
+    ///
+    /// This deliberately does NOT reuse `rt.workspace_filesystem`: that handle
+    /// is intentionally read-only (it backs setup-marker reads — see
+    /// `local_dev_setup_marker_workspace_filesystem_is_read_only`), so writing
+    /// an attachment through it fails closed with `PermissionDenied`. Build a
+    /// read-write view over the same root using the read-write `workspace_mounts`
+    /// the agent's `file_write`/`file_read` tools resolve through, so a landed
+    /// attachment is addressable at its recorded `storage_key`.
     pub(crate) fn webui_workspace_filesystem(
         &self,
     ) -> Option<Arc<ironclaw_filesystem::ScopedFilesystem<crate::factory::LocalDevRootFilesystem>>>
     {
-        self.services
-            .local_runtime
-            .as_ref()
-            .map(|rt| Arc::clone(&rt.workspace_filesystem))
+        self.services.local_runtime.as_ref().map(|rt| {
+            Arc::new(ironclaw_filesystem::ScopedFilesystem::with_fixed_view(
+                Arc::clone(&rt.extension_filesystem),
+                rt.workspace_mounts.clone(),
+            ))
+        })
     }
 
     /// Test-only handle on the resource governor backing the budget
@@ -1260,6 +1271,12 @@ impl RebornRuntime {
     /// without the `root-llm-provider` feature or an LLM config is not
     /// provided), the run will fail and the returned reply will surface
     /// that failure via `status = Failed` and `text = None`.
+    ///
+    /// **WebUI-only origin contract**: this task-level send path resolves
+    /// the turn's product-context origin as WebUI chat (`resolve_web_ui`).
+    /// A non-WebUI ingress (e.g. a future channel adapter) must not reuse
+    /// this method for its submissions; it must resolve its own origin at
+    /// that ingress instead.
     pub async fn send_user_message(
         &self,
         conversation: &ConversationId,
@@ -1422,6 +1439,9 @@ impl RebornRuntime {
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
+                product_context: Some(ironclaw_product_context::resolve_web_ui(
+                    scope.product_owner(&TurnActor::new(self.actor_user_id.clone())),
+                )),
             })
             .await
         {
@@ -1522,6 +1542,7 @@ impl RebornRuntime {
                 .shutdown(TRIGGER_POLLER_SHUTDOWN_TIMEOUT)
                 .await;
         }
+        self.trace_flush_worker.shutdown().await;
         self.worker_cancel.cancel();
         if let Some(projection) = self.budget_event_projection {
             projection.shutdown().await;
@@ -1537,11 +1558,16 @@ impl RebornRuntime {
     }
 
     fn turn_scope_for(&self, thread_id: &ThreadId) -> TurnScope {
-        TurnScope::new(
+        // RebornRuntime is bound to a single actor user, so its turns are
+        // owned by that user (not the shared agent).  Passing the explicit
+        // owner here makes `TurnScope::product_owner` resolve to
+        // `TurnOwner::Personal` instead of `TurnOwner::SharedAgent`.
+        TurnScope::new_with_owner(
             self.thread_scope.tenant_id.clone(),
             Some(self.thread_scope.agent_id.clone()),
             self.thread_scope.project_id.clone(),
             thread_id.clone(),
+            Some(self.actor_user_id.clone()),
         )
     }
 
@@ -2011,6 +2037,7 @@ pub async fn build_reborn_runtime(
         hooks: hooks_config,
         budget_defaults,
         budget_event_observer,
+        trajectory_observer,
         #[cfg(any(test, feature = "test-support"))]
         model_gateway_override,
         #[cfg(any(test, feature = "test-support"))]
@@ -2351,6 +2378,8 @@ pub async fn build_reborn_runtime(
             model_gateway,
             milestone_sink.clone(),
             skill_activation_source.clone(),
+            None,
+            trajectory_observer,
         )
         .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
         (
@@ -2364,6 +2393,18 @@ pub async fn build_reborn_runtime(
             Some(local_dev_capabilities.display_previews),
         )
     } else {
+        // The trajectory observer is wired only through the local-dev capability
+        // path; non-local-dev runtimes have no capability/result hook to forward
+        // to. Accepting one here would silently produce an empty trajectory, so
+        // fail fast — the seam is local-dev/bench-only (see
+        // `RebornRuntimeInput::with_trajectory_observer`).
+        if trajectory_observer.is_some() {
+            return Err(RebornRuntimeError::InvalidArgument {
+                reason: "a trajectory observer was supplied, but it is only supported on \
+                         local-dev runtimes; this profile has no local runtime to observe"
+                    .to_string(),
+            });
+        }
         let capability_io = Arc::new(UnavailableCapabilityIo);
         let capability_input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io;
@@ -2421,6 +2462,53 @@ pub async fn build_reborn_runtime(
         None
     };
 
+    // Autonomous Trace Commons capture: a best-effort lifecycle sink mirrors
+    // the v1 binary's turn-end capture. Policy-gated per user scope — the
+    // sink is inert (one policy-file read per turn) until a scope enrolls
+    // via `builtin.trace_commons.onboard` or `traces opt-in`.
+    // Seed with the runtime owner's TENANT-SCOPED key (matching how capture
+    // keys state), so startup pending-queue discovery finds the owner's queued
+    // traces — a bare owner id would miss the `trace_scope_key(tenant, owner)`
+    // queue dir.
+    let runtime_owner_trace_scope = ironclaw_reborn_traces::contribution::trace_scope_key(
+        thread_scope.tenant_id.as_str(),
+        actor_user_id.as_str(),
+    );
+    let trace_capture_scopes: crate::trace_capture::ObservedTraceScopes =
+        Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::from([
+            runtime_owner_trace_scope,
+        ])));
+    let trace_capture_sink: Arc<dyn ironclaw_turns::TurnEventSink> =
+        Arc::new(crate::trace_capture::TraceCaptureTurnEventSink::new(
+            Arc::clone(&thread_service),
+            Arc::clone(&trace_capture_scopes),
+        ));
+
+    let communication_context_provider: Option<
+        Arc<dyn ironclaw_turns::run_profile::CommunicationContextProvider>,
+    > = local_runtime.map(|local_runtime| {
+        let mut lifecycle_facade = crate::lifecycle::RebornLocalLifecycleFacade::new(Arc::clone(
+            &local_runtime.skill_management,
+        ));
+        if let Some(extension_management) = &local_runtime.extension_management {
+            lifecycle_facade =
+                lifecycle_facade.with_extension_management(Arc::clone(extension_management));
+        }
+        Arc::new(
+                crate::communication_context::RuntimeCommunicationContextProvider::new(Arc::new(
+                    crate::outbound_preferences::RebornOutboundPreferencesFacade::new(
+                        Arc::clone(&local_runtime.outbound_preferences),
+                        Arc::new(
+                            crate::outbound_preferences::OutboundDeliveryTargetRegistry::new(
+                                Vec::new(),
+                            ),
+                        ),
+                    ),
+                ))
+                .with_lifecycle_facade(Arc::new(lifecycle_facade)),
+            ) as Arc<dyn ironclaw_turns::run_profile::CommunicationContextProvider>
+    });
+
     let planned_runtime_parts = DefaultPlannedRuntimeParts {
         turn_state: Arc::clone(&turn_state_store),
         thread_service: Arc::clone(&thread_service),
@@ -2472,8 +2560,9 @@ pub async fn build_reborn_runtime(
         model_budget_accountant,
         safety_context: None,
         hook_security_audit_sink: Some(Arc::new(ironclaw_events::TracingSecurityAuditSink)),
-        turn_event_sink: None,
+        turn_event_sink: Some(trace_capture_sink),
         hook_dispatcher_builder_factory,
+        communication_context_provider,
     };
     let composition = match planned_runtime_wake_channel {
         Some(wake_channel) => {
@@ -2662,6 +2751,8 @@ pub async fn build_reborn_runtime(
     let worker_handle = tokio::spawn(async move {
         worker.run(worker_cancel_clone).await;
     });
+    let trace_flush_worker =
+        crate::trace_capture::spawn_trace_queue_flush_worker(trace_capture_scopes);
     services.readiness.workers.turn_runner = true;
     services.readiness.workers.trigger_poller = trigger_poller_handle.is_some();
     let turn_coordinator = planned_turn_coordinator;
@@ -2694,6 +2785,7 @@ pub async fn build_reborn_runtime(
         worker_handle,
         worker_cancel,
         trigger_poller_handle,
+        trace_flush_worker,
         #[cfg(feature = "slack-v2-host-beta")]
         post_submit_hook_slot: runtime_post_submit_hook_slot,
         #[cfg(any(test, feature = "test-support"))]
@@ -3009,10 +3101,17 @@ pub(crate) struct RebornLlmReloadParts {
 #[cfg(feature = "root-llm-provider")]
 async fn build_llm_gateway(llm: ResolvedRebornLlm) -> Result<LlmGatewayBundle, RebornRuntimeError> {
     let session = ironclaw_llm::create_session_manager(llm.config.session.clone()).await;
-    let raw = ironclaw_llm::build_static_provider_chain(&llm.config, Arc::clone(&session))
+    // Config is always the construction source. A caller-supplied factory (e.g.
+    // an instrumentation wrapper) then decorates the built provider; without one
+    // the config-built provider is driven as-is.
+    let built = ironclaw_llm::build_static_provider_chain(&llm.config, Arc::clone(&session))
         .await
         .map_err(|error| RebornRuntimeError::LlmProvider(error.to_string()))?;
-    wrap_swappable_gateway(raw, session)
+    // The factory is applied *inside* `wrap_swappable_gateway` — over the
+    // swappable wrapper, not the bare config provider — so a live config reload
+    // (which swaps the swappable's inner) keeps the factory's wrapper in the
+    // call path. See `wrap_swappable_gateway`.
+    wrap_swappable_gateway(built, session, llm.provider_factory.clone())
 }
 
 /// Cold-boot gateway: no LLM configured yet. Wraps a placeholder provider (which
@@ -3024,16 +3123,25 @@ async fn build_placeholder_llm_gateway() -> Result<LlmGatewayBundle, RebornRunti
     let session =
         ironclaw_llm::create_session_manager(ironclaw_llm::SessionConfig::default()).await;
     let raw: Arc<dyn ironclaw_llm::LlmProvider> = Arc::new(PlaceholderLlmProvider);
-    wrap_swappable_gateway(raw, session)
+    wrap_swappable_gateway(raw, session, None)
 }
 
 /// Wrap a raw provider in a [`SwappableLlmProvider`] + reload handle and build
 /// the model gateway. Shared by the real and placeholder boot paths so both get
 /// an identical live-reload seam.
+///
+/// The optional `provider_factory` (caller instrumentation, e.g. token/reasoning
+/// capture) is applied **over the swappable wrapper**, so the gateway drives
+/// `factory(swappable)`. A live config reload swaps the *inner* of the swappable
+/// via the reload handle; because the factory wraps the swappable itself, its
+/// instrumentation stays in the call path and continues to observe model calls
+/// against the reloaded provider. (Applying the factory to the bare provider
+/// instead would let the first reload silently drop the wrapper.)
 #[cfg(feature = "root-llm-provider")]
 fn wrap_swappable_gateway(
     raw: Arc<dyn ironclaw_llm::LlmProvider>,
     session: Arc<ironclaw_llm::SessionManager>,
+    provider_factory: Option<crate::runtime_input::RebornProviderFactory>,
 ) -> Result<LlmGatewayBundle, RebornRuntimeError> {
     use ironclaw_llm::{LlmProvider, LlmReloadHandle, SwappableLlmProvider};
     use ironclaw_reborn::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
@@ -3041,7 +3149,13 @@ fn wrap_swappable_gateway(
 
     let swappable = Arc::new(SwappableLlmProvider::new(raw));
     let reload_handle = Arc::new(LlmReloadHandle::new(Arc::clone(&swappable), None));
-    let provider: Arc<dyn LlmProvider> = swappable;
+    let swappable_provider: Arc<dyn LlmProvider> = swappable;
+    // Gateway drives the factory's wrapper over the swappable (reload-stable);
+    // with no factory it drives the swappable directly.
+    let provider: Arc<dyn LlmProvider> = match provider_factory {
+        Some(factory) => factory(Arc::clone(&swappable_provider)),
+        None => swappable_provider,
+    };
 
     let model_profile_id = ModelProfileId::new("interactive_model").map_err(|reason| {
         RebornRuntimeError::LlmProvider(format!("invalid interactive model profile id: {reason}"))
@@ -3299,7 +3413,7 @@ mod tests {
     use ironclaw_skills::SkillTrust;
     use ironclaw_threads::{
         AppendToolResultReferenceRequest, EnsureThreadRequest, LoadContextMessagesRequest,
-        MessageKind, ThreadHistoryRequest, ThreadScope, ToolResultSafeSummary,
+        MessageKind, MessageStatus, ThreadHistoryRequest, ThreadScope, ToolResultSafeSummary,
     };
     use ironclaw_turns::{
         AcceptedMessageRef, AllowAllTurnAdmissionPolicy, BlockedReason, GetRunStateRequest,
@@ -3537,6 +3651,72 @@ mod tests {
                     id: "call-1".to_string(),
                     name: echo_tool.name,
                     arguments: serde_json::json!({"message": "hello from tool"}),
+                    response_reasoning: None,
+                    reasoning: None,
+                    signature: None,
+                })
+                .await
+                .map_err(model_capability_error)?;
+            Ok(HostManagedModelResponse::capability_calls(
+                vec![candidate],
+                "",
+            ))
+        }
+    }
+
+    /// A long echo argument (well over the safe-preview 512-byte string cap) so
+    /// the default-observer test can prove the payload is truncated before the
+    /// observer sees it.
+    const LARGE_ECHO_MESSAGE: &str = "PAYLOAD0123456789ABCDEF_";
+
+    #[derive(Debug, Default)]
+    struct LargeEchoToolCallingGateway {
+        calls: StdMutex<usize>,
+    }
+
+    #[async_trait]
+    impl HostManagedModelGateway for LargeEchoToolCallingGateway {
+        async fn stream_model(
+            &self,
+            _request: HostManagedModelRequest,
+        ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+            Err(HostManagedModelError::safe(
+                HostManagedModelErrorKind::InvalidRequest,
+                "expected capability-aware model path",
+            ))
+        }
+
+        async fn stream_model_with_capabilities(
+            &self,
+            _request: HostManagedModelRequest,
+            capabilities: Arc<dyn LoopCapabilityPort>,
+        ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+            let call_index = {
+                let mut calls = self.calls.lock().expect("large echo gateway lock poisoned");
+                let call_index = *calls;
+                *calls += 1;
+                call_index
+            };
+            if call_index > 0 {
+                return Ok(HostManagedModelResponse::assistant_reply("tool ok"));
+            }
+            let echo_id = CapabilityId::new("builtin.echo").expect("echo id");
+            let echo_tool = capabilities
+                .tool_definitions()
+                .map_err(model_capability_error)?
+                .into_iter()
+                .find(|definition| definition.capability_id == echo_id)
+                .expect("echo provider tool definition");
+            // ~2.4 KB message: far over the 512-byte string preview cap.
+            let big_message = LARGE_ECHO_MESSAGE.repeat(100);
+            let candidate = capabilities
+                .register_provider_tool_call(ProviderToolCall {
+                    provider_id: "test-provider".to_string(),
+                    provider_model_id: "test-model".to_string(),
+                    turn_id: Some("provider-turn-1".to_string()),
+                    id: "call-1".to_string(),
+                    name: echo_tool.name,
+                    arguments: serde_json::json!({ "message": big_message }),
                     response_reasoning: None,
                     reasoning: None,
                     signature: None,
@@ -3893,7 +4073,7 @@ mod tests {
         let raw: Arc<dyn ironclaw_llm::LlmProvider> = provider.clone();
         let session =
             ironclaw_llm::create_session_manager(ironclaw_llm::SessionConfig::default()).await;
-        let bundle = super::wrap_swappable_gateway(raw, session).expect("gateway bundle");
+        let bundle = super::wrap_swappable_gateway(raw, session, None).expect("gateway bundle");
 
         bundle
             .gateway
@@ -4023,6 +4203,278 @@ mod tests {
             .expect("chat request should be captured")
             .expect("auth header should be sent by capture server");
         assert_eq!(auth_header, "Bearer sess_reborn_env_token");
+    }
+
+    /// Counts how many times the runtime drives this provider and answers with a
+    /// fixed sentinel, so a test can prove an injected provider — not one built
+    /// from config — is the one the gateway actually calls.
+    #[cfg(feature = "root-llm-provider")]
+    struct CountingOverrideProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    #[async_trait::async_trait]
+    impl ironclaw_llm::LlmProvider for CountingOverrideProvider {
+        fn model_name(&self) -> &str {
+            "mock-override-model"
+        }
+
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: ironclaw_llm::CompletionRequest,
+        ) -> Result<ironclaw_llm::CompletionResponse, ironclaw_llm::LlmError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ironclaw_llm::CompletionResponse {
+                content: "override-driven".to_string(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
+                reasoning: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ironclaw_llm::ToolCompletionRequest,
+        ) -> Result<ironclaw_llm::ToolCompletionResponse, ironclaw_llm::LlmError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ironclaw_llm::ToolCompletionResponse {
+                content: Some("override-driven".to_string()),
+                tool_calls: Vec::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                reasoning: None,
+            })
+        }
+    }
+
+    /// The LLM-provider-instrumentation seam: when a caller installs a factory
+    /// via `ResolvedRebornLlm::with_provider_factory` (how the bench wraps an
+    /// instrumented provider to capture reasoning / tokens / cost / system-prompt
+    /// / tool definitions), the gateway must drive the factory's output. Here the
+    /// factory ignores the config-built provider and returns a counting mock, so
+    /// if the factory were not applied the gateway would drive the config-built
+    /// provider (dead endpoint) instead of returning the mock's sentinel.
+    #[cfg(feature = "root-llm-provider")]
+    #[tokio::test]
+    async fn build_llm_gateway_applies_provider_factory() {
+        let session_dir = tempfile::tempdir().expect("session tempdir");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mock: Arc<dyn ironclaw_llm::LlmProvider> = Arc::new(CountingOverrideProvider {
+            calls: Arc::clone(&calls),
+        });
+
+        let config = ironclaw_llm::LlmConfig {
+            backend: "nearai".to_string(),
+            session: ironclaw_llm::SessionConfig {
+                auth_base_url: "http://127.0.0.1:1".to_string(),
+                session_path: session_dir.path().join("session.json"),
+            },
+            nearai: ironclaw_llm::NearAiConfig {
+                model: "config-model-should-not-be-used".to_string(),
+                cheap_model: None,
+                base_url: "http://127.0.0.1:1".to_string(),
+                api_key: None,
+                fallback_model: None,
+                max_retries: 0,
+                circuit_breaker_threshold: None,
+                circuit_breaker_recovery_secs: 30,
+                response_cache_enabled: false,
+                response_cache_ttl_secs: 3600,
+                response_cache_max_entries: 1000,
+                failover_cooldown_secs: 300,
+                failover_cooldown_threshold: 3,
+                smart_routing_cascade: false,
+            },
+            provider: None,
+            bedrock: None,
+            gemini_oauth: None,
+            openai_codex: None,
+            request_timeout_secs: 5,
+            cheap_model: None,
+            smart_routing_cascade: false,
+            max_retries: 0,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+        };
+
+        let factory_mock = Arc::clone(&mock);
+        let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config)
+            .with_provider_factory(Arc::new(move |_built| Arc::clone(&factory_mock)));
+        let bundle = super::build_llm_gateway(llm)
+            .await
+            .expect("gateway builds with the provider factory");
+
+        let response = bundle
+            .gateway
+            .stream_model(nearai_gateway_test_request())
+            .await
+            .expect("gateway drives the factory-produced provider");
+
+        assert_eq!(
+            response.safe_text_deltas,
+            vec!["override-driven".to_string()],
+            "gateway must return the factory provider's response, not the config-built one"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the override provider should be invoked exactly once"
+        );
+    }
+
+    /// Provider wrapper that counts model calls and delegates to its inner — a
+    /// stand-in for the bench's instrumentation wrapper. Unlike
+    /// `CountingOverrideProvider`, it wraps `inner` so swapping the inner (via a
+    /// live reload of a `SwappableLlmProvider`) is observable through it.
+    #[cfg(feature = "root-llm-provider")]
+    struct CountingWrapperProvider {
+        inner: Arc<dyn ironclaw_llm::LlmProvider>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    #[async_trait::async_trait]
+    impl ironclaw_llm::LlmProvider for CountingWrapperProvider {
+        fn model_name(&self) -> &str {
+            self.inner.model_name()
+        }
+
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            self.inner.cost_per_token()
+        }
+
+        async fn complete(
+            &self,
+            request: ironclaw_llm::CompletionRequest,
+        ) -> Result<ironclaw_llm::CompletionResponse, ironclaw_llm::LlmError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.complete(request).await
+        }
+
+        async fn complete_with_tools(
+            &self,
+            request: ironclaw_llm::ToolCompletionRequest,
+        ) -> Result<ironclaw_llm::ToolCompletionResponse, ironclaw_llm::LlmError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.complete_with_tools(request).await
+        }
+    }
+
+    /// Minimal nearai `LlmConfig` pointed at a dead endpoint: it *builds* lazily
+    /// (no connection at construction) but any model call errors. Enough to
+    /// exercise gateway/reload wiring without a network.
+    #[cfg(feature = "root-llm-provider")]
+    fn dead_endpoint_nearai_config(session_path: std::path::PathBuf) -> ironclaw_llm::LlmConfig {
+        ironclaw_llm::LlmConfig {
+            backend: "nearai".to_string(),
+            session: ironclaw_llm::SessionConfig {
+                auth_base_url: "http://127.0.0.1:1".to_string(),
+                session_path,
+            },
+            nearai: ironclaw_llm::NearAiConfig {
+                model: "config-model".to_string(),
+                cheap_model: None,
+                base_url: "http://127.0.0.1:1".to_string(),
+                api_key: None,
+                fallback_model: None,
+                max_retries: 0,
+                circuit_breaker_threshold: None,
+                circuit_breaker_recovery_secs: 30,
+                response_cache_enabled: false,
+                response_cache_ttl_secs: 3600,
+                response_cache_max_entries: 1000,
+                failover_cooldown_secs: 300,
+                failover_cooldown_threshold: 3,
+                smart_routing_cascade: false,
+            },
+            provider: None,
+            bedrock: None,
+            gemini_oauth: None,
+            openai_codex: None,
+            request_timeout_secs: 5,
+            cheap_model: None,
+            smart_routing_cascade: false,
+            max_retries: 0,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+        }
+    }
+
+    /// Regression guard for Firat's review: the provider factory (caller
+    /// instrumentation) must survive a live config reload. `build_llm_gateway`
+    /// wraps the factory over the `SwappableLlmProvider`, so reloading — which
+    /// swaps the swappable's *inner* — keeps the wrapper in the call path. If the
+    /// factory were applied to the bare provider instead, the first reload would
+    /// silently drop instrumentation and this test's post-reload count would stay
+    /// at 1.
+    #[cfg(feature = "root-llm-provider")]
+    #[tokio::test]
+    async fn provider_factory_survives_live_reload() {
+        let session_dir = tempfile::tempdir().expect("session tempdir");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_factory = Arc::clone(&calls);
+        let factory: crate::runtime_input::RebornProviderFactory = Arc::new(move |inner| {
+            Arc::new(CountingWrapperProvider {
+                inner,
+                calls: Arc::clone(&calls_for_factory),
+            }) as Arc<dyn ironclaw_llm::LlmProvider>
+        });
+
+        let config = dead_endpoint_nearai_config(session_dir.path().join("session.json"));
+        let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config.clone())
+            .with_provider_factory(factory);
+        let bundle = super::build_llm_gateway(llm)
+            .await
+            .expect("gateway builds with the provider factory");
+
+        // First model call routes through the instrumentation wrapper. The dead
+        // endpoint makes the underlying call error, but the wrapper counts before
+        // delegating, so the result is irrelevant — only that it was observed.
+        let _ = bundle
+            .gateway
+            .stream_model(nearai_gateway_test_request())
+            .await;
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the instrumentation wrapper should observe the first model call"
+        );
+
+        // Live config reload: rebuild the chain and atomically swap the
+        // swappable's inner provider — exactly what the WebUI settings path does.
+        bundle
+            .reload
+            .reload_handle
+            .reload(&config, Arc::clone(&bundle.reload.session))
+            .await
+            .expect("live reload rebuilds the provider chain");
+
+        let _ = bundle
+            .gateway
+            .stream_model(nearai_gateway_test_request())
+            .await;
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the instrumentation wrapper must still observe model calls after a live reload"
+        );
     }
 
     #[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
@@ -4248,6 +4700,78 @@ mod tests {
         assert!(runtime.services().readiness.workers.turn_runner);
 
         runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    /// Regression guard for Firat's review: a trajectory observer is only wired
+    /// through the local-dev capability path, so supplying one to a production
+    /// runtime (no local runtime to observe) must fail fast rather than silently
+    /// produce an empty trajectory.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn build_reborn_runtime_rejects_trajectory_observer_for_production() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Arc::new(
+            libsql::Builder::new_local(dir.path().join("reborn.db"))
+                .build()
+                .await
+                .expect("libsql db"),
+        );
+        let gateway = Arc::new(RecordingGateway {
+            reply: "production".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let observer = Arc::new(RecordingTrajectoryObserver::default());
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::libsql(
+                crate::RebornCompositionProfile::Production,
+                "runtime-observer-reject-owner",
+                db,
+                dir.path().join("events.db").to_string_lossy(),
+                None,
+                ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
+            )
+            .with_production_trust_policy(Arc::new(
+                crate::builtin_first_party_trust_policy().expect("trust policy"),
+            ))
+            .with_runtime_policy(EffectiveRuntimePolicy {
+                deployment: DeploymentMode::HostedMultiTenant,
+                requested_profile: RuntimeProfile::SecureDefault,
+                resolved_profile: RuntimeProfile::SecureDefault,
+                filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+                process_backend: ProcessBackendKind::TenantSandbox,
+                network_mode: NetworkMode::Deny,
+                secret_mode: SecretMode::BrokeredHandles,
+                approval_policy: ApprovalPolicy::AskAlways,
+                audit_mode: AuditMode::Standard,
+            })
+            .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
+                ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(
+                    RecordingSandboxTransport,
+                )),
+            ))),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-observer-reject-tenant".to_string(),
+            agent_id: "runtime-observer-reject-agent".to_string(),
+            source_binding_id: "runtime-observer-reject-source".to_string(),
+            reply_target_binding_id: "runtime-observer-reject-reply".to_string(),
+        })
+        .with_raw_trajectory_observer(observer)
+        .with_model_gateway_override(gateway);
+
+        let err = match build_reborn_runtime(input).await {
+            Ok(runtime) => {
+                runtime.shutdown().await.expect("shutdown");
+                panic!("production runtime must reject a trajectory observer");
+            }
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err, super::RebornRuntimeError::InvalidArgument { ref reason }
+                if reason.contains("trajectory observer") && reason.contains("local-dev")),
+            "expected an InvalidArgument naming the local-dev-only constraint, got {err:#}"
+        );
     }
 
     #[cfg(feature = "libsql")]
@@ -4691,6 +5215,281 @@ mod tests {
         runtime.shutdown().await.expect("runtime shutdown");
     }
 
+    /// End-to-end Trace Commons auto-capture: a real runtime turn through
+    /// `send_user_message` must, for an enrolled owner scope, land a redacted
+    /// envelope in that scope's submission queue without any manual trace
+    /// command. This drives the full chain: turn completion → lifecycle bus →
+    /// best-effort capture sink → thread-history read → redact/score →
+    /// eligibility → queue (+ immediate flush attempt, which fails locally
+    /// against the closed loopback endpoint and must leave the entry queued).
+    #[tokio::test]
+    async fn send_user_message_auto_queues_trace_for_enrolled_scope() {
+        use ironclaw_reborn_traces::contribution as trace_contribution;
+
+        let owner = format!("runtime-trace-capture-owner-{}", uuid::Uuid::new_v4());
+        // Trace state is keyed by the tenant-scoped composite, so enroll (and
+        // later read the queue) under `trace_scope_key(tenant, owner)`, not the
+        // bare owner id.
+        let scope = trace_contribution::trace_scope_key("runtime-trace-capture-tenant", &owner);
+        let policy = trace_contribution::StandingTraceContributionPolicy {
+            enabled: true,
+            // Closed loopback port: the immediate flush fails fast and
+            // locally; no traffic leaves the machine.
+            ingestion_endpoint: Some("https://127.0.0.1:1/v1/traces".to_string()),
+            min_submission_score: 0.0,
+            require_manual_approval_when_pii_detected: false,
+            auto_submit_high_value_traces: true,
+            ..trace_contribution::StandingTraceContributionPolicy::default()
+        };
+        trace_contribution::write_trace_policy_for_scope(Some(&scope), &policy)
+            .expect("write trace policy");
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "auto capture reply".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(&owner, root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-trace-capture-tenant".to_string(),
+            agent_id: "runtime-trace-capture-agent".to_string(),
+            source_binding_id: "runtime-trace-capture-source".to_string(),
+            reply_target_binding_id: "runtime-trace-capture-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: RUNTIME_SEND_TIMEOUT,
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            RUNTIME_SEND_TIMEOUT,
+            runtime.send_user_message(&conversation, "capture this turn"),
+        )
+        .await
+        .expect("runtime send should finish")
+        .expect("runtime send should succeed");
+        assert_eq!(reply.status, TurnStatus::Completed);
+
+        // The capture task is detached from the lifecycle path; poll briefly.
+        let queue_dir =
+            trace_contribution::trace_contribution_dir_for_scope(Some(&scope)).join("queue");
+        let queued = |dir: &std::path::Path| -> Vec<std::path::PathBuf> {
+            match std::fs::read_dir(dir) {
+                Ok(entries) => entries
+                    .map(|entry| {
+                        // Fail loud on a per-entry IO error too, so the test
+                        // can't silently drop a broken entry and still claim the
+                        // queue holds exactly one envelope.
+                        entry
+                            .unwrap_or_else(|error| {
+                                panic!(
+                                    "failed to read a trace queue entry in {}: {error}",
+                                    dir.display()
+                                )
+                            })
+                            .path()
+                    })
+                    .filter(|path| {
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| {
+                                name.ends_with(".json") && !name.ends_with(".held.json")
+                            })
+                    })
+                    .collect(),
+                // The queue dir not existing yet is the expected pre-capture
+                // state; any other IO error is a real failure the test must not
+                // mask as "no queued traces".
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                Err(error) => panic!("failed to read trace queue dir {}: {error}", dir.display()),
+            }
+        };
+        let mut entries = Vec::new();
+        for _ in 0..150 {
+            entries = queued(&queue_dir);
+            if !entries.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            entries.len(),
+            1,
+            "a completed turn for an enrolled scope must auto-queue one trace envelope"
+        );
+        let body = std::fs::read_to_string(&entries[0]).expect("queued envelope readable");
+        let envelope: serde_json::Value = serde_json::from_str(&body).expect("envelope is JSON");
+        assert_eq!(envelope["outcome"]["task_success"], "success");
+
+        runtime.shutdown().await.expect("runtime shutdown");
+        let _ = std::fs::remove_dir_all(trace_contribution::trace_contribution_dir_for_scope(
+            Some(&scope),
+        ));
+    }
+
+    /// Regression guard: `send_user_message` must persist a
+    /// `TurnOwner::Personal` (the bound actor user) in `product_context`,
+    /// not a `TurnOwner::SharedAgent`.  Before the fix, `turn_scope_for`
+    /// built an ownerless scope whose `product_owner` resolved to
+    /// `SharedAgent` because `agent_id` was set and no explicit owner was
+    /// carried.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn send_user_message_persists_personal_owner_for_webui() {
+        use ironclaw_turns::TurnOwner;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let actor_owner_id = "runtime-personal-owner-user";
+        let gateway = Arc::new(RecordingGateway {
+            reply: "owner-check reply".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(actor_owner_id, root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-personal-owner-tenant".to_string(),
+            agent_id: "runtime-personal-owner-agent".to_string(),
+            source_binding_id: "runtime-personal-owner-source".to_string(),
+            reply_target_binding_id: "runtime-personal-owner-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: RUNTIME_SEND_TIMEOUT,
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            RUNTIME_SEND_TIMEOUT,
+            runtime.send_user_message(&conversation, "ping"),
+        )
+        .await
+        .expect("runtime send should finish within timeout")
+        .expect("runtime send should succeed");
+
+        assert_eq!(reply.status, TurnStatus::Completed);
+
+        // Verify the persisted product_context carries Personal{user: actor_user_id},
+        // not SharedAgent.
+        let scope = runtime.turn_scope_for(&conversation.0);
+        let run_state = runtime
+            .turn_coordinator
+            .get_run_state(GetRunStateRequest {
+                scope,
+                run_id: reply.run_id,
+            })
+            .await
+            .expect("get_run_state should succeed");
+
+        let product_context = run_state
+            .product_context
+            .expect("product_context must be set by send_user_message");
+        let expected_user_id = UserId::new(actor_owner_id).expect("actor user id should be valid");
+        assert!(
+            matches!(
+                &product_context.owner,
+                TurnOwner::Personal { user } if user == &expected_user_id
+            ),
+            "send_user_message must persist TurnOwner::Personal{{user: actor_user_id}}, \
+             got {:?}",
+            product_context.owner
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    /// Regression guard: `send_user_message` resolves product context via
+    /// `resolve_web_ui`, which sets `TurnOriginKind::WebUi`.  The runtime
+    /// context section rendered into the model request must therefore contain
+    /// the WebUI origin line produced by
+    /// `LoopRuntimeContext::render_model_content`.  Previously, only the
+    /// persisted `product_context` owner was asserted; this test closes the
+    /// gap by asserting the *rendered* origin appears in the captured model
+    /// request.
+    #[tokio::test]
+    async fn send_user_message_renders_webui_origin_in_model_request() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let gateway = Arc::new(RecordingGateway {
+            reply: "webui-origin-check reply".to_string(),
+            requests: Arc::clone(&requests),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-webui-origin-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-webui-origin-tenant".to_string(),
+            agent_id: "runtime-webui-origin-agent".to_string(),
+            source_binding_id: "runtime-webui-origin-source".to_string(),
+            reply_target_binding_id: "runtime-webui-origin-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: RUNTIME_SEND_TIMEOUT,
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            RUNTIME_SEND_TIMEOUT,
+            runtime.send_user_message(&conversation, "ping"),
+        )
+        .await
+        .expect("runtime send should finish within timeout")
+        .expect("runtime send should succeed");
+
+        assert_eq!(reply.status, TurnStatus::Completed);
+
+        // The runtime-context system message carries the rendered
+        // `LoopRuntimeContext` — its content_ref uses the "runtime" section
+        // prefix stamped by `push_runtime_context`.
+        let runtime_context_content = {
+            let requests = requests
+                .lock()
+                .expect("recording gateway requests lock poisoned");
+            requests[0]
+                .messages
+                .iter()
+                .find(|message| {
+                    message.role == HostManagedModelMessageRole::System
+                        && message
+                            .content_ref
+                            .as_str()
+                            .starts_with("msg:runtime.loop-start.")
+                })
+                .expect(
+                    "model request must include a runtime-context system message \
+                     (content_ref starts with msg:runtime.loop-start.)",
+                )
+                .content
+                .clone()
+        };
+
+        // Exact string produced by LoopRuntimeContext::render_model_content
+        // for TurnOriginKind::WebUi (runtime_context.rs line 225).
+        assert!(
+            runtime_context_content
+                .contains("Run origin: WebUI chat; replies render in this chat."),
+            "runtime-context system message must contain the WebUI origin line, \
+             got: {runtime_context_content:?}"
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
     #[tokio::test]
     async fn send_user_message_until_gate_returns_blocked_on_auth_gate() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -4830,6 +5629,7 @@ mod tests {
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
+                product_context: None,
             })
             .await
             .expect("parent submitted");
@@ -5089,6 +5889,179 @@ mod tests {
         );
 
         runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    /// Records both trajectory callbacks so the e2e test can assert the
+    /// observer fires through a real `build_reborn_runtime` turn — driving the
+    /// input hook (`HostRuntimeLoopCapabilityPort`) and the result hook
+    /// (`LocalDevCapabilityIo::write_capability_result`) on the actual dispatch
+    /// path, not a direct helper call.
+    #[derive(Debug, Default)]
+    struct RecordingTrajectoryObserver {
+        inputs: StdMutex<Vec<(String, String, serde_json::Value)>>,
+        results: StdMutex<Vec<(String, String, serde_json::Value)>>,
+    }
+
+    impl crate::RebornTrajectoryObserver for RecordingTrajectoryObserver {
+        fn on_capability_input(
+            &self,
+            call_id: &str,
+            capability_id: &str,
+            arguments: &serde_json::Value,
+        ) {
+            self.inputs.lock().expect("inputs lock").push((
+                call_id.to_string(),
+                capability_id.to_string(),
+                arguments.clone(),
+            ));
+        }
+
+        fn on_capability_result(
+            &self,
+            call_id: &str,
+            capability_id: &str,
+            output: &serde_json::Value,
+        ) {
+            self.results.lock().expect("results lock").push((
+                call_id.to_string(),
+                capability_id.to_string(),
+                output.clone(),
+            ));
+        }
+    }
+
+    /// End-to-end guard for the #4588 trajectory observer seam: a real runtime
+    /// turn that dispatches the `builtin.echo` capability must fire BOTH the
+    /// input and result callbacks installed via
+    /// `RebornRuntimeInput::with_raw_trajectory_observer`. This drives the
+    /// result hook on the genuine dispatch path (the prior direct-call unit
+    /// test was dropped as false confidence — it stayed green even when
+    /// end-to-end dispatch was broken).
+    #[tokio::test]
+    async fn local_dev_runtime_forwards_tool_call_trajectory_to_raw_observer() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(ToolCallingGateway::default());
+        let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
+        let observer = Arc::new(RecordingTrajectoryObserver::default());
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-trajectory-owner", root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-trajectory-tenant".to_string(),
+            agent_id: "runtime-trajectory-agent".to_string(),
+            source_binding_id: "runtime-trajectory-source".to_string(),
+            reply_target_binding_id: "runtime-trajectory-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        // Raw (not safe-preview) so we can assert verbatim arguments + output.
+        .with_raw_trajectory_observer(observer.clone())
+        .with_model_gateway_override(gateway_for_runtime);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            RUNTIME_SEND_TIMEOUT,
+            runtime.send_user_message(&conversation, "use echo tool"),
+        )
+        .await
+        .expect("runtime send should finish")
+        .expect("runtime send should succeed");
+        assert_eq!(reply.status, TurnStatus::Completed);
+        // Shut down before inspecting the recorded callbacks so the std-Mutex
+        // guards are never held across an `.await` (clippy::await_holding_lock).
+        runtime.shutdown().await.expect("runtime shutdown");
+
+        let echo_id = CapabilityId::new("builtin.echo").unwrap();
+
+        let inputs = observer.inputs.lock().expect("inputs lock");
+        assert_eq!(inputs.len(), 1, "exactly one capability input observed");
+        let (input_call_id, input_capability, arguments) = &inputs[0];
+        assert!(!input_call_id.is_empty(), "input call_id should be present");
+        assert_eq!(input_capability, echo_id.as_str());
+        assert_eq!(
+            arguments,
+            &serde_json::json!({"message": "hello from tool"}),
+            "observer should receive the raw model-emitted tool arguments"
+        );
+
+        let results = observer.results.lock().expect("results lock");
+        assert_eq!(results.len(), 1, "exactly one capability result observed");
+        let (result_call_id, result_capability, output) = &results[0];
+        assert_eq!(result_capability, echo_id.as_str());
+        assert_eq!(
+            result_call_id, input_call_id,
+            "result and input callbacks correlate by call_id"
+        );
+        assert!(
+            output.to_string().contains("hello from tool"),
+            "observer should receive the staged capability output, got {output}"
+        );
+    }
+
+    /// Caller-level guard for the **default** (safe-preview) observer path:
+    /// installing via the public `with_trajectory_observer` and driving a real
+    /// turn with a large tool payload must deliver a *bounded* preview to the
+    /// observer — proving truncation is wired between dispatch and the observer,
+    /// not just unit-tested on the helper in isolation.
+    #[tokio::test]
+    async fn local_dev_runtime_safe_preview_observer_receives_bounded_payload() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(LargeEchoToolCallingGateway::default());
+        let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
+        let observer = Arc::new(RecordingTrajectoryObserver::default());
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-preview-owner", root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-preview-tenant".to_string(),
+            agent_id: "runtime-preview-agent".to_string(),
+            source_binding_id: "runtime-preview-source".to_string(),
+            reply_target_binding_id: "runtime-preview-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        // Default path → safe-preview truncation applied before the observer.
+        .with_trajectory_observer(observer.clone())
+        .with_model_gateway_override(gateway_for_runtime);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            RUNTIME_SEND_TIMEOUT,
+            runtime.send_user_message(&conversation, "echo a big payload"),
+        )
+        .await
+        .expect("runtime send should finish")
+        .expect("runtime send should succeed");
+        assert_eq!(reply.status, TurnStatus::Completed);
+        // Shut down before inspecting the recorded callbacks so the std-Mutex
+        // guards are never held across an `.await` (clippy::await_holding_lock).
+        runtime.shutdown().await.expect("runtime shutdown");
+
+        let original_len = LARGE_ECHO_MESSAGE.repeat(100).len();
+
+        let inputs = observer.inputs.lock().expect("inputs lock");
+        assert_eq!(inputs.len(), 1, "exactly one capability input observed");
+        let observed_message = inputs[0].2["message"].as_str().expect("message string");
+        assert!(
+            observed_message.len() < original_len && observed_message.contains("[truncated"),
+            "observer should receive a truncated preview of the large argument, got {} bytes",
+            observed_message.len()
+        );
+
+        let results = observer.results.lock().expect("results lock");
+        assert_eq!(results.len(), 1, "exactly one capability result observed");
+        assert!(
+            results[0].2.to_string().contains("[truncated"),
+            "observer should receive a truncated preview of the large result"
+        );
     }
 
     #[tokio::test]
@@ -6776,6 +7749,7 @@ mod tests {
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
+                product_context: None,
             })
             .await
             .expect("submit turn");
@@ -7259,6 +8233,231 @@ mod tests {
             reply.text,
         );
         assert_eq!(reply.text.as_deref(), Some("multi-tool surface-change ok"));
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    /// Regression guard: a message that arrives while the thread is busy is stored with
+    /// `RejectedBusy` status and must NOT be auto-resubmitted when the blocking run
+    /// reaches a terminal state.
+    ///
+    /// Scenario:
+    ///  A – submitted via `turn_coordinator.submit_turn`; worker is stopped so it stays
+    ///      Queued and holds the active-lock.
+    ///  B – submitted via `bundle.api.submit_turn` (WebUI path); thread is busy → stored
+    ///      as `RejectedBusy`; response carries a non-empty `notice`.
+    ///  Cancel A → B stays `RejectedBusy` (no auto-resubmission).
+    ///  C – submitted after A is cancelled; thread is free → `Submitted`.
+    ///
+    /// arch-note: lives in runtime.rs (adds ~200 lines to an already >3000-line file) because
+    /// it requires `build_reborn_runtime` + full turn-runner control that only the runtime test
+    /// harness provides; moving it would require duplicating that harness. Decomposition of
+    /// runtime.rs is tracked in plan #4471.
+    #[tokio::test]
+    async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "busy-drain ok".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-rejected-busy-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-rejected-busy-tenant".to_string(),
+            agent_id: "runtime-rejected-busy-agent".to_string(),
+            source_binding_id: "runtime-rejected-busy-source".to_string(),
+            reply_target_binding_id: "runtime-rejected-busy-reply".to_string(),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        // Stop the worker so run A stays Queued and holds the thread active-lock.
+        stop_turn_runner_worker_for_manual_state_test(&runtime).await;
+
+        let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new("runtime-rejected-busy-tenant").unwrap(),
+            UserId::new("runtime-rejected-busy-owner").unwrap(),
+            Some(AgentId::new("runtime-rejected-busy-agent").unwrap()),
+            None,
+        );
+
+        // Create the thread via WebUI so the thread record exists.
+        let created = bundle
+            .api
+            .create_thread(
+                caller.clone(),
+                WebUiCreateThreadRequest {
+                    client_action_id: Some("create-rejected-busy-thread".to_string()),
+                    requested_thread_id: None,
+                },
+            )
+            .await
+            .expect("create thread");
+        let thread_id = created.thread.thread_id.clone();
+
+        // Submit message A directly so we hold the active-lock (worker is stopped,
+        // so the run stays Queued indefinitely).
+        let scope = caller.turn_scope(thread_id.clone());
+        let actor = caller.actor();
+        let submitted_a = runtime
+            .turn_coordinator
+            .submit_turn(SubmitTurnRequest {
+                scope: scope.clone(),
+                actor: actor.clone(),
+                accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy-a").unwrap(),
+                source_binding_ref: SourceBindingRef::new("source:rejected-busy-a").unwrap(),
+                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:rejected-busy-a")
+                    .unwrap(),
+                requested_run_profile: None,
+                idempotency_key: IdempotencyKey::new("rejected-busy-a").unwrap(),
+                received_at: Utc::now(),
+                requested_run_id: None,
+                parent_run_id: None,
+                subagent_depth: 0,
+                spawn_tree_root_run_id: None,
+                product_context: None,
+            })
+            .await
+            .expect("message A submitted");
+        let SubmitTurnResponse::Accepted {
+            run_id: run_id_a, ..
+        } = submitted_a;
+
+        // Submit message B through the WebUI path — thread is busy, must get RejectedBusy.
+        let response_b = bundle
+            .api
+            .submit_turn(
+                caller.clone(),
+                WebUiSendMessageRequest {
+                    client_action_id: Some("send-rejected-busy-b".to_string()),
+                    thread_id: Some(thread_id.to_string()),
+                    content: Some("message B while thread is busy".to_string()),
+                    attachments: Vec::new(),
+                },
+            )
+            .await
+            .expect("message B submit should not error");
+
+        let RebornSubmitTurnResponse::RejectedBusy {
+            notice: notice_b,
+            active_run_id: busy_run_id,
+            ..
+        } = response_b
+        else {
+            panic!("expected RejectedBusy for message B, got {response_b:?}");
+        };
+        assert_eq!(
+            busy_run_id,
+            Some(run_id_a),
+            "RejectedBusy should report run A as the active run"
+        );
+        assert!(
+            !notice_b.is_empty(),
+            "RejectedBusy response must carry a non-empty notice"
+        );
+
+        // Verify message B is stored with RejectedBusy status.
+        let history = runtime
+            .thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: runtime.thread_scope.clone(),
+                thread_id: thread_id.clone(),
+            })
+            .await
+            .expect("thread history after B");
+        let rejected_messages: Vec<_> = history
+            .messages
+            .iter()
+            .filter(|m| matches!(m.status, MessageStatus::RejectedBusy))
+            .collect();
+        assert_eq!(
+            rejected_messages.len(),
+            1,
+            "exactly one message should be stored as RejectedBusy after thread-busy submit"
+        );
+        assert_eq!(
+            rejected_messages[0].kind,
+            MessageKind::User,
+            "the RejectedBusy message must be of kind User"
+        );
+
+        // Cancel run A — this is the terminal event that (must NOT) auto-resubmit B.
+        runtime
+            .cancel_run(
+                &scope,
+                run_id_a,
+                SanitizedCancelReason::UserRequested,
+                "rejected-busy-cancel-a",
+            )
+            .await
+            .expect("run A cancellation succeeds");
+
+        // B must remain RejectedBusy — no auto-resubmission should have fired.
+        let history_after_cancel = runtime
+            .thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: runtime.thread_scope.clone(),
+                thread_id: thread_id.clone(),
+            })
+            .await
+            .expect("thread history after cancel");
+        // Identify message B by the message_id we captured from the pre-cancel history.
+        // Using the stable message_id (rather than a simple RejectedBusy count) ensures
+        // a regression that leaves the RejectedBusy row AND adds a Submitted row for the
+        // same message cannot slip past as "still one RejectedBusy".
+        let msg_b_id = rejected_messages[0].message_id;
+
+        let msg_b_after_cancel: Vec<_> = history_after_cancel
+            .messages
+            .iter()
+            .filter(|m| m.message_id == msg_b_id)
+            .collect();
+        assert_eq!(
+            msg_b_after_cancel.len(),
+            1,
+            "message B must appear exactly once in history after run A is cancelled"
+        );
+        assert_eq!(
+            msg_b_after_cancel[0].status,
+            MessageStatus::RejectedBusy,
+            "message B must still be RejectedBusy after run A is cancelled — no auto-resubmission"
+        );
+        // Guard: no additional Submitted row must have been created for message B's message_id.
+        let submitted_for_b: Vec<_> = history_after_cancel
+            .messages
+            .iter()
+            .filter(|m| matches!(m.status, MessageStatus::Submitted) && m.message_id == msg_b_id)
+            .collect();
+        assert!(
+            submitted_for_b.is_empty(),
+            "no Submitted row must exist for message B after run A is cancelled — got {submitted_for_b:?}"
+        );
+
+        // Submit message C — thread is free again, must be Submitted.
+        let response_c = bundle
+            .api
+            .submit_turn(
+                caller.clone(),
+                WebUiSendMessageRequest {
+                    client_action_id: Some("send-rejected-busy-c".to_string()),
+                    thread_id: Some(thread_id.to_string()),
+                    content: Some("message C after thread is free".to_string()),
+                    attachments: Vec::new(),
+                },
+            )
+            .await
+            .expect("message C submit should not error");
+
+        assert!(
+            matches!(response_c, RebornSubmitTurnResponse::Submitted { .. }),
+            "message C must be accepted after run A is cancelled, got {response_c:?}"
+        );
 
         runtime.shutdown().await.expect("runtime shutdown");
     }

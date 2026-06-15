@@ -41,11 +41,13 @@ use ironclaw_product_workflow::{
     RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
     RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
     RebornSkillSearchResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
+    RebornTraceHoldAuthorizeResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    WebUiAttachmentCapabilities, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
     WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest,
+    WebUiSetupExtensionRequest, webui_attachment_capabilities,
 };
 use serde::{Deserialize, Serialize};
 
@@ -59,6 +61,11 @@ pub struct WebUiV2SessionResponse {
     pub tenant_id: String,
     pub user_id: String,
     pub capabilities: WebUiV2Capabilities,
+    /// Inline-attachment contract (allowed `accept` tokens + size budgets)
+    /// the browser advertises on its file picker. Generated from the shared
+    /// format registry so the picker can never drift from the server's
+    /// allowed set; the send-message decode remains authoritative.
+    pub attachments: WebUiAttachmentCapabilities,
 }
 
 /// `GET /api/webchat/v2/session`
@@ -70,6 +77,7 @@ pub async fn get_session(
         tenant_id: caller.tenant_id.to_string(),
         user_id: caller.user_id.to_string(),
         capabilities,
+        attachments: webui_attachment_capabilities(),
     })
 }
 
@@ -570,6 +578,41 @@ pub struct ListAutomationsQuery {
     /// Optional maximum number of recent runs to return per automation row.
     #[serde(default)]
     pub run_limit: Option<u32>,
+}
+
+/// `GET /api/webchat/v2/traces/credit`
+///
+/// Read-only Trace Commons credit summary scoped strictly to the
+/// authenticated caller — the facade derives the trace scope from the
+/// caller's user id; no scope input is accepted from the request. The
+/// response is the contributor-local view as of the last credit sync;
+/// the authoritative ledger is server-side. A caller with no local
+/// Trace Commons state receives the unenrolled zero-state, not an
+/// error.
+pub async fn trace_credits(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornTraceCreditsResponse>, WebUiV2HttpError> {
+    let response = state.services().trace_credits(caller).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/traces/holds/{submission_id}/authorize`
+///
+/// Authorize a held manual-review trace for submission (promote-as-is). The
+/// trace scope is derived from the authenticated caller; the `submission_id`
+/// path segment is never authority to cross scopes. A missing/already-resolved
+/// hold returns `{ authorized: false }`, not an error.
+pub async fn authorize_trace_hold(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(submission_id): Path<String>,
+) -> Result<Json<RebornTraceHoldAuthorizeResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .authorize_trace_hold(caller, submission_id)
+        .await?;
+    Ok(Json(response))
 }
 
 /// `GET /api/webchat/v2/channels/connectable`

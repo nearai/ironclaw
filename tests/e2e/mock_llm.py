@@ -21,6 +21,13 @@ DENIAL_PATTERN = re.compile(
 
 CANNED_RESPONSES = [
     (re.compile(r"empty routine response", re.IGNORECASE), ""),
+    # Reborn attachment e2e: the inbound pipeline extracts a document's text
+    # and folds it into the model-visible <attachments> block. A unique marker
+    # in the uploaded file proves the extracted text reached the prompt.
+    (
+        re.compile(r"IRONCLAW_ATTACHMENT_MARKER_4644", re.IGNORECASE),
+        "I can read the attached document text.",
+    ),
     # Markdown link reply for the WebChat v2 "links open in a new tab" smoke.
     # The renderer must add target=_blank to the rendered anchor.
     (re.compile(r"link test", re.IGNORECASE),

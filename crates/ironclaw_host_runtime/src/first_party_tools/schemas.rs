@@ -181,6 +181,68 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["subagent_type", "task"],
             "additionalProperties": false
         }),
+        "schemas/builtin/trace_commons-onboard.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "invite_url": {
+                    "type": "string",
+                    "description": "Trace Commons operator-issued invite link (https://…/onboard#CODE)"
+                },
+                "include_message_text": {
+                    "type": "boolean",
+                    "description": "Whether contributions may include redacted message text (default: false)"
+                },
+                "include_tool_payloads": {
+                    "type": "boolean",
+                    "description": "Whether contributions may include redacted tool payloads (default: false)"
+                },
+                "confirmed": {
+                    "type": "boolean",
+                    "description": "Must be true only after the user has explicitly consented in this conversation (default: false)"
+                }
+            },
+            "required": ["invite_url"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trace_commons-status.input.v1.json" => json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trace_commons-credits.input.v1.json" => json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trace_commons-profile_token.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "confirmed": {
+                    "type": "boolean",
+                    "description": "Must be true only after the user has explicitly asked to mint a manual/browser profile-management token in this conversation (default: false)"
+                }
+            },
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trace_commons-profile_set.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "display_handle": {
+                    "type": "string",
+                    "description": "Pseudonymous public display handle, 3-32 ASCII letters, digits, '-' or '_'"
+                },
+                "bio": {
+                    "type": "string",
+                    "description": "Optional short public bio, at most 280 bytes"
+                },
+                "confirmed": {
+                    "type": "boolean",
+                    "description": "Must be true only after the user has explicitly approved publishing this handle/bio in this conversation (default: false)"
+                }
+            },
+            "required": ["display_handle"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/read_file.input.v1.json" => json!({
             "type": "object",
             "properties": {

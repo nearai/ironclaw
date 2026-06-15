@@ -14,8 +14,8 @@ use thiserror::Error;
 
 use crate::{
     AcceptedMessageRef, LoopDiagnosticRef, LoopGateRef, LoopMessageRef, LoopResultRef,
-    RedactedCheckpointPayload, RunProfileVersion, TurnActor, TurnCheckpointId, TurnId, TurnRunId,
-    TurnScope,
+    ProductTurnContext, RedactedCheckpointPayload, RunProfileVersion, TurnActor, TurnCheckpointId,
+    TurnId, TurnRunId, TurnScope,
 };
 
 use super::{
@@ -548,6 +548,8 @@ pub struct LoopRunContext {
     pub loop_driver_version: RunProfileVersion,
     pub checkpoint_schema_id: CheckpointSchemaId,
     pub checkpoint_schema_version: RunProfileVersion,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product_context: Option<ProductTurnContext>,
 }
 
 impl LoopRunContext {
@@ -575,6 +577,7 @@ impl LoopRunContext {
             loop_driver_version,
             checkpoint_schema_id,
             checkpoint_schema_version,
+            product_context: None,
         }
     }
 
@@ -594,6 +597,11 @@ impl LoopRunContext {
 
     pub fn with_resolved_model_route(mut self, snapshot: LoopModelRouteSnapshot) -> Self {
         self.resolved_model_route = Some(snapshot);
+        self
+    }
+
+    pub fn with_product_context(mut self, product_context: ProductTurnContext) -> Self {
+        self.product_context = Some(product_context);
         self
     }
 }
@@ -1474,6 +1482,20 @@ pub struct CapabilityAuthResume {
     /// The two sub-fields are always set together; see [`AuthResumeApprovalIdentity`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prior_approval: Option<AuthResumeApprovalIdentity>,
+    /// Original runtime input captured when the auth gate was produced.
+    ///
+    /// Capability input refs are scoped to a loop run and may be consumed by the
+    /// first dispatch before the auth gate is resolved. When present, this
+    /// replay payload lets auth-resume re-dispatch without resolving a stale or
+    /// already-consumed input ref.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<CapabilityAuthResumeReplay>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityAuthResumeReplay {
+    pub input: serde_json::Value,
+    pub estimate: ResourceEstimate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1503,6 +1525,8 @@ pub enum CapabilityOutcome {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
         safe_summary: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth_resume: Option<CapabilityAuthResume>,
     },
     ResourceBlocked {
         gate_ref: LoopGateRef,

@@ -51,6 +51,15 @@ enum CompactionMessageDisposition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CompactionSkipReason {
     CapabilityDisplayPreview,
+    /// The message has a stable terminal status that is not model-visible (e.g.
+    /// `RejectedBusy`, where the user must explicitly resend and the message
+    /// will never be auto-retried).  It is silently excluded from the compacted
+    /// transcript but does not block the range from completing.
+    ///
+    /// Note: `DeferredBusy` is NOT classified here — legacy rows can still
+    /// transition to `Submitted` via the inbound replay path, so they are
+    /// deferred until they reach a stable status.
+    StableNonModelVisible,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -311,6 +320,15 @@ where
                 deferred_reason = Some(reason);
             }
             CompactionMessageDisposition::Include if terminal.kind == MessageKind::User => {}
+            // A stable-non-model-visible terminal (e.g. RejectedBusy) is a legal
+            // cut point: it is excluded from the compacted output (same as the
+            // in-range SkipEphemeral branch below) and compaction proceeds normally.
+            // Only StableNonModelVisible qualifies — other ephemeral skips (e.g.
+            // CapabilityDisplayPreview) are not valid terminals and fall through
+            // to InvalidCutPoint below.
+            CompactionMessageDisposition::SkipEphemeral(
+                CompactionSkipReason::StableNonModelVisible,
+            ) => {}
             CompactionMessageDisposition::Include
             | CompactionMessageDisposition::SkipEphemeral(_)
             | CompactionMessageDisposition::RejectInvalid(_) => {
@@ -343,11 +361,23 @@ where
             return Ok(defer_compaction(reason));
         }
 
+        // The summary span ends at the last model-visible message so it does not cover
+        // trailing non-visible terminal messages (e.g. RejectedBusy), which would make
+        // the backend skip the replacement summary (summary_covers_hidden_content).
+        //
+        // An empty `validated_messages` means the range had nothing model-visible to
+        // summarize (e.g. only a terminal RejectedBusy). That is not a valid cut point —
+        // proceeding to build_input/inference would persist a meaningless empty summary.
+        let last_visible_seq = match validated_messages.last() {
+            Some(message) => message.sequence,
+            None => return Err(CompactionError::InvalidCutPoint),
+        };
+
         Ok(CompactionRangeDecision::Ready(ValidatedCompactionRange {
             thread_id: request.thread_id.clone(),
             thread_scope,
             start_sequence: start_exclusive.saturating_add(1),
-            end_sequence: request.drop_through_seq,
+            end_sequence: last_visible_seq,
             messages: validated_messages,
         }))
     }
@@ -540,6 +570,20 @@ fn classify_compaction_message(
     if matches!(status, MessageStatus::Redacted | MessageStatus::Deleted) {
         return CompactionMessageDisposition::RejectInvalid(
             CompactionRejectReason::UnsupportedStatus,
+        );
+    }
+    // RejectedBusy is terminal and non-model-visible: the user must explicitly
+    // resend and the message will never be auto-retried, so skipping it is safe
+    // and prevents it from blocking compaction ranges indefinitely.
+    //
+    // DeferredBusy is NOT terminal: legacy rows can still transition to Submitted
+    // via the inbound replay path, which would make the message model-visible
+    // after a compaction summary was produced without it — silently omitting a
+    // user message from compacted context.  Defer until it reaches a stable
+    // status, exactly like Draft/Interrupted/Superseded.
+    if matches!(status, MessageStatus::RejectedBusy) {
+        return CompactionMessageDisposition::SkipEphemeral(
+            CompactionSkipReason::StableNonModelVisible,
         );
     }
     if matches!(

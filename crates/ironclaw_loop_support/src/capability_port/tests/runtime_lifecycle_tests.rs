@@ -614,6 +614,116 @@ async fn runtime_auth_gate_forwards_credential_requirements() {
 }
 
 #[tokio::test]
+async fn auth_resume_uses_replay_input_without_resolving_stale_input_ref() {
+    let capability_id = CapabilityId::new("gmail.list_messages").expect("valid capability id");
+    let provider_id = ExtensionId::new("gmail").expect("valid provider id");
+    let runtime = Arc::new(
+        QueuedHostRuntime::new(
+            vec![visible_capability(
+                capability_id.clone(),
+                provider_id.clone(),
+            )],
+            vec![Ok(RuntimeCapabilityOutcome::AuthRequired(
+                RuntimeAuthGate {
+                    gate_id: RuntimeGateId::new(),
+                    capability_id: capability_id.clone(),
+                    reason: RuntimeBlockedReason::AuthRequired,
+                    required_secrets: Vec::new(),
+                    credential_requirements: Vec::new(),
+                },
+            ))],
+        )
+        .with_auth_resume_outcomes(vec![Ok(RuntimeCapabilityOutcome::Completed(
+            Box::new(RuntimeCapabilityCompleted {
+                capability_id: capability_id.clone(),
+                output: serde_json::json!({"auth_resumed": true}),
+                display_preview: None,
+                usage: ResourceUsage::default(),
+            }),
+        ))]),
+    );
+    let resolver = Arc::new(OneShotInputResolver::new(serde_json::json!({
+        "query": "is:unread",
+        "max_results": 10
+    })));
+    let mut context = execution_context("thread-auth-resume-replay");
+    let run_context = loop_run_context(&context).await;
+    let input_ref = CapabilityInputRef::new(format!("input:{}:gmail-list", run_context.run_id))
+        .expect("valid input ref");
+    let loop_driver_extension =
+        loop_driver_execution_extension_id(&run_context).expect("valid extension id");
+    context.grants.grants.push(dispatch_capability_grant(
+        &capability_id,
+        &loop_driver_extension,
+    ));
+    let port = HostRuntimeLoopCapabilityPortFactory::new(
+        runtime.clone(),
+        visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
+            provider_id,
+            dispatch_trust_decision(),
+        )])),
+        resolver.clone(),
+        Arc::new(RecordingResultWriter::default()),
+        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default()),
+    )
+    .port_for_run_context(run_context);
+    let surface = port
+        .visible_capabilities(VisibleCapabilityRequest {})
+        .await
+        .expect("visible capabilities load");
+
+    let auth_blocked = port
+        .invoke_capability(CapabilityInvocation {
+            surface_version: surface.version.clone(),
+            capability_id: capability_id.clone(),
+            input_ref: input_ref.clone(),
+            approval_resume: None,
+            auth_resume: None,
+        })
+        .await
+        .expect("first dispatch reaches auth gate");
+    let CapabilityOutcome::AuthRequired {
+        auth_resume: Some(auth_resume),
+        ..
+    } = auth_blocked
+    else {
+        panic!("auth gate must carry replay metadata, got {auth_blocked:?}");
+    };
+    assert_eq!(
+        resolver.resolve_count(),
+        1,
+        "first dispatch resolves the staged input once"
+    );
+
+    let auth_resumed = port
+        .invoke_capability(CapabilityInvocation {
+            surface_version: surface.version,
+            capability_id,
+            input_ref,
+            approval_resume: None,
+            auth_resume: Some(auth_resume),
+        })
+        .await
+        .expect("auth resume must use replay input instead of resolving input_ref again");
+    assert!(
+        matches!(auth_resumed, CapabilityOutcome::Completed(_)),
+        "auth resume must dispatch and complete, got {auth_resumed:?}"
+    );
+    assert_eq!(
+        resolver.resolve_count(),
+        1,
+        "auth resume must not resolve the stale input ref"
+    );
+    let requests = runtime.auth_resume_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].input,
+        serde_json::json!({"query": "is:unread", "max_results": 10}),
+        "auth resume runtime request must receive the original input"
+    );
+}
+
+#[tokio::test]
 async fn runtime_capability_unknown_outcome_with_invalid_kind_does_not_emit_failure_milestone() {
     let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
     let provider_id = ExtensionId::new("demo").expect("valid provider id");
@@ -979,6 +1089,10 @@ async fn auth_resume_after_approval_reuses_original_invocation_identity() {
                     approval_request_id,
                     correlation_id: original_correlation_id,
                 }),
+                replay: Some(ironclaw_turns::run_profile::CapabilityAuthResumeReplay {
+                    input: resume.input.clone(),
+                    estimate: resume.estimate.clone(),
+                }),
             }),
         })
         .await
@@ -1112,6 +1226,42 @@ impl LoopCapabilityInputResolver for InputRefEchoResolver {
         input_ref: &CapabilityInputRef,
     ) -> Result<serde_json::Value, AgentLoopHostError> {
         Ok(serde_json::json!({ "input_ref": input_ref.as_str() }))
+    }
+}
+
+struct OneShotInputResolver {
+    payload: serde_json::Value,
+    resolve_count: AtomicUsize,
+}
+
+impl OneShotInputResolver {
+    fn new(payload: serde_json::Value) -> Self {
+        Self {
+            payload,
+            resolve_count: AtomicUsize::new(0),
+        }
+    }
+
+    fn resolve_count(&self) -> usize {
+        self.resolve_count.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl LoopCapabilityInputResolver for OneShotInputResolver {
+    async fn resolve_capability_input(
+        &self,
+        _run_context: &LoopRunContext,
+        _input_ref: &CapabilityInputRef,
+    ) -> Result<serde_json::Value, AgentLoopHostError> {
+        if self.resolve_count.fetch_add(1, Ordering::SeqCst) == 0 {
+            Ok(self.payload.clone())
+        } else {
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::ScopeMismatch,
+                "capability input ref is not scoped to this loop run",
+            ))
+        }
     }
 }
 
@@ -1255,6 +1405,8 @@ impl HostRuntime for ApprovalResumeRecordingRuntime {
 struct QueuedHostRuntime {
     capabilities: Vec<VisibleCapability>,
     outcomes: Mutex<VecDeque<Result<RuntimeCapabilityOutcome, HostRuntimeError>>>,
+    auth_resume_outcomes: Mutex<VecDeque<Result<RuntimeCapabilityOutcome, HostRuntimeError>>>,
+    auth_resume_requests: Mutex<Vec<RuntimeCapabilityAuthResumeRequest>>,
 }
 
 impl QueuedHostRuntime {
@@ -1265,7 +1417,27 @@ impl QueuedHostRuntime {
         Self {
             capabilities,
             outcomes: Mutex::new(VecDeque::from(outcomes)),
+            auth_resume_outcomes: Mutex::new(VecDeque::new()),
+            auth_resume_requests: Mutex::new(Vec::new()),
         }
+    }
+
+    fn with_auth_resume_outcomes(
+        self,
+        outcomes: Vec<Result<RuntimeCapabilityOutcome, HostRuntimeError>>,
+    ) -> Self {
+        *self
+            .auth_resume_outcomes
+            .lock()
+            .expect("auth resume outcomes lock") = VecDeque::from(outcomes);
+        self
+    }
+
+    fn auth_resume_requests(&self) -> Vec<RuntimeCapabilityAuthResumeRequest> {
+        self.auth_resume_requests
+            .lock()
+            .expect("auth resume requests lock")
+            .clone()
     }
 }
 
@@ -1287,6 +1459,21 @@ impl HostRuntime for QueuedHostRuntime {
         _request: RuntimeCapabilityResumeRequest,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         unreachable!("queued host runtime should not resume")
+    }
+
+    async fn auth_resume_capability(
+        &self,
+        request: RuntimeCapabilityAuthResumeRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        self.auth_resume_requests
+            .lock()
+            .expect("auth resume requests lock")
+            .push(request);
+        self.auth_resume_outcomes
+            .lock()
+            .expect("auth resume outcomes lock")
+            .pop_front()
+            .expect("queued host runtime auth resume outcome")
     }
 
     async fn visible_capabilities(
