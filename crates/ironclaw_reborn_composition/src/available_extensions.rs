@@ -1594,6 +1594,41 @@ mod tests {
     }
 
     #[test]
+    fn bundled_web_access_defers_github_repository_tasks_to_github_extension() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "web-access").unwrap();
+        let package = catalog.resolve(&package_ref).unwrap();
+        let search = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "web-access.search")
+            .expect("web access search capability");
+        assert!(
+            search
+                .description
+                .contains("Prefer GitHub extension capabilities"),
+            "web-access.search description should route GitHub repository data to GitHub tools"
+        );
+
+        let prompt_asset = package
+            .assets
+            .iter()
+            .find(|asset| asset.path == "prompts/web-access/search.md")
+            .expect("web access search prompt");
+        let AvailableExtensionAssetContent::Bytes(bytes) = &prompt_asset.content else {
+            panic!("web access prompt should be bundled bytes");
+        };
+        let prompt = std::str::from_utf8(bytes).expect("prompt should be UTF-8");
+        assert!(
+            prompt.contains("prefer the GitHub extension capabilities"),
+            "web-access.search prompt should route GitHub repository data to GitHub tools"
+        );
+    }
+
+    #[test]
     fn bundled_extension_summaries_include_onboarding_messages() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
 

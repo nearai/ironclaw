@@ -52,7 +52,7 @@ impl HttpSaveMode {
 pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
     http_manifest(
         HTTP_CAPABILITY_ID,
-        "Perform an outbound HTTP request through host egress. Redirect responses are returned; the host transport does not follow them.",
+        "Perform an outbound HTTP request through host egress. Redirect responses are returned; the host transport does not follow them. Prefer GitHub extension capabilities for GitHub repository, issue, pull request, release, or workflow data when they are available.",
         vec![EffectKind::DispatchCapability, EffectKind::Network],
     )
 }
@@ -60,7 +60,7 @@ pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
 pub(super) fn save_manifest() -> Result<CapabilityManifest, ExtensionError> {
     http_manifest(
         HTTP_SAVE_CAPABILITY_ID,
-        "Perform an outbound HTTP request through host egress and save the sanitized response body through scoped filesystem authority.",
+        "Perform an outbound HTTP request through host egress and save the sanitized response body through scoped filesystem authority. Prefer GitHub extension capabilities for GitHub repository, issue, pull request, release, or workflow data when they are available.",
         vec![
             EffectKind::DispatchCapability,
             EffectKind::Network,
