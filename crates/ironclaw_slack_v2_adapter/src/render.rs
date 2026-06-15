@@ -96,23 +96,24 @@ pub fn render_auth_prompt(
 }
 
 fn gate_prompt_reply_instruction(target: &ProductOutboundTarget, gate_ref: &str) -> String {
+    // `gate_ref` already carries its `gate:` prefix (e.g. `gate:approval-…`).
+    // DMs resolve a bare reply in-place; channels need an @mention to be heard.
+    // The explicit `approve <gate_ref>` form works from any conversation.
     if requires_app_mention(target) {
         return format!(
-            "Mention this app in this Slack thread with `approve` or `deny`. If the thread has multiple pending approvals, use `approve {gate_ref}` or `deny {gate_ref}`."
+            "Mention me with `approve` or `deny` in this thread — or from any DM/channel, `approve {gate_ref}`."
         );
     }
-    format!(
-        "Reply `approve` or `deny` in this Slack thread. If the thread has multiple pending approvals, use `approve {gate_ref}` or `deny {gate_ref}`."
-    )
+    format!("Reply `approve` or `deny` here — or from any DM/channel, `approve {gate_ref}`.")
 }
 
 fn auth_prompt_reply_instruction(target: &ProductOutboundTarget, auth_request_ref: &str) -> String {
     if requires_app_mention(target) {
         return format!(
-            "Mention this app in this Slack thread with `auth deny {auth_request_ref}` to cancel this blocked run."
+            "Mention me with `auth deny {auth_request_ref}` in this thread to cancel this run."
         );
     }
-    format!("Reply `auth deny {auth_request_ref}` to cancel this blocked run.")
+    format!("Reply `auth deny {auth_request_ref}` here to cancel this run.")
 }
 
 fn requires_app_mention(target: &ProductOutboundTarget) -> bool {

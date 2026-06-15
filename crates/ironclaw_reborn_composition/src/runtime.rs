@@ -1057,6 +1057,14 @@ impl RebornRuntime {
         self.turn_coordinator.clone()
     }
 
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) fn auth_challenge_provider(&self) -> Option<Arc<dyn crate::AuthChallengeProvider>> {
+        self.services
+            .product_auth
+            .as_ref()
+            .and_then(|product_auth| product_auth.as_auth_challenge_provider())
+    }
+
     pub(crate) fn webui_event_stream(&self) -> Arc<dyn ProjectionStream> {
         self.projection_services.webui_event_stream()
     }
@@ -1067,14 +1075,6 @@ impl RebornRuntime {
 
     pub(crate) fn webui_auth_interaction_service(&self) -> Arc<dyn AuthInteractionService> {
         self.auth_interaction_service.clone()
-    }
-
-    #[cfg(feature = "slack-v2-host-beta")]
-    pub(crate) fn auth_challenge_provider(&self) -> Option<Arc<dyn crate::AuthChallengeProvider>> {
-        self.services
-            .product_auth
-            .as_ref()
-            .and_then(|product_auth| product_auth.as_auth_challenge_provider())
     }
 
     /// Wire the triggered-run delivery hook into the already-spawned trigger

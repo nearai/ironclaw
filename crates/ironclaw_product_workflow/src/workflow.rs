@@ -1483,8 +1483,11 @@ fn rejection_kind_for_approval_interaction(
         ApprovalInteractionRejectionKind::AmbiguousGate => {
             ProductRejectionKind::AmbiguousResolution
         }
-        ApprovalInteractionRejectionKind::StaleGate
-        | ApprovalInteractionRejectionKind::InvalidGateRef
+        // StaleGate means the gate was already approved or denied — map to its own
+        // distinct kind so callers can show "already resolved" wording rather than
+        // "declined by policy".
+        ApprovalInteractionRejectionKind::StaleGate => ProductRejectionKind::StaleGate,
+        ApprovalInteractionRejectionKind::InvalidGateRef
         | ApprovalInteractionRejectionKind::AlwaysAllowUnsupported
         | ApprovalInteractionRejectionKind::UnsupportedAction
         | ApprovalInteractionRejectionKind::LeaseTermsUnavailable
@@ -1702,5 +1705,59 @@ mod tests {
         assert!(!should_settle_ack(&ProductInboundAck::Rejected(
             ProductRejection::retryable(ProductRejectionKind::PolicyDenied, "try later")
         )));
+    }
+
+    // BUG 3 regression: StaleGate must map to ProductRejectionKind::StaleGate,
+    // not PolicyDenied. A `deny` followed by an `approve` produces a
+    // StaleGate error, and the user must see "already resolved" wording.
+    #[test]
+    fn stale_gate_maps_to_stale_gate_not_policy_denied() {
+        let kind =
+            rejection_kind_for_approval_interaction(ApprovalInteractionRejectionKind::StaleGate);
+        assert_eq!(
+            kind,
+            ProductRejectionKind::StaleGate,
+            "StaleGate must map to ProductRejectionKind::StaleGate, not PolicyDenied"
+        );
+        assert_ne!(
+            kind,
+            ProductRejectionKind::PolicyDenied,
+            "StaleGate must NOT map to PolicyDenied"
+        );
+    }
+
+    #[test]
+    fn stale_gate_terminal_ack_carries_stale_gate_kind() {
+        let ack = terminal_ack_for_error(&ProductWorkflowError::ApprovalInteractionRejected {
+            kind: ApprovalInteractionRejectionKind::StaleGate,
+        })
+        .expect("stale gate is a terminal (non-retryable) error");
+        assert!(
+            matches!(
+                ack,
+                ProductInboundAck::Rejected(ref rejection)
+                    if rejection.kind == ProductRejectionKind::StaleGate
+            ),
+            "expected StaleGate rejection kind, got: {ack:?}"
+        );
+    }
+
+    #[test]
+    fn other_approval_kinds_still_map_to_policy_denied() {
+        use ApprovalInteractionRejectionKind::*;
+        for kind in [
+            InvalidGateRef,
+            AlwaysAllowUnsupported,
+            UnsupportedAction,
+            LeaseTermsUnavailable,
+            ResolverUnavailable,
+            InvalidBindingRef,
+        ] {
+            assert_eq!(
+                rejection_kind_for_approval_interaction(kind),
+                ProductRejectionKind::PolicyDenied,
+                "{kind:?} should still map to PolicyDenied"
+            );
+        }
     }
 }
