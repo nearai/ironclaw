@@ -804,7 +804,10 @@ function loadTraceCommonsCredits() {
 
     container.innerHTML = '';
 
-    if (!report.submissions_total) {
+    // Show the opt-in empty state ONLY when the user is genuinely not enrolled.
+    // An enrolled user with zero submissions still gets their (zero-credit)
+    // view — keying on `submissions_total` alone misreports them as not enrolled.
+    if (!data.enrolled) {
       container.innerHTML = '<div class="empty-state">' + escapeHtml(I18n.t('traceCommons.empty')) + '</div>';
       return;
     }
