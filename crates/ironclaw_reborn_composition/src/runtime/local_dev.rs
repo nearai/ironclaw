@@ -85,6 +85,7 @@ pub(super) fn capability_wiring(
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
     outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
+    trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
 ) -> Option<LocalDevCapabilityWiring> {
     let runtime = services.host_runtime.clone()?;
     let local_runtime = services.local_runtime.as_ref()?;
@@ -100,11 +101,14 @@ pub(super) fn capability_wiring(
     let extension_surface_source =
         LocalDevExtensionSurfaceSource::new(local_runtime.extension_management.clone());
     let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
-    let capability_io = Arc::new(LocalDevCapabilityIo::new_with_durable_previews(
-        Arc::clone(&display_previews),
-        thread_service,
-        thread_scope,
-    ));
+    let capability_io = Arc::new(
+        LocalDevCapabilityIo::new_with_durable_previews(
+            Arc::clone(&display_previews),
+            thread_service,
+            thread_scope,
+        )
+        .with_observer(trajectory_observer.clone()),
+    );
     let capability_input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
     let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
@@ -119,6 +123,7 @@ pub(super) fn capability_wiring(
             result_writer: Arc::clone(&capability_result_writer),
             milestone_sink,
             skill_activation_source,
+            trajectory_observer,
             outbound_preferences_facade,
             outbound_delivery_target_set_requires_approval,
             approval_requests,
@@ -149,6 +154,7 @@ struct LocalDevLoopCapabilityPortFactory {
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
+    trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
     outbound_delivery_target_set_requires_approval: bool,
     approval_requests: Arc<dyn ApprovalRequestStore>,
@@ -179,6 +185,10 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             result_writer: Arc::clone(&self.result_writer),
             milestone_sink: Arc::clone(&self.milestone_sink),
             skill_activation_source: self.skill_activation_source.clone(),
+            // Same observer drives both the input hook (on the capability port the
+            // refreshing helper builds) and the result hook (on `LocalDevCapabilityIo`),
+            // so the two callbacks correlate by `call_id` for one tool call.
+            trajectory_observer: self.trajectory_observer.clone(),
             outbound_preferences_facade: self.outbound_preferences_facade.clone(),
             outbound_delivery_target_set_requires_approval: self
                 .outbound_delivery_target_set_requires_approval,
@@ -200,6 +210,11 @@ struct LocalDevCapabilityIo {
     results: StdMutex<StagedValueStore>,
     display_previews: Arc<CapabilityDisplayPreviewStore>,
     durable_previews: Option<DurableCapabilityDisplayPreviewSink>,
+    /// Optional consumer hook. This struct drives only the *result* half of the
+    /// trajectory observer (via `write_capability_result`); the resolved
+    /// tool-call inputs are emitted upstream by `HostRuntimeLoopCapabilityPort`
+    /// (the input resolver bypasses this IO for provider tool-call inputs).
+    observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
 }
 
 #[derive(Clone)]
@@ -221,6 +236,7 @@ impl LocalDevCapabilityIo {
             results: StdMutex::new(StagedValueStore::default()),
             display_previews,
             durable_previews: None,
+            observer: None,
         }
     }
 
@@ -237,7 +253,14 @@ impl LocalDevCapabilityIo {
                 thread_service,
                 thread_scope,
             }),
+            observer: None,
         }
+    }
+
+    /// Attach a trajectory observer (no-op when `None`).
+    fn with_observer(mut self, observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>) -> Self {
+        self.observer = observer;
+        self
     }
 
     fn result_output(
@@ -457,6 +480,14 @@ impl LoopCapabilityInputResolver for LocalDevCapabilityIo {
             &tool_call.name,
             &tool_call.arguments,
         );
+        // Trajectory inputs are observed at the port level
+        // (`HostRuntimeLoopCapabilityPort::invoke_capability`), which forwards
+        // the *resolved* dotted `CapabilityId` per the observer contract. This
+        // staging point only has the provider tool name (`builtin_echo`), not
+        // the resolved id, and `ProviderToolCallInputResolver` doesn't delegate
+        // here for provider tool calls anyway — so emitting `on_capability_input`
+        // here would both never fire in practice and break call-id correlation.
+        // `LocalDevCapabilityIo` remains the source of `on_capability_result`.
         Ok(input_ref)
     }
 }
@@ -500,6 +531,20 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             },
             display_preview.as_ref(),
         );
+        if let Some(observer) = &self.observer {
+            // Best-effort, inline on the capability hot path: a panicking
+            // observer must never unwind capability result staging. (Blocking
+            // is the observer's own contract — see `RebornTrajectoryObserver`.)
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                observer.on_capability_result(input_ref.as_str(), capability_id.as_str(), &output);
+            }));
+            if caught.is_err() {
+                tracing::warn!(
+                    capability_id = capability_id.as_str(),
+                    "trajectory observer on_capability_result panicked; dropping event"
+                );
+            }
+        }
         if let Some(message_id) = self
             .try_append_durable_display_preview(run_context, invocation_id, capability_id)
             .await

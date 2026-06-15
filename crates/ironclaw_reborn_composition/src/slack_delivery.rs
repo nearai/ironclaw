@@ -4,7 +4,7 @@
 //! observer runs after the workflow accepts an inbound Slack message, waits for
 //! the submitted run to finish, reads the finalized assistant reply, and sends it
 //! through the host-mediated product outbound delivery seam.
-// arch-exempt: large_file, deferred-busy hint logic stays here to share observer/test fixtures with final-reply delivery; decomposition tracked in #4818.
+// arch-exempt: large_file, busy-thread / RejectedBusy hint logic stays here to share observer/test fixtures with final-reply delivery; decomposition tracked in #4818.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -64,12 +64,9 @@ const SLACK_DELIVERY_TIMEOUT_MESSAGE: &str =
 const SLACK_DELIVERY_ERROR_MESSAGE: &str =
     "Something went wrong delivering the result here. Check the WebUI.";
 /// Posted when the blocking run is `BlockedApproval` and no gate_ref is available.
-const SLACK_DEFERRED_BUSY_APPROVAL_MESSAGE: &str = "Ironclaw is waiting on a pending approval before taking new messages — reply `approve` or `deny` (or `approve gate:<ref>`) to resume.";
+const SLACK_BUSY_APPROVAL_MESSAGE: &str = "Ironclaw is waiting on a pending approval before taking new messages — reply `approve` or `deny` (or `approve gate:<ref>`) to resume.";
 /// Posted for any other non-terminal blocking state, or when the state lookup fails.
-///
-/// Honest copy: no queue yet — deferred-message drain ships in a separate PR (#4812).
-/// Revisit this wording once #4812 lands and automatic retry is available.
-const SLACK_DEFERRED_BUSY_GENERIC_MESSAGE: &str = "Ironclaw is still working on a previous message and can't take this one yet — please resend it once the current task finishes.";
+const SLACK_BUSY_GENERIC_MESSAGE: &str = "Ironclaw is still working on a previous message and can't take this one yet — please resend it once the current task finishes.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BlockedActionableMarker {
@@ -134,7 +131,7 @@ pub struct SlackFinalReplyDeliveryObserver {
     services: SlackFinalReplyDeliveryServices,
     settings: SlackFinalReplyDeliverySettings,
     delivery_permits: Arc<Semaphore>,
-    /// Per-observer throttle: at most one deferred-busy hint per
+    /// Per-observer throttle: at most one busy-thread hint per
     /// (conversation fingerprint, active_run_id) pair.
     /// Caps Slack API usage per blocked run; bounded FIFO eviction keeps memory O(1);
     /// a false-negative after eviction just means one extra hint, harmless.
@@ -1003,10 +1000,11 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
         {
             return;
         }
-        // A2b: DeferredBusy feedback — the user's message was silently dropped
-        // because a run is blocked on a pending gate. Post a one-shot state-aware
-        // hint so the user knows to approve/deny/wait rather than being left in
-        // silence. Same best-effort semantics as A2: post failure → debug! only.
+        // A2b: Busy-thread hint — the user's message was silently dropped
+        // because a run is busy (pending gate or generic RejectedBusy). Post a
+        // one-shot state-aware hint so the user knows to approve/deny/wait (gate
+        // cases) or simply retry later (running-state cases) rather than being
+        // left in silence. Same best-effort semantics as A2: post failure → debug! only.
         //
         // Authorization: only post if the binding lookup succeeds, matching the
         // same guard used by `post_rejection_hint_if_authorized`.
@@ -1016,7 +1014,7 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
         // bounds the lifetime of this entire post-ACK task. A detached spawn would
         // escape `drain_immediate_ack_tasks` shutdown/drain without adding any
         // backpressure benefit.
-        if let Some(active_run_id) = deferred_busy_user_message_run_id(&envelope, &ack) {
+        if let Some(active_run_id) = busy_hint_user_message_run_id(&envelope, &ack) {
             // Throttle: at most one hint per (conversation, active_run_id) pair.
             // Check before the coordinator call to avoid a round-trip on repeats.
             let conv_key = envelope
@@ -1043,7 +1041,7 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
             if already_seen {
                 tracing::debug!(
                     target = "ironclaw::reborn::slack_delivery",
-                    "deferred-busy hint suppressed: already posted for this (conversation, run_id) pair"
+                    "busy-thread hint suppressed: already posted for this (conversation, run_id) pair"
                 );
                 return;
             }
@@ -1060,14 +1058,14 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
                     tracing::debug!(
                         target = "ironclaw::reborn::slack_delivery",
                         error = %error,
-                        "skipped deferred-busy hint because the originating conversation was not authorized"
+                        "skipped busy-thread hint because the originating conversation was not authorized"
                     );
                     return;
                 }
             };
             // Derive the scope for the active run state lookup.
             // Falls back to generic copy on any failure — never skips the hint.
-            let hint = deferred_busy_hint_from_run_state(
+            let hint = busy_hint_from_run_state(
                 self.services.turn_coordinator.as_ref(),
                 &binding,
                 active_run_id,
@@ -1083,7 +1081,7 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
                 tracing::debug!(
                     target = "ironclaw::reborn::slack_delivery",
                     error = %post_err,
-                    "failed to post deferred-busy hint to Slack (best-effort)"
+                    "failed to post busy-thread hint to Slack (best-effort)"
                 );
             }
             return;
@@ -1281,6 +1279,7 @@ fn submitted_run_id(ack: &ProductInboundAck) -> Option<TurnRunId> {
         } => Some(*submitted_run_id),
         ProductInboundAck::Duplicate { .. } => None,
         ProductInboundAck::DeferredBusy { .. }
+        | ProductInboundAck::RejectedBusy { .. }
         | ProductInboundAck::Rejected(_)
         | ProductInboundAck::CommandResult { .. }
         | ProductInboundAck::NoOp => None,
@@ -1348,33 +1347,60 @@ fn rejection_hint_for_resolution(
 }
 
 /// Returns `Some(active_run_id)` when the ack + payload combination should trigger
-/// the deferred-busy hint flow: a plain `DeferredBusy` ack on a `UserMessage` payload.
+/// the busy-thread hint flow: a `DeferredBusy` (legacy) or `RejectedBusy` ack on a
+/// `UserMessage` payload.
 ///
-/// Returns `None` for `Duplicate` acks (the idempotency ledger never settles
-/// `DeferredBusy`, so Slack transport retries re-process as a fresh plain
-/// `DeferredBusy`, never `Duplicate{DeferredBusy}`; suppressing all `Duplicate`
-/// matches the invariant in `rejection_hint_for_resolution`) and for all non-user-
-/// message payloads (resolution/control payloads must stay silent).
-fn deferred_busy_user_message_run_id(
+/// `RejectedBusy { active_run_id: Some(run_id) }` carries a live blocking run whose
+/// state can be fetched to produce a gate-aware hint.  When `active_run_id` is `None`
+/// (e.g. a replay with no live run) we return `None` — there is no run state to
+/// inspect so no hint is appropriate.
+///
+/// `Duplicate { prior }` — `RejectedBusy` is a settled outcome, so a Slack transport
+/// retry of the same external event arrives as `Duplicate { prior: RejectedBusy { .. } }`.
+/// We unwrap the prior and re-apply the same extraction so that `Duplicate { prior:
+/// RejectedBusy { active_run_id: Some(run) } }` still yields the blocking run id.
+/// The per-(conversation, run_id) throttle prevents a double-post when the first
+/// delivery already succeeded — the retry only posts if the original hint was lost.
+/// `Duplicate { prior: DeferredBusy { active_run_id, .. } }` yields `Some(active_run_id)` —
+/// the recursive call re-applies the same extraction on the prior ack.  DeferredBusy is never
+/// settled upstream (so this wrapping is unreachable in practice), but when it does occur the
+/// run id is surfaced rather than silently dropped.
+///
+/// Returns `None` for all non-user-message payloads (resolution/control payloads must
+/// stay silent).
+fn busy_hint_user_message_run_id(
     envelope: &ProductInboundEnvelope,
     ack: &ProductInboundAck,
 ) -> Option<TurnRunId> {
-    // All Duplicate acks are suppressed — same pattern as rejection_hint_for_resolution.
-    if matches!(ack, ProductInboundAck::Duplicate { .. }) {
-        return None;
-    }
     // Only reply to user messages — resolution/control/noop payloads must stay silent.
     if !matches!(envelope.payload(), ProductInboundPayload::UserMessage(_)) {
         return None;
     }
     match ack {
         ProductInboundAck::DeferredBusy { active_run_id, .. } => Some(*active_run_id),
+        // RejectedBusy with a live blocking run → hint is gated on the run state.
+        // RejectedBusy with no run (replay / no live run) → no hint.
+        ProductInboundAck::RejectedBusy {
+            active_run_id: Some(run_id),
+            ..
+        } => Some(*run_id),
+        ProductInboundAck::RejectedBusy {
+            active_run_id: None,
+            ..
+        } => None,
+        // Unwrap Duplicate and re-apply extraction on the prior ack.
+        // RejectedBusy is a settled outcome, so transport retries arrive as
+        // Duplicate{RejectedBusy{..}} — the prior still carries the blocking run id.
+        // DeferredBusy is never settled upstream, so Duplicate{DeferredBusy} is
+        // unreachable in practice; but when it occurs the recursive call yields
+        // Some(active_run_id) from the prior — the run id is not silently dropped.
+        ProductInboundAck::Duplicate { prior } => busy_hint_user_message_run_id(envelope, prior),
         _ => None,
     }
 }
 
-/// Looks up the blocking run's state and returns the appropriate deferred-busy
-/// hint copy.
+/// Looks up the blocking run's state and returns the appropriate busy-thread hint
+/// copy.
 ///
 /// - `BlockedApproval` with `Some(gate_ref)` → approval wording with concrete `approve {ref}` command
 /// - `BlockedApproval` with `None` gate_ref  → approval wording without a specific gate command
@@ -1383,7 +1409,7 @@ fn deferred_busy_user_message_run_id(
 /// - anything else / lookup failure           → generic wording
 ///
 /// Never returns an error — lookup failures degrade to the generic copy.
-async fn deferred_busy_hint_from_run_state(
+async fn busy_hint_from_run_state(
     coordinator: &dyn TurnCoordinator,
     binding: &ResolvedBinding,
     active_run_id: TurnRunId,
@@ -1397,9 +1423,9 @@ async fn deferred_busy_hint_from_run_state(
             tracing::debug!(
                 target = "ironclaw::reborn::slack_delivery",
                 error = %err,
-                "deferred-busy scope derivation failed; using generic copy"
+                "busy-thread hint scope derivation failed; using generic copy"
             );
-            return SLACK_DEFERRED_BUSY_GENERIC_MESSAGE.to_string();
+            return SLACK_BUSY_GENERIC_MESSAGE.to_string();
         }
     };
     match coordinator
@@ -1416,7 +1442,7 @@ async fn deferred_busy_hint_from_run_state(
                      — reply `approve {ref}` or `deny` to resume.",
                     ref = gate_ref.as_str()
                 ),
-                None => SLACK_DEFERRED_BUSY_APPROVAL_MESSAGE.to_string(),
+                None => SLACK_BUSY_APPROVAL_MESSAGE.to_string(),
             },
             TurnStatus::BlockedAuth => match state.gate_ref.as_ref() {
                 Some(gate_ref) => format!(
@@ -1428,15 +1454,15 @@ async fn deferred_busy_hint_from_run_state(
                          — complete the authentication prompt to continue."
                     .to_string(),
             },
-            _ => SLACK_DEFERRED_BUSY_GENERIC_MESSAGE.to_string(),
+            _ => SLACK_BUSY_GENERIC_MESSAGE.to_string(),
         },
         Err(err) => {
             tracing::debug!(
                 target = "ironclaw::reborn::slack_delivery",
                 error = %err,
-                "deferred-busy run-state lookup failed; using generic copy"
+                "busy-thread hint run-state lookup failed; using generic copy"
             );
-            SLACK_DEFERRED_BUSY_GENERIC_MESSAGE.to_string()
+            SLACK_BUSY_GENERIC_MESSAGE.to_string()
         }
     }
 }
@@ -3528,22 +3554,30 @@ mod tests {
         );
     }
 
-    /// Duplicate { prior: DeferredBusy } + UserMessage → nothing posted.
+    /// Duplicate { prior: DeferredBusy } + UserMessage → hint posted (run id extracted
+    /// from the prior, same as for a plain DeferredBusy).
     ///
     /// `should_settle_ack` returns false for DeferredBusy, so the idempotency
-    /// ledger never settles it. Slack transport retries re-process as a fresh
-    /// plain DeferredBusy (never Duplicate{DeferredBusy}), making this case
-    /// unreachable in practice. We still enforce None-for-all-Duplicate for
-    /// safety, matching the invariant in `rejection_hint_for_resolution`.
+    /// ledger never settles it and this case is unreachable in practice. However,
+    /// the Duplicate unwrap arm delegates to the prior ack's extraction, so
+    /// DeferredBusy inside a Duplicate consistently yields the run id rather than
+    /// silently dropping it.
     #[tokio::test]
-    async fn duplicate_deferred_busy_with_user_message_posts_nothing() {
+    async fn duplicate_deferred_busy_with_user_message_posts_hint() {
         let install = "test-install";
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "8001.1"),
+            )),
+        );
 
         let outbound = Arc::new(InMemoryOutboundStateStore::default());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
-            TurnStatus::Running,
+            TurnStatus::BlockedApproval,
         ));
         let observer = make_observer(coordinator, egress.clone(), outbound, install);
         let env = envelope(user_message_payload());
@@ -3554,9 +3588,14 @@ mod tests {
         observer.observe_workflow_ack(env, ack).await;
 
         let calls = egress.calls();
-        assert!(
-            !calls.iter().any(|c| c.path == "/api/chat.postMessage"),
-            "Duplicate{{DeferredBusy}} must NOT post a hint (None-for-all-Duplicate invariant)"
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "Duplicate{{DeferredBusy}} must post a hint — run id extracted from prior"
         );
     }
 
@@ -3799,6 +3838,264 @@ mod tests {
         assert!(
             !calls.iter().any(|c| c.path == "/api/chat.postMessage"),
             "no chat.postMessage expected when binding authorization fails"
+        );
+    }
+
+    // ── RejectedBusy ack feedback tests ───────────────────────────────────────
+    //
+    // PR #4838 replaced `DeferredBusy` with `RejectedBusy` for busy user-message
+    // outcomes.  The hint path must recognise the new variant and produce the same
+    // gate-aware (BlockedApproval/BlockedAuth) or generic copy as it does for the
+    // legacy `DeferredBusy` variant.
+
+    fn rejected_busy_ack_with_run_id() -> ProductInboundAck {
+        ProductInboundAck::RejectedBusy {
+            accepted_message_ref: AcceptedMessageRef::new("slack:rejected-busy").expect("ref"),
+            active_run_id: Some(TurnRunId::new()),
+        }
+    }
+
+    fn rejected_busy_ack_no_run_id() -> ProductInboundAck {
+        ProductInboundAck::RejectedBusy {
+            accepted_message_ref: AcceptedMessageRef::new("slack:rejected-busy-none").expect("ref"),
+            active_run_id: None,
+        }
+    }
+
+    /// RejectedBusy { active_run_id: Some(..) } + UserMessage + BlockedApproval with
+    /// gate_ref → exactly one Slack post containing the concrete `approve {ref}` command.
+    #[tokio::test]
+    async fn rejected_busy_ack_with_run_id_posts_approval_hint() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "7000.1"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let gate_ref_str = "gate:approval-rb123";
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+            TurnStatus::BlockedApproval,
+            Some(gate_ref_str),
+        )]));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+        let env = envelope(user_message_payload());
+        let ack = rejected_busy_ack_with_run_id();
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "expected exactly one chat.postMessage for RejectedBusy(Some) + BlockedApproval"
+        );
+        let body = std::str::from_utf8(&post_calls[0].body).expect("utf8 body");
+        assert!(
+            body.contains("waiting on a pending approval"),
+            "RejectedBusy hint must mention 'waiting on a pending approval', got: {body}"
+        );
+        assert!(
+            body.contains(gate_ref_str),
+            "RejectedBusy approval hint must embed the concrete gate ref '{gate_ref_str}', got: {body}"
+        );
+    }
+
+    /// RejectedBusy { active_run_id: Some(..) } + UserMessage + BlockedAuth state →
+    /// auth copy with concrete `auth deny <ref>` command posted.
+    #[tokio::test]
+    async fn rejected_busy_ack_with_run_id_posts_auth_hint() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "7001.1"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let gate_ref_str = "gate:auth-rb456";
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+            TurnStatus::BlockedAuth,
+            Some(gate_ref_str),
+        )]));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+        let env = envelope(user_message_payload());
+        let ack = rejected_busy_ack_with_run_id();
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "expected exactly one chat.postMessage for RejectedBusy(Some) + BlockedAuth"
+        );
+        let body = std::str::from_utf8(&post_calls[0].body).expect("utf8 body");
+        assert!(
+            body.contains("authentication step"),
+            "RejectedBusy auth hint must mention 'authentication step', got: {body}"
+        );
+        assert!(
+            body.contains(gate_ref_str),
+            "RejectedBusy auth hint must embed the concrete gate ref '{gate_ref_str}', got: {body}"
+        );
+    }
+
+    /// RejectedBusy { active_run_id: None } + UserMessage → no hint posted.
+    ///
+    /// When there is no live blocking run there is no run state to inspect, so
+    /// the hint flow is skipped entirely.
+    #[tokio::test]
+    async fn rejected_busy_ack_with_no_run_id_posts_nothing() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::BlockedApproval,
+        ));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+        let env = envelope(user_message_payload());
+        let ack = rejected_busy_ack_no_run_id();
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        let calls = egress.calls();
+        assert!(
+            !calls.iter().any(|c| c.path == "/api/chat.postMessage"),
+            "no chat.postMessage expected for RejectedBusy(None) — no live run to inspect"
+        );
+    }
+
+    /// Duplicate { prior: RejectedBusy { active_run_id: Some(..) } } + UserMessage +
+    /// BlockedApproval state → hint posted (gate-aware approval copy).
+    ///
+    /// `RejectedBusy` is a settled outcome, so a Slack transport retry of the same
+    /// external event arrives as `Duplicate { prior: RejectedBusy { .. } }`.  The
+    /// busy-hint helper must unwrap the prior and extract the blocking run id so the
+    /// retry can still post the hint if the original was lost.
+    #[tokio::test]
+    async fn duplicate_rejected_busy_with_run_id_posts_approval_hint() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "8100.1"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let gate_ref_str = "gate:approval-dup-rb001";
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+            TurnStatus::BlockedApproval,
+            Some(gate_ref_str),
+        )]));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+        let env = envelope(user_message_payload());
+        let ack = ProductInboundAck::Duplicate {
+            prior: Box::new(rejected_busy_ack_with_run_id()),
+        };
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "Duplicate{{RejectedBusy(Some)}} + UserMessage must post exactly one hint"
+        );
+        let body = std::str::from_utf8(&post_calls[0].body).expect("utf8 body");
+        assert!(
+            body.contains("waiting on a pending approval"),
+            "Duplicate{{RejectedBusy}} hint must mention 'waiting on a pending approval', got: {body}"
+        );
+        assert!(
+            body.contains(gate_ref_str),
+            "Duplicate{{RejectedBusy}} approval hint must embed gate ref '{gate_ref_str}', got: {body}"
+        );
+    }
+
+    /// Duplicate { prior: RejectedBusy { active_run_id: Some(..) } } delivered twice
+    /// with the same (conversation, run_id) → exactly one post (throttle suppresses
+    /// the second).
+    ///
+    /// The per-(conversation, run_id) throttle prevents double-posting: the first
+    /// delivery (regardless of whether it was the original plain `RejectedBusy` or a
+    /// `Duplicate{RejectedBusy}`) inserts the key, and the second delivery is
+    /// suppressed because the key is already present.
+    #[tokio::test]
+    async fn duplicate_rejected_busy_throttle_suppresses_second_delivery() {
+        let install = "test-install";
+        let run_id = TurnRunId::new();
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // Only one response slot — if two posts were attempted the second would
+        // error, making the assertion below a double-check.
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "8101.1"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::BlockedApproval,
+        ));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+
+        let make_dup_ack = || ProductInboundAck::Duplicate {
+            prior: Box::new(ProductInboundAck::RejectedBusy {
+                accepted_message_ref: AcceptedMessageRef::new("slack:dup-rb-throttle")
+                    .expect("ref"),
+                active_run_id: Some(run_id),
+            }),
+        };
+
+        // First delivery: extracts run_id from prior, inserts throttle key, posts hint.
+        observer
+            .observe_workflow_ack(envelope(user_message_payload()), make_dup_ack())
+            .await;
+        // Second delivery: same (conversation, run_id) pair → throttle key present → suppressed.
+        observer
+            .observe_workflow_ack(envelope(user_message_payload()), make_dup_ack())
+            .await;
+
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "throttle must suppress the second Duplicate{{RejectedBusy}} hint for the same (conversation, run_id)"
         );
     }
 
@@ -4887,7 +5184,7 @@ mod tests {
     /// Binding service that always returns a binding with `agent_id = None`.
     ///
     /// Used to exercise the scope-derivation fallback in
-    /// `deferred_busy_hint_from_run_state`: when `thread_scope_from_binding` fails
+    /// `busy_hint_from_run_state`: when `thread_scope_from_binding` fails
     /// because `agent_id` is missing, the hint must still be posted using the
     /// generic copy rather than being silently dropped.
     struct NoAgentConversationBindingService;
@@ -4970,9 +5267,9 @@ mod tests {
 
     /// Binding with no `agent_id` → scope derivation fails → generic copy posted.
     ///
-    /// `deferred_busy_hint_from_run_state` calls `thread_scope_from_binding` which
+    /// `busy_hint_from_run_state` calls `thread_scope_from_binding` which
     /// returns `Err` when `agent_id` is `None`. The code must fall back to
-    /// `SLACK_DEFERRED_BUSY_GENERIC_MESSAGE` and still post the hint.
+    /// `SLACK_BUSY_GENERIC_MESSAGE` and still post the hint.
     #[tokio::test]
     async fn deferred_busy_missing_agent_binding_posts_generic_hint() {
         let install = "test-install";
@@ -5038,8 +5335,8 @@ mod tests {
 
     /// Run-state lookup returns `Err` → generic copy posted.
     ///
-    /// `deferred_busy_hint_from_run_state` swallows `TurnError` from
-    /// `get_run_state` and degrades to `SLACK_DEFERRED_BUSY_GENERIC_MESSAGE`.
+    /// `busy_hint_from_run_state` swallows `TurnError` from
+    /// `get_run_state` and degrades to `SLACK_BUSY_GENERIC_MESSAGE`.
     #[tokio::test]
     async fn deferred_busy_run_state_lookup_error_posts_generic_hint() {
         let install = "test-install";

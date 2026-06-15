@@ -31,9 +31,15 @@ export function useAutomations() {
     [automations]
   );
 
+  // The scheduler (trigger poller) may be turned off, in which case listed
+  // automations never fire. Treat an absent flag as enabled so we don't show a
+  // false "off" notice against an older payload.
+  const schedulerEnabled = query.data?.scheduler_enabled !== false;
+
   return {
     automations,
     summary,
+    schedulerEnabled,
     isLoading: query.isLoading,
     isRefreshing: query.isFetching,
     error: query.error || null,

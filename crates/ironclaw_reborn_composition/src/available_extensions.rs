@@ -1539,7 +1539,7 @@ mod tests {
         InMemoryBackend,
     };
     use ironclaw_host_api::{
-        EffectKind, HostPortCatalog, RuntimeCredentialAccountSetup,
+        EffectKind, HostPortCatalog, PermissionMode, RuntimeCredentialAccountSetup,
         RuntimeCredentialRequirementSource,
     };
 
@@ -1649,6 +1649,82 @@ mod tests {
                 "{query} should discover every GSuite package; got {ids:?}"
             );
         }
+    }
+
+    #[test]
+    fn bundled_github_read_only_capabilities_default_allow_without_relaxing_writes() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").unwrap();
+        let github = catalog.resolve(&package_ref).unwrap();
+        let mut allowed_read_only = BTreeSet::new();
+        let mut ask_required = BTreeSet::new();
+        let sensitive_token_backed_reads = BTreeSet::from(["github.search_code"]);
+
+        for capability in &github.package.manifest.capabilities {
+            let requires_explicit_approval = capability.effects.iter().any(|effect| {
+                effect.is_write() || matches!(effect, EffectKind::DispatchCapability)
+            }) || sensitive_token_backed_reads
+                .contains(capability.id.as_str());
+            if requires_explicit_approval {
+                assert_eq!(
+                    capability.default_permission,
+                    PermissionMode::Ask,
+                    "{} should still ask before effectful or broad token-backed GitHub actions",
+                    capability.id
+                );
+                ask_required.insert(capability.id.as_str());
+            } else {
+                assert_eq!(
+                    capability.default_permission,
+                    PermissionMode::Allow,
+                    "{} should not require an extra approval prompt for GitHub reads",
+                    capability.id
+                );
+                allowed_read_only.insert(capability.id.as_str());
+            }
+        }
+
+        assert!(allowed_read_only.contains("github.get_repo"));
+        assert!(allowed_read_only.contains("github.list_branches"));
+        assert!(ask_required.contains("github.search_code"));
+        assert!(ask_required.contains("github.create_issue"));
+        assert!(ask_required.contains("github.handle_webhook"));
+    }
+
+    #[test]
+    fn bundled_web_access_defers_github_repository_tasks_to_github_extension() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "web-access").unwrap();
+        let package = catalog.resolve(&package_ref).unwrap();
+        let search = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "web-access.search")
+            .expect("web access search capability");
+        assert!(
+            search
+                .description
+                .contains("Prefer GitHub extension capabilities"),
+            "web-access.search description should route GitHub repository data to GitHub tools"
+        );
+
+        let prompt_asset = package
+            .assets
+            .iter()
+            .find(|asset| asset.path == "prompts/web-access/search.md")
+            .expect("web access search prompt");
+        let AvailableExtensionAssetContent::Bytes(bytes) = &prompt_asset.content else {
+            panic!("web access prompt should be bundled bytes");
+        };
+        let prompt = std::str::from_utf8(bytes).expect("prompt should be UTF-8");
+        assert!(
+            prompt.contains("prefer the GitHub extension capabilities"),
+            "web-access.search prompt should route GitHub repository data to GitHub tools"
+        );
     }
 
     #[test]

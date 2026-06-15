@@ -859,6 +859,7 @@ impl AutomationProductFacade for RecordingAutomationFacade {
 #[derive(Clone)]
 struct StaticAutomationFacade {
     output: Vec<RebornAutomationInfo>,
+    scheduler_enabled: bool,
     /// Scopes returned by `resolve_run_thread_scope`, keyed by the queried
     /// thread id so tests prove the lookup contract rather than accepting a
     /// cached scope for any request.
@@ -870,9 +871,15 @@ impl StaticAutomationFacade {
     fn new(output: Vec<RebornAutomationInfo>) -> Self {
         Self {
             output,
+            scheduler_enabled: true,
             resolve_scopes: HashMap::new(),
             resolve_calls: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    fn with_scheduler_enabled(mut self, scheduler_enabled: bool) -> Self {
+        self.scheduler_enabled = scheduler_enabled;
+        self
     }
 
     fn with_resolve_scope_for_thread(
@@ -891,6 +898,10 @@ impl StaticAutomationFacade {
 
 #[async_trait]
 impl AutomationProductFacade for StaticAutomationFacade {
+    fn scheduler_enabled(&self) -> bool {
+        self.scheduler_enabled
+    }
+
     async fn list_automations(
         &self,
         _caller: ProductAgentBoundCaller,
@@ -1296,13 +1307,13 @@ impl SessionThreadService for ScopeMismatchThreadStub {
         panic!("ScopeMismatchThreadStub::mark_message_submitted should not be reached")
     }
 
-    async fn mark_message_deferred_busy(
+    async fn mark_message_rejected_busy(
         &self,
         _scope: &ThreadScope,
         _thread_id: &ThreadId,
         _message_id: ThreadMessageId,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        panic!("ScopeMismatchThreadStub::mark_message_deferred_busy should not be reached")
+        panic!("ScopeMismatchThreadStub::mark_message_rejected_busy should not be reached")
     }
 
     async fn append_assistant_draft(
@@ -1383,7 +1394,28 @@ enum ScriptedThreadBehavior {
     BackendHistory,
     History(Box<ThreadHistory>),
     ListPages,
-    SubmittedReplay { turn_run_id: Option<String> },
+    SubmittedReplay {
+        turn_run_id: Option<String>,
+    },
+    RejectedBusyReplay,
+    /// `mark_message_rejected_busy` fails; reconcile path replays the accepted
+    /// message as RejectedBusy so no error surfaces to the caller.
+    RejectedBusyMarkFails {
+        /// Message id assigned by `accept_inbound_message`, shared so that
+        /// `reconcile_terminal_duplicate` can match it against the handoff.
+        message_id: ThreadMessageId,
+    },
+    /// `mark_message_rejected_busy` fails; reconcile path replays the accepted
+    /// message as legacy DeferredBusy.  Unlike `RejectedBusyMarkFails`,
+    /// `DeferredBusy` is non-terminal: `reconcile_terminal_duplicate` accepts
+    /// only `RejectedBusy` as settled, so this replay does NOT satisfy
+    /// reconciliation.  The original mark failure surfaces as a retryable error
+    /// (Unavailable / 503) rather than a false-terminal RejectedBusy.
+    DeferredBusyMarkFails {
+        /// Message id assigned by `accept_inbound_message`, shared so that
+        /// `reconcile_terminal_duplicate` can match it against the handoff.
+        message_id: ThreadMessageId,
+    },
 }
 
 struct ScriptedThreadService {
@@ -1391,6 +1423,11 @@ struct ScriptedThreadService {
     history_requests: Mutex<Vec<ThreadHistoryRequest>>,
     list_requests: Mutex<Vec<ListThreadsForScopeRequest>>,
     list_responses: Mutex<Vec<ListThreadsForScopeResponse>>,
+    /// Tracks `replay_accepted_inbound_message` call count; used by
+    /// `RejectedBusyMarkFails` (and `DeferredBusyMarkFails`) to return `None`
+    /// on the first two calls (idempotency probes) and `Some(…)` on the third
+    /// call (reconcile probe) onward.
+    replay_call_count: Mutex<usize>,
 }
 
 impl ScriptedThreadService {
@@ -1400,6 +1437,7 @@ impl ScriptedThreadService {
             history_requests: Mutex::new(Vec::new()),
             list_requests: Mutex::new(Vec::new()),
             list_responses: Mutex::new(Vec::new()),
+            replay_call_count: Mutex::new(0),
         }
     }
 
@@ -1409,6 +1447,7 @@ impl ScriptedThreadService {
             history_requests: Mutex::new(Vec::new()),
             list_requests: Mutex::new(Vec::new()),
             list_responses: Mutex::new(Vec::new()),
+            replay_call_count: Mutex::new(0),
         }
     }
 
@@ -1418,6 +1457,7 @@ impl ScriptedThreadService {
             history_requests: Mutex::new(Vec::new()),
             list_requests: Mutex::new(Vec::new()),
             list_responses: Mutex::new(responses),
+            replay_call_count: Mutex::new(0),
         }
     }
 
@@ -1427,6 +1467,57 @@ impl ScriptedThreadService {
             history_requests: Mutex::new(Vec::new()),
             list_requests: Mutex::new(Vec::new()),
             list_responses: Mutex::new(Vec::new()),
+            replay_call_count: Mutex::new(0),
+        }
+    }
+
+    fn rejected_busy_replay() -> Self {
+        Self {
+            behavior: ScriptedThreadBehavior::RejectedBusyReplay,
+            history_requests: Mutex::new(Vec::new()),
+            list_requests: Mutex::new(Vec::new()),
+            list_responses: Mutex::new(Vec::new()),
+            replay_call_count: Mutex::new(0),
+        }
+    }
+
+    /// Scripted service for the mark-failure reconcile path:
+    /// - `accept_inbound_message` accepts the message
+    /// - `mark_message_rejected_busy` returns a backend error
+    /// - `replay_accepted_inbound_message` returns `None` on the first two
+    ///   calls (idempotency probes) and `Some(RejectedBusy)` on the third
+    ///   call (reconcile probe), so `reconcile_terminal_duplicate` settles
+    ///   without error
+    fn rejected_busy_mark_fails() -> Self {
+        Self {
+            behavior: ScriptedThreadBehavior::RejectedBusyMarkFails {
+                message_id: ThreadMessageId::new(),
+            },
+            history_requests: Mutex::new(Vec::new()),
+            list_requests: Mutex::new(Vec::new()),
+            list_responses: Mutex::new(Vec::new()),
+            replay_call_count: Mutex::new(0),
+        }
+    }
+
+    /// Scripted service for the legacy DeferredBusy mark-failure path:
+    /// - `accept_inbound_message` accepts the message
+    /// - `mark_message_rejected_busy` returns a backend error
+    /// - `replay_accepted_inbound_message` returns `None` on the first two
+    ///   calls (idempotency probes) and `Some(DeferredBusy)` on the reconcile
+    ///   probe.  `DeferredBusy` is non-terminal: `reconcile_terminal_duplicate`
+    ///   no longer accepts it as settled (only `RejectedBusy` qualifies), so the
+    ///   mark failure propagates as a retryable Unavailable error rather than
+    ///   silently producing a false-terminal RejectedBusy.
+    fn deferred_busy_mark_fails() -> Self {
+        Self {
+            behavior: ScriptedThreadBehavior::DeferredBusyMarkFails {
+                message_id: ThreadMessageId::new(),
+            },
+            history_requests: Mutex::new(Vec::new()),
+            list_requests: Mutex::new(Vec::new()),
+            list_responses: Mutex::new(Vec::new()),
+            replay_call_count: Mutex::new(0),
         }
     }
 
@@ -1455,7 +1546,10 @@ impl SessionThreadService for ScriptedThreadService {
             )),
             ScriptedThreadBehavior::History(history) => Ok(history.as_ref().clone()),
             ScriptedThreadBehavior::ListPages => scripted_stub_unreachable("list_thread_history"),
-            ScriptedThreadBehavior::SubmittedReplay { .. } => Ok(ThreadHistory {
+            ScriptedThreadBehavior::SubmittedReplay { .. }
+            | ScriptedThreadBehavior::RejectedBusyReplay
+            | ScriptedThreadBehavior::RejectedBusyMarkFails { .. }
+            | ScriptedThreadBehavior::DeferredBusyMarkFails { .. } => Ok(ThreadHistory {
                 thread: SessionThreadRecord {
                     scope: request.scope,
                     thread_id: request.thread_id,
@@ -1479,9 +1573,20 @@ impl SessionThreadService for ScriptedThreadService {
 
     async fn accept_inbound_message(
         &self,
-        _request: AcceptInboundMessageRequest,
+        request: AcceptInboundMessageRequest,
     ) -> Result<AcceptedInboundMessage, SessionThreadError> {
-        scripted_stub_unreachable("accept_inbound_message")
+        match &self.behavior {
+            ScriptedThreadBehavior::RejectedBusyMarkFails { message_id }
+            | ScriptedThreadBehavior::DeferredBusyMarkFails { message_id } => {
+                Ok(AcceptedInboundMessage {
+                    thread_id: request.thread_id,
+                    message_id: *message_id,
+                    sequence: 1,
+                    idempotent_replay: false,
+                })
+            }
+            _ => scripted_stub_unreachable("accept_inbound_message"),
+        }
     }
 
     async fn replay_accepted_inbound_message(
@@ -1502,6 +1607,68 @@ impl SessionThreadService for ScriptedThreadService {
                     turn_run_id: turn_run_id.clone(),
                 }))
             }
+            ScriptedThreadBehavior::RejectedBusyReplay => Ok(Some(AcceptedInboundMessageReplay {
+                scope: request.scope,
+                thread_id: ThreadId::new("thread-alpha").expect("valid thread"),
+                message_id: ThreadMessageId::new(),
+                sequence: 1,
+                status: MessageStatus::RejectedBusy,
+                actor_id: Some(request.actor_id),
+                source_binding_id: Some(request.source_binding_id),
+                reply_target_binding_id: Some("webui-reply:replayed".to_string()),
+                turn_run_id: None,
+            })),
+            ScriptedThreadBehavior::RejectedBusyMarkFails { message_id } => {
+                // replay_webui_send_message probes with two source-binding variants
+                // (main + legacy) before accepting the message, so calls 1 and 2
+                // are the initial idempotency probes — both must return None so
+                // accept_inbound_message is reached.  Call 3+ comes from
+                // reconcile_terminal_duplicate after mark_message_rejected_busy
+                // fails; return the already-settled RejectedBusy so reconciliation
+                // succeeds without propagating the mark error.
+                let mut count = self.replay_call_count.lock().expect("lock");
+                *count += 1;
+                if *count <= 2 {
+                    Ok(None)
+                } else {
+                    Ok(Some(AcceptedInboundMessageReplay {
+                        scope: request.scope,
+                        thread_id: ThreadId::new("thread-alpha").expect("valid thread"),
+                        message_id: *message_id,
+                        sequence: 1,
+                        status: MessageStatus::RejectedBusy,
+                        actor_id: Some(request.actor_id),
+                        source_binding_id: Some(request.source_binding_id),
+                        reply_target_binding_id: Some("webui-reply:replayed".to_string()),
+                        turn_run_id: None,
+                    }))
+                }
+            }
+            ScriptedThreadBehavior::DeferredBusyMarkFails { message_id } => {
+                // Same two-phase probe as RejectedBusyMarkFails: calls 1 and 2 are
+                // the initial idempotency probes and must return None.  Call 3+
+                // comes from reconcile_terminal_duplicate; return legacy DeferredBusy.
+                // DeferredBusy is non-terminal — reconcile_terminal_duplicate accepts
+                // only RejectedBusy as settled, so this replay does NOT satisfy
+                // reconciliation.  The original mark failure surfaces as an error.
+                let mut count = self.replay_call_count.lock().expect("lock");
+                *count += 1;
+                if *count <= 2 {
+                    Ok(None)
+                } else {
+                    Ok(Some(AcceptedInboundMessageReplay {
+                        scope: request.scope,
+                        thread_id: ThreadId::new("thread-alpha").expect("valid thread"),
+                        message_id: *message_id,
+                        sequence: 1,
+                        status: MessageStatus::DeferredBusy,
+                        actor_id: Some(request.actor_id),
+                        source_binding_id: Some(request.source_binding_id),
+                        reply_target_binding_id: Some("webui-reply:replayed".to_string()),
+                        turn_run_id: None,
+                    }))
+                }
+            }
             ScriptedThreadBehavior::BackendHistory
             | ScriptedThreadBehavior::History(_)
             | ScriptedThreadBehavior::ListPages => {
@@ -1521,13 +1688,21 @@ impl SessionThreadService for ScriptedThreadService {
         scripted_stub_unreachable("mark_message_submitted")
     }
 
-    async fn mark_message_deferred_busy(
+    async fn mark_message_rejected_busy(
         &self,
         _scope: &ThreadScope,
         _thread_id: &ThreadId,
         _message_id: ThreadMessageId,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        scripted_stub_unreachable("mark_message_deferred_busy")
+        match &self.behavior {
+            ScriptedThreadBehavior::RejectedBusyMarkFails { .. }
+            | ScriptedThreadBehavior::DeferredBusyMarkFails { .. } => {
+                Err(SessionThreadError::Backend(
+                    "simulated backend failure in mark_message_rejected_busy".to_string(),
+                ))
+            }
+            _ => scripted_stub_unreachable("mark_message_rejected_busy"),
+        }
     }
 
     async fn append_assistant_draft(
@@ -1905,7 +2080,7 @@ async fn busy_submit_clears_skill_activation_message() {
     );
     create_thread_for(&services, caller(), "thread-alpha").await;
 
-    let deferred = services
+    let rejected = services
         .submit_turn(
             caller(),
             serde_json::from_value::<WebUiSendMessageRequest>(json!({
@@ -1916,12 +2091,12 @@ async fn busy_submit_clears_skill_activation_message() {
             .expect("request"),
         )
         .await
-        .expect("busy submit is deferred");
+        .expect("busy submit is rejected");
 
     assert!(matches!(
-        deferred,
-        RebornSubmitTurnResponse::DeferredBusy {
-            active_run_id: id,
+        rejected,
+        RebornSubmitTurnResponse::RejectedBusy {
+            active_run_id: Some(id),
             ..
         } if id == active_run_id
     ));
@@ -1932,7 +2107,7 @@ async fn busy_submit_clears_skill_activation_message() {
     assert_eq!(
         cleared.as_slice(),
         &[(recorded[0].0.clone(), recorded[0].1.clone())],
-        "deferred submissions must clear their activation input before returning"
+        "rejected submissions must clear their activation input before returning"
     );
 }
 
@@ -2441,14 +2616,14 @@ async fn concurrent_duplicate_submit_creates_one_message_and_replays_outcome() {
     let first_run_id = match &first {
         RebornSubmitTurnResponse::Submitted { run_id, .. }
         | RebornSubmitTurnResponse::AlreadySubmitted { run_id, .. } => *run_id,
-        RebornSubmitTurnResponse::DeferredBusy { .. } => {
+        RebornSubmitTurnResponse::RejectedBusy { .. } => {
             panic!("duplicate submit must not defer while deduping")
         }
     };
     let second_run_id = match &second {
         RebornSubmitTurnResponse::Submitted { run_id, .. }
         | RebornSubmitTurnResponse::AlreadySubmitted { run_id, .. } => *run_id,
-        RebornSubmitTurnResponse::DeferredBusy { .. } => {
+        RebornSubmitTurnResponse::RejectedBusy { .. } => {
             panic!("duplicate submit must not defer while deduping")
         }
     };
@@ -5643,14 +5818,14 @@ impl SessionThreadService for FirstMissBackendErrorThreadService {
         panic!("FirstMissBackendErrorThreadService::mark_message_submitted should not be reached")
     }
 
-    async fn mark_message_deferred_busy(
+    async fn mark_message_rejected_busy(
         &self,
         _scope: &ThreadScope,
         _thread_id: &ThreadId,
         _message_id: ThreadMessageId,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         panic!(
-            "FirstMissBackendErrorThreadService::mark_message_deferred_busy should not be reached"
+            "FirstMissBackendErrorThreadService::mark_message_rejected_busy should not be reached"
         )
     }
 
@@ -6395,6 +6570,29 @@ async fn list_automations_returns_empty_list() {
         .expect("list automations");
 
     assert!(listed.automations.is_empty());
+    // Default facade reports the scheduler as running.
+    assert!(listed.scheduler_enabled);
+}
+
+#[tokio::test]
+async fn list_automations_surfaces_disabled_scheduler() {
+    // Regression: when the trigger poller is off, the response must report
+    // scheduler_enabled=false so the browser can warn that listed automations
+    // will not fire. Previously the wire response had no such signal.
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(Arc::new(
+        StaticAutomationFacade::new(Vec::new()).with_scheduler_enabled(false),
+    ));
+
+    let listed = services
+        .list_automations(caller(), WebUiListAutomationsRequest::default())
+        .await
+        .expect("list automations");
+
+    assert!(!listed.scheduler_enabled);
 }
 
 #[tokio::test]
@@ -7991,6 +8189,431 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
         vec![second_visible_thread_id],
     );
     assert_eq!(second_page.next_cursor, None);
+}
+
+// ---------------------------------------------------------------------------
+// Notice-text mapping: rejected_busy_notice maps TurnStatus to the right copy
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn rejected_busy_notice_blocked_approval_contains_approval_copy() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id: TurnRunId::new(),
+            status: TurnStatus::BlockedApproval,
+            event_cursor: EventCursor(5),
+        }),
+    ));
+    let services = RebornServices::new(threads, coordinator);
+    create_thread_for(&services, caller(), "thread-notice").await;
+
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-notice-approval",
+                "thread_id": "thread-notice",
+                "content": "hello"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("busy submit succeeds with RejectedBusy");
+
+    match response {
+        RebornSubmitTurnResponse::RejectedBusy {
+            status: Some(status),
+            notice,
+            ..
+        } => {
+            assert_eq!(status, TurnStatus::BlockedApproval);
+            assert_eq!(
+                notice,
+                "An approval gate is open on this thread — resolve it (approve or deny) before continuing, then resend your message."
+            );
+        }
+        other => panic!("expected RejectedBusy, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn rejected_busy_notice_blocked_auth_contains_auth_copy() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id: TurnRunId::new(),
+            status: TurnStatus::BlockedAuth,
+            event_cursor: EventCursor(5),
+        }),
+    ));
+    let services = RebornServices::new(threads, coordinator);
+    create_thread_for(&services, caller(), "thread-notice").await;
+
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-notice-auth",
+                "thread_id": "thread-notice",
+                "content": "hello"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("busy submit succeeds with RejectedBusy");
+
+    match response {
+        RebornSubmitTurnResponse::RejectedBusy {
+            status: Some(status),
+            notice,
+            ..
+        } => {
+            assert_eq!(status, TurnStatus::BlockedAuth);
+            assert_eq!(
+                notice,
+                "An authentication gate is open on this thread — complete authentication before continuing, then resend your message."
+            );
+        }
+        other => panic!("expected RejectedBusy, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn rejected_busy_notice_generic_status_contains_generic_copy() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id: TurnRunId::new(),
+            status: TurnStatus::Running,
+            event_cursor: EventCursor(5),
+        }),
+    ));
+    let services = RebornServices::new(threads, coordinator);
+    create_thread_for(&services, caller(), "thread-notice").await;
+
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-notice-generic",
+                "thread_id": "thread-notice",
+                "content": "hello"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("busy submit succeeds with RejectedBusy");
+
+    match response {
+        RebornSubmitTurnResponse::RejectedBusy {
+            status: Some(status),
+            notice,
+            ..
+        } => {
+            assert_eq!(status, TurnStatus::Running);
+            assert_eq!(
+                notice,
+                "Ironclaw is still working on a previous message — resend yours once the current task finishes."
+            );
+        }
+        other => panic!("expected RejectedBusy, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Replay regression: a replayed RejectedBusy must return RejectedBusy again,
+// never submit a new run (contract from PR #4838)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn replayed_rejected_busy_returns_rejected_busy_without_new_submission() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    // ScriptedThreadService pre-seeds the message as RejectedBusy — simulates
+    // the client retrying after the original rejection response was lost.
+    let services = RebornServices::new(
+        Arc::new(ScriptedThreadService::rejected_busy_replay()),
+        coordinator.clone(),
+    );
+
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-replay-rejected-busy",
+                "thread_id": "thread-alpha",
+                "content": "hello from webui"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("replayed RejectedBusy must succeed (not error)");
+
+    assert!(
+        matches!(response, RebornSubmitTurnResponse::RejectedBusy { .. }),
+        "replay of RejectedBusy must return RejectedBusy, got {response:?}"
+    );
+    assert_eq!(
+        coordinator.submission_count(),
+        0,
+        "a replayed RejectedBusy must not produce a new turn submission"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Option<> run-metadata contract: replay path yields None; fresh path yields Some
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn replayed_rejected_busy_returns_none_run_metadata() {
+    // Replay: the original blocking run is gone — run metadata must be None,
+    // not a fabricated run-id or status that the client cannot query.
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(ScriptedThreadService::rejected_busy_replay()),
+        coordinator.clone(),
+    );
+
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-replay-none-metadata",
+                "thread_id": "thread-alpha",
+                "content": "replay with none metadata"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("replayed RejectedBusy must succeed");
+
+    match response {
+        RebornSubmitTurnResponse::RejectedBusy {
+            active_run_id,
+            status,
+            event_cursor,
+            notice,
+            ..
+        } => {
+            assert!(
+                active_run_id.is_none(),
+                "replayed RejectedBusy must not fabricate active_run_id, got {active_run_id:?}"
+            );
+            assert!(
+                status.is_none(),
+                "replayed RejectedBusy must not fabricate status, got {status:?}"
+            );
+            assert!(
+                event_cursor.is_none(),
+                "replayed RejectedBusy must not fabricate event_cursor, got {event_cursor:?}"
+            );
+            assert!(
+                !notice.is_empty(),
+                "replayed RejectedBusy must carry a notice"
+            );
+        }
+        other => panic!("expected RejectedBusy, got {other:?}"),
+    }
+    assert_eq!(
+        coordinator.submission_count(),
+        0,
+        "replay must not produce a new turn submission"
+    );
+}
+
+#[tokio::test]
+async fn fresh_rejected_busy_returns_some_run_metadata() {
+    // Fresh ThreadBusy: the blocking run is live — run metadata must be Some
+    // with the real values so the client can poll the existing run.
+    let active_run_id = TurnRunId::new();
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id,
+            status: TurnStatus::Running,
+            event_cursor: EventCursor(7),
+        }),
+    ));
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let services = RebornServices::new(threads, coordinator.clone());
+    create_thread_for(&services, caller(), "thread-busy-fresh").await;
+
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-fresh-busy-metadata",
+                "thread_id": "thread-busy-fresh",
+                "content": "hello busy"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("fresh RejectedBusy must succeed");
+
+    match response {
+        RebornSubmitTurnResponse::RejectedBusy {
+            active_run_id: returned_run_id,
+            status: returned_status,
+            event_cursor: returned_cursor,
+            notice,
+            ..
+        } => {
+            assert_eq!(
+                returned_run_id,
+                Some(active_run_id),
+                "fresh RejectedBusy must carry the real blocking run id"
+            );
+            assert_eq!(
+                returned_status,
+                Some(TurnStatus::Running),
+                "fresh RejectedBusy must carry the real blocking run status"
+            );
+            assert_eq!(
+                returned_cursor,
+                Some(EventCursor(7)),
+                "fresh RejectedBusy must carry the real event cursor"
+            );
+            assert!(!notice.is_empty(), "fresh RejectedBusy must carry a notice");
+        }
+        other => panic!("expected RejectedBusy, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mark-failure reconcile path: mark_message_rejected_busy errors → replay
+// confirms RejectedBusy → no error surfaces, RejectedBusy returned
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn rejected_busy_mark_failure_reconciles_via_replay_and_returns_rejected_busy() {
+    // Arrange: coordinator returns ThreadBusy so the busy path fires; the
+    // scripted thread service makes mark_message_rejected_busy fail and then
+    // supplies a RejectedBusy replay on the reconcile probe so
+    // reconcile_terminal_duplicate settles the race without propagating the error.
+    let active_run_id = TurnRunId::new();
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id,
+            status: TurnStatus::Running,
+            event_cursor: EventCursor(3),
+        }),
+    ));
+    let services = RebornServices::new(
+        Arc::new(ScriptedThreadService::rejected_busy_mark_fails()),
+        coordinator,
+    );
+
+    // Act: submit a fresh turn against thread-alpha (which the scripted service
+    // owns); coordinator fires ThreadBusy, mark fails, reconcile replays.
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-mark-fail-reconcile",
+                "thread_id": "thread-alpha",
+                "content": "hello mark-fail"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("mark-failure reconcile must succeed (not error)");
+
+    // Assert: the mark error must NOT propagate to the caller — reconcile_terminal_duplicate
+    // replays the accepted message, sees RejectedBusy, and returns Ok(()).
+    // The response is built from the original ThreadBusy metadata (active_run_id,
+    // status, event_cursor), proving the full path ran without dropping state.
+    match response {
+        RebornSubmitTurnResponse::RejectedBusy {
+            active_run_id: returned_run_id,
+            status: returned_status,
+            event_cursor: returned_cursor,
+            notice,
+            ..
+        } => {
+            assert_eq!(
+                returned_run_id,
+                Some(active_run_id),
+                "mark-failure reconcile must carry the real blocking run id from ThreadBusy"
+            );
+            assert_eq!(
+                returned_status,
+                Some(TurnStatus::Running),
+                "mark-failure reconcile must carry the real blocking run status"
+            );
+            assert_eq!(
+                returned_cursor,
+                Some(EventCursor(3)),
+                "mark-failure reconcile must carry the real event cursor"
+            );
+            assert!(!notice.is_empty(), "RejectedBusy must carry a notice");
+        }
+        other => {
+            panic!("mark-failure reconcile must return RejectedBusy (not error), got {other:?}")
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Legacy DeferredBusy mark-failure reconcile path: mark_message_rejected_busy errors
+// → replay returns legacy DeferredBusy (non-terminal) → predicate does NOT match
+// → original mark error surfaces as Unavailable, not a false-terminal RejectedBusy
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn legacy_deferred_busy_mark_failure_surfaces_error_not_false_terminal() {
+    // Arrange: coordinator returns ThreadBusy so the busy path fires; the
+    // scripted thread service makes mark_message_rejected_busy fail and then
+    // supplies a legacy DeferredBusy replay on the reconcile probe.
+    // DeferredBusy is non-terminal — reconcile_terminal_duplicate must NOT
+    // accept it as settled.  The predicate now matches only RejectedBusy, so
+    // the `_ =>` arm propagates the original mark failure as an error.
+    let active_run_id = TurnRunId::new();
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id,
+            status: TurnStatus::Running,
+            event_cursor: EventCursor(3),
+        }),
+    ));
+    let services = RebornServices::new(
+        Arc::new(ScriptedThreadService::deferred_busy_mark_fails()),
+        coordinator,
+    );
+
+    // Act: submit a fresh turn against thread-alpha; coordinator fires ThreadBusy,
+    // mark_message_rejected_busy fails, reconcile sees legacy DeferredBusy which
+    // no longer matches → the original mark error must propagate.
+    let error = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-deferred-busy-mark-fail-reconcile",
+                "thread_id": "thread-alpha",
+                "content": "hello deferred-busy mark-fail"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err(
+            "legacy DeferredBusy reconcile must surface the mark failure as an error, \
+             not silently return a false-terminal RejectedBusy",
+        );
+
+    // Assert: SessionThreadError::Backend maps to service_unavailable(true) —
+    // code=Unavailable, status_code=503, retryable=true.
+    assert_eq!(
+        error.code,
+        RebornServicesErrorCode::Unavailable,
+        "DeferredBusy reconcile miss must surface the backend mark failure (Unavailable), got {error:?}",
+    );
+    assert_eq!(
+        error.status_code, 503,
+        "DeferredBusy reconcile miss must return 503, got {error:?}",
+    );
+    assert!(
+        error.retryable,
+        "backend mark failure is retryable, got {error:?}",
+    );
 }
 
 /// Test lander that records what it was asked to land and returns a ref per

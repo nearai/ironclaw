@@ -159,6 +159,11 @@ pub enum MessageKind {
 pub enum MessageStatus {
     Accepted,
     Submitted,
+    /// Message arrived while the thread was busy; it will NOT be auto-resubmitted.
+    /// The user must resend the message once the current task finishes.
+    RejectedBusy,
+    /// Legacy status — no longer written by new code; kept for deserializing
+    /// existing rows in storage.
     DeferredBusy,
     Draft,
     Finalized,

@@ -690,6 +690,9 @@ registerPack("en", {
   "automations.filter.paused": "Paused",
   "automations.refresh": "Refresh automations",
   "automations.error.loadFailed": "Unable to load automations",
+  "automations.schedulerOff.title": "Scheduling is turned off",
+  "automations.schedulerOff.description":
+    "These automations are saved but won't run until the scheduler is enabled.",
   "automations.delivery.eyebrow": "Delivery defaults",
   "automations.delivery.title": "Where triggered results are sent",
   "automations.delivery.explainer":
@@ -707,6 +710,8 @@ registerPack("en", {
   "automations.delivery.save": "Save",
   "automations.delivery.clear": "Clear",
   "automations.delivery.saved": "Saved",
+  "automations.delivery.saveFailed":
+    "Couldn't save the delivery target. Please try again.",
   "automations.delivery.footnote":
     "Approval requests sent to your DM are answered by replying {command} in Slack.",
   "automations.delivery.pill.ready": "Ready",
@@ -723,9 +728,10 @@ registerPack("en", {
   "automations.summary.paused": "Paused",
   "automations.summary.pausedDetail": "Schedules not currently expected to run.",
   "automations.summary.running": "Running now",
-  "automations.summary.runningDetail": "Runs currently in progress.",
+  "automations.summary.runningDetail": "Automations with a run in progress.",
   "automations.summary.failures": "Failures",
-  "automations.summary.failuresDetail": "Failed runs in the visible history.",
+  "automations.summary.failuresDetail":
+    "Automations with a failed run in recent history.",
   "automations.summary.nextRun": "Next run",
   "automations.summary.none": "None",
   "automations.summary.nextRunDetail": "Soonest scheduled run in this list.",
