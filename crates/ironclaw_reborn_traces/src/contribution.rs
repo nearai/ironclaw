@@ -5025,14 +5025,22 @@ fn validate_trace_upload_claim_response(
 // production — the symbol does not exist outside `cfg(test)`) every guard
 // runs exactly as before.
 #[cfg(test)]
-thread_local! {
-    static TRACE_UPLOAD_CLAIM_ISSUER_TEST_BYPASS: std::cell::Cell<bool> =
-        const { std::cell::Cell::new(false) };
+tokio::task_local! {
+    static TRACE_UPLOAD_CLAIM_ISSUER_TEST_BYPASS: bool;
 }
 
+// A `tokio::task_local!` (rather than `thread_local!`) so the flag travels with
+// the task across `.await` points even if the request future migrates threads.
+// The read sites are reached synchronously from within the async
+// `fetch_trace_upload_claim_from_issuer` future, so a `.scope(true, async { .. })`
+// wrapper at the test driver makes the flag visible to every guard. Outside any
+// scope (production, and the validation-only unit test) `try_with` returns the
+// `false` default and every SSRF guard runs unchanged.
 #[cfg(test)]
 fn trace_upload_claim_issuer_test_bypass() -> bool {
-    TRACE_UPLOAD_CLAIM_ISSUER_TEST_BYPASS.with(std::cell::Cell::get)
+    TRACE_UPLOAD_CLAIM_ISSUER_TEST_BYPASS
+        .try_with(|bypass| *bypass)
+        .unwrap_or(false)
 }
 
 #[cfg(not(test))]
@@ -12206,9 +12214,9 @@ mod tests {
     /// exercised through the actual request/response path — not just the
     /// factored-out `build_trace_upload_claim_http_error` helper.
     ///
-    /// The whole request is run inside `spawn_blocking` + a current-thread
-    /// runtime so the thread-local bypass flag (set on the same thread that
-    /// runs the caller) is visible to `fetch_trace_upload_claim_from_issuer`.
+    /// The request runs inside a `TRACE_UPLOAD_CLAIM_ISSUER_TEST_BYPASS.scope(..)`
+    /// so the task-local bypass flag is visible to every guard the caller hits,
+    /// regardless of which worker thread the future ends up on.
     async fn drive_fetch_against_mock_issuer(
         status: axum::http::StatusCode,
         body: &'static str,
@@ -12237,21 +12245,15 @@ mod tests {
         };
         let context = TraceUploadClaimContext::for_status_sync();
 
-        // The bypass is thread-local; run the caller on a dedicated thread that
-        // sets the flag, using a current-thread runtime so the request future
-        // never migrates threads.
-        let result = tokio::task::spawn_blocking(move || {
-            TRACE_UPLOAD_CLAIM_ISSUER_TEST_BYPASS.with(|b| b.set(true));
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("current-thread runtime builds");
-            let outcome = rt.block_on(fetch_trace_upload_claim_from_issuer(&policy, &context));
-            TRACE_UPLOAD_CLAIM_ISSUER_TEST_BYPASS.with(|b| b.set(false));
-            outcome
-        })
-        .await
-        .expect("mock-issuer driver thread joins");
+        // Establish the bypass for the duration of the request future. The flag
+        // travels with the task across `.await` points, so the guards see it even
+        // if the future migrates worker threads.
+        let result = TRACE_UPLOAD_CLAIM_ISSUER_TEST_BYPASS
+            .scope(
+                true,
+                fetch_trace_upload_claim_from_issuer(&policy, &context),
+            )
+            .await;
 
         server.abort();
         result.expect_err("mock issuer returned an error status; caller must surface an error")
