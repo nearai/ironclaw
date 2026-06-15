@@ -30,15 +30,14 @@ use ironclaw_auth::{
     AuthInteractionId, AuthProductError, AuthProductScope, AuthProviderId, AuthSessionId,
     AuthSurface, AuthorizationCodeHash, CredentialAccountChoiceRequest, CredentialAccountId,
     CredentialAccountLabel, CredentialAccountListPage, CredentialAccountListRequest,
-    CredentialAccountProjection, CredentialAccountSelectionRequest, CredentialAccountStatus,
-    CredentialAccountUpdateBinding, CredentialRecoveryProjection, CredentialRecoveryRequest,
-    CredentialRefreshReport, CredentialRefreshRequest, GOOGLE_PROVIDER_ID,
-    GoogleOAuthCallbackState, GoogleOAuthRouteConfig, OAuthAuthorizationCode,
+    CredentialAccountOwnerScope, CredentialAccountProjection, CredentialAccountSelectionRequest,
+    CredentialAccountStatus, CredentialAccountUpdateBinding, CredentialRecoveryProjection,
+    CredentialRecoveryRequest, CredentialRefreshReport, CredentialRefreshRequest,
+    GOOGLE_PROVIDER_ID, GoogleOAuthCallbackState, GoogleOAuthRouteConfig, OAuthAuthorizationCode,
     OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash,
     PkceVerifierSecret, ProviderScope, SecretCleanupAction, SecretCleanupReport,
     SecretCleanupRequest, Timestamp, TurnRunRef, build_google_authorization_url,
     parse_google_callback_scopes, parse_google_requested_scopes, pkce_s256_challenge,
-    scope_matches,
 };
 use ironclaw_host_api::NetworkMethod;
 use ironclaw_host_api::ingress::{
@@ -62,7 +61,6 @@ use crate::{
     RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse,
     RebornOAuthCallbackError, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
     RebornOAuthCallbackResponse, RebornProductAuthServices,
-    product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest,
 };
 
 pub(crate) const OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/start";
@@ -869,32 +867,42 @@ pub(super) async fn scoped_update_binding_for_requester(
     state: &ProductAuthRouteState,
     scope: AuthProductScope,
     provider: AuthProviderId,
-    provider_scopes: Vec<ProviderScope>,
     requester_extension: Option<&ExtensionId>,
 ) -> Result<Option<CredentialAccountUpdateBinding>, ProductAuthRouteFailure> {
     let Some(requester_extension) = requester_extension else {
         return Ok(None);
     };
+    // Bind a reconnect at durable owner granularity. `thread_id`/`mission_id`
+    // (and the per-flow `invocation_id` the old `scope_matches` full-equality
+    // compared) are transient invocation provenance, not identity — matching on
+    // them meant the 2nd OAuth flow could never find the existing account and
+    // forked a duplicate `UserReusable` account on every flow. `session_id` IS
+    // path-segmenting (paths.rs), so it stays matched; the update path reads at
+    // the flow's stored scope and would orphan across a different session.
+    let owner_scope = {
+        let owner = AuthProductScope::new(scope.resource.credential_owner_scope(), scope.surface);
+        match scope.session_id.clone() {
+            Some(session_id) => owner.with_session_id(session_id),
+            None => owner,
+        }
+    };
+    // Scope-agnostic on purpose: a reconnect that grants a NEW provider scope
+    // must still bind to (and update) the existing account that lacks it.
     let account = state
         .product_auth
         .runtime_credential_account_selection_service()
-        .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
-            CredentialAccountSelectionRequest::new(scope.clone(), provider.clone())
+        .select_configured_account_for_binding(
+            CredentialAccountSelectionRequest::new(owner_scope.clone(), provider.clone())
                 .for_extension(requester_extension.clone()),
-            scope.clone(),
-            ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
-                scopes: provider_scopes
-                    .iter()
-                    .map(|scope| scope.as_str().to_string())
-                    .collect(),
-            },
-            provider_scopes,
-        ))
+            owner_scope.clone(),
+        )
         .await;
     match account {
-        Ok(account) if scope_matches(&scope, &account.scope) => Ok(Some(
-            CredentialAccountUpdateBinding::from_projection(&account.projection()),
-        )),
+        Ok(account) if CredentialAccountOwnerScope::from_scope(&owner_scope).matches(&account) => {
+            Ok(Some(CredentialAccountUpdateBinding::from_projection(
+                &account.projection(),
+            )))
+        }
         Ok(_) => Ok(None),
         Err(AuthProductError::CredentialMissing) => Ok(None),
         Err(AuthProductError::CrossScopeDenied) => Ok(None),
@@ -1534,7 +1542,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn extension_oauth_start_handler_does_not_bind_reconnect_accounts_outside_exact_scope() {
+    async fn extension_oauth_start_handler_binds_reconnect_to_existing_owner_account() {
+        // Regression (#4935 defect A — account fork): a 2nd OAuth flow for the
+        // same owner must BIND to the owner's existing account, not fork a
+        // duplicate. The existing account differs from the flow scope only by
+        // `invocation_id` (fresh per flow) — the old `scope_matches`
+        // full-equality compared `invocation_id` and so never matched, forking a
+        // new account on every reconnect. The bind is now owner-granularity.
         let secret_store = Arc::new(InMemorySecretStore::new());
         let dcr_provider = Arc::new(
             OAuthDcrProvider::new(
@@ -1566,37 +1580,126 @@ mod tests {
         let app = product_auth_route_mount(state)
             .protected
             .layer(axum::Extension(test_caller()));
-        let stale_scope = AuthProductScope::new(test_resource_scope(), AuthSurface::Callback);
-        shared
+        // Owner fields equal to the flow scope; only `invocation_id` differs.
+        let existing_scope = AuthProductScope::new(test_resource_scope(), AuthSurface::Callback);
+        let existing = shared
             .create_account(NewCredentialAccount {
-                scope: stale_scope,
+                scope: existing_scope,
                 provider: AuthProviderId::new("notion").expect("provider"),
                 label: CredentialAccountLabel::new("work notion").expect("label"),
                 status: CredentialAccountStatus::Configured,
                 ownership: CredentialOwnership::UserReusable,
                 owner_extension: None,
                 granted_extensions: Vec::new(),
-                access_secret: Some(SecretHandle::new("stale-notion-access").expect("secret")),
-                refresh_secret: Some(SecretHandle::new("stale-notion-refresh").expect("secret")),
+                access_secret: Some(SecretHandle::new("existing-notion-access").expect("secret")),
+                refresh_secret: Some(SecretHandle::new("existing-notion-refresh").expect("secret")),
                 scopes: Vec::new(),
             })
             .await
-            .expect("seed stale account");
+            .expect("seed existing account");
+        let flow_invocation_id = InvocationId::new();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/extensions/notion/setup/oauth/start")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "provider": "notion",
+                            "account_label": "work notion",
+                            "scopes": [],
+                            "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
+                            "invocation_id": flow_invocation_id.to_string(),
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("route response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("start json");
+        let flow_id = AuthFlowId::from_uuid(
+            Uuid::parse_str(json["flow_id"].as_str().expect("flow id")).expect("flow uuid"),
+        );
+        let mut flow_resource = test_resource_scope();
+        flow_resource.invocation_id = flow_invocation_id;
+        let flow_scope = AuthProductScope::new(flow_resource, AuthSurface::Callback);
+        let flow = shared
+            .get_flow(&flow_scope, flow_id)
+            .await
+            .expect("flow lookup")
+            .expect("flow");
+        assert_eq!(
+            flow.update_binding
+                .expect("reconnect must bind to the owner's existing account")
+                .account_id,
+            existing.id,
+        );
+    }
+
+    #[tokio::test]
+    async fn extension_oauth_start_handler_does_not_bind_across_owner_boundary() {
+        // Owner isolation guard for defect A: an account owned by a DIFFERENT
+        // agent must never be bound by this owner's reconnect. tenant/user/
+        // agent/project stay hard-`==` in the owner match, so a cross-owner
+        // account is invisible and the flow starts with no update binding.
+        let secret_store = Arc::new(InMemorySecretStore::new());
+        let dcr_provider = Arc::new(
+            OAuthDcrProvider::new(
+                OAuthDcrProviderConfig {
+                    spec: notion_provider_spec(),
+                    callback_origin: "http://127.0.0.1:3000".to_string(),
+                    client_name: "Ironclaw".to_string(),
+                    account_label: CredentialAccountLabel::new("notion").expect("label"),
+                    scopes: Vec::new(),
+                },
+                Arc::new(RouteDcrSetupEgress),
+                secret_store,
+                Arc::new(NoopObligationHandler),
+            )
+            .expect("DCR provider"),
+        );
+        let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
+        let product_auth =
+            RebornProductAuthServices::from_shared(shared.clone(), Arc::new(NoopDispatcher))
+                .with_dcr_oauth_registry(Arc::new(OAuthDcrProviderRegistry::new(vec![
+                    dcr_provider,
+                ])));
+        let state = ProductAuthRouteState::new(
+            Arc::new(product_auth),
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        );
+        let app = product_auth_route_mount(state)
+            .protected
+            .layer(axum::Extension(test_caller()));
+        // Same tenant/user as the caller, but a different agent_id → different
+        // owner. Must NOT be bound.
+        let mut other_owner = test_resource_scope();
+        other_owner.agent_id = Some(AgentId::new("agent-other").expect("agent"));
         shared
             .create_account(NewCredentialAccount {
-                scope: AuthProductScope::new(test_resource_scope(), AuthSurface::Callback),
+                scope: AuthProductScope::new(other_owner, AuthSurface::Callback),
                 provider: AuthProviderId::new("notion").expect("provider"),
-                label: CredentialAccountLabel::new("personal notion").expect("label"),
+                label: CredentialAccountLabel::new("other-agent notion").expect("label"),
                 status: CredentialAccountStatus::Configured,
                 ownership: CredentialOwnership::UserReusable,
                 owner_extension: None,
                 granted_extensions: Vec::new(),
-                access_secret: Some(SecretHandle::new("other-notion-access").expect("secret")),
-                refresh_secret: Some(SecretHandle::new("other-notion-refresh").expect("secret")),
+                access_secret: Some(SecretHandle::new("other-owner-access").expect("secret")),
+                refresh_secret: Some(SecretHandle::new("other-owner-refresh").expect("secret")),
                 scopes: Vec::new(),
             })
             .await
-            .expect("seed second stale account");
+            .expect("seed cross-owner account");
         let flow_invocation_id = InvocationId::new();
 
         let response = app

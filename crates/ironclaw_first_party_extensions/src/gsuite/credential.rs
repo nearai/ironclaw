@@ -58,7 +58,13 @@ impl GoogleCredentialResolver {
         requester_extension: &ExtensionId,
         required_scopes: &[ProviderScope],
     ) -> Result<GoogleCredential, GoogleCredentialError> {
-        let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+        // Look up the owner's Google account at tenant/user/agent/project
+        // granularity. The runtime `scope` carries the current chat thread, but
+        // credentials are owned by the user, not the thread, so the thread/
+        // mission sub-scope must be stripped or the account authorized in one
+        // thread is invisible in the next. Staging still uses the real runtime
+        // scope via `credential.access_secret_scope` / `request.scope`.
+        let auth_scope = AuthProductScope::new(scope.credential_owner_scope(), AuthSurface::Api);
         let provider = google_provider_id()?;
         let account = match self
             .select_configured_account_for_gsuite_requester(
@@ -205,9 +211,13 @@ impl GoogleCredentialResolver {
         requester_extension: ExtensionId,
         account_id: CredentialAccountId,
     ) -> Result<Option<CredentialAccount>, AuthProductError> {
+        // Owner-scope the read so a known account is found from any thread of
+        // the same owner, not just the thread/session it was authorized in.
+        let owner_scope =
+            AuthProductScope::new(scope.resource.credential_owner_scope(), scope.surface);
         let account = self
             .account_records
-            .accounts_for_owner(scope)
+            .accounts_for_owner(&owner_scope)
             .await?
             .into_iter()
             .find(|account| account.id == account_id);
@@ -332,7 +342,7 @@ impl GoogleCredentialResolver {
         self.accounts
             .project_credential_recovery(
                 ironclaw_auth::CredentialRecoveryRequest::new(
-                    AuthProductScope::new(scope.clone(), AuthSurface::Api),
+                    AuthProductScope::new(scope.credential_owner_scope(), AuthSurface::Api),
                     provider,
                 )
                 .for_extension(requester_extension.clone()),
@@ -385,7 +395,7 @@ mod tests {
         CredentialRefreshReport, CredentialRefreshRequest, InMemoryAuthProductServices,
         NewCredentialAccount,
     };
-    use ironclaw_host_api::{InvocationId, UserId};
+    use ironclaw_host_api::{InvocationId, ThreadId, UserId};
 
     use super::*;
 
@@ -579,6 +589,91 @@ mod tests {
             SecretHandle::new("google-access-token").unwrap()
         );
         assert!(credential.missing_scopes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_finds_owner_account_authorized_in_a_different_thread() {
+        // Regression (#4920-follow-up): a Google credential a user authorizes in
+        // one chat thread MUST stay resolvable from a new thread of the same
+        // owner. Credentials are owned by tenant/user/agent/project, never by the
+        // thread they happened to be authorized in.
+        let user = UserId::new("alice").unwrap();
+        let mut thread_a = ResourceScope::local_default(user.clone(), InvocationId::new()).unwrap();
+        thread_a.thread_id = Some(ThreadId::new("thread-a").unwrap());
+        let auth_scope = AuthProductScope::new(thread_a.clone(), AuthSurface::Api);
+
+        let auth = Arc::new(InMemoryAuthProductServices::new());
+        let account = auth
+            .create_account(new_credential_account(
+                auth_scope,
+                CredentialAccountStatus::Configured,
+            ))
+            .await
+            .unwrap();
+        let resolver = GoogleCredentialResolver::new(auth.clone(), auth.clone());
+
+        let mut thread_b = ResourceScope::local_default(user, InvocationId::new()).unwrap();
+        thread_b.thread_id = Some(ThreadId::new("thread-b").unwrap());
+
+        let credential = resolver
+            .resolve(
+                &thread_b,
+                &ExtensionId::new("gmail").unwrap(),
+                &[ProviderScope::new("https://www.googleapis.com/auth/gmail.send").unwrap()],
+            )
+            .await
+            .expect("owner credential must resolve from a different thread");
+
+        assert_eq!(credential.account_id, account.id);
+        assert_eq!(
+            credential.access_secret,
+            SecretHandle::new("google-access-token").unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_finds_extension_owned_account_authorized_in_a_different_thread() {
+        // The cross-thread guarantee is not limited to UserReusable accounts:
+        // an ExtensionOwned Google account stays resolvable for an authorized
+        // gsuite-sibling requester from any thread of the owner.
+        let user = UserId::new("alice").unwrap();
+        let calendar_scope =
+            ProviderScope::new("https://www.googleapis.com/auth/calendar.readonly").unwrap();
+        let mut thread_a = ResourceScope::local_default(user.clone(), InvocationId::new()).unwrap();
+        thread_a.thread_id = Some(ThreadId::new("thread-a").unwrap());
+        let auth_scope = AuthProductScope::new(thread_a.clone(), AuthSurface::Api);
+
+        let auth = Arc::new(InMemoryAuthProductServices::new());
+        let account = auth
+            .create_account(NewCredentialAccount {
+                scope: auth_scope,
+                provider: google_provider_id().unwrap(),
+                label: CredentialAccountLabel::new("work google").unwrap(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::ExtensionOwned,
+                owner_extension: Some(ExtensionId::new("google-drive").unwrap()),
+                granted_extensions: Vec::new(),
+                access_secret: Some(SecretHandle::new("google-access-token").unwrap()),
+                refresh_secret: None,
+                scopes: vec![calendar_scope.clone()],
+            })
+            .await
+            .unwrap();
+        let resolver = GoogleCredentialResolver::new(auth.clone(), auth.clone());
+
+        let mut thread_b = ResourceScope::local_default(user, InvocationId::new()).unwrap();
+        thread_b.thread_id = Some(ThreadId::new("thread-b").unwrap());
+
+        let credential = resolver
+            .resolve(
+                &thread_b,
+                &ExtensionId::new("google-calendar").unwrap(),
+                &[calendar_scope],
+            )
+            .await
+            .expect("extension-owned credential must resolve from a different thread");
+
+        assert_eq!(credential.account_id, account.id);
     }
 
     #[tokio::test]

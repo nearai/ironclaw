@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount,
     CredentialAccountId, CredentialAccountRecordSource, CredentialAccountSelectionRequest,
-    CredentialAccountStatus, CredentialOwnership, CredentialRefreshReport,
-    CredentialRefreshRequest, ProviderScope, select_latest_duplicate_user_reusable_account,
+    CredentialAccountStatus, CredentialRefreshReport, CredentialRefreshRequest, ProviderScope,
+    select_latest_duplicate_user_reusable_account,
 };
 use ironclaw_host_api::{
     CredentialStageError, ExtensionId, ResourceScope, RuntimeCredentialAccountProviderId,
@@ -48,6 +48,23 @@ pub(crate) trait RuntimeCredentialAccountSelectionService: Send + Sync {
         &self,
         request: RuntimeCredentialAccountSelectionRequest,
     ) -> Result<CredentialAccount, AuthProductError>;
+
+    /// Select the owner's existing configured account for an OAuth *bind*
+    /// decision — i.e. "does this owner already have an account for this
+    /// provider that this requester may update?". Unlike runtime resolution,
+    /// this deliberately does NOT apply the provider-scope gate: a reconnect
+    /// that adds a new scope must still find (and bind to) the existing
+    /// account that lacks that scope, instead of forking a duplicate. Callers
+    /// are responsible for passing an owner-granularity scope (thread/mission
+    /// stripped). The default returns `CredentialMissing` so test mocks inherit
+    /// a no-bind behavior unchanged.
+    async fn select_configured_account_for_binding(
+        &self,
+        _lookup: CredentialAccountSelectionRequest,
+        _runtime_scope: AuthProductScope,
+    ) -> Result<CredentialAccount, AuthProductError> {
+        Err(AuthProductError::CredentialMissing)
+    }
 }
 
 #[async_trait]
@@ -218,28 +235,45 @@ impl std::fmt::Debug for ProductAuthRuntimeCredentialAccountSelector {
     }
 }
 
-#[async_trait]
-impl RuntimeCredentialAccountSelectionService for ProductAuthRuntimeCredentialAccountSelector {
-    async fn select_unique_configured_runtime_account(
+impl ProductAuthRuntimeCredentialAccountSelector {
+    /// Owner-scoped pre-filter shared by runtime resolution and OAuth binding.
+    ///
+    /// `scope_gate` is `Some((setup, scopes))` for runtime resolution (the
+    /// account must already carry the requested provider scopes) and `None`
+    /// for binding (find the existing account regardless of which scopes it
+    /// currently holds, so a reconnect updates it instead of forking a
+    /// duplicate). Requester authorization is NOT applied here — that is the
+    /// caller's `finalize_selection` stage.
+    async fn configured_accounts_for_requester(
         &self,
-        request: RuntimeCredentialAccountSelectionRequest,
-    ) -> Result<CredentialAccount, AuthProductError> {
-        let configured = self
+        lookup: &CredentialAccountSelectionRequest,
+        runtime_scope: &AuthProductScope,
+        scope_gate: Option<(&RuntimeCredentialAccountSetup, &[ProviderScope])>,
+    ) -> Result<Vec<CredentialAccount>, AuthProductError> {
+        Ok(self
             .accounts
-            .accounts_for_owner(&request.lookup.scope)
+            .accounts_for_owner(&lookup.scope)
             .await?
             .into_iter()
             .filter(|account| {
-                account.provider == request.lookup.provider
+                account.provider == lookup.provider
                     && account.status == CredentialAccountStatus::Configured
-                    && account_has_provider_scopes(
-                        account,
-                        &request.setup,
-                        &request.provider_scopes,
-                    )
-                    && account_visible_from_runtime_scope(account, &request.runtime_scope)
+                    && scope_gate.is_none_or(|(setup, scopes)| {
+                        account_has_provider_scopes(account, setup, scopes)
+                    })
+                    && account_visible_from_runtime_scope(account, runtime_scope)
             })
-            .collect::<Vec<_>>();
+            .collect())
+    }
+
+    /// Apply the requester-authorization stage and resolve to a single account.
+    /// `configured` is the owner pre-filtered set from
+    /// `configured_accounts_for_requester`.
+    fn finalize_selection(
+        &self,
+        configured: Vec<CredentialAccount>,
+        lookup: &CredentialAccountSelectionRequest,
+    ) -> Result<CredentialAccount, AuthProductError> {
         if configured.is_empty() {
             return Err(AuthProductError::CredentialMissing);
         }
@@ -247,7 +281,7 @@ impl RuntimeCredentialAccountSelectionService for ProductAuthRuntimeCredentialAc
             .into_iter()
             .filter(|account| {
                 self.visibility_policy
-                    .account_visible_to_requester(account, &request.lookup)
+                    .account_visible_to_requester(account, lookup)
             })
             .collect::<Vec<_>>();
         match selectable.as_slice() {
@@ -256,6 +290,34 @@ impl RuntimeCredentialAccountSelectionService for ProductAuthRuntimeCredentialAc
             _ => select_latest_duplicate_user_reusable_account(&selectable)
                 .ok_or(AuthProductError::AccountSelectionRequired),
         }
+    }
+}
+
+#[async_trait]
+impl RuntimeCredentialAccountSelectionService for ProductAuthRuntimeCredentialAccountSelector {
+    async fn select_unique_configured_runtime_account(
+        &self,
+        request: RuntimeCredentialAccountSelectionRequest,
+    ) -> Result<CredentialAccount, AuthProductError> {
+        let configured = self
+            .configured_accounts_for_requester(
+                &request.lookup,
+                &request.runtime_scope,
+                Some((&request.setup, &request.provider_scopes)),
+            )
+            .await?;
+        self.finalize_selection(configured, &request.lookup)
+    }
+
+    async fn select_configured_account_for_binding(
+        &self,
+        lookup: CredentialAccountSelectionRequest,
+        runtime_scope: AuthProductScope,
+    ) -> Result<CredentialAccount, AuthProductError> {
+        let configured = self
+            .configured_accounts_for_requester(&lookup, &runtime_scope, None)
+            .await?;
+        self.finalize_selection(configured, &lookup)
     }
 }
 
@@ -438,27 +500,27 @@ fn account_visible_from_runtime_scope(
     account: &CredentialAccount,
     runtime_scope: &AuthProductScope,
 ) -> bool {
-    if account.ownership == CredentialOwnership::UserReusable {
-        return true;
-    }
+    // Runtime credential accounts are owned at tenant/user/agent/project
+    // granularity. `mission_id`/`thread_id`/`session_id` are transient runtime
+    // sub-scopes and MUST NOT narrow visibility: a credential authorized in one
+    // thread is resolvable from every thread of the same owner. Which requester
+    // may USE a non-reusable account is governed separately by ownership/grant
+    // policy (`VisibilityPolicy::account_visible_to_requester` +
+    // `CredentialAccount::is_authorized_for_requester`), not by the thread it
+    // was authorized in. Re-binding to the thread here is what made Google (and
+    // every other non-`UserReusable`) credential vanish on a new chat thread.
     let account_resource = &account.scope.resource;
     let runtime_resource = &runtime_scope.resource;
     account_resource.tenant_id == runtime_resource.tenant_id
         && account_resource.user_id == runtime_resource.user_id
         && account_resource.agent_id == runtime_resource.agent_id
         && account_resource.project_id == runtime_resource.project_id
-        && account_resource.mission_id == runtime_resource.mission_id
-        && account_resource.thread_id == runtime_resource.thread_id
-        && account.scope.session_id == runtime_scope.session_id
 }
 
 pub(crate) fn runtime_account_owner_scope(
     scope: &ironclaw_host_api::ResourceScope,
 ) -> ironclaw_host_api::ResourceScope {
-    let mut owner = scope.clone();
-    owner.mission_id = None;
-    owner.thread_id = None;
-    owner
+    scope.credential_owner_scope()
 }
 
 fn map_account_error(error: AuthProductError) -> CredentialStageError {

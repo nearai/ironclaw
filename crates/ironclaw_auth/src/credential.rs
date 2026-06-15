@@ -577,6 +577,25 @@ impl CredentialAccountOwnerScope {
     }
 }
 
+/// True iff `account` is owned by the owner of `scope`, ignoring transient
+/// invocation provenance.
+///
+/// OAuth/manual-token reconnect binding and the subsequent bound-account update
+/// must resolve at durable owner granularity: the flow `scope` carries a fresh
+/// per-flow `invocation_id` (and possibly a thread/mission) that the account —
+/// created in an earlier flow — does not share. Comparing those transient
+/// fields (the old `scope_matches` full-equality) rejected every legitimate
+/// reconnect and forked a duplicate account (#4935 defect A). This keeps
+/// tenant/user/agent/project hard-required (via [`CredentialAccountOwnerScope`])
+/// and `session_id` matched (it is path-segmenting), while dropping
+/// `invocation_id`/`thread_id`/`mission_id`. Requester authorization is enforced
+/// separately by the callers; this is only the owner-boundary check.
+pub fn binding_scope_owns_account(scope: &AuthProductScope, account: &CredentialAccount) -> bool {
+    let mut owner = scope.clone();
+    owner.resource = owner.resource.credential_owner_scope();
+    CredentialAccountOwnerScope::from_scope(&owner).matches(account)
+}
+
 /// Read-only credential-account projection source for account owner queries.
 ///
 /// This intentionally does not encode host-runtime credential selection. It

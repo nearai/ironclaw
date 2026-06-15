@@ -125,6 +125,30 @@ impl ResourceScope {
     pub fn is_system(&self) -> bool {
         self.tenant_id.as_str() == SYSTEM_RESERVED_ID && self.user_id.as_str() == SYSTEM_RESERVED_ID
     }
+
+    /// Owner-granularity copy of this scope for credential-account lookups.
+    ///
+    /// Runtime credential accounts (OAuth tokens, manual tokens) are owned by
+    /// the tenant/user/agent/project — NOT by a single thread or mission. A
+    /// credential a user authorizes in one chat thread must stay resolvable
+    /// from every other thread of the same owner; "thread" is not an ownership
+    /// class. This drops the transient `mission_id`/`thread_id` so an
+    /// owner-scoped account read matches across the owner's threads instead of
+    /// binding the credential to the thread it was authorized in. The
+    /// `invocation_id` is left untouched because credential-owner matching
+    /// ignores it.
+    ///
+    /// This is the single source of truth shared by every runtime credential
+    /// resolver (the host-runtime generic resolver and the first-party GSuite
+    /// resolver). Do not re-derive the strip inline — that drift is exactly
+    /// what bound Google credentials to a thread.
+    pub fn credential_owner_scope(&self) -> Self {
+        Self {
+            mission_id: None,
+            thread_id: None,
+            ..self.clone()
+        }
+    }
 }
 
 /// Origin of a background reservation. Distinguishes heartbeats, routines,

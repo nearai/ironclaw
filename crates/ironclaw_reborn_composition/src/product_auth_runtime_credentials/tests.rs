@@ -51,6 +51,101 @@ impl RuntimeCredentialAccountRefreshPort for TestRuntimeCredentialRefreshPort {
     }
 }
 
+fn selector_for(
+    accounts: Arc<InMemoryAuthProductServices>,
+) -> ProductAuthRuntimeCredentialAccountSelector {
+    ProductAuthRuntimeCredentialAccountSelector::new_with_visibility(
+        accounts,
+        Arc::new(crate::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy),
+    )
+}
+
+#[tokio::test]
+async fn binding_selection_ignores_provider_scope_gate() {
+    // Defect A (A1): the OAuth bind lookup must find the owner's existing
+    // google account even when it lacks the newly requested scope, so a
+    // reconnect that grants a new scope UPDATES the existing account instead of
+    // forking a duplicate.
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let scope =
+        ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
+    let auth_scope = AuthProductScope::new(scope, AuthSurface::Api);
+    let created = accounts
+        .create_account(NewCredentialAccount {
+            scope: auth_scope.clone(),
+            provider: AuthProviderId::new("google").unwrap(),
+            label: CredentialAccountLabel::new("work google").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("google_access").unwrap()),
+            refresh_secret: None,
+            scopes: vec![ProviderScope::new("https://www.googleapis.com/auth/gmail.send").unwrap()],
+        })
+        .await
+        .unwrap();
+    let selector = selector_for(accounts);
+
+    // Lookup for a calendar reconnect — the account holds only gmail.send.
+    let bound = selector
+        .select_configured_account_for_binding(
+            CredentialAccountSelectionRequest::new(
+                auth_scope.clone(),
+                AuthProviderId::new("google").unwrap(),
+            )
+            .for_extension(ExtensionId::new("google-calendar").unwrap()),
+            auth_scope,
+        )
+        .await
+        .expect("binding must find the existing account despite the missing scope");
+
+    assert_eq!(bound.id, created.id);
+}
+
+#[tokio::test]
+async fn runtime_selection_still_enforces_provider_scope_gate() {
+    // Defect A guard: relaxing the scope gate is scoped to BINDING only. Runtime
+    // resolution keeps the gate, so an account lacking the requested scope is
+    // CredentialMissing (never serves a token for a scope it does not hold).
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let scope =
+        ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
+    let auth_scope = AuthProductScope::new(scope, AuthSurface::Api);
+    accounts
+        .create_account(NewCredentialAccount {
+            scope: auth_scope.clone(),
+            provider: AuthProviderId::new("google").unwrap(),
+            label: CredentialAccountLabel::new("work google").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("google_access").unwrap()),
+            refresh_secret: None,
+            scopes: vec![ProviderScope::new("https://www.googleapis.com/auth/gmail.send").unwrap()],
+        })
+        .await
+        .unwrap();
+    let selector = selector_for(accounts);
+
+    let error = selector
+        .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
+            CredentialAccountSelectionRequest::new(
+                auth_scope.clone(),
+                AuthProviderId::new("google").unwrap(),
+            )
+            .for_extension(ExtensionId::new("google-drive").unwrap()),
+            auth_scope,
+            RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+            vec![ProviderScope::new("https://www.googleapis.com/auth/drive.readonly").unwrap()],
+        ))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error, AuthProductError::CredentialMissing);
+}
+
 #[tokio::test]
 async fn resolver_returns_configured_product_auth_access_secret() {
     let accounts = Arc::new(InMemoryAuthProductServices::new());
@@ -558,14 +653,24 @@ async fn resolver_matches_reusable_setup_account_from_new_mission() {
 }
 
 #[tokio::test]
-async fn resolver_rejects_extension_owned_account_from_new_thread() {
+async fn resolver_resolves_extension_owned_account_from_new_thread() {
+    // Regression (#4920-follow-up): an ExtensionOwned credential authorized via
+    // an OAuth callback in one thread (`thread-auth-1`, `Callback` surface) MUST
+    // still resolve when the owning extension runs a tool in a new thread
+    // (`thread-auth-2`). Credentials are owned by the user/extension, not the
+    // thread they were authorized in. This previously asserted `AuthRequired`,
+    // which was the bug: a user lost their auth every time they opened a new
+    // chat thread.
     let accounts = Arc::new(InMemoryAuthProductServices::new());
     let mut setup_scope =
         ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
     setup_scope.thread_id = Some(ThreadId::new("thread-auth-1").unwrap());
+    setup_scope.mission_id = Some(MissionId::new("mission-auth-1").unwrap());
     let mut runtime_scope = setup_scope.clone();
     runtime_scope.thread_id = Some(ThreadId::new("thread-auth-2").unwrap());
+    runtime_scope.mission_id = Some(MissionId::new("mission-auth-2").unwrap());
     runtime_scope.invocation_id = InvocationId::new();
+    let access_secret = SecretHandle::new("github_manual_access").unwrap();
     accounts
         .create_account(NewCredentialAccount {
             scope: AuthProductScope::new(setup_scope, AuthSurface::Callback),
@@ -575,7 +680,7 @@ async fn resolver_rejects_extension_owned_account_from_new_thread() {
             ownership: CredentialOwnership::ExtensionOwned,
             owner_extension: Some(ExtensionId::new("github").unwrap()),
             granted_extensions: Vec::new(),
-            access_secret: Some(SecretHandle::new("github_manual_access").unwrap()),
+            access_secret: Some(access_secret.clone()),
             refresh_secret: None,
             scopes: Vec::new(),
         })
@@ -583,7 +688,7 @@ async fn resolver_rejects_extension_owned_account_from_new_thread() {
         .unwrap();
     let resolver = resolver_with_accounts(accounts);
 
-    let error = resolver
+    let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &runtime_scope,
             provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
@@ -592,9 +697,9 @@ async fn resolver_rejects_extension_owned_account_from_new_thread() {
             requester_extension: &ExtensionId::new("github").unwrap(),
         })
         .await
-        .unwrap_err();
+        .expect("extension-owned credential must resolve from a new thread");
 
-    assert_eq!(error, CredentialStageError::AuthRequired);
+    assert_eq!(resolved.handle, access_secret);
 }
 
 #[tokio::test]

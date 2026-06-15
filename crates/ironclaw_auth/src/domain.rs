@@ -271,7 +271,16 @@ fn validate_scoped_update_binding(
     binding: &CredentialAccountUpdateBinding,
     provider_mismatch: &'static str,
 ) -> Result<(), AuthProductError> {
-    if !scope_matches(scope, &account.scope) {
+    // Validate the bind at durable OWNER granularity (#4935 defect A). The
+    // flow / manual-token `scope` carries a fresh per-flow `invocation_id` (and
+    // possibly a thread/mission) that the account — created in an earlier flow
+    // — does not share. The old `scope_matches` full-equality compared those
+    // transient fields and so rejected every legitimate reconnect, forking a
+    // duplicate account each time. tenant/user/agent/project stay hard-required
+    // via `CredentialAccountOwnerScope`; session_id stays matched; the
+    // requester-authority check below is unchanged, so an unauthorized
+    // requester still cannot bind another owner's account.
+    if !crate::binding_scope_owns_account(scope, account) {
         return Err(AuthProductError::CrossScopeDenied);
     }
     if &account.provider != provider {
