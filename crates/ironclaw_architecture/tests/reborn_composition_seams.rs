@@ -63,6 +63,23 @@ fn read_crate_source(relative: &str) -> String {
 /// production composition function rather than the whole file (so a setter call
 /// that only appears in a `#[cfg(test)]` unit test does not satisfy a
 /// production-path assertion).
+///
+/// # Known limitations (future work)
+///
+/// This helper is a deliberately simple lexer-free scanner: it locates the
+/// signature with a plain substring search and then balances braces by counting
+/// raw `{` / `}` bytes. It does **not** understand Rust tokens, so it will
+/// miscount when `{` or `}` appear inside string literals, char literals, or
+/// comments (including doc comments) within the scanned function — any such
+/// brace is treated as real nesting and can prematurely or belatedly terminate
+/// the extracted body. It also assumes the `signature_marker` is unique enough
+/// to land on the intended function (a matching marker inside a comment or
+/// string earlier in the file would be found first).
+///
+/// This is acceptable today because the composition functions these assertions
+/// scope to are brace-balanced setter-call chains free of literal/comment
+/// braces. If that ever stops holding, replace this with a real token-aware
+/// scan (e.g. `proc_macro2`/`syn`) rather than extending the brace counter.
 fn function_body<'a>(source: &'a str, signature_marker: &str) -> &'a str {
     let start = source.find(signature_marker).unwrap_or_else(|| {
         panic!("expected to find `{signature_marker}` in composition source");
@@ -94,6 +111,19 @@ const OBLIGATIONS_SRC: &str = "crates/ironclaw_host_runtime/src/obligations.rs";
 const SERVICES_SRC: &str = "crates/ironclaw_host_runtime/src/services.rs";
 const REBORN_RUNTIME_SRC: &str = "crates/ironclaw_reborn/src/runtime.rs";
 const LOOP_DRIVER_HOST_SRC: &str = "crates/ironclaw_reborn/src/loop_driver_host.rs";
+
+/// Signature marker for the function whose body actually assembles the default
+/// planned runtime and calls the `with_hook_*` seam setters.
+///
+/// The public entry points `build_default_planned_runtime` and
+/// `build_default_planned_runtime_with_wake_channel` are thin wrappers that
+/// immediately delegate to this private `_with_optional_wake_channel` impl, so
+/// the seam wiring lives here. Scoping the seam assertions to this function (and
+/// not the public wrapper) is what keeps them load-bearing — pointing at the
+/// empty wrapper would silently make every hook-seam guard vacuous. The `<`
+/// pins the match to the generic definition rather than its call sites.
+const PLANNED_RUNTIME_COMPOSITION_FN: &str =
+    "fn build_default_planned_runtime_with_optional_wake_channel<";
 
 /// Sanity check: the security seams this test references must still exist as
 /// `Option<Arc<dyn ...>>` fields with `with_*` setters. If a setter is renamed
@@ -141,23 +171,14 @@ fn security_seam_setters_exist() {
 /// in production are never audited and the seam silently no-ops — exactly the
 /// #3919/#3922/#3938 defect class.
 ///
-/// `#[ignore]` UNTIL #3922 MERGES. As of `reborn-integration` this assertion
-/// FAILS, correctly: `HostRuntimeServices` has no `security_audit_sink` field,
-/// and `builtin_obligation_handler` wires the (distinct) obligation `AuditSink`
-/// via `with_audit_sink_dyn` but never the `SecurityAuditSink` — so leak-block
-/// audit events are dropped in production. The open PR #3922
-/// (`security-audit-sink-wiring`, "wire SecurityAuditSink into obligation
-/// handler + hook deny paths") is the fix: it adds a `security_audit_sink` field
-/// plus a `with_security_audit_sink` setter to `HostRuntimeServices` and calls
-/// that setter inside `builtin_obligation_handler`. This test asserts that exact
-/// end state.
-/// It is `#[ignore]`d only so it does not red-block CI before #3922 lands;
-/// remove the `#[ignore]` (and this note) the moment #3922 merges, at which
-/// point the textual assertion goes green and guards against regression.
-/// Verified against the #3922 diff: the `with_security_audit_sink` call lands
-/// inside the same `fn builtin_obligation_handler` body this test scopes to.
+/// #3922 (`security-audit-sink-wiring`, "wire SecurityAuditSink into obligation
+/// handler + hook deny paths") has landed: `HostRuntimeServices` now carries a
+/// `security_audit_sink` field plus a `with_security_audit_sink` setter, and
+/// `builtin_obligation_handler` calls that setter when the sink is installed.
+/// This test now actively guards that end state — if the production builder ever
+/// stops calling `with_security_audit_sink`, this assertion fails the build
+/// rather than letting leak-block audit events silently drop in production.
 #[test]
-#[ignore = "asserts the #3922 end state; un-ignore once #3922 (security-audit-sink-wiring) merges into reborn-integration"]
 fn production_obligation_handler_wires_security_audit_sink() {
     let services = read_crate_source(SERVICES_SRC);
     let builder = function_body(&services, "fn builtin_obligation_handler(");
@@ -174,59 +195,73 @@ fn production_obligation_handler_wires_security_audit_sink() {
 }
 
 /// SEAM: hook gate-ref factory + hook dispatcher builder factory on
-/// `RebornLoopDriverHostFactory`, assembled by `build_default_planned_runtime`.
+/// `RebornLoopDriverHostFactory`, assembled by the default planned-runtime
+/// composition.
 ///
-/// These seams are *conditionally* required: the production hooks feature is
-/// being landed incrementally and is not yet composed into the production
-/// runtime path on `reborn-integration` (the `with_hook_*` setters are
-/// currently only exercised by `crates/ironclaw_reborn/tests/hooks_integration.rs`).
-/// Asserting they are populated *today* would be a false positive — the feature
-/// is legitimately not composed yet, which is different from "forgotten setter".
+/// This was originally written as a *conditional* guard for when hooks were not
+/// yet composed in production: "if the composition ever wires a hook dispatcher,
+/// it must also wire the gate-ref factory." That precondition has since flipped
+/// — the planned-runtime composition now wires `with_hook_dispatcher_builder_factory`
+/// — and doing so surfaced a real, already-tracked production gap: the dispatcher
+/// is composed but its companion gate-ref factory is NOT
+/// (`with_hook_gate_ref_factory*` is only ever called in
+/// `crates/ironclaw_reborn/tests/hooks_integration.rs`, never in production
+/// composition). A hook dispatcher without a gate-ref factory fails closed for
+/// `PauseApproval` / `PauseAuth` and silently degrades the approval/auth security
+/// boundary — the exact #3919/#3922/#3938 defect class.
 ///
-/// The guard we CAN assert without a false positive: **if** the production
-/// composition `build_default_planned_runtime` ever starts wiring hooks (i.e.
-/// references a `HookDispatcher` / hook-dispatcher builder), **then** it must
-/// also wire the gate-ref factory. A hook dispatcher without a gate-ref factory
-/// is fail-closed for `PauseApproval` / `PauseAuth` and silently degrades the
-/// approval/auth security boundary — the same "feature enabled but seam
-/// forgotten" failure mode, one layer up.
+/// That gap is tracked by issue #3962 ("[Reborn] Standalone composition root
+/// doesn't wire hooked-prompt deps (gate-ref factory / capability input
+/// resolver) under HOOKS_ENABLED"). Rather than red-block CI on a pre-existing,
+/// separately-tracked defect — or hide it behind a silent early-return — this
+/// test pins the gap as an *explicit, self-arming* assertion: it confirms the
+/// dispatcher IS composed and the gate-ref factory is NOT, and is wired so that
+/// the moment #3962 is fixed (gate-ref factory gets wired) the assertion flips
+/// red, forcing whoever lands the fix to delete this gap-acknowledgment and turn
+/// the test back into a positive "they are paired" guard.
+///
+/// TODO(#3962): once the gate-ref factory is wired into production composition,
+/// replace the body below with the positive pairing assertion (dispatcher
+/// composed => gate-ref factory composed) and drop the gap tolerance.
 #[test]
 fn production_planned_runtime_pairs_hook_dispatcher_with_gate_ref_factory() {
     let runtime = read_crate_source(REBORN_RUNTIME_SRC);
-    let composition = function_body(&runtime, "pub fn build_default_planned_runtime<");
+    let composition = function_body(&runtime, PLANNED_RUNTIME_COMPOSITION_FN);
 
     let composes_hook_dispatcher = composition.contains("with_hook_dispatcher_builder_factory")
         || composition.contains("with_hook_dispatcher_factory");
-
-    if !composes_hook_dispatcher {
-        // Hooks not yet composed into the production planned runtime. This is
-        // the legitimate `reborn-integration` state, not a forgotten setter.
-        // Nothing to assert until the feature is composed; the
-        // `security_seam_setters_exist` test guards the setters' continued
-        // existence in the meantime.
-        return;
-    }
+    let composes_gate_ref_factory = composition.contains("with_hook_gate_ref_factory_builder")
+        || composition.contains("with_hook_gate_ref_factory");
 
     assert!(
-        composition.contains("with_hook_gate_ref_factory_builder")
-            || composition.contains("with_hook_gate_ref_factory"),
-        "`build_default_planned_runtime` in {REBORN_RUNTIME_SRC} composes a hook dispatcher \
-         but does not wire a hook gate-ref factory. Without it, hook `PauseApproval` / \
-         `PauseAuth` decisions fail closed and the approval/auth security boundary silently \
-         degrades. When hooks are enabled in production, the gate-ref factory seam must be \
-         populated (#3919/#3922/#3938 defect class)."
+        composes_hook_dispatcher,
+        "production planned-runtime composition ({REBORN_RUNTIME_SRC}, \
+         `{PLANNED_RUNTIME_COMPOSITION_FN}`) no longer wires a hook dispatcher. If hooks were \
+         intentionally removed from production, delete this test; otherwise the dispatcher seam \
+         regressed (#3919/#3922/#3938 defect class)."
+    );
+
+    // KNOWN GAP (#3962): the dispatcher is composed but the gate-ref factory is
+    // not. This assertion documents and pins that state. When #3962 lands and
+    // wires `with_hook_gate_ref_factory*` into production composition, this
+    // flips red on purpose — see the TODO above for what to do then.
+    assert!(
+        !composes_gate_ref_factory,
+        "the hook gate-ref factory now appears to be wired into production composition \
+         ({REBORN_RUNTIME_SRC}). That closes the #3962 gap — good! Update this test: remove the \
+         known-gap tolerance and replace it with a positive assertion that the dispatcher and \
+         gate-ref factory are wired together, per the TODO(#3962) note above."
     );
 }
 
 /// SEAM: hook security-audit sink (`hook_security_audit_sink`).
 ///
-/// This is the seam the in-flight #3922 fix threads through
-/// `default_loop_composition`. As of `reborn-integration` the symbol does not
-/// exist yet (the fix is unmerged). We assert the END STATE conditionally: once
-/// the `with_hook_security_audit_sink` setter exists in the loop-driver host,
-/// the production planned-runtime composition must call it. Until then this is a
-/// no-op so the guard does not falsely fail before #3922 lands; after #3922
-/// merges it becomes load-bearing automatically.
+/// This is the seam #3922 threads through the loop-driver host. The guard is
+/// written to self-arm: if the `with_hook_security_audit_sink` setter is absent
+/// from the loop-driver host it is a no-op (so it cannot falsely fail before the
+/// seam exists), but once the setter is present the production planned-runtime
+/// composition MUST call it. As of the current branch the setter exists and the
+/// composition wires it, so this assertion is load-bearing.
 #[test]
 fn production_planned_runtime_wires_hook_security_audit_sink_once_available() {
     let host = read_crate_source(LOOP_DRIVER_HOST_SRC);
@@ -238,7 +273,7 @@ fn production_planned_runtime_wires_hook_security_audit_sink_once_available() {
     }
 
     let runtime = read_crate_source(REBORN_RUNTIME_SRC);
-    let composition = function_body(&runtime, "pub fn build_default_planned_runtime<");
+    let composition = function_body(&runtime, PLANNED_RUNTIME_COMPOSITION_FN);
     assert!(
         composition.contains("with_hook_security_audit_sink"),
         "the `with_hook_security_audit_sink` seam now exists but the production composition \
