@@ -8,11 +8,16 @@ export const EXTENSIONS_TABS = [
 export const KIND_LABELS = {
   wasm_tool: "WASM Tool",
   wasm_channel: "Channel",
+  channel: "Channel",
   mcp_server: "MCP Server",
   first_party: "First-party",
   system: "System",
   channel_relay: "Relay",
 };
+
+export function isChannelExtensionKind(kind) {
+  return kind === "wasm_channel" || kind === "channel";
+}
 
 export const STATE_TONES = {
   active: "success",

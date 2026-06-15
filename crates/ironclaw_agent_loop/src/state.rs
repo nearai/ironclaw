@@ -67,6 +67,13 @@ pub struct LoopExecutionState {
     /// (#3841 follow-up F1).
     pub recent_output_token_counts: BoundedRing<u32, 8>,
 
+    /// Count of final-answer nudges issued this run (driver-specific nudge,
+    /// gated by `SteeringPolicy.allow_driver_specific_nudges`). Capped so the
+    /// loop can't issue unbounded extra model calls. `#[serde(default)]` keeps
+    /// older checkpoints decodable.
+    #[serde(default)]
+    pub final_answer_nudges_used: u32,
+
     // strategy slots — one per strategy that mutates state.
     pub context_state: ContextStrategyState,
     pub capability_state: CapabilityStrategyState,
@@ -182,6 +189,7 @@ impl LoopExecutionState {
             recent_call_signatures: BoundedRing::new(),
             recent_failure_kinds: BoundedRing::new(),
             recent_output_token_counts: BoundedRing::new(),
+            final_answer_nudges_used: 0,
             context_state: ContextStrategyState::default(),
             capability_state: CapabilityStrategyState::default(),
             model_state: ModelStrategyState::default(),
@@ -758,6 +766,36 @@ mod tests {
         assert!(
             from_legacy.pending_auth_resume.is_none(),
             "legacy checkpoint missing pending_auth_resume field must decode to None"
+        );
+    }
+
+    #[test]
+    fn checkpoint_payload_without_final_answer_nudges_slot_decodes_to_zero() {
+        // A checkpoint produced before `final_answer_nudges_used` was added would
+        // lack the field entirely. The `#[serde(default)]` contract must decode it
+        // to 0 rather than failing, so a resumed run still has its one-shot budget.
+        let context = test_run_context();
+        let state = LoopExecutionState::initial_for_run(&context);
+        assert_eq!(
+            state.final_answer_nudges_used, 0,
+            "initial state must start with zero nudges used"
+        );
+
+        let payload = encode_payload(&state);
+        let mut value: serde_json::Value = serde_json::from_slice(&payload).expect("parse");
+        value
+            .as_object_mut()
+            .expect("state serializes as object")
+            .remove("final_answer_nudges_used");
+        let stripped_payload = serde_json::to_vec(&value).expect("re-encode");
+        let from_legacy = LoopExecutionState::from_checkpoint_payload(
+            &stripped_payload,
+            CheckpointKind::BeforeBlock,
+        )
+        .expect("decode legacy checkpoint payload without final_answer_nudges_used");
+        assert_eq!(
+            from_legacy.final_answer_nudges_used, 0,
+            "legacy checkpoint missing final_answer_nudges_used must decode to 0"
         );
     }
 

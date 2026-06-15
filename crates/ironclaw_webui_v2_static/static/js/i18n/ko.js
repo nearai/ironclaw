@@ -402,6 +402,7 @@ registerPack("ko", {
   // Settings — channels tab
   "channels.builtIn": "내장 채널",
   "channels.messaging": "메시징 채널",
+  "channels.availableChannels": "사용 가능한 채널",
   "channels.mcpServers": "MCP 서버",
   "channels.webGateway": "웹 게이트웨이",
   "channels.webGatewayDesc": "SSE 스트리밍을 지원하는 브라우저 기반 채팅",
@@ -411,6 +412,7 @@ registerPack("ko", {
   "channels.cliDesc": "TUI 또는 간단한 REPL이 있는 터미널 인터페이스",
   "channels.repl": "REPL",
   "channels.replDesc": "테스트를 위한 간단한 읽기-실행-출력 루프",
+  "channels.slack": "Slack",
   "channels.slackDesc": "DM 및 앱 멘션을 위한 테넌트 앱 채널",
   "channels.slackDetail": "테넌트 Slack 앱 설치",
   "channels.statusOn": "켜짐",
@@ -929,6 +931,7 @@ registerPack("ko", {
   "extensions.moreActions": "추가 작업",
   "extensions.kind.wasm_tool": "WASM 도구",
   "extensions.kind.wasm_channel": "채널",
+  "extensions.kind.channel": "채널",
   "extensions.kind.mcp_server": "MCP 서버",
   "extensions.kind.first_party": "자사",
   "extensions.kind.system": "시스템",

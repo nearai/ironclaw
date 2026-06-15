@@ -402,6 +402,7 @@ registerPack("zh-CN", {
   // Settings — channels tab
   "channels.builtIn": "内置频道",
   "channels.messaging": "消息频道",
+  "channels.availableChannels": "可用频道",
   "channels.mcpServers": "MCP 服务器",
   "channels.webGateway": "Web 网关",
   "channels.webGatewayDesc": "基于浏览器的 SSE 流式聊天",
@@ -411,6 +412,7 @@ registerPack("zh-CN", {
   "channels.cliDesc": "带 TUI 或简单 REPL 的终端界面",
   "channels.repl": "REPL",
   "channels.replDesc": "用于测试的简易读取-执行-打印循环",
+  "channels.slack": "Slack",
   "channels.slackDesc": "用于私信和应用提及的租户应用频道",
   "channels.slackDetail": "租户 Slack 应用安装",
   "channels.statusOn": "开",
@@ -929,6 +931,7 @@ registerPack("zh-CN", {
   "extensions.moreActions": "更多操作",
   "extensions.kind.wasm_tool": "WASM 工具",
   "extensions.kind.wasm_channel": "通道",
+  "extensions.kind.channel": "通道",
   "extensions.kind.mcp_server": "MCP 协议服务",
   "extensions.kind.first_party": "第一方系统",
   "extensions.kind.system": "系统级别",
