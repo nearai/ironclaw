@@ -1823,6 +1823,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extension_google_oauth_start_rebinds_account_authorized_in_a_different_thread() {
+        // #4935 user-visible regression: a Google account a user authorized in
+        // one chat thread/mission must be rebound — not forked — when the OAuth
+        // reconnect starts from a different context. The bind is owner-
+        // granularity (tenant/user/agent/project), so the account's
+        // `thread_id`/`mission_id` are stripped from the match; the old
+        // `scope_matches` full-equality would have missed this account and
+        // forked a duplicate on every reconnect.
+        let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
+        let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+            shared.clone(),
+            Arc::new(NoopDispatcher),
+        ));
+        let state = ProductAuthRouteState::new(
+            product_auth,
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        )
+        .with_google_oauth(
+            GoogleOAuthRouteConfig::new(
+                "google-client.apps.googleusercontent.com",
+                "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
+            )
+            .expect("google oauth route config"),
+        );
+        let app = product_auth_route_mount(state)
+            .protected
+            .layer(axum::Extension(test_caller()));
+
+        // The existing account was authorized in thread-auth-1 / mission-auth-1.
+        let mut existing_resource = test_resource_scope();
+        existing_resource.thread_id = Some(ThreadId::new("thread-auth-1").expect("thread"));
+        existing_resource.mission_id =
+            Some(ironclaw_host_api::MissionId::new("mission-auth-1").expect("mission"));
+        let existing_scope = AuthProductScope::new(existing_resource, AuthSurface::Callback);
+        let account = shared
+            .create_account(NewCredentialAccount {
+                scope: existing_scope,
+                provider: AuthProviderId::new(GOOGLE_PROVIDER_ID).expect("provider"),
+                label: CredentialAccountLabel::new("google-drive google").expect("label"),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(SecretHandle::new("google-drive-access").expect("secret")),
+                refresh_secret: Some(SecretHandle::new("google-drive-refresh").expect("secret")),
+                scopes: vec![
+                    ProviderScope::new("https://www.googleapis.com/auth/drive")
+                        .expect("provider scope"),
+                ],
+            })
+            .await
+            .expect("seed configured google account");
+
+        // The reconnect starts from a different context: the Google start route
+        // carries no thread/mission, so the flow scope has neither — i.e. a
+        // different thread/mission than where the account was authorized.
+        let flow_invocation_id = InvocationId::new();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/extensions/google-drive/setup/oauth/start")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "provider": GOOGLE_PROVIDER_ID,
+                            "account_label": "google-drive google",
+                            "scopes": ["https://www.googleapis.com/auth/drive"],
+                            "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
+                            "invocation_id": flow_invocation_id.to_string(),
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("route response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("start json");
+        let flow_id = AuthFlowId::from_uuid(
+            Uuid::parse_str(json["flow_id"].as_str().expect("flow id")).expect("flow uuid"),
+        );
+        // The flow is stored under the reconnect scope (no thread/mission).
+        let mut flow_resource = test_resource_scope();
+        flow_resource.invocation_id = flow_invocation_id;
+        let flow_scope = AuthProductScope::new(flow_resource, AuthSurface::Callback);
+        let flow = shared
+            .get_flow(&flow_scope, flow_id)
+            .await
+            .expect("flow lookup")
+            .expect("flow");
+        let update_binding = flow
+            .update_binding
+            .expect("cross-thread reconnect must rebind the owner's existing account");
+        assert_eq!(update_binding.account_id, account.id);
+    }
+
+    #[tokio::test]
     async fn extension_google_oauth_start_continues_when_update_binding_lookup_is_unavailable() {
         let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
         let flow_manager: Arc<dyn AuthFlowManager> = shared.clone();

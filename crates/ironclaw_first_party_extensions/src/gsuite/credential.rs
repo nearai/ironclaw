@@ -63,7 +63,8 @@ impl GoogleCredentialResolver {
         // credentials are owned by the user, not the thread, so the thread/
         // mission sub-scope must be stripped or the account authorized in one
         // thread is invisible in the next. Staging still uses the real runtime
-        // scope via `credential.access_secret_scope` / `request.scope`.
+        // scope via this method's `scope` parameter and
+        // `credential.access_secret_scope`.
         let auth_scope = AuthProductScope::credential_owner(scope, AuthSurface::Api);
         let provider = google_provider_id()?;
         let account = match self
@@ -213,10 +214,10 @@ impl GoogleCredentialResolver {
     ) -> Result<Option<CredentialAccount>, AuthProductError> {
         // Owner-scope the read so a known account is found from any thread of
         // the same owner, not just the thread/session it was authorized in.
-        // `AuthProductScope::new` drops `session_id` on purpose here (a known
-        // account id is looked up across the owner, session-agnostic).
-        let owner_scope =
-            AuthProductScope::new(scope.resource.without_thread_and_mission(), scope.surface);
+        // `credential_owner` is session-agnostic (it builds a fresh owner scope
+        // with no `session_id`), which is what we want for a known-account-id
+        // lookup across the owner.
+        let owner_scope = AuthProductScope::credential_owner(&scope.resource, scope.surface);
         let account = self
             .account_records
             .accounts_for_owner(&owner_scope)
