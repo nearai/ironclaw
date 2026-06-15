@@ -19,17 +19,21 @@ const OAUTH_SETUP_REFRESH_MS = 2000;
 const OAUTH_SETUP_TIMEOUT_MS = 10 * 60 * 1000;
 
 function packageId(item) {
-  return item?.package_ref?.id || "";
+  return item?.package_ref?.id || null;
 }
 
 function displayName(item) {
-  return item?.display_name || packageId(item);
+  return item?.display_name || packageId(item) || "";
+}
+
+function catalogId(prefix, item, index) {
+  return packageId(item) || `${prefix}:${displayName(item) || "unknown"}:${index}`;
 }
 
 function catalogSort(a, b) {
   if (a.installed !== b.installed) return a.installed ? -1 : 1;
-  return displayName(a.extension || a.entry).localeCompare(
-    displayName(b.extension || b.entry)
+  return displayName(a.entry || a.extension).localeCompare(
+    displayName(b.entry || b.extension)
   );
 }
 
@@ -141,22 +145,30 @@ export function useExtensions() {
   const extensions = extensionsQuery.data?.extensions || [];
   const registry = registryQuery.data?.entries || [];
   const connectableChannels = connectableChannelsQuery.data?.channels || [];
-  const extensionById = new Map(extensions.map((extension) => [packageId(extension), extension]));
-  const registryIds = new Set(registry.map((entry) => packageId(entry)));
+  const extensionById = new Map(
+    extensions
+      .map((extension) => [packageId(extension), extension])
+      .filter(([id]) => Boolean(id))
+  );
+  const registryIds = new Set(registry.map((entry) => packageId(entry)).filter(Boolean));
   const catalogEntries = [
-    ...registry.map((entry) => {
-      const extension = extensionById.get(packageId(entry)) || null;
+    ...registry.map((entry, index) => {
+      const id = packageId(entry);
+      const extension = id ? extensionById.get(id) || null : null;
       return {
-        id: packageId(entry),
+        id: catalogId("registry", entry, index),
         installed: Boolean(extension || entry.installed),
         entry,
         extension,
       };
     }),
     ...extensions
-      .filter((extension) => !registryIds.has(packageId(extension)))
-      .map((extension) => ({
-        id: packageId(extension),
+      .filter((extension) => {
+        const id = packageId(extension);
+        return !id || !registryIds.has(id);
+      })
+      .map((extension, index) => ({
+        id: catalogId("installed", extension, index),
         installed: true,
         entry: null,
         extension,

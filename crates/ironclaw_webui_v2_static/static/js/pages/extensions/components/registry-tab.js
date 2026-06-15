@@ -7,7 +7,7 @@ function packageId(item) {
 }
 
 function catalogItem(entry) {
-  return entry.extension || entry.entry || {};
+  return entry.entry || entry.extension || {};
 }
 
 export function RegistryTab({

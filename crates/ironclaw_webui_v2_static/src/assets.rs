@@ -385,13 +385,23 @@ mod tests {
             "extensions hook should expose a merged installed-plus-registry catalog"
         );
         assert!(
+            use_extensions.contains("catalogId(\"registry\", entry, index)")
+                && use_extensions.contains("catalogId(\"installed\", extension, index)"),
+            "merged extension catalog should use stable fallback keys for id-less entries"
+        );
+        assert!(
             use_extensions
-                .contains("if (a.installed !== b.installed) return a.installed ? -1 : 1;"),
+                .contains("if (a.installed !== b.installed) return a.installed ? -1 : 1;")
+                && use_extensions.contains("displayName(a.entry || a.extension)"),
             "merged extension catalog should sort installed entries before available entries"
         );
         assert!(
             registry_tab.contains("installedEntries") && registry_tab.contains("availableEntries"),
             "registry tab should render installed and available sections from one catalog"
+        );
+        assert!(
+            registry_tab.contains("return entry.entry || entry.extension || {};"),
+            "registry search should prefer richer registry metadata when installed entries are available"
         );
         assert!(
             registry_tab.contains("<${ExtensionCard}") && registry_tab.contains("<${RegistryCard}"),
