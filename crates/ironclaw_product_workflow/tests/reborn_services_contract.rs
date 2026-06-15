@@ -25,18 +25,19 @@ use ironclaw_product_workflow::{
     AuthInteractionDecision, AuthInteractionService, AutomationListRequest,
     AutomationProductFacade, CodexLoginStart, ExtensionCredentialSetupService,
     ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, InboundAttachmentLander,
-    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
-    LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
-    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
-    LifecyclePackageRef, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
-    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleReadinessBlocker, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
-    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse, LlmActiveSelection,
-    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
-    LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, OperatorLogsService,
-    OperatorServiceLifecycleService, OutboundPreferencesProductFacade, ProductAgentBoundCaller,
-    ProductWorkflowError, RebornAutomationInfo, RebornAutomationRecentRunInfo,
+    InboundAttachmentReader, LifecycleExtensionCredentialRequirement,
+    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
+    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
+    LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductAction,
+    LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
+    LifecycleProductResponse, LifecycleReadinessBlocker, ListPendingApprovalsRequest,
+    ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
+    ListPendingAuthInteractionsResponse, LlmActiveSelection, LlmConfigService,
+    LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
+    LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
+    NearAiWalletLoginResult, OperatorLogsService, OperatorServiceLifecycleService,
+    OutboundPreferencesProductFacade, ProductAgentBoundCaller, ProductWorkflowError,
+    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornChannelConnectAction, RebornChannelConnectStrategy,
     RebornConnectableChannelInfo, RebornDeleteThreadRequest, RebornExtensionOnboardingState,
@@ -5648,6 +5649,135 @@ async fn get_timeline_succeeds_for_own_automation_trigger_thread() {
         .expect("owner should be able to read their automation trigger thread timeline");
 
     assert_eq!(response.thread.thread_id, trigger_thread_id);
+}
+
+/// Records the scope each byte read is issued under so a test can assert the
+/// reader addressed the right project mount.
+struct RecordingAttachmentReader {
+    bytes: Vec<u8>,
+    scopes: Mutex<Vec<ThreadScope>>,
+}
+
+#[async_trait]
+impl InboundAttachmentReader for RecordingAttachmentReader {
+    async fn read(
+        &self,
+        thread_scope: &ThreadScope,
+        _storage_key: &str,
+    ) -> Result<Vec<u8>, RebornServicesError> {
+        self.scopes.lock().expect("lock").push(thread_scope.clone());
+        Ok(self.bytes.clone())
+    }
+}
+
+// Regression for the trigger-thread byte-read scope. `read_attachment` shares
+// the timeline's automation-trigger fallback, which resolves the thread under
+// the trigger creator's scope (not the WebUI caller's session scope). The bytes
+// must be read back under that same resolved scope — reading under the caller's
+// session scope would address the wrong project mount and 404.
+#[tokio::test]
+async fn read_attachment_reads_trigger_thread_bytes_under_creator_scope() {
+    let trigger_thread_id = ThreadId::new("thread-trigger-bytes").expect("valid trigger thread id");
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: trigger_thread_scope_for(&caller),
+            thread_id: Some(trigger_thread_id.clone()),
+            created_by_actor_id: "system".to_string(),
+            title: Some("Scheduled run".to_string()),
+            metadata_json: Some(automation_trigger_thread_metadata_json("trigger-bytes")),
+        })
+        .await
+        .expect("trigger thread stored");
+
+    // A landed image attachment on the trigger thread, stored under the
+    // creator's scope.
+    let accepted = thread_service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: trigger_thread_scope_for(&caller),
+            thread_id: trigger_thread_id.clone(),
+            actor_id: "system".to_string(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: Some("trigger-image".to_string()),
+            content: MessageContent::with_attachments(
+                "see image",
+                vec![AttachmentRef {
+                    id: "att-0".to_string(),
+                    kind: AttachmentKind::Image,
+                    mime_type: "image/png".to_string(),
+                    filename: Some("p.png".to_string()),
+                    size_bytes: Some(4),
+                    storage_key: Some("/workspace/attachments/2026-06-14/m-0-p.png".to_string()),
+                    extracted_text: None,
+                }],
+            ),
+        })
+        .await
+        .expect("message with attachment accepted");
+
+    let automation_facade = Arc::new(
+        StaticAutomationFacade::new(vec![RebornAutomationInfo {
+            automation_id: "trigger-bytes".to_string(),
+            name: "Morning briefing".to_string(),
+            source: RebornAutomationSource::Schedule {
+                cron: "0 9 * * *".to_string(),
+                timezone: "UTC".to_string(),
+            },
+            state: RebornAutomationState::Active,
+            next_run_at: None,
+            last_run_at: None,
+            last_status: Some(RebornAutomationRunStatus::Ok),
+            recent_runs: vec![RebornAutomationRecentRunInfo {
+                run_id: Some(automation_run_id()),
+                thread_id: Some(trigger_thread_id.clone()),
+                fire_slot: None,
+                status: RebornAutomationRecentRunStatus::Ok,
+                submitted_at: "2026-06-09T09:00:01Z".parse().expect("submitted_at"),
+                completed_at: Some("2026-06-09T09:00:42Z".parse().expect("completed_at")),
+            }],
+            is_active: true,
+            created_at: None,
+        }])
+        .with_resolve_scope_for_thread(
+            trigger_thread_id.clone(),
+            trigger_run_thread_scope_for(&caller),
+        ),
+    );
+
+    let reader = Arc::new(RecordingAttachmentReader {
+        bytes: vec![1, 2, 3, 4],
+        scopes: Mutex::new(Vec::new()),
+    });
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(automation_facade)
+        .with_inbound_attachment_reader(reader.clone());
+
+    let result = services
+        .read_attachment(
+            caller,
+            RebornAttachmentRequest {
+                thread_id: trigger_thread_id.as_str().to_string(),
+                message_id: accepted.message_id.to_string(),
+                attachment_id: "att-0".to_string(),
+            },
+        )
+        .await
+        .expect("owner should be able to read their trigger thread's attachment");
+
+    assert_eq!(result.bytes, vec![1, 2, 3, 4]);
+    assert_eq!(result.mime_type, "image/png");
+
+    // The fix: the read was issued under the trigger creator's scope, not the
+    // caller's session scope.
+    let scopes = reader.scopes.lock().expect("lock");
+    assert_eq!(scopes.len(), 1);
+    assert_eq!(
+        scopes[0].owner_user_id,
+        Some(UserId::new(TRIGGER_CREATOR_USER_ID).expect("trigger creator user id")),
+    );
 }
 
 #[tokio::test]

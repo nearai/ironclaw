@@ -2018,45 +2018,12 @@ impl RebornServicesApi for RebornServices {
         request: RebornTimelineRequest,
     ) -> Result<RebornTimelineResponse, RebornServicesError> {
         let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
-        let actor = caller.actor();
         let limit = clamp_timeline_limit(request.limit);
         let cursor = parse_timeline_cursor(request.cursor.as_deref())?;
         let scope = caller.turn_scope(thread_id);
-        let thread_scope = thread_scope_from_turn_scope(&scope, Some(actor.user_id.clone()))?;
-        let history = match self
-            .thread_service
-            .list_thread_history(ThreadHistoryRequest {
-                scope: thread_scope,
-                thread_id: scope.thread_id.clone(),
-            })
-            .await
-        {
-            Ok(history) => history,
-            // When the session-scoped lookup fails with NotFound, try the
-            // automation-trigger fallback: automation-trigger threads are
-            // created under the trigger creator's scope, not the WebUI
-            // caller's session scope, so the user-scoped lookup always misses
-            // them. If the thread_id appears in any recent run of an
-            // automation that belongs to this caller, we know the caller is
-            // authorized (list_automations applies the same authorization).
-            // We then re-fetch using the trigger-owned thread scope. Both
-            // UnknownThread and ThreadScopeMismatch are treated as "not found
-            // in my scope" — only those are eligible for the automation
-            // fallback; backend/serialization errors propagate as-is.
-            Err(
-                SessionThreadError::UnknownThread { .. }
-                | SessionThreadError::ThreadScopeMismatch { .. },
-            ) => {
-                // The primary user-scoped lookup missed. Try the automation-
-                // trigger fallback; if it does not authorize the access it
-                // returns the canonical NotFound error.
-                let original_error =
-                    RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false);
-                self.try_automation_trigger_timeline_fallback(caller, &scope, original_error)
-                    .await?
-            }
-            Err(err) => return Err(map_timeline_probe_error(err)),
-        };
+        let (_thread_scope, history) = self
+            .resolve_thread_history_for_caller(caller, &scope)
+            .await?;
 
         let (messages, next_cursor) = paginate_timeline_messages(history.messages, limit, cursor);
         let summary_artifacts = cap_summary_artifacts(history.summary_artifacts);
@@ -2087,33 +2054,16 @@ impl RebornServicesApi for RebornServices {
         let message_id = ThreadMessageId::parse(&request.message_id).map_err(|_| {
             RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false)
         })?;
-        let actor = caller.actor();
         let scope = caller.turn_scope(thread_id);
-        let thread_scope = thread_scope_from_turn_scope(&scope, Some(actor.user_id.clone()))?;
 
-        // Resolve the thread under the caller's scope, reusing the same
-        // automation-trigger fallback as the timeline so a thumbnail on a
-        // trigger-owned thread loads exactly when its message does.
-        let history = match self
-            .thread_service
-            .list_thread_history(ThreadHistoryRequest {
-                scope: thread_scope.clone(),
-                thread_id: scope.thread_id.clone(),
-            })
-            .await
-        {
-            Ok(history) => history,
-            Err(
-                SessionThreadError::UnknownThread { .. }
-                | SessionThreadError::ThreadScopeMismatch { .. },
-            ) => {
-                let original_error =
-                    RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false);
-                self.try_automation_trigger_timeline_fallback(caller, &scope, original_error)
-                    .await?
-            }
-            Err(err) => return Err(map_timeline_probe_error(err)),
-        };
+        // Resolve the thread the same way the timeline does (including the
+        // automation-trigger fallback) and read the bytes back through the
+        // scope the history actually lives under — for a trigger-fired thread
+        // that is the creator's scope, not the caller's session scope, so the
+        // reader addresses the right project mount.
+        let (thread_scope, history) = self
+            .resolve_thread_history_for_caller(caller, &scope)
+            .await?;
 
         // The (message, attachment-id) pair is required: an attachment id is
         // only unique within its message. Resolve the ref server-side so the
@@ -3172,28 +3122,76 @@ impl RebornServices {
     /// scope. On authorization failure (thread not in any of the caller's
     /// automation runs), the `original_not_found_error` is returned so the
     /// response is indistinguishable from a genuinely absent thread.
+    /// Resolve a caller-visible thread's history together with the thread scope
+    /// it actually lives under.
+    ///
+    /// The primary path is the caller's own session scope. On a 404-class miss
+    /// it applies the automation-trigger fallback: trigger-fired threads are
+    /// stored under the creator's scope, not the WebUI caller's session scope,
+    /// so the user-scoped lookup always misses them. If the thread belongs to
+    /// one of the caller's automations (`list_automations` applies the same
+    /// authorization), the history is re-fetched under the trigger-owned scope.
+    /// Both `UnknownThread` and `ThreadScopeMismatch` are eligible for the
+    /// fallback; backend/serialization errors propagate as-is.
+    ///
+    /// Returning the resolved scope — not just the history — lets callers that
+    /// must do further scope-bound work (e.g. reading attachment bytes through
+    /// the project mount) address the correct scope instead of re-deriving the
+    /// caller's session scope, which would be wrong for a trigger thread.
+    async fn resolve_thread_history_for_caller(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        scope: &TurnScope,
+    ) -> Result<(ThreadScope, ThreadHistory), RebornServicesError> {
+        let thread_scope =
+            thread_scope_from_turn_scope(scope, Some(caller.actor().user_id.clone()))?;
+        match self
+            .thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: thread_scope.clone(),
+                thread_id: scope.thread_id.clone(),
+            })
+            .await
+        {
+            Ok(history) => Ok((thread_scope, history)),
+            Err(
+                SessionThreadError::UnknownThread { .. }
+                | SessionThreadError::ThreadScopeMismatch { .. },
+            ) => {
+                let original_error =
+                    RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false);
+                self.try_automation_trigger_timeline_fallback(caller, scope, original_error)
+                    .await
+            }
+            Err(err) => Err(map_timeline_probe_error(err)),
+        }
+    }
+
     async fn try_automation_trigger_timeline_fallback(
         &self,
         caller: WebUiAuthenticatedCaller,
         scope: &TurnScope,
         original_not_found_error: RebornServicesError,
-    ) -> Result<ThreadHistory, RebornServicesError> {
+    ) -> Result<(ThreadScope, ThreadHistory), RebornServicesError> {
         let access = self
             .check_automation_trigger_access(caller, scope, original_not_found_error)
             .await?;
         // Authorized: re-fetch the history using the TRUE stored scope
-        // (owner_user_id = creator_user_id, not the caller's session user).
+        // (owner_user_id = creator_user_id, not the caller's session user) and
+        // return that scope so byte reads address the trigger creator's mount.
         let true_thread_scope = thread_scope_from_turn_scope(
             &access.scope,
             access.scope.explicit_owner_user_id().cloned(),
         )?;
-        self.thread_service
+        let history = self
+            .thread_service
             .list_thread_history(ThreadHistoryRequest {
-                scope: true_thread_scope,
+                scope: true_thread_scope.clone(),
                 thread_id: access.scope.thread_id.clone(),
             })
             .await
-            .map_err(map_timeline_probe_error)
+            .map_err(map_timeline_probe_error)?;
+        Ok((true_thread_scope, history))
     }
 
     /// Ownership probe for interaction endpoints (stream, cancel, gate resolve,
