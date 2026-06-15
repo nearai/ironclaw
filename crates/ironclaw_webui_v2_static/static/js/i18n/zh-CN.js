@@ -394,6 +394,7 @@ registerPack("zh-CN", {
   // Settings — channels tab
   "channels.builtIn": "内置频道",
   "channels.messaging": "消息频道",
+  "channels.availableChannels": "可用频道",
   "channels.mcpServers": "MCP 服务器",
   "channels.webGateway": "Web 网关",
   "channels.webGatewayDesc": "基于浏览器的 SSE 流式聊天",

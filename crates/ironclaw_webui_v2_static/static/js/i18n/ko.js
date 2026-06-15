@@ -394,6 +394,7 @@ registerPack("ko", {
   // Settings — channels tab
   "channels.builtIn": "내장 채널",
   "channels.messaging": "메시징 채널",
+  "channels.availableChannels": "사용 가능한 채널",
   "channels.mcpServers": "MCP 서버",
   "channels.webGateway": "웹 게이트웨이",
   "channels.webGatewayDesc": "SSE 스트리밍을 지원하는 브라우저 기반 채팅",

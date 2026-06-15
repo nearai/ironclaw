@@ -57,24 +57,6 @@ function channelsTabForTest(props) {
   };
 }
 
-function renderedValueAfter(rendered, fragment) {
-  if (!rendered || typeof rendered !== "object") {
-    return undefined;
-  }
-  if (Array.isArray(rendered.strings)) {
-    if (rendered.strings.some((part) => part.includes(fragment))) {
-      return rendered;
-    }
-  }
-  if (Array.isArray(rendered.values)) {
-    for (const value of rendered.values) {
-      const found = renderedValueAfter(value, fragment);
-      if (found !== undefined) return found;
-    }
-  }
-  return undefined;
-}
-
 function renderedContainsComponent(rendered, component) {
   if (!rendered || typeof rendered !== "object") {
     return rendered === component;
@@ -236,11 +218,16 @@ test("ChannelsTab keeps Slack controls in the legacy builtin location when Slack
   assert.equal(renderedContainsComponent(builtinSlackSection, view.SlackConnectActionSections), true);
   assert.equal(renderedContainsSlackActionPair(builtinSlackSection), true);
 
-  const registrySection = renderedValueAfter(view.rendered, "Available channels");
-  assert.notEqual(registrySection, undefined, "expected available channels section");
-  const registryCard = registrySection.values[0][0];
+  // The registry heading is now localized via t(...), so it is an interpolated
+  // value rather than a literal in the template strings; locate the registry
+  // section by the RegistryCard component instead of by heading text.
+  const registryCard = renderedNodeContainingComponent(
+    view.rendered,
+    view.RegistryCard,
+  );
+  assert.notEqual(registryCard, undefined, "expected available channels registry card");
 
-  assert.equal(registryCard.values[0], view.RegistryCard);
+  assert.equal(renderedContainsComponent(registryCard, view.RegistryCard), true);
   assert.equal(
     renderedContainsComponent(registryCard, view.SlackConnectActionSections),
     false,

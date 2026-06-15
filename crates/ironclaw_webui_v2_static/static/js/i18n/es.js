@@ -394,6 +394,7 @@ registerPack("es", {
   // Settings — channels tab
   "channels.builtIn": "Canales integrados",
   "channels.messaging": "Canales de mensajería",
+  "channels.availableChannels": "Canales disponibles",
   "channels.mcpServers": "Servidores MCP",
   "channels.webGateway": "Web Gateway",
   "channels.webGatewayDesc": "Chat en navegador con streaming SSE",

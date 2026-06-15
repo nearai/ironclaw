@@ -394,6 +394,7 @@ registerPack("uk", {
   // Settings — channels tab
   "channels.builtIn": "Вбудовані канали",
   "channels.messaging": "Канали повідомлень",
+  "channels.availableChannels": "Доступні канали",
   "channels.mcpServers": "MCP-сервери",
   "channels.webGateway": "Веб Gateway",
   "channels.webGatewayDesc": "Браузерний чат зі стрімінгом SSE",

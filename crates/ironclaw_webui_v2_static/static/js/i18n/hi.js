@@ -394,6 +394,7 @@ registerPack("hi", {
   // Settings — channels tab
   "channels.builtIn": "अंतर्निहित चैनल",
   "channels.messaging": "संदेश चैनल",
+  "channels.availableChannels": "उपलब्ध चैनल",
   "channels.mcpServers": "MCP सर्वर",
   "channels.webGateway": "वेब Gateway",
   "channels.webGatewayDesc": "SSE streaming के साथ browser-based chat",

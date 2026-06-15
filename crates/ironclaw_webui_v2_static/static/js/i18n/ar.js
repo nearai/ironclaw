@@ -394,6 +394,7 @@ registerPack("ar", {
   // Settings — channels tab
   "channels.builtIn": "قنوات مدمجة",
   "channels.messaging": "قنوات المراسلة",
+  "channels.availableChannels": "القنوات المتاحة",
   "channels.mcpServers": "خوادم MCP",
   "channels.webGateway": "بوابة الويب",
   "channels.webGatewayDesc": "دردشة عبر المتصفح مع بث SSE",

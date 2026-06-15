@@ -394,6 +394,7 @@ registerPack("ja", {
   // Settings — channels tab
   "channels.builtIn": "組み込みチャネル",
   "channels.messaging": "メッセージングチャネル",
+  "channels.availableChannels": "利用可能なチャネル",
   "channels.mcpServers": "MCP サーバー",
   "channels.webGateway": "Web Gateway",
   "channels.webGatewayDesc": "SSE ストリーミング対応ブラウザチャット",
