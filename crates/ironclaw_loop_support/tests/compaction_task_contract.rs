@@ -661,6 +661,44 @@ async fn compaction_port_rejects_terminal_cut_point_that_is_capability_preview()
 }
 
 #[tokio::test]
+async fn compaction_port_rejects_range_whose_only_message_is_terminal_rejected_busy() {
+    // Regression: when the entire range consists solely of a terminal RejectedBusy
+    // message (the cut point itself and nothing else), validated_messages ends up
+    // empty after the loop because RejectedBusy is SkipEphemeral.  The port must
+    // return InvalidCutPoint — not proceed to inference with an empty prompt.
+    let fixture = CompactionFixture::new().await;
+    let rejected_id = fixture.append_user("only-rejected-busy").await;
+    fixture
+        .threads
+        .mark_message_rejected_busy(&fixture.scope, &fixture.thread_id, rejected_id)
+        .await
+        .unwrap();
+    let inference = Arc::new(CapturingInference::new("summary"));
+    // drop_through_seq = 1 — the sole RejectedBusy message is both the only
+    // in-range message AND the terminal cut point.
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(CleanLeakScanner),
+        fixture.scope.clone(),
+    );
+
+    let error = port
+        .compact_loop_context(fixture.request(1))
+        .await
+        .expect_err("all-skip range should return InvalidCutPoint, not proceed to inference");
+
+    assert!(
+        matches!(error, LoopCompactionError::InvalidCutPoint),
+        "expected InvalidCutPoint, got {error:?}",
+    );
+    assert!(
+        inference.last_input().is_empty(),
+        "inference must not be called when the range has no model-visible messages",
+    );
+}
+
+#[tokio::test]
 async fn compaction_port_defers_range_containing_deferred_busy_message() {
     // DeferredBusy is NOT terminal: legacy rows can still be submitted via the
     // inbound replay path, transitioning to Submitted and becoming model-visible.

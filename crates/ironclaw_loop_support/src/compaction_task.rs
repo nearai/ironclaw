@@ -361,6 +361,14 @@ where
             return Ok(defer_compaction(reason));
         }
 
+        // A range whose every message was skipped (e.g. only a terminal RejectedBusy)
+        // has nothing model-visible to summarize. Proceeding to build_input/inference
+        // would persist a meaningless empty summary artifact; reject as an invalid cut
+        // point instead.
+        if validated_messages.is_empty() {
+            return Err(CompactionError::InvalidCutPoint);
+        }
+
         Ok(CompactionRangeDecision::Ready(ValidatedCompactionRange {
             thread_id: request.thread_id.clone(),
             thread_scope,
