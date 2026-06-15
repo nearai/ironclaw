@@ -2909,6 +2909,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
     ));
     let event_sink = Arc::new(InMemoryTurnEventSink::default());
     let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
+        attachment_read_port: None,
         turn_state: turn_store.clone(),
         thread_service: fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
         thread_scope: fixture.thread_scope.clone(),
@@ -3086,6 +3087,7 @@ async fn build_runtime_host_with_optional_hooks(
         turn_store.clone(),
     ));
     let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
+        attachment_read_port: None,
         turn_state: turn_store.clone(),
         thread_service: fixture.thread_service.clone(),
         thread_scope: fixture.thread_scope.clone(),
@@ -3424,6 +3426,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
     );
 
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
+        attachment_read_port: None,
         turn_state: turn_store.clone(),
         thread_service: fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
         thread_scope: fixture.thread_scope.clone(),
@@ -3537,6 +3540,7 @@ async fn product_live_parts_for_gate_test(
         ),
     );
     DefaultPlannedRuntimeParts {
+        attachment_read_port: None,
         turn_state: turn_store.clone(),
         thread_service: fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
         thread_scope: fixture.thread_scope.clone(),

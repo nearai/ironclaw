@@ -7,12 +7,12 @@ use ironclaw_host_api::CapabilityId;
 use ironclaw_loop_support::{
     CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier,
     DecoratingLoopCapabilityPortFactory, HostIdentityContextSource, HostInputQueue,
-    HostManagedModelGateway, HostSkillContextSource, LoopCapabilityPortDecorator,
-    LoopCapabilityPortFactory, LoopCapabilityResultWriter, ProductLiveCancellationReadiness,
-    RunCancellationFactory, SpawnSubagentFlavorDescriptor, SpawnSubagentInputCodec,
-    SubagentDefinitionResolver, SubagentPromptComposer, SubagentPromptMaterialSource,
-    SubagentSpawnCapabilityPort, SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits,
-    verify_product_live_cancellation_probe,
+    HostManagedModelGateway, HostSkillContextSource, LoopAttachmentReadPort,
+    LoopCapabilityPortDecorator, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    ProductLiveCancellationReadiness, RunCancellationFactory, SpawnSubagentFlavorDescriptor,
+    SpawnSubagentInputCodec, SubagentDefinitionResolver, SubagentPromptComposer,
+    SubagentPromptMaterialSource, SubagentSpawnCapabilityPort, SubagentSpawnDeps,
+    SubagentSpawnGoalStore, SubagentSpawnLimits, verify_product_live_cancellation_probe,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 use ironclaw_turns::{
@@ -106,6 +106,10 @@ where
     pub model_route_resolver: Option<Arc<dyn ModelRouteResolver>>,
     pub cancellation_factory: Option<Arc<dyn RunCancellationFactory>>,
     pub skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
+    /// Reads landed attachment bytes so the model port can build multimodal
+    /// image parts for vision-capable models. `None` leaves images as the
+    /// transcript's textual pointer only.
+    pub attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
     pub input_queue: Option<Arc<dyn HostInputQueue>>,
     /// Required by live planned-runtime composition. Helper-level tests may use
     /// a no-op implementation, but the type signature always requires a valid
@@ -492,6 +496,9 @@ where
     }
     if let Some(factory) = parts.cancellation_factory {
         host_factory = host_factory.with_cancellation_factory(factory);
+    }
+    if let Some(port) = parts.attachment_read_port {
+        host_factory = host_factory.with_attachment_read_port(port);
     }
     if let Some(source) = parts.skill_context_source {
         host_factory = host_factory.with_skill_context_source(source);

@@ -15,6 +15,8 @@ use ironclaw_attachments::{
     DEFAULT_MAX_ATTACHMENT_BYTES, InboundAttachment, land_inbound_attachments,
 };
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
+use ironclaw_host_api::{ResourceScope, ScopedPath};
+use ironclaw_loop_support::{LoopAttachmentReadError, LoopAttachmentReadPort};
 use ironclaw_product_workflow::{InboundAttachmentLander, RebornServicesError};
 use ironclaw_threads::{AttachmentRef, ThreadScope};
 
@@ -36,6 +38,46 @@ impl<F: RootFilesystem> ProjectScopedAttachmentLander<F> {
             filesystem,
             project_alias: WORKSPACE_ALIAS.to_string(),
             max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
+        }
+    }
+}
+
+/// Reads landed attachment bytes back through the same project-scoped workspace
+/// filesystem, so the loop model port can build multimodal image parts for a
+/// vision-capable model. The read re-scopes `storage_key` through the
+/// `MountView` authority (it is never treated as a host path), and is bounded so
+/// a corrupt/oversized key can't materialize unbounded bytes.
+pub(crate) struct ProjectScopedAttachmentReader<F: RootFilesystem> {
+    filesystem: Arc<ScopedFilesystem<F>>,
+    max_bytes: usize,
+}
+
+impl<F: RootFilesystem> ProjectScopedAttachmentReader<F> {
+    pub(crate) fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
+        Self {
+            filesystem,
+            max_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
+        }
+    }
+}
+
+#[async_trait]
+impl<F: RootFilesystem> LoopAttachmentReadPort for ProjectScopedAttachmentReader<F> {
+    async fn read_attachment_bytes(
+        &self,
+        scope: &ResourceScope,
+        storage_key: &str,
+    ) -> Result<Vec<u8>, LoopAttachmentReadError> {
+        let path = ScopedPath::new(storage_key.to_string())
+            .map_err(|error| LoopAttachmentReadError::Backend(error.to_string()))?;
+        match self
+            .filesystem
+            .read_bytes_bounded(scope, &path, self.max_bytes)
+            .await
+        {
+            Ok(Some(bytes)) => Ok(bytes),
+            Ok(None) => Err(LoopAttachmentReadError::NotFound),
+            Err(error) => Err(LoopAttachmentReadError::Backend(error.to_string())),
         }
     }
 }
