@@ -321,10 +321,14 @@ mod tests {
         assert!(trace_hook.contains("invalidateQueries({ queryKey: [\"trace-credits\"] })"));
 
         // The hook refetches so the card and Settings tab reflect new
-        // accepted submissions without a manual reload.
+        // accepted submissions without a manual reload. Polling is infrequent
+        // (300s) and paused while the tab is hidden; a focus refetch keeps the
+        // surface live and staleTime dedupes redundant focus refetches.
         let hook = asset_text("js/pages/settings/hooks/useTraceCredits.js");
-        assert!(hook.contains("refetchInterval: 60_000"));
+        assert!(hook.contains("refetchInterval: 300_000"));
+        assert!(hook.contains("refetchIntervalInBackground: false"));
         assert!(hook.contains("refetchOnWindowFocus: true"));
+        assert!(hook.contains("staleTime: 60_000"));
 
         // The new i18n keys are present in the eagerly-bundled English pack
         // (other locales fall back to it if missing, but all 11 carry them).
