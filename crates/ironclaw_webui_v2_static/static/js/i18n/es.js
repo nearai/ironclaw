@@ -650,7 +650,7 @@ registerPack("es", {
   "automations.delivery.clear": "Clear",
   "automations.delivery.saved": "Saved",
   "automations.delivery.saveFailed":
-    "Couldn't save the delivery target. Please try again.",
+    "No se pudo guardar el destino de entrega. Inténtalo de nuevo.",
   "automations.delivery.footnote": "Approval requests sent to your DM are answered by replying {command} in Slack.",
   "automations.delivery.pill.ready": "Ready",
   "automations.delivery.pill.unavailable": "Unavailable",

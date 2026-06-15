@@ -71,15 +71,19 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
 
   // Flash the "Saved" confirmation; the mutation's rejection is reflected
   // through `deliveryState.saveError` (rendered below), so the catch here only
-  // prevents an unhandled promise rejection.
-  const flashSavedOnSuccess = (promise) =>
-    promise
+  // prevents an unhandled promise rejection. Clear any lingering "Saved" flash
+  // up front: the error alert is gated on `!showSaved`, so a stale flash from a
+  // prior success would otherwise hide the error of a new failing attempt.
+  const flashSavedOnSuccess = (promise) => {
+    if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
+    setShowSaved(false);
+    return promise
       .then(() => {
-        if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
         setShowSaved(true);
         savedTimerRef.current = setTimeout(() => setShowSaved(false), 2200);
       })
       .catch(() => {});
+  };
 
   const handleSave = () => {
     if (!canSave) return;
