@@ -919,8 +919,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn policy_scope_prefers_project_over_thread() {
+    #[test]
+    fn policy_scope_prefers_project_over_thread() {
         // Project is still part of the scope; differing thread ids under the same
         // project produce identical keys (project carried, thread_id always None).
         let scope_a = scope(Some("project-a"), Some("thread-a"));
@@ -993,8 +993,8 @@ mod tests {
         assert!(reloaded.active_grant().is_some());
     }
 
-    #[tokio::test]
-    async fn policy_scope_without_project_is_thread_agnostic() {
+    #[test]
+    fn policy_scope_without_project_is_thread_agnostic() {
         let scope_a = scope(None, Some("thread-a"));
         let scope_b = scope(None, Some("thread-b"));
 
@@ -1005,8 +1005,8 @@ mod tests {
         assert_eq!(derived_a.thread_id, None);
     }
 
-    #[tokio::test]
-    async fn policy_scope_without_project_isolates_users() {
+    #[test]
+    fn policy_scope_without_project_isolates_users() {
         let scope_a = ResourceScope {
             user_id: UserId::new("alice").unwrap(),
             ..scope(None, Some("thread-a"))
@@ -1022,8 +1022,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn policy_scope_without_project_isolates_agents() {
+    #[test]
+    fn policy_scope_without_project_isolates_agents() {
         let scope_a = ResourceScope {
             agent_id: Some(AgentId::new("agent-x").unwrap()),
             ..scope(None, Some("thread-a"))

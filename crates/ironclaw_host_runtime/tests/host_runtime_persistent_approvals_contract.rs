@@ -478,7 +478,7 @@ async fn default_runtime_skips_expired_persistent_policy() {
 
 #[tokio::test]
 async fn default_runtime_uses_persistent_policy_for_no_project_no_thread_scope() {
-    // A WebChat-style context (no project, no thread) now yields a valid
+    // A fully unscoped context (no project, no thread) now yields a valid
     // (tenant, user, agent) persistent approval scope: the lookup proceeds and a
     // seeded "always allow" policy authorizes dispatch without a gate.
     let registry = Arc::new(registry_with_echo_capability());
@@ -507,7 +507,7 @@ async fn default_runtime_uses_persistent_policy_for_no_project_no_thread_scope()
                 secrets: Vec::new(),
                 resource_ceiling: None,
                 expires_at: None,
-                max_invocations: Some(1),
+                max_invocations: None,
             },
             source_approval_request_id: None,
         })
