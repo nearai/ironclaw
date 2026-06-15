@@ -20,10 +20,12 @@ use ironclaw_host_api::{
 };
 use ironclaw_reborn_traces::contribution::{
     COMMUNITY_PROFILE_BIO_MAX_BYTES, COMMUNITY_PROFILE_HANDLE_MAX_CHARS,
-    COMMUNITY_PROFILE_HANDLE_MIN_CHARS, ProfileAttributionToken, StandingTraceContributionPolicy,
-    TraceCreditReport, TraceUploadAuthMode, mint_profile_attribution_token_for_scope,
-    read_trace_policy_for_scope, set_community_profile_for_scope, trace_contribution_dir_for_scope,
-    trace_scope_key,
+    COMMUNITY_PROFILE_HANDLE_MIN_CHARS, ContributionHttpError, ContributionHttpMethod,
+    ContributionHttpRequest, ContributionHttpResponse, ContributionHttpSink,
+    ProfileAttributionToken, StandingTraceContributionPolicy, TraceCreditReport,
+    TraceUploadAuthMode, mint_profile_attribution_token_for_scope_via_sink,
+    read_trace_policy_for_scope, set_community_profile_for_scope_via_sink,
+    trace_contribution_dir_for_scope, trace_scope_key,
 };
 use ironclaw_reborn_traces::onboarding::{
     OnboardConsents, OnboardError, OnboardHttpResponse, OnboardOutcome, OnboardingHttpSink,
@@ -338,6 +340,82 @@ fn map_egress_error(error: RuntimeHttpEgressError) -> OnboardError {
     }
 }
 
+// ── Host network-egress contribution sink ─────────────────────────────────────
+
+/// [`ContributionHttpSink`] implementation that routes the AGENT-INVOKED
+/// contribution writes (upload-claim mint, community-profile PUT/DELETE) through
+/// the host runtime's network-egress policy, so the agent-invoked tools cannot
+/// reach private/internal destinations outside the deployment's outbound
+/// allowlist. Mirrors [`HostEgressOnboardingSink`].
+struct HostEgressContributionSink {
+    egress: Arc<dyn RuntimeHttpEgress>,
+    scope: ResourceScope,
+    capability_id: CapabilityId,
+}
+
+#[async_trait]
+impl ContributionHttpSink for HostEgressContributionSink {
+    async fn execute(
+        &self,
+        req: ContributionHttpRequest,
+    ) -> Result<ContributionHttpResponse, ContributionHttpError> {
+        let method = match req.method {
+            ContributionHttpMethod::Post => NetworkMethod::Post,
+            ContributionHttpMethod::Put => NetworkMethod::Put,
+            ContributionHttpMethod::Delete => NetworkMethod::Delete,
+        };
+        let mut headers = vec![
+            ("accept".to_string(), "application/json".to_string()),
+            ("content-type".to_string(), "application/json".to_string()),
+        ];
+        // Only attach the bearer header when a token is present; the raw token
+        // never appears in any error path below.
+        if let Some(token) = req.bearer_token {
+            headers.push(("authorization".to_string(), format!("Bearer {token}")));
+        }
+        let request = RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope: self.scope.clone(),
+            capability_id: self.capability_id.clone(),
+            method,
+            url: req.url,
+            headers,
+            body: req.json_body.unwrap_or_default(),
+            // First-party network policy is staged in HostHttpEgressService from
+            // the grant obligation for this scope/capability; this request field
+            // is the ignored fallback on that path (matches http::dispatch).
+            network_policy: NetworkPolicy::default(),
+            credential_injections: Vec::new(),
+            response_body_limit: Some(req.response_body_limit),
+            // The response is parsed inline, never persisted to a mount.
+            save_body_to: None,
+            timeout_ms: Some(req.timeout_ms),
+        };
+        let egress = self.egress.clone();
+        // Catch a panic in the egress future so a faulty transport cannot abort
+        // the contribution task; map it to a sanitized network error.
+        let response = AssertUnwindSafe(async move { egress.execute(request).await })
+            .catch_unwind()
+            .await
+            .map_err(|_| {
+                tracing::error!("trace_commons contribution egress future panicked");
+                ContributionHttpError::new("contribution egress worker failed")
+            })?
+            .map_err(map_egress_contribution_error)?;
+        Ok(ContributionHttpResponse {
+            status: response.status,
+            body: response.body,
+        })
+    }
+}
+
+/// Map a host egress error to a `ContributionHttpError`, without leaking
+/// credential/secret detail (or the URL/token) into the reason string. Reuses
+/// the same stable-reason sanitization as [`map_egress_error`].
+fn map_egress_contribution_error(error: RuntimeHttpEgressError) -> ContributionHttpError {
+    ContributionHttpError::new(error.stable_runtime_reason())
+}
+
 // ── Onboard dispatch ──────────────────────────────────────────────────────────
 
 pub(super) async fn dispatch_onboard(
@@ -604,7 +682,38 @@ pub(super) async fn dispatch_profile_token(
         request.scope.tenant_id.as_str(),
         request.scope.user_id.as_str(),
     );
-    match mint_profile_attribution_token_for_scope(Some(scope.as_str())).await {
+
+    // Enrollment pre-check BEFORE extracting host egress: a not-enrolled user
+    // must get NotEnrolled guidance, not a NetworkDenied miswiring error. This
+    // mirrors dispatch_profile_set's ordering (enrollment check precedes the
+    // network call). Egress extraction below is the host-runtime miswiring
+    // guard for the confirmed+enrolled mint path.
+    match read_trace_policy_for_scope(Some(scope.as_str())) {
+        Ok(policy) if policy.enabled => {}
+        Ok(_) => {
+            return Ok(profile_token_error_value(
+                "not enrolled in Trace Commons".to_string(),
+            ));
+        }
+        Err(error) => return Ok(profile_token_error_value(error.to_string())),
+    }
+
+    // The agent profile_token path MUST route through host network egress — it
+    // must never silently fall back to a direct client (mirrors dispatch_onboard).
+    let egress = match request.services.runtime_http_egress.as_ref() {
+        Some(egress) => egress.clone(),
+        None => {
+            return Err(FirstPartyCapabilityError::new(
+                RuntimeDispatchErrorKind::NetworkDenied,
+            ));
+        }
+    };
+    let sink = HostEgressContributionSink {
+        egress,
+        scope: request.scope.clone(),
+        capability_id: request.capability_id.clone(),
+    };
+    match mint_profile_attribution_token_for_scope_via_sink(Some(scope.as_str()), &sink).await {
         Ok(token) => match persist_profile_token(&scope, &token) {
             Ok(_path) => Ok(format_profile_token(&token)),
             Err(error) => {
@@ -768,10 +877,29 @@ pub(super) async fn dispatch_profile_set(
         }
         Err(error) => return Ok(profile_set_error_value(error.to_string())),
     }
-    match set_community_profile_for_scope(
+
+    // The agent profile_set path MUST route through host network egress — it
+    // must never silently fall back to a direct client (mirrors dispatch_onboard).
+    // Extracted AFTER the enrollment check so a not-enrolled user gets NotEnrolled
+    // guidance rather than a NetworkDenied miswiring error.
+    let egress = match request.services.runtime_http_egress.as_ref() {
+        Some(egress) => egress.clone(),
+        None => {
+            return Err(FirstPartyCapabilityError::new(
+                RuntimeDispatchErrorKind::NetworkDenied,
+            ));
+        }
+    };
+    let sink = HostEgressContributionSink {
+        egress,
+        scope: request.scope.clone(),
+        capability_id: request.capability_id.clone(),
+    };
+    match set_community_profile_for_scope_via_sink(
         Some(scope.as_str()),
         &input.display_handle,
         input.bio.as_deref(),
+        &sink,
     )
     .await
     {

@@ -4798,7 +4798,7 @@ async fn trace_upload_issuer_claim_bearer_token(
         return Ok(cached);
     }
 
-    let claim = fetch_trace_upload_claim_from_issuer(policy, context).await?;
+    let claim = fetch_trace_upload_claim_from_issuer(policy, context, None).await?;
     if let Some(refresh_after) = trace_upload_claim_refresh_after(&claim, Utc::now()) {
         let mut cache = match TRACE_UPLOAD_CLAIM_CACHE.lock() {
             Ok(cache) => cache,
@@ -5101,9 +5101,76 @@ fn build_trace_upload_claim_issuer_request(
     }
 }
 
+/// Host-injected HTTP transport for AGENT-INVOKED Trace Commons contribution
+/// writes (upload-claim mint, community-profile PUT/DELETE). When `Some`, these
+/// run through the host `RuntimeHttpEgress` pipeline (private-IP filtering,
+/// redaction, byte accounting). The background flush/sync worker and the CLI
+/// pass `None` and keep their crate-local client (see `trace_remote_http_client`,
+/// whose comment justifies why the worker lane intentionally bypasses egress).
+#[async_trait]
+pub trait ContributionHttpSink: Send + Sync {
+    async fn execute(
+        &self,
+        request: ContributionHttpRequest,
+    ) -> Result<ContributionHttpResponse, ContributionHttpError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContributionHttpMethod {
+    Post,
+    Put,
+    Delete,
+}
+
+pub struct ContributionHttpRequest {
+    pub method: ContributionHttpMethod,
+    pub url: String,
+    pub bearer_token: Option<String>,
+    pub json_body: Option<Vec<u8>>,
+    pub response_body_limit: u64,
+    pub timeout_ms: u32,
+}
+
+pub struct ContributionHttpResponse {
+    pub status: u16,
+    pub body: Vec<u8>,
+}
+
+#[derive(Debug)]
+pub struct ContributionHttpError {
+    message: String,
+}
+
+impl ContributionHttpError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for ContributionHttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ContributionHttpError {}
+
+/// Decode a host-egress response body into a bounded UTF-8 string, capping at
+/// `TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES` (the host egress already enforced the
+/// limit, but truncating defensively keeps a hostile body bounded). Lossy
+/// decoding is acceptable — the body is parsed as JSON or scanned for an error
+/// label, never echoed verbatim.
+fn bounded_utf8_from_egress_body(mut body: Vec<u8>) -> String {
+    body.truncate(TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES);
+    String::from_utf8_lossy(&body).into_owned()
+}
+
 async fn fetch_trace_upload_claim_from_issuer(
     policy: &StandingTraceContributionPolicy,
     context: &TraceUploadClaimContext,
+    sink: Option<&dyn ContributionHttpSink>,
 ) -> anyhow::Result<TraceUploadClaimIssuerResponse> {
     let issuer_url = policy.upload_token_issuer_url.as_deref().ok_or_else(|| {
         anyhow::anyhow!("Trace Commons upload token issuer URL is not configured")
@@ -5111,69 +5178,112 @@ async fn fetch_trace_upload_claim_from_issuer(
     let parsed =
         reqwest::Url::parse(issuer_url).context("invalid Trace Commons upload token issuer URL")?;
     validate_trace_upload_claim_issuer_url(&parsed, &policy.upload_token_issuer_allowed_hosts)?;
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| anyhow::anyhow!("Trace Commons upload token issuer URL requires a host"))?
-        .to_ascii_lowercase();
-    let port = parsed.port_or_known_default().ok_or_else(|| {
-        anyhow::anyhow!("Trace Commons upload token issuer URL requires a known port")
-    })?;
-    let resolved_addrs = resolve_trace_upload_claim_issuer_host(&host, port).await?;
     let timeout = trace_upload_claim_issuer_timeout(policy)?;
-    let client = reqwest::Client::builder()
-        .timeout(timeout)
-        .connect_timeout(timeout.min(Duration::from_secs(3)))
-        .redirect(reqwest::redirect::Policy::none())
-        .user_agent("ironclaw-trace-commons-upload-claim/0.1")
-        .resolve_to_addrs(&host, &resolved_addrs)
-        .build()
-        .context("failed to build Trace Commons upload token issuer HTTP client")?;
     let request_body = build_trace_upload_claim_issuer_request(policy, context);
-    let mut request = client
-        .post(parsed.clone())
-        .header(reqwest::header::ACCEPT, "application/json")
-        .json(&request_body);
-    if let Some(bearer) = issuer_request_bearer(policy, context).await? {
-        request = request.bearer_auth(bearer);
-    }
+    let issuer_bearer = issuer_request_bearer(policy, context).await?;
 
-    let response = request.send().await.with_context(|| {
-        format!(
-            "failed to fetch Trace Commons upload claim from {}",
-            safe_trace_upload_claim_issuer_url_label(&parsed)
-        )
-    })?;
-    let status = response.status();
-    if !status.is_success() {
-        // Try to extract the issuer's typed error label so PilotAllowlist*
-        // refusals surface a clear diagnostic to the user (and don't drag
-        // raw response bodies into anyhow chains). Body size is bounded by
-        // TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES via the shared reader;
-        // error bodies are tiny so the existing cap is plenty.
-        let body_text = read_bounded_trace_upload_claim_response(response, &parsed)
+    // Both branches converge on `(status, body_text)`, then share the status
+    // check + JSON parse + response validation below.
+    let (status, body_text): (u16, String) = if let Some(sink) = sink {
+        // AGENT path: route through the host RuntimeHttpEgress pipeline. The
+        // egress performs its own private-IP filtering and DNS resolution, so
+        // this branch does NOT build a reqwest client / resolve_to_addrs.
+        let json_body = serde_json::to_vec(&request_body)
+            .context("failed to serialize Trace Commons upload claim request body")?;
+        let timeout_ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
+        let response = sink
+            .execute(ContributionHttpRequest {
+                method: ContributionHttpMethod::Post,
+                url: parsed.to_string(),
+                bearer_token: issuer_bearer,
+                json_body: Some(json_body),
+                response_body_limit: TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES as u64,
+                timeout_ms,
+            })
             .await
-            .unwrap_or_default();
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "failed to fetch Trace Commons upload claim from {}: {}",
+                    safe_trace_upload_claim_issuer_url_label(&parsed),
+                    error
+                )
+            })?;
+        (
+            response.status,
+            bounded_utf8_from_egress_body(response.body),
+        )
+    } else {
+        // WORKER/CLI/TEST path: existing crate-local hardened reqwest client,
+        // unchanged behavior (pinned DNS, bounded body, no redirects).
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| {
+                anyhow::anyhow!("Trace Commons upload token issuer URL requires a host")
+            })?
+            .to_ascii_lowercase();
+        let port = parsed.port_or_known_default().ok_or_else(|| {
+            anyhow::anyhow!("Trace Commons upload token issuer URL requires a known port")
+        })?;
+        let resolved_addrs = resolve_trace_upload_claim_issuer_host(&host, port).await?;
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            .connect_timeout(timeout.min(Duration::from_secs(3)))
+            .redirect(reqwest::redirect::Policy::none())
+            .user_agent("ironclaw-trace-commons-upload-claim/0.1")
+            .resolve_to_addrs(&host, &resolved_addrs)
+            .build()
+            .context("failed to build Trace Commons upload token issuer HTTP client")?;
+        let mut request = client
+            .post(parsed.clone())
+            .header(reqwest::header::ACCEPT, "application/json")
+            .json(&request_body);
+        if let Some(bearer) = issuer_bearer {
+            request = request.bearer_auth(bearer);
+        }
+
+        let response = request.send().await.with_context(|| {
+            format!(
+                "failed to fetch Trace Commons upload claim from {}",
+                safe_trace_upload_claim_issuer_url_label(&parsed)
+            )
+        })?;
+        let status = response.status();
+        if !status.is_success() {
+            // Read the (tiny) error body so the typed-label path below can
+            // surface a clear diagnostic; bounded by the shared reader.
+            let body_text = read_bounded_trace_upload_claim_response(response, &parsed)
+                .await
+                .unwrap_or_default();
+            (status.as_u16(), body_text)
+        } else {
+            if let Some(content_length) = response.content_length() {
+                anyhow::ensure!(
+                    content_length <= TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES as u64,
+                    "Trace Commons upload claim response from {} exceeded {} bytes",
+                    safe_trace_upload_claim_issuer_url_label(&parsed),
+                    TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES
+                );
+            }
+            let body_text = read_bounded_trace_upload_claim_response(response, &parsed).await?;
+            (status.as_u16(), body_text)
+        }
+    };
+
+    // Shared handling: status check + typed-label error, JSON parse, validation.
+    if !(200..300).contains(&status) {
         return Err(build_trace_upload_claim_http_error(
             &safe_trace_upload_claim_issuer_url_label(&parsed),
-            status.as_u16(),
+            status,
             &body_text,
         ));
     }
-    if let Some(content_length) = response.content_length() {
-        anyhow::ensure!(
-            content_length <= TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES as u64,
-            "Trace Commons upload claim response from {} exceeded {} bytes",
-            safe_trace_upload_claim_issuer_url_label(&parsed),
-            TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES
-        );
-    }
-    let body = read_bounded_trace_upload_claim_response(response, &parsed).await?;
-    let claim: TraceUploadClaimIssuerResponse = serde_json::from_str(&body).with_context(|| {
-        format!(
-            "Trace Commons upload claim response from {} was not valid JSON",
-            safe_trace_upload_claim_issuer_url_label(&parsed)
-        )
-    })?;
+    let claim: TraceUploadClaimIssuerResponse =
+        serde_json::from_str(&body_text).with_context(|| {
+            format!(
+                "Trace Commons upload claim response from {} was not valid JSON",
+                safe_trace_upload_claim_issuer_url_label(&parsed)
+            )
+        })?;
     validate_trace_upload_claim_response(&claim)?;
     Ok(claim)
 }
@@ -5428,12 +5538,23 @@ pub async fn mint_profile_attribution_token_for_scope(
     scope: Option<&str>,
 ) -> anyhow::Result<ProfileAttributionToken> {
     let policy = read_trace_policy_for_scope(scope)?;
-    mint_profile_attribution_token_with_policy(&policy, scope).await
+    mint_profile_attribution_token_with_policy(&policy, scope, None).await
+}
+
+/// Agent-invoked variant: routes the upload-claim mint through the host
+/// `RuntimeHttpEgress` pipeline via the injected `sink`.
+pub async fn mint_profile_attribution_token_for_scope_via_sink(
+    scope: Option<&str>,
+    sink: &dyn ContributionHttpSink,
+) -> anyhow::Result<ProfileAttributionToken> {
+    let policy = read_trace_policy_for_scope(scope)?;
+    mint_profile_attribution_token_with_policy(&policy, scope, Some(sink)).await
 }
 
 async fn mint_profile_attribution_token_with_policy(
     policy: &StandingTraceContributionPolicy,
     scope: Option<&str>,
+    sink: Option<&dyn ContributionHttpSink>,
 ) -> anyhow::Result<ProfileAttributionToken> {
     anyhow::ensure!(
         policy.enabled,
@@ -5448,7 +5569,7 @@ async fn mint_profile_attribution_token_with_policy(
         "Trace Commons upload token issuer URL is not configured; re-run onboarding"
     );
     let context = profile_attribution_claim_context(scope);
-    let claim = fetch_trace_upload_claim_from_issuer(policy, &context).await?;
+    let claim = fetch_trace_upload_claim_from_issuer(policy, &context, sink).await?;
     Ok(ProfileAttributionToken {
         access_token: claim.access_token,
         expires_at: claim.expires_at,
@@ -5464,24 +5585,44 @@ pub async fn set_community_profile_for_scope(
     display_handle: &str,
     bio: Option<&str>,
 ) -> anyhow::Result<()> {
+    set_community_profile_for_scope_inner(scope, display_handle, bio, None).await
+}
+
+/// Agent-invoked variant: routes BOTH the upload-claim mint AND the profile PUT
+/// through the host `RuntimeHttpEgress` pipeline via the injected `sink`.
+pub async fn set_community_profile_for_scope_via_sink(
+    scope: Option<&str>,
+    display_handle: &str,
+    bio: Option<&str>,
+    sink: &dyn ContributionHttpSink,
+) -> anyhow::Result<()> {
+    set_community_profile_for_scope_inner(scope, display_handle, bio, Some(sink)).await
+}
+
+async fn set_community_profile_for_scope_inner(
+    scope: Option<&str>,
+    display_handle: &str,
+    bio: Option<&str>,
+    sink: Option<&dyn ContributionHttpSink>,
+) -> anyhow::Result<()> {
     let handle = validate_community_profile_handle(display_handle)?;
     if let Some(bio) = bio {
         validate_community_profile_bio(bio)?;
     }
     let policy = read_trace_policy_for_scope(scope)?;
     let url = community_profile_url_from_policy(&policy)?;
-    let token = mint_profile_attribution_token_with_policy(&policy, scope).await?;
-    let client = community_profile_http_client(&policy, &url).await?;
+    let token = mint_profile_attribution_token_with_policy(&policy, scope, sink).await?;
     let body = serde_json::json!({
         "display_handle": handle,
         "bio": bio,
     });
     execute_community_profile_request(
-        &client,
-        reqwest::Method::PUT,
+        &policy,
+        ContributionHttpMethod::Put,
         url,
         &token.access_token,
         Some(&body),
+        sink,
     )
     .await
 }
@@ -5492,13 +5633,13 @@ pub async fn set_community_profile_for_scope(
 pub async fn withdraw_community_profile_for_scope(scope: Option<&str>) -> anyhow::Result<()> {
     let policy = read_trace_policy_for_scope(scope)?;
     let url = community_profile_url_from_policy(&policy)?;
-    let token = mint_profile_attribution_token_with_policy(&policy, scope).await?;
-    let client = community_profile_http_client(&policy, &url).await?;
+    let token = mint_profile_attribution_token_with_policy(&policy, scope, None).await?;
     execute_community_profile_request(
-        &client,
-        reqwest::Method::DELETE,
+        &policy,
+        ContributionHttpMethod::Delete,
         url,
         &token.access_token,
+        None,
         None,
     )
     .await
@@ -5627,42 +5768,102 @@ async fn community_profile_http_client(
         .context("failed to build Trace Commons community profile HTTP client")
 }
 
+fn community_profile_method_label(method: ContributionHttpMethod) -> &'static str {
+    match method {
+        ContributionHttpMethod::Post => "POST",
+        ContributionHttpMethod::Put => "PUT",
+        ContributionHttpMethod::Delete => "DELETE",
+    }
+}
+
 /// Send a community-profile request and map non-success statuses to a bounded
 /// diagnostic. The bearer token and raw response bodies never appear in
 /// errors or logs — only the bounded JSON `error` field, when present.
+///
+/// `sink == Some`: AGENT path — route through the host `RuntimeHttpEgress`
+/// pipeline. `sink == None`: WORKER/CLI path — build the crate-local hardened
+/// reqwest client via [`community_profile_http_client`] (unchanged behavior).
 async fn execute_community_profile_request(
-    client: &reqwest::Client,
-    method: reqwest::Method,
+    policy: &StandingTraceContributionPolicy,
+    method: ContributionHttpMethod,
     url: reqwest::Url,
     access_token: &str,
     body: Option<&Value>,
+    sink: Option<&dyn ContributionHttpSink>,
 ) -> anyhow::Result<()> {
-    let method_label = method.as_str().to_string();
-    let mut request = client
-        .request(method, url.clone())
-        .header(reqwest::header::ACCEPT, "application/json")
-        .bearer_auth(access_token);
-    if let Some(body) = body {
-        request = request.json(body);
-    }
-    let response = request.send().await.with_context(|| {
-        format!(
-            "Trace Commons community profile {} request to {} failed",
-            method_label,
-            safe_trace_upload_claim_issuer_url_label(&url)
-        )
-    })?;
-    let status = response.status();
-    if !status.is_success() {
-        let body_text = read_bounded_trace_upload_claim_response(response, &url)
+    let method_label = community_profile_method_label(method);
+
+    let (status, body_text): (u16, String) = if let Some(sink) = sink {
+        let json_body = match body {
+            Some(body) => Some(
+                serde_json::to_vec(body)
+                    .context("failed to serialize Trace Commons community profile request body")?,
+            ),
+            None => None,
+        };
+        let timeout = trace_upload_claim_issuer_timeout(policy)?;
+        let timeout_ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
+        let response = sink
+            .execute(ContributionHttpRequest {
+                method,
+                url: url.to_string(),
+                bearer_token: Some(access_token.to_string()),
+                json_body,
+                response_body_limit: TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES as u64,
+                timeout_ms,
+            })
             .await
-            .unwrap_or_default(); // silent-ok: error-body read best-effort, status alone is diagnostic
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "Trace Commons community profile {} request to {} failed: {}",
+                    method_label,
+                    safe_trace_upload_claim_issuer_url_label(&url),
+                    error
+                )
+            })?;
+        (
+            response.status,
+            bounded_utf8_from_egress_body(response.body),
+        )
+    } else {
+        let client = community_profile_http_client(policy, &url).await?;
+        let reqwest_method = match method {
+            ContributionHttpMethod::Post => reqwest::Method::POST,
+            ContributionHttpMethod::Put => reqwest::Method::PUT,
+            ContributionHttpMethod::Delete => reqwest::Method::DELETE,
+        };
+        let mut request = client
+            .request(reqwest_method, url.clone())
+            .header(reqwest::header::ACCEPT, "application/json")
+            .bearer_auth(access_token);
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let response = request.send().await.with_context(|| {
+            format!(
+                "Trace Commons community profile {} request to {} failed",
+                method_label,
+                safe_trace_upload_claim_issuer_url_label(&url)
+            )
+        })?;
+        let status = response.status();
+        if status.is_success() {
+            (status.as_u16(), String::new())
+        } else {
+            let body_text = read_bounded_trace_upload_claim_response(response, &url)
+                .await
+                .unwrap_or_default(); // silent-ok: error-body read best-effort, status alone is diagnostic
+            (status.as_u16(), body_text)
+        }
+    };
+
+    if !(200..300).contains(&status) {
         let label = parse_trace_upload_claim_error_label(&body_text);
         return Err(anyhow::anyhow!(
             "Trace Commons community profile {} request to {} rejected: HTTP {}{}",
             method_label,
             safe_trace_upload_claim_issuer_url_label(&url),
-            status.as_u16(),
+            status,
             label
                 .as_deref()
                 .map(|l| format!(" ({l})"))
@@ -5710,6 +5911,26 @@ fn trace_remote_request_timeout() -> Duration {
         .unwrap_or_else(|| Duration::from_millis(TRACE_REMOTE_REQUEST_DEFAULT_TIMEOUT_MS))
 }
 
+// Justification — why the background trace-upload / status-sync lane does NOT
+// route through host `RuntimeHttpEgress` (unlike the agent-invoked onboard /
+// profile_token / profile_set paths, which do):
+//
+// The host egress pipeline exists to gate *model-driven* external writes — it
+// attaches a per-request capability identity + resource scope, an approval-gate
+// obligation, and a host-derived credential-injection plan. The trace queue
+// flush/sync worker has none of those by construction: it is a durable runtime
+// task (`spawn_trace_queue_flush_worker`) that drains the local contribution
+// queue for many scopes on a fixed interval, with no model input, no
+// per-request capability, and no approval gate. Forcing it through egress would
+// require synthesizing a fake capability id + scope and a credential model for a
+// gate-less task — added complexity with no security benefit, because this lane
+// already: (1) sends only trace envelopes that passed the safety/redaction
+// pipeline at capture time (scan-before-storage); (2) targets the user's own
+// operator-enrolled ingest endpoint, validated for SSRF/private-IP via
+// `validate_trace_commons_ingest_url` with pinned `resolve_to_addrs`; and
+// (3) authenticates with the enrolled-policy bearer token, never a model-
+// supplied value. So this is an intentional trusted internal lane, not an
+// un-gated external-write hole. See PR #4559 discussion.
 fn trace_remote_http_client() -> Result<reqwest::Client, TraceRemoteRequestFailure> {
     let timeout = trace_remote_request_timeout();
     reqwest::Client::builder()
@@ -12388,7 +12609,7 @@ mod tests {
             allowed_uses: Vec::new(),
             scope_dir: Some(scope_dir.path().to_path_buf()),
         };
-        let claim = fetch_trace_upload_claim_from_issuer(&policy, &context)
+        let claim = fetch_trace_upload_claim_from_issuer(&policy, &context, None)
             .await
             .expect("loopback dev issuer mints a claim");
         assert_eq!(claim.access_token, token);
@@ -14088,16 +14309,16 @@ mod tests {
 
         let url = reqwest::Url::parse(&format!("http://{addr}/v1/community/profile"))
             .expect("profile url parses");
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("reqwest client builds");
+        // None sink exercises the worker/CLI crate-local reqwest path
+        // (community_profile_http_client builds against the loopback mock).
+        let policy = StandingTraceContributionPolicy::default();
         execute_community_profile_request(
-            &client,
-            reqwest::Method::PUT,
+            &policy,
+            ContributionHttpMethod::Put,
             url,
             &token,
             Some(&serde_json::json!({"display_handle": "pilot_zaki", "bio": null})),
+            None,
         )
         .await
         .expect("profile PUT succeeds");
@@ -14150,13 +14371,17 @@ mod tests {
 
         let url = reqwest::Url::parse(&format!("http://{addr}/v1/community/profile"))
             .expect("profile url parses");
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("reqwest client builds");
-        execute_community_profile_request(&client, reqwest::Method::DELETE, url, &token, None)
-            .await
-            .expect("profile DELETE succeeds");
+        let policy = StandingTraceContributionPolicy::default();
+        execute_community_profile_request(
+            &policy,
+            ContributionHttpMethod::Delete,
+            url,
+            &token,
+            None,
+            None,
+        )
+        .await
+        .expect("profile DELETE succeeds");
 
         let seen = seen.lock().expect("seen lock");
         assert_eq!(seen.len(), 1);
@@ -14190,16 +14415,14 @@ mod tests {
 
         let url = reqwest::Url::parse(&format!("http://{addr}/v1/community/profile"))
             .expect("profile url parses");
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("reqwest client builds");
+        let policy = StandingTraceContributionPolicy::default();
         let error = execute_community_profile_request(
-            &client,
-            reqwest::Method::PUT,
+            &policy,
+            ContributionHttpMethod::Put,
             url,
             &token,
             Some(&serde_json::json!({"display_handle": "pilot_zaki", "bio": null})),
+            None,
         )
         .await
         .expect_err("conflict must surface as an error");
