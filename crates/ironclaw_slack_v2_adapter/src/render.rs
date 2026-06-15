@@ -98,13 +98,17 @@ pub fn render_auth_prompt(
 fn gate_prompt_reply_instruction(target: &ProductOutboundTarget, gate_ref: &str) -> String {
     // `gate_ref` already carries its `gate:` prefix (e.g. `gate:approval-…`).
     // DMs resolve a bare reply in-place; channels need an @mention to be heard.
-    // The explicit `approve <gate_ref>` form works from any conversation.
+    // The explicit `approve <gate_ref>` form disambiguates when several approvals
+    // are pending in the same conversation — it still only works where I receive
+    // messages (this chat), so we do NOT claim "from anywhere".
     if requires_app_mention(target) {
         return format!(
-            "Mention me with `approve` or `deny` in this thread — or from any DM/channel, `approve {gate_ref}`."
+            "Reply by mentioning me with `approve` or `deny` in this thread. If several approvals are pending here, use `approve {gate_ref}` or `deny {gate_ref}`."
         );
     }
-    format!("Reply `approve` or `deny` here — or from any DM/channel, `approve {gate_ref}`.")
+    format!(
+        "Reply `approve` or `deny` in this chat to respond to this request. If several approvals are pending here, use `approve {gate_ref}` or `deny {gate_ref}`."
+    )
 }
 
 fn auth_prompt_reply_instruction(target: &ProductOutboundTarget, auth_request_ref: &str) -> String {
