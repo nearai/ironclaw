@@ -8,9 +8,9 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, PermissionMode, ResourceScope,
-    RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement, RuntimeHttpEgress, VirtualPath,
-    sha256_digest_token,
+    CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, NetworkTargetPattern,
+    PermissionMode, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement,
+    RuntimeHttpEgress, RuntimeKind, VirtualPath, sha256_digest_token,
 };
 use ironclaw_product_workflow::{
     LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
@@ -33,6 +33,7 @@ use crate::extension_activation_credentials::{
 };
 use crate::extension_credential_requirements::package_runtime_credential_auth_requirements;
 use crate::lifecycle::response_with_payload;
+use crate::mcp::hosted_mcp_endpoint_target;
 use crate::mcp_discovery::{
     HostedMcpDiscoveryError, discover_hosted_mcp_package, is_hosted_http_mcp_package,
 };
@@ -64,6 +65,10 @@ pub(crate) struct ActiveExtensionCapability {
     pub(crate) effects: Vec<EffectKind>,
     pub(crate) default_permission: PermissionMode,
     pub(crate) runtime_credentials: Vec<RuntimeCredentialRequirement>,
+    /// Network targets the provider declares in its manifest (e.g. a hosted MCP
+    /// server's endpoint), independent of any credentials. Lets the dispatch
+    /// network policy allow a credential-free hosted MCP server.
+    pub(crate) declared_network_targets: Vec<NetworkTargetPattern>,
 }
 
 #[derive(Clone)]
@@ -76,13 +81,17 @@ pub(crate) enum ExtensionActivationMode {
 }
 
 impl ActiveExtensionCapability {
-    fn from_descriptor(descriptor: &CapabilityDescriptor) -> Self {
+    fn from_descriptor(
+        descriptor: &CapabilityDescriptor,
+        declared_network_targets: Vec<NetworkTargetPattern>,
+    ) -> Self {
         Self {
             id: descriptor.id.clone(),
             provider: descriptor.provider.clone(),
             effects: descriptor.effects.clone(),
             default_permission: descriptor.default_permission,
             runtime_credentials: descriptor.runtime_credentials.clone(),
+            declared_network_targets,
         }
     }
 }
@@ -272,7 +281,21 @@ impl RebornLocalExtensionManagementPort {
                     .unwrap_or(CapabilityVisibility::Model)
                     == CapabilityVisibility::Model
             })
-            .map(ActiveExtensionCapability::from_descriptor)
+            .map(|descriptor| {
+                // A hosted MCP provider's egress target lives on its manifest,
+                // not on a credential. Source it here so a credential-free MCP
+                // server still gets a dispatch network-policy allow-list entry.
+                let declared_network_targets = if descriptor.runtime == RuntimeKind::Mcp {
+                    registry
+                        .get_extension(&descriptor.provider)
+                        .and_then(hosted_mcp_endpoint_target)
+                        .into_iter()
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                ActiveExtensionCapability::from_descriptor(descriptor, declared_network_targets)
+            })
             .collect())
     }
 

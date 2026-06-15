@@ -157,6 +157,24 @@ pub(crate) fn hosted_http_mcp_endpoint(package: &ExtensionPackage) -> Option<Hos
     HostedMcpEndpoint::parse(url)
 }
 
+/// The network target a hosted-HTTP MCP package is allowed to reach: its
+/// manifest endpoint (always HTTPS, since [`HostedMcpEndpoint::parse`] rejects
+/// other schemes). Returns `None` for non-MCP / non-host-bundled packages.
+///
+/// The capability dispatch network policy uses this so a credential-free hosted
+/// MCP provider gets an allow-list entry from its manifest, rather than an empty
+/// one derived only from credentials.
+pub(crate) fn hosted_mcp_endpoint_target(
+    package: &ExtensionPackage,
+) -> Option<NetworkTargetPattern> {
+    let endpoint = hosted_http_mcp_endpoint(package)?;
+    Some(NetworkTargetPattern {
+        scheme: Some(NetworkScheme::Https),
+        host_pattern: endpoint.host_pattern,
+        port: endpoint.port,
+    })
+}
+
 /// Returns `true` only when `url` has scheme `https`, a host that
 /// case-insensitively matches `endpoint.host_pattern`, and a path that
 /// (ignoring trailing slashes) matches `endpoint.path`.
@@ -274,6 +292,31 @@ mod tests {
         assert_eq!(
             plan.network_policy.allowed_targets[0].host_pattern,
             "fixture.example.com"
+        );
+    }
+
+    #[test]
+    fn hosted_mcp_endpoint_target_uses_manifest_url() {
+        let registry = SharedExtensionRegistry::new(registry_with_provider(
+            "example-mcp",
+            "https://mcp.example.com:8443/mcp",
+            "example-mcp.ping",
+            "example_token",
+        ));
+        let snapshot = registry.snapshot();
+        let package = snapshot
+            .get_extension(&ExtensionId::new("example-mcp").unwrap())
+            .expect("package present");
+
+        let target = hosted_mcp_endpoint_target(package).expect("hosted MCP endpoint target");
+
+        assert_eq!(
+            target,
+            NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: "mcp.example.com".to_string(),
+                port: Some(8443),
+            }
         );
     }
 

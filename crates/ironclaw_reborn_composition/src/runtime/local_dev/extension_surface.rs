@@ -165,6 +165,14 @@ fn extension_network_policy(capability: &ActiveExtensionCapability) -> NetworkPo
             targets.push(credential.audience.clone());
         }
     }
+    // Manifest-declared targets (e.g. a hosted MCP server's endpoint). Without
+    // these a credential-free hosted MCP provider gets an empty allow-list and
+    // is rejected by the obligation handler before it can connect.
+    for target in &capability.declared_network_targets {
+        if !targets.contains(target) {
+            targets.push(target.clone());
+        }
+    }
     let is_web_access_exa_mcp = capability.provider.as_str() == WEB_ACCESS_EXTENSION_ID
         && matches!(
             capability.id.as_str(),
@@ -202,6 +210,7 @@ mod tests {
             effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
+            declared_network_targets: Vec::new(),
         };
 
         let policy = extension_network_policy(&capability);
@@ -226,6 +235,7 @@ mod tests {
             effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
+            declared_network_targets: Vec::new(),
         };
 
         let policy = extension_network_policy(&capability);
@@ -264,12 +274,42 @@ mod tests {
                 },
                 required: true,
             }],
+            declared_network_targets: Vec::new(),
         };
 
         let policy = extension_network_policy(&capability);
 
         assert_eq!(policy.allowed_targets.len(), 1);
         assert_eq!(policy.max_egress_bytes, Some(NETWORK_EGRESS_LIMIT));
+    }
+
+    /// A credential-free hosted MCP provider (public/unauthenticated server, so
+    /// no `runtime_credentials`) is allowed to reach the endpoint declared on
+    /// its manifest. Before the manifest endpoint was sourced into the dispatch
+    /// policy, this capability got an empty `allowed_targets` and the obligation
+    /// handler rejected it as `Network` before it could connect.
+    #[test]
+    fn credential_free_capability_allows_declared_manifest_network_target() {
+        let endpoint = NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "mcp.example.com".to_string(),
+            port: None,
+        };
+        let capability = ActiveExtensionCapability {
+            id: CapabilityId::new("example-mcp.ping").unwrap(),
+            provider: ExtensionId::new("example-mcp").unwrap(),
+            effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+            default_permission: PermissionMode::Allow,
+            runtime_credentials: Vec::new(),
+            declared_network_targets: vec![endpoint.clone()],
+        };
+
+        let policy = extension_network_policy(&capability);
+
+        assert_eq!(policy.allowed_targets, vec![endpoint]);
+        // Still public-IP only: the manifest endpoint is allowed, private
+        // ranges remain denied.
+        assert!(policy.deny_private_ip_ranges);
     }
 
     #[test]
@@ -285,6 +325,7 @@ mod tests {
             ],
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
+            declared_network_targets: Vec::new(),
         };
 
         let policy = extension_network_policy(&capability);
@@ -305,6 +346,7 @@ mod tests {
             ],
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
+            declared_network_targets: Vec::new(),
         };
 
         let policy = extension_network_policy(&capability);
