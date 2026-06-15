@@ -32,7 +32,10 @@ function useChatEventsSourceForTest() {
   return `${lines.join("\n")}\nglobalThis.__testExports = { useChatEvents };`;
 }
 
-function createUseChatEventsHarness({ gateFromEvent = () => null } = {}) {
+function createUseChatEventsHarness({
+  gateFromEvent = () => null,
+  failureMessageForRunStatus = () => "run failed",
+} = {}) {
   let messages = [];
   let pendingGate = null;
   let isProcessing = false;
@@ -45,7 +48,7 @@ function createUseChatEventsHarness({ gateFromEvent = () => null } = {}) {
       useCallback: (fn) => fn,
       useRef: (value) => ({ current: value }),
     },
-    failureMessageForRunStatus: () => "run failed",
+    failureMessageForRunStatus,
     gateFromEvent,
     globalThis: {},
     isTerminalToolStatus,
@@ -246,6 +249,7 @@ test("useChatEvents: cleared non-auth gates are not restored by later projection
     gateRef: "gate:resource",
     headline: "Resource unavailable",
     body: "",
+    allowAlways: false,
   });
 
   harness.handleEvent({
@@ -276,6 +280,128 @@ test("useChatEvents: cleared non-auth gates are not restored by later projection
   });
 
   assert.equal(harness.pendingGate, null);
+});
+
+test("useChatEvents: projection approval gate preserves always-allow affordance", () => {
+  const runId = "run-approval";
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: runId, status: "blocked_approval" } },
+          {
+            gate: {
+              gate_ref: "gate:approval",
+              headline: "Approval required",
+              allow_always: true,
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(plain(harness.pendingGate), {
+    kind: "gate",
+    runId,
+    gateRef: "gate:approval",
+    headline: "Approval required",
+    body: "",
+    allowAlways: true,
+  });
+});
+
+test("useChatEvents: failed terminal projection appends visible error", () => {
+  const seenFailureInputs = [];
+  const harness = createUseChatEventsHarness({
+    failureMessageForRunStatus: (input) => {
+      seenFailureInputs.push(input);
+      return input.failureSummary || "run failed";
+    },
+  });
+
+  harness.setCurrentActiveRun({
+    runId: "run-failed-1",
+    threadId: "thread-1",
+    status: "running",
+  });
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: "run-failed-1",
+              status: "failed",
+              failure_category: "driver_invalid_request",
+              failure_summary:
+                "The run failed because the execution driver rejected the request.",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.isProcessing, false);
+  assert.equal(harness.pendingGate, null);
+  assert.equal(harness.activeRun, null);
+  assert.deepEqual(plain(seenFailureInputs), [
+    {
+      status: "failed",
+      failureCategory: "driver_invalid_request",
+      failureSummary:
+        "The run failed because the execution driver rejected the request.",
+    },
+  ]);
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, "err-run-failed-1");
+  assert.equal(harness.messages[0].role, "error");
+  assert.equal(
+    harness.messages[0].content,
+    "The run failed because the execution driver rejected the request.",
+  );
+});
+
+test("useChatEvents: typed failed event appends visible error", () => {
+  const seenFailureInputs = [];
+  const harness = createUseChatEventsHarness({
+    failureMessageForRunStatus: (input) => {
+      seenFailureInputs.push(input);
+      return `category:${input.failureCategory}`;
+    },
+  });
+
+  harness.handleEvent({
+    type: "failed",
+    frame: {
+      run_state: {
+        run_id: "run-typed-failed-1",
+        status: "Failed",
+        failure: { category: "model_unavailable" },
+      },
+    },
+  });
+
+  assert.equal(harness.isProcessing, false);
+  assert.equal(harness.pendingGate, null);
+  assert.equal(harness.activeRun, null);
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, "err-run-typed-failed-1");
+  assert.equal(harness.messages[0].role, "error");
+  assert.equal(harness.messages[0].content, "category:model_unavailable");
+  assert.deepEqual(plain(seenFailureInputs), [
+    {
+      status: "Failed",
+      failureCategory: "model_unavailable",
+      failureSummary: null,
+    },
+  ]);
 });
 
 test("useChatEvents: stale terminal run status does not clear newer run", () => {

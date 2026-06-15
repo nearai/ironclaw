@@ -1,4 +1,5 @@
 import { React, html } from "../../lib/html.js";
+import { useT } from "../../lib/i18n.js";
 import {
   THREAD_STATE,
   clearThreadState,
@@ -18,7 +19,9 @@ import { RecoveryNotice } from "./components/recovery-notice.js";
 import { SuggestionChips } from "./components/suggestion-chips.js";
 import { TypingIndicator } from "./components/typing-indicator.js";
 import { useChat } from "./hooks/useChat.js";
+import { NEW_DRAFT_KEY } from "./lib/draft-store.js";
 import { buildRuntimeContext } from "./lib/runtime-context.js";
+import { buildScopedLogsPath } from "../logs/lib/logs-data.js";
 
 export function Chat({
   threads,
@@ -29,6 +32,7 @@ export function Chat({
   composerResetKey = "",
   gatewayStatus,
 }) {
+  const t = useT();
   const {
     messages,
     isProcessing,
@@ -37,6 +41,7 @@ export function Chat({
     suggestions,
     sseStatus,
     historyLoading,
+    historyLoadError,
     hasMore,
     cooldownSeconds,
     recoveryNotice,
@@ -62,10 +67,16 @@ export function Chat({
   );
   const hasMessages =
     messages.length > 0 || isProcessing || Boolean(pendingGate) || Boolean(channelConnectAction);
-  const showLanding = !historyLoading && !hasMessages;
+  // Don't show the landing composer when history failed to load — show the
+  // error banner instead so the user is not misled into thinking the thread
+  // is empty.
+  const showLanding = !historyLoading && !hasMessages && !historyLoadError;
   const composerDisabled = (isProcessing && !pendingGate) || cooldownSeconds > 0;
   const composerStatusText =
     cooldownSeconds > 0 ? `Retry in ${cooldownSeconds}s` : undefined;
+  // Scope the persisted composer draft to the open thread (or the
+  // shared new-conversation slot when there's no active thread yet).
+  const composerDraftKey = activeThreadId || NEW_DRAFT_KEY;
   const canCancelRun = Boolean(
     activeThreadId &&
       activeRun?.runId &&
@@ -73,6 +84,15 @@ export function Chat({
       isProcessing &&
       !pendingGate
   );
+  const scopedLogsHref = React.useMemo(() => {
+    if (!activeThreadId) return null;
+    const runId =
+      activeRun?.threadId === activeThreadId ? activeRun.runId : null;
+    return buildScopedLogsPath(
+      { threadId: activeThreadId, runId },
+      { absolute: true }
+    );
+  }, [activeRun, activeThreadId]);
 
   const handleSend = React.useCallback(
     async (content, { images = [], attachments = [] } = {}) => {
@@ -115,10 +135,9 @@ export function Chat({
    * working.
    *
    * Invariant: useChat resets pendingGate (and isProcessing reaches a
-   * fresh value) on threadId change via the sibling effect at
-   * useChat.js:136-140, so within a single React commit batch we never
-   * observe stale state from a previous thread paired with a new
-   * activeThreadId.
+   * fresh value) on threadId change via the thread-reset effect in
+   * useChat, so within a single React commit batch we never observe
+   * stale state from a previous thread paired with a new activeThreadId.
    *
    * Coverage gap (writer is per-active-thread only): this seam only
    * flags whichever thread the user is currently viewing. Cross-thread
@@ -160,6 +179,28 @@ export function Chat({
       <div className="flex min-w-0 flex-1 flex-col">
         <${ConnectionStatus} status=${sseStatus} />
 
+        ${scopedLogsHref &&
+        html`
+          <div className="flex justify-end border-b border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)] px-4 py-1.5">
+            <a
+              href=${scopedLogsHref}
+              className="rounded-[6px] px-2 py-1 text-xs font-medium text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
+            >
+              ${t("nav.logs")}
+            </a>
+          </div>
+        `}
+
+        ${historyLoadError &&
+        html`
+          <div
+            className="mx-4 mt-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300"
+            role="alert"
+          >
+            ${historyLoadError}
+          </div>
+        `}
+
         ${showLanding &&
         html`
           <${EmptyState}
@@ -168,6 +209,7 @@ export function Chat({
             disabled=${composerDisabled}
             initialText=${composerDraft}
             resetKey=${composerResetKey}
+            draftKey=${composerDraftKey}
             context=${runtimeContext}
             statusText=${composerStatusText}
             canCancel=${canCancelRun}
@@ -182,6 +224,7 @@ export function Chat({
             hasMore=${hasMore}
             onLoadMore=${loadMore}
             onRetryMessage=${retryMessage}
+            pending=${isProcessing}
           >
             ${recoveryNotice &&
             html`
@@ -247,6 +290,7 @@ export function Chat({
             disabled=${composerDisabled}
             initialText=${composerDraft}
             resetKey=${composerResetKey}
+            draftKey=${composerDraftKey}
             context=${runtimeContext}
             statusText=${composerStatusText}
             canCancel=${canCancelRun}

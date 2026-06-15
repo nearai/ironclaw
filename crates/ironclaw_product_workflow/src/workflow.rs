@@ -6,8 +6,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
-use ironclaw_host_api::ThreadId;
+use ironclaw_host_api::{ThreadId, UserId};
 use ironclaw_product_adapters::{
     ApprovalDecision, ExternalConversationRef, ProductAdapterError, ProductInboundAck,
     ProductInboundEnvelope, ProductInboundPayload, ProductProjectionReadInput,
@@ -26,11 +27,12 @@ use crate::action::{ActionDispatchKind, ActionFingerprintKey, SourceBindingKey};
 use crate::approval_interaction::{
     ApprovalInteractionDecision, ApprovalInteractionRejectionKind, ApprovalInteractionService,
     ListPendingApprovalsRequest, RejectingApprovalInteractionService,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse, is_approval_gate_ref,
 };
 use crate::auth_interaction::{
     AuthInteractionDecision, AuthInteractionRejectionKind, AuthInteractionService,
     RejectingAuthInteractionService, ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
+    is_auth_gate_ref,
 };
 use crate::binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
@@ -61,6 +63,7 @@ pub struct DefaultProductWorkflow {
     command_service: Arc<dyn ProductCommandService>,
     approval_interaction_service: Arc<dyn ApprovalInteractionService>,
     auth_interaction_service: Arc<dyn AuthInteractionService>,
+    delivered_gate_routes: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
 }
 
 impl DefaultProductWorkflow {
@@ -78,6 +81,9 @@ impl DefaultProductWorkflow {
             command_service: Arc::new(RejectingProductCommandService),
             approval_interaction_service: Arc::new(RejectingApprovalInteractionService),
             auth_interaction_service: Arc::new(RejectingAuthInteractionService),
+            delivered_gate_routes: Arc::new(
+                ironclaw_outbound::InMemoryDeliveredGateRouteStore::default(),
+            ),
         }
     }
 
@@ -118,6 +124,14 @@ impl DefaultProductWorkflow {
         auth_interaction_service: Arc<dyn AuthInteractionService>,
     ) -> Self {
         self.auth_interaction_service = auth_interaction_service;
+        self
+    }
+
+    pub fn with_delivered_gate_routes(
+        mut self,
+        store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
+    ) -> Self {
+        self.delivered_gate_routes = store;
         self
     }
 }
@@ -191,6 +205,7 @@ impl ProductWorkflow for DefaultProductWorkflow {
                         command_service: &*self.command_service,
                         approval_interaction_service: &*self.approval_interaction_service,
                         auth_interaction_service: &*self.auth_interaction_service,
+                        delivered_gate_routes: &*self.delivered_gate_routes,
                     },
                 )
                 .await;
@@ -302,6 +317,7 @@ struct DispatchPorts<'a> {
     command_service: &'a dyn ProductCommandService,
     approval_interaction_service: &'a dyn ApprovalInteractionService,
     auth_interaction_service: &'a dyn AuthInteractionService,
+    delivered_gate_routes: &'a dyn ironclaw_outbound::DeliveredGateRouteStore,
 }
 
 fn resolve_binding_request(envelope: &ProductInboundEnvelope) -> ResolveBindingRequest {
@@ -377,12 +393,388 @@ fn direct_base_binding_request(
         request.external_conversation_ref.space_id(),
         request.external_conversation_ref.conversation_id(),
         None,
-        request.external_conversation_ref.reply_target_message_id(),
+        None,
     )
     .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
         reason: error.to_string(),
     })?;
     Ok(request)
+}
+
+fn delivered_route_conversation_ref(
+    envelope: &ProductInboundEnvelope,
+) -> Result<ironclaw_conversations::ExternalConversationRef, ProductWorkflowError> {
+    let external_ref = envelope.external_conversation_ref();
+    ironclaw_conversations::ExternalConversationRef::new(
+        external_ref.space_id(),
+        external_ref.conversation_id(),
+        external_ref.topic_id(),
+        None,
+    )
+    .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+        reason: error.to_string(),
+    })
+}
+
+async fn delivered_route_base_binding(
+    envelope: &ProductInboundEnvelope,
+    binding_service: &dyn ConversationBindingService,
+) -> Option<ResolvedBinding> {
+    // AUTHZ INVARIANT: the returned binding's `actor_user_id` is the
+    // authenticated external actor resolved by the pairing/binding service
+    // (never a shared subject or an agent user). `load_delivered_routes_for_envelope`
+    // filters routes using `binding.actor_user_id`, and the authorization of
+    // the delivered-route fallback depends on this invariant holding. The
+    // interaction services remain the resolution authority for the downstream
+    // approve/deny operation.
+    let request = match direct_base_binding_request(resolve_binding_request(envelope)) {
+        Ok(request) => request,
+        Err(error) => {
+            debug!(
+                error = %error,
+                "delivered gate route fallback skipped because base binding request was invalid"
+            );
+            return None;
+        }
+    };
+    match binding_service.lookup_binding(request).await {
+        Ok(binding) => Some(binding),
+        Err(error) => {
+            debug!(
+                error = %error,
+                "delivered gate route fallback skipped because base binding was not resolved"
+            ); // silent-ok: best-effort fallback lookup; original rejection still surfaces to the user
+            None
+        }
+    }
+}
+
+/// Outcome of a conversation-fingerprint lookup for delivered gate route
+/// fallback.
+enum DeliveredRouteOutcome {
+    /// No live routes matched this conversation + actor.
+    Miss,
+    /// Exactly one live route matched — proceed with it.
+    Single(Box<ironclaw_outbound::DeliveredGateRouteRecord>),
+    /// More than one live route matched — fail closed; user must specify an
+    /// explicit gate ref.
+    Ambiguous,
+}
+
+async fn load_delivered_routes_for_envelope(
+    envelope: &ProductInboundEnvelope,
+    binding: &ResolvedBinding,
+    delivered_gate_routes: &dyn ironclaw_outbound::DeliveredGateRouteStore,
+    expected_gate_ref: Option<&str>,
+    // Applied only on bare lookups (`expected_gate_ref == None`): only routes
+    // whose `gate_ref` satisfies this predicate are considered live. This
+    // separates approval routes (`is_approval_gate_ref`) from auth routes
+    // (`is_auth_gate_ref`) so that a lingering gate of the other kind recorded
+    // in the same conversation bucket cannot make a bare lookup ambiguous.
+    // For exact-ref lookups (`expected_gate_ref == Some(_)`) this predicate is
+    // NOT applied: the exact match is authoritative, and the kind filter can
+    // only total-drop a validly named generic/legacy gate — it can never
+    // disambiguate.  The predicate receives the raw stored gate string directly
+    // — no `GateRef::new` wrap — so routes whose stored string fails validation
+    // are not silently dropped before the predicate runs.
+    gate_kind_filter: fn(&str) -> bool,
+) -> DeliveredRouteOutcome {
+    let conversation_ref = match delivered_route_conversation_ref(envelope) {
+        Ok(conversation_ref) => conversation_ref,
+        Err(error) => {
+            debug!(
+                error = %error,
+                "delivered gate route fallback skipped because conversation reference was invalid"
+            );
+            return DeliveredRouteOutcome::Miss;
+        }
+    };
+    let conversation_fingerprint = conversation_ref.conversation_fingerprint();
+    let now = Utc::now();
+    let all_routes = match delivered_gate_routes
+        .load_delivered_gate_route_by_conversation_fingerprint(
+            &binding.tenant_id,
+            &binding.actor_user_id,
+            &conversation_fingerprint,
+        )
+        .await
+    {
+        Ok(routes) => routes,
+        Err(error) => {
+            debug!(
+                error = %error,
+                "delivered gate route fallback lookup failed"
+            );
+            return DeliveredRouteOutcome::Miss;
+        }
+    };
+    // Filter: non-expired, tenant+actor match, then either exact-ref match
+    // (when the caller names a specific gate) or gate-kind filter (for bare
+    // lookups only — see gate_kind_filter parameter comment above).
+    let live: Vec<ironclaw_outbound::DeliveredGateRouteRecord> = all_routes
+        .into_iter()
+        .filter(|r| {
+            if r.is_expired(now) {
+                return false;
+            }
+            // AUTHZ INVARIANT: `binding.actor_user_id` is the authenticated
+            // external actor resolved by the pairing/binding service (see
+            // `delivered_route_base_binding`). This filter's authorization
+            // depends on that invariant: only routes owned by the authenticated
+            // actor are eligible. The inner interaction services remain the
+            // resolution authority for the downstream approve/deny operation.
+            //
+            // A non-owner actor in a shared conversation (e.g. a third party
+            // typing "approve" in a channel where a gate prompt was delivered)
+            // reaches this lookup and is dropped here without user-facing
+            // feedback. That silence is deliberate: replying "not authorized"
+            // to arbitrary channel chatter would be noise, and the inner
+            // interaction services authorize again.
+            if r.tenant_id != binding.tenant_id || r.user_id != binding.actor_user_id {
+                return false;
+            }
+            if let Some(expected) = expected_gate_ref {
+                // Exact ref named: the named ref is authoritative and the downstream
+                // interaction service decides resolvability. Do NOT apply the gate-kind
+                // filter here — for an exact-ref lookup every surviving route shares the
+                // same gate_ref string, so the kind filter can only total-drop a validly
+                // named generic/legacy gate, never disambiguate.
+                if r.gate_ref != expected {
+                    return false;
+                }
+            } else if !gate_kind_filter(&r.gate_ref) {
+                // Bare lookup: use the kind filter so a lingering gate of the other kind
+                // (e.g. an auth gate when resolving a bare "approve") cannot inflate the
+                // live-route count and trigger a spurious ambiguity.
+                return false;
+            }
+            true
+        })
+        .collect();
+    match live.as_slice() {
+        [] => {
+            debug!("delivered gate route fallback found no live route for conversation");
+            DeliveredRouteOutcome::Miss
+        }
+        [_] => match live.into_iter().next() {
+            Some(route) => DeliveredRouteOutcome::Single(Box::new(route)),
+            None => DeliveredRouteOutcome::Miss,
+        },
+        _ => {
+            debug!(
+                count = live.len(),
+                "delivered gate route fallback found multiple live routes — ambiguous"
+            );
+            DeliveredRouteOutcome::Ambiguous
+        }
+    }
+}
+
+/// Outcome of the shared delivered-route selection step used by both the
+/// approval and auth delivered-route fallback paths.
+struct SelectedDeliveredRoute {
+    route: ironclaw_outbound::DeliveredGateRouteRecord,
+    actor_user_id: UserId,
+}
+
+/// Resolves the binding and selects a delivered gate route for `envelope`.
+///
+/// Shared by [`resolve_via_delivered_approval_route`] and
+/// [`resolve_via_delivered_auth_route`]. Returns `None` on a route miss
+/// (the caller should fall through to the next strategy), `Some(Err(_))` on an
+/// ambiguity (mapped by the caller-supplied `ambiguity_error` fn) or a hard
+/// error, and `Some(Ok(_))` with the selected route and resolved actor when
+/// exactly one live route matched.
+async fn select_delivered_gate_route(
+    envelope: &ProductInboundEnvelope,
+    binding_service: &dyn ConversationBindingService,
+    delivered_gate_routes: &dyn ironclaw_outbound::DeliveredGateRouteStore,
+    expected_gate_ref: Option<&str>,
+    gate_kind_filter: fn(&str) -> bool,
+    pre_resolved_binding: Option<&ResolvedBinding>,
+    ambiguity_error: impl Fn() -> ProductWorkflowError,
+) -> Option<Result<SelectedDeliveredRoute, ProductWorkflowError>> {
+    // When the dispatcher already resolved a binding for this envelope (the
+    // MissingGate fallback path), reuse it instead of re-deriving one — two
+    // independent lookups can diverge if route configuration changes between
+    // them, and the dispatcher's binding is the one the actor was admitted
+    // under. Only the BindingRequired path (no binding at all) derives the
+    // topic-stripped base binding here.
+    let derived_binding;
+    let binding = match pre_resolved_binding {
+        Some(binding) => binding,
+        None => {
+            derived_binding = delivered_route_base_binding(envelope, binding_service).await?;
+            &derived_binding
+        }
+    };
+    let route = match load_delivered_routes_for_envelope(
+        envelope,
+        binding,
+        delivered_gate_routes,
+        expected_gate_ref,
+        gate_kind_filter,
+    )
+    .await
+    {
+        DeliveredRouteOutcome::Miss => return None,
+        DeliveredRouteOutcome::Single(route) => *route,
+        DeliveredRouteOutcome::Ambiguous => return Some(Err(ambiguity_error())),
+    };
+    Some(Ok(SelectedDeliveredRoute {
+        actor_user_id: binding.actor_user_id.clone(),
+        route,
+    }))
+}
+
+// arch-exempt: too_many_args, needs a DeliveredRouteResolutionContext bundle (services + dispatch identity), plan docs/plans/2026-06-10-slack-gate-feedback-and-routing.md Phase C
+#[allow(clippy::too_many_arguments)]
+async fn resolve_via_delivered_approval_route(
+    envelope: &ProductInboundEnvelope,
+    binding_service: &dyn ConversationBindingService,
+    delivered_gate_routes: &dyn ironclaw_outbound::DeliveredGateRouteStore,
+    approval_interaction_service: &dyn ApprovalInteractionService,
+    decision: ApprovalInteractionDecision,
+    action_fingerprint: &ActionFingerprintKey,
+    expected_gate_ref: Option<&str>,
+    pre_resolved_binding: Option<&ResolvedBinding>,
+) -> Option<Result<DispatchedAction, ProductWorkflowError>> {
+    let selected = match select_delivered_gate_route(
+        envelope,
+        binding_service,
+        delivered_gate_routes,
+        expected_gate_ref,
+        // Bare approve must only match approval gates; a lingering auth gate
+        // recorded in the same conversation bucket must not count toward the
+        // ambiguity check or be forwarded to the approval service.
+        is_approval_gate_ref,
+        pre_resolved_binding,
+        || ProductWorkflowError::ApprovalInteractionRejected {
+            kind: ApprovalInteractionRejectionKind::AmbiguousGate,
+        },
+    )
+    .await
+    {
+        None => return None,
+        Some(Err(error)) => return Some(Err(error)),
+        Some(Ok(selected)) => selected,
+    };
+    let gate_ref = GateRef::new(selected.route.gate_ref.clone()).map_err(|_| {
+        ProductWorkflowError::ApprovalInteractionRejected {
+            kind: ApprovalInteractionRejectionKind::InvalidGateRef,
+        }
+    });
+    let gate_ref = match gate_ref {
+        Ok(gate_ref) => gate_ref,
+        Err(error) => return Some(Err(error)),
+    };
+    let idempotency_key = match approval_resolution_idempotency_key(action_fingerprint) {
+        Ok(idempotency_key) => idempotency_key,
+        Err(error) => return Some(Err(error)),
+    };
+    let response = match approval_interaction_service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: selected.route.scope,
+            actor: TurnActor::new(selected.actor_user_id),
+            run_id_hint: Some(selected.route.run_id),
+            gate_ref,
+            decision,
+            idempotency_key,
+        })
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => return Some(Err(error)),
+    };
+    let submitted_run_id = run_id_from_approval_resolution(response);
+    let dispatch_kind = match ActionDispatchKind::try_from_payload(envelope.payload()) {
+        Ok(kind) => kind,
+        Err(error) => return Some(Err(error)),
+    };
+    Some(
+        interaction_accepted_message_ref("approval", envelope).map(|accepted_message_ref| {
+            DispatchedAction {
+                ack: ProductInboundAck::Accepted {
+                    accepted_message_ref,
+                    submitted_run_id,
+                },
+                dispatch_kind,
+            }
+        }),
+    )
+}
+
+// arch-exempt: too_many_args, needs a DeliveredRouteResolutionContext bundle (services + dispatch identity), plan docs/plans/2026-06-10-slack-gate-feedback-and-routing.md Phase C
+#[allow(clippy::too_many_arguments)]
+async fn resolve_via_delivered_auth_route(
+    envelope: &ProductInboundEnvelope,
+    binding_service: &dyn ConversationBindingService,
+    delivered_gate_routes: &dyn ironclaw_outbound::DeliveredGateRouteStore,
+    auth_interaction_service: &dyn AuthInteractionService,
+    decision: AuthInteractionDecision,
+    action_fingerprint: &ActionFingerprintKey,
+    expected_gate_ref: Option<&str>,
+    pre_resolved_binding: Option<&ResolvedBinding>,
+) -> Option<Result<DispatchedAction, ProductWorkflowError>> {
+    let selected = match select_delivered_gate_route(
+        envelope,
+        binding_service,
+        delivered_gate_routes,
+        expected_gate_ref,
+        // Bare "auth deny" must only match auth gates; a lingering approval
+        // gate recorded in the same conversation bucket must not count toward
+        // the ambiguity check or be forwarded to the auth service.
+        is_auth_gate_ref,
+        pre_resolved_binding,
+        || ProductWorkflowError::AuthInteractionRejected {
+            kind: AuthInteractionRejectionKind::AmbiguousAuth,
+        },
+    )
+    .await
+    {
+        None => return None,
+        Some(Err(error)) => return Some(Err(error)),
+        Some(Ok(selected)) => selected,
+    };
+    let gate_ref = GateRef::new(selected.route.gate_ref.clone()).map_err(|_| {
+        ProductWorkflowError::AuthInteractionRejected {
+            kind: AuthInteractionRejectionKind::InvalidGateRef,
+        }
+    });
+    let gate_ref = match gate_ref {
+        Ok(gate_ref) => gate_ref,
+        Err(error) => return Some(Err(error)),
+    };
+    let idempotency_key = match auth_resolution_idempotency_key(action_fingerprint) {
+        Ok(idempotency_key) => idempotency_key,
+        Err(error) => return Some(Err(error)),
+    };
+    let response = match auth_interaction_service
+        .resolve(ResolveAuthInteractionRequest {
+            scope: selected.route.scope,
+            actor: TurnActor::new(selected.actor_user_id),
+            run_id_hint: Some(selected.route.run_id),
+            gate_ref,
+            decision,
+            idempotency_key,
+        })
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => return Some(Err(error)),
+    };
+    let submitted_run_id = run_id_from_auth_resolution(response);
+    Some(
+        interaction_accepted_message_ref("auth", envelope).and_then(|accepted_message_ref| {
+            Ok(DispatchedAction {
+                ack: ProductInboundAck::Accepted {
+                    accepted_message_ref,
+                    submitted_run_id,
+                },
+                dispatch_kind: ActionDispatchKind::try_from_payload(envelope.payload())?,
+            })
+        }),
+    )
 }
 
 fn projection_thread_id_from_binding(
@@ -481,6 +873,7 @@ async fn dispatch_payload(
                 action_fingerprint,
                 ports.binding_service,
                 ports.approval_interaction_service,
+                ports.delivered_gate_routes,
             )
             .await
         }
@@ -491,6 +884,7 @@ async fn dispatch_payload(
                 action_fingerprint,
                 ports.binding_service,
                 ports.approval_interaction_service,
+                ports.delivered_gate_routes,
             )
             .await
         }
@@ -501,6 +895,7 @@ async fn dispatch_payload(
                 action_fingerprint,
                 ports.binding_service,
                 ports.auth_interaction_service,
+                ports.delivered_gate_routes,
             )
             .await
         }
@@ -541,9 +936,30 @@ async fn dispatch_approval_resolution(
     action_fingerprint: ActionFingerprintKey,
     binding_service: &dyn ConversationBindingService,
     approval_interaction_service: &dyn ApprovalInteractionService,
+    delivered_gate_routes: &dyn ironclaw_outbound::DeliveredGateRouteStore,
 ) -> Result<DispatchedAction, ProductWorkflowError> {
     let decision = approval_interaction_decision(payload.decision)?;
-    let binding = lookup_interaction_binding(envelope, binding_service).await?;
+    let binding = match lookup_interaction_binding(envelope, binding_service).await {
+        Ok(binding) => binding,
+        Err(error @ ProductWorkflowError::BindingRequired { .. }) => {
+            if let Some(result) = resolve_via_delivered_approval_route(
+                envelope,
+                binding_service,
+                delivered_gate_routes,
+                approval_interaction_service,
+                decision,
+                &action_fingerprint,
+                Some(payload.gate_ref.as_str()),
+                None,
+            )
+            .await
+            {
+                return result;
+            }
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
     let scope = turn_scope_from_binding(&binding);
     let actor = TurnActor::new(binding.actor_user_id.clone());
     let gate_ref = GateRef::new(payload.gate_ref.clone()).map_err(|_| {
@@ -578,9 +994,30 @@ async fn dispatch_scoped_approval_resolution(
     action_fingerprint: ActionFingerprintKey,
     binding_service: &dyn ConversationBindingService,
     approval_interaction_service: &dyn ApprovalInteractionService,
+    delivered_gate_routes: &dyn ironclaw_outbound::DeliveredGateRouteStore,
 ) -> Result<DispatchedAction, ProductWorkflowError> {
     let decision = approval_interaction_decision(payload.decision)?;
-    let binding = lookup_interaction_binding(envelope, binding_service).await?;
+    let binding = match lookup_interaction_binding(envelope, binding_service).await {
+        Ok(binding) => binding,
+        Err(error @ ProductWorkflowError::BindingRequired { .. }) => {
+            if let Some(result) = resolve_via_delivered_approval_route(
+                envelope,
+                binding_service,
+                delivered_gate_routes,
+                approval_interaction_service,
+                decision,
+                &action_fingerprint,
+                None,
+                None,
+            )
+            .await
+            {
+                return result;
+            }
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
     let scope = turn_scope_from_binding(&binding);
     let actor = TurnActor::new(binding.actor_user_id.clone());
     let pending = approval_interaction_service
@@ -592,6 +1029,20 @@ async fn dispatch_scoped_approval_resolution(
     let gate = match pending.approvals.as_slice() {
         [gate] => gate,
         [] => {
+            if let Some(result) = resolve_via_delivered_approval_route(
+                envelope,
+                binding_service,
+                delivered_gate_routes,
+                approval_interaction_service,
+                decision,
+                &action_fingerprint,
+                None,
+                Some(&binding),
+            )
+            .await
+            {
+                return result;
+            }
             return Err(ProductWorkflowError::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::MissingGate,
             });
@@ -630,9 +1081,7 @@ fn approval_interaction_decision(
     match decision {
         ApprovalDecision::ApproveOnce => Ok(ApprovalInteractionDecision::ApproveOnce),
         ApprovalDecision::Deny => Ok(ApprovalInteractionDecision::Deny),
-        ApprovalDecision::AlwaysAllow => Err(ProductWorkflowError::ApprovalInteractionRejected {
-            kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
-        }),
+        ApprovalDecision::AlwaysAllow => Ok(ApprovalInteractionDecision::AlwaysAllow),
     }
 }
 
@@ -642,6 +1091,7 @@ async fn dispatch_auth_resolution(
     action_fingerprint: ActionFingerprintKey,
     binding_service: &dyn ConversationBindingService,
     auth_interaction_service: &dyn AuthInteractionService,
+    delivered_gate_routes: &dyn ironclaw_outbound::DeliveredGateRouteStore,
 ) -> Result<DispatchedAction, ProductWorkflowError> {
     let decision = match &payload.result {
         ironclaw_product_adapters::AuthResolutionResult::CredentialProvided { credential_ref } => {
@@ -656,7 +1106,27 @@ async fn dispatch_auth_resolution(
         }
         ironclaw_product_adapters::AuthResolutionResult::Denied => AuthInteractionDecision::Deny,
     };
-    let binding = lookup_interaction_binding(envelope, binding_service).await?;
+    let binding = match lookup_interaction_binding(envelope, binding_service).await {
+        Ok(binding) => binding,
+        Err(error @ ProductWorkflowError::BindingRequired { .. }) => {
+            if let Some(result) = resolve_via_delivered_auth_route(
+                envelope,
+                binding_service,
+                delivered_gate_routes,
+                auth_interaction_service,
+                decision.clone(),
+                &action_fingerprint,
+                Some(payload.auth_request_ref.as_str()),
+                None,
+            )
+            .await
+            {
+                return result;
+            }
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
     let scope = turn_scope_from_binding(&binding);
     let actor = TurnActor::new(binding.actor_user_id.clone());
     let gate_ref = GateRef::new(payload.auth_request_ref.clone()).map_err(|_| {
@@ -665,16 +1135,41 @@ async fn dispatch_auth_resolution(
         }
     })?;
     let idempotency_key = auth_resolution_idempotency_key(&action_fingerprint)?;
-    let response = auth_interaction_service
+    let response = match auth_interaction_service
         .resolve(ResolveAuthInteractionRequest {
             scope,
             actor,
             run_id_hint: None,
             gate_ref,
-            decision,
+            decision: decision.clone(),
             idempotency_key,
         })
-        .await?;
+        .await
+    {
+        Ok(response) => response,
+        Err(
+            error @ ProductWorkflowError::AuthInteractionRejected {
+                kind: AuthInteractionRejectionKind::MissingAuth,
+            },
+        ) => {
+            if let Some(result) = resolve_via_delivered_auth_route(
+                envelope,
+                binding_service,
+                delivered_gate_routes,
+                auth_interaction_service,
+                decision,
+                &action_fingerprint,
+                Some(payload.auth_request_ref.as_str()),
+                Some(&binding),
+            )
+            .await
+            {
+                return result;
+            }
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
     let submitted_run_id = run_id_from_auth_resolution(response);
     Ok(DispatchedAction {
         ack: ProductInboundAck::Accepted {
@@ -955,6 +1450,7 @@ fn rejection_kind_for_auth_interaction(kind: AuthInteractionRejectionKind) -> Pr
     match kind {
         AuthInteractionRejectionKind::MissingAuth => ProductRejectionKind::BindingRequired,
         AuthInteractionRejectionKind::CrossScopeDenied => ProductRejectionKind::AccessDenied,
+        AuthInteractionRejectionKind::AmbiguousAuth => ProductRejectionKind::AmbiguousResolution,
         AuthInteractionRejectionKind::StaleAuth
         | AuthInteractionRejectionKind::InvalidGateRef
         | AuthInteractionRejectionKind::InvalidCredentialRef
@@ -971,8 +1467,10 @@ fn rejection_kind_for_approval_interaction(
     match kind {
         ApprovalInteractionRejectionKind::MissingGate => ProductRejectionKind::BindingRequired,
         ApprovalInteractionRejectionKind::CrossScopeDenied => ProductRejectionKind::AccessDenied,
-        ApprovalInteractionRejectionKind::AmbiguousGate
-        | ApprovalInteractionRejectionKind::StaleGate
+        ApprovalInteractionRejectionKind::AmbiguousGate => {
+            ProductRejectionKind::AmbiguousResolution
+        }
+        ApprovalInteractionRejectionKind::StaleGate
         | ApprovalInteractionRejectionKind::InvalidGateRef
         | ApprovalInteractionRejectionKind::AlwaysAllowUnsupported
         | ApprovalInteractionRejectionKind::UnsupportedAction

@@ -34,7 +34,8 @@ use ironclaw_reborn::planned_driver_factory::{
     PLANNED_DEFAULT_PROFILE_ID, default_planned_run_profile_resolver,
 };
 use ironclaw_reborn::runtime::{
-    DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, build_product_live_planned_runtime,
+    DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, RuntimeTurnStateStore,
+    build_product_live_planned_runtime,
 };
 use ironclaw_reborn_composition::ProductLiveCapabilityIo;
 use ironclaw_threads::{
@@ -46,8 +47,8 @@ use ironclaw_turns::{
     IdempotencyKey, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
     InMemoryTurnStateStore, LoopResultRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
     RunProfileVersion, SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
-    TurnActor, TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnRunWake, TurnScope,
-    TurnStateStore, TurnStatus,
+    TurnActor, TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState,
+    TurnRunWake, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
         LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken,
@@ -650,8 +651,9 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         ),
     );
     let cancellation_factory = Arc::new(ReadyRunCancellationFactory::default());
+    let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
-        turn_state: Arc::clone(&turn_store),
+        turn_state: turn_state_for_runtime,
         thread_service: Arc::new(thread_service.clone()),
         thread_scope: thread_scope.clone(),
         model_gateway,
@@ -693,6 +695,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
         hook_dispatcher_builder_factory: None,
+        communication_context_provider: None,
         hook_security_audit_sink: None,
         turn_event_sink: None,
     })
@@ -818,8 +821,9 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         ),
     );
     let cancellation_factory = Arc::new(ReadyRunCancellationFactory::default());
+    let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
-        turn_state: Arc::clone(&turn_store),
+        turn_state: turn_state_for_runtime,
         thread_service: Arc::new(thread_service.clone()),
         thread_scope: thread_scope.clone(),
         model_gateway,
@@ -860,6 +864,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
         hook_dispatcher_builder_factory: None,
+        communication_context_provider: None,
         hook_security_audit_sink: None,
         turn_event_sink: None,
     })
@@ -999,8 +1004,9 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         ),
     );
 
+    let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
     let error = match build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
-        turn_state: turn_store,
+        turn_state: turn_state_for_runtime,
         thread_service: Arc::new(thread_service.clone()),
         thread_scope: thread_scope.clone(),
         model_gateway,
@@ -1039,6 +1045,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
         hook_dispatcher_builder_factory: None,
+        communication_context_provider: None,
         hook_security_audit_sink: None,
         turn_event_sink: None,
     }) {
@@ -1280,6 +1287,20 @@ async fn reply_target_binding_ref_has_single_reply_prefix() {
     assert!(reply_ref.starts_with("reply:"));
     assert!(!reply_ref.starts_with("reply:reply:"));
     assert_eq!(reply_ref.matches("reply:").count(), 1);
+    assert_eq!(
+        request.product_context.as_ref().map(|c| c.origin),
+        Some(TurnOriginKind::Inbound),
+        "inbound turn must carry Inbound origin"
+    );
+    assert_eq!(
+        request
+            .product_context
+            .as_ref()
+            .and_then(|c| c.adapter.as_ref())
+            .map(|a| a.as_str()),
+        Some("test_adapter"),
+        "inbound turn must carry adapter name from envelope"
+    );
 }
 
 #[tokio::test]

@@ -5,8 +5,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AppendAssistantDraftRequest,
-    AppendCapabilityDisplayPreviewRequest, AppendToolResultReferenceRequest,
-    CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
+    AppendCapabilityDisplayPreviewRequest, AppendToolResultReferenceRequest, AttachmentKind,
+    AttachmentRef, CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
     CapabilityDisplayPreviewStatus, CreateSummaryArtifactRequest, EnsureThreadRequest,
     InMemorySessionThreadService, ListThreadsForScopeRequest, LoadContextMessagesRequest,
     LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
@@ -2503,4 +2503,201 @@ async fn list_threads_for_scope_title_stays_none_when_user_message_is_whitespace
         title, None,
         "whitespace-only user message must yield `title: None`, not an empty string",
     );
+}
+
+#[tokio::test]
+async fn attachment_extracted_text_reaches_model_visible_context() {
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("attachments-context");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-attachments-context").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: Some("event-att-ctx".into()),
+            content: MessageContent::with_attachments(
+                "see attached",
+                vec![sample_attachment_ref()],
+            ),
+        })
+        .await
+        .unwrap();
+
+    let window = service
+        .load_context_window(LoadContextWindowRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            max_messages: 10,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(window.messages.len(), 1);
+    let content = &window.messages[0].content;
+    // The user's text plus a rendered <attachments> block with the document's
+    // extracted text and stored project path are what the model sees.
+    assert!(content.starts_with("see attached"));
+    assert!(content.contains("<attachments>"));
+    assert!(content.contains("type=\"document\""));
+    assert!(content.contains("quarterly numbers"));
+    assert!(content.contains("project_path=\"/workspace/attachments/2026-06-09/m1-report.pdf\""));
+
+    // The by-id projection (`load_context_messages`) renders the same
+    // <attachments> block — both context read paths fold attachment text.
+    let direct = service
+        .load_context_messages(LoadContextMessagesRequest {
+            scope,
+            thread_id: thread.thread_id,
+            message_ids: vec![accepted.message_id],
+        })
+        .await
+        .unwrap();
+    assert_eq!(direct.messages.len(), 1);
+    let direct_content = &direct.messages[0].content;
+    assert!(direct_content.contains("<attachments>"));
+    assert!(direct_content.contains("quarterly numbers"));
+    assert!(
+        direct_content.contains("project_path=\"/workspace/attachments/2026-06-09/m1-report.pdf\"")
+    );
+}
+
+fn sample_attachment_ref() -> AttachmentRef {
+    AttachmentRef {
+        id: "att-1".into(),
+        kind: AttachmentKind::Document,
+        mime_type: "application/pdf".into(),
+        filename: Some("report.pdf".into()),
+        size_bytes: Some(2048),
+        // The landed scoped path, as `land_attachment` records it: rooted at the
+        // project mount alias (`/workspace`), which the agent's `file_read`
+        // resolves through — not a raw host path.
+        storage_key: Some("/workspace/attachments/2026-06-09/m1-report.pdf".into()),
+        extracted_text: Some("quarterly numbers".into()),
+    }
+}
+
+#[tokio::test]
+async fn accept_inbound_message_carries_attachment_refs_through_history() {
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("attachments");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-attachments").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let attachment = sample_attachment_ref();
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: Some("event-att".into()),
+            content: MessageContent::with_attachments("see attached", vec![attachment.clone()]),
+        })
+        .await
+        .unwrap();
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.messages.len(), 1);
+    assert_eq!(history.messages[0].content.as_deref(), Some("see attached"));
+    assert_eq!(history.messages[0].attachments, vec![attachment]);
+
+    // Redaction clears attachment refs in parity with text content, while the
+    // message identity and sequence are preserved.
+    service
+        .redact_message(RedactMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            message_id: accepted.message_id,
+            redaction_ref: "redaction:test".into(),
+        })
+        .await
+        .unwrap();
+
+    let after = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(after.messages.len(), 1);
+    assert_eq!(after.messages[0].message_id, accepted.message_id);
+    assert_eq!(after.messages[0].sequence, accepted.sequence);
+    assert_eq!(after.messages[0].status, MessageStatus::Redacted);
+    assert!(after.messages[0].content.is_none());
+    assert!(after.messages[0].attachments.is_empty());
+}
+
+#[tokio::test]
+async fn accept_inbound_message_rejects_oversized_extracted_text() {
+    // Drive the real accept caller (not just the validator) with an attachment
+    // whose extracted_text exceeds the contract cap, and assert nothing was
+    // persisted on rejection.
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("att-oversize");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-att-oversize").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let mut oversized = sample_attachment_ref();
+    // 200_001 chars — one past MAX_EXTRACTED_TEXT_CHARS (kept crate-internal, so
+    // assert the boundary by size rather than importing the constant).
+    oversized.extracted_text = Some("x".repeat(200_001));
+    let err = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: Some("event-att-oversize".into()),
+            content: MessageContent::with_attachments("huge", vec![oversized]),
+        })
+        .await
+        .expect_err("oversized extracted_text must be rejected at accept");
+    assert!(matches!(err, SessionThreadError::InvalidAttachment(_)));
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert!(history.messages.is_empty());
 }

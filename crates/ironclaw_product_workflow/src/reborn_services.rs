@@ -6,11 +6,13 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::{Arc, Mutex as StdMutex, Weak},
 };
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, CredentialAccountId, CredentialAccountProjection,
     CredentialAccountUpdateBinding, ProviderScope,
@@ -21,9 +23,10 @@ use ironclaw_product_adapters::{
     ProjectionSubscriptionRequest,
 };
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest, MessageContent,
-    MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
-    SessionThreadService, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
+    AcceptInboundMessageRequest, AcceptedInboundMessageReplay, AttachmentRef, EnsureThreadRequest,
+    MessageContent, MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadRecord, SessionThreadService, ThreadHistory, ThreadHistoryRequest,
+    ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
@@ -32,6 +35,7 @@ use ironclaw_turns::{
 };
 use secrecy::SecretString;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
+use url::Url;
 use uuid::Uuid;
 
 use crate::{
@@ -54,6 +58,7 @@ use crate::{
 };
 
 mod error;
+mod extension_credentials;
 mod extension_onboarding;
 mod extension_setup_credentials;
 mod extensions;
@@ -78,12 +83,24 @@ pub use types::{
     RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
     RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
     RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornOutboundDeliveryModality,
+    RebornListThreadsResponse, RebornLogEntry, RebornLogLevel, RebornLogQueryRequest,
+    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
+    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
+    RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
+    RebornOperatorSetupRequest, RebornOperatorSetupResponse, RebornOperatorSetupStatus,
+    RebornOperatorSetupStep, RebornOperatorSetupStepStatus, RebornOperatorStatusCheck,
+    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
+    RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetChannel,
     RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetDisplayName,
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetSummary,
-    RebornOutboundPreferencesResponse, RebornResolveGateResponse, RebornResumeGateResponse,
+    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
+    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
+    RebornResolveGateResponse, RebornResumeGateResponse, RebornServiceLifecycleAction,
+    RebornServiceLifecycleRequest, RebornServiceLifecycleResponse, RebornServiceLifecycleState,
     RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
     RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
     RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
@@ -96,6 +113,13 @@ type SkillActivationRecorder =
 type SkillActivationClearer =
     dyn Fn(&TurnScope, &AcceptedMessageRef) -> Result<(), RebornServicesError> + Send + Sync;
 type ThreadOperationLocks = StdMutex<HashMap<String, Weak<AsyncMutex<()>>>>;
+
+const OPERATOR_LOGS_DEFAULT_LIMIT: u32 = 100;
+const OPERATOR_LOGS_MAX_LIMIT: u32 = 500;
+const OPERATOR_LOGS_CURSOR_MAX_BYTES: usize = 512;
+const OPERATOR_LOGS_TARGET_MAX_BYTES: usize = 256;
+const OPERATOR_LOGS_CONTEXT_MAX_BYTES: usize = 256;
+const OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX: &str = " ... [truncated]";
 
 #[async_trait]
 pub trait ConnectableChannelsProductFacade: Send + Sync {
@@ -126,6 +150,102 @@ impl ConnectableChannelsProductFacade for StaticConnectableChannelsProductFacade
     ) -> Result<RebornConnectableChannelListResponse, RebornServicesError> {
         Ok(RebornConnectableChannelListResponse {
             channels: self.channels.iter().cloned().collect(),
+        })
+    }
+}
+
+#[async_trait]
+pub trait OperatorStatusService: Send + Sync {
+    async fn status(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorStatusResponse, RebornServicesError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct StaticOperatorStatusService {
+    response: RebornOperatorStatusResponse,
+}
+
+impl StaticOperatorStatusService {
+    pub fn new(response: RebornOperatorStatusResponse) -> Self {
+        Self { response }
+    }
+}
+
+#[async_trait]
+impl OperatorStatusService for StaticOperatorStatusService {
+    async fn status(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorStatusResponse, RebornServicesError> {
+        Ok(self.response.clone())
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct UnsupportedOperatorStatusService;
+
+#[async_trait]
+impl OperatorStatusService for UnsupportedOperatorStatusService {
+    async fn status(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorStatusResponse, RebornServicesError> {
+        Err(operator_surface_unavailable())
+    }
+}
+
+#[async_trait]
+pub trait OperatorLogsService: Send + Sync {
+    async fn query_logs(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornLogQueryRequest,
+    ) -> Result<RebornLogQueryResponse, RebornServicesError>;
+}
+
+#[derive(Debug, Default)]
+pub struct UnsupportedOperatorLogsService;
+
+#[async_trait]
+impl OperatorLogsService for UnsupportedOperatorLogsService {
+    async fn query_logs(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: RebornLogQueryRequest,
+    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
+        Err(operator_surface_unavailable())
+    }
+}
+
+#[async_trait]
+pub trait OperatorServiceLifecycleService: Send + Sync {
+    async fn control_service(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornServiceLifecycleRequest,
+    ) -> Result<RebornServiceLifecycleResponse, RebornServicesError>;
+}
+
+#[derive(Debug, Default)]
+pub struct UnsupportedOperatorServiceLifecycleService;
+
+#[async_trait]
+impl OperatorServiceLifecycleService for UnsupportedOperatorServiceLifecycleService {
+    async fn control_service(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornServiceLifecycleRequest,
+    ) -> Result<RebornServiceLifecycleResponse, RebornServicesError> {
+        Ok(RebornServiceLifecycleResponse {
+            action: request.action,
+            state: RebornServiceLifecycleState::Unsupported,
+            message: "local service lifecycle management is not wired for this runtime".to_string(),
+            remediation: Some(
+                "use the host process manager directly until a platform lifecycle backend is configured"
+                    .to_string(),
+            ),
         })
     }
 }
@@ -276,6 +396,7 @@ impl OutboundPreferencesProductFacade for UnsupportedOutboundPreferencesProductF
 pub struct ExtensionCredentialStatusRequest {
     pub scope: AuthProductScope,
     pub provider: AuthProviderId,
+    pub setup: crate::LifecycleExtensionCredentialSetup,
     pub provider_scopes: Vec<ProviderScope>,
     pub requester_extension: ExtensionId,
 }
@@ -334,6 +455,27 @@ pub struct AutomationListRequest {
     pub run_limit: usize,
 }
 
+/// Stored scope of a trigger-fired thread, returned by
+/// `AutomationProductFacade::resolve_run_thread_scope`.
+///
+/// Trigger threads are written by `record_trigger_prompt` with:
+///  - `agent_id` = trigger record's `agent_id` (or default agent)
+///  - `project_id` = trigger record's `project_id`
+///  - `owner_user_id` = `Some(creator_user_id)` (the actor that fired it)
+///
+/// These three fields let the caller reconstruct the true `TurnScope` / `ThreadScope`
+/// needed to locate the thread in storage without guessing.
+#[derive(Debug, Clone)]
+pub struct TriggerRunThreadScope {
+    /// `agent_id` stored on the trigger record.
+    pub agent_id: Option<AgentId>,
+    /// `project_id` stored on the trigger record.
+    pub project_id: Option<ProjectId>,
+    /// `creator_user_id` stored on the trigger record, which equals
+    /// `owner_user_id` in the stored thread scope.
+    pub creator_user_id: UserId,
+}
+
 #[async_trait]
 pub trait AutomationProductFacade: Send + Sync {
     async fn list_automations(
@@ -341,6 +483,30 @@ pub trait AutomationProductFacade: Send + Sync {
         caller: ProductAgentBoundCaller,
         request: AutomationListRequest,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError>;
+
+    /// Looks up the stored trigger-thread scope for a given `thread_id`.
+    ///
+    /// Scans the caller-scoped triggers for one whose run history contains
+    /// `thread_id`, then returns the scope fields from that trigger record.
+    /// The lookup is caller-scoped via `list_scoped_triggers`, so authorization
+    /// is embedded: if the trigger exists for this caller and contains the run,
+    /// the caller is permitted to access it.
+    ///
+    /// Returns `Ok(None)` when no caller-scoped trigger has a run with this
+    /// `thread_id`. Backend lookup failures should return a stable
+    /// `RebornServicesError` so outages do not masquerade as authorization
+    /// misses.
+    ///
+    /// Implementors that do not support trigger-thread access must provide an
+    /// explicit `Ok(None)` body with a short comment noting the unsupported
+    /// state. No default body is provided here so a future production facade
+    /// cannot silently forget to implement this method and degrade
+    /// timeline/SSE/gate/cancel/run-state to 404.
+    async fn resolve_run_thread_scope(
+        &self,
+        caller: ProductAgentBoundCaller,
+        thread_id: &ThreadId,
+    ) -> Result<Option<TriggerRunThreadScope>, RebornServicesError>;
 }
 
 #[derive(Debug)]
@@ -360,6 +526,15 @@ impl AutomationProductFacade for UnsupportedAutomationProductFacade {
         _request: AutomationListRequest,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
         Err(automation_unavailable())
+    }
+
+    async fn resolve_run_thread_scope(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<TriggerRunThreadScope>, RebornServicesError> {
+        // Trigger-thread access is unsupported when no automation facade is wired.
+        Ok(None)
     }
 }
 
@@ -406,8 +581,8 @@ impl GateResolutionRoute {
 
     fn from_gate_shape(gate_ref: &GateRef, resolution: &WebUiGateResolution) -> Self {
         match (
-            is_approval_gate_ref(gate_ref),
-            is_auth_gate_ref(gate_ref),
+            is_approval_gate_ref(gate_ref.as_str()),
+            is_auth_gate_ref(gate_ref.as_str()),
             matches!(resolution, WebUiGateResolution::CredentialProvided { .. }),
         ) {
             (true, _, _) => Self::Approval,
@@ -418,6 +593,296 @@ impl GateResolutionRoute {
 }
 
 /// Stable WebUI-facing facade surface for beta Reborn routes.
+fn operator_setup_diagnostic(
+    key: &str,
+    severity: RebornOperatorConfigDiagnosticSeverity,
+    reason_code: &str,
+    message: &str,
+    remediation: &str,
+) -> RebornOperatorConfigDiagnostic {
+    RebornOperatorConfigDiagnostic {
+        key: key.to_string(),
+        severity,
+        reason_code: reason_code.to_string(),
+        message: message.to_string(),
+        owning_area: RebornOperatorArea::Setup,
+        remediation: remediation.to_string(),
+    }
+}
+
+fn operator_setup_info_diagnostic(
+    key: &str,
+    reason_code: &str,
+    message: &str,
+    remediation: &str,
+) -> RebornOperatorConfigDiagnostic {
+    operator_setup_diagnostic(
+        key,
+        RebornOperatorConfigDiagnosticSeverity::Info,
+        reason_code,
+        message,
+        remediation,
+    )
+}
+
+fn operator_setup_validation_error(field: &str) -> RebornServicesError {
+    WebUiInboundValidationError {
+        field: field.to_string(),
+        code: WebUiInboundValidationCode::InvalidValue,
+    }
+    .into()
+}
+
+fn setup_response_from_llm_snapshot(
+    snapshot: LlmConfigSnapshot,
+    mut diagnostics: Vec<RebornOperatorConfigDiagnostic>,
+) -> RebornOperatorSetupResponse {
+    diagnostics.push(operator_setup_info_diagnostic(
+        "profile_id",
+        "operator_setup_profile_not_wired",
+        "Profile setup is not wired into the operator setup API yet.",
+        "Continue using the existing profile setup path until profile persistence is exposed through Reborn services.",
+    ));
+    diagnostics.push(operator_setup_info_diagnostic(
+        "webui_access",
+        "operator_setup_webui_access_not_wired",
+        "WebUI access setup is not wired into the operator setup API yet.",
+        "Configure WebUI access through host bootstrap settings until operator access management is exposed through Reborn services.",
+    ));
+
+    let active_provider_id = snapshot
+        .active
+        .as_ref()
+        .map(|active| active.provider_id.clone());
+    let active_model = snapshot
+        .active
+        .as_ref()
+        .and_then(|active| active.model.clone());
+    let provider_complete = active_provider_id.is_some();
+    let model_complete = active_model.is_some();
+    let status = if provider_complete && model_complete {
+        RebornOperatorSetupStatus::Complete
+    } else {
+        RebornOperatorSetupStatus::Incomplete
+    };
+
+    RebornOperatorSetupResponse {
+        area: RebornOperatorArea::Setup,
+        status,
+        message: if provider_complete {
+            "Provider setup is available through the operator setup API.".to_string()
+        } else {
+            "Provider setup is incomplete.".to_string()
+        },
+        active_provider_id,
+        active_model,
+        steps: vec![
+            RebornOperatorSetupStep {
+                name: "provider".to_string(),
+                status: if provider_complete {
+                    RebornOperatorSetupStepStatus::Complete
+                } else {
+                    RebornOperatorSetupStepStatus::Required
+                },
+                message: if provider_complete {
+                    "An active provider is configured.".to_string()
+                } else {
+                    "Select a provider before first use.".to_string()
+                },
+            },
+            RebornOperatorSetupStep {
+                name: "model".to_string(),
+                status: if model_complete {
+                    RebornOperatorSetupStepStatus::Complete
+                } else {
+                    RebornOperatorSetupStepStatus::Required
+                },
+                message: if model_complete {
+                    "An active model is configured.".to_string()
+                } else {
+                    "Select a model for the active provider.".to_string()
+                },
+            },
+            RebornOperatorSetupStep {
+                name: "profile".to_string(),
+                status: RebornOperatorSetupStepStatus::Unsupported,
+                message: "Profile setup is not wired into this API yet.".to_string(),
+            },
+            RebornOperatorSetupStep {
+                name: "webui_access".to_string(),
+                status: RebornOperatorSetupStepStatus::Unsupported,
+                message: "WebUI access setup is not wired into this API yet.".to_string(),
+            },
+        ],
+        diagnostics,
+    }
+}
+
+const LLM_BASE_URL_MAX_BYTES: usize = 2048;
+
+/// Validate an operator-supplied LLM `base_url` before it is persisted or
+/// probed.
+///
+/// Mirrors the `AllowPrivateNetwork` posture used at the model-discovery egress
+/// point (`ironclaw_llm`'s `check_models_url`) and the binary's
+/// `validate_operator_base_url`: a self-hosted provider on a loopback or private
+/// address (Ollama, vLLM) is the primary local use case and must be allowed.
+/// Only the never-legitimate classes — cloud metadata / link-local, multicast,
+/// and the unspecified address — are rejected here. DNS-name hosts are resolved,
+/// re-validated, and pinned by the egress guard; this syntactic check only
+/// screens literal IPs.
+fn validate_llm_base_url(base_url: Option<&str>) -> Result<(), RebornServicesError> {
+    let Some(raw) = base_url else {
+        return Ok(());
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > LLM_BASE_URL_MAX_BYTES {
+        return Err(operator_setup_validation_error("base_url"));
+    }
+    let parsed = Url::parse(trimmed).map_err(|_| operator_setup_validation_error("base_url"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(operator_setup_validation_error("base_url"));
+    }
+    let Some(host) = parsed.host_str() else {
+        return Err(operator_setup_validation_error("base_url"));
+    };
+    // `localhost` and loopback/private literals are intentionally allowed —
+    // pointing the operator's provider at a self-hosted endpoint is the main
+    // reason this field exists. Only literal IPs in the always-blocked classes
+    // are rejected.
+    let normalized_host = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = normalized_host.parse::<IpAddr>()
+        && forbidden_llm_base_url_ip(ip)
+    {
+        return Err(operator_setup_validation_error("base_url"));
+    }
+    Ok(())
+}
+
+fn forbidden_llm_base_url_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => forbidden_llm_base_url_ipv4(ip),
+        IpAddr::V6(ip) => forbidden_llm_base_url_ipv6(ip),
+    }
+}
+
+/// Always-blocked IPv4 classes: the unspecified address, multicast, and
+/// link-local (which includes the cloud-metadata endpoint 169.254.169.254).
+/// Loopback and private ranges are allowed so self-hosted providers work.
+fn forbidden_llm_base_url_ipv4(ip: Ipv4Addr) -> bool {
+    ip.is_unspecified() || ip.is_multicast() || ip.is_link_local()
+}
+
+/// Always-blocked IPv6 classes: unspecified, multicast, and link-local.
+/// Loopback (`::1`) and unique-local are allowed so self-hosted providers work.
+/// Embedded-IPv4 forms (`::ffff:a.b.c.d` and `::a.b.c.d`) are unwrapped so an
+/// IPv4-compatible metadata address can't slip through as a "plain" v6 host.
+fn forbidden_llm_base_url_ipv6(ip: Ipv6Addr) -> bool {
+    if ip.is_unspecified() || ip.is_multicast() || ip.is_unicast_link_local() {
+        return true;
+    }
+    if let Some(v4) = ip.to_ipv4() {
+        return forbidden_llm_base_url_ipv4(v4);
+    }
+    false
+}
+
+fn operator_config_surface_not_wired_diagnostic() -> RebornOperatorConfigDiagnostic {
+    RebornOperatorConfigDiagnostic {
+        key: "*".to_string(),
+        severity: RebornOperatorConfigDiagnosticSeverity::Error,
+        reason_code: "operator_config_service_not_wired".to_string(),
+        message: "Operator config diagnostics are available, but the effective config service is not wired yet.".to_string(),
+        owning_area: RebornOperatorArea::Config,
+        remediation: "Use bootstrap config, environment variables, or existing CLI setup until the operator config service is enabled.".to_string(),
+    }
+}
+
+fn operator_config_validation_diagnostics(
+    keys: Vec<String>,
+) -> Vec<RebornOperatorConfigDiagnostic> {
+    let keys = if keys.is_empty() {
+        vec!["*".to_string()]
+    } else {
+        keys
+    };
+
+    keys.into_iter()
+        .map(operator_config_key_diagnostic)
+        .collect()
+}
+
+fn operator_config_key_diagnostic(key: String) -> RebornOperatorConfigDiagnostic {
+    let normalized = key.to_ascii_lowercase();
+    let is_secret = ["api_key", "credential", "password", "secret", "token"]
+        .iter()
+        .any(|marker| normalized.contains(marker));
+
+    let (reason_code, message, remediation) = if key == "*" {
+        (
+            "operator_config_service_not_wired",
+            "Operator config validation is available, but the effective config service is not wired yet.",
+            "Use bootstrap config, environment variables, or existing CLI setup until the operator config service is enabled.",
+        )
+    } else if is_secret {
+        (
+            "operator_config_secret_not_wired",
+            "Secret-backed operator config is not writable through the operator API yet.",
+            "Store secrets through the configured secret provider or bootstrap environment until the operator secrets flow is enabled.",
+        )
+    } else if normalized.starts_with("deprecated.") || normalized.starts_with("legacy.") {
+        (
+            "operator_config_deprecated",
+            "This operator config key is deprecated and is not applied by the Reborn runtime.",
+            "Move the setting to the current config key before relying on operator-managed startup.",
+        )
+    } else if normalized.starts_with("bootstrap.") {
+        (
+            "operator_config_immutable",
+            "Bootstrap config is immutable from the browser operator API.",
+            "Change this setting in bootstrap config and restart the host process.",
+        )
+    } else if matches!(
+        normalized.as_str(),
+        "provider.default" | "model.default" | "profile.default"
+    ) {
+        (
+            "operator_config_not_wired",
+            "This parsed operator config key is not wired into runtime behavior yet.",
+            "Keep using the existing setup path for this setting until effective config persistence is enabled.",
+        )
+    } else {
+        (
+            "operator_config_unknown_key",
+            "This operator config key is not recognized by the current Reborn runtime.",
+            "Remove the key or rename it to a documented operator config key.",
+        )
+    };
+
+    RebornOperatorConfigDiagnostic {
+        key,
+        severity: RebornOperatorConfigDiagnosticSeverity::Error,
+        reason_code: reason_code.to_string(),
+        message: message.to_string(),
+        owning_area: RebornOperatorArea::Config,
+        remediation: remediation.to_string(),
+    }
+}
+
+fn operator_config_diagnostic_command_plane_response(
+    area: RebornOperatorArea,
+) -> RebornOperatorCommandPlaneResponse {
+    RebornOperatorCommandPlaneResponse {
+        area,
+        status: RebornOperatorSurfaceStatus::Unavailable,
+        message: "Operator config has unsupported or not-yet-wired settings.".to_string(),
+        operator_status: None,
+        logs: None,
+        service_lifecycle: None,
+        diagnostics: vec![operator_config_surface_not_wired_diagnostic()],
+    }
+}
+
 #[async_trait]
 pub trait RebornServicesApi: Send + Sync {
     async fn create_thread(
@@ -701,6 +1166,129 @@ pub trait RebornServicesApi: Send + Sync {
         let _ = caller;
         Err(llm_config::llm_config_unavailable())
     }
+
+    async fn get_operator_setup(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
+        let _ = caller;
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn run_operator_setup(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornOperatorSetupRequest,
+    ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Return the effective operator config projection.
+    ///
+    /// Until the effective config backend is wired, read-only operator config/status/diagnostic
+    /// surfaces intentionally return typed diagnostic payloads so the browser can explain
+    /// what is unsupported. Mutating or side-effecting operator routes remain fail-closed
+    /// with sanitized service-unavailable errors until their owning service is wired.
+    async fn list_operator_config(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorConfigListResponse, RebornServicesError> {
+        let _ = caller;
+        Ok(RebornOperatorConfigListResponse {
+            entries: Vec::new(),
+            precedence: Vec::new(),
+            diagnostics: vec![operator_config_surface_not_wired_diagnostic()],
+        })
+    }
+
+    async fn get_operator_config_key(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        key: String,
+    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
+        let _ = (caller, key);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn set_operator_config_key(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        key: String,
+        request: RebornOperatorConfigSetRequest,
+    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
+        let _ = (caller, key, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn validate_operator_config(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornOperatorConfigValidateRequest,
+    ) -> Result<RebornOperatorConfigValidateResponse, RebornServicesError> {
+        let _ = caller;
+        let diagnostics = operator_config_validation_diagnostics(request.keys);
+        Ok(RebornOperatorConfigValidateResponse {
+            valid: diagnostics.is_empty(),
+            diagnostics,
+        })
+    }
+
+    async fn get_operator_diagnostics(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let _ = caller;
+        Ok(operator_config_diagnostic_command_plane_response(
+            RebornOperatorArea::Diagnostics,
+        ))
+    }
+
+    async fn get_operator_status(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let _ = caller;
+        Ok(operator_config_diagnostic_command_plane_response(
+            RebornOperatorArea::Status,
+        ))
+    }
+
+    async fn query_operator_logs(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: RebornOperatorLogsQuery,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let _ = (caller, query);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn run_operator_service_lifecycle(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornOperatorServiceLifecycleRequest,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+}
+
+/// Lands inbound attachment bytes into durable, agent-accessible storage and
+/// returns the transcript references to persist on the user message.
+///
+/// Injected by host composition, which owns the project-scoped filesystem
+/// authority. `message_id` is a stable per-message id (the idempotency key)
+/// used only to disambiguate the storage path; the implementation writes
+/// through the same `MountView` the agent's file tools resolve through, so
+/// landed bytes are readable by `file_read`/`list_dir` in later turns.
+#[async_trait]
+pub trait InboundAttachmentLander: Send + Sync {
+    async fn land(
+        &self,
+        thread_scope: &ThreadScope,
+        message_id: &str,
+        attachments: Vec<InboundAttachment>,
+    ) -> Result<Vec<AttachmentRef>, RebornServicesError>;
 }
 
 /// Default facade implementation composed at the WebUI boundary.
@@ -708,12 +1296,16 @@ pub trait RebornServicesApi: Send + Sync {
 pub struct RebornServices {
     thread_service: Arc<dyn SessionThreadService>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
+    inbound_attachments: Option<Arc<dyn InboundAttachmentLander>>,
     event_stream: Option<Arc<dyn ProjectionStream>>,
     lifecycle_facade: Arc<dyn LifecycleProductFacade>,
     automation_facade: Arc<dyn AutomationProductFacade>,
     skills_facade: Arc<dyn SkillsProductFacade>,
     connectable_channels_facade: Arc<dyn ConnectableChannelsProductFacade>,
     outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade>,
+    operator_status: Arc<dyn OperatorStatusService>,
+    operator_logs: Arc<dyn OperatorLogsService>,
+    operator_service_lifecycle: Arc<dyn OperatorServiceLifecycleService>,
     approval_interactions: Arc<dyn ApprovalInteractionService>,
     auth_interactions: Arc<dyn AuthInteractionService>,
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
@@ -731,6 +1323,7 @@ impl RebornServices {
         Self {
             thread_service,
             turn_coordinator,
+            inbound_attachments: None,
             event_stream: None,
             lifecycle_facade: Arc::new(UnsupportedLifecycleProductFacade::new_static(
                 "reborn_lifecycle_facade_unwired",
@@ -741,6 +1334,9 @@ impl RebornServices {
             outbound_preferences_facade: Arc::new(
                 UnsupportedOutboundPreferencesProductFacade::new_static(),
             ),
+            operator_status: Arc::new(UnsupportedOperatorStatusService),
+            operator_logs: Arc::new(UnsupportedOperatorLogsService),
+            operator_service_lifecycle: Arc::new(UnsupportedOperatorServiceLifecycleService),
             approval_interactions: Arc::new(RejectingApprovalInteractionService),
             auth_interactions: Arc::new(RejectingAuthInteractionService),
             extension_credentials: None,
@@ -753,6 +1349,17 @@ impl RebornServices {
 
     pub fn with_event_stream(mut self, event_stream: Arc<dyn ProjectionStream>) -> Self {
         self.event_stream = Some(event_stream);
+        self
+    }
+
+    /// Wire the port that lands inbound attachment bytes into project storage.
+    /// Without it, a send-message carrying attachments is rejected rather than
+    /// silently dropping the files.
+    pub fn with_inbound_attachments(
+        mut self,
+        inbound_attachments: Arc<dyn InboundAttachmentLander>,
+    ) -> Self {
+        self.inbound_attachments = Some(inbound_attachments);
         self
     }
 
@@ -798,6 +1405,30 @@ impl RebornServices {
         outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade>,
     ) -> Self {
         self.outbound_preferences_facade = outbound_preferences_facade;
+        self
+    }
+
+    pub fn with_operator_status_service(
+        mut self,
+        operator_status: Arc<dyn OperatorStatusService>,
+    ) -> Self {
+        self.operator_status = operator_status;
+        self
+    }
+
+    pub fn with_operator_logs_service(
+        mut self,
+        operator_logs: Arc<dyn OperatorLogsService>,
+    ) -> Self {
+        self.operator_logs = operator_logs;
+        self
+    }
+
+    pub fn with_operator_service_lifecycle_service(
+        mut self,
+        operator_service_lifecycle: Arc<dyn OperatorServiceLifecycleService>,
+    ) -> Self {
+        self.operator_service_lifecycle = operator_service_lifecycle;
         self
     }
 
@@ -878,6 +1509,83 @@ impl RebornServices {
 
 #[async_trait]
 impl RebornServicesApi for RebornServices {
+    async fn get_operator_setup(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
+        let Some(llm_config) = &self.llm_config else {
+            return Err(llm_config::llm_config_unavailable());
+        };
+        let snapshot = llm_config
+            .snapshot(caller)
+            .await
+            .map_err(llm_config::map_llm_config_error)?;
+        Ok(setup_response_from_llm_snapshot(snapshot, Vec::new()))
+    }
+
+    async fn run_operator_setup(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornOperatorSetupRequest,
+    ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
+        let Some(llm_config) = &self.llm_config else {
+            return Err(llm_config::llm_config_unavailable());
+        };
+
+        if request.model.is_some() && request.provider_id.is_none() {
+            return Err(operator_setup_validation_error("model"));
+        }
+        if request.provider_id.is_none()
+            && (request.adapter.is_some()
+                || request.base_url.is_some()
+                || request.api_key.is_some())
+        {
+            return Err(operator_setup_validation_error("provider_id"));
+        }
+        if request.base_url.is_some() && request.adapter.is_none() {
+            return Err(operator_setup_validation_error("base_url"));
+        }
+        if request.api_key.is_some() && request.adapter.is_none() {
+            return Err(operator_setup_validation_error("api_key"));
+        }
+        validate_llm_base_url(request.base_url.as_deref())?;
+
+        let snapshot = match (request.provider_id, request.adapter) {
+            (Some(provider_id), Some(adapter)) => llm_config
+                .upsert_provider(
+                    caller,
+                    UpsertLlmProviderRequest {
+                        id: provider_id,
+                        name: None,
+                        adapter,
+                        base_url: request.base_url,
+                        default_model: request.model.clone(),
+                        api_key: request.api_key,
+                        set_active: true,
+                        model: request.model,
+                    },
+                )
+                .await
+                .map_err(llm_config::map_llm_config_error)?,
+            (Some(provider_id), None) => llm_config
+                .set_active(
+                    caller,
+                    SetActiveLlmRequest {
+                        provider_id,
+                        model: request.model,
+                    },
+                )
+                .await
+                .map_err(llm_config::map_llm_config_error)?,
+            (None, _) => llm_config
+                .snapshot(caller)
+                .await
+                .map_err(llm_config::map_llm_config_error)?,
+        };
+
+        Ok(setup_response_from_llm_snapshot(snapshot, Vec::new()))
+    }
+
     /// `requested_thread_id` makes the caller's choice authoritative.
     /// Without it, `client_action_id` deterministically derives the thread id
     /// so a retry of the same create maps back to the same thread.
@@ -936,6 +1644,9 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         request: WebUiSendMessageRequest,
     ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
+        // Decode + budget inline attachment bytes before the request is
+        // consumed into the (bytes-free, serializable) command.
+        let attachments = request.decode_attachments()?;
         let command = request.into_command(caller)?;
         let WebUiInboundCommand::SendMessage {
             scope,
@@ -1008,6 +1719,26 @@ impl RebornServicesApi for RebornServices {
                 }
             }
         } else {
+            // Land attachment bytes (if any) into project storage before the
+            // message is accepted, recording each as a transcript reference.
+            // The stable per-message external_event_id is the path's message
+            // segment, so a same-day retry re-lands at the same path; the lander
+            // also partitions by UTC day, so a retry that crosses midnight UTC
+            // lands under the new day's directory (the earlier bytes are left
+            // addressable but unreferenced). Idempotency is enforced at message
+            // acceptance, not by the storage path.
+            let message_content = if attachments.is_empty() {
+                MessageContent::text(content.clone())
+            } else {
+                let lander = self
+                    .inbound_attachments
+                    .as_ref()
+                    .ok_or_else(|| RebornServicesError::service_unavailable(false))?;
+                let refs = lander
+                    .land(&thread_scope, &external_event_id, attachments)
+                    .await?;
+                MessageContent::with_attachments(content.clone(), refs)
+            };
             let accepted = self
                 .thread_service
                 .accept_inbound_message(AcceptInboundMessageRequest {
@@ -1017,7 +1748,7 @@ impl RebornServicesApi for RebornServices {
                     source_binding_id: Some(source_binding_id.clone()),
                     reply_target_binding_id: Some(source_binding_id.clone()),
                     external_event_id: Some(external_event_id),
-                    content: MessageContent::text(content.clone()),
+                    content: message_content,
                 })
                 .await
                 .map_err(map_thread_error)?;
@@ -1037,6 +1768,7 @@ impl RebornServicesApi for RebornServices {
             "webui-reply",
             &handoff.reply_target_binding_id,
         )?;
+        let product_context = ironclaw_product_context::resolve_web_ui(scope.product_owner(&actor));
         let submit = SubmitTurnRequest {
             scope: scope.clone(),
             actor,
@@ -1050,6 +1782,7 @@ impl RebornServicesApi for RebornServices {
             parent_run_id: None,
             subagent_depth: 0,
             spawn_tree_root_run_id: None,
+            product_context: Some(product_context),
         };
 
         self.record_skill_activation_message(&scope, &accepted_message_ref, &content)?;
@@ -1141,14 +1874,40 @@ impl RebornServicesApi for RebornServices {
         let cursor = parse_timeline_cursor(request.cursor.as_deref())?;
         let scope = caller.turn_scope(thread_id);
         let thread_scope = thread_scope_from_turn_scope(&scope, Some(actor.user_id.clone()))?;
-        let history = self
+        let history = match self
             .thread_service
             .list_thread_history(ThreadHistoryRequest {
                 scope: thread_scope,
                 thread_id: scope.thread_id.clone(),
             })
             .await
-            .map_err(map_timeline_probe_error)?;
+        {
+            Ok(history) => history,
+            // When the session-scoped lookup fails with NotFound, try the
+            // automation-trigger fallback: automation-trigger threads are
+            // created under the trigger creator's scope, not the WebUI
+            // caller's session scope, so the user-scoped lookup always misses
+            // them. If the thread_id appears in any recent run of an
+            // automation that belongs to this caller, we know the caller is
+            // authorized (list_automations applies the same authorization).
+            // We then re-fetch using the trigger-owned thread scope. Both
+            // UnknownThread and ThreadScopeMismatch are treated as "not found
+            // in my scope" — only those are eligible for the automation
+            // fallback; backend/serialization errors propagate as-is.
+            Err(
+                SessionThreadError::UnknownThread { .. }
+                | SessionThreadError::ThreadScopeMismatch { .. },
+            ) => {
+                // The primary user-scoped lookup missed. Try the automation-
+                // trigger fallback; if it does not authorize the access it
+                // returns the canonical NotFound error.
+                let original_error =
+                    RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false);
+                self.try_automation_trigger_timeline_fallback(caller, &scope, original_error)
+                    .await?
+            }
+            Err(err) => return Err(map_timeline_probe_error(err)),
+        };
 
         let (messages, next_cursor) = paginate_timeline_messages(history.messages, limit, cursor);
         let summary_artifacts = cap_summary_artifacts(history.summary_artifacts);
@@ -1168,17 +1927,20 @@ impl RebornServicesApi for RebornServices {
     ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
         let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
         let actor = caller.actor();
-        // Metadata-only ownership probe: the SSE handler calls
-        // stream_events once per poll, and using list_thread_history here
-        // would load the full message transcript + summary artifacts per
-        // call — for an active stream that is hundreds of rows per second
-        // per caller. resolve_webui_thread_metadata uses the cheap
-        // read_thread probe; without it a caller sharing
-        // (tenant, agent, project) could still read another user's
-        // projection feed by guessing thread_id, so the probe itself
-        // stays.
-        let (scope, _thread_scope) = self
-            .resolve_webui_thread_metadata(caller.turn_scope(thread_id), &actor)
+        // Ownership probe: the SSE handler calls stream_events once per poll,
+        // so the cheap read_thread probe is used rather than loading the full
+        // transcript. Without it a caller sharing (tenant, agent, project)
+        // could read another user's projection feed by guessing thread_id.
+        // The automation fallback allows the owner of an automation to stream
+        // events for a trigger-fired thread (which is stored under the trigger
+        // creator). The returned scope may contain an explicit owner for
+        // trigger threads.
+        //
+        // Authorization is revalidated on every poll — no caching — so a
+        // caller that loses automation visibility between polls cannot keep
+        // draining the trigger-owned stream.
+        let access = self
+            .resolve_thread_access_for_caller(caller.clone(), caller.turn_scope(thread_id), &actor)
             .await?;
         let Some(event_stream) = &self.event_stream else {
             return Err(RebornServicesError::from_status_kind(
@@ -1188,10 +1950,19 @@ impl RebornServicesApi for RebornServices {
                 false,
             ));
         };
+        // Projection identity must be the thread owner, not necessarily the
+        // caller. Turn events and the runtime event stream are keyed under the
+        // identity of the actor that submitted the run (the trigger creator for
+        // trigger threads; the session user for normal threads). The caller
+        // already proved visibility via automation ownership above; using the
+        // caller's id here would filter to the wrong stream/events.
+        //
+        // For normal session threads `explicit_owner_user_id()` is `None` and
+        // we fall back to the caller's id — behaviour is unchanged.
         let events = event_stream
             .drain(ProjectionSubscriptionRequest {
-                actor,
-                scope,
+                actor: access.run_actor,
+                scope: access.scope,
                 after_cursor: request.after_cursor,
             })
             .await
@@ -1204,14 +1975,24 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         request: WebUiCancelRunRequest,
     ) -> Result<RebornCancelRunResponse, RebornServicesError> {
+        let caller_for_fallback = caller.clone();
         let command = request.into_command(caller)?;
-        let WebUiInboundCommand::CancelRun { request } = command else {
+        let WebUiInboundCommand::CancelRun { mut request } = command else {
             return Err(RebornServicesError::internal_invariant());
         };
-        // Metadata-only ownership probe — cancel_run has no use for the
-        // message transcript and the load would be wasted work.
-        self.resolve_webui_thread_metadata(request.scope.clone(), &request.actor)
+        // Ownership probe with automation-trigger fallback. If the thread is a
+        // trigger-fired thread belonging to the caller's automation, the probe
+        // succeeds and returns the trigger-owned scope/actor so the cancel
+        // arrives at the actual run, not the browser caller's session scope.
+        let access = self
+            .resolve_thread_access_for_caller(
+                caller_for_fallback,
+                request.scope.clone(),
+                &request.actor,
+            )
             .await?;
+        request.scope = access.scope;
+        request.actor = access.run_actor;
         let response = self
             .turn_coordinator
             .cancel_run(request)
@@ -1225,6 +2006,7 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         request: WebUiResolveGateRequest,
     ) -> Result<RebornResolveGateResponse, RebornServicesError> {
+        let caller_for_fallback = caller.clone();
         let command = request.into_command(caller)?;
         let WebUiInboundCommand::ResolveGate {
             scope,
@@ -1238,18 +2020,27 @@ impl RebornServicesApi for RebornServices {
             return Err(RebornServicesError::internal_invariant());
         };
 
-        // Metadata-only ownership probe — resolve_gate has no use for
-        // the message transcript and the load would be wasted work.
-        self.resolve_webui_thread_metadata(scope.clone(), &actor)
+        // Ownership probe with automation-trigger fallback. Trigger threads
+        // return the trigger-owned scope and run actor; gate routing and resume
+        // paths must use that run actor while authorization remains tied to the
+        // WebUI caller's automation visibility.
+        let access = self
+            .resolve_thread_access_for_caller(caller_for_fallback, scope, &actor)
             .await?;
         match self
-            .gate_resolution_route(&scope, &actor, run_id, &gate_ref, &resolution)
+            .gate_resolution_route(
+                &access.scope,
+                &access.run_actor,
+                run_id,
+                &gate_ref,
+                &resolution,
+            )
             .await?
         {
             GateResolutionRoute::Approval => {
                 self.resolve_approval_gate(
-                    scope,
-                    actor,
+                    access.scope,
+                    access.run_actor,
                     run_id,
                     gate_ref,
                     client_action_id,
@@ -1258,13 +2049,20 @@ impl RebornServicesApi for RebornServices {
                 .await
             }
             GateResolutionRoute::Auth => {
-                self.resolve_auth_gate(scope, actor, run_id, gate_ref, client_action_id, resolution)
-                    .await
+                self.resolve_auth_gate(
+                    access.scope,
+                    access.run_actor,
+                    run_id,
+                    gate_ref,
+                    client_action_id,
+                    resolution,
+                )
+                .await
             }
             GateResolutionRoute::Generic => {
                 self.resolve_generic_gate(
-                    scope,
-                    actor,
+                    access.scope,
+                    access.run_actor,
                     run_id,
                     gate_ref,
                     client_action_id,
@@ -1284,16 +2082,19 @@ impl RebornServicesApi for RebornServices {
         let run_id = parse_run_id_field("run_id", request.run_id)?;
         let scope = caller.turn_scope(thread_id);
         let actor = caller.actor();
-        // TurnScope has no owner_user_id, so without this gate any caller
-        // sharing the (tenant, agent, project) scope could read another user's
-        // run state by guessing thread_id and run_id. Mirrors the ownership
-        // probe `cancel_run` and `resolve_gate` already perform.
-        // Metadata-only — get_run_state has no use for the transcript.
-        self.resolve_webui_thread_metadata(scope.clone(), &actor)
+        // Ownership probe with automation-trigger fallback. Without this gate
+        // any caller sharing (tenant, agent, project) could read another user's
+        // run state by guessing thread_id and run_id. The fallback also allows
+        // the owner of an automation to poll run state on a trigger-fired thread.
+        let access = self
+            .resolve_thread_access_for_caller(caller, scope, &actor)
             .await?;
         let state = self
             .turn_coordinator
-            .get_run_state(GetRunStateRequest { scope, run_id })
+            .get_run_state(GetRunStateRequest {
+                scope: access.scope,
+                run_id,
+            })
             .await
             .map_err(map_turn_error)?;
         Ok(state.into())
@@ -1387,7 +2188,12 @@ impl RebornServicesApi for RebornServices {
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornExtensionListResponse, RebornServicesError> {
-        extensions::list_extensions(self.lifecycle_facade.as_ref(), caller).await
+        extensions::list_extensions(
+            Arc::clone(&self.lifecycle_facade),
+            self.extension_credentials.clone(),
+            caller,
+        )
+        .await
     }
 
     async fn list_skills(
@@ -1488,6 +2294,81 @@ impl RebornServicesApi for RebornServices {
         .await
     }
 
+    async fn get_operator_status(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let status = self.operator_status.status(caller).await?;
+        Ok(RebornOperatorCommandPlaneResponse {
+            area: RebornOperatorArea::Status,
+            status: RebornOperatorSurfaceStatus::Available,
+            message: "operator status is available".to_string(),
+            operator_status: Some(status),
+            logs: None,
+            service_lifecycle: None,
+            diagnostics: Vec::new(),
+        })
+    }
+
+    async fn query_operator_logs(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: RebornOperatorLogsQuery,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let request = bounded_operator_logs_query(query);
+        let logs = self.operator_logs.query_logs(caller, request).await?;
+        Ok(RebornOperatorCommandPlaneResponse {
+            area: RebornOperatorArea::Logs,
+            status: RebornOperatorSurfaceStatus::Available,
+            message: "operator logs query completed".to_string(),
+            operator_status: None,
+            logs: Some(logs),
+            service_lifecycle: None,
+            diagnostics: Vec::new(),
+        })
+    }
+
+    async fn run_operator_service_lifecycle(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornOperatorServiceLifecycleRequest,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let request = RebornServiceLifecycleRequest {
+            action: match request.action {
+                RebornOperatorServiceLifecycleAction::Install => {
+                    RebornServiceLifecycleAction::Install
+                }
+                RebornOperatorServiceLifecycleAction::Start => RebornServiceLifecycleAction::Start,
+                RebornOperatorServiceLifecycleAction::Stop => RebornServiceLifecycleAction::Stop,
+                RebornOperatorServiceLifecycleAction::Status => {
+                    RebornServiceLifecycleAction::Status
+                }
+            },
+        };
+        let service_lifecycle = self
+            .operator_service_lifecycle
+            .control_service(caller, request)
+            .await?;
+        let status = match service_lifecycle.state {
+            RebornServiceLifecycleState::Installed
+            | RebornServiceLifecycleState::Running
+            | RebornServiceLifecycleState::Stopped
+            | RebornServiceLifecycleState::Unknown => RebornOperatorSurfaceStatus::Available,
+            RebornServiceLifecycleState::Unsupported | RebornServiceLifecycleState::Failed => {
+                RebornOperatorSurfaceStatus::Unavailable
+            }
+        };
+        Ok(RebornOperatorCommandPlaneResponse {
+            area: RebornOperatorArea::ServiceLifecycle,
+            status,
+            message: service_lifecycle.message.clone(),
+            operator_status: None,
+            logs: None,
+            service_lifecycle: Some(service_lifecycle),
+            diagnostics: Vec::new(),
+        })
+    }
+
     async fn get_llm_config(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -1511,6 +2392,7 @@ impl RebornServicesApi for RebornServices {
             .llm_config
             .as_ref()
             .ok_or_else(llm_config::llm_config_unavailable)?;
+        validate_llm_base_url(request.base_url.as_deref())?;
         service
             .upsert_provider(caller, request)
             .await
@@ -1556,6 +2438,7 @@ impl RebornServicesApi for RebornServices {
             .llm_config
             .as_ref()
             .ok_or_else(llm_config::llm_config_unavailable)?;
+        validate_llm_base_url(request.base_url.as_deref())?;
         service
             .test_connection(caller, request)
             .await
@@ -1571,6 +2454,7 @@ impl RebornServicesApi for RebornServices {
             .llm_config
             .as_ref()
             .ok_or_else(llm_config::llm_config_unavailable)?;
+        validate_llm_base_url(request.base_url.as_deref())?;
         service
             .list_models(caller, request)
             .await
@@ -1782,6 +2666,10 @@ fn outbound_preferences_unavailable() -> RebornServicesError {
     RebornServicesError::service_unavailable(false)
 }
 
+fn operator_surface_unavailable() -> RebornServicesError {
+    RebornServicesError::service_unavailable(false)
+}
+
 struct AcceptedWebUiMessage {
     thread_id: ThreadId,
     message_id: ThreadMessageId,
@@ -1929,13 +2817,203 @@ async fn replay_accepted_message(
         .map_err(map_thread_error)
 }
 
+struct ResolvedThreadAccess {
+    scope: TurnScope,
+    run_actor: TurnActor,
+}
+
 // Owner-bound thread resolution shared by the WebUI-facing methods that
 // only need to prove a browser thread id belongs to the authenticated actor.
 // The actor is pinned as `owner_user_id` so a caller sharing (tenant, agent,
 // project) cannot act on a thread it does not own; `map_ownership_probe_error`
 // collapses both UnknownThread and ThreadScopeMismatch into NotFound so the
 // response cannot be used as an existence oracle.
+//
+// Automation-trigger threads are an exception: they are stored by
+// `record_trigger_prompt` (trigger_poller_trusted_submit.rs) with
+// `owner_user_id = Some(creator_user_id)` — the actor that fired the trigger
+// — not the WebUI caller's user_id. The user-scoped probe therefore misses
+// them. `resolve_thread_access_for_caller` handles that case via the shared
+// automation fallback path; all interaction endpoints (stream, cancel, gate
+// resolve, run-state) route through it so the reconstructed `TurnScope` (with
+// `owner_user_id = Some(creator_user_id)`) is returned to callers that need
+// to act on a trigger run.
+//
+// Authorization is revalidated on every call — no caching of the authz result
+// — so a caller that loses automation visibility between polls cannot keep
+// accessing the trigger-owned thread.
+//
+// Scope reconstruction field-by-field match against `record_trigger_prompt`
+// (trigger_poller_trusted_submit.rs:285-291):
+//   tenant_id    : resolution.turn_scope.tenant_id == caller's tenant_id (same installation)
+//   agent_id     : resolution.turn_scope.agent_id OR default_agent_id
+//                → trigger_scope.agent_id OR bound_caller.agent_id  (same fallback shape)
+//   project_id   : resolution.turn_scope.project_id == trigger_scope.project_id
+//   owner_user_id: Some(resolution.actor.user_id)
+//                == Some(trigger_scope.creator_user_id)
+//                == Some(fire.creator_user_id) [post-#4754: new first-fire bindings
+//                   persist creator; legacy (pre-#4754) bindings remain owner-None
+//                   and will not match — accepted breakage; recreate trigger to fix].
 impl RebornServices {
+    /// Shared authorization check for automation-trigger threads.
+    ///
+    /// Checks whether `scope.thread_id` belongs to one of the authenticated
+    /// caller's automation triggers and, if so, returns a `TurnScope` with the
+    /// TRUE stored scope (agent_id, project_id, and owner_user_id = creator_user_id).
+    ///
+    /// Requires #4754 ("Part A"): `record_trigger_prompt` stores threads with
+    /// `owner_user_id = Some(fire.creator_user_id)` only for new first-fire
+    /// bindings created after #4754 landed. Pre-#4754 (legacy) runs were stored
+    /// with `owner_user_id = None`; their gate/cancel/run-state will NOT match
+    /// the reconstructed scope — this is accepted breakage; recreating the
+    /// trigger creates a fresh owner-bearing binding.
+    ///
+    /// Delegates to `AutomationProductFacade::resolve_run_thread_scope` which
+    /// is caller-scoped: authorization is embedded in the repository lookup.
+    /// If the trigger exists for this caller and contains the run, the returned
+    /// scope lets all downstream storage lookups (timeline, gate, cancel, SSE)
+    /// find the thread as stored rather than under the caller's session scope.
+    ///
+    /// Authorization is revalidated on every call (no caching) so a caller
+    /// that loses automation visibility cannot keep acting on the thread.
+    ///
+    /// Returns `original_not_found_error` when:
+    ///  - The caller has no bound agent.
+    ///  - `resolve_run_thread_scope` returns `None` (thread not in caller's triggers).
+    ///
+    /// This is the authorization half of the trigger-thread fallback. Callers
+    /// that need the full transcript call `try_automation_trigger_timeline_fallback`.
+    async fn check_automation_trigger_access(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        scope: &TurnScope,
+        original_not_found_error: RebornServicesError,
+    ) -> Result<ResolvedThreadAccess, RebornServicesError> {
+        let Some(bound_caller) = product_agent_bound_caller_from_webui(caller) else {
+            return Err(original_not_found_error);
+        };
+        let thread_id = &scope.thread_id;
+        let Some(trigger_scope) = self
+            .automation_facade
+            .resolve_run_thread_scope(bound_caller.clone(), thread_id)
+            .await?
+        else {
+            return Err(original_not_found_error);
+        };
+        // Use the trigger's stored agent_id; fall back to the caller's agent_id
+        // when the trigger record had no explicit agent.
+        let true_agent_id = trigger_scope
+            .agent_id
+            .or_else(|| Some(bound_caller.agent_id.clone()));
+        let run_actor = TurnActor::new(trigger_scope.creator_user_id.clone());
+        Ok(ResolvedThreadAccess {
+            scope: TurnScope::new_with_owner(
+                scope.tenant_id.clone(),
+                true_agent_id,
+                trigger_scope.project_id,
+                thread_id.clone(),
+                Some(trigger_scope.creator_user_id),
+            ),
+            run_actor,
+        })
+    }
+
+    /// Fallback timeline fetch for automation-trigger threads.
+    ///
+    /// Automation-trigger threads are created under the trigger creator's
+    /// scope, not the caller's session scope. The normal user-scoped
+    /// `list_thread_history` therefore always misses them. This fallback is
+    /// only reached when the user-scoped lookup returned `UnknownThread` or
+    /// `ThreadScopeMismatch`.
+    ///
+    /// Authorization: the thread_id must appear in at least one `recent_run`
+    /// for an automation returned by `list_automations` for this caller. That
+    /// is the same authorization check the Automations list endpoint applies,
+    /// so no new trust boundary is introduced. Authorization is revalidated on
+    /// every call — no caching.
+    ///
+    /// On authorization success, the history is loaded with the trigger-owned
+    /// scope. On authorization failure (thread not in any of the caller's
+    /// automation runs), the `original_not_found_error` is returned so the
+    /// response is indistinguishable from a genuinely absent thread.
+    async fn try_automation_trigger_timeline_fallback(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        scope: &TurnScope,
+        original_not_found_error: RebornServicesError,
+    ) -> Result<ThreadHistory, RebornServicesError> {
+        let access = self
+            .check_automation_trigger_access(caller, scope, original_not_found_error)
+            .await?;
+        // Authorized: re-fetch the history using the TRUE stored scope
+        // (owner_user_id = creator_user_id, not the caller's session user).
+        let true_thread_scope = thread_scope_from_turn_scope(
+            &access.scope,
+            access.scope.explicit_owner_user_id().cloned(),
+        )?;
+        self.thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: true_thread_scope,
+                thread_id: access.scope.thread_id.clone(),
+            })
+            .await
+            .map_err(map_timeline_probe_error)
+    }
+
+    /// Ownership probe for interaction endpoints (stream, cancel, gate resolve,
+    /// run-state).
+    ///
+    /// Tries the primary user-scoped `read_thread` probe. On a 404-class miss
+    /// (UnknownThread / ThreadScopeMismatch), falls back to the automation
+    /// trigger authorization check. If the thread belongs to one of the
+    /// caller's automations, returns the trigger-owned `TurnScope` and run
+    /// actor so downstream turn operations address the submitted run. Non-owner
+    /// callers and genuinely absent threads both receive the same canonical
+    /// NotFound response.
+    ///
+    /// Authorization is revalidated on every call — no caching of the authz
+    /// result — so a caller that loses automation visibility cannot keep
+    /// acting on the thread after their access is revoked.
+    async fn resolve_thread_access_for_caller(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        scope: TurnScope,
+        actor: &TurnActor,
+    ) -> Result<ResolvedThreadAccess, RebornServicesError> {
+        let thread_scope = thread_scope_from_turn_scope(&scope, Some(actor.user_id.clone()))?;
+        match self
+            .thread_service
+            .read_thread(ThreadHistoryRequest {
+                scope: thread_scope.clone(),
+                thread_id: scope.thread_id.clone(),
+            })
+            .await
+        {
+            Ok(_) => Ok(ResolvedThreadAccess {
+                scope,
+                run_actor: actor.clone(),
+            }),
+            Err(
+                SessionThreadError::UnknownThread { .. }
+                | SessionThreadError::ThreadScopeMismatch { .. },
+            ) => {
+                let original_error =
+                    RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false);
+                let access = self
+                    .check_automation_trigger_access(caller, &scope, original_error)
+                    .await?;
+                Ok(ResolvedThreadAccess {
+                    scope: access.scope,
+                    run_actor: access.run_actor,
+                })
+            }
+            Err(err) => Err(map_ownership_probe_error(err)),
+        }
+    }
+
+    /// Ownership probe for `submit_turn` and `delete_thread` — these only
+    /// operate on session-owned threads (not trigger threads), so the probe
+    /// is user-scoped with no automation fallback.
     async fn resolve_webui_thread_metadata(
         &self,
         scope: TurnScope,
@@ -1968,13 +3046,11 @@ impl RebornServices {
     ) -> Result<RebornResolveGateResponse, RebornServicesError> {
         let decision = match resolution {
             WebUiGateResolution::Approved { always } => {
-                // `always: true` requests a *persistent* approval but this
-                // facade has only one-shot approval interaction routing and no
-                // approval-policy port. Fail loud rather than silently downgrade.
                 if always {
-                    return Err(persistent_approval_unavailable());
+                    ApprovalInteractionDecision::AlwaysAllow
+                } else {
+                    ApprovalInteractionDecision::ApproveOnce
                 }
-                ApprovalInteractionDecision::ApproveOnce
             }
             WebUiGateResolution::Denied | WebUiGateResolution::Cancelled => {
                 ApprovalInteractionDecision::Deny
@@ -2100,9 +3176,8 @@ impl RebornServices {
             WebUiGateResolution::Approved { always } => {
                 reject_generic_auth_gate_resolution(self.turn_coordinator.as_ref(), &scope, run_id)
                     .await?;
-                // `always: true` requests a *persistent* approval but this
-                // facade has only one-shot `resume_turn` and no approval-policy
-                // port. Fail loud rather than silently downgrade.
+                // Generic fallback has only one-shot `resume_turn`; persistent
+                // approval must go through the typed approval interaction path.
                 if always {
                     return Err(persistent_approval_unavailable());
                 }
@@ -2652,6 +3727,12 @@ fn map_thread_error(error: SessionThreadError) -> RebornServicesError {
         | SessionThreadError::OverlappingSummaryRange { .. } => {
             RebornServicesError::from_status(RebornServicesErrorCode::Conflict, 409, false)
         }
+        SessionThreadError::InvalidAttachment(_) => RebornServicesError::from_status_kind(
+            RebornServicesErrorCode::InvalidRequest,
+            RebornServicesErrorKind::Validation,
+            400,
+            false,
+        ),
         SessionThreadError::GeneratedThreadId(_)
         | SessionThreadError::Serialization(_)
         | SessionThreadError::Deserialization(_)
@@ -2820,7 +3901,9 @@ fn kind_for_workflow_rejection(kind: ProductWorkflowRejectionKind) -> RebornServ
         ProductWorkflowRejectionKind::Unauthorized => RebornServicesErrorKind::ParticipantDenied,
         ProductWorkflowRejectionKind::InvalidRequest => RebornServicesErrorKind::Validation,
         ProductWorkflowRejectionKind::Unavailable => RebornServicesErrorKind::ServiceUnavailable,
-        ProductWorkflowRejectionKind::Conflict => RebornServicesErrorKind::Conflict,
+        ProductWorkflowRejectionKind::Conflict | ProductWorkflowRejectionKind::Ambiguous => {
+            RebornServicesErrorKind::Conflict
+        }
     }
 }
 
@@ -2831,6 +3914,83 @@ fn create_thread_metadata_json(
         "client_action_id": client_action_id.as_str(),
     }))
     .map_err(|_| RebornServicesError::internal_invariant())
+}
+
+fn bounded_operator_logs_query(query: RebornOperatorLogsQuery) -> RebornLogQueryRequest {
+    RebornLogQueryRequest {
+        limit: Some(
+            query
+                .limit
+                .unwrap_or(OPERATOR_LOGS_DEFAULT_LIMIT)
+                .clamp(1, OPERATOR_LOGS_MAX_LIMIT),
+        ),
+        cursor: bounded_operator_logs_string(query.cursor, OPERATOR_LOGS_CURSOR_MAX_BYTES),
+        level: query.level,
+        target: bounded_operator_logs_string(query.target, OPERATOR_LOGS_TARGET_MAX_BYTES),
+        thread_id: bounded_operator_logs_context_string(query.thread_id),
+        run_id: bounded_operator_logs_context_string(query.run_id),
+        turn_id: bounded_operator_logs_context_string(query.turn_id),
+        tool_call_id: bounded_operator_logs_context_string(query.tool_call_id),
+        tool_name: bounded_operator_logs_context_string(query.tool_name),
+        source: bounded_operator_logs_context_string(query.source),
+        tail: false,
+    }
+}
+
+fn bounded_operator_logs_string(value: Option<String>, max_bytes: usize) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else if trimmed.len() <= max_bytes {
+            Some(trimmed.to_string())
+        } else {
+            Some(truncate_utf8_to_bytes(trimmed, max_bytes))
+        }
+    })
+}
+
+fn bounded_operator_logs_context_string(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(normalize_operator_log_context_value(trimmed))
+        }
+    })
+}
+
+pub fn normalize_operator_log_context_value(value: &str) -> String {
+    truncate_utf8_with_suffix(value, OPERATOR_LOGS_CONTEXT_MAX_BYTES)
+}
+
+fn truncate_utf8_to_bytes(value: &str, max_bytes: usize) -> String {
+    let mut end = max_bytes.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
+}
+
+fn truncate_utf8_with_suffix(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+
+    if max_bytes <= OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX.len() {
+        return OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX[..max_bytes].to_string();
+    }
+
+    let mut end = max_bytes - OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX.len();
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    let mut truncated = String::with_capacity(max_bytes);
+    truncated.push_str(&value[..end]);
+    truncated.push_str(OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX);
+    truncated
 }
 
 fn product_agent_bound_caller_from_webui(

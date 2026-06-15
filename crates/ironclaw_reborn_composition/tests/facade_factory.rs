@@ -33,10 +33,15 @@ use ironclaw_host_runtime::{
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn_composition::RebornRuntimeProcessBinding;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_reborn_composition::{RebornBuildError, RebornCompositionProfile};
+use ironclaw_reborn_composition::{RebornBuildError, RebornCompositionProfile, RebornServices};
 use ironclaw_reborn_composition::{
     RebornBuildInput, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
-    RebornReadinessState, build_reborn_services,
+    RebornReadinessDiagnostic, RebornReadinessState, build_reborn_services,
+};
+#[cfg(feature = "libsql")]
+use ironclaw_reborn_composition::{
+    RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
+    RebornReadinessDiagnosticStatus,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_secrets::SecretMaterial;
@@ -90,9 +95,6 @@ impl Drop for EnvVarGuard {
         }
     }
 }
-
-#[path = "facade_factory/sandbox_process_ports.rs"]
-mod sandbox_process_ports;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn test_master_key() -> SecretMaterial {
@@ -157,6 +159,15 @@ fn local_only_runtime_policy() -> EffectiveRuntimePolicy {
         approval_policy: ApprovalPolicy::AskDestructive,
         audit_mode: AuditMode::LocalMinimal,
     }
+}
+
+#[cfg(feature = "libsql")]
+fn local_only_minimal_approval_policy() -> EffectiveRuntimePolicy {
+    let mut policy = local_only_runtime_policy();
+    policy.requested_profile = RuntimeProfile::LocalYolo;
+    policy.resolved_profile = RuntimeProfile::LocalYolo;
+    policy.approval_policy = ApprovalPolicy::Minimal;
+    policy
 }
 
 #[cfg(feature = "libsql")]
@@ -323,6 +334,30 @@ fn live_wake_notifier() -> (Arc<SchedulerTurnRunWakeNotifier>, TurnRunSchedulerH
     (handle.wake_notifier(), handle)
 }
 
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn assert_production_services_ready_with_first_party_runtime(services: &RebornServices) {
+    assert_eq!(
+        services.readiness.state,
+        RebornReadinessState::ProductionValidated
+    );
+    assert!(services.turn_coordinator.is_some());
+    assert!(services.product_auth.is_some());
+
+    let runtime = services
+        .host_runtime
+        .as_deref()
+        .expect("production services expose host runtime");
+    let health = runtime
+        .health()
+        .await
+        .expect("production host runtime health should resolve");
+    assert!(
+        health.ready,
+        "production host runtime should report first-party backend ready"
+    );
+    assert!(health.missing_runtime_backends.is_empty());
+}
+
 #[cfg(feature = "libsql")]
 async fn libsql_db_at(path: impl AsRef<std::path::Path>) -> Arc<libsql::Database> {
     Arc::new(
@@ -429,6 +464,10 @@ async fn disabled_returns_empty_services() {
     assert!(services.host_runtime.is_none());
     assert!(services.turn_coordinator.is_none());
     assert_eq!(services.readiness.state, RebornReadinessState::Disabled);
+    assert_eq!(
+        services.readiness.diagnostics,
+        vec![RebornReadinessDiagnostic::disabled()]
+    );
 }
 
 #[tokio::test]
@@ -869,6 +908,51 @@ async fn production_rejects_local_only_runtime_policy() {
         ),
         "local-only runtime policy should fail production wiring: {report:?}"
     );
+    let diagnostics = RebornReadinessDiagnostic::from_production_wiring_report(
+        RebornCompositionProfile::Production,
+        &report,
+    );
+    assert!(
+        RebornReadinessDiagnostic::from_production_wiring_report(
+            RebornCompositionProfile::LocalDev,
+            &report,
+        )
+        .is_empty(),
+        "production wiring reports should not produce production diagnostics for local-dev profiles"
+    );
+    assert!(
+        diagnostics.contains(
+            &RebornReadinessDiagnostic::production_blocker(
+                RebornCompositionProfile::Production,
+                RebornReadinessDiagnosticComponent::RuntimePolicy,
+                RebornReadinessDiagnosticReason::LocalOnly,
+            )
+            .expect("production profile should create a blocker")
+        ),
+        "runtime policy local-only issue should map to readiness diagnostics: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics.contains(
+            &RebornReadinessDiagnostic::production_blocker(
+                RebornCompositionProfile::Production,
+                RebornReadinessDiagnosticComponent::RuntimeProcessPort,
+                RebornReadinessDiagnosticReason::LocalOnly,
+            )
+            .expect("production profile should create a blocker")
+        ),
+        "runtime process port local-only issue should map to readiness diagnostics: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.status == RebornReadinessDiagnosticStatus::Blocking)
+    );
+    let serialized = serde_json::to_string(&diagnostics).unwrap();
+    assert!(!serialized.contains("LocalOnlyImplementation"));
+    assert!(!serialized.contains("EffectiveRuntimePolicy"));
+    assert!(!serialized.contains("ironclaw_"));
+    assert!(!serialized.contains("/root/"));
+    assert!(!serialized.contains("postgres://"));
 }
 
 #[cfg(feature = "libsql")]
@@ -961,7 +1045,9 @@ async fn production_libsql_services_wire_first_party_runtime_http_egress() {
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
-        .with_runtime_process_binding(test_sandbox_process_binding()),
+        .with_runtime_process_binding(test_sandbox_process_binding())
+        .with_required_runtime_backends([RuntimeKind::FirstParty])
+        .require_runtime_http_egress(),
     )
     .await;
 
@@ -969,13 +1055,7 @@ async fn production_libsql_services_wire_first_party_runtime_http_egress() {
 
     let services =
         result.expect("production libsql services should build with a sandbox process binding");
-    assert_eq!(
-        services.readiness.state,
-        RebornReadinessState::ProductionValidated
-    );
-    assert!(services.host_runtime.is_some());
-    assert!(services.turn_coordinator.is_some());
-    assert!(services.product_auth.is_some());
+    assert_production_services_ready_with_first_party_runtime(&services).await;
 }
 
 #[cfg(feature = "libsql")]
@@ -1026,7 +1106,7 @@ async fn local_dev_services_dispatch_trigger_management_through_composed_runtime
     let dir = tempfile::tempdir().unwrap();
     let services = build_reborn_services(
         RebornBuildInput::local_dev("test-owner", dir.path().to_path_buf())
-            .with_runtime_policy(local_only_runtime_policy()),
+            .with_runtime_policy(local_only_minimal_approval_policy()),
     )
     .await
     .expect("local-dev services should build with trigger management runtime");
@@ -1041,7 +1121,8 @@ async fn local_dev_services_dispatch_trigger_management_through_composed_runtime
         json!({
             "name": "Daily production summary",
             "prompt": "Summarize production state",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
     )
     .await;
@@ -1126,10 +1207,34 @@ async fn production_postgres_services_migrate_trigger_repository_before_runtime_
 
 #[cfg(feature = "postgres")]
 #[tokio::test]
-#[ignore = "TODO(#3856): restore when tenant sandbox process-port wiring exists"]
 async fn production_postgres_services_wire_first_party_runtime_http_egress() {
-    // Restore the ProductionValidated readiness and host_runtime.health()
-    // happy-path assertions that are temporarily fail-closed below.
+    let Some((_container, pool, database_url)) = postgres_pool_or_skip().await else {
+        return;
+    };
+    let (notifier, handle) = live_wake_notifier();
+
+    let result = build_reborn_services(
+        RebornBuildInput::postgres(
+            RebornCompositionProfile::Production,
+            "test-owner",
+            pool,
+            SecretMaterial::from(database_url),
+            test_master_key(),
+        )
+        .with_production_trust_policy(production_trust_policy())
+        .with_runtime_policy(production_runtime_policy())
+        .with_turn_run_wake_notifier(notifier)
+        .with_runtime_process_binding(test_sandbox_process_binding())
+        .with_required_runtime_backends([RuntimeKind::FirstParty])
+        .require_runtime_http_egress(),
+    )
+    .await;
+
+    handle.shutdown().await;
+
+    let services =
+        result.expect("production postgres services should build with a sandbox process binding");
+    assert_production_services_ready_with_first_party_runtime(&services).await;
 }
 
 #[cfg(feature = "libsql")]
@@ -1236,6 +1341,7 @@ async fn migration_dry_run_validates_libsql_shape() {
         services.readiness.state,
         RebornReadinessState::MigrationDryRunValidated
     );
+    assert!(services.readiness.diagnostics.is_empty());
     assert!(services.host_runtime.is_some());
     assert!(services.turn_coordinator.is_some());
 }

@@ -38,6 +38,15 @@ CapabilityHost::resume_json
   -> compares the replayed invocation fingerprint
   -> claims the lease before runtime dispatch
   -> dispatches and consumes the claimed lease on success
+
+CapabilityHost::auth_resume_json
+  -> validates run record is BlockedAuth
+  -> when approval_request_id is Some: locates matching fingerprinted lease
+     (Active on first arrival, Claimed after a prior auth bounce claimed it)
+  -> transitions lease to Dispatching via begin_dispatch_claimed (single-winner CAS)
+  -> dispatches; on success consumes the Dispatching lease
+  -> on non-terminal BlockedAuth re-bounce: reverts Dispatching → Claimed via abort_dispatch_claimed
+     so the next auth_resume_json call can reuse the same lease without a second approval
 ```
 
 ---
@@ -122,14 +131,24 @@ The lease adds host-managed lifecycle state:
 pub enum CapabilityLeaseStatus {
     Active,
     Claimed,
+    Dispatching,
     Consumed,
     Revoked,
 }
 ```
 
+`Dispatching` is a transient state set by `begin_dispatch_claimed` during `auth_resume_json` to enforce single-winner concurrent reuse of a `Claimed` lease.  A second concurrent `auth_resume_json` call that finds the lease already in `Dispatching` receives `InactiveLease`, mirroring the loser of a concurrent `Active` `claim()` race.  `abort_dispatch_claimed` reverts `Dispatching` back to `Claimed` when a non-terminal auth re-bounce requires the lease to remain available for the next attempt.
+
+`CapabilityLeaseStore` exposes two new operations:
+
+- `begin_dispatch_claimed(scope, lease_id, fingerprint)` — atomically transitions a `Claimed`, fingerprint-matched, non-expired lease to `Dispatching`.
+- `abort_dispatch_claimed(scope, lease_id)` — reverts a `Dispatching` lease to `Claimed`; no-op-safe if the lease is already `Claimed`.
+
+`consume` and `revoke` treat both `Claimed` and `Dispatching` as valid source states (i.e., a terminal outcome can consume or revoke from either).
+
 V1 includes in-memory and filesystem-backed lease stores with exact tenant/user/agent/invocation scoped lookup, claim, consumption, and revocation. Filesystem leases persist under `/engine/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/capability-leases/{invocation_id}/{lease_id}.json`. Lease lookup, claim, consumption, and revocation are not global by ID; the authorizer asks for unexpired active leases visible to the current `ExecutionContext.resource_scope`. This slice treats issued approval leases as one-off invocation leases: a lease only authorizes a context with the same invocation ID as the approved request. Broader reusable approval scopes are a later policy slice.
 
-Leases preserve the approval request fingerprint so resume can validate that the replayed invocation request matches what was approved. Fingerprinted approval leases are not converted into generic grants for plain `invoke_json`; they can only be used by `resume_json`, which compares the fingerprint and claims the exact lease before dispatch.
+Leases preserve the approval request fingerprint so resume can validate that the replayed invocation request matches what was approved. Fingerprinted approval leases are not converted into generic grants for plain `invoke_json`; they can only be used by `resume_json` or `auth_resume_json`, which compare the fingerprint and claim the exact lease before dispatch.
 
 Claiming enforces that the lease is active, unexpired, not exhausted, and fingerprint-equal to the replayed request. A claimed lease is hidden from generic authorization so a second concurrent resume cannot also dispatch with the same one-shot approval lease.
 
@@ -250,10 +269,20 @@ The dispatcher remains auth-blind and state-blind. It never resolves approvals o
 
 This slice intentionally keeps approval resolution narrow:
 
-- no reusable approval-scope expansion yet; V1 leases are exact-invocation only
+- V1 leases are exact-invocation only; persistent approvals are represented as
+  separate Reborn approval-policy records, not as broadened V1 leases
 - no single-store ACID transaction across approval status update and lease issuance yet; an `Approved` request without a lease is recovered by retrying lease issuance against the durable approval decision
 - no approval support for actions other than dispatch and one-shot spawn yet
-- spawn approvals are supported only for one-shot `Action::SpawnCapability` requests through the approval interaction boundary; there is no reusable or persistent long-running-task approval policy in this slice
+- persistent approval policies cover dispatch and `Action::SpawnCapability`
+  approval interaction decisions at the current Reborn sandbox scope
+  (`tenant_id`, `user_id`, optional `agent_id`, and `project_id` when present,
+  otherwise `thread_id`)
+- persistent approval is fail-closed by manifest policy: the current default
+  only allows durable reuse for capabilities whose manifest
+  `default_permission` is `allow`; `ask` and `deny` remain one-shot approval
+  gates and are re-checked before any stored policy is injected as authority
+- revoke is exposed at the policy-store layer for future product integration;
+  no user-facing revoke flow is defined in this slice
 
 Before a durable/user-facing approval resume UI ships, the host should revisit whether approval records, lease writes, and run-state transitions should share one transactional persistence boundary.
 

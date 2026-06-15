@@ -1,4 +1,6 @@
-use ironclaw_host_api::{Action, ApprovalRequest, ApprovalRequestId, CapabilityId, ResourceScope};
+use ironclaw_host_api::{
+    Action, ApprovalRequest, ApprovalRequestId, CapabilityId, InvocationId, ResourceScope,
+};
 use ironclaw_product_adapters::ProductWorkflowRejectionKind;
 use ironclaw_run_state::ApprovalStatus;
 use ironclaw_turns::{
@@ -45,7 +47,8 @@ impl ApprovalInteractionRejectionKind {
     pub fn workflow_rejection_kind(self) -> ProductWorkflowRejectionKind {
         match self {
             Self::MissingGate => ProductWorkflowRejectionKind::ScopeNotFound,
-            Self::AmbiguousGate | Self::StaleGate => ProductWorkflowRejectionKind::Conflict,
+            Self::AmbiguousGate => ProductWorkflowRejectionKind::Ambiguous,
+            Self::StaleGate => ProductWorkflowRejectionKind::Conflict,
             Self::CrossScopeDenied => ProductWorkflowRejectionKind::Unauthorized,
             Self::InvalidGateRef
             | Self::AlwaysAllowUnsupported
@@ -61,7 +64,7 @@ impl ApprovalInteractionRejectionKind {
         match self.workflow_rejection_kind() {
             ProductWorkflowRejectionKind::ScopeNotFound => 404,
             ProductWorkflowRejectionKind::Unauthorized => 403,
-            ProductWorkflowRejectionKind::Conflict => 409,
+            ProductWorkflowRejectionKind::Conflict | ProductWorkflowRejectionKind::Ambiguous => 409,
             ProductWorkflowRejectionKind::Unavailable => 503,
             ProductWorkflowRejectionKind::InvalidRequest => 400,
             ProductWorkflowRejectionKind::ThreadBusy
@@ -103,6 +106,18 @@ impl ApprovalInteractionScope {
             agent_id: scope.agent_id.clone(),
             project_id: scope.project_id.clone(),
             thread_id: scope.thread_id.clone(),
+        }
+    }
+
+    pub fn to_resource_scope(&self) -> ResourceScope {
+        ResourceScope {
+            tenant_id: self.tenant_id.clone(),
+            user_id: self.user_id.clone(),
+            agent_id: self.agent_id.clone(),
+            project_id: self.project_id.clone(),
+            mission_id: None,
+            thread_id: Some(self.thread_id.clone()),
+            invocation_id: InvocationId::new(),
         }
     }
 }
@@ -250,6 +265,7 @@ pub struct ListPendingApprovalsResponse {
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalInteractionDecision {
     ApproveOnce,
+    AlwaysAllow,
     Deny,
 }
 

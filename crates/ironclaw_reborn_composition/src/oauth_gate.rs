@@ -446,6 +446,7 @@ mod tests {
             GoogleOAuthGateProviderRegistry::new(vec![Arc::new(fixture.provider.clone())]);
         let unsupported_requirement = RuntimeCredentialAuthRequirement {
             provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            setup: Default::default(),
             requester_extension: ExtensionId::new("github").unwrap(),
             provider_scopes: Vec::new(),
         };
@@ -514,6 +515,9 @@ mod tests {
                 gate_ref: AuthGateRef::new("gate:google-auth").unwrap(),
                 requirement: RuntimeCredentialAuthRequirement {
                     provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+                    setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                        scopes: vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()],
+                    },
                     requester_extension: ExtensionId::new("google-calendar").unwrap(),
                     provider_scopes: vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()],
                 },

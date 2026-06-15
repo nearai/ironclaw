@@ -122,10 +122,8 @@ impl DefaultExecutorPipeline {
                                     LoopDriverNoteKind::Planning,
                                     "repeated capability call warning rendered",
                                 )
-                                .map_err(|_| {
-                                    AgentLoopExecutorError::PlannerContract {
-                                        detail: "repeated-call warning progress summary was invalid",
-                                    }
+                                .map_err(|_| AgentLoopExecutorError::PlannerContract {
+                                    detail: "repeated-call warning progress summary was invalid",
                                 })?,
                             )
                             .await;
@@ -265,6 +263,78 @@ impl DefaultExecutorPipeline {
                             InputStep::Exit(exit) => return Ok(exit),
                         }
                     }
+
+                    match self
+                        .stop
+                        .decide(
+                            ctx,
+                            StopInput {
+                                state: next_state,
+                                summary,
+                                pending_input_ack: std::mem::take(&mut pending_input_ack),
+                            },
+                        )
+                        .await?
+                    {
+                        StopStep::Stop {
+                            state,
+                            kind,
+                            pending_input_ack: mut ack,
+                        } => {
+                            let exit = self.exit.process(ctx, ExitInput { state, kind }).await?;
+                            ack.ack(host).await?;
+                            return Ok(exit);
+                        }
+                        StopStep::Continue {
+                            state: next,
+                            pending_input_ack: ack,
+                        } => {
+                            state = next;
+                            pending_input_ack = ack;
+                        }
+                        StopStep::Exit(exit) => return Ok(exit),
+                    }
+
+                    state.iteration = state.iteration.saturating_add(1);
+                }
+
+                PromptStep::ResumeApproval(resume) | PromptStep::ResumeAuth(resume) => {
+                    let resume = *resume;
+                    pending_input_ack = resume.pending_input_ack;
+                    pending_input_ack.ack(host).await?;
+                    let completed = self
+                        .capabilities
+                        .process(
+                            ctx,
+                            CapabilityInput {
+                                state: resume.state,
+                                surface: resume.surface,
+                                calls: vec![resume.call],
+                            },
+                        )
+                        .await?;
+
+                    let completed = self.post_capability.process(ctx, completed).await?;
+
+                    let (next_state, summary) = match completed {
+                        TurnCompletedStep::Continue { state, summary } => (*state, summary),
+                        TurnCompletedStep::Exit(exit) => return Ok(exit),
+                    };
+
+                    let (next_state, summary) = match self
+                        .stop
+                        .observe(
+                            ctx,
+                            StopObservationInput {
+                                state: next_state,
+                                summary,
+                            },
+                        )
+                        .await?
+                    {
+                        StopObservationStep::Continue { state, summary } => (*state, summary),
+                        StopObservationStep::Exit(exit) => return Ok(exit),
+                    };
 
                     match self
                         .stop

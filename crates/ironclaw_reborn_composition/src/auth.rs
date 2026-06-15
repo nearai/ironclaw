@@ -19,6 +19,7 @@ use ironclaw_auth::{
     SecretCleanupReport, SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest,
     SecretSubmitResult, Timestamp, TurnGateAuthFlowQuery, TurnRunRef, scope_matches,
 };
+use ironclaw_events::{SecurityAuditEvent, SecurityAuditSink, SecurityBoundary, SecurityDecision};
 use ironclaw_product_adapters::AuthPromptChallengeKind;
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use secrecy::SecretString;
@@ -31,9 +32,13 @@ use crate::manual_token_flow::{PortBackedManualTokenFlowService, RebornManualTok
 use crate::oauth_dcr::{DcrGateChallengeRequest, DcrSetupFlowRequest, OAuthDcrProviderRegistry};
 use crate::oauth_gate::{GoogleOAuthGateProviderRegistry, OAuthGateChallengeRequest};
 use crate::product_auth_runtime_credentials::{
-    ProductAuthRuntimeCredentialAccountSelector, RuntimeCredentialAccountSelectionService,
+    ProductAuthRuntimeCredentialAccountRefresher, ProductAuthRuntimeCredentialAccountSelector,
+    RuntimeCredentialAccountRefreshPort, RuntimeCredentialAccountRefreshService,
+    RuntimeCredentialAccountSelectionService,
 };
 use crate::{AuthChallengeProvider, AuthChallengeView};
+
+pub(crate) const AUTH_CONTINUATION_DISPATCH_FAILED_CODE: &str = "auth_continuation_dispatch_failed";
 
 /// Dispatches a typed continuation event once an OAuth callback flow has
 /// completed.
@@ -451,6 +456,7 @@ pub struct RebornProductAuthServices {
     provider_client: Arc<dyn AuthProviderClient>,
     cleanup_service: Arc<dyn SecretCleanupService>,
     continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
+    security_audit_sink: Option<Arc<dyn SecurityAuditSink>>,
     dcr_oauth_registry: Option<Arc<OAuthDcrProviderRegistry>>,
     oauth_gate_registry: Option<Arc<GoogleOAuthGateProviderRegistry>>,
     /// Optional read projection for WebUI/local-dev auth interactions.
@@ -495,6 +501,7 @@ impl std::fmt::Debug for RebornProductAuthServices {
                 "continuation_dispatcher",
                 &"Arc<dyn RebornAuthContinuationDispatcher>",
             )
+            .field("security_audit_sink", &self.security_audit_sink.is_some())
             .field("flow_record_source", &self.flow_record_source.is_some())
             .field("dcr_oauth_registry", &self.dcr_oauth_registry.is_some())
             .field("oauth_gate_registry", &self.oauth_gate_registry.is_some())
@@ -527,6 +534,7 @@ impl RebornProductAuthServices {
             provider_client,
             cleanup_service,
             continuation_dispatcher,
+            security_audit_sink: None,
             dcr_oauth_registry: None,
             oauth_gate_registry: None,
             flow_record_source: None,
@@ -627,8 +635,20 @@ impl RebornProductAuthServices {
     pub(crate) fn runtime_credential_account_selection_service(
         &self,
     ) -> Arc<dyn RuntimeCredentialAccountSelectionService> {
-        Arc::new(ProductAuthRuntimeCredentialAccountSelector::new(
-            self.credential_account_record_source(),
+        Arc::new(
+            ProductAuthRuntimeCredentialAccountSelector::new_with_visibility(
+                self.credential_account_record_source(),
+                Arc::new(crate::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy),
+            ),
+        )
+    }
+
+    pub(crate) fn runtime_credential_account_refresh_service(
+        self: &Arc<Self>,
+    ) -> Arc<dyn RuntimeCredentialAccountRefreshService> {
+        let refresh_port: Arc<dyn RuntimeCredentialAccountRefreshPort> = self.clone();
+        Arc::new(ProductAuthRuntimeCredentialAccountRefresher::new(
+            refresh_port,
         ))
     }
 
@@ -687,6 +707,11 @@ impl RebornProductAuthServices {
         dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
     ) -> Self {
         self.continuation_dispatcher = dispatcher;
+        self
+    }
+
+    pub fn with_security_audit_sink(mut self, sink: Arc<dyn SecurityAuditSink>) -> Self {
+        self.security_audit_sink = Some(sink);
         self
     }
 
@@ -1180,6 +1205,7 @@ impl RebornProductAuthServices {
             .dispatch_auth_continuation(event)
             .await
         {
+            self.record_auth_continuation_dispatch_failure(&completed);
             tracing::debug!(
                 flow_id = %completed.id,
                 error_code = ?error.code(),
@@ -1198,6 +1224,19 @@ impl RebornProductAuthServices {
             .await
     }
 
+    fn record_auth_continuation_dispatch_failure(&self, completed: &AuthFlowRecord) {
+        if let Some(sink) = &self.security_audit_sink {
+            sink.record(
+                SecurityAuditEvent::new(
+                    SecurityBoundary::AuthContinuation,
+                    SecurityDecision::Blocked,
+                    AUTH_CONTINUATION_DISPATCH_FAILED_CODE,
+                )
+                .with_scope(completed.scope.resource.clone()),
+            );
+        }
+    }
+
     #[allow(
         dead_code,
         reason = "used by feature-scoped product-auth route tests that do not compile in every lib-test target"
@@ -1209,6 +1248,38 @@ impl RebornProductAuthServices {
         RebornProductAuthServicePorts::from_shared(services.clone())
             .into_services(continuation_dispatcher)
             .with_flow_record_source(services)
+    }
+}
+
+#[async_trait]
+impl RuntimeCredentialAccountRefreshPort for RebornProductAuthServices {
+    async fn refresh_credential_account(
+        &self,
+        request: CredentialRefreshRequest,
+    ) -> Result<CredentialRefreshReport, AuthProductError> {
+        RebornProductAuthServices::refresh_credential_account(self, request)
+            .await
+            .map_err(auth_product_error_from_reborn_error)
+    }
+}
+
+fn auth_product_error_from_reborn_error(error: RebornAuthProductError) -> AuthProductError {
+    match error.code {
+        AuthErrorCode::UnknownOrExpiredFlow => AuthProductError::UnknownOrExpiredFlow,
+        AuthErrorCode::CrossScopeDenied => AuthProductError::CrossScopeDenied,
+        AuthErrorCode::ProviderDenied => AuthProductError::ProviderDenied,
+        AuthErrorCode::TokenExchangeFailed => AuthProductError::TokenExchangeFailed,
+        AuthErrorCode::RefreshFailed => AuthProductError::RefreshFailed,
+        AuthErrorCode::CredentialMissing => AuthProductError::CredentialMissing,
+        AuthErrorCode::AccountSelectionRequired => AuthProductError::AccountSelectionRequired,
+        AuthErrorCode::BackendUnavailable => AuthProductError::BackendUnavailable,
+        AuthErrorCode::MalformedConfig => AuthProductError::MalformedConfig,
+        AuthErrorCode::MalformedCallback => AuthProductError::MalformedCallback,
+        AuthErrorCode::Canceled => AuthProductError::Canceled,
+        AuthErrorCode::FlowAlreadyTerminal => AuthProductError::FlowAlreadyTerminal,
+        AuthErrorCode::InvalidRequest => AuthProductError::InvalidRequest {
+            reason: "runtime credential refresh request rejected".to_string(),
+        },
     }
 }
 

@@ -16,18 +16,24 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures_util::future::join_all;
+use ironclaw_approvals::{
+    PersistentApprovalAction, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+    PersistentApprovalScope, permission_mode_allows_persistent_approval,
+};
 use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_capabilities::{
-    CapabilityHost, CapabilityInvocationError, CapabilityInvocationRequest,
-    CapabilityInvocationResult, CapabilityObligationHandler, CapabilityResumeRequest,
-    CapabilitySpawnRequest, CapabilitySpawnResult,
+    CapabilityAuthResumeRequest, CapabilityHost, CapabilityInvocationError,
+    CapabilityInvocationRequest, CapabilityInvocationResult, CapabilityObligationHandler,
+    CapabilityResumeRequest, CapabilitySpawnRequest, CapabilitySpawnResult,
 };
 use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityDispatcher, CapabilityId, DispatchFailureKind, InvocationId,
-    PackageSource, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind,
-    RuntimeKind, SecretHandle, runtime_policy::EffectiveRuntimePolicy, sha256_digest_token,
+    ApprovalRequestId, CapabilityDispatcher, CapabilityId, Decision, DispatchFailureKind,
+    InvocationId, PackageSource, Principal, ResourceEstimate, ResourceScope,
+    RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
+    runtime_policy::EffectiveRuntimePolicy, sha256_digest_token,
 };
 use ironclaw_process_sandbox::{
     PROCESS_SANDBOX_CAPABILITY_ID, SandboxProcessPlan, ValidatedSandboxProcessPlan,
@@ -46,11 +52,11 @@ use crate::{
     BuiltinObligationHandler, BuiltinObligationServices, CancelRuntimeWorkOutcome,
     CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime, HostRuntimeError,
     HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeAuthGate,
-    RuntimeBackendHealth, RuntimeBlockedReason, RuntimeCapabilityCompleted,
-    RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeGateId, RuntimeStatusRequest,
-    RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest, VisibleCapabilitySurface,
-    plan_capability, surface::CapabilityCatalog,
+    RuntimeBackendHealth, RuntimeBlockedReason, RuntimeCapabilityAuthResumeRequest,
+    RuntimeCapabilityCompleted, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
+    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeGateId,
+    RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest,
+    VisibleCapabilitySurface, plan_capability, surface::CapabilityCatalog,
 };
 
 /// Default production wiring for [`HostRuntime`].
@@ -63,6 +69,10 @@ pub struct DefaultHostRuntime {
     approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
     run_state_approval_store: Option<Arc<dyn RunStateApprovalStore>>,
     capability_leases: Option<Arc<dyn CapabilityLeaseStore>>,
+    // arch-exempt: optional_arc, minimal/test compositions intentionally disable
+    // persistent approval replay until the product revoke control plane is split out,
+    // plan #4539
+    persistent_approval_policies: Option<Arc<dyn PersistentApprovalPolicyStore>>,
     process_manager: Option<Arc<dyn ProcessManager>>,
     process_store: Option<Arc<dyn ProcessStore>>,
     process_result_store: Option<Arc<dyn ProcessResultStore>>,
@@ -127,6 +137,7 @@ impl DefaultHostRuntime {
             approval_requests: None,
             run_state_approval_store: None,
             capability_leases: None,
+            persistent_approval_policies: None,
             process_manager: None,
             process_store: None,
             process_result_store: None,
@@ -199,6 +210,16 @@ impl DefaultHostRuntime {
         capability_leases: Arc<dyn CapabilityLeaseStore>,
     ) -> Self {
         self.capability_leases = Some(capability_leases);
+        self
+    }
+
+    /// Attaches reusable approval policy overrides used to inject scoped,
+    /// manifest-bounded grants before ordinary authorization.
+    pub fn with_persistent_approval_policies(
+        mut self,
+        policies: Arc<dyn PersistentApprovalPolicyStore>,
+    ) -> Self {
+        self.persistent_approval_policies = Some(policies);
         self
     }
 
@@ -351,6 +372,15 @@ impl HostRuntime for DefaultHostRuntime {
         context.trust = trust_decision.effective_trust.class();
 
         let registry = self.registry.snapshot();
+        self.apply_persistent_approval_policy(
+            &mut context,
+            &registry,
+            PersistentApprovalAction::Dispatch,
+            &capability_id,
+            &estimate,
+            &trust_decision,
+        )
+        .await;
         let host = self.capability_host(&registry);
 
         let invocation = CapabilityInvocationRequest {
@@ -425,6 +455,15 @@ impl HostRuntime for DefaultHostRuntime {
         context.trust = trust_decision.effective_trust.class();
 
         let registry = self.registry.snapshot();
+        self.apply_persistent_approval_policy(
+            &mut context,
+            &registry,
+            PersistentApprovalAction::SpawnCapability,
+            &capability_id,
+            &estimate,
+            &trust_decision,
+        )
+        .await;
         let host = self.capability_host(&registry);
         let spawn = CapabilitySpawnRequest {
             context,
@@ -534,6 +573,104 @@ impl HostRuntime for DefaultHostRuntime {
                     error_kind = failure_kind_from(&error).as_str(),
                     idempotency_key = idempotency_key.as_deref().unwrap_or(""),
                     "capability resume failed"
+                );
+                match error {
+                    CapabilityInvocationError::AuthorizationRequiresAuth {
+                        capability,
+                        required_secrets,
+                        credential_requirements,
+                    } => Ok(auth_required_outcome(
+                        capability,
+                        required_secrets,
+                        credential_requirements,
+                    )),
+                    other => Ok(RuntimeCapabilityOutcome::Failed(failure_from(
+                        other,
+                        capability_id,
+                    ))),
+                }
+            }
+        }
+    }
+
+    async fn auth_resume_capability(
+        &self,
+        request: RuntimeCapabilityAuthResumeRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        let RuntimeCapabilityAuthResumeRequest {
+            mut context,
+            capability_id,
+            estimate,
+            input,
+            idempotency_key,
+            trust_decision: _caller_trust_decision,
+            approval_request_id,
+        } = request;
+        let idempotency_key = idempotency_key.map(|key| key.as_str().to_string());
+        if let Some(key) = idempotency_key.as_deref() {
+            tracing::debug!(
+                capability_id = %capability_id,
+                approval_request_id = approval_request_id.map(|id| id.to_string()).as_deref().unwrap_or("none"),
+                idempotency_key = %key,
+                "capability auth-resume accepted advisory idempotency key (not yet enforced)"
+            );
+        }
+
+        if let Err(error) = self.enforce_runtime_policy(&capability_id) {
+            tracing::debug!(
+                capability_id = %capability_id,
+                runtime_policy_error_kind = error.kind(),
+                "capability runtime policy rejected auth-resume before dispatch"
+            );
+            self.fail_matching_blocked_auth_resume_on_preflight_error(
+                &context,
+                &capability_id,
+                error.kind(),
+            )
+            .await;
+            return Ok(runtime_policy_failure(capability_id, error));
+        }
+
+        let trust_decision = match self.evaluate_invocation_trust(&capability_id) {
+            Ok(host_decision) => host_decision,
+            Err(error) => {
+                tracing::debug!(
+                    capability_id = %capability_id,
+                    trust_error_kind = error.kind(),
+                    "capability trust evaluation failed before auth-resume"
+                );
+                self.fail_matching_blocked_auth_resume_on_preflight_error(
+                    &context,
+                    &capability_id,
+                    error.kind(),
+                )
+                .await;
+                return Ok(trust_evaluation_failure(capability_id, error));
+            }
+        };
+        context.trust = trust_decision.effective_trust.class();
+
+        let registry = self.registry.snapshot();
+        let host = self.capability_host(&registry);
+        let auth_resume = CapabilityAuthResumeRequest {
+            context,
+            capability_id: capability_id.clone(),
+            estimate,
+            input,
+            trust_decision,
+            approval_request_id,
+        };
+
+        match host.auth_resume_json(auth_resume).await {
+            Ok(result) => Ok(RuntimeCapabilityOutcome::Completed(Box::new(
+                completed_outcome_from(result, capability_id),
+            ))),
+            Err(error) => {
+                tracing::debug!(
+                    capability_id = %capability_id,
+                    error_kind = failure_kind_from(&error).as_str(),
+                    idempotency_key = idempotency_key.as_deref().unwrap_or(""),
+                    "capability auth-resume failed"
                 );
                 match error {
                     CapabilityInvocationError::AuthorizationRequiresAuth {
@@ -924,6 +1061,123 @@ impl DefaultHostRuntime {
         Ok(())
     }
 
+    async fn apply_persistent_approval_policy(
+        &self,
+        context: &mut ironclaw_host_api::ExecutionContext,
+        registry: &ExtensionRegistry,
+        action: PersistentApprovalAction,
+        capability_id: &CapabilityId,
+        estimate: &ResourceEstimate,
+        trust_decision: &TrustDecision,
+    ) {
+        let Some(policies) = self.persistent_approval_policies.as_ref() else {
+            return;
+        };
+        let Some(descriptor) = registry.get_capability(capability_id) else {
+            return;
+        };
+        if !permission_mode_allows_persistent_approval(descriptor.default_permission) {
+            tracing::debug!(
+                capability_id = %capability_id,
+                permission = ?descriptor.default_permission,
+                "persistent approval skipped for manifest policy"
+            );
+            return;
+        }
+        let scope = match PersistentApprovalScope::from_resource_scope(&context.resource_scope) {
+            Ok(scope) => scope,
+            Err(error) => {
+                tracing::debug!(
+                    capability_id = %capability_id,
+                    error = %error,
+                    "persistent approval lookup skipped for unsupported scope"
+                );
+                return;
+            }
+        };
+        let lookup_results = join_all(persistent_approval_grantees(context).into_iter().map(
+            |grantee| {
+                let policies = Arc::clone(policies);
+                let key = PersistentApprovalPolicyKey {
+                    scope: scope.clone(),
+                    action,
+                    capability_id: capability_id.clone(),
+                    grantee,
+                };
+                async move { policies.lookup(&key).await }
+            },
+        ))
+        .await;
+        for policy in lookup_results {
+            let policy = match policy {
+                Ok(policy) => policy,
+                Err(error) => {
+                    tracing::warn!(
+                        capability_id = %capability_id,
+                        error = %error,
+                        "persistent approval policy lookup failed; falling back to normal authorization"
+                    );
+                    continue;
+                }
+            };
+            let Some(policy) = policy else {
+                continue;
+            };
+            let Some(grant) = policy.active_grant() else {
+                continue;
+            };
+            let mut candidate_context = context.clone();
+            candidate_context.grants.grants.clear();
+            candidate_context.grants.grants.push(grant.clone());
+            let decision = match action {
+                PersistentApprovalAction::Dispatch => {
+                    self.authorizer
+                        .authorize_dispatch_with_trust(
+                            &candidate_context,
+                            descriptor,
+                            estimate,
+                            trust_decision,
+                        )
+                        .await
+                }
+                PersistentApprovalAction::SpawnCapability => {
+                    self.authorizer
+                        .authorize_spawn_with_trust(
+                            &candidate_context,
+                            descriptor,
+                            estimate,
+                            trust_decision,
+                        )
+                        .await
+                }
+            };
+            match decision {
+                Decision::Allow { .. } => {}
+                Decision::Deny { reason } => {
+                    tracing::debug!(
+                        capability_id = %capability_id,
+                        deny_reason = ?reason,
+                        "persistent approval policy matched but cannot authorize invocation"
+                    );
+                    continue;
+                }
+                Decision::RequireApproval { .. } => {
+                    tracing::debug!(
+                        capability_id = %capability_id,
+                        "persistent approval policy matched but still requires approval"
+                    );
+                    continue;
+                }
+            }
+            tracing::debug!(
+                capability_id = %capability_id,
+                "persistent approval policy matched; injecting scoped grant"
+            );
+            context.grants.grants.push(grant);
+            break;
+        }
+    }
+
     async fn fail_matching_blocked_resume_on_preflight_error(
         &self,
         context: &ironclaw_host_api::ExecutionContext,
@@ -970,6 +1224,63 @@ impl DefaultHostRuntime {
                 preflight_error_kind = error_kind,
                 transition_error = %unavailable_from_run_state(error),
                 "blocked resume preflight failed, but run-state fail transition failed; original failure is returned to caller",
+            );
+        }
+    }
+
+    /// Mirrors `fail_matching_blocked_resume_on_preflight_error` for
+    /// `auth_resume_capability` preflight rejections.  Checks for a
+    /// `BlockedAuth` run record matching the capability; if found,
+    /// transitions it to `Failed` so it is not left as a stale resumable
+    /// gate after the caller has returned a terminal failure outcome.
+    ///
+    /// The `approval_request_id` carried by the auth-resume request is
+    /// intentionally NOT compared here: the `BlockedAuth` transition always
+    /// clears `approval_request_id` to `None` on the persisted record, so
+    /// any equality check against `Some(id)` would always fail and silently
+    /// skip the fail-transition.  `invocation_id` (embedded in `context`)
+    /// already uniquely identifies the run.
+    async fn fail_matching_blocked_auth_resume_on_preflight_error(
+        &self,
+        context: &ironclaw_host_api::ExecutionContext,
+        capability_id: &CapabilityId,
+        error_kind: &'static str,
+    ) {
+        if context.validate().is_err() {
+            return;
+        }
+        let Some(run_state) = self.run_state.as_ref() else {
+            return;
+        };
+        let scope = &context.resource_scope;
+        let invocation_id = context.invocation_id;
+        let record = match run_state.get(scope, invocation_id).await {
+            Ok(Some(record)) => record,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(
+                    invocation_id = %invocation_id,
+                    capability_id = %capability_id,
+                    preflight_error_kind = error_kind,
+                    transition_error = %unavailable_from_run_state(error),
+                    "blocked auth-resume preflight failed, but run-state lookup failed; leaving run state unchanged",
+                );
+                return;
+            }
+        };
+        if record.status != RunStatus::BlockedAuth || &record.capability_id != capability_id {
+            return;
+        }
+        if let Err(error) = run_state
+            .fail(scope, invocation_id, error_kind.to_string())
+            .await
+        {
+            tracing::warn!(
+                invocation_id = %invocation_id,
+                capability_id = %capability_id,
+                preflight_error_kind = error_kind,
+                transition_error = %unavailable_from_run_state(error),
+                "blocked auth-resume preflight failed, but run-state fail transition failed; original failure is returned to caller",
             );
         }
     }
@@ -1387,6 +1698,26 @@ fn spawned_process_outcome_from(
     }
 }
 
+fn persistent_approval_grantees(context: &ironclaw_host_api::ExecutionContext) -> Vec<Principal> {
+    let mut grantees = vec![
+        Principal::Extension(context.extension_id.clone()),
+        Principal::User(context.user_id.clone()),
+    ];
+    if let Some(agent_id) = &context.agent_id {
+        grantees.push(Principal::Agent(agent_id.clone()));
+    }
+    if let Some(project_id) = &context.project_id {
+        grantees.push(Principal::Project(project_id.clone()));
+    }
+    if let Some(mission_id) = &context.mission_id {
+        grantees.push(Principal::Mission(mission_id.clone()));
+    }
+    if let Some(thread_id) = &context.thread_id {
+        grantees.push(Principal::Thread(thread_id.clone()));
+    }
+    grantees
+}
+
 fn host_runtime_spawn_input_for_capability(
     capability_id: &CapabilityId,
     input: serde_json::Value,
@@ -1606,6 +1937,9 @@ mod tests {
     fn auth_requirement(scopes: &[&str]) -> RuntimeCredentialAuthRequirement {
         RuntimeCredentialAuthRequirement {
             provider: RuntimeCredentialAccountProviderId::new("notion").unwrap(),
+            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
+            },
             requester_extension: ExtensionId::new("notion").unwrap(),
             provider_scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
         }

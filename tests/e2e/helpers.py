@@ -215,6 +215,29 @@ AUTH_TOKEN = "e2e-test-token"
 OWNER_SCOPE_ID = "e2e-owner-scope"
 HTTP_WEBHOOK_SECRET = "e2e-http-webhook-secret"
 
+# Bearer token for the Reborn WebUI v2 surface (`ironclaw-reborn serve`).
+# Must be >= 32 bytes: `serve` also uses this value as the SSO session-signing
+# key and refuses to bind with a shorter secret. Distinct from AUTH_TOKEN,
+# which targets the legacy `ironclaw` web channel.
+REBORN_V2_AUTH_TOKEN = "e2e-reborn-v2-bearer-token-0123456789abcdef"
+
+# Selectors for the Reborn WebUI v2 React SPA (served under /v2/). The shell
+# DOM differs entirely from the legacy gateway in SEL, so keep these separate.
+SEL_V2 = {
+    "root":           "#v2-root",          # SPA mount point (index.html)
+    "login_token":    "#v2-token",         # token input on the login/connect view
+    "chat_composer":  "[data-testid='chat-composer']",  # message textarea on /chat
+    "msg_user":       "[data-testid='msg-user']",       # user message bubble
+    "msg_assistant":  "[data-testid='msg-assistant']",  # assistant message bubble
+    "logs_scope_toolbar": "[data-testid='logs-scope-toolbar']",
+    "logs_scope_chip": "[data-testid='logs-scope-chip'][data-scope-key='{key}']",
+    "logs_entry": "[data-testid='logs-entry']",
+    "logs_entry_row": "[data-testid='logs-entry-row']",
+    "logs_entry_message": "[data-testid='logs-entry-message']",
+    "logs_entry_context": "[data-testid='logs-entry-context']",
+    "logs_context_chip": "[data-testid='logs-context-chip'][data-context-key='{key}']",
+}
+
 
 async def wait_for_ready(url: str, *, timeout: float = 60, interval: float = 0.5):
     """Poll a URL until it returns 200 or timeout."""

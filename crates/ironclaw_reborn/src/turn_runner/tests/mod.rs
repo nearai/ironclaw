@@ -130,6 +130,7 @@ fn test_run_state(scope: TurnScope, status: TurnStatus) -> TurnRunState {
         credential_requirements: Vec::new(),
         failure: None,
         event_cursor: EventCursor(0),
+        product_context: None,
     }
 }
 
@@ -1604,6 +1605,13 @@ fn sanitized_driver_failure_returns_credits_exhausted_for_known_category() {
     let result = sanitized_driver_failure(MODEL_CREDITS_EXHAUSTED_CATEGORY);
     let failure = result.expect("should return Some for credits exhausted category");
     assert_eq!(failure.category(), MODEL_CREDITS_EXHAUSTED_CATEGORY);
+}
+
+#[test]
+fn sanitized_driver_failure_returns_model_credentials_for_known_category() {
+    let result = sanitized_driver_failure(MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY);
+    let failure = result.expect("should return Some for model credentials category");
+    assert_eq!(failure.category(), MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY);
 }
 
 #[test]

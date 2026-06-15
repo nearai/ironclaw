@@ -59,6 +59,15 @@ mod tests {
         LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), resolved)
     }
 
+    fn local_dev_minimal_approval_policy()
+    -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
+        let mut policy = crate::local_dev_runtime_policy().expect("local-dev policy resolves");
+        policy.requested_profile = ironclaw_host_api::runtime_policy::RuntimeProfile::LocalYolo;
+        policy.resolved_profile = ironclaw_host_api::runtime_policy::RuntimeProfile::LocalYolo;
+        policy.approval_policy = ironclaw_host_api::runtime_policy::ApprovalPolicy::Minimal;
+        policy
+    }
+
     #[tokio::test]
     async fn local_dev_visible_capability_request_uses_run_actor_for_runtime_scope() {
         let run_context = run_context("actor-runtime-scope")
@@ -202,6 +211,18 @@ mod tests {
             .create_capability_port(run_context)
             .await
             .expect("capability port");
+        let initial_tool_definition_ids = port
+            .tool_definitions()
+            .expect("initial tool definitions")
+            .into_iter()
+            .map(|definition| definition.capability_id.as_str().to_string())
+            .collect::<Vec<_>>();
+        assert!(
+            initial_tool_definition_ids
+                .iter()
+                .any(|id| id == "github.search_issues"),
+            "fresh capability ports must initialize active extension tools for auth-resume replay"
+        );
         let surface = port
             .visible_capabilities(VisibleCapabilityRequest {})
             .await
@@ -326,10 +347,14 @@ mod tests {
         extension_state: GsuiteExtensionState,
     ) -> GsuiteSurfaceHarness {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
-            owner,
-            dir.path().join("local-dev"),
-        ))
+        let services = crate::build_reborn_services(
+            crate::RebornBuildInput::local_dev_with_profile(
+                crate::RebornCompositionProfile::LocalDevYolo,
+                owner,
+                dir.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_minimal_approval_policy()),
+        )
         .await
         .expect("local-dev services build");
         let run_context = run_context(label).await;
@@ -379,7 +404,8 @@ mod tests {
         let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
             local_runtime.skill_management.clone(),
         )
-        .with_extension_management(extension_management);
+        .with_extension_management(extension_management)
+        .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
         for extension_id in ["gmail", "google-calendar"] {
             let package_ref =
                 LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id)
@@ -402,6 +428,45 @@ mod tests {
                     .await
                     .expect("activate GSuite extension");
             }
+        }
+    }
+
+    struct ConfiguredRuntimeCredentialAccounts;
+
+    #[async_trait::async_trait]
+    impl crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionService
+        for ConfiguredRuntimeCredentialAccounts
+    {
+        async fn select_unique_configured_runtime_account(
+            &self,
+            _request: crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest,
+        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            let now = chrono::Utc::now();
+            Ok(ironclaw_auth::CredentialAccount {
+                id: ironclaw_auth::CredentialAccountId::new(),
+                scope: ironclaw_auth::AuthProductScope::new(
+                    ironclaw_host_api::ResourceScope::local_default(
+                        UserId::new("configured-credential-user").expect("user id"),
+                        ironclaw_host_api::InvocationId::new(),
+                    )
+                    .expect("resource scope"),
+                    ironclaw_auth::AuthSurface::Api,
+                ),
+                provider: ironclaw_auth::AuthProviderId::new("test-provider").expect("provider id"),
+                label: ironclaw_auth::CredentialAccountLabel::new("test-provider")
+                    .expect("account label"),
+                status: ironclaw_auth::CredentialAccountStatus::Configured,
+                ownership: ironclaw_auth::CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(
+                    ironclaw_host_api::SecretHandle::new("test-secret").expect("secret handle"),
+                ),
+                refresh_secret: None,
+                scopes: Vec::new(),
+                created_at: now,
+                updated_at: now,
+            })
         }
     }
 
@@ -772,7 +837,6 @@ mod tests {
 
         for capability_id in [
             EXTENSION_INSTALL_CAPABILITY_ID,
-            EXTENSION_ACTIVATE_CAPABILITY_ID,
             EXTENSION_REMOVE_CAPABILITY_ID,
         ] {
             let grant = grant_for(capability_id);
@@ -780,6 +844,39 @@ mod tests {
             assert!(grant.constraints.mounts.mounts.is_empty());
             assert_eq!(grant.constraints.network, NetworkPolicy::default());
         }
+        let extension_activate_grant = grant_for(EXTENSION_ACTIVATE_CAPABILITY_ID);
+        assert_eq!(
+            extension_activate_grant.constraints.allowed_effects,
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::Network
+            ]
+        );
+        assert!(
+            extension_activate_grant
+                .constraints
+                .mounts
+                .mounts
+                .is_empty()
+        );
+        assert_eq!(
+            extension_activate_grant
+                .constraints
+                .network
+                .allowed_targets
+                .iter()
+                .map(|target| target.host_pattern.as_str())
+                .collect::<Vec<_>>(),
+            vec!["*"]
+        );
+        assert!(
+            extension_activate_grant
+                .constraints
+                .network
+                .deny_private_ip_ranges
+        );
 
         let read_file_grant = grant_for(READ_FILE_CAPABILITY_ID);
         assert_eq!(
@@ -946,6 +1043,8 @@ mod tests {
                 surface_version: candidate.surface_version,
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("skill activation invokes");
@@ -1218,6 +1317,8 @@ mod tests {
                 capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
                     .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
                 input_ref,
+                approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("read_file invocation"); // safety: test-only assertion in #[cfg(test)] module.
@@ -1249,6 +1350,8 @@ mod tests {
                 capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
                     .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
                 input_ref,
+                approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("raw workspace read_file invocation"); // safety: test-only assertion in #[cfg(test)] module.
@@ -1269,10 +1372,14 @@ mod tests {
     async fn local_dev_capability_port_skill_install_writes_user_skill_root() {
         let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only setup in #[cfg(test)] module.
         let storage_root = dir.path().join("local-dev");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
-            "local-dev-skill-port-owner",
-            storage_root.clone(),
-        ))
+        let services = crate::build_reborn_services(
+            crate::RebornBuildInput::local_dev_with_profile(
+                crate::RebornCompositionProfile::LocalDevYolo,
+                "local-dev-skill-port-owner",
+                storage_root.clone(),
+            )
+            .with_runtime_policy(local_dev_minimal_approval_policy()),
+        )
         .await
         .expect("local-dev services build"); // safety: test-only assertion in #[cfg(test)] module.
         let runtime = services.host_runtime.clone().expect("host runtime"); // safety: test-only assertion in #[cfg(test)] module.
@@ -1325,6 +1432,8 @@ mod tests {
                 capability_id: CapabilityId::new(SKILL_INSTALL_CAPABILITY_ID)
                     .expect("skill_install capability id"), // safety: built-in capability id is a valid literal.
                 input_ref,
+                approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("skill_install invocation"); // safety: test-only assertion in #[cfg(test)] module.
@@ -1464,6 +1573,8 @@ mod tests {
                 capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
                     .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
                 input_ref,
+                approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("raw workspace read_file invocation"); // safety: test-only assertion in #[cfg(test)] module.
@@ -1499,7 +1610,8 @@ mod tests {
             let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
                 local_runtime.skill_management.clone(),
             )
-            .with_extension_management(extension_management);
+            .with_extension_management(extension_management)
+            .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
             let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
                 .expect("valid github ref");
             facade
@@ -1552,7 +1664,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_capability_port_snapshots_extensions_when_port_is_created() {
+    async fn local_dev_capability_port_refreshes_extensions_after_activation() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
         let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
@@ -1583,6 +1695,25 @@ mod tests {
             None,
         )
         .expect("local-dev capability wiring");
+        let port = wiring
+            .capability_factory
+            .create_capability_port(&run_context)
+            .await
+            .expect("capability port");
+        let inactive_surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("inactive visible surface");
+        let inactive_capability_ids = inactive_surface
+            .descriptors
+            .iter()
+            .map(|descriptor| descriptor.capability_id.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            !inactive_capability_ids.contains(&"github.search_issues"),
+            "github capability should stay hidden before activation"
+        );
+
         let local_runtime = services
             .local_runtime
             .as_ref()
@@ -1595,7 +1726,8 @@ mod tests {
         let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
             local_runtime.skill_management.clone(),
         )
-        .with_extension_management(extension_management);
+        .with_extension_management(extension_management)
+        .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
             .expect("valid github ref");
         facade
@@ -1615,7 +1747,174 @@ mod tests {
             .await
             .expect("activate github extension");
 
-        assert_github_capabilities_visible(&wiring, &run_context).await;
+        let active_surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("active visible surface");
+        let active_capability_ids = active_surface
+            .descriptors
+            .iter()
+            .map(|descriptor| descriptor.capability_id.as_str())
+            .collect::<Vec<_>>();
+        assert!(active_capability_ids.contains(&"github.search_issues"));
+        assert!(active_capability_ids.contains(&"github.get_issue"));
+        assert!(active_capability_ids.contains(&"github.comment_issue"));
+
+        let staged_after_activation = port
+            .register_provider_tool_call(provider_tool_call_with_name(
+                "github__search_issues",
+                serde_json::json!({"query": "repo:nearai/ironclaw is:issue"}),
+            ))
+            .await
+            .expect("provider registration resolves github after prompt-stage refresh");
+        assert_eq!(
+            staged_after_activation.capability_id.as_str(),
+            "github.search_issues"
+        );
+
+        let tool_definitions = port.tool_definitions().expect("tool definitions");
+        let tool_definition_ids = tool_definitions
+            .iter()
+            .map(|definition| definition.capability_id.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            tool_definition_ids.contains(&"github.search_issues"),
+            "refreshed provider tools should include github after activation"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_does_not_rebuild_surface_mid_response() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let services = crate::build_reborn_services(
+            crate::RebornBuildInput::local_dev_with_profile(
+                crate::RebornCompositionProfile::LocalDevYolo,
+                "local-dev-mid-response-owner",
+                storage_root,
+            )
+            .with_runtime_policy(local_dev_minimal_approval_policy()),
+        )
+        .await
+        .expect("local-dev services build");
+        let run_context = run_context("mid-response").await;
+        let thread_scope = ThreadScope {
+            tenant_id: run_context.scope.tenant_id.clone(),
+            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
+            project_id: run_context.scope.project_id.clone(),
+            owner_user_id: None,
+            mission_id: None,
+        };
+        let wiring = capability_wiring(
+            &services,
+            Arc::new(InMemorySessionThreadService::default()),
+            thread_scope,
+            UserId::new("local-dev-mid-response-user").expect("user id"),
+            Arc::new(
+                crate::local_dev_capability_policy::local_dev_capability_policy()
+                    .expect("policy parses"),
+            ),
+            Arc::new(UnavailableModelGateway),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
+        )
+        .expect("local-dev capability wiring");
+        let port = wiring
+            .capability_factory
+            .create_capability_port(&run_context)
+            .await
+            .expect("capability port");
+
+        port.visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("prompt-stage surface refresh");
+
+        let mut call1 = provider_tool_call_with_name(
+            "builtin__read_file",
+            serde_json::json!({"path": "/host/nonexistent.txt"}),
+        );
+        call1.id = "call-mid-response-1".to_string();
+        let candidate1 = port
+            .register_provider_tool_call(call1)
+            .await
+            .expect("first register");
+
+        let local_runtime = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management")
+            .clone();
+        let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
+            local_runtime.skill_management.clone(),
+        )
+        .with_extension_management(extension_management)
+        .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
+            .expect("valid github ref");
+        facade
+            .execute(
+                lifecycle_context("mid-response-install"),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("install github extension");
+        facade
+            .execute(
+                lifecycle_context("mid-response-activate"),
+                LifecycleProductAction::ExtensionActivate { package_ref },
+            )
+            .await
+            .expect("activate github extension");
+
+        let mut call2 = provider_tool_call_with_name(
+            "builtin__read_file",
+            serde_json::json!({"path": "/host/other.txt"}),
+        );
+        call2.id = "call-mid-response-2".to_string();
+        let candidate2 = port
+            .register_provider_tool_call(call2)
+            .await
+            .expect("second register after extension activation");
+
+        assert_eq!(
+            candidate1.surface_version, candidate2.surface_version,
+            "both candidates must carry the same surface version so invoke_capability_batch can serve them from one snapshot"
+        );
+
+        let batch_result = port
+            .invoke_capability_batch(ironclaw_turns::run_profile::CapabilityBatchInvocation {
+                invocations: vec![
+                    ironclaw_turns::run_profile::CapabilityInvocation {
+                        surface_version: candidate1.surface_version,
+                        capability_id: candidate1.capability_id,
+                        input_ref: candidate1.input_ref,
+                        approval_resume: None,
+                        auth_resume: None,
+                    },
+                    ironclaw_turns::run_profile::CapabilityInvocation {
+                        surface_version: candidate2.surface_version,
+                        capability_id: candidate2.capability_id,
+                        input_ref: candidate2.input_ref,
+                        approval_resume: None,
+                        auth_resume: None,
+                    },
+                ],
+                stop_on_first_suspension: false,
+            })
+            .await;
+        if let Err(ref error) = batch_result {
+            assert_ne!(
+                error.kind,
+                ironclaw_turns::run_profile::AgentLoopHostErrorKind::StaleSurface,
+                "invoke_capability_batch must not fail with StaleSurface: {error:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1675,6 +1974,8 @@ mod tests {
                 surface_version: candidate.surface_version,
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("gmail provider tool call invokes");

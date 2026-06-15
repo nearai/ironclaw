@@ -27,12 +27,12 @@ pub enum AudioFormat {
 impl AudioFormat {
     /// Infer audio format from MIME type. Returns `None` for unsupported types.
     pub fn from_mime_type(mime: &str) -> Option<Self> {
-        let base = mime.split(';').next().unwrap_or(mime).trim();
-        match base {
+        let base = ironclaw_common::normalize_mime_type(mime);
+        match base.as_str() {
             "audio/ogg" | "audio/opus" => Some(Self::Ogg),
             "audio/mpeg" | "audio/mp3" => Some(Self::Mp3),
             "audio/mp4" => Some(Self::Mp4),
-            "audio/wav" | "audio/x-wav" => Some(Self::Wav),
+            "audio/wav" | "audio/x-wav" | "audio/wave" => Some(Self::Wav),
             "audio/webm" => Some(Self::Webm),
             "audio/flac" | "audio/x-flac" => Some(Self::Flac),
             "audio/m4a" | "audio/x-m4a" | "audio/aac" => Some(Self::M4a),
@@ -171,6 +171,30 @@ mod tests {
     use super::*;
     use ironclaw_common::{AttachmentKind, IncomingAttachment};
 
+    /// `AudioFormat::from_mime_type` is the transcription side of the attachment
+    /// registry: every audio format the registry advertises (canonical MIME and
+    /// every alias) must transcribe, or an uploadable file would be accepted and
+    /// then silently fail to transcribe. Locks the two in sync.
+    #[test]
+    fn every_registry_audio_format_is_transcribable() {
+        for format in ironclaw_common::attachment_format::all_formats()
+            .iter()
+            .filter(|f| f.kind == AttachmentKind::Audio)
+        {
+            assert!(
+                AudioFormat::from_mime_type(format.mime).is_some(),
+                "registry audio MIME {} is not transcribable",
+                format.mime
+            );
+            for alias in format.mime_aliases {
+                assert!(
+                    AudioFormat::from_mime_type(alias).is_some(),
+                    "registry audio alias {alias} is not transcribable",
+                );
+            }
+        }
+    }
+
     struct MockProvider {
         result: Result<String, TranscriptionError>,
     }
@@ -289,6 +313,11 @@ mod tests {
         assert_eq!(
             AudioFormat::from_mime_type("audio/ogg; codecs=opus"),
             Some(AudioFormat::Ogg)
+        );
+        // `audio/wave` is an alias for WAV alongside `audio/wav` / `audio/x-wav`.
+        assert_eq!(
+            AudioFormat::from_mime_type("audio/wave"),
+            Some(AudioFormat::Wav)
         );
         assert_eq!(AudioFormat::from_mime_type("image/jpeg"), None);
     }

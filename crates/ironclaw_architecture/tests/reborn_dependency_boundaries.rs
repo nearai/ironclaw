@@ -1297,6 +1297,68 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
 }
 
 #[test]
+fn reborn_openai_compat_routes_do_not_depend_on_v1_gateway_or_legacy_streams() {
+    let forbidden = [
+        ForbiddenUse {
+            pattern: "src/channels/web",
+            reason: "OpenAI-compatible Reborn routes must not route through v1 gateway handlers",
+            exempt: None,
+        },
+        ForbiddenUse {
+            pattern: "crate::channels::web",
+            reason: "OpenAI-compatible Reborn routes must not import v1 gateway modules",
+            exempt: None,
+        },
+        ForbiddenUse {
+            pattern: "ironclaw::channels::web",
+            reason: "OpenAI-compatible Reborn routes must not import v1 gateway modules",
+            exempt: None,
+        },
+        ForbiddenUse {
+            pattern: "GatewayState",
+            reason: "OpenAI-compatible Reborn routes must not depend on v1 gateway state",
+            exempt: None,
+        },
+        ForbiddenUse {
+            pattern: "SseManager",
+            reason: "OpenAI-compatible Reborn streaming must use projection-stream ports, not raw legacy SSE streams",
+            exempt: None,
+        },
+        ForbiddenUse {
+            pattern: "AppEvent",
+            reason: "OpenAI-compatible Reborn streaming must translate ProductProjectionItem state, not raw legacy AppEvent streams",
+            exempt: None,
+        },
+        ForbiddenUse {
+            pattern: "IncomingMessage",
+            reason: "OpenAI-compatible Reborn routes must enter through ProductWorkflow, not legacy channel ingress",
+            exempt: None,
+        },
+        ForbiddenUse {
+            pattern: "get_or_create_assistant_conversation",
+            reason: "OpenAI-compatible Reborn retrieve/cancel must use opaque refs and projection readers, not legacy conversation reconstruction",
+            exempt: None,
+        },
+        ForbiddenUse {
+            pattern: "ConversationManager",
+            reason: "OpenAI-compatible Reborn routes must not reconstruct legacy conversations directly",
+            exempt: None,
+        },
+    ];
+
+    let root = workspace_root();
+    let compat_src = root.join("crates/ironclaw_reborn_openai_compat/src");
+    let mut violations = Vec::new();
+    collect_forbidden_uses(&compat_src, &root, &forbidden, &mut violations);
+
+    assert!(
+        violations.is_empty(),
+        "Reborn OpenAI-compatible routes must stay ProductWorkflow/projection-port backed and independent of v1 gateway handlers, legacy SSE/AppEvent streams, and legacy conversation reconstruction:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn reborn_product_auth_contract_stays_reborn_native() {
     let forbidden = [
         ForbiddenUse {

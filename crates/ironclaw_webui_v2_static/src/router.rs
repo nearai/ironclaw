@@ -358,6 +358,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spa_document_csp_allowlist_is_locked() {
+        // The SPA loads React / Tailwind / fonts from CDNs at runtime, so
+        // the document CSP carries a deliberate allowlist. Lock its exact
+        // shape (security-parity 03 row 3b): a regression that added
+        // `unsafe-eval`, allowed `'unsafe-inline'` scripts, or widened the
+        // CDN origin set must fail here, not ship silently.
+        let app = static_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(response.status(), StatusCode::OK);
+        let csp = response
+            .headers()
+            .get(axum::http::header::CONTENT_SECURITY_POLICY)
+            .expect("CSP header on SPA shell")
+            .to_str()
+            .expect("CSP ASCII")
+            .to_string();
+
+        // The exact documented `script-src` CDN origins — no more, no less.
+        for origin in [
+            "https://esm.sh",
+            "https://cdn.jsdelivr.net",
+            "https://cdnjs.cloudflare.com",
+        ] {
+            assert!(
+                csp.contains(origin),
+                "document CSP must allow CDN script origin `{origin}`; got `{csp}`",
+            );
+        }
+        assert!(
+            csp.contains("'nonce-"),
+            "document `script-src` must carry a per-request nonce; got `{csp}`",
+        );
+        assert!(
+            csp.contains("object-src 'none'"),
+            "document CSP must keep `object-src 'none'`; got `{csp}`",
+        );
+        // Scripts must NOT be executable via eval or arbitrary inline —
+        // the document relies on the nonce, not `'unsafe-inline'`.
+        assert!(
+            !csp.contains("'unsafe-eval'"),
+            "document CSP must not allow `unsafe-eval`; got `{csp}`",
+        );
+        let script_src = csp
+            .split(';')
+            .map(str::trim)
+            .find(|d| d.starts_with("script-src ") || *d == "script-src")
+            .expect("script-src directive present");
+        assert!(
+            !script_src.contains("'unsafe-inline'"),
+            "document `script-src` must not allow `'unsafe-inline'` (nonce-based); got `{script_src}`",
+        );
+    }
+
+    #[tokio::test]
     async fn wallet_connect_popup_gets_relaxed_csp_and_spa_shell_stays_strict() {
         let app = mount_at_prefix("/v2");
 

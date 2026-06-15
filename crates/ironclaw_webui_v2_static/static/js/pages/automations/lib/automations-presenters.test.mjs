@@ -14,7 +14,7 @@ test("normalizeAutomations keeps only schedule rows and avoids raw schedule text
       {
         automation_id: "daily",
         name: "Daily summary",
-        source: { type: "schedule", cron: "0 9 * * 1-5" },
+        source: { type: "schedule", cron: "0 9 * * 1-5", timezone: "America/New_York" },
         state: "active",
         is_active: true,
         next_run_at: "2026-06-05T16:00:00Z",
@@ -33,8 +33,27 @@ test("normalizeAutomations keeps only schedule rows and avoids raw schedule text
 
   assert.equal(automations.length, 1);
   assert.equal(automations[0].display_name, "Daily summary");
-  assert.equal(automations[0].schedule_label, "Weekdays at 9:00 AM");
+  assert.equal(automations[0].schedule_label, "Weekdays at 9:00 AM (America/New_York)");
+  assert.equal(automations[0].schedule_timezone, "America/New_York");
   assert.equal(automations[0].last_status_label, "Done");
+});
+
+test("normalizeAutomations defaults schedule_timezone to UTC when absent", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "utc-default",
+        name: "UTC default",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "scheduled",
+        is_active: false,
+      },
+    ],
+  });
+
+  assert.equal(automations.length, 1);
+  assert.equal(automations[0].schedule_timezone, "UTC");
+  assert.equal(automations[0].schedule_label, "Every day at 9:00 AM (UTC)");
 });
 
 test("normalizeAutomations handles empty and malformed schedule payloads", () => {
@@ -106,6 +125,21 @@ test("scheduleLabel presents common recurring schedules in friendly language", (
   assert.equal(scheduleLabel("0 24 * * *"), "Custom schedule");
   assert.equal(scheduleLabel("0 0 32 * *"), "Custom schedule");
   assert.equal(scheduleLabel("0 0 * 13 *"), "Custom schedule");
+});
+
+test("scheduleLabel appends timezone suffix when timezone is provided", () => {
+  assert.equal(scheduleLabel("0 9 * * *", "America/New_York"), "Every day at 9:00 AM (America/New_York)");
+  assert.equal(scheduleLabel("0 9 * * MON-FRI", "Europe/London"), "Weekdays at 9:00 AM (Europe/London)");
+  assert.equal(scheduleLabel("0 9 * * 1", "Asia/Tokyo"), "Mondays at 9:00 AM (Asia/Tokyo)");
+  assert.equal(scheduleLabel("0 17 1 * *", "America/Chicago"), "1st day of each month at 5:00 PM (America/Chicago)");
+  assert.equal(scheduleLabel("0 0 9 1 1 * 2027", "UTC"), "Jan 1, 2027 at 9:00 AM (UTC)");
+  // Custom schedule does not append timezone suffix
+  assert.equal(scheduleLabel("*/5 * * * *", "America/New_York"), "Custom schedule");
+  // No timezone argument — no suffix
+  assert.equal(scheduleLabel("0 9 * * *"), "Every day at 9:00 AM");
+  // Null/undefined timezone — no suffix
+  assert.equal(scheduleLabel("0 9 * * *", null), "Every day at 9:00 AM");
+  assert.equal(scheduleLabel("0 9 * * *", undefined), "Every day at 9:00 AM");
 });
 
 test("filterAutomations, sorting, and summary use browser-visible active state", () => {
@@ -250,7 +284,10 @@ test("normalizeAutomations presents bounded recent run history", () => {
   assert.match(automations[0].last_run_label, /Jun 4/);
   assert.equal(automations[0].last_status_label, "Error");
   assert.equal(automations[0].last_status_tone, "danger");
+  // Post-acceptance statuses (running/ok/error) must produce a chat_path.
   assert.equal(automations[0].recent_runs[0].chat_path, "/chat/thread-running");
+  assert.equal(automations[0].recent_runs[1].chat_path, "/chat/thread-error");
+  assert.equal(automations[0].recent_runs[2].chat_path, "/chat/thread-ok");
   assert.equal(automations[0].success_rate_label, "50% visible runs");
   assert.deepEqual(automationSummary(automations), {
     scheduled: 1,
@@ -266,5 +303,81 @@ test("normalizeAutomations presents bounded recent run history", () => {
   assert.deepEqual(
     filterAutomations(automations, "failures").map((automation) => automation.automation_id),
     ["daily"],
+  );
+});
+
+test("normalizeAutomations does not emit chat_path when thread_id is absent/null", () => {
+  // Pre-acceptance and pre-submit-failure runs have no canonical thread; the
+  // backend serializes thread_id as null (or omits it). chat_path must be null
+  // for any run that lacks a thread_id regardless of status.
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "pre-accept",
+        name: "Pre-acceptance run",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "active",
+        next_run_at: "2026-06-06T16:00:00Z",
+        recent_runs: [
+          {
+            status: "error",
+            fire_slot: "2026-06-05T16:00:00Z",
+            submitted_at: "2026-06-05T16:00:01Z",
+            // thread_id absent — pre-submit failure, no canonical thread
+            run_id: "run-pre-accept-error",
+          },
+          {
+            status: "running",
+            fire_slot: "2026-06-05T17:00:00Z",
+            submitted_at: "2026-06-05T17:00:01Z",
+            // thread_id explicitly null — same shape as skip_serializing_if(None)
+            thread_id: null,
+            run_id: "run-pre-accept-running",
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(
+    automations[0].recent_runs[0].chat_path,
+    null,
+    "error run without thread_id must not produce a chat_path",
+  );
+  assert.equal(
+    automations[0].recent_runs[1].chat_path,
+    null,
+    "running run with null thread_id must not produce a chat_path",
+  );
+});
+
+test("normalizeAutomations emits chat_path for any status when thread_id is present", () => {
+  // Once thread_id is set (after fire acceptance), the panel can always link to it
+  // regardless of run status. Replayed fires may also carry a canonical thread_id.
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "accepted",
+        name: "Accepted run",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "active",
+        next_run_at: "2026-06-06T16:00:00Z",
+        recent_runs: [
+          {
+            status: "error",
+            fire_slot: "2026-06-05T16:00:00Z",
+            submitted_at: "2026-06-05T16:00:01Z",
+            thread_id: "550e8400-e29b-41d4-a716-446655440000",
+            run_id: "run-accepted-error",
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(
+    automations[0].recent_runs[0].chat_path,
+    "/chat/550e8400-e29b-41d4-a716-446655440000",
+    "accepted run with thread_id must produce a chat_path",
   );
 });
