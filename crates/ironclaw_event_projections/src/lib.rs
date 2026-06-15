@@ -1374,7 +1374,7 @@ impl ReplayEventProjectionService {
                         )),
                     });
                 }
-                if touched.contains(&entry.record.scope.invocation_id) {
+                if entry_touches_invocations(entry, touched) {
                     state.apply(entry);
                 }
                 if entry.cursor >= until {
@@ -1389,6 +1389,17 @@ impl ReplayEventProjectionService {
         }
         Ok(state)
     }
+}
+
+fn entry_touches_invocations(
+    entry: &EventLogEntry<RuntimeEvent>,
+    touched: &HashSet<InvocationId>,
+) -> bool {
+    touched.contains(&entry.record.scope.invocation_id)
+        || entry
+            .record
+            .parent_invocation_id
+            .is_some_and(|parent| touched.contains(&parent))
 }
 
 impl std::fmt::Debug for ReplayEventProjectionService {

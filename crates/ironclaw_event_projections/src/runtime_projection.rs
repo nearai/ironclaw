@@ -228,6 +228,7 @@ fn apply_capability_activity_event(
     entry: &EventLogEntry<RuntimeEvent>,
 ) {
     let event = &entry.record;
+    apply_loop_terminal_to_child_activities(activities, entry);
     let existing = activities.get(&event.scope.invocation_id);
     let Some(status) = capability_activity_status_for_event(
         event.kind,
@@ -271,6 +272,52 @@ fn apply_capability_activity_event(
     }
     activity.last_cursor = entry.cursor;
     activity.updated_at = event.timestamp;
+}
+
+fn apply_loop_terminal_to_child_activities(
+    activities: &mut HashMap<InvocationId, CapabilityActivityProjection>,
+    entry: &EventLogEntry<RuntimeEvent>,
+) {
+    let event = &entry.record;
+    let Some(status) = child_activity_status_for_loop_terminal(event.kind) else {
+        return;
+    };
+    let run_id = event.scope.invocation_id;
+    let sanitized_error_kind = event.error_kind.clone().map(sanitize_error_kind);
+    for activity in activities.values_mut() {
+        if activity.run_id != Some(run_id) || activity_is_terminal(activity.status) {
+            continue;
+        }
+        activity.status = status;
+        if status == CapabilityActivityStatus::Completed {
+            activity.error_kind = None;
+        } else if sanitized_error_kind.is_some() {
+            activity.error_kind = sanitized_error_kind.clone();
+        }
+        activity.last_cursor = entry.cursor;
+        activity.updated_at = event.timestamp;
+    }
+}
+
+fn child_activity_status_for_loop_terminal(
+    kind: RuntimeEventKind,
+) -> Option<CapabilityActivityStatus> {
+    match kind {
+        RuntimeEventKind::LoopCompleted => Some(CapabilityActivityStatus::Completed),
+        RuntimeEventKind::LoopCancelled | RuntimeEventKind::LoopFailed => {
+            Some(CapabilityActivityStatus::Failed)
+        }
+        _ => None,
+    }
+}
+
+fn activity_is_terminal(status: CapabilityActivityStatus) -> bool {
+    matches!(
+        status,
+        CapabilityActivityStatus::Completed
+            | CapabilityActivityStatus::Failed
+            | CapabilityActivityStatus::Killed
+    )
 }
 
 fn capability_activity_projection_for_entry(

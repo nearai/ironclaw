@@ -1052,6 +1052,81 @@ async fn replay_projection_folds_process_completed_into_completed_capability_act
 }
 
 #[tokio::test]
+async fn replay_projection_marks_capability_activity_failed_when_loop_is_cancelled() {
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let service = ReplayEventProjectionService::new(Arc::clone(&log));
+    let run_invocation = InvocationId::new();
+    let run_scope = scope_for_thread_with_invocation(
+        ThreadId::new("thread-tool-activity-cancelled").unwrap(),
+        run_invocation,
+    );
+    let tool_invocation = InvocationId::new();
+    let mut tool_scope = run_scope.clone();
+    tool_scope.invocation_id = tool_invocation;
+    let capability = capability_id();
+
+    let mut requested = RuntimeEvent::capability_activity_requested(tool_scope, capability.clone());
+    requested.parent_invocation_id = Some(run_invocation);
+    let started = log.append(requested).await.unwrap();
+    log.append(RuntimeEvent::loop_cancelled(
+        run_scope.clone(),
+        capability.clone(),
+    ))
+    .await
+    .unwrap();
+
+    let snapshot = service
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&run_scope),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.runs.len(), 1);
+    assert_eq!(snapshot.runs[0].status, RunProjectionStatus::Cancelled);
+    assert_eq!(snapshot.capability_activities.len(), 1);
+    assert_eq!(
+        snapshot.capability_activities[0].invocation_id,
+        tool_invocation
+    );
+    assert_eq!(
+        snapshot.capability_activities[0].run_id,
+        Some(run_invocation)
+    );
+    assert_eq!(
+        snapshot.capability_activities[0].status,
+        CapabilityActivityStatus::Failed
+    );
+    assert_eq!(snapshot.capability_activities[0].capability_id, capability);
+
+    let replay = service
+        .updates(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&run_scope),
+            after: Some(ProjectionCursor::for_scope(
+                ProjectionScope::from_resource_scope(&run_scope),
+                started.cursor,
+            )),
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(replay.runs.len(), 1);
+    assert_eq!(replay.runs[0].status, RunProjectionStatus::Cancelled);
+    assert_eq!(replay.capability_activities.len(), 1);
+    assert_eq!(
+        replay.capability_activities[0].invocation_id,
+        tool_invocation
+    );
+    assert_eq!(
+        replay.capability_activities[0].status,
+        CapabilityActivityStatus::Failed
+    );
+}
+
+#[tokio::test]
 async fn replay_projection_snapshot_bounds_capability_activity_window_to_request_limit() {
     let log = Arc::new(InMemoryDurableEventLog::new());
     let service = ReplayEventProjectionService::new(Arc::clone(&log));
