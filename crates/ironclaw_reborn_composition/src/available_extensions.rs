@@ -1603,13 +1603,10 @@ mod tests {
         let mut asked_effectful = BTreeSet::new();
 
         for capability in &github.package.manifest.capabilities {
-            let has_effectful_boundary = capability.effects.iter().any(|effect| {
-                matches!(
-                    effect,
-                    EffectKind::DispatchCapability | EffectKind::ExternalWrite
-                )
+            let requires_explicit_approval = capability.effects.iter().any(|effect| {
+                effect.is_write() || matches!(effect, EffectKind::DispatchCapability)
             });
-            if has_effectful_boundary {
+            if requires_explicit_approval {
                 assert_eq!(
                     capability.default_permission,
                     PermissionMode::Ask,
