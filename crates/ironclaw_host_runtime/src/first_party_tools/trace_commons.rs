@@ -10,7 +10,7 @@
 
 use std::{
     panic::AssertUnwindSafe,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
 };
 
@@ -588,7 +588,7 @@ pub(super) async fn dispatch_profile_token(
     );
     match mint_profile_attribution_token_for_scope(Some(scope.as_str())).await {
         Ok(token) => match persist_profile_token(&scope, &token) {
-            Ok(path) => Ok(format_profile_token(&path, &token)),
+            Ok(_path) => Ok(format_profile_token(&token)),
             Err(error) => {
                 tracing::debug!(%error, "failed to persist Trace Commons profile token");
                 Ok(profile_token_error_value(
@@ -649,33 +649,39 @@ fn persist_profile_token(scope: &str, token: &ProfileAttributionToken) -> std::i
     Ok(path)
 }
 
-fn format_profile_token(token_path: &Path, token: &ProfileAttributionToken) -> Value {
+fn format_profile_token(token: &ProfileAttributionToken) -> Value {
     json!({
         "minted": true,
         "token_type": "Bearer",
         // The raw access_token is deliberately NOT included here — it is a
-        // bearer credential and must not enter the model transcript. It is
-        // written to `token_file` (0600) for out-of-band manual use.
-        "token_file": token_path.display().to_string(),
+        // bearer credential and must not enter the model transcript. Neither is
+        // the host path of the file it was written to: an absolute/local path
+        // is a host detail that must not cross a model/user-visible surface.
+        // The token is persisted (0600) for out-of-band retrieval by a
+        // bearer-auth UI/CLI; `token_delivery` is an opaque marker for that.
+        "token_delivery": "local_private_profile_token_file",
         "expires_at": token.expires_at.as_ref().map(|dt| dt.to_rfc3339()),
         "expires_in": token.expires_in,
         "consent_scope": "public_attribution",
         "allowed_uses": [],
         "profile_url": "https://tracecommons.ai/profile",
         "message": "Prefer asking the agent to set your public profile directly with a pseudonymous handle. \
-    For browser/manual setup only, the short-lived profile token was written to the file shown in token_file; \
-    open that file and paste its contents into https://tracecommons.ai/profile without a Bearer prefix. \
+    For browser/manual setup only, use the local Trace Commons UI or CLI to open the private profile-token \
+    file, then paste its contents into https://tracecommons.ai/profile without a Bearer prefix. \
     The token is not shown here because it is a credential and must not appear in the conversation."
     })
 }
 
 fn profile_token_error_value(error: String) -> Value {
-    let (error_code, message) = if error.contains("not enrolled in Trace Commons")
-        || error.contains("could not read policy")
-    {
+    let (error_code, message) = if error.contains("not enrolled in Trace Commons") {
         (
             "NotEnrolled",
             "Trace Commons enrollment was not found for this user. Onboard with the operator invite link first.",
+        )
+    } else if error.contains("could not read policy") {
+        (
+            "PolicyReadFailed",
+            "Could not read local Trace Commons enrollment state; the policy file may be unreadable or corrupt.",
         )
     } else if error.contains("issuer URL is not configured") {
         (
@@ -713,10 +719,10 @@ pub(super) async fn dispatch_profile_set(
     let input = parse_profile_set_input(&request.input)?;
 
     // Consent gate: publishing/updating the public community profile is a
-    // separate public-attribution opt-in, and this capability is exempt from
-    // approval gates in local-dev policy — so the hard invariant lives here,
-    // mirroring dispatch_onboard. Never reach the network without explicit
-    // per-conversation confirmation.
+    // separate public-attribution opt-in. The runtime approval gate is the
+    // primary user-controlled consent boundary (profile_set is NOT exempt and
+    // is registered PermissionMode::Ask); this input check is defense-in-depth.
+    // Never reach the network without explicit per-conversation confirmation.
     if !input.confirmed {
         return Ok(json!({
             "updated": false,
@@ -763,12 +769,15 @@ fn profile_set_success_value(input: &ProfileSetToolInput) -> Value {
 }
 
 fn profile_set_error_value(error: String) -> Value {
-    let (error_code, message) = if error.contains("not enrolled in Trace Commons")
-        || error.contains("could not read policy")
-    {
+    let (error_code, message) = if error.contains("not enrolled in Trace Commons") {
         (
             "NotEnrolled",
             "Trace Commons enrollment was not found for this user. Onboard with the operator invite link first.",
+        )
+    } else if error.contains("could not read policy") {
+        (
+            "PolicyReadFailed",
+            "Could not read local Trace Commons enrollment state; the policy file may be unreadable or corrupt.",
         )
     } else if error.contains("community profile handle") || error.contains("community profile bio")
     {
@@ -1145,8 +1154,7 @@ mod tests {
             expires_at: Some(expires_at),
             expires_in: Some(300),
         };
-        let token_path = std::path::Path::new("/some/scope/profile_token.jwt");
-        let v = format_profile_token(token_path, &token);
+        let v = format_profile_token(&token);
         assert_eq!(v["minted"], json!(true));
         assert_eq!(v["token_type"], json!("Bearer"));
         // The raw bearer credential must NOT appear in the model-visible result
@@ -1161,11 +1169,17 @@ mod tests {
                 .contains("eyJ.profile.token"),
             "raw token must not appear anywhere in the serialized output"
         );
-        // The token is delivered out-of-band via a private file path instead.
+        // The token is delivered out-of-band via an opaque marker — never a
+        // host filesystem path (an absolute/local path is a host detail that
+        // must not cross a model/user-visible surface).
         assert_eq!(
-            v["token_file"],
-            json!("/some/scope/profile_token.jwt"),
-            "the out-of-band token file path is surfaced instead of the token"
+            v["token_delivery"],
+            json!("local_private_profile_token_file"),
+            "out-of-band delivery is signaled by an opaque marker, not a path"
+        );
+        assert!(
+            v.get("token_file").is_none(),
+            "no host path field may be present on the model-visible result"
         );
         assert_eq!(v["consent_scope"], json!("public_attribution"));
         let message = v["message"].as_str().unwrap();
@@ -1174,8 +1188,8 @@ mod tests {
             "message must prefer direct agent profile setup"
         );
         assert!(
-            message.contains("token_file"),
-            "message must point the user at the out-of-band token file"
+            message.contains("local Trace Commons UI or CLI"),
+            "message must point the user at the out-of-band retrieval path"
         );
     }
 

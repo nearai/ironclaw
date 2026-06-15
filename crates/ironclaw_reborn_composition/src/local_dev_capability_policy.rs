@@ -485,8 +485,18 @@ mod tests {
                 .ask_destructive
                 .contains(&EffectKind::SpawnProcess)
         );
+        // onboard is exempt (it runs its own in-turn confirmed=true consent
+        // before the network POST); profile_set is deliberately NOT exempt —
+        // publishing a public community profile must hit the runtime approval
+        // gate, with its model-controlled confirmed=true only as defense-in-depth.
         assert!(
             policy
+                .approval_gate_exempt_capabilities()
+                .iter()
+                .any(|capability| capability.as_str() == "builtin.trace_commons.onboard")
+        );
+        assert!(
+            !policy
                 .approval_gate_exempt_capabilities()
                 .iter()
                 .any(|capability| capability.as_str() == "builtin.trace_commons.profile_set")
@@ -542,10 +552,14 @@ mod tests {
         let onboard = policy
             .grant(&CapabilityId::new("builtin.trace_commons.onboard").expect("capability id"))
             .expect("trace_commons.onboard grant");
+        // onboard persists device-key material (Ed25519 keypair + policy.json),
+        // so its grant carries the local filesystem read/write effects too.
         assert_eq!(
             onboard.effects,
             vec![
                 EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
                 EffectKind::Network,
                 EffectKind::ExternalWrite,
             ]
@@ -568,25 +582,45 @@ mod tests {
             assert_eq!(grant.mounts, LocalDevMountProfile::Ambient);
             assert_eq!(grant.network, LocalDevNetworkProfile::Default);
         }
-        for capability in [
-            "builtin.trace_commons.profile_token",
-            "builtin.trace_commons.profile_set",
-        ] {
-            let grant = policy
-                .grant(&CapabilityId::new(capability).expect("capability id"))
-                .expect("trace_commons profile grant");
-            assert_eq!(
-                grant.effects,
-                vec![
-                    EffectKind::DispatchCapability,
-                    EffectKind::ReadFilesystem,
-                    EffectKind::Network,
-                    EffectKind::ExternalWrite,
-                ]
-            );
-            assert_eq!(grant.mounts, LocalDevMountProfile::Ambient);
-            assert_eq!(grant.network, LocalDevNetworkProfile::LocalDevWildcard);
-        }
+        // profile_token writes profile_token.jwt (0600), so its grant carries
+        // WriteFilesystem; profile_set only reads policy + posts, so it does not.
+        let profile_token = policy
+            .grant(
+                &CapabilityId::new("builtin.trace_commons.profile_token").expect("capability id"),
+            )
+            .expect("trace_commons.profile_token grant");
+        assert_eq!(
+            profile_token.effects,
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::Network,
+                EffectKind::ExternalWrite,
+            ]
+        );
+        assert_eq!(profile_token.mounts, LocalDevMountProfile::Ambient);
+        assert_eq!(
+            profile_token.network,
+            LocalDevNetworkProfile::LocalDevWildcard
+        );
+        let profile_set = policy
+            .grant(&CapabilityId::new("builtin.trace_commons.profile_set").expect("capability id"))
+            .expect("trace_commons.profile_set grant");
+        assert_eq!(
+            profile_set.effects,
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::Network,
+                EffectKind::ExternalWrite,
+            ]
+        );
+        assert_eq!(profile_set.mounts, LocalDevMountProfile::Ambient);
+        assert_eq!(
+            profile_set.network,
+            LocalDevNetworkProfile::LocalDevWildcard
+        );
     }
 
     #[test]

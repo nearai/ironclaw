@@ -1714,10 +1714,10 @@ impl HostRuntimeCapabilityHarness {
             vec![
                 EffectKind::DispatchCapability,
                 EffectKind::ReadFilesystem,
-                // onboard + profile_token persist device-key material
-                // (Ed25519 keypair + policy.json), so the harness allow-set
-                // must grant WriteFilesystem or those capabilities are filtered
-                // out of the model-visible surface.
+                // onboard persists device-key material (Ed25519 keypair +
+                // policy.json) and profile_token writes profile_token.jwt, so
+                // the harness allow-set must grant WriteFilesystem or those
+                // capabilities are filtered out of the model-visible surface.
                 EffectKind::WriteFilesystem,
                 EffectKind::Network,
                 EffectKind::ExternalWrite,
@@ -1725,9 +1725,10 @@ impl HostRuntimeCapabilityHarness {
             Vec::new(),
             ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
             UserId::new("reborn-e2e-trace-commons-user")?,
-            // onboard is PermissionMode::Ask — like the skill/trigger
-            // harnesses, the yolo runtime policy auto-approves it so the
-            // scripted run is not gated.
+            // The Trace Commons write/network capabilities are
+            // PermissionMode::Ask (onboard, profile_token, profile_set) — like
+            // the skill/trigger harnesses, the yolo runtime policy
+            // auto-approves them so the scripted run is not gated.
             HostRuntimeHarnessOptions::new(
                 MountView::default(),
                 Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
