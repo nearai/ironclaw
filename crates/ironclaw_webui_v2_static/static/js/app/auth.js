@@ -253,6 +253,8 @@ export function useAuthSession() {
     // identity-change effect above when `session` drops to null.
   }, []);
 
+  const hasOperatorConfig = Boolean(session?.capabilities?.operator_webui_config);
+
   return {
     token,
     profile: session
@@ -265,7 +267,8 @@ export function useAuthSession() {
     setError,
     isChecking: isExchanging || isSessionChecking,
     isAuthenticated: Boolean(token),
-    isAdmin: Boolean(session?.capabilities?.operator_webui_config),
+    hasOperatorConfig,
+    isAdmin: hasOperatorConfig,
     signIn,
     signOut,
   };

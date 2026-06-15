@@ -8,7 +8,7 @@ import { TeeShield } from "./tee-shield.js";
 
 const DOCS_URL = "https://docs.ironclaw.com";
 
-export function PageHeader({ threadsState, onToggleSidebar, isAdmin = false }) {
+export function PageHeader({ threadsState, onToggleSidebar, hasOperatorConfig = false }) {
   const t = useT();
   const location = useLocation();
 
@@ -89,7 +89,7 @@ export function PageHeader({ threadsState, onToggleSidebar, isAdmin = false }) {
 
       <div className="ml-auto flex shrink-0 items-center gap-1">
         <${TeeShield} />
-        ${isAdmin &&
+        ${hasOperatorConfig &&
         html`
           <${NavLink}
             to="/logs"

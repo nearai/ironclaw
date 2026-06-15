@@ -79,6 +79,7 @@ function AuthenticatedLayout({ auth }) {
         token=${auth.token}
         profile=${auth.profile}
         isChecking=${auth.isChecking}
+        hasOperatorConfig=${auth.hasOperatorConfig}
         isAdmin=${auth.isAdmin}
         onSignOut=${auth.signOut}
       />
@@ -94,7 +95,7 @@ function AdminRoute({ auth }) {
 }
 
 function OperatorRoute({ auth, children }) {
-  if (!auth.isAdmin) {
+  if (!auth.hasOperatorConfig) {
     return html`<${Navigate} to=${defaultRoute} replace />`;
   }
   return children;
