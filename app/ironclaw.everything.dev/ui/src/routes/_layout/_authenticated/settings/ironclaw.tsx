@@ -19,8 +19,10 @@ function IronclawSettings() {
   const { status: connectionStatus, refetch: refetchStatus } = useIronclawStatus();
   const [tunnelUrl, setTunnelUrl] = useState("");
   const [apiToken, setApiToken] = useState("");
+  const [tokenConfigured, setTokenConfigured] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
   const [testingConnection, setTestingConnection] = useState(false);
   const [hasSettings, setHasSettings] = useState(false);
   const [connectionMode, setConnectionMode] = useState<"local" | "hosted">(getConnectionMode());
@@ -38,7 +40,7 @@ function IronclawSettings() {
       .get()
       .then((res) => {
         setTunnelUrl(res.tunnelUrl);
-        setApiToken(res.apiToken);
+        setTokenConfigured(res.hasToken ?? false);
         setHasSettings(true);
       })
       .catch(() => {
@@ -65,9 +67,10 @@ function IronclawSettings() {
     try {
       await apiClient.ironclaw.settings.update({
         tunnelUrl,
-        apiToken,
+        ...(apiToken ? { apiToken } : {}),
       });
       setHasSettings(true);
+      if (apiToken) setTokenConfigured(true);
       toast.success("IronClaw settings saved");
     } catch (err: any) {
       toast.error(err.message ?? "Failed to save settings");
@@ -76,7 +79,26 @@ function IronclawSettings() {
     }
   };
 
+  const handleDisconnect = async () => {
+    setDisconnecting(true);
+    try {
+      await apiClient.ironclaw.settings.delete();
+      setTunnelUrl("");
+      setApiToken("");
+      setTokenConfigured(false);
+      setHasSettings(false);
+      refetchStatus();
+      toast.success("Disconnected from tunnel");
+    } catch (err: any) {
+      toast.error(err.message ?? "Failed to disconnect");
+    } finally {
+      setDisconnecting(false);
+    }
+  };
+
   const isConnected = connectionStatus === "connected";
+  const canTest = tunnelUrl && (apiToken || tokenConfigured);
+  const canSave = tunnelUrl && (apiToken || tokenConfigured);
 
   return (
     <div className="space-y-6">
@@ -171,11 +193,15 @@ function IronclawSettings() {
                 type="password"
                 value={apiToken}
                 onChange={(e) => setApiToken(e.target.value)}
-                placeholder="The bearer token your binary expects"
-                required
+                placeholder={
+                  tokenConfigured ? "Token is configured" : "The bearer token your binary expects"
+                }
+                required={!tokenConfigured}
               />
               <p className="text-xs text-muted-foreground">
-                Must match the bearer token configured on your Reborn binary.
+                {tokenConfigured
+                  ? "Token is already configured. Leave empty to keep the existing token."
+                  : "Must match the bearer token configured on your Reborn binary."}
               </p>
             </div>
           </Card>
@@ -187,10 +213,26 @@ function IronclawSettings() {
               </p>
             )}
             <div className="flex items-center gap-2 ml-auto">
+              {hasSettings && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={disconnecting}
+                  onClick={handleDisconnect}
+                  className="text-destructive hover:text-destructive"
+                >
+                  {disconnecting ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Cloud size={14} />
+                  )}
+                  {disconnecting ? "Disconnecting..." : "Disconnect"}
+                </Button>
+              )}
               <Button
                 type="button"
                 variant="outline"
-                disabled={testingConnection || !tunnelUrl || !apiToken}
+                disabled={testingConnection || !canTest}
                 onClick={handleTestConnection}
               >
                 {testingConnection ? (
@@ -200,7 +242,7 @@ function IronclawSettings() {
                 )}
                 {testingConnection ? "Testing..." : "Test connection"}
               </Button>
-              <Button type="submit" disabled={saving || !tunnelUrl || !apiToken}>
+              <Button type="submit" disabled={saving || !canSave}>
                 {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save size={14} />}
                 {saving ? "Saving..." : "Save settings"}
               </Button>

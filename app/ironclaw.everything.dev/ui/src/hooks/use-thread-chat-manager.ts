@@ -19,7 +19,9 @@ function notify(threadId: string) {
   const session = sessions.get(threadId);
   if (session) {
     for (const listener of session.listeners) {
-      try { listener(); } catch {}
+      try {
+        listener();
+      } catch {}
     }
   }
 }
@@ -38,18 +40,15 @@ async function connectStream(threadId: string, content: string) {
   session.pendingApprovals = [];
 
   try {
-    const response = await fetch(
-      `/api/conversation/threads/${encodeURIComponent(threadId)}/chat`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          threadId,
-          messages: [{ id: crypto.randomUUID(), role: "user" as const, content }],
-        }),
-        signal: ac.signal,
-      },
-    );
+    const response = await fetch(`/api/conversation/threads/${encodeURIComponent(threadId)}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        threadId,
+        messages: [{ id: crypto.randomUUID(), role: "user" as const, content }],
+      }),
+      signal: ac.signal,
+    });
 
     if (!response.ok) {
       const text = await response.text().catch(() => "");
@@ -79,7 +78,8 @@ async function connectStream(threadId: string, content: string) {
         const trimmed = line.trim();
         if (!trimmed.startsWith("data: ")) continue;
         try {
-          const chunk: StreamChunk & { name?: string; value?: unknown; runId?: string } = JSON.parse(trimmed.slice(6));
+          const chunk: StreamChunk & { name?: string; value?: unknown; runId?: string } =
+            JSON.parse(trimmed.slice(6));
           handleChunk(threadId, chunk);
         } catch {}
       }

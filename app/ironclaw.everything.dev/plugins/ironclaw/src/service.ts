@@ -105,7 +105,8 @@ function mapThreadEntry(m: any): z.infer<typeof TimelineEntrySchema> {
     const lower = kind.toLowerCase();
     if (lower === "user" || lower === "user_message") return "user";
     if (lower === "system") return "system";
-    if (lower === "assistant" || lower === "assistant_message" || lower === "tool_result") return "assistant";
+    if (lower === "assistant" || lower === "assistant_message" || lower === "tool_result")
+      return "assistant";
     if (m.actor_id ?? m.actorId) return "user";
     return "assistant";
   })();

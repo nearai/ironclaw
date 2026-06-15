@@ -45,7 +45,9 @@ export function useThreadChat({ threadId, initialMessages }: UseThreadChatOption
   }, [threadId, initialMessages]);
 
   useEffect(() => {
-    return () => { threadChatManager.destroy(threadId); };
+    return () => {
+      threadChatManager.destroy(threadId);
+    };
   }, [threadId]);
 
   const resolveGate = useCallback(
@@ -74,22 +76,27 @@ export function useThreadChat({ threadId, initialMessages }: UseThreadChatOption
   const copyConversation = useCallback(async () => {
     const session = threadChatManager.get(threadId);
     if (!session) return;
-    const text = session.messages.map((msg) => {
-      const role = msg.role === "user" ? "User" : "Assistant";
-      const textParts: string[] = [];
-      const toolParts: string[] = [];
-      for (const p of msg.parts) {
-        if (p.type === "text") {
-          textParts.push(p.content);
-        } else if (p.type === "tool-call") {
-          toolParts.push(`  Tool: ${p.name}(${p.arguments})`);
-        } else if (p.type === "tool-result") {
-          const summary = typeof p.content === "string" ? p.content.slice(0, 200) : String(p.content).slice(0, 200);
-          toolParts.push(`  ${p.state === "error" ? "Error" : "Result"}: ${summary}`);
+    const text = session.messages
+      .map((msg) => {
+        const role = msg.role === "user" ? "User" : "Assistant";
+        const textParts: string[] = [];
+        const toolParts: string[] = [];
+        for (const p of msg.parts) {
+          if (p.type === "text") {
+            textParts.push(p.content);
+          } else if (p.type === "tool-call") {
+            toolParts.push(`  Tool: ${p.name}(${p.arguments})`);
+          } else if (p.type === "tool-result") {
+            const summary =
+              typeof p.content === "string"
+                ? p.content.slice(0, 200)
+                : String(p.content).slice(0, 200);
+            toolParts.push(`  ${p.state === "error" ? "Error" : "Result"}: ${summary}`);
+          }
         }
-      }
-      return `${role}:\n${[...textParts, ...toolParts].join("\n")}`;
-    }).join("\n\n---\n\n");
+        return `${role}:\n${[...textParts, ...toolParts].join("\n")}`;
+      })
+      .join("\n\n---\n\n");
     await navigator.clipboard.writeText(text);
   }, [threadId]);
 

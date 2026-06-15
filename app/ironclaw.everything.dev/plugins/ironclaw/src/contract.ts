@@ -589,7 +589,7 @@ export const contract = oc.router({
         z.object({
           id: z.string(),
           runId: z.string(),
-      gateRef: z.string().catch(""),
+          gateRef: z.string().catch(""),
           resolution: GateResolutionSchema,
           always: z.boolean().optional(),
         }),

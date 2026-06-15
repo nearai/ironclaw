@@ -98,7 +98,9 @@ export function ChatMessage({ message, isOptimistic, status, verbose }: ChatMess
   const blocks = buildBlocks();
 
   return (
-    <div className={cn("group flex w-full gap-2", isUser ? "justify-end" : "justify-start items-end")}>
+    <div
+      className={cn("group flex w-full gap-2", isUser ? "justify-end" : "justify-start items-end")}
+    >
       {!isUser && (
         <img
           src="/logo.png"

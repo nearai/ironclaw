@@ -94,12 +94,12 @@ const steps: Array<{
         <CommandCopy command='export NEARAI_API_KEY="your-key-here"' />
 
         <p className="text-xs text-muted-foreground">
-            The{" "}
-            <code className="rounded bg-secondary px-1 py-0.5 font-mono text-xs">
-              scripts/bos-dev.sh --local
-            </code>{" "}
-            script in the next step will configure the model provider automatically (defaults to
-            DeepSeek V4 Flash via NEAR AI).
+          The{" "}
+          <code className="rounded bg-secondary px-1 py-0.5 font-mono text-xs">
+            scripts/bos-dev.sh --local
+          </code>{" "}
+          script in the next step will configure the model provider automatically (defaults to
+          DeepSeek V4 Flash via NEAR AI).
         </p>
 
         <div className="rounded-md border border-border bg-muted/50 px-3.5 py-2.5 text-xs text-muted-foreground">

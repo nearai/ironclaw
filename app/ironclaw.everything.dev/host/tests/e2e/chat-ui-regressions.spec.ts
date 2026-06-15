@@ -164,7 +164,11 @@ test.describe("Chat UI regressions", () => {
           });
           return;
         }
-        if (p.includes("conversation.live") || p.includes("threads.streamEvents") || p.includes("streamEvents")) {
+        if (
+          p.includes("conversation.live") ||
+          p.includes("threads.streamEvents") ||
+          p.includes("streamEvents")
+        ) {
           const tid = body?.input?.threadId ?? body?.input?.id ?? "test";
           const sseUrl = `${rebornMock.baseUrl}/api/webchat/v2/threads/${tid}/events?token=${rebornMock.token}`;
           const res = await fetch(sseUrl);

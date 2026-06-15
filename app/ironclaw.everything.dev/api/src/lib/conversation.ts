@@ -65,7 +65,8 @@ function roleFromKind(raw: any): "user" | "assistant" {
   if (role === "user" || role === "assistant") return role;
   const lower = kind.toLowerCase();
   if (lower === "user" || lower === "user_message") return "user";
-  if (lower === "assistant" || lower === "assistant_message" || lower === "tool_result") return "assistant";
+  if (lower === "assistant" || lower === "assistant_message" || lower === "tool_result")
+    return "assistant";
   if (raw.actorId ?? raw.actor_id) return "user";
   return "assistant";
 }

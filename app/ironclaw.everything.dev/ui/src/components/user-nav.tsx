@@ -1,9 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useRouter } from "@tanstack/react-router";
 import { Check, Cloud, Terminal } from "lucide-react";
+import { toast } from "sonner";
 import { useMemo } from "react";
 import type { Organization } from "@/app";
-import { sessionQueryOptions, useAuthClient } from "@/app";
+import { ironclawStatusQueryKey } from "@/hooks/use-ironclaw-status";
+import { sessionQueryOptions, useApiClient, useAuthClient } from "@/app";
 import { OrgSwitcher } from "@/components";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
@@ -50,12 +52,28 @@ export function UserNav() {
     staleTime: 5 * 60 * 1000,
   });
 
-  const nearAvatarUrl = nearProfile?.image?.url
-    ?? (nearProfile?.image?.ipfs_cid
+  const nearAvatarUrl =
+    nearProfile?.image?.url ??
+    (nearProfile?.image?.ipfs_cid
       ? `https://ipfs.near.social/ipfs/${nearProfile.image.ipfs_cid}`
       : null);
 
   const { connectionMode, switchMode } = useConnectionMode();
+  const apiClient = useApiClient();
+
+  const disconnectTunnelMutation = useMutation({
+    mutationFn: async () => {
+      await apiClient.ironclaw.settings.delete();
+    },
+    onSuccess: () => {
+      switchMode("hosted");
+      queryClient.invalidateQueries({ queryKey: ironclawStatusQueryKey });
+      toast.success("Tunnel disconnected");
+    },
+    onError: (err: any) => {
+      toast.error(err.message ?? "Failed to disconnect");
+    },
+  });
 
   const signOutMutation = useMutation({
     mutationFn: async () => {
@@ -115,7 +133,10 @@ export function UserNav() {
           >
             <Avatar className="w-6 h-6">
               {nearAvatarUrl ? (
-                <AvatarImage src={nearAvatarUrl} alt={nearProfile?.name ?? nearAccountId ?? "User"} />
+                <AvatarImage
+                  src={nearAvatarUrl}
+                  alt={nearProfile?.name ?? nearAccountId ?? "User"}
+                />
               ) : null}
               <AvatarFallback className="bg-foreground text-background text-[10px] font-medium">
                 {(nearProfile?.name ?? user.email ?? user.id).charAt(0).toUpperCase()}
@@ -171,6 +192,14 @@ export function UserNav() {
             </div>
             <Terminal size={12} className="shrink-0" />
             Using my own binary
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            onClick={() => disconnectTunnelMutation.mutate()}
+            disabled={disconnectTunnelMutation.isPending}
+            className="gap-2 text-xs cursor-pointer text-destructive focus:text-destructive"
+          >
+            <Terminal size={12} className="shrink-0" />
+            {disconnectTunnelMutation.isPending ? "Disconnecting..." : "Disconnect from tunnel"}
           </DropdownMenuItem>
           <DropdownMenuItem asChild>
             <Link to="/settings">settings</Link>

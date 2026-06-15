@@ -31,7 +31,9 @@ export function serializeIronclawToolResultEnvelope(envelope: IronclawToolResult
   return JSON.stringify(envelope);
 }
 
-export function parseIronclawToolResultEnvelope(content: unknown): IronclawToolResultEnvelope | null {
+export function parseIronclawToolResultEnvelope(
+  content: unknown,
+): IronclawToolResultEnvelope | null {
   if (content == null) return null;
 
   if (isRecord(content)) {
@@ -54,7 +56,11 @@ export function parseIronclawToolResultEnvelope(content: unknown): IronclawToolR
     const parsed = JSON.parse(content);
     if (!isRecord(parsed)) return null;
 
-    if (parsed.version === 1 && typeof parsed.capability_id === "string" && typeof parsed.invocation_id === "string") {
+    if (
+      parsed.version === 1 &&
+      typeof parsed.capability_id === "string" &&
+      typeof parsed.invocation_id === "string"
+    ) {
       return {
         title: typeof parsed.title === "string" ? parsed.title : parsed.capability_id,
         inputSummary: asOptionalText(parsed.input_summary),
@@ -114,19 +120,21 @@ export function restMessageToParts(
     const toolCallId =
       typeof parsed.invocation_id === "string"
         ? parsed.invocation_id
-        : options.toolCallIdFallback ??
+        : (options.toolCallIdFallback ??
           (typeof parsed.capability_id === "string"
             ? parsed.capability_id
             : typeof parsed.title === "string"
               ? parsed.title
-              : "tool-call");
+              : "tool-call"));
     const displayName =
       typeof parsed.title === "string"
         ? parsed.title
         : typeof parsed.capability_id === "string"
           ? parsed.capability_id
           : "unknown";
-    const outputText = asText(parsed.output_preview ?? parsed.output_summary ?? parsed.output ?? "");
+    const outputText = asText(
+      parsed.output_preview ?? parsed.output_summary ?? parsed.output ?? "",
+    );
     const status = typeof parsed.status === "string" ? parsed.status : undefined;
     const isError = status === "failed" || status === "error" || status === "killed";
     const toolOutput = {
@@ -166,9 +174,7 @@ export function restMessageToParts(
   return [{ type: "text" as const, content: trimmed }];
 }
 
-export function messagesToUIMessages(
-  rawMessages: ConversationMessageType[],
-): UIMessage[] {
+export function messagesToUIMessages(rawMessages: ConversationMessageType[]): UIMessage[] {
   const result: UIMessage[] = [];
   let i = 0;
   while (i < rawMessages.length) {
@@ -198,7 +204,11 @@ export function messagesToUIMessages(
     }
 
     const group: ConversationMessageType[] = [];
-    while (i < rawMessages.length && rawMessages[i].role === "assistant" && rawMessages[i].runId === runId) {
+    while (
+      i < rawMessages.length &&
+      rawMessages[i].role === "assistant" &&
+      rawMessages[i].runId === runId
+    ) {
       group.push(rawMessages[i]);
       i++;
     }
@@ -209,7 +219,9 @@ export function messagesToUIMessages(
       const parts = restMessageToParts("assistant", g.text ?? "", { toolCallIdFallback: g.id });
       const textParts = parts.filter((p): p is MessagePart & { type: "text" } => p.type === "text");
       const toolParts = parts.filter((p) => p.type === "tool-call" || p.type === "tool-result");
-      const otherParts = parts.filter((p) => p.type !== "text" && p.type !== "tool-call" && p.type !== "tool-result");
+      const otherParts = parts.filter(
+        (p) => p.type !== "text" && p.type !== "tool-call" && p.type !== "tool-result",
+      );
 
       if (toolParts.length > 0 || otherParts.length > 0) {
         allParts.push(...toolParts, ...otherParts);

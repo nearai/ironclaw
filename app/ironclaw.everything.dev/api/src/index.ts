@@ -24,6 +24,42 @@ function generateId(): string {
   return `hc_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 }
 
+async function lookupDbCredentials(db: any, tenantId: string) {
+  let tunnelUrl: string | undefined;
+  let apiToken: string | undefined;
+
+  const bindings = await db
+    .select()
+    .from(ironclawScopeBindings)
+    .where(eq(ironclawScopeBindings.tenantId, tenantId));
+  if (bindings.length > 0) {
+    const conns = await db
+      .select()
+      .from(ironclawConnections)
+      .where(eq(ironclawConnections.id, bindings[0].connectionId));
+    if (conns.length > 0) {
+      tunnelUrl = conns[0].tunnelUrl;
+      apiToken = conns[0].apiToken;
+    }
+  }
+
+  if (!tunnelUrl || !apiToken) {
+    const creds = await db
+      .select()
+      .from(tenantCredentials)
+      .where(eq(tenantCredentials.tenantId, tenantId));
+    if (creds.length > 0) {
+      tunnelUrl = creds[0].tunnelUrl;
+      apiToken = creds[0].apiToken;
+    }
+  }
+
+  if (tunnelUrl && apiToken) {
+    return { tunnelUrl, apiToken };
+  }
+  return null;
+}
+
 type Ic = ContractRouterClient<IronclawContract>;
 
 const h0 =
@@ -140,6 +176,40 @@ export default createPlugin.withPlugins<PluginsClient>()({
     const resolveCredentials = builder.middleware(async ({ context, next }) => {
       const tenantId = context.organizationId ?? context.userId;
 
+      // Try DB/local credentials first (user/organization-specific override)
+      if (tenantId && s.db) {
+        try {
+          const localCreds = await lookupDbCredentials(s.db, tenantId);
+          if (localCreds) {
+            let sessionToken = localCreds.apiToken;
+            try {
+              const resp = await fetch(
+                `${localCreds.tunnelUrl.replace(/\/+$/, "")}/api/webchat/v2/operator/access-sessions`,
+                {
+                  method: "POST",
+                  headers: {
+                    Authorization: `Bearer ${localCreds.apiToken}`,
+                    "Content-Type": "application/json",
+                  },
+                  body: JSON.stringify({ tenant_id: tenantId }),
+                  signal: AbortSignal.timeout(10_000),
+                },
+              );
+              if (resp.ok) {
+                const data = (await resp.json()) as { token?: string };
+                if (data.token) sessionToken = data.token;
+              }
+            } catch {}
+            return next({
+              context: { ...context, baseUrl: localCreds.tunnelUrl, apiToken: sessionToken },
+            });
+          }
+        } catch {
+          // DB error, continue to next path
+        }
+      }
+
+      // Host secrets — if set, pass through to plugin
       if (s.secrets?.IRONCLAW_BASE_URL) {
         return next({ context });
       }
@@ -175,76 +245,9 @@ export default createPlugin.withPlugins<PluginsClient>()({
             context: { ...context, baseUrl, apiToken: sessionToken },
           });
         }
-        // No shared binary configured — API key can't be used
         return next({ context });
       }
 
-      // Local binary path: per-user DB lookup
-      if (tenantId && s.db) {
-        try {
-          let tunnelUrl: string | undefined;
-          let apiToken: string | undefined;
-
-          const bindings = await s.db
-            .select()
-            .from(ironclawScopeBindings)
-            .where(eq(ironclawScopeBindings.tenantId, tenantId));
-          if (bindings.length > 0) {
-            const conns = await s.db
-              .select()
-              .from(ironclawConnections)
-              .where(eq(ironclawConnections.id, bindings[0].connectionId));
-            if (conns.length > 0) {
-              tunnelUrl = conns[0].tunnelUrl;
-              apiToken = conns[0].apiToken;
-            }
-          }
-
-          if (!tunnelUrl || !apiToken) {
-            const creds = await s.db
-              .select()
-              .from(tenantCredentials)
-              .where(eq(tenantCredentials.tenantId, tenantId));
-            if (creds.length > 0) {
-              tunnelUrl = creds[0].tunnelUrl;
-              apiToken = creds[0].apiToken;
-            }
-          }
-
-          if (tunnelUrl && apiToken) {
-            let sessionToken = apiToken;
-            try {
-              const resp = await fetch(
-                `${tunnelUrl.replace(/\/+$/, "")}/api/webchat/v2/operator/access-sessions`,
-                {
-                  method: "POST",
-                  headers: {
-                    Authorization: `Bearer ${apiToken}`,
-                    "Content-Type": "application/json",
-                  },
-                  body: JSON.stringify({ tenant_id: tenantId }),
-                  signal: AbortSignal.timeout(10_000),
-                },
-              );
-              if (resp.ok) {
-                const data = (await resp.json()) as { token?: string };
-                if (data.token) sessionToken = data.token;
-              }
-            } catch {
-              // Session mint failed; fall back to operator token
-            }
-            return next({
-              context: {
-                ...context,
-                baseUrl: tunnelUrl,
-                apiToken: sessionToken,
-              },
-            });
-          }
-        } catch {
-          // DB error, continue without credentials
-        }
-      }
       return next({ context });
     });
 
@@ -383,8 +386,8 @@ export default createPlugin.withPlugins<PluginsClient>()({
               throw new ORPCError("UNAUTHORIZED", { message: "No tenant or user context" });
             }
             const db = s.db;
-            // Try new tables first, then fall back to legacy tenant_credentials.
             let tunnelUrl: string | undefined;
+            let hasToken = false;
             let updatedAt: Date | undefined;
             const bindings = await db
               .select()
@@ -397,6 +400,7 @@ export default createPlugin.withPlugins<PluginsClient>()({
                 .where(eq(ironclawConnections.id, bindings[0].connectionId));
               if (conns.length > 0) {
                 tunnelUrl = conns[0].tunnelUrl;
+                hasToken = !!conns[0].apiToken;
                 updatedAt = conns[0].updatedAt;
               }
             }
@@ -407,6 +411,7 @@ export default createPlugin.withPlugins<PluginsClient>()({
                 .where(eq(tenantCredentials.tenantId, tenantId));
               if (creds.length > 0) {
                 tunnelUrl = creds[0].tunnelUrl;
+                hasToken = !!creds[0].apiToken;
                 updatedAt = creds[0].updatedAt;
               }
             }
@@ -415,8 +420,8 @@ export default createPlugin.withPlugins<PluginsClient>()({
             }
             return {
               tunnelUrl,
-              apiToken: "", // Never read back the stored token
-              hasToken: true,
+              apiToken: "",
+              hasToken,
               updatedAt: updatedAt?.toISOString(),
             };
           }),
@@ -429,7 +434,20 @@ export default createPlugin.withPlugins<PluginsClient>()({
                 throw new ORPCError("UNAUTHORIZED", { message: "No tenant or user context" });
               }
               const db = s.db;
-              // Write to both the new tables and the legacy table during migration.
+
+              let apiToken = input.apiToken;
+              if (!apiToken) {
+                const existing = await lookupDbCredentials(db, tenantId);
+                if (existing) {
+                  apiToken = existing.apiToken;
+                }
+              }
+              if (!apiToken) {
+                throw new ORPCError("BAD_REQUEST", {
+                  message: "API token is required when no token is already configured",
+                });
+              }
+
               const connectionId = `conn_${tenantId}`;
               await db
                 .insert(ironclawConnections)
@@ -437,14 +455,14 @@ export default createPlugin.withPlugins<PluginsClient>()({
                   id: connectionId,
                   name: `Default connection for ${tenantId}`,
                   tunnelUrl: input.tunnelUrl,
-                  apiToken: input.apiToken,
+                  apiToken,
                   createdBy: context.userId,
                 })
                 .onConflictDoUpdate({
                   target: ironclawConnections.id,
                   set: {
                     tunnelUrl: input.tunnelUrl,
-                    apiToken: input.apiToken,
+                    apiToken,
                     updatedBy: context.userId,
                   },
                 });
@@ -461,27 +479,48 @@ export default createPlugin.withPlugins<PluginsClient>()({
                     ironclawScopeBindings.agentId,
                     ironclawScopeBindings.projectId,
                   ],
-                  set: { connectionId, createdBy: context.userId },
+                  set: { connectionId },
                 });
-              // Legacy table
               await db
                 .insert(tenantCredentials)
                 .values({
                   tenantId,
                   tunnelUrl: input.tunnelUrl,
-                  apiToken: input.apiToken,
+                  apiToken,
                   updatedBy: context.userId,
                 })
                 .onConflictDoUpdate({
                   target: tenantCredentials.tenantId,
                   set: {
                     tunnelUrl: input.tunnelUrl,
-                    apiToken: input.apiToken,
+                    apiToken,
                     updatedBy: context.userId,
                   },
                 });
               return { success: true };
             }),
+
+          delete: builder.ironclaw.settings.delete.use(requireAuth).handler(async ({ context }) => {
+            const tenantId = context.organizationId ?? context.userId;
+            if (!tenantId) {
+              throw new ORPCError("UNAUTHORIZED", { message: "No tenant or user context" });
+            }
+            const db = s.db;
+            const bindings = await db
+              .select()
+              .from(ironclawScopeBindings)
+              .where(eq(ironclawScopeBindings.tenantId, tenantId));
+            if (bindings.length > 0) {
+              await db
+                .delete(ironclawConnections)
+                .where(eq(ironclawConnections.id, bindings[0].connectionId));
+            }
+            await db
+              .delete(ironclawScopeBindings)
+              .where(eq(ironclawScopeBindings.tenantId, tenantId));
+            await db.delete(tenantCredentials).where(eq(tenantCredentials.tenantId, tenantId));
+            return { success: true };
+          }),
         },
 
         threads: {
@@ -675,13 +714,11 @@ export default createPlugin.withPlugins<PluginsClient>()({
             };
           }),
 
-        live: builder.conversation.live
-          .use(requireAuth)
-          .handler(async () => {
-            throw new ORPCError("BAD_REQUEST", {
-              message: "The live endpoint is deprecated. Use conversation.threadChat instead.",
-            });
-          }),
+        live: builder.conversation.live.use(requireAuth).handler(async () => {
+          throw new ORPCError("BAD_REQUEST", {
+            message: "The live endpoint is deprecated. Use conversation.threadChat instead.",
+          });
+        }),
 
         threadChat: builder.conversation.threadChat
           .use(requireAuth)

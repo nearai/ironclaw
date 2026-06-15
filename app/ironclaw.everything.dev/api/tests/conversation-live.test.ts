@@ -18,9 +18,7 @@ function mockIc(events: any[], timelineData?: any[]) {
           for (const e of events) yield e;
         })(),
       ),
-      getTimeline: vi.fn().mockResolvedValue(
-        timelineData ? { data: timelineData } : { data: [] },
-      ),
+      getTimeline: vi.fn().mockResolvedValue(timelineData ? { data: timelineData } : { data: [] }),
     },
   };
 
@@ -31,7 +29,14 @@ async function collectEvents(
   handler: ReturnType<typeof createThreadChatBridge>,
   input: { threadId: string; messages?: any[] },
 ) {
-  const gen = handler({ input: { threadId: input.threadId, messages: input.messages ?? [{ id: "test-1", role: "user", content: "test" }] }, signal: new AbortController().signal, context: {} });
+  const gen = handler({
+    input: {
+      threadId: input.threadId,
+      messages: input.messages ?? [{ id: "test-1", role: "user", content: "test" }],
+    },
+    signal: new AbortController().signal,
+    context: {},
+  });
   const events: any[] = [];
   for await (const e of gen) events.push(e);
   return events;

@@ -172,7 +172,10 @@ export function setupIronclawApiMock(page: Page, app: RebornAppHost) {
         });
       }
 
-      if (procedure.includes("conversation.getMessages") || procedure.includes("threads.getTimeline")) {
+      if (
+        procedure.includes("conversation.getMessages") ||
+        procedure.includes("threads.getTimeline")
+      ) {
         const input = body?.input ?? {};
         const threadId =
           typeof input?.threadId === "string"
@@ -194,7 +197,10 @@ export function setupIronclawApiMock(page: Page, app: RebornAppHost) {
         });
       }
 
-      if (procedure.includes("conversation.sendMessage") || procedure.includes("threads.sendMessage")) {
+      if (
+        procedure.includes("conversation.sendMessage") ||
+        procedure.includes("threads.sendMessage")
+      ) {
         const input = body?.input ?? {};
         const threadId =
           typeof input?.threadId === "string"
@@ -239,7 +245,11 @@ export function setupIronclawApiMock(page: Page, app: RebornAppHost) {
         });
       }
 
-      if (procedure.includes("conversation.live") || procedure.includes("threads.streamEvents") || procedure.includes("streamEvents")) {
+      if (
+        procedure.includes("conversation.live") ||
+        procedure.includes("threads.streamEvents") ||
+        procedure.includes("streamEvents")
+      ) {
         const input = body?.input ?? {};
         const threadId =
           typeof input?.threadId === "string"
@@ -251,7 +261,9 @@ export function setupIronclawApiMock(page: Page, app: RebornAppHost) {
           status: 200,
           contentType: "text/event-stream",
           body: await (
-            await fetch(`${app.rebornBaseUrl}/api/webchat/v2/threads/${threadId}/events?token=${app.rebornToken}`)
+            await fetch(
+              `${app.rebornBaseUrl}/api/webchat/v2/threads/${threadId}/events?token=${app.rebornToken}`,
+            )
           ).text(),
         });
       }

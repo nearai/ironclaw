@@ -234,11 +234,20 @@ export const contract = oc.router({
         .input(
           z.object({
             tunnelUrl: z.string().url(),
-            apiToken: z.string().min(1),
+            apiToken: z.string().optional(),
           }),
         )
         .output(z.object({ success: z.boolean() }))
         .errors({ UNAUTHORIZED, BAD_REQUEST }),
+
+      delete: oc
+        .route({
+          method: "DELETE",
+          path: "/ironclaw/settings",
+          summary: "Delete ironclaw connection settings",
+        })
+        .output(z.object({ success: z.boolean() }))
+        .errors({ UNAUTHORIZED }),
     },
   },
 
@@ -316,7 +325,6 @@ export const contract = oc.router({
       .input(ThreadApproveInputSchema)
       .output(z.object({ success: z.boolean() }))
       .errors({ UNAUTHORIZED, NOT_FOUND }),
-
   },
 });
 

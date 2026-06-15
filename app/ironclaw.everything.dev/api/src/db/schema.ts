@@ -45,6 +45,7 @@ export const ironclawConnections = pgTable("ironclaw_connections", {
   tunnelUrl: text("tunnel_url").notNull(),
   apiToken: text("api_token").notNull(),
   createdBy: text("created_by"),
+  updatedBy: text("updated_by"),
   createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).defaultNow().notNull(),
 });

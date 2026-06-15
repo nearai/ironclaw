@@ -62,7 +62,11 @@ function ChatArea(props: {
     const loginTicket = params.get("loginTicket");
     if (!loginTicket) return;
     params.delete("loginTicket");
-    window.history.replaceState(null, "", window.location.pathname + (params.toString() ? `?${params}` : ""));
+    window.history.replaceState(
+      null,
+      "",
+      window.location.pathname + (params.toString() ? `?${params}` : ""),
+    );
     apiClient.ironclaw.auth.exchangeLoginTicket({ loginTicket }).catch(() => {});
   }, [apiClient]);
 
@@ -82,7 +86,9 @@ function ChatArea(props: {
       } catch {}
       if (!cancelled) setLoadingInitial(false);
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [fetchThreadMessages]);
 
   if (loadingInitial) {
@@ -95,7 +101,9 @@ function ChatArea(props: {
           verbose={props.verbose}
           onToggleVerbose={props.onToggleVerbose}
         />
-        <ChatMessageList loading><div /></ChatMessageList>
+        <ChatMessageList loading>
+          <div />
+        </ChatMessageList>
       </>
     );
   }
@@ -139,7 +147,19 @@ function ChatAreaCore({
   const showLoading = chat.isLoading || chat.error != null;
 
   const threadState = threadMeta
-    ? { thread: { threadId: threadMeta.threadId, title: threadMeta.title, scope: { tenantId: threadMeta.scope.tenantId, agentId: threadMeta.scope.agentId, projectId: threadMeta.scope.projectId }, createdByActorId: threadMeta.createdByActorId }, messages: [] }
+    ? {
+        thread: {
+          threadId: threadMeta.threadId,
+          title: threadMeta.title,
+          scope: {
+            tenantId: threadMeta.scope.tenantId,
+            agentId: threadMeta.scope.agentId,
+            projectId: threadMeta.scope.projectId,
+          },
+          createdByActorId: threadMeta.createdByActorId,
+        },
+        messages: [],
+      }
     : null;
 
   return (
@@ -161,7 +181,9 @@ function ChatAreaCore({
             size="sm"
             variant="outline"
             className="h-7 shrink-0 border-amber-500/30 bg-amber-500/10 px-2.5 text-xs font-medium text-amber-600 hover:bg-amber-500/20"
-            onClick={() => chat.runId && chat.resolveGate(chat.runId, firstPendingApproval.gateRef, true)}
+            onClick={() =>
+              chat.runId && chat.resolveGate(chat.runId, firstPendingApproval.gateRef, true)
+            }
           >
             Approve
           </Button>
@@ -169,7 +191,9 @@ function ChatAreaCore({
             size="sm"
             variant="outline"
             className="h-7 shrink-0 border-amber-500/30 bg-amber-500/10 px-2.5 text-xs font-medium text-amber-600 hover:bg-amber-500/20"
-            onClick={() => chat.runId && chat.resolveGate(chat.runId, firstPendingApproval.gateRef, false)}
+            onClick={() =>
+              chat.runId && chat.resolveGate(chat.runId, firstPendingApproval.gateRef, false)
+            }
           >
             Deny
           </Button>
@@ -179,11 +203,15 @@ function ChatAreaCore({
       <ChatMessageList
         streamLoading={isBusy}
         empty={initialMessages.length === 0 && !isBusy}
-        emptyMessage={threadMetaError ? "Failed to load thread" : "No messages yet. Send a message to start."}
+        emptyMessage={
+          threadMetaError ? "Failed to load thread" : "No messages yet. Send a message to start."
+        }
       >
-        {chat.messages.filter((m: any) => m.parts.length > 0).map((message: any) => (
-          <ChatMessage key={message.id} message={message} verbose={verbose} />
-        ))}
+        {chat.messages
+          .filter((m: any) => m.parts.length > 0)
+          .map((message: any) => (
+            <ChatMessage key={message.id} message={message} verbose={verbose} />
+          ))}
         {showLoading ? (
           <div className="flex items-end gap-2">
             <img
@@ -202,7 +230,13 @@ function ChatAreaCore({
         ) : null}
       </ChatMessageList>
 
-      <ChatInput onSend={handleSend} onStop={chat.stop} placeholder="Type a message..." isSending={isBusy} attachmentCapabilities={attachmentCapabilities} />
+      <ChatInput
+        onSend={handleSend}
+        onStop={chat.stop}
+        placeholder="Type a message..."
+        isSending={isBusy}
+        attachmentCapabilities={attachmentCapabilities}
+      />
     </>
   );
 }
@@ -292,29 +326,35 @@ function ChatPage() {
   const startX = useRef(0);
   const startWidth = useRef(0);
 
-  const handleResizeStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    isResizing.current = true;
-    startX.current = e.clientX;
-    startWidth.current = sidebarWidth;
+  const handleResizeStart = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      isResizing.current = true;
+      startX.current = e.clientX;
+      startWidth.current = sidebarWidth;
 
-    const onMouseMove = (ev: MouseEvent) => {
-      if (!isResizing.current) return;
-      const delta = ev.clientX - startX.current;
-      const newWidth = Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, startWidth.current + delta));
-      setSidebarWidth(newWidth);
-      if (newWidth <= SIDEBAR_MIN_WIDTH + 20 && !sidebarOpen) setSidebarOpen(true);
-    };
+      const onMouseMove = (ev: MouseEvent) => {
+        if (!isResizing.current) return;
+        const delta = ev.clientX - startX.current;
+        const newWidth = Math.min(
+          SIDEBAR_MAX_WIDTH,
+          Math.max(SIDEBAR_MIN_WIDTH, startWidth.current + delta),
+        );
+        setSidebarWidth(newWidth);
+        if (newWidth <= SIDEBAR_MIN_WIDTH + 20 && !sidebarOpen) setSidebarOpen(true);
+      };
 
-    const onMouseUp = () => {
-      isResizing.current = false;
-      document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup", onMouseUp);
-    };
+      const onMouseUp = () => {
+        isResizing.current = false;
+        document.removeEventListener("mousemove", onMouseMove);
+        document.removeEventListener("mouseup", onMouseUp);
+      };
 
-    document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup", onMouseUp);
-  }, [sidebarWidth, sidebarOpen]);
+      document.addEventListener("mousemove", onMouseMove);
+      document.addEventListener("mouseup", onMouseUp);
+    },
+    [sidebarWidth, sidebarOpen],
+  );
 
   const statusDotClass =
     connectionStatus === "connected"
@@ -391,7 +431,10 @@ function ChatPage() {
                 className="shrink-0 p-1 -m-1 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity touch-manipulation"
                 aria-label="Delete thread"
               >
-                <Trash2 size={12} className="text-muted-foreground/40 hover:text-destructive transition-colors" />
+                <Trash2
+                  size={12}
+                  className="text-muted-foreground/40 hover:text-destructive transition-colors"
+                />
               </button>
             </div>
           ))
@@ -593,9 +636,7 @@ function ChatPage() {
           <div className="flex h-full items-center justify-center px-4">
             <div className="text-center space-y-3">
               <MessageSquare className="mx-auto h-8 w-8 text-muted-foreground" />
-              <p className="text-sm text-muted-foreground">
-                Select a thread or create a new one
-              </p>
+              <p className="text-sm text-muted-foreground">Select a thread or create a new one</p>
               <button
                 type="button"
                 onClick={() => setSheetOpen(true)}

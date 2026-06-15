@@ -210,7 +210,11 @@ function Layout() {
 
           <main
             className={`flex-1 w-full min-h-0 flex flex-col ${pathname !== "/" ? "overflow-y-auto" : "overflow-hidden"}`}
-            style={isAuthenticated && pathname !== "/" ? { paddingBottom: "calc(3.5rem + env(safe-area-inset-bottom, 0px))" } : undefined}
+            style={
+              isAuthenticated && pathname !== "/"
+                ? { paddingBottom: "calc(3.5rem + env(safe-area-inset-bottom, 0px))" }
+                : undefined
+            }
           >
             <Outlet />
           </main>
@@ -218,7 +222,11 @@ function Layout() {
           {pathname !== "/" && (
             <footer
               className="shrink-0 flex justify-center py-6"
-              style={{ paddingBottom: isAuthenticated ? "calc(1.5rem + env(safe-area-inset-bottom, 0px))" : undefined }}
+              style={{
+                paddingBottom: isAuthenticated
+                  ? "calc(1.5rem + env(safe-area-inset-bottom, 0px))"
+                  : undefined,
+              }}
             >
               <a
                 href="https://near.dev"
@@ -250,7 +258,10 @@ function Layout() {
             <nav className="fixed bottom-0 left-0 right-0 sm:hidden border-t border-border bg-card/95 backdrop-blur-sm animate-fade-in z-40">
               <div
                 className="flex items-center justify-around px-1"
-                style={{ paddingTop: "0.375rem", paddingBottom: "calc(0.375rem + env(safe-area-inset-bottom, 0px))" }}
+                style={{
+                  paddingTop: "0.375rem",
+                  paddingBottom: "calc(0.375rem + env(safe-area-inset-bottom, 0px))",
+                }}
               >
                 {visibleItems.map((item) => {
                   const Icon = item.icon;

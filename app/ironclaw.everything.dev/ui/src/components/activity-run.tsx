@@ -48,7 +48,10 @@ function summarizeTools(tools: ToolItem[]): string {
     const name = t.call.name.toLowerCase();
     if (/(grep|search|find|lookup|query)/.test(name)) searches++;
     else if (/(bash|shell|exec|run|command|terminal|spawn|process)/.test(name)) commands++;
-    else if (/(read|file|content|cat|view|open|glob|list|ls|tree|fetch|get|inspect|diff)/.test(name)) files++;
+    else if (
+      /(read|file|content|cat|view|open|glob|list|ls|tree|fetch|get|inspect|diff)/.test(name)
+    )
+      files++;
     else others++;
   }
   const segs: string[] = [];
@@ -100,9 +103,13 @@ function RichResult({ text }: { text: string }) {
     }
   }
 
-  if (Array.isArray(parsed) && parsed.length > 0 && parsed.every(
-    (r): r is Record<string, unknown> => r !== null && typeof r === "object" && !Array.isArray(r),
-  )) {
+  if (
+    Array.isArray(parsed) &&
+    parsed.length > 0 &&
+    parsed.every(
+      (r): r is Record<string, unknown> => r !== null && typeof r === "object" && !Array.isArray(r),
+    )
+  ) {
     const columns = Array.from(
       parsed.reduce((set: Set<string>, row) => {
         Object.keys(row).forEach((k) => set.add(k));
@@ -115,7 +122,10 @@ function RichResult({ text }: { text: string }) {
           <thead>
             <tr>
               {columns.map((col) => (
-                <th key={col} className="border-b border-border/60 bg-muted/50 px-2 py-1 font-semibold text-foreground">
+                <th
+                  key={col}
+                  className="border-b border-border/60 bg-muted/50 px-2 py-1 font-semibold text-foreground"
+                >
                   {col}
                 </th>
               ))}
@@ -125,7 +135,10 @@ function RichResult({ text }: { text: string }) {
             {parsed.map((row, i) => (
               <tr key={i}>
                 {columns.map((col) => (
-                  <td key={col} className="border-b border-border/40 px-2 py-1 text-muted-foreground">
+                  <td
+                    key={col}
+                    className="border-b border-border/40 px-2 py-1 text-muted-foreground"
+                  >
                     {String(row[col] ?? "")}
                   </td>
                 ))}
@@ -168,15 +181,23 @@ function ToolDetailPanel({
     tabs.push({ id: "result", label: "Result", content: <RichResult text={displayText} /> });
   }
   if (envelope?.inputSummary) {
-    tabs.push({ id: "input", label: "Input", content: <p className="text-xs text-muted-foreground/80">{envelope.inputSummary}</p> });
+    tabs.push({
+      id: "input",
+      label: "Input",
+      content: <p className="text-xs text-muted-foreground/80">{envelope.inputSummary}</p>,
+    });
   }
   if (verbose) {
-    tabs.push({ id: "meta", label: "Meta", content: (
-      <div className="space-y-1 text-[10px] text-muted-foreground/50 font-mono">
-        {envelope?.outputKind && <div>Kind: {envelope.outputKind}</div>}
-        {envelope?.truncated && <div className="text-amber-600">Truncated</div>}
-      </div>
-    )});
+    tabs.push({
+      id: "meta",
+      label: "Meta",
+      content: (
+        <div className="space-y-1 text-[10px] text-muted-foreground/50 font-mono">
+          {envelope?.outputKind && <div>Kind: {envelope.outputKind}</div>}
+          {envelope?.truncated && <div className="text-amber-600">Truncated</div>}
+        </div>
+      ),
+    });
   }
 
   const [activeTab, setActiveTab] = useState(tabs[0]?.id ?? null);
@@ -194,7 +215,9 @@ function ToolDetailPanel({
             onClick={() => setActiveTab(tab.id)}
             className={cn(
               "rounded-t-md px-2.5 py-1 font-mono text-[10px]",
-              active?.id === tab.id ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground",
+              active?.id === tab.id
+                ? "bg-muted text-foreground"
+                : "text-muted-foreground hover:text-foreground",
             )}
           >
             {tab.label}
@@ -206,13 +229,7 @@ function ToolDetailPanel({
   );
 }
 
-function ToolRunRow({
-  item,
-  verbose,
-}: {
-  item: ToolItem;
-  verbose?: boolean;
-}) {
+function ToolRunRow({ item, verbose }: { item: ToolItem; verbose?: boolean }) {
   const status = toolStatus(item);
   const dotClass = DOT_STYLE[status] || DOT_STYLE.running;
   const statusWord = STATUS_WORD[status] || "run";
@@ -233,9 +250,17 @@ function ToolRunRow({
     }
   })();
 
-  const detailEnvelope = envelope ?? (inputFromArgs
-    ? { title: item.call.name, inputSummary: inputFromArgs, output: "", outputKind: null as string | null, truncated: false }
-    : null);
+  const detailEnvelope =
+    envelope ??
+    (inputFromArgs
+      ? {
+          title: item.call.name,
+          inputSummary: inputFromArgs,
+          output: "",
+          outputKind: null as string | null,
+          truncated: false,
+        }
+      : null);
 
   const displayName = detailEnvelope?.title ?? item.call.name;
   const hasDetails = !!(resultContent || detailEnvelope?.inputSummary || verbose);
@@ -261,14 +286,13 @@ function ToolRunRow({
           {status === "success" && (
             <CheckCircle2 size={10} className="shrink-0 text-[color:var(--near-green)]" />
           )}
-          {status === "error" && (
-            <AlertCircle size={10} className="shrink-0 text-destructive" />
-          )}
-          {hasDetails && (
-            expanded
-              ? <ChevronDown size={10} className="shrink-0 text-muted-foreground/50" />
-              : <ChevronRight size={10} className="shrink-0 text-muted-foreground/50" />
-          )}
+          {status === "error" && <AlertCircle size={10} className="shrink-0 text-destructive" />}
+          {hasDetails &&
+            (expanded ? (
+              <ChevronDown size={10} className="shrink-0 text-muted-foreground/50" />
+            ) : (
+              <ChevronRight size={10} className="shrink-0 text-muted-foreground/50" />
+            ))}
         </span>
       </button>
       {expanded && hasDetails && (
@@ -282,13 +306,7 @@ function ToolRunRow({
   );
 }
 
-export function ActivityRun({
-  tools,
-  verbose,
-}: {
-  tools: ToolItem[];
-  verbose?: boolean;
-}) {
+export function ActivityRun({ tools, verbose }: { tools: ToolItem[]; verbose?: boolean }) {
   const hasError = tools.some((t) => toolStatus(t) === "error");
   const [expanded, setExpanded] = useState(hasError);
 

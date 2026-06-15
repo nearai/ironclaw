@@ -69,7 +69,15 @@ describe("messagesToUIMessages", () => {
       msg({
         id: "tool-1",
         role: "assistant",
-        text: JSON.stringify({ version: 1, capability_id: "read_file", invocation_id: "inv-1", title: "Read file", output_summary: "content", output_kind: "text", truncated: false }),
+        text: JSON.stringify({
+          version: 1,
+          capability_id: "read_file",
+          invocation_id: "inv-1",
+          title: "Read file",
+          output_summary: "content",
+          output_kind: "text",
+          truncated: false,
+        }),
         runId: "run-1",
         createdAt: "2025-01-01T00:00:00Z",
       }),
@@ -152,9 +160,21 @@ describe("messagesToUIMessages", () => {
   it("preserves submitted (pending) messages instead of filtering them out", () => {
     const result = messagesToUIMessages([
       msg({ id: "user-1", role: "user", text: "hello", runId: null }),
-      msg({ id: "pending-1", role: "user", text: "pending message", status: "submitted", runId: null }),
+      msg({
+        id: "pending-1",
+        role: "user",
+        text: "pending message",
+        status: "submitted",
+        runId: null,
+      }),
       msg({ id: "assistant-1", role: "assistant", text: "reply", runId: "run-1" }),
-      msg({ id: "pending-assistant", role: "assistant", text: "still thinking", status: "submitted", runId: "run-2" }),
+      msg({
+        id: "pending-assistant",
+        role: "assistant",
+        text: "still thinking",
+        status: "submitted",
+        runId: "run-2",
+      }),
     ]);
 
     // All msgs preserved: user-1, pending-1, assistant-1, pending-assistant

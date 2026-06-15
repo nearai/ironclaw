@@ -106,9 +106,7 @@ export function ChatIdentityBar({
             variant="ghost"
             size="icon"
             className={`h-7 w-7 transition-colors ${
-              verbose
-                ? "text-primary bg-primary/10 hover:bg-primary/20"
-                : "text-muted-foreground"
+              verbose ? "text-primary bg-primary/10 hover:bg-primary/20" : "text-muted-foreground"
             }`}
             onClick={onToggleVerbose}
             title={verbose ? "Verbose mode on — click to disable" : "Enable verbose mode"}
