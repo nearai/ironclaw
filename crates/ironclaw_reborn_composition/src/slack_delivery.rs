@@ -60,9 +60,9 @@ const SLACK_API_HOST: &str = "slack.com";
 const SLACK_BOT_TOKEN_HANDLE: &str = "slack_bot_token";
 const SLACK_WORKING_MESSAGE: &str = "Ironclaw is thinking...";
 const SLACK_AUTH_CANCELED_MESSAGE: &str = "Authentication canceled.";
-/// Posted when a run blocks on auth and interactive auth is disabled on Slack
-/// (`SlackFinalReplyDeliverySettings.interactive_auth_enabled == false`).
-const SLACK_AUTH_UNAVAILABLE_MESSAGE: &str = "I can't complete authentication over Slack — connecting an account here would persist credentials from a chat surface. Set it up in the Ironclaw web app, then ask me again here.";
+/// Posted when a run blocks on a credential-entry (non-OAuth) auth challenge:
+/// entering a secret in chat is a security risk, so it must be done in the web app.
+const SLACK_AUTH_UNAVAILABLE_MESSAGE: &str = "Setting this up needs a credential (an API key or token). Sharing one here is a security risk — anything entered in chat is stored in the conversation — so credential-based connections can only be set up in the Ironclaw web app. Connect it there, then ask me again here.";
 const SLACK_DELIVERY_TIMEOUT_MESSAGE: &str =
     "This is taking longer than expected — check the WebUI for the result.";
 const SLACK_DELIVERY_ERROR_MESSAGE: &str =

@@ -415,16 +415,22 @@ fn parse_approval_resolution(
     decision: ApprovalDecision,
     source_trigger: ProductTriggerReason,
 ) -> Result<Option<ProductInboundPayload>, SlackPayloadParseError> {
-    if extra_token.is_some() {
-        return malformed_interaction_noop("approval");
-    }
-
     match gate_ref {
-        Some(gate_ref) => ApprovalResolutionPayload::new(gate_ref, decision)
-            .map(|payload| payload.with_source_trigger(source_trigger))
-            .map(ProductInboundPayload::ApprovalResolution)
-            .map(Some)
-            .map_err(adapter_error_to_payload_error),
+        Some(gate_ref) => {
+            // A well-formed `gate:<ref>` wins even when the user pasted the whole
+            // instruction line (e.g. "approve gate:X or deny gate:X") — the
+            // leading verb + first gate ref are the intent; trailing tokens are
+            // ignored. Reject only a non-gate token followed by extra text, which
+            // is a genuine typo rather than a targeted resolution.
+            if extra_token.is_some() && !gate_ref.starts_with("gate:") {
+                return malformed_interaction_noop("approval");
+            }
+            ApprovalResolutionPayload::new(gate_ref, decision)
+                .map(|payload| payload.with_source_trigger(source_trigger))
+                .map(ProductInboundPayload::ApprovalResolution)
+                .map(Some)
+                .map_err(adapter_error_to_payload_error)
+        }
         None => ScopedApprovalResolutionPayload::new(decision)
             .map(|payload| payload.with_source_trigger(source_trigger))
             .map(ProductInboundPayload::ScopedApprovalResolution)
