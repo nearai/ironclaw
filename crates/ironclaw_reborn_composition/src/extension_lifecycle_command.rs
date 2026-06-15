@@ -341,6 +341,7 @@ mod tests {
                     source: LifecycleExtensionSource::HostBundled,
                     runtime_kind:
                         ironclaw_product_workflow::LifecycleExtensionRuntimeKind::WasmTool,
+                    surface_kinds: Vec::new(),
                     visible_capability_ids: Vec::new(),
                     visible_read_only_capability_ids: Vec::new(),
                     credential_requirements: Vec::new(),

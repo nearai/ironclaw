@@ -402,6 +402,7 @@ registerPack("es", {
   // Settings — channels tab
   "channels.builtIn": "Canales integrados",
   "channels.messaging": "Canales de mensajería",
+  "channels.availableChannels": "Canales disponibles",
   "channels.mcpServers": "Servidores MCP",
   "channels.webGateway": "Web Gateway",
   "channels.webGatewayDesc": "Chat en navegador con streaming SSE",
@@ -411,6 +412,7 @@ registerPack("es", {
   "channels.cliDesc": "Interfaz de terminal con TUI o REPL simple",
   "channels.repl": "REPL",
   "channels.replDesc": "Bucle mínimo de lectura‑evaluación‑impresión",
+  "channels.slack": "Slack",
   "channels.slackDesc": "Canal de app del tenant para DMs y menciones de la app",
   "channels.slackDetail": "Instalación de la app de Slack del tenant",
   "channels.statusOn": "encendido",
@@ -644,6 +646,8 @@ registerPack("es", {
   "automations.delivery.save": "Save",
   "automations.delivery.clear": "Clear",
   "automations.delivery.saved": "Saved",
+  "automations.delivery.saveFailed":
+    "Couldn't save the delivery target. Please try again.",
   "automations.delivery.footnote": "Approval requests sent to your DM are answered by replying {command} in Slack.",
   "automations.delivery.pill.ready": "Ready",
   "automations.delivery.pill.unavailable": "Unavailable",
@@ -930,6 +934,7 @@ registerPack("es", {
   "extensions.moreActions": "Más acciones",
   "extensions.kind.wasm_tool": "Herramienta WASM",
   "extensions.kind.wasm_channel": "Canal",
+  "extensions.kind.channel": "Canal",
   "extensions.kind.mcp_server": "Servidor MCP",
   "extensions.kind.first_party": "Propio",
   "extensions.kind.system": "Sistema",

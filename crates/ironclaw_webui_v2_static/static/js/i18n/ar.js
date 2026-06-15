@@ -402,6 +402,7 @@ registerPack("ar", {
   // Settings — channels tab
   "channels.builtIn": "قنوات مدمجة",
   "channels.messaging": "قنوات المراسلة",
+  "channels.availableChannels": "القنوات المتاحة",
   "channels.mcpServers": "خوادم MCP",
   "channels.webGateway": "بوابة الويب",
   "channels.webGatewayDesc": "دردشة عبر المتصفح مع بث SSE",
@@ -411,6 +412,7 @@ registerPack("ar", {
   "channels.cliDesc": "واجهة طرفية مع TUI أو REPL بسيط",
   "channels.repl": "REPL",
   "channels.replDesc": "حلقة قراءة-تقييم-طباعة بسيطة للاختبار",
+  "channels.slack": "Slack",
   "channels.slackDesc": "قناة تطبيق المستأجر للرسائل المباشرة وإشارات التطبيق",
   "channels.slackDetail": "تثبيت تطبيق Slack للمستأجر",
   "channels.statusOn": "تشغيل",
@@ -644,6 +646,8 @@ registerPack("ar", {
   "automations.delivery.save": "Save",
   "automations.delivery.clear": "Clear",
   "automations.delivery.saved": "Saved",
+  "automations.delivery.saveFailed":
+    "Couldn't save the delivery target. Please try again.",
   "automations.delivery.footnote": "Approval requests sent to your DM are answered by replying {command} in Slack.",
   "automations.delivery.pill.ready": "Ready",
   "automations.delivery.pill.unavailable": "Unavailable",
@@ -929,6 +933,7 @@ registerPack("ar", {
   "extensions.moreActions": "المزيد من الإجراءات",
   "extensions.kind.wasm_tool": "أداة WASM",
   "extensions.kind.wasm_channel": "قناة",
+  "extensions.kind.channel": "قناة",
   "extensions.kind.mcp_server": "خادم MCP",
   "extensions.kind.first_party": "الطرف الأول",
   "extensions.kind.system": "النظام",

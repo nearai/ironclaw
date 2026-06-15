@@ -416,6 +416,7 @@ registerPack("en", {
   // Settings — channels tab
   "channels.builtIn": "Built-in channels",
   "channels.messaging": "Messaging channels",
+  "channels.availableChannels": "Available channels",
   "channels.mcpServers": "MCP servers",
   "channels.webGateway": "Web Gateway",
   "channels.webGatewayDesc": "Browser-based chat with SSE streaming",
@@ -426,6 +427,7 @@ registerPack("en", {
   "channels.cliDesc": "Terminal interface with TUI or simple REPL",
   "channels.repl": "REPL",
   "channels.replDesc": "Minimal read-eval-print loop for testing",
+  "channels.slack": "Slack",
   "channels.slackDesc": "Tenant app channel for DMs and app mentions",
   "channels.slackDetail": "Tenant Slack app install",
   "channels.statusOn": "on",
@@ -980,6 +982,7 @@ registerPack("en", {
   "extensions.moreActions": "More actions",
   "extensions.kind.wasm_tool": "WASM Tool",
   "extensions.kind.wasm_channel": "Channel",
+  "extensions.kind.channel": "Channel",
   "extensions.kind.mcp_server": "MCP Server",
   "extensions.kind.first_party": "First-party",
   "extensions.kind.system": "System",

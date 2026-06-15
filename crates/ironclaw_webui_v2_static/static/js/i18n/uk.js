@@ -402,6 +402,7 @@ registerPack("uk", {
   // Settings — channels tab
   "channels.builtIn": "Вбудовані канали",
   "channels.messaging": "Канали повідомлень",
+  "channels.availableChannels": "Доступні канали",
   "channels.mcpServers": "MCP-сервери",
   "channels.webGateway": "Веб Gateway",
   "channels.webGatewayDesc": "Браузерний чат зі стрімінгом SSE",
@@ -411,6 +412,7 @@ registerPack("uk", {
   "channels.cliDesc": "Термінальний інтерфейс із TUI або простим REPL",
   "channels.repl": "REPL",
   "channels.replDesc": "Мінімальний read-eval-print loop для тестування",
+  "channels.slack": "Slack",
   "channels.slackDesc": "Канал застосунку орендаря для особистих повідомлень і згадок",
   "channels.slackDetail": "Встановлення застосунку Slack орендаря",
   "channels.statusOn": "увімкнено",
@@ -644,6 +646,8 @@ registerPack("uk", {
   "automations.delivery.save": "Save",
   "automations.delivery.clear": "Clear",
   "automations.delivery.saved": "Saved",
+  "automations.delivery.saveFailed":
+    "Couldn't save the delivery target. Please try again.",
   "automations.delivery.footnote": "Approval requests sent to your DM are answered by replying {command} in Slack.",
   "automations.delivery.pill.ready": "Ready",
   "automations.delivery.pill.unavailable": "Unavailable",
@@ -929,6 +933,7 @@ registerPack("uk", {
   "extensions.moreActions": "Більше дій",
   "extensions.kind.wasm_tool": "Інструмент WASM",
   "extensions.kind.wasm_channel": "Канал",
+  "extensions.kind.channel": "Канал",
   "extensions.kind.mcp_server": "Сервер MCP",
   "extensions.kind.first_party": "Основний",
   "extensions.kind.system": "Система",
