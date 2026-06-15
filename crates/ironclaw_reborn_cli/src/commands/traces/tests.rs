@@ -151,6 +151,7 @@ fn trace_queue_envelope_fixture(
         hindsight: None,
         training_dynamics: None,
         process_evaluation: None,
+        manual_review_authorized: false,
     }
 }
 
