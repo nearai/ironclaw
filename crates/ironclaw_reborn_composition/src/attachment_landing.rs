@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use ironclaw_attachments::{
     DEFAULT_MAX_ATTACHMENT_BYTES, InboundAttachment, land_inbound_attachments,
 };
-use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{ResourceScope, ScopedPath};
 use ironclaw_loop_support::{LoopAttachmentReadError, LoopAttachmentReadPort};
 use ironclaw_product_workflow::{InboundAttachmentLander, RebornServicesError};
@@ -59,6 +59,17 @@ impl<F: RootFilesystem> ProjectScopedAttachmentReader<F> {
             max_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
         }
     }
+
+    /// Construct a reader with an explicit read ceiling. Test-only: production
+    /// always uses [`DEFAULT_MAX_ATTACHMENT_BYTES`] via [`Self::new`], but the
+    /// oversized branch is only reachable in a test with a tiny ceiling.
+    #[cfg(test)]
+    fn with_max_bytes(filesystem: Arc<ScopedFilesystem<F>>, max_bytes: usize) -> Self {
+        Self {
+            filesystem,
+            max_bytes,
+        }
+    }
 }
 
 #[async_trait]
@@ -76,7 +87,17 @@ impl<F: RootFilesystem> LoopAttachmentReadPort for ProjectScopedAttachmentReader
             .await
         {
             Ok(Some(bytes)) => Ok(bytes),
-            Ok(None) => Err(LoopAttachmentReadError::NotFound),
+            // `read_bytes_bounded` returns `Ok(None)` only when the file is
+            // larger than `max_bytes` — an oversized attachment we refuse to
+            // materialize, not a missing one.
+            Ok(None) => Err(LoopAttachmentReadError::Backend(format!(
+                "attachment exceeds the {}-byte read limit",
+                self.max_bytes
+            ))),
+            Err(FilesystemError::NotFound { .. }) => Err(LoopAttachmentReadError::NotFound),
+            Err(FilesystemError::PermissionDenied { .. }) => {
+                Err(LoopAttachmentReadError::Forbidden)
+            }
             Err(error) => Err(LoopAttachmentReadError::Backend(error.to_string())),
         }
     }
@@ -193,5 +214,80 @@ mod tests {
             .await
             .expect_err("read-only workspace mount must fail closed");
         assert_eq!(err.code, RebornServicesErrorCode::Internal);
+    }
+
+    #[tokio::test]
+    async fn reader_reads_back_landed_attachment_bytes() {
+        // The reader is the producer side of the image-vision path: it must read
+        // back exactly what the lander wrote under the same workspace mount.
+        let fs = workspace_fs(MountPermissions::read_write());
+        let lander = ProjectScopedAttachmentLander::new(Arc::clone(&fs));
+        let refs = lander
+            .land(
+                &thread_scope(),
+                "msg1",
+                vec![InboundAttachment {
+                    id: "att-0".to_string(),
+                    mime_type: "image/png".to_string(),
+                    filename: Some("diagram.png".to_string()),
+                    bytes: vec![1, 2, 3, 4],
+                }],
+            )
+            .await
+            .expect("landing succeeds through a read-write workspace mount");
+        let storage_key = refs[0].storage_key.as_deref().expect("storage_key set");
+
+        let reader = ProjectScopedAttachmentReader::new(Arc::clone(&fs));
+        let bytes = reader
+            .read_attachment_bytes(&thread_scope().to_resource_scope(), storage_key)
+            .await
+            .expect("reading back the landed attachment succeeds");
+        assert_eq!(bytes, vec![1, 2, 3, 4]);
+    }
+
+    #[tokio::test]
+    async fn reader_missing_attachment_maps_to_not_found() {
+        let reader =
+            ProjectScopedAttachmentReader::new(workspace_fs(MountPermissions::read_write()));
+        let err = reader
+            .read_attachment_bytes(
+                &thread_scope().to_resource_scope(),
+                "/workspace/attachments/2026-06-14/m1-0-missing.png",
+            )
+            .await
+            .expect_err("an absent attachment is a not-found, not bytes");
+        assert!(matches!(err, LoopAttachmentReadError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn reader_oversized_attachment_is_a_backend_refusal_not_not_found() {
+        let fs = workspace_fs(MountPermissions::read_write());
+        let lander = ProjectScopedAttachmentLander::new(Arc::clone(&fs));
+        let refs = lander
+            .land(
+                &thread_scope(),
+                "msg1",
+                vec![InboundAttachment {
+                    id: "att-0".to_string(),
+                    mime_type: "image/png".to_string(),
+                    filename: Some("diagram.png".to_string()),
+                    bytes: vec![1, 2, 3, 4],
+                }],
+            )
+            .await
+            .expect("landing succeeds through a read-write workspace mount");
+        let storage_key = refs[0].storage_key.as_deref().expect("storage_key set");
+
+        // A 2-byte ceiling rejects the 4-byte attachment. The reader must not
+        // mislabel an oversized file as `NotFound`.
+        let reader = ProjectScopedAttachmentReader::with_max_bytes(Arc::clone(&fs), 2);
+        let err = reader
+            .read_attachment_bytes(&thread_scope().to_resource_scope(), storage_key)
+            .await
+            .expect_err("an oversized attachment is refused");
+        match err {
+            LoopAttachmentReadError::Backend(reason) => assert!(reason.contains("exceeds")),
+            other => panic!("expected a backend refusal, got {other}"),
+        }
     }
 }
