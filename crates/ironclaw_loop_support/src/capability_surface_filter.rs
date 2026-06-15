@@ -635,6 +635,8 @@ mod tests {
             surface_version: surface_version(),
             capability_id: capability_id(capability),
             input_ref: input_ref(input),
+            approval_resume: None,
+            auth_resume: None,
         }
     }
 
@@ -704,6 +706,7 @@ mod tests {
         CapabilityOutcome::ApprovalRequired {
             gate_ref: LoopGateRef::new(gate_ref).expect("test gate ref is valid"),
             safe_summary: "approval needed".to_string(),
+            approval_resume: None,
         }
     }
 
@@ -1064,6 +1067,8 @@ mod tests {
                 surface_version: candidate.surface_version,
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("staged capability_info invocation should pass");
@@ -1114,6 +1119,8 @@ mod tests {
                     surface_version: candidate.surface_version,
                     capability_id: candidate.capability_id,
                     input_ref: candidate.input_ref,
+                    approval_resume: None,
+                    auth_resume: None,
                 }],
                 stop_on_first_suspension: true,
             })

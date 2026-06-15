@@ -1,0 +1,17 @@
+[package]
+name = "ironclaw_extractors"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Type-aware text extraction for IronClaw: turn a file's bytes (PDF, OOXML, legacy Office, RTF, text/code) into plain text, independent of where the file came from."
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[dependencies]
+ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
+pdf-extract = "0.7"
+thiserror = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }

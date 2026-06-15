@@ -30,6 +30,10 @@ use crate::slack_channel_routes::{
     SlackChannelRoute, SlackChannelRouteAssignment, SlackChannelRouteError, SlackChannelRouteKey,
     SlackChannelRouteListPage, SlackChannelRouteStore,
 };
+use crate::slack_outbound_targets::{
+    SlackPersonalDmTarget, SlackPersonalDmTargetError, SlackPersonalDmTargetKey,
+    SlackPersonalDmTargetStore,
+};
 use crate::slack_personal_binding::{
     RebornUserIdentityBinding, RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
 };
@@ -45,6 +49,7 @@ const IDENTITY_ROOT: &str = "/tenant-shared/slack-personal-binding/identities";
 const PAIRING_CODE_ROOT: &str = "/tenant-shared/slack-personal-binding/pairing/codes";
 const PAIRING_ACTOR_ROOT: &str = "/tenant-shared/slack-personal-binding/pairing/actors";
 const CHANNEL_ROUTE_ROOT: &str = "/tenant-shared/slack-channel-routes";
+const PERSONAL_DM_TARGET_ROOT: &str = "/tenant-shared/slack-personal-binding/dm-targets";
 const PAIRING_CODE_LEN: usize = 8;
 const PAIRING_CODE_RETRIES: usize = 16;
 const DEFAULT_PAIRING_TTL: Duration = Duration::from_secs(10 * 60);
@@ -559,6 +564,18 @@ where
         ))
     }
 
+    fn personal_dm_target_path(
+        key: &SlackPersonalDmTargetKey,
+    ) -> Result<ScopedPath, FilesystemError> {
+        scoped_path(&format!(
+            "{}/{}/{}/{}.json",
+            PERSONAL_DM_TARGET_ROOT,
+            path_segment(key.installation_id.as_str()),
+            path_segment(&key.team_id),
+            path_segment(key.user_id.as_str())
+        ))
+    }
+
     fn listed_channel_route_path(
         installation_id: &AdapterInstallationId,
         team_id: &str,
@@ -760,6 +777,98 @@ where
         Err(RebornUserIdentityBindingError::Backend(
             "Slack actor is already bound to a different user".into(),
         ))
+    }
+}
+
+impl<F> FilesystemSlackHostState<F>
+where
+    F: RootFilesystem + 'static,
+{
+    async fn read_personal_dm_target_record(
+        &self,
+        path: &ScopedPath,
+    ) -> Result<Option<(StoredSlackPersonalDmTarget, RecordVersion)>, SlackPersonalDmTargetError>
+    {
+        match self.read_record::<StoredSlackPersonalDmTarget>(path).await {
+            Ok(record) => Ok(record),
+            Err(FilesystemError::NotFound { .. }) => Ok(None),
+            Err(error) => Err(map_personal_dm_target_fs_error(error)),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl<F> SlackPersonalDmTargetStore for FilesystemSlackHostState<F>
+where
+    F: RootFilesystem + 'static,
+{
+    async fn load_personal_dm_target(
+        &self,
+        key: &SlackPersonalDmTargetKey,
+    ) -> Result<Option<SlackPersonalDmTarget>, SlackPersonalDmTargetError> {
+        // Cross-tenant reads return Ok(None) (not an error) so a caller
+        // cannot distinguish "other tenant has this key" from "no target
+        // exists" — reads stay free of a tenant-existence oracle. Writes
+        // below differ deliberately: a cross-tenant upsert is a caller bug
+        // and fails loudly with InvalidTarget.
+        if key.tenant_id != self.scope.tenant_id {
+            return Ok(None);
+        }
+        let path = Self::personal_dm_target_path(key).map_err(map_personal_dm_target_fs_error)?;
+        let Some((record, _)) = self.read_personal_dm_target_record(&path).await? else {
+            return Ok(None);
+        };
+        stored_personal_dm_target(record).map(Some)
+    }
+
+    async fn upsert_personal_dm_target(
+        &self,
+        target: SlackPersonalDmTarget,
+    ) -> Result<SlackPersonalDmTarget, SlackPersonalDmTargetError> {
+        if target.key.tenant_id != self.scope.tenant_id {
+            return Err(SlackPersonalDmTargetError::InvalidTarget);
+        }
+        let path =
+            Self::personal_dm_target_path(&target.key).map_err(map_personal_dm_target_fs_error)?;
+        // Lock key omits tenant_id: this store instance is pinned to one
+        // tenant (cross-tenant writes are rejected above before locking),
+        // so installation/team/user uniquely identify the record within
+        // the instance. Revisit if a multi-tenant store instance ever
+        // shares this lock map.
+        let lock = self.lock_for(format!(
+            "personal-dm:{}:{}:{}",
+            target.key.installation_id.as_str(),
+            target.key.team_id,
+            target.key.user_id.as_str()
+        ));
+        let _guard = lock.lock().await;
+        let existing = self.read_personal_dm_target_record(&path).await?;
+        let created_at = existing
+            .as_ref()
+            .map(|(record, _)| record.created_at)
+            .unwrap_or_else(Utc::now);
+        let record = StoredSlackPersonalDmTarget::from_target(&target, created_at);
+        let cas = existing
+            .map(|(_, version)| CasExpectation::Version(version))
+            .unwrap_or(CasExpectation::Absent);
+        match self.write_record(&path, &record, cas).await {
+            Ok(_) => Ok(target),
+            Err(FilesystemError::VersionMismatch { .. }) => {
+                // CAS lost to a concurrent writer. Read back and return the winning record.
+                // This is last-write-wins semantics: whichever writer committed first wins.
+                // This is safe today because provisioning the same (tenant, user) DM target is
+                // idempotent — both concurrent writers store the same DM channel ID for the same
+                // Slack user. If a future change makes the payload non-idempotent (e.g. storing a
+                // caller-chosen dm_channel_id that could differ between writers), this branch must
+                // be replaced with explicit conflict semantics (e.g. reject the loser with a
+                // retriable error rather than silently discarding the losing value).
+                let Some((record, _)) = self.read_personal_dm_target_record(&path).await? else {
+                    return Err(SlackPersonalDmTargetError::StoreUnavailable);
+                };
+                stored_personal_dm_target(record)
+            }
+            Err(error) => Err(map_personal_dm_target_fs_error(error)),
+        }
     }
 }
 
@@ -1217,6 +1326,55 @@ impl StoredSlackUserIdentity {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct StoredSlackPersonalDmTarget {
+    tenant_id: String,
+    installation_id: String,
+    team_id: String,
+    user_id: String,
+    slack_user_id: String,
+    dm_channel_id: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl StoredSlackPersonalDmTarget {
+    // arch-exempt: dead_code, reserved for explicit Slack DM provisioning product route, plan #4600
+    #[allow(dead_code)]
+    fn from_target(target: &SlackPersonalDmTarget, created_at: DateTime<Utc>) -> Self {
+        Self {
+            tenant_id: target.key.tenant_id.as_str().to_string(),
+            installation_id: target.key.installation_id.as_str().to_string(),
+            team_id: target.key.team_id.clone(),
+            user_id: target.key.user_id.as_str().to_string(),
+            slack_user_id: target.slack_user_id.as_str().to_string(),
+            dm_channel_id: target.dm_channel_id.clone(),
+            created_at,
+            updated_at: Utc::now(),
+        }
+    }
+}
+
+fn stored_personal_dm_target(
+    record: StoredSlackPersonalDmTarget,
+) -> Result<SlackPersonalDmTarget, SlackPersonalDmTargetError> {
+    let key = SlackPersonalDmTargetKey::new(
+        TenantId::new(record.tenant_id)
+            .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?,
+        AdapterInstallationId::new(record.installation_id)
+            .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?,
+        record.team_id,
+        UserId::new(record.user_id).map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?,
+    )
+    .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?;
+    SlackPersonalDmTarget::new(
+        key,
+        SlackUserId::new(record.slack_user_id),
+        record.dm_channel_id,
+    )
+    .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum StoredSlackPairingStatus {
@@ -1478,6 +1636,11 @@ fn map_route_fs_error(error: FilesystemError) -> SlackChannelRouteError {
     SlackChannelRouteError::StoreUnavailable
 }
 
+fn map_personal_dm_target_fs_error(error: FilesystemError) -> SlackPersonalDmTargetError {
+    tracing::debug!(%error, "Slack personal DM target filesystem operation failed");
+    SlackPersonalDmTargetError::StoreUnavailable
+}
+
 fn is_unsupported_delete_error(error: &FilesystemError) -> bool {
     match error {
         FilesystemError::Unsupported {
@@ -1530,6 +1693,210 @@ mod tests {
         assert_eq!(resolved, Some(user("user:alice")));
         let stored = read_identity(&state, "slack", "install-alpha:U123").await;
         assert_eq!(stored.binding(), Some(binding));
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_persists_personal_dm_targets_across_state_recreation() {
+        let root = Arc::new(InMemoryBackend::default());
+        let writer = state_with_root(root.clone());
+        let key = SlackPersonalDmTargetKey::new(
+            TenantId::new("tenant-alpha").unwrap(),
+            installation(),
+            "T123".to_string(),
+            user("user:alice"),
+        )
+        .unwrap();
+        let target =
+            SlackPersonalDmTarget::new(key.clone(), SlackUserId::new("U123"), "D123".to_string())
+                .unwrap();
+
+        writer
+            .upsert_personal_dm_target(target.clone())
+            .await
+            .expect("upsert personal DM target succeeds");
+        assert_eq!(
+            writer
+                .load_personal_dm_target(&key)
+                .await
+                .expect("load personal DM target succeeds"),
+            Some(target.clone())
+        );
+
+        let reader = state_with_root(root);
+        assert_eq!(
+            reader
+                .load_personal_dm_target(&key)
+                .await
+                .expect("load persisted personal DM target succeeds"),
+            Some(target)
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_rejects_cross_tenant_personal_dm_target_operations() {
+        let state = state();
+        let foreign_key = SlackPersonalDmTargetKey::new(
+            TenantId::new("tenant-foreign").unwrap(),
+            installation(),
+            "T123".to_string(),
+            user("user:alice"),
+        )
+        .unwrap();
+        let foreign_target = SlackPersonalDmTarget::new(
+            foreign_key.clone(),
+            SlackUserId::new("U123"),
+            "D123".to_string(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            state.upsert_personal_dm_target(foreign_target).await,
+            Err(SlackPersonalDmTargetError::InvalidTarget)
+        ));
+        assert_eq!(
+            state
+                .load_personal_dm_target(&foreign_key)
+                .await
+                .expect("foreign tenant load fails closed"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_reports_corrupt_personal_dm_target_as_unavailable() {
+        let state = state();
+        let key = SlackPersonalDmTargetKey::new(
+            TenantId::new("tenant-alpha").unwrap(),
+            installation(),
+            "T123".to_string(),
+            user("user:alice"),
+        )
+        .unwrap();
+        let path =
+            FilesystemSlackHostState::<InMemoryBackend>::personal_dm_target_path(&key).unwrap();
+        let record = StoredSlackPersonalDmTarget {
+            tenant_id: String::new(),
+            installation_id: installation().as_str().to_string(),
+            team_id: "T123".to_string(),
+            user_id: "user:alice".to_string(),
+            slack_user_id: "U123".to_string(),
+            dm_channel_id: "D123".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        state
+            .write_record(&path, &record, CasExpectation::Any)
+            .await
+            .expect("write corrupt personal DM record");
+
+        assert!(matches!(
+            state.load_personal_dm_target(&key).await,
+            Err(SlackPersonalDmTargetError::StoreUnavailable)
+        ));
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_reports_corrupt_personal_dm_target_key_fields_as_unavailable()
+     {
+        // Regression guard: corrupt team_id (fails SlackPersonalDmTargetKey::new validation)
+        // and corrupt dm_channel_id (fails SlackPersonalDmTarget::new validation) must both map
+        // to StoreUnavailable (503), not InvalidTarget (404). A stored record that exists on disk
+        // with an invalid field is a data-integrity problem, not an absence.
+        let state = state();
+        let key = SlackPersonalDmTargetKey::new(
+            TenantId::new("tenant-alpha").unwrap(),
+            installation(),
+            "T123".to_string(),
+            user("user:alice"),
+        )
+        .unwrap();
+        let path =
+            FilesystemSlackHostState::<InMemoryBackend>::personal_dm_target_path(&key).unwrap();
+
+        // Corrupt team_id — fails SlackPersonalDmTargetKey::new (validate_slack_id)
+        let record_bad_team = StoredSlackPersonalDmTarget {
+            tenant_id: "tenant-alpha".to_string(),
+            installation_id: installation().as_str().to_string(),
+            team_id: String::new(), // empty string fails Slack-ID validation
+            user_id: "user:alice".to_string(),
+            slack_user_id: "U123".to_string(),
+            dm_channel_id: "D123".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        state
+            .write_record(&path, &record_bad_team, CasExpectation::Any)
+            .await
+            .expect("write corrupt personal DM record with bad team_id");
+        assert!(
+            matches!(
+                state.load_personal_dm_target(&key).await,
+                Err(SlackPersonalDmTargetError::StoreUnavailable)
+            ),
+            "corrupt team_id must surface as StoreUnavailable, not InvalidTarget"
+        );
+
+        // Corrupt dm_channel_id — fails SlackPersonalDmTarget::new (validate_slack_dm_channel_id)
+        let record_bad_dm = StoredSlackPersonalDmTarget {
+            tenant_id: "tenant-alpha".to_string(),
+            installation_id: installation().as_str().to_string(),
+            team_id: "T123".to_string(),
+            user_id: "user:alice".to_string(),
+            slack_user_id: "U123".to_string(),
+            dm_channel_id: "NOTADM".to_string(), // must start with "D"
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        state
+            .write_record(&path, &record_bad_dm, CasExpectation::Any)
+            .await
+            .expect("write corrupt personal DM record with bad dm_channel_id");
+        assert!(
+            matches!(
+                state.load_personal_dm_target(&key).await,
+                Err(SlackPersonalDmTargetError::StoreUnavailable)
+            ),
+            "corrupt dm_channel_id must surface as StoreUnavailable, not InvalidTarget"
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_upsert_personal_dm_target_concurrent_write_returns_winner()
+    {
+        let root = Arc::new(RouteLockTestBackend::barrier_personal_dm_writes());
+        let writer_one = state_with_backend(root.clone());
+        let writer_two = state_with_backend(root.clone());
+        let reader = state_with_backend(root);
+        let key = SlackPersonalDmTargetKey::new(
+            TenantId::new("tenant-alpha").unwrap(),
+            installation(),
+            "T123".to_string(),
+            user("user:alice"),
+        )
+        .unwrap();
+        let target_one =
+            SlackPersonalDmTarget::new(key.clone(), SlackUserId::new("U123"), "D123".to_string())
+                .unwrap();
+        let target_two =
+            SlackPersonalDmTarget::new(key.clone(), SlackUserId::new("U123"), "D456".to_string())
+                .unwrap();
+
+        let (stored_one, stored_two) = tokio::join!(
+            writer_one.upsert_personal_dm_target(target_one),
+            writer_two.upsert_personal_dm_target(target_two)
+        );
+        let stored_one = stored_one.expect("first upsert succeeds");
+        let stored_two = stored_two.expect("second upsert succeeds");
+        let persisted = reader
+            .load_personal_dm_target(&key)
+            .await
+            .expect("load personal DM target succeeds")
+            .expect("personal DM target persists");
+
+        assert_eq!(stored_one, stored_two);
+        assert_eq!(persisted, stored_one);
+        assert!(matches!(persisted.dm_channel_id.as_str(), "D123" | "D456"));
     }
 
     #[tokio::test]
@@ -2358,6 +2725,7 @@ mod tests {
         inner: InMemoryBackend,
         reject_lock_renewal: bool,
         route_write_delay: Option<Duration>,
+        personal_dm_write_barrier: Option<Arc<tokio::sync::Barrier>>,
         route_write_failures: AtomicUsize,
         lock_puts: AtomicUsize,
     }
@@ -2368,6 +2736,7 @@ mod tests {
                 inner: InMemoryBackend::default(),
                 reject_lock_renewal: false,
                 route_write_delay: None,
+                personal_dm_write_barrier: None,
                 route_write_failures: AtomicUsize::new(0),
                 lock_puts: AtomicUsize::new(0),
             }
@@ -2378,6 +2747,7 @@ mod tests {
                 inner: InMemoryBackend::default(),
                 reject_lock_renewal: false,
                 route_write_delay: Some(delay),
+                personal_dm_write_barrier: None,
                 route_write_failures: AtomicUsize::new(0),
                 lock_puts: AtomicUsize::new(0),
             }
@@ -2388,6 +2758,18 @@ mod tests {
                 inner: InMemoryBackend::default(),
                 reject_lock_renewal: true,
                 route_write_delay: Some(delay),
+                personal_dm_write_barrier: None,
+                route_write_failures: AtomicUsize::new(0),
+                lock_puts: AtomicUsize::new(0),
+            }
+        }
+
+        fn barrier_personal_dm_writes() -> Self {
+            Self {
+                inner: InMemoryBackend::default(),
+                reject_lock_renewal: false,
+                route_write_delay: None,
+                personal_dm_write_barrier: Some(Arc::new(tokio::sync::Barrier::new(2))),
                 route_write_failures: AtomicUsize::new(0),
                 lock_puts: AtomicUsize::new(0),
             }
@@ -2427,6 +2809,10 @@ mod tests {
                 && let Some(delay) = self.route_write_delay
             {
                 tokio::time::sleep(delay).await;
+            } else if is_personal_dm_target_record_path(path)
+                && let Some(barrier) = &self.personal_dm_write_barrier
+            {
+                barrier.wait().await;
             }
             if is_channel_route_record_path(path)
                 && self.route_write_failures.load(Ordering::SeqCst) > 0
@@ -2475,6 +2861,12 @@ mod tests {
         path.as_str().contains("/slack-channel-routes/")
             && path.as_str().ends_with(".json")
             && !is_replace_lock_path(path)
+    }
+
+    fn is_personal_dm_target_record_path(path: &VirtualPath) -> bool {
+        path.as_str()
+            .contains("/slack-personal-binding/dm-targets/")
+            && path.as_str().ends_with(".json")
     }
 
     fn binding(user_id: &str) -> RebornUserIdentityBinding {

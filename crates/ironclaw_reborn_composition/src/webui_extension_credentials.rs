@@ -8,8 +8,8 @@ use ironclaw_auth::{
 };
 use ironclaw_product_workflow::{
     ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
-    ExtensionCredentialSubmitRequest, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind,
+    ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialSetup, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind,
 };
 
 use crate::{
@@ -45,6 +45,7 @@ impl ExtensionCredentialSetupService for ProductAuthExtensionCredentialSetup {
                     CredentialAccountSelectionRequest::new(request.scope.clone(), request.provider)
                         .for_extension(request.requester_extension),
                     request.scope,
+                    runtime_credential_setup(request.setup),
                     request.provider_scopes,
                 ),
             )
@@ -136,6 +137,19 @@ fn map_auth_error(error: crate::RebornAuthProductError) -> RebornServicesError {
     }
 }
 
+fn runtime_credential_setup(
+    setup: LifecycleExtensionCredentialSetup,
+) -> ironclaw_host_api::RuntimeCredentialAccountSetup {
+    match setup {
+        LifecycleExtensionCredentialSetup::ManualToken => {
+            ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken
+        }
+        LifecycleExtensionCredentialSetup::OAuth { scopes } => {
+            ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth { scopes }
+        }
+    }
+}
+
 fn invalid_auth_setup_request() -> RebornServicesError {
     services_error(
         RebornServicesErrorCode::InvalidRequest,
@@ -177,6 +191,7 @@ mod tests {
     };
     use ironclaw_product_workflow::{
         ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
+        LifecycleExtensionCredentialSetup,
     };
 
     use crate::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
@@ -216,6 +231,7 @@ mod tests {
             .credential_status(ExtensionCredentialStatusRequest {
                 scope,
                 provider: AuthProviderId::new("notion").expect("provider"),
+                setup: LifecycleExtensionCredentialSetup::ManualToken,
                 provider_scopes: Vec::new(),
                 requester_extension: ExtensionId::new("notion").expect("extension"),
             })
@@ -254,6 +270,7 @@ mod tests {
             .credential_status(ExtensionCredentialStatusRequest {
                 scope,
                 provider: AuthProviderId::new("notion").expect("provider"),
+                setup: LifecycleExtensionCredentialSetup::ManualToken,
                 provider_scopes: Vec::new(),
                 requester_extension: ExtensionId::new("notion").expect("extension"),
             })
@@ -304,6 +321,9 @@ mod tests {
                 .credential_status(ExtensionCredentialStatusRequest {
                     scope: ui_scope.clone(),
                     provider: AuthProviderId::new("google").expect("provider"),
+                    setup: LifecycleExtensionCredentialSetup::OAuth {
+                        scopes: vec![scope.to_string()],
+                    },
                     provider_scopes: vec![ProviderScope::new(scope).expect("scope")],
                     requester_extension: ExtensionId::new(extension).expect("extension"),
                 })

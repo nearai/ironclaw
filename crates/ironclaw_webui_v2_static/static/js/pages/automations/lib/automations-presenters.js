@@ -35,7 +35,31 @@ const STATE_PRESENTATION = {
 const LAST_STATUS_PRESENTATION = {
   ok: { label: "Done", tone: "success" },
   error: { label: "Error", tone: "danger" },
+  running: { label: "Running", tone: "info" },
 };
+
+const RUN_STATUS_PRESENTATION = {
+  ok: { label: "OK", tone: "success" },
+  error: { label: "Error", tone: "danger" },
+  running: { label: "Running", tone: "info" },
+  unknown: { label: "Unknown", tone: "muted" },
+};
+
+export const AUTOMATION_FILTERS = [
+  { value: "all", labelKey: "automations.filter.all", predicate: null },
+  { value: "active", labelKey: "automations.filter.active", predicate: isBrowserActive },
+  {
+    value: "running",
+    labelKey: "automations.filter.running",
+    predicate: (automation) => automation.has_running_run,
+  },
+  {
+    value: "failures",
+    labelKey: "automations.filter.failures",
+    predicate: (automation) => automation.has_failed_runs,
+  },
+  { value: "paused", labelKey: "automations.filter.paused", predicate: isBrowserPaused },
+];
 
 export function normalizeAutomations(response) {
   const automations = Array.isArray(response?.automations)
@@ -43,35 +67,27 @@ export function normalizeAutomations(response) {
     : [];
   return automations
     .filter((automation) => automation?.source?.type === "schedule")
-    .map((automation) => ({
-      ...automation,
-      display_name: automation.name || "Untitled automation",
-      schedule_label: scheduleLabel(automation.source?.cron),
-      state_label: stateLabel(automation.state),
-      state_tone: stateTone(automation.state),
-      next_run_timestamp: parseTimestamp(automation.next_run_at),
-      next_run_label: formatAutomationDate(automation.next_run_at, "Not scheduled"),
-      last_run_label: formatAutomationDate(automation.last_run_at, "No runs yet"),
-      last_status_label: lastStatusLabel(automation.last_status),
-      last_status_tone: lastStatusTone(automation.last_status),
-      created_label: formatAutomationDate(automation.created_at, "Unknown"),
-    }))
+    .map((automation) => normalizeAutomation(automation))
     .sort(compareAutomations);
 }
 
 export function filterAutomations(automations, filter) {
-  if (filter === "active") {
-    return automations.filter((automation) => isBrowserActive(automation));
-  }
-  if (filter === "paused") {
-    return automations.filter((automation) => isBrowserPaused(automation));
-  }
-  return automations;
+  const strategy = AUTOMATION_FILTERS.find((item) => item.value === filter)?.predicate;
+  return strategy ? automations.filter(strategy) : automations;
 }
 
 export function automationSummary(automations) {
   const active = automations.filter((automation) => isBrowserActive(automation)).length;
-  const paused = automations.filter((automation) => isBrowserPaused(automation)).length;
+  const running = automations.reduce(
+    (count, automation) =>
+      count + automation.recent_runs.filter((run) => run.status === "running").length,
+    0,
+  );
+  const failures = automations.reduce(
+    (count, automation) =>
+      count + automation.recent_runs.filter((run) => run.status === "error").length,
+    0,
+  );
   const next = automations
     .filter((automation) => nextRunTimestamp(automation) !== null)
     .sort(
@@ -82,12 +98,13 @@ export function automationSummary(automations) {
   return {
     scheduled: automations.length,
     active,
-    paused,
+    running,
+    failures,
     nextRun: next?.next_run_label || null,
   };
 }
 
-export function scheduleLabel(cron) {
+export function scheduleLabel(cron, timezone) {
   if (!cron || typeof cron !== "string") return "Custom schedule";
   const parts = cronFields(cron);
   if (!parts) return "Custom schedule";
@@ -96,13 +113,16 @@ export function scheduleLabel(cron) {
   const time = formatCronTime(hour, minute);
   if (!time) return "Custom schedule";
 
+  const tz = timezone && typeof timezone === "string" ? timezone : null;
+  const tzSuffix = tz ? ` (${tz})` : "";
+
   if (year === "*" && dayOfMonth === "*" && month === "*" && dayOfWeek === "*") {
-    return `Every day at ${time}`;
+    return `Every day at ${time}${tzSuffix}`;
   }
   const normalizedDayOfWeek = normalizeDayOfWeek(dayOfWeek);
 
   if (year === "*" && dayOfMonth === "*" && month === "*" && normalizedDayOfWeek === "1-5") {
-    return `Weekdays at ${time}`;
+    return `Weekdays at ${time}${tzSuffix}`;
   }
   if (
     year === "*" &&
@@ -110,7 +130,7 @@ export function scheduleLabel(cron) {
     month === "*" &&
     isSingleNumber(normalizedDayOfWeek, 0, 7)
   ) {
-    return `${WEEKDAYS[Number(normalizedDayOfWeek) % 7]} at ${time}`;
+    return `${WEEKDAYS[Number(normalizedDayOfWeek) % 7]} at ${time}${tzSuffix}`;
   }
   if (
     year === "*" &&
@@ -118,7 +138,7 @@ export function scheduleLabel(cron) {
     month === "*" &&
     dayOfWeek === "*"
   ) {
-    return `${ordinal(Number(dayOfMonth))} day of each month at ${time}`;
+    return `${ordinal(Number(dayOfMonth))} day of each month at ${time}${tzSuffix}`;
   }
   if (
     isSingleNumber(dayOfMonth, 1, 31) &&
@@ -127,7 +147,9 @@ export function scheduleLabel(cron) {
     (year === "*" || isSingleNumber(year, 1970, 9999))
   ) {
     const date = `${MONTHS[Number(month) - 1]} ${Number(dayOfMonth)}`;
-    return year === "*" ? `${date} at ${time}` : `${date}, ${year} at ${time}`;
+    return year === "*"
+      ? `${date} at ${time}${tzSuffix}`
+      : `${date}, ${year} at ${time}${tzSuffix}`;
   }
 
   return "Custom schedule";
@@ -159,6 +181,87 @@ export function lastStatusLabel(status) {
 
 export function lastStatusTone(status) {
   return LAST_STATUS_PRESENTATION[status]?.tone || "muted";
+}
+
+export function runStatusLabel(status) {
+  return RUN_STATUS_PRESENTATION[normalizeRunStatus(status)]?.label || "Unknown";
+}
+
+export function runStatusTone(status) {
+  return RUN_STATUS_PRESENTATION[normalizeRunStatus(status)]?.tone || "muted";
+}
+
+function normalizeAutomation(automation) {
+  const recentRuns = normalizeRuns(automation.recent_runs);
+  const latestRun = recentRuns[0] || null;
+  const currentRun = recentRuns.find((run) => run.status === "running") || null;
+  const lastCompletedRun =
+    recentRuns.find((run) => run.status === "ok" || run.status === "error") ||
+    null;
+  const lastStatus = lastCompletedRun?.status || automation.last_status;
+  const lastRunAt = lastCompletedRun?.completed_at || automation.last_run_at || null;
+
+  return {
+    ...automation,
+    display_name: automation.name || "Untitled automation",
+    schedule_timezone: automation.source?.timezone || "UTC",
+    schedule_label: scheduleLabel(automation.source?.cron, automation.source?.timezone || "UTC"),
+    state_label: stateLabel(automation.state),
+    state_tone: stateTone(automation.state),
+    next_run_timestamp: parseTimestamp(automation.next_run_at),
+    next_run_label: formatAutomationDate(automation.next_run_at, "Not scheduled"),
+    last_run_label: formatAutomationDate(lastRunAt, "No runs yet"),
+    last_status_label: lastStatusLabel(lastStatus),
+    last_status_tone: lastStatusTone(lastStatus),
+    created_label: formatAutomationDate(automation.created_at, "Unknown"),
+    recent_runs: recentRuns,
+    latest_run: latestRun,
+    current_run: currentRun,
+    has_running_run: recentRuns.some((run) => run.status === "running"),
+    has_failed_runs: recentRuns.some((run) => run.status === "error"),
+    success_rate_label: successRateLabel(recentRuns),
+  };
+}
+
+function normalizeRuns(runs) {
+  if (!Array.isArray(runs)) return [];
+  return runs
+    .map((run) => {
+      const status = normalizeRunStatus(run?.status);
+      const timestampSource =
+        run?.fired_at || run?.fire_slot || run?.submitted_at || run?.completed_at || null;
+      const timestamp = parseTimestamp(timestampSource);
+      return {
+        ...run,
+        status,
+        status_label: runStatusLabel(status),
+        status_tone: runStatusTone(status),
+        timestamp,
+        timestamp_source: timestampSource,
+        fired_label: formatAutomationDate(timestampSource, "Unscheduled"),
+        submitted_label: formatAutomationDate(run?.submitted_at, "Not submitted"),
+        completed_label: formatAutomationDate(run?.completed_at, "Not completed"),
+        // Only emit chat_path when a canonical thread_id is present. The backend sets
+        // thread_id only after fire acceptance; pre-acceptance and pre-submit-failure rows
+        // carry null/absent thread_id, which is falsy and suppresses the link.
+        chat_path: run?.thread_id
+          ? `/chat/${encodeURIComponent(run.thread_id)}`
+          : null,
+      };
+    })
+    .sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
+}
+
+function normalizeRunStatus(status) {
+  if (status === "ok" || status === "error" || status === "running") return status;
+  return "unknown";
+}
+
+function successRateLabel(runs) {
+  const terminalRuns = runs.filter((run) => run.status === "ok" || run.status === "error");
+  if (!terminalRuns.length) return "No completed runs";
+  const ok = terminalRuns.filter((run) => run.status === "ok").length;
+  return `${Math.round((ok / terminalRuns.length) * 100)}% visible runs`;
 }
 
 function compareAutomations(a, b) {

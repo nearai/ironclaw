@@ -112,7 +112,9 @@ use ironclaw_turns::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
         BatchPolicyKind, CapabilityDeniedReasonKind, CapabilityDescriptorView,
         CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-        CapabilitySurfaceVersion, CompactionInitiator, FinalizeAssistantMessage,
+        CapabilitySurfaceVersion, CommunicationContextFetch, CommunicationContextProvider,
+        CommunicationRuntimeContext, CompactionInitiator, ConnectedChannelSummary,
+        ConnectedChannelsState, DeliveryTargetState, FinalizeAssistantMessage,
         InMemoryLoopHostMilestoneSink, InstructionSafetyContext, LoopCancelReasonKind,
         LoopCancellationPort, LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort,
         LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError, LoopCompactionMode,
@@ -213,7 +215,7 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
         })
         .await
         .unwrap();
-    assert_eq!(prompt_bundle.messages.len(), 2);
+    assert_eq!(prompt_bundle.messages.len(), 3);
     assert!(prompt_bundle.instruction_fingerprint.is_some());
 
     let model_response = host_dyn
@@ -855,10 +857,24 @@ async fn text_only_model_reply_driver_runs_prompt_model_transcript_path() {
 
     let requests = fixture.gateway.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].messages.len(), 2);
+    assert_eq!(requests[0].messages.len(), 3);
     assert!(requests[0].messages.iter().any(|message| {
         message.content == "RAW_PROMPT_TEXT_SENTINEL sk-prompt-secret /host/path tool_input"
     }));
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|message| message.content.contains("Current date/time at loop start:")),
+        "model request must contain the runtime context message stamped by the production host"
+    );
+    assert!(
+        !requests[0]
+            .messages
+            .iter()
+            .any(|message| message.content.contains("Connected channels:")),
+        "model request must NOT contain communication section when no provider is installed"
+    );
     assert_eq!(
         fixture.milestone_names(),
         vec![
@@ -870,6 +886,393 @@ async fn text_only_model_reply_driver_runs_prompt_model_transcript_path() {
     );
     assert_public_milestones_hide_raw_payloads(&fixture.milestones());
     assert_driver_public_outputs_hide_raw_payloads(&completed);
+}
+
+/// Regression guard: the runtime context ("Current date/time at loop start:")
+/// must appear exactly once in every model request, including across multiple
+/// loop spawns over the same thread (where the transcript grows but the
+/// synthetic runtime section must NOT leak into it and reappear alongside the
+/// fresh section on the next spawn).
+///
+/// There is no existing test that drives 2+ model requests through
+/// HostFixture in a single turn worker run (all existing HostFixture-based
+/// tests assert requests.len() == 1). Instead, this test uses two independent
+/// build_host()+driver.run() calls over the same fixture to simulate two
+/// successive loop spawns. Each spawn sets a fresh LoopRuntimeContext on its
+/// prompt port; after the first run the assistant reply is persisted to the
+/// thread service transcript. The second spawn therefore sees a longer
+/// transcript, and we verify the runtime context still appears exactly once
+/// (not twice, which would happen if it had been stored in the transcript).
+#[tokio::test]
+async fn text_only_model_reply_driver_embeds_runtime_context_exactly_once_per_model_request() {
+    // --- spawn 1 ---
+    let mut fixture = HostFixture::new(
+        "thread-driver-runtime-once",
+        "first message RAW_PROMPT_TEXT_SENTINEL",
+    )
+    .await;
+    let driver = TextOnlyModelReplyDriver::default();
+    assign_driver_to_fixture(&mut fixture, driver.descriptor());
+
+    let host1 = fixture.build_host().await;
+    driver
+        .run(driver_request(&fixture.context), &host1)
+        .await
+        .unwrap();
+
+    let requests_after_spawn1 = fixture.gateway.requests();
+    assert_eq!(
+        requests_after_spawn1.len(),
+        1,
+        "spawn 1 should produce exactly one gateway request"
+    );
+    let occurrences_spawn1 = requests_after_spawn1[0]
+        .messages
+        .iter()
+        .filter(|message| message.content.contains("Current date/time at loop start:"))
+        .count();
+    assert_eq!(
+        occurrences_spawn1, 1,
+        "model request for spawn 1 must embed the runtime context exactly once, found {occurrences_spawn1}"
+    );
+    assert!(
+        !requests_after_spawn1[0]
+            .messages
+            .iter()
+            .any(|message| message.content.contains("Connected channels:")),
+        "model request for spawn 1 must NOT contain communication section when no provider is installed"
+    );
+
+    // --- spawn 2 (same thread, transcript now has the assistant reply from
+    // spawn 1; the runtime context from spawn 1 must NOT reappear) ---
+    let host2 = fixture.build_host().await;
+    driver
+        .run(driver_request(&fixture.context), &host2)
+        .await
+        .unwrap();
+
+    let requests_after_spawn2 = fixture.gateway.requests();
+    assert_eq!(
+        requests_after_spawn2.len(),
+        2,
+        "spawn 2 should add a second gateway request (cumulative total)"
+    );
+    let occurrences_spawn2 = requests_after_spawn2[1]
+        .messages
+        .iter()
+        .filter(|message| message.content.contains("Current date/time at loop start:"))
+        .count();
+    assert_eq!(
+        occurrences_spawn2, 1,
+        "model request for spawn 2 must embed the runtime context exactly once (not accumulated from spawn 1), found {occurrences_spawn2}"
+    );
+    assert!(
+        !requests_after_spawn2[1]
+            .messages
+            .iter()
+            .any(|message| message.content.contains("Connected channels:")),
+        "model request for spawn 2 must NOT contain communication section when no provider is installed"
+    );
+}
+
+struct StubCommunicationContextProvider;
+
+impl CommunicationContextProvider for StubCommunicationContextProvider {
+    fn begin_communication_context(
+        &self,
+        _scope: TurnScope,
+        _actor: Option<TurnActor>,
+    ) -> CommunicationContextFetch {
+        // `delivery_tools_visible` is a placeholder; the host stamps the real
+        // surface-derived value in `CommunicationContextFetch::resolve`.
+        CommunicationContextFetch::from_ready(Some(CommunicationRuntimeContext {
+            connected_channels: ConnectedChannelsState::Known(vec![ConnectedChannelSummary {
+                name: "test-channel".to_string(),
+                authenticated: true,
+                active: true,
+            }]),
+            delivery_target: DeliveryTargetState::NoneSet,
+            delivery_tools_visible: false,
+        }))
+    }
+}
+
+#[tokio::test]
+async fn text_only_host_factory_with_communication_context_provider_injects_comm_section() {
+    let mut fixture = HostFixture::new("thread-driver-runtime-comm", "hello runtime").await;
+    let driver = TextOnlyModelReplyDriver::default();
+    assign_driver_to_fixture(&mut fixture, driver.descriptor());
+    let host = fixture
+        .factory()
+        .with_communication_context_provider(Arc::new(StubCommunicationContextProvider))
+        .build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: fixture.claimed.clone(),
+            loop_run_context: fixture.context.clone(),
+        })
+        .await
+        .unwrap();
+
+    driver
+        .run(driver_request(&fixture.context), &host)
+        .await
+        .unwrap();
+
+    let requests = fixture.gateway.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].messages.iter().any(|message| message
+            .content
+            .contains("Connected channels: test-channel (authenticated, active).")),
+        "model request must contain provider-supplied connected channel"
+    );
+    assert!(
+        requests[0].messages.iter().any(|message| message
+            .content
+            .contains("Outbound delivery target: none set.")),
+        "model request must contain provider-supplied outbound delivery target state"
+    );
+}
+
+// Provider that records what the host passed to `begin_communication_context`
+// so callers can assert the scope/actor the host handed in. `delivery_tools_visible`
+// is no longer a provider input — the host stamps it in `resolve` after the
+// capability surface is known — so it is asserted via rendered output, not here.
+struct RecordingCommunicationContextProvider {
+    recorded_thread_id: Mutex<Option<ThreadId>>,
+    recorded_actor_present: Mutex<Option<bool>>,
+}
+
+impl RecordingCommunicationContextProvider {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            recorded_thread_id: Mutex::new(None),
+            recorded_actor_present: Mutex::new(None),
+        })
+    }
+
+    #[allow(dead_code)]
+    fn thread_id(&self) -> Option<ThreadId> {
+        self.recorded_thread_id.lock().unwrap().clone()
+    }
+
+    #[allow(dead_code)]
+    fn actor_present(&self) -> Option<bool> {
+        *self.recorded_actor_present.lock().unwrap()
+    }
+}
+
+impl CommunicationContextProvider for RecordingCommunicationContextProvider {
+    fn begin_communication_context(
+        &self,
+        scope: TurnScope,
+        actor: Option<TurnActor>,
+    ) -> CommunicationContextFetch {
+        *self.recorded_thread_id.lock().unwrap() = Some(scope.thread_id.clone());
+        *self.recorded_actor_present.lock().unwrap() = Some(actor.is_some());
+        // Placeholder flag; the host stamps the surface-derived value in `resolve`.
+        CommunicationContextFetch::from_ready(Some(CommunicationRuntimeContext {
+            connected_channels: ConnectedChannelsState::Unknown,
+            delivery_target: DeliveryTargetState::NoneSet,
+            delivery_tools_visible: false,
+        }))
+    }
+}
+
+// f-test-5: when the visible surface includes BOTH builtin.outbound_delivery_target_set
+// AND builtin.outbound_delivery_targets_list, the host derives delivery_tools_visible=true
+// and stamps it onto the resolved communication context. Asserted end-to-end via the
+// rendered ScheduledTrigger + NoneSet warning, whose tool-hint sentence only appears when
+// both delivery capabilities are present in the surface.
+#[tokio::test]
+async fn delivery_tools_visible_from_surface_renders_tool_hint_warning() {
+    let mut fixture = HostFixture::new("thread-comm-delivery-visible", "hello delivery").await;
+    let driver = TextOnlyModelReplyDriver::default();
+    assign_driver_to_fixture(&mut fixture, driver.descriptor());
+
+    // ScheduledTrigger + NoneSet is the render path gated on delivery_tools_visible.
+    let loop_run_context =
+        fixture
+            .context
+            .clone()
+            .with_product_context(ironclaw_turns::ProductTurnContext::new(
+                ironclaw_turns::TurnOriginKind::ScheduledTrigger,
+                None,
+                None,
+                ironclaw_turns::TurnOwner::Personal {
+                    user: UserId::new("user-comm-delivery-visible").unwrap(),
+                },
+            ));
+
+    // Both the setter AND the lister must be present: the rendered guidance names both tools.
+    let setter_id = CapabilityId::new("builtin.outbound_delivery_target_set").unwrap();
+    let lister_id = CapabilityId::new("builtin.outbound_delivery_targets_list").unwrap();
+    let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
+        capability_descriptor(setter_id.as_str()),
+        capability_descriptor(lister_id.as_str()),
+    ])));
+    let io = Arc::new(InMemoryCapabilityIo::default());
+    let capability_port = HostRuntimeLoopCapabilityPort::new(
+        runtime.clone(),
+        loop_run_context.clone(),
+        host_runtime_visible_request(&fixture, ["builtin"]),
+        io.clone(),
+        io,
+        fixture.milestone_sink.clone(),
+    );
+    let surface_resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
+        CapabilityAllowSet::allowlist([setter_id.clone(), lister_id.clone()]),
+    ));
+    let recording_provider = RecordingCommunicationContextProvider::new();
+
+    let host = fixture
+        .factory()
+        .with_communication_context_provider(
+            Arc::clone(&recording_provider) as Arc<dyn CommunicationContextProvider>
+        )
+        .build_text_only_host_with_profiled_capabilities(
+            RebornLoopDriverHostRequest {
+                claimed_run: fixture.claimed.clone(),
+                loop_run_context: loop_run_context.clone(),
+            },
+            Arc::new(capability_port),
+            surface_resolver,
+        )
+        .await
+        .unwrap();
+
+    driver
+        .run(driver_request(&loop_run_context), &host)
+        .await
+        .unwrap();
+
+    let requests = fixture.gateway.requests();
+    assert!(
+        requests[0].messages.iter().any(|message| message
+            .content
+            .contains("Set one with builtin__outbound_delivery_target_set.")),
+        "delivery_tools_visible=true (both capabilities in surface) must render the tool-hint warning variant"
+    );
+}
+
+// f-test-5b: when the visible surface includes ONLY builtin.outbound_delivery_target_set
+// but NOT builtin.outbound_delivery_targets_list, delivery_tools_visible must be false.
+// The rendered guidance must not name tools the model cannot call.
+#[tokio::test]
+async fn delivery_tools_visible_requires_both_caps_setter_only_suppresses_hint() {
+    let mut fixture =
+        HostFixture::new("thread-comm-delivery-setter-only", "hello setter-only").await;
+    let driver = TextOnlyModelReplyDriver::default();
+    assign_driver_to_fixture(&mut fixture, driver.descriptor());
+
+    // ScheduledTrigger + NoneSet is the render path gated on delivery_tools_visible.
+    let loop_run_context =
+        fixture
+            .context
+            .clone()
+            .with_product_context(ironclaw_turns::ProductTurnContext::new(
+                ironclaw_turns::TurnOriginKind::ScheduledTrigger,
+                None,
+                None,
+                ironclaw_turns::TurnOwner::Personal {
+                    user: UserId::new("user-comm-delivery-setter-only").unwrap(),
+                },
+            ));
+
+    // Only the setter — lister absent. delivery_tools_visible must remain false.
+    let setter_id = CapabilityId::new("builtin.outbound_delivery_target_set").unwrap();
+    let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
+        capability_descriptor(setter_id.as_str()),
+    ])));
+    let io = Arc::new(InMemoryCapabilityIo::default());
+    let capability_port = HostRuntimeLoopCapabilityPort::new(
+        runtime.clone(),
+        loop_run_context.clone(),
+        host_runtime_visible_request(&fixture, ["builtin"]),
+        io.clone(),
+        io,
+        fixture.milestone_sink.clone(),
+    );
+    let surface_resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
+        CapabilityAllowSet::allowlist([setter_id.clone()]),
+    ));
+    let recording_provider = RecordingCommunicationContextProvider::new();
+
+    let host = fixture
+        .factory()
+        .with_communication_context_provider(
+            Arc::clone(&recording_provider) as Arc<dyn CommunicationContextProvider>
+        )
+        .build_text_only_host_with_profiled_capabilities(
+            RebornLoopDriverHostRequest {
+                claimed_run: fixture.claimed.clone(),
+                loop_run_context: loop_run_context.clone(),
+            },
+            Arc::new(capability_port),
+            surface_resolver,
+        )
+        .await
+        .unwrap();
+
+    driver
+        .run(driver_request(&loop_run_context), &host)
+        .await
+        .unwrap();
+
+    let requests = fixture.gateway.requests();
+    // The tool-hint variant must NOT appear: lister is not in the surface.
+    assert!(
+        !requests[0].messages.iter().any(|message| message
+            .content
+            .contains("builtin__outbound_delivery_target_set")),
+        "delivery_tools_visible must be false when only the setter capability is present (lister absent)"
+    );
+}
+
+// f-test-6: when claimed.state.product_context.origin is ScheduledTrigger, the model request
+// contains the "Run origin: scheduled trigger fire." line.
+#[tokio::test]
+async fn scheduled_trigger_run_origin_appears_in_model_request() {
+    let mut fixture = HostFixture::new("thread-comm-sched-trigger", "hello trigger").await;
+    let driver = TextOnlyModelReplyDriver::default();
+    assign_driver_to_fixture(&mut fixture, driver.descriptor());
+
+    let loop_run_context =
+        fixture
+            .context
+            .clone()
+            .with_product_context(ironclaw_turns::ProductTurnContext::new(
+                ironclaw_turns::TurnOriginKind::ScheduledTrigger,
+                None,
+                None,
+                ironclaw_turns::TurnOwner::Personal {
+                    user: UserId::new("user-comm-sched-trigger").unwrap(),
+                },
+            ));
+    let host = fixture
+        .factory()
+        .with_communication_context_provider(
+            RecordingCommunicationContextProvider::new() as Arc<dyn CommunicationContextProvider>
+        )
+        .build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: fixture.claimed.clone(),
+            loop_run_context: loop_run_context.clone(),
+        })
+        .await
+        .unwrap();
+
+    driver
+        .run(driver_request(&loop_run_context), &host)
+        .await
+        .unwrap();
+
+    let requests = fixture.gateway.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].messages.iter().any(|message| message
+            .content
+            .contains("Run origin: scheduled trigger fire.")),
+        "model request must contain scheduled trigger run origin line"
+    );
 }
 
 #[tokio::test]
@@ -1284,6 +1687,7 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
                     parent_run_id: None,
                     subagent_depth: 0,
                     spawn_tree_root_run_id: None,
+                    product_context: None,
                 },
                 &ironclaw_turns::AllowAllTurnAdmissionPolicy,
                 &resolver,
@@ -2266,6 +2670,8 @@ async fn planned_host_factory_create_host_uses_profiled_capabilities() {
             surface_version: surface.version,
             capability_id: denied_id,
             input_ref: CapabilityInputRef::new("input:denied-from-planned-host").unwrap(),
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -2536,6 +2942,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
         model_budget_accountant: None,
         safety_context: None,
         hook_dispatcher_builder_factory: None,
+        communication_context_provider: None,
         hook_security_audit_sink: None,
         turn_event_sink: Some(event_sink.clone()),
     })
@@ -2556,6 +2963,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
             parent_run_id: None,
             subagent_depth: 0,
             spawn_tree_root_run_id: None,
+            product_context: None,
         })
         .await
         .unwrap();
@@ -2596,6 +3004,8 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
             surface_version: surface.version,
             capability_id: denied_id,
             input_ref: CapabilityInputRef::new("input:runtime-denied").unwrap(),
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -2707,6 +3117,7 @@ async fn build_runtime_host_with_optional_hooks(
         hook_security_audit_sink: None,
         turn_event_sink: None,
         hook_dispatcher_builder_factory: hook_factory,
+        communication_context_provider: None,
     })
     .unwrap();
 
@@ -2826,6 +3237,8 @@ async fn hooks_flag_off_capability_invocation_is_unaffected() {
             surface_version,
             capability_id: allowed_id.clone(),
             input_ref,
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -2867,6 +3280,8 @@ async fn hooks_flag_on_first_party_only_does_not_change_outcome() {
             surface_version,
             capability_id: allowed_id.clone(),
             input_ref,
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -2901,6 +3316,8 @@ async fn hooks_flag_on_extension_deny_hook_denies_through_composed_runtime() {
             surface_version,
             capability_id: allowed_id.clone(),
             input_ref: CapabilityInputRef::new("input:hooks-deny").unwrap(),
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -2935,6 +3352,8 @@ async fn hooks_are_isolated_per_tenant_runtime() {
             surface_version: surface_a,
             capability_id: allowed_id.clone(),
             input_ref: CapabilityInputRef::new("input:tenant-a").unwrap(),
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -2962,6 +3381,8 @@ async fn hooks_are_isolated_per_tenant_runtime() {
             surface_version: surface_b,
             capability_id: allowed_id.clone(),
             input_ref: input_ref_b,
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -3035,6 +3456,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
         hook_dispatcher_builder_factory: None,
+        communication_context_provider: None,
         hook_security_audit_sink: None,
         turn_event_sink: None,
     })
@@ -3092,7 +3514,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
 /// to assert the fail-closed branch fires.
 async fn product_live_parts_for_gate_test(
     thread_label: &'static str,
-) -> DefaultPlannedRuntimeParts<InMemoryTurnStateStore, RecordingGateway> {
+) -> DefaultPlannedRuntimeParts<RecordingGateway> {
     let fixture = HostFixture::new_unsubmitted(thread_label, "hello").await;
     let turn_store = Arc::new(InMemoryTurnStateStore::default());
     let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
@@ -3147,6 +3569,7 @@ async fn product_live_parts_for_gate_test(
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
         hook_dispatcher_builder_factory: None,
+        communication_context_provider: None,
         hook_security_audit_sink: None,
         turn_event_sink: None,
     }
@@ -3587,7 +4010,7 @@ async fn text_only_host_prompt_accepts_empty_surface_version() {
         .await
         .unwrap();
 
-    assert_eq!(prompt_bundle.messages.len(), 2);
+    assert_eq!(prompt_bundle.messages.len(), 3);
 }
 
 #[tokio::test]
@@ -4429,7 +4852,7 @@ async fn text_only_host_skill_context_does_not_expand_capability_surface() {
         })
         .await
         .unwrap();
-    assert_eq!(prompt_bundle.messages.len(), 3);
+    assert_eq!(prompt_bundle.messages.len(), 4);
 
     let surface = host
         .visible_capabilities(VisibleCapabilityRequest)
@@ -4442,6 +4865,8 @@ async fn text_only_host_skill_context_does_not_expand_capability_surface() {
                 surface_version: surface.version,
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
                 input_ref: CapabilityInputRef::new("input:opaque-tool-input").unwrap(),
+                approval_resume: None,
+                auth_resume: None,
             }],
             stop_on_first_suspension: true,
         })
@@ -4500,7 +4925,7 @@ async fn text_only_host_prompt_bundle_includes_surface_metadata_and_still_stream
 
     assert!(prompt_bundle.instruction_fingerprint.is_some());
     assert_eq!(prompt_bundle.surface_version, Some(surface.version.clone()));
-    assert_eq!(prompt_bundle.messages.len(), 3);
+    assert_eq!(prompt_bundle.messages.len(), 4);
 
     host.stream_model(LoopModelRequest {
         messages: prompt_bundle.messages,
@@ -4567,6 +4992,8 @@ async fn text_only_host_routes_capability_invocation_through_host_runtime() {
             surface_version: surface.version.clone(),
             capability_id: capability_id.clone(),
             input_ref,
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -4630,6 +5057,8 @@ async fn text_only_host_profiled_capabilities_filter_surface_and_invocation() {
             surface_version: surface.version,
             capability_id: denied_id,
             input_ref: CapabilityInputRef::new("input:denied-profile").unwrap(),
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -4704,6 +5133,8 @@ async fn default_strategy_filter_all_loses_to_host_profile_filter() {
             surface_version: surface.version,
             capability_id: tool_b_id,
             input_ref: CapabilityInputRef::new("input:tool-b-denied").unwrap(),
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -4776,6 +5207,8 @@ async fn text_only_host_uses_fresh_execution_context_per_capability_invocation()
                 surface_version: surface.version.clone(),
                 capability_id: capability_id.clone(),
                 input_ref,
+                approval_resume: None,
+                auth_resume: None,
             })
             .await
             .unwrap();
@@ -4863,6 +5296,8 @@ async fn text_only_host_rejects_outside_surface_capability_before_host_runtime()
             surface_version: surface.version,
             capability_id: hidden_id,
             input_ref: CapabilityInputRef::new("input:hidden-request").unwrap(),
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -4878,6 +5313,8 @@ async fn text_only_host_rejects_outside_surface_capability_before_host_runtime()
             surface_version: CapabilitySurfaceVersion::new("sha256:stale").unwrap(),
             capability_id: visible_id,
             input_ref: CapabilityInputRef::new("input:stale-request").unwrap(),
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap_err();
@@ -4931,6 +5368,8 @@ async fn text_only_host_sanitizes_runtime_failure_message_before_driver_output()
             surface_version: surface.version,
             capability_id,
             input_ref,
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -5035,6 +5474,8 @@ async fn text_only_host_maps_runtime_suspension_and_process_outcomes() {
                 surface_version: surface.version.clone(),
                 capability_id,
                 input_ref,
+                approval_resume: None,
+                auth_resume: None,
             })
             .await
             .unwrap(),
@@ -5043,7 +5484,7 @@ async fn text_only_host_maps_runtime_suspension_and_process_outcomes() {
 
     assert!(matches!(
         &outcomes[0],
-        CapabilityOutcome::ApprovalRequired { gate_ref, safe_summary }
+        CapabilityOutcome::ApprovalRequired { gate_ref, safe_summary, .. }
             if gate_ref.as_str().starts_with("gate:approval-")
                 && safe_summary == "capability requires approval"
     ));
@@ -5119,6 +5560,8 @@ async fn text_only_host_maps_explicit_unknown_runtime_outcome_to_failure() {
             surface_version: surface.version,
             capability_id,
             input_ref,
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -5140,7 +5583,7 @@ async fn text_only_host_maps_explicit_unknown_runtime_outcome_to_failure() {
 }
 
 #[tokio::test]
-async fn text_only_host_preserves_host_runtime_error_kind_and_summary() {
+async fn text_only_host_preserves_invalid_request_and_returns_unavailable_as_failed_outcome() {
     let fixture = HostFixture::new("thread-host-runtime-capability-host-error", "hello").await;
     let capability_id = CapabilityId::new("demo.echo").unwrap();
     let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
@@ -5186,6 +5629,8 @@ async fn text_only_host_preserves_host_runtime_error_kind_and_summary() {
             surface_version: surface.version.clone(),
             capability_id: capability_id.clone(),
             input_ref: first_input,
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap_err();
@@ -5194,17 +5639,20 @@ async fn text_only_host_preserves_host_runtime_error_kind_and_summary() {
             surface_version: surface.version,
             capability_id,
             input_ref: second_input,
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
-        .unwrap_err();
+        .unwrap();
 
     assert_eq!(invalid.kind, AgentLoopHostErrorKind::InvalidInvocation);
     assert_eq!(invalid.safe_summary, "capability input schema invalid");
-    assert_eq!(unavailable.kind, AgentLoopHostErrorKind::Unavailable);
-    assert_eq!(
-        unavailable.safe_summary,
-        "resource governor temporarily unavailable"
-    );
+    assert!(matches!(
+        unavailable,
+        CapabilityOutcome::Failed(failure)
+            if failure.error_kind == CapabilityFailureKind::Unavailable
+                && failure.safe_summary == "resource governor temporarily unavailable"
+    ));
 }
 
 #[tokio::test]
@@ -5267,11 +5715,15 @@ async fn text_only_host_batch_stops_on_first_suspension_before_later_invocations
                     surface_version: surface.version.clone(),
                     capability_id: approval_id,
                     input_ref: approval_input,
+                    approval_resume: None,
+                    auth_resume: None,
                 },
                 CapabilityInvocation {
                     surface_version: surface.version,
                     capability_id: echo_id,
                     input_ref: echo_input,
+                    approval_resume: None,
+                    auth_resume: None,
                 },
             ],
             stop_on_first_suspension: true,
@@ -5329,6 +5781,8 @@ async fn text_only_host_does_not_reinvoke_runtime_after_failed_outcome_retry() {
         surface_version: surface.version,
         capability_id: capability_id.clone(),
         input_ref,
+        approval_resume: None,
+        auth_resume: None,
     };
 
     let first = host.invoke_capability(invocation.clone()).await.unwrap();
@@ -5450,6 +5904,8 @@ async fn text_only_host_waits_for_concurrent_duplicate_invocation_result() {
         surface_version: surface.version,
         capability_id: capability_id.clone(),
         input_ref,
+        approval_resume: None,
+        auth_resume: None,
     };
 
     let (first, second) = tokio::join!(
@@ -5529,6 +5985,8 @@ async fn text_only_host_bounds_completed_dispatch_records() {
                 surface_version: surface.version.clone(),
                 capability_id: capability_id.clone(),
                 input_ref,
+                approval_resume: None,
+                auth_resume: None,
             })
             .await
             .unwrap();
@@ -5539,6 +5997,8 @@ async fn text_only_host_bounds_completed_dispatch_records() {
             surface_version: surface.version,
             capability_id,
             input_ref: input_refs[0].clone(),
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -5640,6 +6100,8 @@ async fn text_only_host_does_not_reinvoke_runtime_after_result_write_failure_ret
         surface_version: surface.version,
         capability_id: capability_id.clone(),
         input_ref,
+        approval_resume: None,
+        auth_resume: None,
     };
 
     let first = host
@@ -5707,6 +6169,8 @@ async fn text_only_host_rejects_runtime_outcome_for_different_capability() {
             surface_version: surface.version,
             capability_id: requested_id,
             input_ref,
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap_err();
@@ -5776,6 +6240,8 @@ async fn text_only_host_rejects_previous_surface_after_refetch() {
             surface_version: first_surface.version,
             capability_id: first_id,
             input_ref,
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap_err();
@@ -5799,6 +6265,8 @@ async fn text_only_host_empty_capability_surface_denies_invocation() {
                 surface_version: surface.version.clone(),
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
                 input_ref: CapabilityInputRef::new("input:opaque-tool-input").unwrap(),
+                approval_resume: None,
+                auth_resume: None,
             }],
             stop_on_first_suspension: true,
         })
@@ -5815,6 +6283,8 @@ async fn text_only_host_empty_capability_surface_denies_invocation() {
             surface_version: CapabilitySurfaceVersion::new("other:v1").unwrap(),
             capability_id: CapabilityId::new("demo.echo").unwrap(),
             input_ref: CapabilityInputRef::new("input:opaque-tool-input").unwrap(),
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap_err();
@@ -5883,6 +6353,8 @@ async fn text_only_host_e2e_invokes_script_capability_through_real_host_runtime(
             surface_version: surface.version,
             capability_id: e2e_script_capability_id(),
             input_ref,
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -5935,6 +6407,8 @@ async fn text_only_host_denies_capability_without_provider_trust_before_host_run
             surface_version: surface.version,
             capability_id,
             input_ref,
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -5992,6 +6466,8 @@ async fn text_only_host_allows_retry_after_missing_capability_input_is_staged() 
         surface_version: surface.version,
         capability_id: capability_id.clone(),
         input_ref: input_ref.clone(),
+        approval_resume: None,
+        auth_resume: None,
     };
 
     let missing = host
@@ -6519,7 +6995,7 @@ fn host_runtime_visible_request(
         .unwrap_or_else(|| UserId::new("user-text-host").unwrap());
     let mut context = ExecutionContext::local_default(
         user_id,
-        ExtensionId::new(fixture.context.loop_driver_id.as_str()).unwrap(),
+        loop_driver_execution_extension_id(&fixture.context).unwrap(),
         RuntimeKind::FirstParty,
         TrustClass::System,
         CapabilitySet::default(),
@@ -6860,6 +7336,8 @@ impl AgentLoopDriver for ScriptCapabilityFinalReplyDriver {
                 surface_version: surface.version.clone(),
                 capability_id: self.capability_id.clone(),
                 input_ref: self.input_ref.clone(),
+                approval_resume: None,
+                auth_resume: None,
             })
             .await
             .map_err(driver_host_error)?;
@@ -7136,6 +7614,7 @@ async fn queue_fixture_turn(
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
+                product_context: None,
             },
             &ironclaw_turns::AllowAllTurnAdmissionPolicy,
             resolver,
@@ -7263,6 +7742,7 @@ impl HostFixture {
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
+            product_context: None,
         };
         let claimed = ClaimedTurnRun {
             state,

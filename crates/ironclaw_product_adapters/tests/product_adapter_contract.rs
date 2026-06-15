@@ -9,13 +9,13 @@ use ironclaw_product_adapters::{
     ExternalConversationRef, ExternalEventId, FakeOutboundDeliverySink, FakeProductWorkflow,
     FakeProjectionStream, FakeProtocolHttpEgress, InboundCommandPayload, OutboundDeliverySink,
     ParsedProductInbound, ProductAdapterCapabilities, ProductAdapterError, ProductAdapterId,
-    ProductAttachmentDescriptor, ProductAttachmentKind, ProductCapabilityFlag, ProductInboundAck,
-    ProductInboundEnvelope, ProductInboundPayload, ProductOutboundEnvelope, ProductOutboundPayload,
-    ProductOutboundTarget, ProductProjectionItem, ProductProjectionReadInput,
-    ProductProjectionState, ProductProjectionSubject, ProductProjectionSubscribeInput,
-    ProductRejection, ProductRejectionKind, ProductSurfaceKind, ProductTriggerReason,
-    ProductWorkflow, ProjectionCursor, ProjectionReadRequest, ProjectionStream,
-    ProjectionSubscriptionRequest, ProtocolAuthEvidence, ProtocolHttpEgress,
+    ProductAttachmentDescriptor, ProductAttachmentKind, ProductCapabilityFlag,
+    ProductControlActionPayload, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
+    ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem,
+    ProductProjectionReadInput, ProductProjectionState, ProductProjectionSubject,
+    ProductProjectionSubscribeInput, ProductRejection, ProductRejectionKind, ProductSurfaceKind,
+    ProductTriggerReason, ProductWorkflow, ProjectionCursor, ProjectionReadRequest,
+    ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthEvidence, ProtocolHttpEgress,
     ProtocolHttpEgressError, REDACTED_PLACEHOLDER, RedactedDebug, RedactedString,
     TrustedInboundContext, UserMessagePayload,
 };
@@ -216,8 +216,26 @@ fn verified_auth_evidence_only_constructible_for_tests_via_test_support() {
     let evidence = ProtocolAuthEvidence::test_verified(AuthRequirement::BearerToken, "alice");
     assert!(evidence.is_verified());
     assert_eq!(evidence.claim().expect("claim").subject(), "alice");
+    assert!(evidence.claim().expect("claim").tenant_id().is_none());
     let json = serde_json::to_string(&evidence).expect("serialize");
     assert!(serde_json::from_str::<ProtocolAuthEvidence>(&json).is_err());
+}
+
+#[test]
+fn verified_auth_evidence_can_carry_tenant_scope_for_host_minted_claims() {
+    let tenant_id = ironclaw_host_api::TenantId::new("tenant-a").expect("tenant");
+    let evidence = ProtocolAuthEvidence::test_verified_for_tenant(
+        AuthRequirement::BearerToken,
+        "alice",
+        tenant_id.clone(),
+    );
+
+    let claim = evidence.claim().expect("claim");
+    assert_eq!(claim.subject(), "alice");
+    assert_eq!(claim.tenant_id(), Some(&tenant_id));
+    let json = serde_json::to_value(&evidence).expect("serialize");
+    assert_eq!(json["claim"]["tenant_id"], "tenant-a");
+    assert!(serde_json::from_value::<ProtocolAuthEvidence>(json).is_err());
 }
 
 #[tokio::test]
@@ -272,6 +290,13 @@ async fn workflow_returns_programmed_outcomes() {
         .await
         .expect("reject");
     assert!(matches!(reject_ack, ProductInboundAck::Rejected(_)));
+}
+
+#[test]
+fn control_action_cancel_run_validates_run_id() {
+    assert!(ProductControlActionPayload::cancel_run("").is_err());
+    assert!(ProductControlActionPayload::cancel_run("not-a-run-id").is_err());
+    assert!(ProductControlActionPayload::cancel_run(&TurnRunId::new().to_string()).is_ok());
 }
 
 #[tokio::test]

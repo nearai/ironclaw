@@ -28,6 +28,9 @@ use ironclaw_loop_support::{
     ModelCost, StaticModelCostTable, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
     ThreadContextWindowCache,
 };
+use ironclaw_safety::{
+    is_provider_arguments_too_large_summary, provider_arguments_exceed_max_bytes,
+};
 use ironclaw_threads::{ProviderToolCallReferenceEnvelope, SessionThreadService, ThreadScope};
 use ironclaw_turns::run_profile::LoopModelUsage;
 use ironclaw_turns::{
@@ -52,6 +55,8 @@ use crate::{
 };
 
 const MODEL_CREDITS_EXHAUSTED_SUMMARY: &str = "model provider account is out of credits";
+const PROVIDER_TOOL_ARGUMENTS_OMITTED_MARKER: &str =
+    "arguments omitted because they exceeded the host provider-tool limit";
 
 /// Fail-closed routing policy from resolved Reborn model profile ids to the
 /// host-selected provider/model envelope.
@@ -833,20 +838,56 @@ where
                 ToolCompletionRequest::from_completion_request(completion, llm_tool_definitions);
             debug!("reborn model gateway dispatching tool-capable provider request");
             let response = provider
-                .complete_with_tools(tool_request)
+                .complete_with_tools(tool_request.clone())
                 .await
                 .map_err(map_provider_error)?;
             let response =
                 recover_textual_tool_calls_from_tool_response(response, &recovery_tool_names)?;
-            return tool_response_to_host(
-                response,
-                capabilities,
+            match tool_response_to_host(
+                response.clone(),
+                Arc::clone(&capabilities),
                 provider_turn_scope
                     .as_deref()
                     .unwrap_or("model_call=unknown"),
                 &replay_identity,
             )
-            .await;
+            .await
+            {
+                Ok(response) => return Ok(response),
+                Err(error) if is_repairable_provider_tool_output_error(&error) => {
+                    debug!(
+                        safe_summary = error.safe_summary.as_str(),
+                        "reborn model gateway retrying after repairable provider tool output"
+                    );
+                    let mut repair_request = tool_request;
+                    repair_request
+                        .messages
+                        .extend(provider_tool_repair_messages(
+                            &response,
+                            error.safe_summary.as_str(),
+                        ));
+                    let rejected_response = response;
+                    let response = provider
+                        .complete_with_tools(repair_request)
+                        .await
+                        .map_err(map_provider_error)?;
+                    let mut response = recover_textual_tool_calls_from_tool_response(
+                        response,
+                        &recovery_tool_names,
+                    )?;
+                    accumulate_tool_response_usage(&mut response, &rejected_response);
+                    return tool_response_to_host(
+                        response,
+                        capabilities,
+                        provider_turn_scope
+                            .as_deref()
+                            .unwrap_or("model_call=unknown"),
+                        &replay_identity,
+                    )
+                    .await;
+                }
+                Err(error) => return Err(error),
+            }
         }
         debug!(
             "reborn model gateway falling back to text-only provider request because no provider tool definitions were available"
@@ -867,6 +908,24 @@ where
         "reborn model gateway received text-only provider response"
     );
     response_to_host_reply(response)
+}
+
+fn accumulate_tool_response_usage(
+    response: &mut ToolCompletionResponse,
+    additional: &ToolCompletionResponse,
+) {
+    response.input_tokens = response
+        .input_tokens
+        .saturating_add(additional.input_tokens);
+    response.output_tokens = response
+        .output_tokens
+        .saturating_add(additional.output_tokens);
+    response.cache_read_input_tokens = response
+        .cache_read_input_tokens
+        .saturating_add(additional.cache_read_input_tokens);
+    response.cache_creation_input_tokens = response
+        .cache_creation_input_tokens
+        .saturating_add(additional.cache_creation_input_tokens);
 }
 
 fn recover_textual_tool_calls_from_tool_response(
@@ -1164,6 +1223,60 @@ fn map_provider_tool_output_error(error: AgentLoopHostError) -> HostManagedModel
     }
 }
 
+fn is_repairable_provider_tool_output_error(error: &HostManagedModelError) -> bool {
+    error.kind == HostManagedModelErrorKind::InvalidOutput
+        && is_provider_arguments_too_large_summary(&error.safe_summary)
+}
+
+fn provider_tool_repair_messages(
+    response: &ToolCompletionResponse,
+    safe_summary: &str,
+) -> Vec<ChatMessage> {
+    if response.tool_calls.is_empty() {
+        return Vec::new();
+    }
+
+    let assistant = ChatMessage::assistant_with_tool_calls(
+        response.content.clone(),
+        response
+            .tool_calls
+            .iter()
+            .map(provider_tool_call_for_repair)
+            .collect(),
+    )
+    .with_reasoning(response.reasoning.clone());
+    std::iter::once(assistant)
+        .chain(response.tool_calls.iter().map(|tool_call| {
+            ChatMessage::tool_result(
+                tool_call.id.clone(),
+                tool_call.name.clone(),
+                format!(
+                    "Tool call batch rejected by host: {safe_summary}. None of this response's tool calls were executed. Retry with smaller arguments or answer directly without this tool if it is not needed."
+                ),
+            )
+        }))
+        .collect()
+}
+
+fn provider_tool_call_for_repair(tool_call: &ToolCall) -> ToolCall {
+    let arguments = if provider_arguments_exceed_max_bytes(&tool_call.arguments) {
+        serde_json::json!({
+            "error": PROVIDER_TOOL_ARGUMENTS_OMITTED_MARKER,
+        })
+    } else {
+        tool_call.arguments.clone()
+    };
+
+    ToolCall {
+        id: tool_call.id.clone(),
+        name: tool_call.name.clone(),
+        arguments,
+        reasoning: tool_call.reasoning.clone(),
+        signature: tool_call.signature.clone(),
+        arguments_parse_error: tool_call.arguments_parse_error.clone(),
+    }
+}
+
 fn convert_messages(
     messages: Vec<HostManagedModelMessage>,
     replay_identity: &ProviderReplayIdentity,
@@ -1380,6 +1493,7 @@ fn provider_tool_call_from_reference(
         arguments: provider_call.arguments.clone(),
         reasoning: provider_call.reasoning.clone(),
         signature: provider_call.signature.clone(),
+        arguments_parse_error: None,
     }
 }
 

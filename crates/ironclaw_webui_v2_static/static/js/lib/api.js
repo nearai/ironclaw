@@ -68,6 +68,48 @@ async function parseErrorBody(response) {
   }
 }
 
+// Turn a snake_case / kebab-case wire token into a readable phrase, e.g.
+// `service_unavailable` -> "Service unavailable".
+function humanizeErrorToken(token) {
+  return String(token)
+    .replace(/[_-]+/g, " ")
+    .trim()
+    .replace(/^\w/, (char) => char.toUpperCase());
+}
+
+// Derive a human-readable message from a WebChat v2 error response.
+//
+// The wire envelope (`ironclaw_webui_v2::WebUiV2HttpErrorBody`) carries only
+// snake_case enum codes — `kind` (the user-renderable family, e.g.
+// `service_unavailable`), `error` (a coarse code), and an optional
+// `validation_code` + `field` — never prose. Throwing the raw JSON body as the
+// error message means a dialog shows `{"error":"...","kind":"..."}`, which reads
+// as "no error" to a user. Humanize the most specific token instead, and only
+// fall back to a non-JSON body when it is short enough to be a real message.
+export function describeApiError({ payload, body, statusText } = {}) {
+  if (payload && typeof payload === "object") {
+    if (payload.validation_code) {
+      const base = humanizeErrorToken(payload.validation_code);
+      return payload.field ? `${base} (${payload.field})` : base;
+    }
+    const code = payload.kind || payload.error;
+    if (code) {
+      const base = humanizeErrorToken(code);
+      return payload.field ? `${base} (${payload.field})` : base;
+    }
+  }
+  const trimmed = (body || "").trim();
+  if (
+    trimmed &&
+    trimmed.length <= 200 &&
+    !trimmed.startsWith("{") &&
+    !trimmed.startsWith("[")
+  ) {
+    return trimmed;
+  }
+  return statusText || "Request failed";
+}
+
 export async function apiFetch(path, options = {}) {
   const token = readStoredToken();
   const headers = new Headers(options.headers || {});
@@ -87,13 +129,16 @@ export async function apiFetch(path, options = {}) {
 
   if (!response.ok) {
     const { text, payload } = await parseErrorBody(response);
-    throw new ApiError(text || response.statusText, {
-      status: response.status,
-      statusText: response.statusText,
-      body: text,
-      headers: response.headers,
-      payload,
-    });
+    throw new ApiError(
+      describeApiError({ payload, body: text, statusText: response.statusText }),
+      {
+        status: response.status,
+        statusText: response.statusText,
+        body: text,
+        headers: response.headers,
+        payload,
+      },
+    );
   }
 
   const contentType = response.headers.get("content-type") || "";
@@ -135,20 +180,79 @@ export function deleteThread({ threadId } = {}) {
 
 // --- Automations ---
 
-export function listAutomations({ limit } = {}) {
+export function listAutomations({ limit, runLimit } = {}) {
   const params = new URLSearchParams();
   if (limit != null) params.set("limit", String(limit));
+  if (runLimit != null) params.set("run_limit", String(runLimit));
   const query = params.toString();
   return apiFetch(`${V2_BASE}/automations${query ? `?${query}` : ""}`);
 }
 
+// --- Outbound delivery preferences ---
+
+export function getOutboundPreferences() {
+  return apiFetch(`${V2_BASE}/outbound/preferences`);
+}
+
+export function listOutboundDeliveryTargets() {
+  return apiFetch(`${V2_BASE}/outbound/targets`);
+}
+
+export function setOutboundPreferences({ finalReplyTargetId } = {}) {
+  return apiFetch(`${V2_BASE}/outbound/preferences`, {
+    method: "POST",
+    body: JSON.stringify({
+      final_reply_target_id: finalReplyTargetId ?? null,
+    }),
+  });
+}
+
+// --- Operator logs ---
+
+export function queryOperatorLogs({
+  limit,
+  cursor,
+  level,
+  target,
+  threadId,
+  runId,
+  turnId,
+  toolCallId,
+  toolName,
+  source,
+} = {}) {
+  const url = new URL(`${V2_BASE}/operator/logs`, window.location.origin);
+  if (limit != null) url.searchParams.set("limit", String(limit));
+  if (cursor) url.searchParams.set("cursor", cursor);
+  if (level) url.searchParams.set("level", level);
+  if (target) url.searchParams.set("target", target);
+  if (threadId) url.searchParams.set("thread_id", threadId);
+  if (runId) url.searchParams.set("run_id", runId);
+  if (turnId) url.searchParams.set("turn_id", turnId);
+  if (toolCallId) url.searchParams.set("tool_call_id", toolCallId);
+  if (toolName) url.searchParams.set("tool_name", toolName);
+  if (source) url.searchParams.set("source", source);
+  return apiFetch(url.pathname + url.search);
+}
+
 // --- Messages ---
 
-export function sendMessage({ threadId, content, clientActionId: clientId }) {
+// `attachments` is an array of `WebUiInboundAttachment`
+// (`{ mime_type, filename, data_base64 }`). Omitted from the body when
+// empty so a text-only send keeps the original wire shape.
+export function sendMessage({
+  threadId,
+  content,
+  attachments = [],
+  clientActionId: clientId,
+}) {
   const body = {
     client_action_id: clientId || clientActionId(),
     content,
   };
+  if (attachments.length > 0) {
+    body.attachments = attachments;
+  }
   return apiFetch(
     `${V2_BASE}/threads/${encodeURIComponent(threadId)}/messages`,
     {

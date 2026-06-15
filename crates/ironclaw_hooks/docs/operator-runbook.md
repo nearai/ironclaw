@@ -92,6 +92,12 @@ capability × hook × field)` key arrives at the cap, the LRU entry
 The cap defends against unbounded growth across permutations
 (threat-model D5).
 
+A single tenant is additionally capped at
+`MAX_KEYS_PER_TENANT = MAX_HISTORY_KEYS / 4` across BOTH predicate
+history maps. Invocation-count keys and numeric-sum keys share that
+tenant budget; when the tenant is at the cap, the oldest-front key
+for that tenant is evicted regardless of which map owns it.
+
 ### What an eviction *means*
 
 The evicted key's rolling window is lost. The next invocation
@@ -174,7 +180,47 @@ These are by-design rejections. The extension author has either:
 
 ---
 
-## 4. Approval gate-ref consumed but the user didn't act
+## 4. Capability dispatch trips the fan-out cap
+
+### What you'll see
+
+- The capability invocation fails closed before every eligible
+  `BeforeCapability` hook runs.
+- The hook milestone stream records a `HookFailed` with category
+  `timeout` and a reason of
+  `before_capability dispatch fan-out budget exceeded`.
+- The skipped hook is not poisoned. The cap is an aggregate
+  dispatcher budget, not evidence that the skipped hook crashed or
+  violated its protocol.
+
+### Recovery
+
+The dispatcher defaults to
+`DEFAULT_MAX_BEFORE_CAPABILITY_HOOKS_PER_DISPATCH = 64`. This is a
+hot-path budget: install-time caps bound how many hooks can exist,
+while this cap bounds how many matching hooks can fire for one
+capability boundary.
+
+1. **Audit matching hook density for the capability.** Look for
+   broad `Global` / `SameTenant` hooks that all match the same
+   capability invocation.
+2. **Prefer narrower scopes and predicates.** `OwnCapabilities`
+   and tighter capability-name predicates reduce fan-out without
+   reducing safety coverage.
+3. **Split extension policy only when it changes behavior.** Many
+   small hooks that all evaluate the same condition should usually be
+   one hook with one predicate tree.
+
+### What you should NOT do
+
+- **Do not raise the dispatch cap just to make an extension pass.**
+  Hitting the cap usually means the tenant has too many hooks matching
+  one hot capability path. Raising it increases latency and reopens the
+  fan-out attack surface the cap is meant to close.
+
+---
+
+## 5. Approval gate-ref consumed but the user didn't act
 
 ### What you'll see
 
@@ -196,7 +242,7 @@ resolution.
 
 ---
 
-## 5. General debugging
+## 6. General debugging
 
 ### "I want to see what a hook decided"
 

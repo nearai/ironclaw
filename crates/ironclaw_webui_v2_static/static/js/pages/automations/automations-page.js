@@ -1,17 +1,34 @@
 import { React, html } from "../../lib/html.js";
 import { useT } from "../../lib/i18n.js";
+import { AutomationDeliveryDefaultsPanel } from "./components/automation-delivery-defaults-panel.js";
 import { AutomationsList } from "./components/automations-list.js";
 import { AutomationsSummaryStrip } from "./components/automations-summary-strip.js";
 import { useAutomations } from "./hooks/useAutomations.js";
+import { useOutboundDeliveryDefaults } from "./hooks/useOutboundDeliveryDefaults.js";
 
 export function AutomationsPage() {
   const t = useT();
   const [filter, setFilter] = React.useState("all");
+  const [selectedAutomationId, setSelectedAutomationId] = React.useState(null);
   const automationsState = useAutomations();
+  const deliveryState = useOutboundDeliveryDefaults();
   const showErrorOnly =
     automationsState.error &&
     !automationsState.isLoading &&
     automationsState.automations.length === 0;
+
+  React.useEffect(() => {
+    if (!automationsState.automations.length) {
+      setSelectedAutomationId(null);
+      return;
+    }
+    const stillExists = automationsState.automations.some(
+      (automation) => automation.automation_id === selectedAutomationId
+    );
+    if (!stillExists) {
+      setSelectedAutomationId(automationsState.automations[0].automation_id);
+    }
+  }, [automationsState.automations, selectedAutomationId]);
 
   return html`
     <div className="flex h-full flex-col overflow-y-auto">
@@ -30,6 +47,7 @@ export function AutomationsPage() {
             ? null
             : html`
                 <${AutomationsSummaryStrip} summary=${automationsState.summary} />
+                <${AutomationDeliveryDefaultsPanel} deliveryState=${deliveryState} />
 
                 ${automationsState.isLoading
                   ? html`
@@ -50,6 +68,8 @@ export function AutomationsPage() {
                         onFilterChange=${setFilter}
                         onRefresh=${automationsState.refetch}
                         isRefreshing=${automationsState.isRefreshing}
+                        selectedAutomationId=${selectedAutomationId}
+                        onSelectAutomation=${setSelectedAutomationId}
                       />
                     `}
               `}

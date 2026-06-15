@@ -10,10 +10,12 @@ publish = false
 default = []
 libsql = ["dep:libsql"]
 postgres = ["dep:deadpool-postgres", "dep:tokio-postgres"]
+test-support = []
 
 [dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 cron = "0.13"
 hex = "0.4"
 deadpool-postgres = { version = "0.14", optional = true }

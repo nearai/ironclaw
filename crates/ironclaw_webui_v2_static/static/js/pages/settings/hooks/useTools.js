@@ -1,6 +1,7 @@
 import { React } from "../../../lib/html.js";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { fetchTools, updateToolPermission } from "../lib/settings-api.js";
+import { throwIfApiFailed } from "../lib/api-result.js";
 
 export function useTools() {
   const queryClient = useQueryClient();
@@ -14,7 +15,10 @@ export function useTools() {
   const [savedTools, setSavedTools] = React.useState({});
 
   const mutation = useMutation({
-    mutationFn: ({ name, state }) => updateToolPermission(name, state),
+    // Treat `success: false` as a failed save so the UI never shows a fake
+    // "Saved" indicator for a permission change that didn't persist.
+    mutationFn: async ({ name, state }) =>
+      throwIfApiFailed(await updateToolPermission(name, state), "Save failed"),
     onSuccess: (_data, { name, state }) => {
       queryClient.setQueryData(["settings-tools"], (old) => {
         if (!old) return old;

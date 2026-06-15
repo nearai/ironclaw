@@ -1941,6 +1941,7 @@ impl GeminiOauthProvider {
                         arguments: args,
                         reasoning: None,
                         signature: None,
+                        arguments_parse_error: None,
                     });
                 }
             }
@@ -2768,6 +2769,7 @@ mod tests {
                     arguments: serde_json::json!({"path": "/tmp/x"}),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }],
             ),
             ChatMessage::tool_result("call_1", "read_file", r#"{"output":"hello"}"#),
@@ -2808,6 +2810,7 @@ mod tests {
                     arguments: serde_json::json!({}),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }],
             ),
             ChatMessage::tool_result("call_1", "echo", r#"{"output":"ok"}"#),

@@ -291,13 +291,24 @@ impl RebornLlmConfigService {
             {
                 apply_stored_api_key(&mut config, stored);
             }
-        } else {
+        } else if self
+            .keys
+            .exists(&request.provider_id)
+            .await
+            .map_err(|_| LlmConfigServiceError::Unavailable)?
+        {
+            // A stored key exists but this probe targets an overridden endpoint:
+            // refuse to inject it (a caller-controlled base_url could exfiltrate
+            // it). The caller must supply an inline key to probe elsewhere.
             return Err(LlmConfigServiceError::InvalidRequest {
                 field: Some("api_key".to_string()),
                 reason: "inline api_key is required when probing an overridden provider endpoint"
                     .to_string(),
             });
         }
+        // Otherwise there is neither an inline key nor a stored key to protect,
+        // so probe keyless — local OpenAI-compatible endpoints (e.g. Ollama)
+        // need no auth and must not be blocked behind a phantom key requirement.
 
         let session = ironclaw_llm::create_session_manager(config.session.clone()).await;
         ironclaw_llm::build_static_provider_chain(&config, session)
@@ -433,26 +444,25 @@ impl LlmConfigService for RebornLlmConfigService {
             .as_ref()
             .is_some_and(|key| !is_masked_sentinel(key));
         let previous_key = if has_new_key {
-            self.keys
-                .read(&id)
-                .await
-                .map_err(|_| LlmConfigServiceError::Unavailable)?
+            self.keys.read(&id).await.map_err(|error| {
+                tracing::error!(provider_id = %id, %error, "LLM provider save: reading existing stored key failed");
+                LlmConfigServiceError::Unavailable
+            })?
         } else {
             None
         };
         let stored_key_present = if has_new_key {
             previous_key.is_some()
         } else {
-            self.keys
-                .exists(&id)
-                .await
-                .map_err(|_| LlmConfigServiceError::Unavailable)?
+            self.keys.exists(&id).await.map_err(|error| {
+                tracing::error!(provider_id = %id, %error, "LLM provider save: checking stored key existence failed");
+                LlmConfigServiceError::Unavailable
+            })?
         };
-        let previous_overlay = self
-            .repo
-            .load_async()
-            .await
-            .map_err(|_| LlmConfigServiceError::Unavailable)?;
+        let previous_overlay = self.repo.load_async().await.map_err(|error| {
+            tracing::error!(provider_id = %id, %error, "LLM provider save: loading provider overlay failed");
+            LlmConfigServiceError::Unavailable
+        })?;
         let previous_definition = previous_overlay
             .iter()
             .find(|definition| definition.id.eq_ignore_ascii_case(&id))
@@ -479,13 +489,14 @@ impl LlmConfigService for RebornLlmConfigService {
 
         // Store the key value only when a real (non-sentinel) one was supplied.
         if has_new_key && let Some(key) = request.api_key.as_ref() {
-            self.keys
-                .put(&id, key.clone())
-                .await
-                .map_err(|_| LlmConfigServiceError::Unavailable)?;
+            self.keys.put(&id, key.clone()).await.map_err(|error| {
+                tracing::error!(provider_id = %id, %error, "LLM provider save: storing API key failed");
+                LlmConfigServiceError::Unavailable
+            })?;
         }
 
-        if self.repo.upsert_async(definition).await.is_err() {
+        if let Err(error) = self.repo.upsert_async(definition).await {
+            tracing::error!(provider_id = %id, %error, "LLM provider save: writing provider overlay failed");
             if has_new_key {
                 self.rollback_provider_key(&id, previous_key).await;
             }
@@ -497,6 +508,7 @@ impl LlmConfigService for RebornLlmConfigService {
                 .set_provider_async(id.clone(), request.model.clone())
                 .await;
             if let Err(error) = active_result {
+                tracing::error!(provider_id = %id, %error, "LLM provider save: writing active selection failed");
                 self.rollback_upsert(&id, previous_definition, previous_key, has_new_key)
                     .await;
                 return Err(map_admin_error(error));
@@ -546,21 +558,34 @@ impl LlmConfigService for RebornLlmConfigService {
         _caller: WebUiAuthenticatedCaller,
         request: LlmProbeRequest,
     ) -> Result<LlmProbeResult, LlmConfigServiceError> {
+        let endpoint = probe_endpoint_label(&request);
         let provider = self.probe_provider(&request).await?;
         match provider.list_models().await {
             Ok(models) if !models.is_empty() => Ok(LlmProbeResult {
                 ok: true,
                 message: format!("connection ok — {} models available", models.len()),
             }),
+            // The endpoint answered but advertised no models. Connectivity is
+            // confirmed, but don't overstate it as a verified model list.
             Ok(_) => Ok(LlmProbeResult {
                 ok: true,
-                message: "provider configured; this adapter does not expose a model list to verify"
-                    .to_string(),
+                message: format!("connected to {endpoint}, but it reported no models"),
             }),
-            Err(_) => Ok(LlmProbeResult {
-                ok: false,
-                message: "could not reach the provider with these settings".to_string(),
-            }),
+            // A failed `list_models` is the connectivity signal: the discovery
+            // request never reached a live endpoint. Name the address so the
+            // operator can see which host was unreachable.
+            Err(error) => {
+                tracing::debug!(
+                    provider_id = %request.provider_id,
+                    adapter = %request.adapter,
+                    error = %error,
+                    "test_connection probe failed"
+                );
+                Ok(LlmProbeResult {
+                    ok: false,
+                    message: format!("could not reach {endpoint} with these settings"),
+                })
+            }
         }
     }
 
@@ -576,11 +601,19 @@ impl LlmConfigService for RebornLlmConfigService {
                 models,
                 message: String::new(),
             }),
-            Err(_) => Ok(LlmModelsResult {
-                ok: false,
-                models: Vec::new(),
-                message: "could not list models for this provider".to_string(),
-            }),
+            Err(error) => {
+                tracing::debug!(
+                    provider_id = %request.provider_id,
+                    adapter = %request.adapter,
+                    error = %error,
+                    "list_models probe failed"
+                );
+                Ok(LlmModelsResult {
+                    ok: false,
+                    models: Vec::new(),
+                    message: "could not list models for this provider".to_string(),
+                })
+            }
         }
     }
 
@@ -809,11 +842,24 @@ pub(crate) const NEARAI_LOGIN_CALLBACK_PATH: &str =
     "/api/webchat/v2/llm/nearai/{state}/auth/callback";
 
 /// Reduce a browser-supplied origin to a bare `scheme://host[:port]`, rejecting
-/// anything with a path/query or a non-http scheme. NEAR AI redirects the token
-/// here, so it must be a clean same-machine origin.
+/// anything with userinfo, a path, a query, or a fragment, plus non-http(s)
+/// schemes. NEAR AI redirects the login token to this origin, so it must be a
+/// clean origin with no smuggled structure — extra components are rejected
+/// outright rather than silently normalized away.
 fn sanitize_origin(raw: &str) -> Option<String> {
     let parsed = url::Url::parse(raw.trim()).ok()?;
     if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    // A bare origin has no credentials, only a root ("" or "/") path, and no
+    // query or fragment. Anything else is not an origin we will trust to build
+    // the token-bearing callback URL.
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || !matches!(parsed.path(), "" | "/")
+    {
         return None;
     }
     let host = parsed.host_str()?;
@@ -869,6 +915,33 @@ fn normalized_endpoint(value: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| value.trim_end_matches('/').to_string())
+}
+
+/// Human-readable endpoint for probe-result messages so a connectivity failure
+/// names the address that was actually tried (e.g. `http://localhost:11434`)
+/// rather than a generic "the provider". Prefers the caller's override URL,
+/// then the builtin provider's default endpoint, then a generic fallback. Only
+/// ever returns the endpoint URL — never a key or other secret.
+fn probe_endpoint_label(request: &LlmProbeRequest) -> String {
+    if let Some(url) = request
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    {
+        return url.to_string();
+    }
+    if let Ok(registry) = ProviderRegistry::try_load_from_path(None)
+        && let Some(definition) = registry.find(&request.provider_id)
+        && let Some(base_url) = definition
+            .default_base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+    {
+        return base_url.to_string();
+    }
+    "the provider endpoint".to_string()
 }
 
 /// Resolve the overlay `ProviderDefinition` to write for an upsert.
@@ -1144,6 +1217,36 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_origin_accepts_bare_origins_only() {
+        assert_eq!(
+            sanitize_origin("https://app.example.com"),
+            Some("https://app.example.com".to_string())
+        );
+        assert_eq!(
+            sanitize_origin("http://localhost:3000"),
+            Some("http://localhost:3000".to_string())
+        );
+        // A trailing root slash is still a bare origin.
+        assert_eq!(
+            sanitize_origin("https://app.example.com/"),
+            Some("https://app.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn sanitize_origin_rejects_smuggled_structure_and_bad_schemes() {
+        // Path, query, fragment, and userinfo must be rejected outright, not
+        // silently dropped — they are not part of a trusted callback origin.
+        assert_eq!(sanitize_origin("https://app.example.com/evil/path"), None);
+        assert_eq!(sanitize_origin("https://app.example.com/?x=1"), None);
+        assert_eq!(sanitize_origin("https://app.example.com/#frag"), None);
+        assert_eq!(sanitize_origin("https://user:pass@app.example.com"), None);
+        assert_eq!(sanitize_origin("ftp://app.example.com"), None);
+        assert_eq!(sanitize_origin("javascript:alert(1)"), None);
+        assert_eq!(sanitize_origin("not a url"), None);
+    }
+
+    #[test]
     fn parses_known_adapters() {
         assert_eq!(
             parse_adapter("open_ai_completions"),
@@ -1357,6 +1460,69 @@ mod tests {
         );
     }
 
+    /// Reproduction for the "Fetch models" failure on a keyless local provider
+    /// (e.g. Ollama at `http://localhost:11434`). With neither an inline key nor
+    /// a stored key, the probe used to be rejected with an `invalid_request`
+    /// validation error demanding an `api_key`. There is no stored key to
+    /// exfiltrate, so the probe must be allowed to run keyless instead — it then
+    /// just reports the endpoint as unreachable in the test environment.
+    #[tokio::test]
+    async fn probe_keyless_local_provider_is_not_blocked_on_missing_api_key() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        let boot = boot_for_home(&reborn_home);
+        let service = RebornLlmConfigService::new(boot, key_store());
+
+        // Brand-new custom provider, never persisted, no stored key.
+        let result = service
+            .list_models(
+                caller(),
+                probe_request("local-ollama", "http://127.0.0.1:1", None),
+            )
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "keyless local provider must pass the probe validation gate, got {result:?}"
+        );
+    }
+
+    /// Testing the connection to a local Ollama that is not running must
+    /// report failure and name the unreachable endpoint — not the prior false
+    /// "provider configured" success that left chat requests to fail later.
+    #[tokio::test]
+    async fn test_connection_reports_unreachable_ollama_endpoint() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        let boot = boot_for_home(&reborn_home);
+        let service = RebornLlmConfigService::new(boot, key_store());
+
+        let request = LlmProbeRequest {
+            provider_id: "ollama".to_string(),
+            adapter: "ollama".to_string(),
+            // Port 1 is never listening, so the `/api/tags` discovery request
+            // fails the same way a stopped Ollama would.
+            base_url: Some("http://127.0.0.1:1".to_string()),
+            model: Some("llama3".to_string()),
+            api_key: None,
+        };
+
+        let result = service
+            .test_connection(caller(), request)
+            .await
+            .expect("probe completes");
+
+        assert!(
+            !result.ok,
+            "an unreachable endpoint must not report success, got {result:?}"
+        );
+        assert!(
+            result.message.contains("127.0.0.1:1"),
+            "failure message must name the unreachable endpoint, got: {}",
+            result.message
+        );
+    }
+
     #[tokio::test]
     async fn upsert_builtin_remains_builtin_in_snapshot() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1428,6 +1594,100 @@ mod tests {
             !acme.api_key_set,
             "unavailable stored-key metadata must degrade to api_key_set=false"
         );
+    }
+
+    /// Reproduction for issue #4673: saving the NEAR AI (builtin) provider
+    /// returns `service_unavailable` even though Test connection succeeds. This
+    /// wires the secret store EXACTLY as production `ironclaw-reborn serve` does
+    /// — the dynamic `invocation_mount_view` scoped filesystem behind a real
+    /// `FilesystemSecretStore` — instead of the in-memory store the other tests
+    /// use, so a system-scope write/read regression in that path is caught.
+    #[tokio::test]
+    async fn upsert_builtin_nearai_with_production_secret_store_succeeds() {
+        use ironclaw_secrets::{FilesystemSecretStore, SecretsCrypto};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        let boot = boot_for_home(&reborn_home);
+
+        let backend = Arc::new(ironclaw_filesystem::InMemoryBackend::default());
+        let scoped = crate::wrap_scoped(backend);
+        let crypto = Arc::new(
+            SecretsCrypto::new(SecretMaterial::from(
+                "0123456789abcdef0123456789abcdef".to_string(),
+            ))
+            .expect("valid master key"),
+        );
+        let keys = LlmKeyStore::new(Arc::new(FilesystemSecretStore::new(scoped, crypto)));
+
+        let nearai_request = || UpsertLlmProviderRequest {
+            id: "nearai".to_string(),
+            name: Some("NEAR AI".to_string()),
+            adapter: "near_ai".to_string(),
+            base_url: Some("https://cloud-api.near.ai".to_string()),
+            default_model: Some("deepseek-ai/DeepSeek-V4-Flash".to_string()),
+            api_key: Some(SecretString::from("sk-near-test")),
+            set_active: true,
+            model: Some("deepseek-ai/DeepSeek-V4-Flash".to_string()),
+        };
+
+        let service = RebornLlmConfigService::new(boot.clone(), keys.clone());
+        // First save persists the operator's NEAR AI key under the system scope.
+        let snapshot = service
+            .upsert_provider(caller(), nearai_request())
+            .await
+            .expect("saving the builtin NEAR AI provider must succeed");
+        let active = snapshot.active.expect("an active provider after save");
+        assert_eq!(active.provider_id, "nearai");
+        assert_eq!(
+            active.model.as_deref(),
+            Some("deepseek-ai/DeepSeek-V4-Flash")
+        );
+
+        // The stored system-scoped key must read back (the #4673 regression: the
+        // reserved system tenant id failed to deserialize, so any read-back of a
+        // system-scoped secret errored — including a second save, which reads the
+        // previous key first).
+        assert_eq!(
+            keys.read("nearai")
+                .await
+                .expect("system-scope key must read back")
+                .expect("a stored key")
+                .expose_secret(),
+            "sk-near-test"
+        );
+        service
+            .upsert_provider(caller(), nearai_request())
+            .await
+            .expect("re-saving an already-configured NEAR AI provider must succeed");
+    }
+
+    /// Integration coverage for the resolver path at the composition boundary
+    /// (review on #4673): an explicit `config.toml` selection is honored
+    /// end-to-end through the real `resolve_reborn_runtime_llm`. The env-vs-
+    /// selection PRECEDENCE itself is unit-tested in
+    /// `ironclaw_llm::resolution` (`explicit_selection_overrides_env_for_model_and_base_url`),
+    /// where the env can be set — this crate is `#![forbid(unsafe_code)]` and the
+    /// resolver reads raw `std::env::var`, so the env dimension cannot be driven
+    /// here; this thin wrapper only adds the config.toml read it is exercised on.
+    #[tokio::test]
+    async fn reborn_runtime_llm_honors_explicit_config_selection() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        let boot = boot_for_home(&reborn_home);
+
+        crate::provider_admin::RebornProviderAdmin::new(boot.clone())
+            .set_provider("nearai", Some("deepseek-ai/DeepSeek-V4-Flash"))
+            .expect("persist active selection");
+        let config_file =
+            ironclaw_reborn_config::RebornConfigFile::load(&boot.home().config_file_path())
+                .expect("load config file");
+
+        let resolved = crate::llm_catalog::resolve_reborn_runtime_llm(&boot, config_file.as_ref())
+            .expect("resolution succeeds")
+            .expect("a provider is resolved from the selection");
+        assert_eq!(resolved.provider_id(), "nearai");
+        assert_eq!(resolved.model(), "deepseek-ai/DeepSeek-V4-Flash");
     }
 
     #[tokio::test]

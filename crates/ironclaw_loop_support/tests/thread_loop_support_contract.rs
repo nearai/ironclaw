@@ -2752,6 +2752,8 @@ async fn empty_capability_port_exposes_empty_surface_and_rejects_invocations() {
             surface_version: CapabilitySurfaceVersion::new("empty:v1").unwrap(),
             capability_id: CapabilityId::new("demo.echo").unwrap(),
             input_ref: CapabilityInputRef::new("input:opaque").unwrap(),
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap_err();
@@ -2770,6 +2772,8 @@ async fn empty_capability_batch_returns_typed_denial_reason() {
                 surface_version: CapabilitySurfaceVersion::new("empty:v1").unwrap(),
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
                 input_ref: CapabilityInputRef::new("input:opaque").unwrap(),
+                approval_resume: None,
+                auth_resume: None,
             }],
             stop_on_first_suspension: true,
         })
@@ -2793,6 +2797,8 @@ async fn empty_capability_batch_rejects_stale_surface() {
                 surface_version: CapabilitySurfaceVersion::new("nonempty:v1").unwrap(),
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
                 input_ref: CapabilityInputRef::new("input:opaque").unwrap(),
+                approval_resume: None,
+                auth_resume: None,
             }],
             stop_on_first_suspension: true,
         })

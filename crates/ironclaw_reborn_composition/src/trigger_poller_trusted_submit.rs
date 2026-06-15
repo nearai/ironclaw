@@ -7,6 +7,7 @@ use ironclaw_conversations::{
     ExternalEventId, InboundTurnError, ResolveConversationRequest,
 };
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
+use ironclaw_product_workflow::automation_trigger_thread_metadata_json;
 use ironclaw_safety::{
     InjectionScanner, PromptSafetyRejection, Sanitizer, validate_trusted_trigger_prompt,
 };
@@ -186,13 +187,14 @@ where
                 resolve_request,
                 fire.agent_id.clone(),
                 fire.project_id.clone(),
-                None,
+                Some(fire.creator_user_id.clone()),
             )
             .await
             .map_err(classify_materializer_inbound_error)?;
         let accepted = record_trigger_prompt(
             Arc::clone(&self.thread_service),
             &resolution,
+            fire.identity.trigger_id(),
             &fire.prompt,
             fire.identity.external_event_id().as_str(),
             &self.default_agent_id,
@@ -269,6 +271,7 @@ fn trigger_resolve_request(
 async fn record_trigger_prompt(
     thread_service: Arc<dyn CanonicalSessionThreadService>,
     resolution: &ConversationBindingResolution,
+    trigger_id: TriggerId,
     prompt: &str,
     external_event_id: &str,
     default_agent_id: &AgentId,
@@ -292,7 +295,7 @@ async fn record_trigger_prompt(
             thread_id: Some(resolution.turn_scope.thread_id.clone()),
             created_by_actor_id: resolution.actor.user_id.as_str().to_string(),
             title: None,
-            metadata_json: None,
+            metadata_json: Some(automation_trigger_thread_metadata_json(trigger_id)),
         })
         .await
         .map_err(|error| InboundTurnError::DurableState {
@@ -370,7 +373,8 @@ fn classify_materializer_inbound_error(error: InboundTurnError) -> TriggerError 
                 | TurnError::Unauthorized
                 | TurnError::InvalidRequest { .. }
                 | TurnError::InvalidTransition { .. }
-                | TurnError::LeaseMismatch,
+                | TurnError::LeaseMismatch
+                | TurnError::InvalidRunOriginAdapter,
         } => rejected_trigger_materialization("trusted trigger submit rejected"),
         InboundTurnError::InvalidExternalRef { .. }
         | InboundTurnError::BindingRequired { .. }
@@ -423,6 +427,7 @@ mod tests {
         MessageIdempotencyStatus, ThreadAccessDecision, trusted_trigger_fire_submitter,
     };
     use ironclaw_host_api::{ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_product_workflow::AUTOMATION_TRIGGER_THREAD_SOURCE_TAG;
     use ironclaw_safety::{InjectionWarning, Severity};
     use ironclaw_threads::{
         AcceptedInboundMessage as CanonicalAcceptedInboundMessage,
@@ -444,7 +449,8 @@ mod tests {
         TriggerFireIdentity, TriggerId, TriggerInboundContentRef, TriggerMaterializedPrompt,
         TriggerPollerFailureReason, TriggerPollerFireOutcome, TriggerPollerWorker,
         TriggerPollerWorkerConfig, TriggerPollerWorkerDeps, TriggerRecord, TriggerRepository,
-        TriggerSchedule, TriggerSourceKind, TriggerState,
+        TriggerSchedule, TriggerSourceKind, TriggerState, TrustedTriggerFireSubmitOutcome,
+        TrustedTriggerFireSubmitter, TrustedTriggerSubmitRequest,
     };
     use ironclaw_turns::{
         AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
@@ -1505,6 +1511,7 @@ mod tests {
         record_trigger_prompt(
             thread_service.clone(),
             &resolution,
+            TriggerId::new(),
             "summarize unread mail",
             "event-trigger-hook",
             &agent_id,
@@ -1515,6 +1522,7 @@ mod tests {
         record_trigger_prompt(
             thread_service.clone(),
             &resolution,
+            TriggerId::new(),
             "summarize unread mail",
             "event-trigger-hook",
             &agent_id,
@@ -1653,6 +1661,15 @@ mod tests {
             .threads
             .first()
             .expect("worker path records trigger prompt");
+        let metadata: serde_json::Value = serde_json::from_str(
+            thread
+                .metadata_json
+                .as_deref()
+                .expect("trigger thread metadata"),
+        )
+        .expect("trigger thread metadata json");
+        assert_eq!(metadata["source"], AUTOMATION_TRIGGER_THREAD_SOURCE_TAG);
+        assert_eq!(metadata["trigger_id"], trigger_id.to_string());
         let history = thread_service
             .list_thread_history(ThreadHistoryRequest {
                 scope: expected_scope,
@@ -1793,5 +1810,125 @@ mod tests {
             .await
             .expect("threads load");
         assert!(threads.threads.is_empty());
+    }
+
+    struct CapturingTrustedTriggerFireSubmitter {
+        inner: Arc<dyn TrustedTriggerFireSubmitter>,
+        captured: Arc<Mutex<Option<TrustedTriggerFireSubmitOutcome>>>,
+    }
+
+    #[async_trait]
+    impl TrustedTriggerFireSubmitter for CapturingTrustedTriggerFireSubmitter {
+        async fn submit_trusted_trigger_fire(
+            &self,
+            request: TrustedTriggerSubmitRequest,
+        ) -> Result<TrustedTriggerFireSubmitOutcome, TriggerError> {
+            let outcome = self.inner.submit_trusted_trigger_fire(request).await?;
+            *self.captured.lock().expect("captured lock") = Some(outcome.clone());
+            Ok(outcome)
+        }
+    }
+
+    #[tokio::test]
+    async fn materialize_and_submit_pipeline_persists_trigger_creator_as_explicit_thread_owner() {
+        let conversations = ironclaw_conversations::InMemoryConversationServices::default();
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let repo = Arc::new(InMemoryTriggerRepository::default());
+        let run_id = TurnRunId::new();
+        let tenant_id = TenantId::new("trigger-owner-scope-tenant").expect("tenant id");
+        let agent_id = AgentId::new("trigger-owner-scope-agent").expect("agent id");
+        let project_id = ProjectId::new("trigger-owner-scope-project").expect("project id");
+        let creator_user_id = UserId::new("trigger-owner-scope-user").expect("user id");
+        let trigger_id = TriggerId::new();
+        let fire_slot = Utc::now();
+        let prompt = "summarize unread mail for owner scope test";
+        conversations
+            .pair_external_actor(
+                tenant_id.clone(),
+                AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).expect("adapter kind"),
+                AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
+                    .expect("installation id"),
+                ExternalActorRef::new(
+                    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
+                    creator_user_id.as_str(),
+                )
+                .expect("actor ref"),
+                creator_user_id.clone(),
+            )
+            .await;
+        repo.upsert_trigger(TriggerRecord {
+            trigger_id,
+            tenant_id: tenant_id.clone(),
+            creator_user_id: creator_user_id.clone(),
+            agent_id: Some(agent_id.clone()),
+            project_id: Some(project_id.clone()),
+            name: "owner scope e2e".to_string(),
+            source: TriggerSourceKind::Schedule,
+            schedule: TriggerSchedule::cron("0 8 * * *").expect("valid cron"),
+            completion_policy: TriggerCompletionPolicy::Recurring,
+            prompt: prompt.to_string(),
+            state: TriggerState::Scheduled,
+            next_run_at: fire_slot,
+            last_run_at: None,
+            last_fired_slot: None,
+            last_status: None,
+            active_fire_slot: None,
+            active_run_ref: None,
+            created_at: fire_slot,
+        })
+        .await
+        .expect("trigger record stored");
+        let materializer = Arc::new(ConversationContentRefMaterializer::new(
+            conversations.clone(),
+            thread_service.clone(),
+            agent_id.clone(),
+            tenant_authorizer(&tenant_id),
+        ));
+        let captured = Arc::new(Mutex::new(None::<TrustedTriggerFireSubmitOutcome>));
+        let inner_submitter = trusted_trigger_fire_submitter(
+            conversations.clone(),
+            conversations,
+            Arc::new(RecordingTurnCoordinator { run_id }),
+        );
+        let capturing_submitter = Arc::new(CapturingTrustedTriggerFireSubmitter {
+            inner: inner_submitter,
+            captured: captured.clone(),
+        });
+        let worker = TriggerPollerWorker::new(
+            TriggerPollerWorkerConfig {
+                fires_per_tick: 1,
+                ..TriggerPollerWorkerConfig::default()
+            },
+            TriggerPollerWorkerDeps {
+                repository: repo,
+                source_provider: Arc::new(ScheduleTriggerSourceProvider),
+                materializer,
+                trusted_submitter: capturing_submitter,
+                active_run_lookup: Arc::new(MissingActiveRunLookup),
+            },
+        )
+        .expect("valid worker");
+
+        let report = worker.tick_once(fire_slot).await.expect("worker tick");
+
+        assert_eq!(
+            report.results.last().map(|r| &r.outcome),
+            Some(&TriggerPollerFireOutcome::Submitted { run_id }),
+            "worker must report Submitted"
+        );
+        let outcome = captured
+            .lock()
+            .expect("captured lock")
+            .take()
+            .expect("submitter must have captured an outcome");
+        let turn_scope = match outcome {
+            TrustedTriggerFireSubmitOutcome::Accepted { turn_scope, .. } => turn_scope,
+            other => panic!("expected Accepted outcome, got {other:?}"),
+        };
+        assert_eq!(
+            turn_scope.explicit_owner_user_id(),
+            Some(&creator_user_id),
+            "full materialize+submit pipeline must persist the trigger creator as thread owner"
+        );
     }
 }

@@ -38,6 +38,11 @@ env:
   # cfg!(test) covers unit tests; this covers integration/e2e that link the
   # non-cfg(test) library.
   IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
+  # GitHub-hosted runners can crash lld with bus errors when several large
+  # Reborn test binaries link concurrently.
+  CARGO_BUILD_JOBS: "1"
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
 
 jobs:
   changes:
@@ -146,6 +151,13 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
 
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af || true
+          df -h /
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
@@ -156,19 +168,27 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Run crate tests
+        env:
+          PACKAGE: ${{ matrix.package }}
         run: |
-          feature_flags="$(scripts/ci/package-feature-flags.sh "${{ matrix.package }}")"
+          feature_flags="$(scripts/ci/package-feature-flags.sh "$PACKAGE")"
+
+          if [ "$PACKAGE" = "ironclaw_reborn_composition" ]; then
+            echo "Serializing ironclaw_reborn_composition test builds to keep runner disk usage bounded."
+            export CARGO_BUILD_JOBS=1
+            export CARGO_INCREMENTAL=0
+          fi
 
           # shellcheck disable=SC2086 # feature_flags intentionally expands to zero or more Cargo args.
           timeout --signal=INT --kill-after=30s 28m \
-            cargo test -p "${{ matrix.package }}" ${feature_flags} --all-targets -- --nocapture
+            cargo test -p "$PACKAGE" ${feature_flags} --all-targets -- --nocapture
 
   root-reborn-parity-tests:
     name: Reborn root tests (${{ matrix.partition }})
     needs: changes
     if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       ANTHROPIC_API_KEY: ""
       LLM_BACKEND: ""
@@ -177,6 +197,8 @@ jobs:
       OPENAI_API_KEY: ""
       REBORN_ROOT_TEST_PARTITIONS: 4
       REBORN_ROOT_TEST_PARTITION: ${{ matrix.partition }}
+      REBORN_ROOT_TEST_TIMEOUT: 28m
+      CARGO_INCREMENTAL: "0"
     strategy:
       fail-fast: true
       matrix:
@@ -187,6 +209,13 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
+
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af || true
+          df -h /
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable

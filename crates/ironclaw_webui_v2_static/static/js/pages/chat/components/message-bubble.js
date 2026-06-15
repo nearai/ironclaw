@@ -1,7 +1,9 @@
 import { React, html } from "../../../lib/html.js";
 import { MarkdownRenderer } from "./markdown-renderer.js";
 import { ToolActivity } from "./tool-activity.js";
+import { Avatar } from "./avatar.js";
 import { Icon } from "../../../design-system/icons.js";
+import { useT } from "../../../lib/i18n.js";
 import { toast } from "../../../lib/toast.js";
 
 /* User keeps a tinted bubble; assistant is borderless (document-like);
@@ -55,6 +57,7 @@ function ThinkingDisclosure({ content }) {
 function MessageBubbleImpl({ message, onRetry }) {
   const { role, content, images, attachments, generatedImages, isOptimistic, status, error, toolCalls, timestamp } = message;
   const isUser = role === "user";
+  const t = useT();
   const [copied, setCopied] = React.useState(false);
   // All hooks must run before the role-based early returns below.
   // A message can change role in place across renders (e.g. an
@@ -109,13 +112,36 @@ function MessageBubbleImpl({ message, onRetry }) {
 
   const timeLabel = formatTimestamp(timestamp);
   const showActions = (role === "assistant" || role === "user") && !isOptimistic;
+  // Persistent identity for the two conversational roles; system / error
+  // stay as centered notices without an avatar.
+  const showIdentity = role === "user" || role === "assistant";
+  const identityName = isUser
+    ? t("chat.identityUser")
+    : t("chat.identityAssistant");
 
   return html`
-    <div className=${["group flex flex-col", isUser ? "items-end" : "items-start"].join(" ")}>
-      <div className="flex min-w-0 max-w-[85%] flex-col gap-1">
+    <div
+      data-testid=${`msg-${role}`}
+      className=${["group flex flex-col", isUser ? "items-end" : "items-start"].join(" ")}
+    >
+      <div className="flex min-w-0 max-w-[85%] flex-col gap-2">
+        ${showIdentity &&
+        html`
+          <div
+            className=${[
+              "flex items-center gap-2 px-1",
+              isUser ? "flex-row-reverse" : "",
+            ].join(" ")}
+          >
+            <${Avatar} role=${role} />
+            <span className="text-xs font-medium text-[var(--v2-text-muted)]">
+              ${identityName}
+            </span>
+          </div>
+        `}
         <div
           className=${[
-            "text-sm leading-6",
+            "text-base leading-7",
             ROLE_STYLES[role] || ROLE_STYLES.assistant,
             isOptimistic ? "opacity-70" : "",
           ].join(" ")}
@@ -139,10 +165,12 @@ function MessageBubbleImpl({ message, onRetry }) {
           ${attachments && attachments.length > 0 && html`
             <div className="mt-2 flex flex-col gap-1.5">
               ${attachments.map((att, i) => html`
-                <div key=${i} className="flex items-center gap-2 rounded-md border border-iron-700 bg-iron-900/50 px-3 py-2 text-xs">
-                  <${Icon} name="file" className="h-3.5 w-3.5 text-signal" />
+                <div key=${att.id || i} className="flex items-center gap-2 rounded-md border border-iron-700 bg-iron-900/50 px-3 py-2 text-xs">
+                  ${att.preview_url
+                    ? html`<img src=${att.preview_url} alt=${att.filename || "attachment"} className="h-9 w-9 shrink-0 rounded object-cover" />`
+                    : html`<${Icon} name="file" className="h-3.5 w-3.5 shrink-0 text-signal" />`}
                   <span className="truncate">${att.filename || "attachment"}</span>
-                  <span className="ml-auto shrink-0 text-iron-200">${att.mime_type} ${att.size_label ? " / " + att.size_label : ""}</span>
+                  <span className="ml-auto shrink-0 text-iron-200">${att.mime_type}${att.size_label ? " / " + att.size_label : ""}</span>
                 </div>
               `)}
             </div>

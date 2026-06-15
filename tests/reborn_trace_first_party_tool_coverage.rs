@@ -397,7 +397,8 @@ async fn reborn_trace_trigger_management_first_party_tools_parity() {
                 serde_json::json!({
                     "name": "Daily trace summary",
                     "prompt": "Summarize trace state",
-                    "cron": "0 8 * * *"
+                    "cron": "0 8 * * *",
+                    "timezone": "UTC"
                 }),
             )],
             expected_tool_results: Vec::new(),

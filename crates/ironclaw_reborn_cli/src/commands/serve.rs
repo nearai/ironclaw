@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use clap::Args;
+#[cfg(feature = "openai-compat-beta")]
+use ironclaw_reborn_composition::build_openai_compat_route_mount;
 #[cfg(not(feature = "slack-v2-host-beta"))]
 use ironclaw_reborn_composition::build_webui_services;
 use ironclaw_reborn_composition::host_api::{AgentId, ProjectId, TenantId, UserId};
@@ -379,6 +381,15 @@ impl ServeCommand {
             )?;
             #[cfg(not(feature = "slack-v2-host-beta"))]
             let bundle: RebornWebuiBundle = build_webui_services(&runtime, None)?;
+            #[cfg(feature = "openai-compat-beta")]
+            let openai_compat_mount = build_openai_compat_route_mount(
+                &runtime,
+                tenant_id.clone(),
+                default_agent_id.clone(),
+                default_project_id.clone(),
+            )
+            .await
+            .context("failed to compose OpenAI-compatible Reborn routes")?;
 
             // Open the canonical Reborn identity resolver on the runtime's
             // existing substrate handle (the same `reborn-local-dev.db` the
@@ -436,9 +447,13 @@ impl ServeCommand {
             );
 
             let mut serve_config = WebuiServeConfig::new(tenant_id, authenticator, allowed_origins)
-                .with_default_agent_id(default_agent_id);
-            if let Some(project_id) = default_project_id {
+                .with_default_agent_id(default_agent_id.clone());
+            if let Some(project_id) = default_project_id.clone() {
                 serve_config = serve_config.with_default_project_id(project_id);
+            }
+            #[cfg(feature = "openai-compat-beta")]
+            {
+                serve_config = serve_config.with_protected_route_mount(openai_compat_mount);
             }
             if let Some(google_oauth) = resolve_google_oauth_config_from_env()
                 .context("failed to resolve Google OAuth setup config for WebUI")?

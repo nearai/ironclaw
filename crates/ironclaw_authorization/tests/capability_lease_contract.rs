@@ -1333,3 +1333,121 @@ fn execution_context(grants: CapabilitySet) -> ExecutionContext {
         resource_scope,
     }
 }
+
+// ---------------------------------------------------------------------------
+// TEST 3: FilesystemCapabilityLeaseStore persists Dispatching across
+// begin_dispatch_claimed / abort_dispatch_claimed / consume lifecycle.
+//
+// Covers the `begin_dispatch_claimed` → `Dispatching` transition (and its
+// persistence across store reload), `abort_dispatch_claimed` → back to
+// `Claimed` (and its persistence), and finally `begin_dispatch_claimed`
+// again followed by `consume` from the `Dispatching` state → `Consumed`
+// (and its persistence).  Prior test coverage stopped at issue/revoke/claim
+// /consume and never exercised the `Dispatching` status or its reload.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn filesystem_lease_store_persists_dispatching_begin_abort_and_consume() {
+    let fs = engine_filesystem();
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let fingerprint = InvocationFingerprint::for_dispatch(
+        &context.resource_scope,
+        &descriptor.id,
+        &ResourceEstimate::default(),
+        &serde_json::json!({"message": "dispatching lifecycle"}),
+    )
+    .unwrap();
+    let mut grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(context.extension_id.clone()),
+        vec![EffectKind::DispatchCapability],
+    );
+    grant.constraints.max_invocations = Some(1);
+    let mut lease = CapabilityLease::new(context.resource_scope.clone(), grant);
+    lease.invocation_fingerprint = Some(fingerprint.clone());
+    let lease_id = lease.grant.id;
+
+    // Issue + claim the lease (Claimed state).
+    let store = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
+    store.issue(lease).await.unwrap();
+    let claimed = store
+        .claim(&context.resource_scope, lease_id, &fingerprint)
+        .await
+        .unwrap();
+    assert_eq!(claimed.status, CapabilityLeaseStatus::Claimed);
+
+    // ── begin_dispatch_claimed → Dispatching ──────────────────────────────
+    let dispatching = store
+        .begin_dispatch_claimed(&context.resource_scope, lease_id, &fingerprint)
+        .await
+        .unwrap();
+    assert_eq!(
+        dispatching.status,
+        CapabilityLeaseStatus::Dispatching,
+        "begin_dispatch_claimed must return a Dispatching lease"
+    );
+
+    // Reload from the same shared filesystem backend and assert Dispatching is persisted.
+    let reloaded = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
+    assert_eq!(
+        reloaded
+            .get(&context.resource_scope, lease_id)
+            .await
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Dispatching,
+        "Dispatching status must survive store reload after begin_dispatch_claimed"
+    );
+
+    // ── abort_dispatch_claimed → back to Claimed ──────────────────────────
+    let aborted = store
+        .abort_dispatch_claimed(&context.resource_scope, lease_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        aborted.status,
+        CapabilityLeaseStatus::Claimed,
+        "abort_dispatch_claimed must revert Dispatching → Claimed"
+    );
+
+    // Reload and assert Claimed is persisted.
+    let reloaded2 = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
+    assert_eq!(
+        reloaded2
+            .get(&context.resource_scope, lease_id)
+            .await
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Claimed,
+        "Claimed status must survive store reload after abort_dispatch_claimed"
+    );
+
+    // ── begin_dispatch again + consume from Dispatching → Consumed ─────────
+    store
+        .begin_dispatch_claimed(&context.resource_scope, lease_id, &fingerprint)
+        .await
+        .unwrap();
+
+    let consumed = store
+        .consume(&context.resource_scope, lease_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        consumed.status,
+        CapabilityLeaseStatus::Consumed,
+        "consume from Dispatching must yield Consumed"
+    );
+
+    // Reload and assert Consumed is persisted.
+    let reloaded3 = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
+    assert_eq!(
+        reloaded3
+            .get(&context.resource_scope, lease_id)
+            .await
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Consumed,
+        "Consumed status must survive store reload after consume-from-Dispatching"
+    );
+}
