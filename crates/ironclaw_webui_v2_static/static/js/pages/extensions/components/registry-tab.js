@@ -35,7 +35,11 @@ export function RegistryTab({
       })
     : catalogEntries;
 
-  const installedEntries = filtered.filter((entry) => entry.installed);
+  const installedEntries = filtered.filter((entry) => entry.installed && entry.extension);
+  const registryOnlyInstalledEntries = filtered.filter(
+    (entry) => entry.installed && !entry.extension && entry.entry
+  );
+  const installedCount = installedEntries.length + registryOnlyInstalledEntries.length;
   const availableEntries = filtered.filter((entry) => !entry.installed && entry.entry);
 
   if (catalogEntries.length === 0) {
@@ -72,7 +76,7 @@ export function RegistryTab({
               ${t("ext.registry.noMatch")}
             </p>`
           : html`
-              ${installedEntries.length > 0 &&
+              ${installedCount > 0 &&
               html`
                 <h3
                   className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
@@ -92,6 +96,16 @@ export function RegistryTab({
                       />
                     `
                   )}
+                  ${registryOnlyInstalledEntries.map(
+                    (entry) => html`
+                      <${RegistryCard}
+                        key=${entry.id}
+                        entry=${entry.entry}
+                        statusLabel=${t("extensions.installed")}
+                        isBusy=${isBusy}
+                      />
+                    `
+                  )}
                 </div>
               `}
 
@@ -100,7 +114,7 @@ export function RegistryTab({
                 <h3
                   className=${[
                     "mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal",
-                    installedEntries.length > 0 ? "mt-6" : "",
+                    installedCount > 0 ? "mt-6" : "",
                   ].join(" ")}
                 >
                   ${t("ext.registry.availableTitle")}
