@@ -7,25 +7,42 @@
 // behind the project mount, the cards render from the refs).
 
 import { attachmentKindFromMime, formatBytes } from "./attachments.js";
+import { attachmentUrl } from "../../../lib/api.js";
 
 // Project a stored `AttachmentRef` (snake_case wire shape) into the
 // render shape `MessageBubble` consumes. The timeline never carries bytes,
-// so `preview_url` is null here; inline image thumbnails only appear on the
-// just-sent optimistic message (which has the local data URL).
-function attachmentsFromRecord(record) {
+// so `preview_url` is null here; a landed image instead gets a `fetch_url`
+// the bubble lazily resolves into a thumbnail (an authenticated byte fetch,
+// since `<img>` cannot send a bearer header). The just-sent optimistic
+// message keeps its local data URL in `preview_url` and needs no fetch.
+function attachmentsFromRecord(record, threadId) {
   const refs = record.attachments;
   if (!Array.isArray(refs) || refs.length === 0) return undefined;
-  return refs.map((ref) => ({
-    id: ref.id,
-    filename: ref.filename || "attachment",
-    mime_type: ref.mime_type || "",
-    kind: ref.kind || attachmentKindFromMime(ref.mime_type),
-    size_label: Number.isFinite(ref.size_bytes) ? formatBytes(ref.size_bytes) : "",
-    preview_url: null,
-  }));
+  return refs.map((ref) => {
+    const kind = ref.kind || attachmentKindFromMime(ref.mime_type);
+    // Only landed images are worth a thumbnail fetch; a ref without a
+    // storage_key never landed, so there are no bytes to serve.
+    const fetch_url =
+      kind === "image" && threadId && ref.storage_key
+        ? attachmentUrl({
+            threadId,
+            messageId: record.message_id,
+            attachmentId: ref.id,
+          })
+        : null;
+    return {
+      id: ref.id,
+      filename: ref.filename || "attachment",
+      mime_type: ref.mime_type || "",
+      kind,
+      size_label: Number.isFinite(ref.size_bytes) ? formatBytes(ref.size_bytes) : "",
+      preview_url: null,
+      fetch_url,
+    };
+  });
 }
 
-export function messagesFromTimeline(records, pendingMessages = []) {
+export function messagesFromTimeline(records, pendingMessages = [], threadId = null) {
   const seen = new Set();
   const messages = [];
 
@@ -65,7 +82,7 @@ export function messagesFromTimeline(records, pendingMessages = []) {
       id,
       role,
       content: record.content || "",
-      attachments: attachmentsFromRecord(record),
+      attachments: attachmentsFromRecord(record, threadId),
       timestamp: timestampForRecord(record),
       kind: record.kind,
       status: isBusyRejected ? "error" : record.status,

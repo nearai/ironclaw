@@ -19,9 +19,9 @@ use crate::config::RegistryProviderConfig;
 use crate::costs;
 use crate::error::LlmError;
 use crate::provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
-    ToolCompletionRequest, ToolCompletionResponse, strip_unsupported_completion_params,
-    strip_unsupported_tool_params,
+    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmProvider,
+    Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+    strip_unsupported_completion_params, strip_unsupported_tool_params,
 };
 
 /// Read a fresh `claude login` OAuth token from the OS credential store.
@@ -483,6 +483,8 @@ enum AnthropicContent {
 enum AnthropicContentBlock {
     #[serde(rename = "text")]
     Text { text: String },
+    #[serde(rename = "image")]
+    Image { source: AnthropicImageSource },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -494,6 +496,15 @@ enum AnthropicContentBlock {
         tool_use_id: String,
         content: String,
     },
+}
+
+/// Inline base64 image source for an Anthropic `image` content block.
+#[derive(Debug, Serialize)]
+struct AnthropicImageSource {
+    #[serde(rename = "type")]
+    source_type: &'static str,
+    media_type: String,
+    data: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -557,6 +568,29 @@ struct AnthropicUsage {
     cache_read_input_tokens: u32,
 }
 
+/// Build Anthropic `image` content blocks from a user message's multimodal
+/// parts. Only inline base64 `data:` images are forwarded (the Anthropic
+/// messages API also accepts `url` sources, but the model gateway always emits
+/// `data:` URLs); anything else is skipped so the text still reaches the model.
+fn user_image_blocks(parts: &[ContentPart]) -> Vec<AnthropicContentBlock> {
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::ImageUrl { image_url } => {
+                let (media_type, data) = image_url.decode_data_url()?;
+                Some(AnthropicContentBlock::Image {
+                    source: AnthropicImageSource {
+                        source_type: "base64",
+                        media_type: media_type.to_string(),
+                        data: data.to_string(),
+                    },
+                })
+            }
+            ContentPart::Text { .. } => None,
+        })
+        .collect()
+}
+
 /// Convert ChatMessage list to Anthropic format.
 ///
 /// Extracts system messages to the top-level `system` parameter (Anthropic
@@ -574,9 +608,22 @@ fn convert_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<Anthropi
                 }
             }
             Role::User => {
+                let content = match user_image_blocks(&msg.content_parts) {
+                    // Text-only (or no inline images): keep the compact string form.
+                    blocks if blocks.is_empty() => AnthropicContent::Text(msg.content),
+                    // Multimodal: text block first (when present), then images.
+                    image_blocks => {
+                        let mut blocks = Vec::with_capacity(1 + image_blocks.len());
+                        if !msg.content.is_empty() {
+                            blocks.push(AnthropicContentBlock::Text { text: msg.content });
+                        }
+                        blocks.extend(image_blocks);
+                        AnthropicContent::Blocks(blocks)
+                    }
+                };
                 anthropic_msgs.push(AnthropicMessage {
                     role: "user".to_string(),
-                    content: AnthropicContent::Text(msg.content),
+                    content,
                 });
             }
             Role::Assistant => {
@@ -735,6 +782,40 @@ mod tests {
         let (system, msgs) = convert_messages(messages);
         assert_eq!(system, Some("System 1\n\nSystem 2".to_string()));
         assert_eq!(msgs.len(), 1);
+    }
+
+    #[test]
+    fn test_convert_messages_user_image_becomes_base64_image_block() {
+        let messages = vec![ChatMessage::user_with_parts(
+            "what is this?",
+            vec![ContentPart::ImageUrl {
+                image_url: crate::provider::ImageUrl {
+                    url: "data:image/png;base64,AQIDBA==".to_string(),
+                    detail: None,
+                },
+            }],
+        )];
+        let (_system, msgs) = convert_messages(messages);
+        assert_eq!(msgs.len(), 1);
+        // Text rides as the first block, the image as a base64 `image` block.
+        let value = serde_json::to_value(&msgs[0]).expect("serialize");
+        let blocks = value["content"].as_array().expect("content blocks");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "what is this?");
+        assert_eq!(blocks[1]["type"], "image");
+        assert_eq!(blocks[1]["source"]["type"], "base64");
+        assert_eq!(blocks[1]["source"]["media_type"], "image/png");
+        assert_eq!(blocks[1]["source"]["data"], "AQIDBA==");
+    }
+
+    #[test]
+    fn test_convert_messages_text_only_user_stays_a_string() {
+        let messages = vec![ChatMessage::user("just text")];
+        let (_system, msgs) = convert_messages(messages);
+        let value = serde_json::to_value(&msgs[0]).expect("serialize");
+        // No inline images → compact string content, not a blocks array.
+        assert_eq!(value["content"], "just text");
     }
 
     #[test]

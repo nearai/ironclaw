@@ -17,7 +17,10 @@ use ironclaw_attachments::{
 use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{ResourceScope, ScopedPath};
 use ironclaw_loop_support::{LoopAttachmentReadError, LoopAttachmentReadPort};
-use ironclaw_product_workflow::{InboundAttachmentLander, RebornServicesError};
+use ironclaw_product_workflow::{
+    InboundAttachmentLander, InboundAttachmentReader, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind,
+};
 use ironclaw_threads::{AttachmentRef, ThreadScope};
 
 use crate::local_dev_mounts::WORKSPACE_ALIAS;
@@ -100,6 +103,47 @@ impl<F: RootFilesystem> LoopAttachmentReadPort for ProjectScopedAttachmentReader
             }
             Err(error) => Err(LoopAttachmentReadError::Backend(error.to_string())),
         }
+    }
+}
+
+/// Read counterpart wired into the WebUI facade so the bytes endpoint can serve
+/// image thumbnails. It reuses the loop read port — the same bounded,
+/// `MountView`-re-scoped read — and translates the scope and error taxonomy to
+/// the facade's surface. A missing/oversized/forbidden read becomes a sanitized
+/// facade error rather than leaking a host path or backend string.
+#[async_trait]
+impl<F: RootFilesystem> InboundAttachmentReader for ProjectScopedAttachmentReader<F> {
+    async fn read(
+        &self,
+        thread_scope: &ThreadScope,
+        storage_key: &str,
+    ) -> Result<Vec<u8>, RebornServicesError> {
+        let scope = thread_scope.to_resource_scope();
+        self.read_attachment_bytes(&scope, storage_key)
+            .await
+            .map_err(|error| match error {
+                LoopAttachmentReadError::NotFound => RebornServicesError {
+                    code: RebornServicesErrorCode::NotFound,
+                    kind: RebornServicesErrorKind::NotFound,
+                    status_code: 404,
+                    retryable: false,
+                    field: None,
+                    validation_code: None,
+                },
+                LoopAttachmentReadError::Forbidden => RebornServicesError {
+                    code: RebornServicesErrorCode::Forbidden,
+                    kind: RebornServicesErrorKind::ParticipantDenied,
+                    status_code: 403,
+                    retryable: false,
+                    field: None,
+                    validation_code: None,
+                },
+                // Carry the cause to the log (sanitized 500 on the wire) rather
+                // than dropping it — see error-handling rule.
+                LoopAttachmentReadError::Backend(reason) => {
+                    RebornServicesError::internal_from(reason)
+                }
+            })
     }
 }
 

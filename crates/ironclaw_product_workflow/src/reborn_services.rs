@@ -77,19 +77,20 @@ pub use llm_config::{
     NearAiWalletLoginResult, SetActiveLlmRequest, UpsertLlmProviderRequest,
 };
 pub use types::{
-    RebornAutomationInfo, RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus,
-    RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
-    RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornConnectableChannelInfo, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
-    RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
-    RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
-    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornLogEntry, RebornLogLevel, RebornLogQueryRequest,
-    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
-    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
+    RebornAutomationSource, RebornAutomationState, RebornCancelRunResponse,
+    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornConnectableChannelInfo,
+    RebornConnectableChannelListResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
+    RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionCredentialSetup,
+    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionOnboardingPayload,
+    RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
+    RebornExtensionSetupField, RebornExtensionSetupSecret, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornLogEntry, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
+    RebornOperatorArea, RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
     RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
     RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
@@ -934,6 +935,23 @@ pub trait RebornServicesApi: Send + Sync {
         request: RebornTimelineRequest,
     ) -> Result<RebornTimelineResponse, RebornServicesError>;
 
+    /// Read the raw bytes of one landed attachment so the browser can render an
+    /// image thumbnail (or download a file) for a persisted message. The default
+    /// reports the bytes are unavailable; compositions that wire a reader over
+    /// the project workspace filesystem override it. Implementations must derive
+    /// the scope from `caller`, never from the request path values.
+    async fn read_attachment(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: RebornAttachmentRequest,
+    ) -> Result<RebornAttachmentBytes, RebornServicesError> {
+        Err(RebornServicesError::from_status(
+            RebornServicesErrorCode::NotFound,
+            404,
+            false,
+        ))
+    }
+
     async fn stream_events(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -1377,12 +1395,27 @@ pub trait InboundAttachmentLander: Send + Sync {
     ) -> Result<Vec<AttachmentRef>, RebornServicesError>;
 }
 
+/// Reads a landed attachment's bytes back for the WebUI bytes endpoint. The
+/// read counterpart of [`InboundAttachmentLander`]: host composition implements
+/// it over the same project-scoped workspace filesystem the lander wrote
+/// through, so `storage_key` is re-scoped through that mount authority and never
+/// treated as a host path.
+#[async_trait]
+pub trait InboundAttachmentReader: Send + Sync {
+    async fn read(
+        &self,
+        thread_scope: &ThreadScope,
+        storage_key: &str,
+    ) -> Result<Vec<u8>, RebornServicesError>;
+}
+
 /// Default facade implementation composed at the WebUI boundary.
 #[derive(Clone)]
 pub struct RebornServices {
     thread_service: Arc<dyn SessionThreadService>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     inbound_attachments: Option<Arc<dyn InboundAttachmentLander>>,
+    inbound_attachment_reader: Option<Arc<dyn InboundAttachmentReader>>,
     event_stream: Option<Arc<dyn ProjectionStream>>,
     lifecycle_facade: Arc<dyn LifecycleProductFacade>,
     automation_facade: Arc<dyn AutomationProductFacade>,
@@ -1410,6 +1443,7 @@ impl RebornServices {
             thread_service,
             turn_coordinator,
             inbound_attachments: None,
+            inbound_attachment_reader: None,
             event_stream: None,
             lifecycle_facade: Arc::new(UnsupportedLifecycleProductFacade::new_static(
                 "reborn_lifecycle_facade_unwired",
@@ -1446,6 +1480,17 @@ impl RebornServices {
         inbound_attachments: Arc<dyn InboundAttachmentLander>,
     ) -> Self {
         self.inbound_attachments = Some(inbound_attachments);
+        self
+    }
+
+    /// Wire the port that reads landed attachment bytes back for the WebUI bytes
+    /// endpoint. Without it, `read_attachment` reports the bytes unavailable
+    /// (the timeline still renders the attachment card from its ref).
+    pub fn with_inbound_attachment_reader(
+        mut self,
+        reader: Arc<dyn InboundAttachmentReader>,
+    ) -> Self {
+        self.inbound_attachment_reader = Some(reader);
         self
     }
 
@@ -2021,6 +2066,83 @@ impl RebornServicesApi for RebornServices {
             messages,
             summary_artifacts,
             next_cursor,
+        })
+    }
+
+    async fn read_attachment(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornAttachmentRequest,
+    ) -> Result<RebornAttachmentBytes, RebornServicesError> {
+        let Some(reader) = self.inbound_attachment_reader.as_ref() else {
+            // No byte-read port wired (e.g. a non-local composition with no
+            // workspace filesystem): the bytes simply aren't available.
+            return Err(RebornServicesError::from_status(
+                RebornServicesErrorCode::NotFound,
+                404,
+                false,
+            ));
+        };
+        let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
+        let message_id = ThreadMessageId::parse(&request.message_id).map_err(|_| {
+            RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false)
+        })?;
+        let actor = caller.actor();
+        let scope = caller.turn_scope(thread_id);
+        let thread_scope = thread_scope_from_turn_scope(&scope, Some(actor.user_id.clone()))?;
+
+        // Resolve the thread under the caller's scope, reusing the same
+        // automation-trigger fallback as the timeline so a thumbnail on a
+        // trigger-owned thread loads exactly when its message does.
+        let history = match self
+            .thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: thread_scope.clone(),
+                thread_id: scope.thread_id.clone(),
+            })
+            .await
+        {
+            Ok(history) => history,
+            Err(
+                SessionThreadError::UnknownThread { .. }
+                | SessionThreadError::ThreadScopeMismatch { .. },
+            ) => {
+                let original_error =
+                    RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false);
+                self.try_automation_trigger_timeline_fallback(caller, &scope, original_error)
+                    .await?
+            }
+            Err(err) => return Err(map_timeline_probe_error(err)),
+        };
+
+        // The (message, attachment-id) pair is required: an attachment id is
+        // only unique within its message. Resolve the ref server-side so the
+        // browser never supplies the storage path and the Content-Type is
+        // authoritative.
+        let attachment = history
+            .messages
+            .iter()
+            .find(|message| message.message_id == message_id)
+            .and_then(|message| {
+                message
+                    .attachments
+                    .iter()
+                    .find(|attachment| attachment.id == request.attachment_id)
+            })
+            .ok_or_else(|| {
+                RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false)
+            })?;
+
+        let storage_key = attachment.storage_key.as_deref().ok_or_else(|| {
+            // An attachment that never landed has no bytes to serve.
+            RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false)
+        })?;
+
+        let bytes = reader.read(&thread_scope, storage_key).await?;
+        Ok(RebornAttachmentBytes {
+            mime_type: attachment.mime_type.clone(),
+            filename: attachment.filename.clone(),
+            bytes,
         })
     }
 

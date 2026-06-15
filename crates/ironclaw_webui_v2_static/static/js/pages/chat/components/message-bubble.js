@@ -5,6 +5,50 @@ import { Avatar } from "./avatar.js";
 import { Icon } from "../../../design-system/icons.js";
 import { useT } from "../../../lib/i18n.js";
 import { toast } from "../../../lib/toast.js";
+import { fetchAttachmentObjectUrl } from "../../../lib/api.js";
+
+/* Thumbnail for one message attachment. An optimistic (just-sent) image
+   carries a local data URL in `preview_url` and renders immediately. A
+   persisted image instead carries a `fetch_url`: `<img>` cannot send the
+   session bearer, so the bytes are fetched here and wrapped in a blob URL
+   (revoked on unmount). Anything else — non-images, unlanded refs, or a failed
+   fetch — falls back to the file icon. */
+function AttachmentThumbnail({ att }) {
+  const [resolvedUrl, setResolvedUrl] = React.useState(att.preview_url || null);
+
+  React.useEffect(() => {
+    // The local data URL is already renderable; only a persisted image needs
+    // the authenticated byte fetch.
+    if (att.preview_url || !att.fetch_url) return undefined;
+    let cancelled = false;
+    let objectUrl = null;
+    fetchAttachmentObjectUrl(att.fetch_url)
+      .then((url) => {
+        if (cancelled) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        objectUrl = url;
+        setResolvedUrl(url);
+      })
+      .catch(() => {
+        /* Leave the file-icon fallback in place on any read failure. */
+      });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [att.preview_url, att.fetch_url]);
+
+  if (resolvedUrl) {
+    return html`<img
+      src=${resolvedUrl}
+      alt=${att.filename || "attachment"}
+      className="h-9 w-9 shrink-0 rounded object-cover"
+    />`;
+  }
+  return html`<${Icon} name="file" className="h-3.5 w-3.5 shrink-0 text-signal" />`;
+}
 
 /* User keeps a tinted bubble; assistant is borderless (document-like);
    system / error stay as centered tinted notices. Reasoning ("thinking")
@@ -170,9 +214,7 @@ function MessageBubbleImpl({ message, onRetry }) {
             <div className="mt-2 flex flex-col gap-1.5">
               ${attachments.map((att, i) => html`
                 <div key=${att.id || i} className="flex items-center gap-2 rounded-md border border-iron-700 bg-iron-900/50 px-3 py-2 text-xs">
-                  ${att.preview_url
-                    ? html`<img src=${att.preview_url} alt=${att.filename || "attachment"} className="h-9 w-9 shrink-0 rounded object-cover" />`
-                    : html`<${Icon} name="file" className="h-3.5 w-3.5 shrink-0 text-signal" />`}
+                  <${AttachmentThumbnail} att=${att} />
                   <span className="truncate">${att.filename || "attachment"}</span>
                   <span className="ml-auto shrink-0 text-iron-200">${att.mime_type}${att.size_label ? " / " + att.size_label : ""}</span>
                 </div>

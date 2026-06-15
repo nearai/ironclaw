@@ -274,6 +274,42 @@ export function fetchTimeline({ threadId, limit, cursor } = {}) {
   return apiFetch(url.pathname + url.search);
 }
 
+// --- Attachments ---
+
+// Path for one landed attachment's bytes. The (thread, message, attachment)
+// triple addresses it: an attachment id is only unique within its message.
+export function attachmentUrl({ threadId, messageId, attachmentId } = {}) {
+  return (
+    `${V2_BASE}/threads/${encodeURIComponent(threadId)}` +
+    `/messages/${encodeURIComponent(messageId)}` +
+    `/attachments/${encodeURIComponent(attachmentId)}`
+  );
+}
+
+// Fetch an attachment's bytes with the session bearer and return an object URL
+// suitable for an `<img>` src. `<img>` cannot send an Authorization header, so
+// (unlike SSE, which uses a `?token=` shim) the bytes are fetched here and
+// wrapped in a blob URL. The caller owns the returned URL and must
+// `URL.revokeObjectURL` it when the element unmounts. Throws on a non-OK
+// response so the caller can fall back to a placeholder.
+export async function fetchAttachmentObjectUrl(path) {
+  const token = readStoredToken();
+  const headers = new Headers();
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+  const response = await fetch(path, { credentials: "same-origin", headers });
+  if (!response.ok) {
+    const { text, payload } = await parseErrorBody(response);
+    throw new ApiError(
+      describeApiError({ payload, body: text, statusText: response.statusText }),
+      { status: response.status, statusText: response.statusText, body: text, payload },
+    );
+  }
+  const blob = await response.blob();
+  return URL.createObjectURL(blob);
+}
+
 // --- Streaming (SSE) ---
 
 // `EventSource` cannot set request headers, so the token rides as a
