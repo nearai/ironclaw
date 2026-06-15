@@ -277,8 +277,8 @@ export declare const ChatEventSchema: z.ZodObject<{
         status: z.ZodCatch<z.ZodString>;
         provider: z.ZodOptional<z.ZodString>;
         runtime: z.ZodOptional<z.ZodString>;
-        processId: z.ZodOptional<z.ZodString>;
-        outputBytes: z.ZodOptional<z.ZodNumber>;
+        processId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        outputBytes: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
         errorKind: z.ZodOptional<z.ZodString>;
         updatedAt: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>>;
@@ -919,8 +919,8 @@ export declare const contract: {
                 threadId?: string | undefined;
                 provider?: string | undefined;
                 runtime?: string | undefined;
-                processId?: string | undefined;
-                outputBytes?: number | undefined;
+                processId?: string | null | undefined;
+                outputBytes?: number | null | undefined;
                 errorKind?: string | undefined;
                 updatedAt?: string | undefined;
             } | undefined;
@@ -1019,8 +1019,8 @@ export declare const contract: {
                 threadId?: string | undefined;
                 provider?: string | undefined;
                 runtime?: string | undefined;
-                processId?: string | undefined;
-                outputBytes?: number | undefined;
+                processId?: string | null | undefined;
+                outputBytes?: number | null | undefined;
                 errorKind?: string | undefined;
                 updatedAt?: string | undefined;
             } | undefined;

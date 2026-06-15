@@ -648,6 +648,7 @@ where
         // path-keyed read above only catches same-scope existence; sibling
         // existence is racy across an outer caller. For now we rely on the
         // path uniqueness — a sibling scope cannot create the same path.
+        let now = chrono::Utc::now();
         let record = SessionThreadRecord {
             scope: request.scope,
             thread_id: thread_id.clone(),
@@ -655,6 +656,8 @@ where
             title: request.title,
             metadata_json: request.metadata_json,
             goal: None,
+            created_at: Some(now),
+            updated_at: Some(now),
         };
         let stored = StoredThreadRecord {
             record: record.clone(),

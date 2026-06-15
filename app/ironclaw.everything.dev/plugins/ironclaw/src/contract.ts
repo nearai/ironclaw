@@ -57,6 +57,8 @@ export const ThreadSchema = z.object({
   title: z.string().optional(),
   metadataJson: z.string().optional(),
   goal: ThreadGoalSchema.optional(),
+  createdAt: z.string().datetime().optional(),
+  updatedAt: z.string().datetime().optional(),
 });
 
 export const ThreadListSchema = z.object({

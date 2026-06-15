@@ -19,6 +19,8 @@ export interface ConversationThread {
   agentId: string;
   projectId: string | null;
   createdByActorId: string;
+  createdAt: string | null;
+  updatedAt: string | null;
 }
 
 const THREADS_KEY = ["conversation", "threads"] as const;

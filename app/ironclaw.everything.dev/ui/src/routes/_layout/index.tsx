@@ -319,7 +319,12 @@ function ChatPage() {
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
 
   const threads = useMemo(() => {
-    return (threadsQuery.data?.pages.flatMap((p) => p.threads) ?? []) as ConversationThread[];
+    const all = (threadsQuery.data?.pages.flatMap((p) => p.threads) ?? []) as ConversationThread[];
+    return all.sort((a, b) => {
+      const aTime = a.updatedAt ?? a.createdAt ?? "";
+      const bTime = b.updatedAt ?? b.createdAt ?? "";
+      return bTime.localeCompare(aTime);
+    });
   }, [threadsQuery.data]);
 
   const activeThreadMeta = useMemo(() => {

@@ -143,6 +143,8 @@ function mapThreadRecord(t: any): z.infer<typeof ThreadSchema> {
     createdByActorId: t.created_by_actor_id,
     title: t.title ?? undefined,
     metadataJson: t.metadata_json ?? undefined,
+    createdAt: t.created_at ?? undefined,
+    updatedAt: t.updated_at ?? undefined,
     goal: t.goal
       ? {
           statement: t.goal.statement,

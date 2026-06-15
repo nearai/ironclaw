@@ -68,6 +68,8 @@ const ConversationThreadSchema = z.object({
   agentId: z.string(),
   projectId: z.string().nullable(),
   createdByActorId: z.string(),
+  createdAt: z.string().nullable().optional(),
+  updatedAt: z.string().nullable().optional(),
 });
 
 const ConversationMessagePageSchema = z.object({

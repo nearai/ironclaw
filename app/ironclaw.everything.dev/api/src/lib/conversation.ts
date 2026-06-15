@@ -5,6 +5,8 @@ export interface ConversationThread {
   agentId: string;
   projectId: string | null;
   createdByActorId: string;
+  createdAt: string | null;
+  updatedAt: string | null;
 }
 
 export interface ConversationAttachmentRef {
@@ -80,6 +82,8 @@ export function normalizeThread(raw: any): ConversationThread {
     agentId: scope.agentId ?? scope.agent_id ?? "",
     projectId: scope.projectId ?? scope.project_id ?? null,
     createdByActorId: raw.createdByActorId ?? raw.created_by_actor_id ?? "",
+    createdAt: raw.createdAt ?? raw.created_at ?? null,
+    updatedAt: raw.updatedAt ?? raw.updated_at ?? null,
   };
 }
 

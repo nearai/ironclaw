@@ -823,6 +823,8 @@ impl RebornServicesApi for StubServices {
                 title: None,
                 metadata_json: None,
                 goal: None,
+                created_at: None,
+                updated_at: None,
             },
         })
     }
@@ -875,6 +877,8 @@ impl RebornServicesApi for StubServices {
                 title: None,
                 metadata_json: None,
                 goal: None,
+                created_at: None,
+                updated_at: None,
             },
             messages: Vec::new(),
             summary_artifacts: Vec::new(),
