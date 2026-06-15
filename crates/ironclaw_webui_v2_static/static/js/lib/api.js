@@ -286,15 +286,13 @@ export function attachmentUrl({ threadId, messageId, attachmentId } = {}) {
   );
 }
 
-// Fetch an attachment's bytes with the session bearer and return a `data:` URL
-// suitable for an `<img>` src. `<img>` cannot send an Authorization header, so
-// (unlike SSE, which uses a `?token=` shim) the bytes are fetched here. We
-// return a `data:` URL rather than a `blob:` object URL on purpose: the SPA's
-// CSP is `img-src 'self' data:` (matching the optimistic compose-time preview,
-// which is also a data URL), so a `blob:` src would be refused — and a data URL
-// needs no `revokeObjectURL` lifecycle. Throws on a non-OK response so the
+// Fetch an attachment's bytes with the session bearer and return them as a
+// `Blob`. `<img>`/`<audio>`/`<iframe>` cannot send an Authorization header, so
+// (unlike SSE, which uses a `?token=` shim) the bytes are fetched here and the
+// caller picks the CSP-appropriate representation (data URL for images/media,
+// blob URL for PDF frames, text for text). Throws on a non-OK response so the
 // caller can fall back to a placeholder.
-export async function fetchAttachmentDataUrl(path) {
+export async function fetchAttachmentBlob(path) {
   const token = readStoredToken();
   const headers = new Headers();
   if (token) {
@@ -308,13 +306,25 @@ export async function fetchAttachmentDataUrl(path) {
       { status: response.status, statusText: response.statusText, body: text, payload },
     );
   }
-  const blob = await response.blob();
-  return await new Promise((resolve, reject) => {
+  return await response.blob();
+}
+
+// Read a `Blob` into a `data:` URL. Used for images and media, whose CSP
+// directives (`img-src`/`media-src 'self' data:`) allow data URLs but not
+// `blob:` — and a data URL needs no `revokeObjectURL` lifecycle.
+export function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(reader.result);
     reader.onerror = () => reject(reader.error || new Error("attachment read failed"));
     reader.readAsDataURL(blob);
   });
+}
+
+// Convenience: fetch an attachment's bytes and return a `data:` URL for an
+// `<img>` thumbnail. CSP-safe (`img-src 'self' data:`); never a `blob:` URL.
+export async function fetchAttachmentDataUrl(path) {
+  return blobToDataUrl(await fetchAttachmentBlob(path));
 }
 
 // --- Streaming (SSE) ---

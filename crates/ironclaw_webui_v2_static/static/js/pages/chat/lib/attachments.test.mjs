@@ -11,6 +11,7 @@ import test, { before } from "node:test";
 
 import {
   attachmentKindFromMime,
+  attachmentPreviewMode,
   formatBytes,
   isAcceptedFile,
   stageFiles,
@@ -60,6 +61,24 @@ test("attachmentKindFromMime classifies by prefix", () => {
   assert.equal(attachmentKindFromMime("AUDIO/MPEG"), "audio");
   assert.equal(attachmentKindFromMime("application/pdf"), "document");
   assert.equal(attachmentKindFromMime(""), "document");
+});
+
+test("attachmentPreviewMode maps each MIME family to its render mode", () => {
+  assert.equal(attachmentPreviewMode("image/png"), "image");
+  assert.equal(attachmentPreviewMode("AUDIO/MPEG"), "audio");
+  assert.equal(attachmentPreviewMode("video/mp4"), "video");
+  assert.equal(attachmentPreviewMode("application/pdf"), "pdf");
+  // Text-like: text/*, JSON/XML/CSV and their +json/+xml suffixes.
+  assert.equal(attachmentPreviewMode("text/plain"), "text");
+  assert.equal(attachmentPreviewMode("text/markdown"), "text");
+  assert.equal(attachmentPreviewMode("application/json"), "text");
+  assert.equal(attachmentPreviewMode("application/csv"), "text");
+  assert.equal(attachmentPreviewMode("application/vnd.api+json"), "text");
+  assert.equal(attachmentPreviewMode("image/svg+xml"), "image");
+  // Unknown binary falls back to download.
+  assert.equal(attachmentPreviewMode("application/octet-stream"), "download");
+  assert.equal(attachmentPreviewMode("application/zip"), "download");
+  assert.equal(attachmentPreviewMode(""), "download");
 });
 
 test("isAcceptedFile honours wildcards, extensions, and exact MIME", () => {

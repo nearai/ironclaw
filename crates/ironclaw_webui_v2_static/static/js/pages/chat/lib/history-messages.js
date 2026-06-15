@@ -20,10 +20,11 @@ function attachmentsFromRecord(record, threadId) {
   if (!Array.isArray(refs) || refs.length === 0) return undefined;
   return refs.map((ref) => {
     const kind = ref.kind || attachmentKindFromMime(ref.mime_type);
-    // Only landed images are worth a thumbnail fetch; a ref without a
-    // storage_key never landed, so there are no bytes to serve.
+    // Any landed attachment can serve its bytes — for an image thumbnail or
+    // for click-to-preview of any kind. A ref without a storage_key never
+    // landed, so there are no bytes to fetch.
     const fetch_url =
-      kind === "image" && threadId && ref.storage_key
+      threadId && ref.storage_key
         ? attachmentUrl({
             threadId,
             messageId: record.message_id,

@@ -250,6 +250,39 @@ test("messagesFromTimeline: landed image gets a thumbnail fetch_url", () => {
   );
 });
 
+// Click-to-preview works for every landed attachment, not just images, so a
+// landed document/PDF also gets a `fetch_url` to fetch its bytes on demand.
+test("messagesFromTimeline: landed non-image attachment gets a fetch_url", () => {
+  const messages = messagesFromTimeline(
+    [
+      {
+        message_id: "m11",
+        kind: "user",
+        content: "see doc",
+        sequence: 1,
+        status: "accepted",
+        attachments: [
+          {
+            id: "att-pdf",
+            kind: "document",
+            mime_type: "application/pdf",
+            filename: "report.pdf",
+            size_bytes: 2048,
+            storage_key: "attachments/2026-06-14/m11-0-report.pdf",
+          },
+        ],
+      },
+    ],
+    [],
+    "thread-42",
+  );
+
+  assert.equal(
+    messages[0].attachments[0].fetch_url,
+    "/api/webchat/v2/threads/thread-42/messages/m11/attachments/att-pdf",
+  );
+});
+
 // Without a thread context (or without a landed storage_key) there is nothing
 // to fetch, so `fetch_url` stays null and the card renders the icon fallback.
 test("messagesFromTimeline: image without thread context has no fetch_url", () => {

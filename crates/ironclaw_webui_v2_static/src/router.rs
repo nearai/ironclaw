@@ -218,6 +218,8 @@ fn render_index_with_nonce() -> Response {
          style-src-elem 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; \
          font-src 'self' https://fonts.gstatic.com data:; \
          img-src 'self' data:; \
+         media-src 'self' data:; \
+         frame-src 'self' blob:; \
          connect-src 'self'; \
          object-src 'none'; \
          frame-ancestors 'none'; \
@@ -402,6 +404,17 @@ mod tests {
         assert!(
             csp.contains("object-src 'none'"),
             "document CSP must keep `object-src 'none'`; got `{csp}`",
+        );
+        // Attachment preview needs inline audio (`media-src data:`) and inline
+        // PDF via blob iframes (`frame-src blob:`). Lock the exact, narrow
+        // values so a regression can't widen them to `*`/`https:`/`data:` frames.
+        assert!(
+            csp.contains("media-src 'self' data:"),
+            "document CSP must allow inline media data URLs for attachment preview; got `{csp}`",
+        );
+        assert!(
+            csp.contains("frame-src 'self' blob:"),
+            "document CSP must allow blob iframes for inline PDF preview; got `{csp}`",
         );
         // Scripts must NOT be executable via eval or arbitrary inline —
         // the document relies on the nonce, not `'unsafe-inline'`.

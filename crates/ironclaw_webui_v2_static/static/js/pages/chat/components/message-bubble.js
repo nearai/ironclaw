@@ -6,6 +6,7 @@ import { Icon } from "../../../design-system/icons.js";
 import { useT } from "../../../lib/i18n.js";
 import { toast } from "../../../lib/toast.js";
 import { fetchAttachmentDataUrl } from "../../../lib/api.js";
+import { AttachmentPreviewModal } from "./attachment-preview.js";
 
 /* Thumbnail for one message attachment. An optimistic (just-sent) image
    carries a local data URL in `preview_url` and renders immediately. A
@@ -41,6 +42,34 @@ function AttachmentThumbnail({ att }) {
     />`;
   }
   return html`<${Icon} name="file" className="h-3.5 w-3.5 shrink-0 text-signal" />`;
+}
+
+/* One attachment chip: thumbnail/icon + filename + type/size. Clicking opens
+   the preview modal when the attachment has bytes to show (a landed
+   `fetch_url`, or an optimistic image's local `preview_url`); otherwise it
+   renders as a static row. */
+const ATTACHMENT_CHIP_CLASS =
+  "flex items-center gap-2 rounded-md border border-iron-700 bg-iron-900/50 px-3 py-2 text-xs";
+
+function AttachmentChip({ att, onPreview }) {
+  const inner = html`
+    <${AttachmentThumbnail} att=${att} />
+    <span className="truncate">${att.filename || "attachment"}</span>
+    <span className="ml-auto shrink-0 text-iron-200"
+      >${att.mime_type}${att.size_label ? " / " + att.size_label : ""}</span
+    >
+  `;
+  if (!att.fetch_url && !att.preview_url) {
+    return html`<div className=${ATTACHMENT_CHIP_CLASS}>${inner}</div>`;
+  }
+  return html`<button
+    type="button"
+    onClick=${() => onPreview(att)}
+    aria-label=${`Preview ${att.filename || "attachment"}`}
+    className=${`${ATTACHMENT_CHIP_CLASS} w-full text-left transition-colors hover:border-signal/40 hover:bg-iron-900/80`}
+  >
+    ${inner}
+  </button>`;
 }
 
 /* User keeps a tinted bubble; assistant is borderless (document-like);
@@ -96,6 +125,8 @@ function MessageBubbleImpl({ message, onRetry }) {
   const isUser = role === "user";
   const t = useT();
   const [copied, setCopied] = React.useState(false);
+  // The attachment currently open in the preview modal (null when closed).
+  const [previewAttachment, setPreviewAttachment] = React.useState(null);
   // All hooks must run before the role-based early returns below.
   // A message can change role in place across renders (e.g. an
   // optimistic bubble upgrading, or a streaming role shift), so
@@ -205,14 +236,16 @@ function MessageBubbleImpl({ message, onRetry }) {
 
           ${attachments && attachments.length > 0 && html`
             <div className="mt-2 flex flex-col gap-1.5">
-              ${attachments.map((att, i) => html`
-                <div key=${att.id || i} className="flex items-center gap-2 rounded-md border border-iron-700 bg-iron-900/50 px-3 py-2 text-xs">
-                  <${AttachmentThumbnail} att=${att} />
-                  <span className="truncate">${att.filename || "attachment"}</span>
-                  <span className="ml-auto shrink-0 text-iron-200">${att.mime_type}${att.size_label ? " / " + att.size_label : ""}</span>
-                </div>
-              `)}
+              ${attachments.map((att, i) => html`<${AttachmentChip}
+                key=${att.id || i}
+                att=${att}
+                onPreview=${setPreviewAttachment}
+              />`)}
             </div>
+            <${AttachmentPreviewModal}
+              attachment=${previewAttachment}
+              onClose=${() => setPreviewAttachment(null)}
+            />
           `}
         </div>
 
