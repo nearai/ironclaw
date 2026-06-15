@@ -8,11 +8,7 @@
 //!
 //! All five are model-visible.
 
-use std::{
-    panic::AssertUnwindSafe,
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{panic::AssertUnwindSafe, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use futures_util::FutureExt as _;
