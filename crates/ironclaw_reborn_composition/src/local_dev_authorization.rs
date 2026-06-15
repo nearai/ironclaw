@@ -58,7 +58,8 @@ mod tests {
         ResourceEstimate, RuntimeKind, TrustClass,
     };
     use ironclaw_host_runtime::{
-        BUILTIN_FIRST_PARTY_PROVIDER, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+        BUILTIN_FIRST_PARTY_PROVIDER, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+        TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
     };
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
     use serde_json::json;
@@ -66,10 +67,15 @@ mod tests {
     use super::*;
     use crate::local_dev_capability_policy::local_dev_capability_policy;
 
-    #[tokio::test]
-    async fn local_dev_trace_commons_profile_set_skips_approval_gate() {
-        let capability_id =
-            CapabilityId::new(TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID).expect("capability id");
+    /// Assert a Trace Commons capability with the given descriptor `effects`
+    /// is allowed under local-dev WITHOUT a REPL approval gate — i.e. it is on
+    /// the TOML approval-gate exemption list. Dropping the exemption makes this
+    /// fail.
+    async fn assert_trace_commons_skips_approval_gate(
+        capability_id: &str,
+        effects: Vec<EffectKind>,
+    ) {
+        let capability_id = CapabilityId::new(capability_id).expect("capability id");
         let descriptor = CapabilityDescriptor {
             id: capability_id,
             provider: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER).expect("provider id"),
@@ -77,11 +83,7 @@ mod tests {
             trust_ceiling: TrustClass::UserTrusted,
             description: "test".to_string(),
             parameters_schema: json!({}),
-            effects: vec![
-                EffectKind::ReadFilesystem,
-                EffectKind::Network,
-                EffectKind::ExternalWrite,
-            ],
+            effects: effects.clone(),
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
             resource_profile: None,
@@ -106,11 +108,7 @@ mod tests {
         let trust_decision = TrustDecision {
             effective_trust: EffectiveTrustClass::user_trusted(),
             authority_ceiling: AuthorityCeiling {
-                allowed_effects: vec![
-                    EffectKind::ReadFilesystem,
-                    EffectKind::Network,
-                    EffectKind::ExternalWrite,
-                ],
+                allowed_effects: effects,
                 max_resource_ceiling: None,
             },
             provenance: TrustProvenance::AdminConfig,
@@ -129,7 +127,38 @@ mod tests {
 
         assert!(
             matches!(decision, ironclaw_host_api::Decision::Allow { .. }),
-            "Trace Commons profile_set is consented in the agent turn and should not require a REPL approval gate, got {decision:?}"
+            "{} is consented in the agent turn and should not require a REPL approval gate, got {decision:?}",
+            descriptor.id.as_str()
         );
+    }
+
+    #[tokio::test]
+    async fn local_dev_trace_commons_profile_set_skips_approval_gate() {
+        assert_trace_commons_skips_approval_gate(
+            TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+            vec![
+                EffectKind::ReadFilesystem,
+                EffectKind::Network,
+                EffectKind::ExternalWrite,
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn local_dev_trace_commons_onboard_skips_approval_gate() {
+        // The onboard exemption (not profile_set) was the actual fix; cover it
+        // with its real network + external_write + filesystem-write effects so
+        // dropping the TOML exemption fails here.
+        assert_trace_commons_skips_approval_gate(
+            TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+            vec![
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::Network,
+                EffectKind::ExternalWrite,
+            ],
+        )
+        .await;
     }
 }

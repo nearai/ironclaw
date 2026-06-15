@@ -2452,9 +2452,17 @@ pub async fn build_reborn_runtime(
     // the v1 binary's turn-end capture. Policy-gated per user scope — the
     // sink is inert (one policy-file read per turn) until a scope enrolls
     // via `builtin.trace_commons.onboard` or `traces opt-in`.
+    // Seed with the runtime owner's TENANT-SCOPED key (matching how capture
+    // keys state), so startup pending-queue discovery finds the owner's queued
+    // traces — a bare owner id would miss the `trace_scope_key(tenant, owner)`
+    // queue dir.
+    let runtime_owner_trace_scope = ironclaw_reborn_traces::contribution::trace_scope_key(
+        thread_scope.tenant_id.as_str(),
+        actor_user_id.as_str(),
+    );
     let trace_capture_scopes: crate::trace_capture::ObservedTraceScopes =
         Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::from([
-            actor_user_id.as_str().to_string(),
+            runtime_owner_trace_scope,
         ])));
     let trace_capture_sink: Arc<dyn ironclaw_turns::TurnEventSink> =
         Arc::new(crate::trace_capture::TraceCaptureTurnEventSink::new(
@@ -4825,21 +4833,25 @@ mod tests {
         // The capture task is detached from the lifecycle path; poll briefly.
         let queue_dir =
             trace_contribution::trace_contribution_dir_for_scope(Some(&scope)).join("queue");
-        let queued =
-            |dir: &std::path::Path| -> Vec<std::path::PathBuf> {
-                std::fs::read_dir(dir)
-                    .map(|entries| {
-                        entries
-                            .filter_map(|e| e.ok().map(|e| e.path()))
-                            .filter(|path| {
-                                path.file_name().and_then(|name| name.to_str()).is_some_and(
-                                    |name| name.ends_with(".json") && !name.ends_with(".held.json"),
-                                )
+        let queued = |dir: &std::path::Path| -> Vec<std::path::PathBuf> {
+            match std::fs::read_dir(dir) {
+                Ok(entries) => entries
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|path| {
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| {
+                                name.ends_with(".json") && !name.ends_with(".held.json")
                             })
-                            .collect()
                     })
-                    .unwrap_or_default()
-            };
+                    .collect(),
+                // The queue dir not existing yet is the expected pre-capture
+                // state; any other IO error is a real failure the test must not
+                // mask as "no queued traces".
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                Err(error) => panic!("failed to read trace queue dir {}: {error}", dir.display()),
+            }
+        };
         let mut entries = Vec::new();
         for _ in 0..150 {
             entries = queued(&queue_dir);
@@ -4859,7 +4871,7 @@ mod tests {
 
         runtime.shutdown().await.expect("runtime shutdown");
         let _ = std::fs::remove_dir_all(trace_contribution::trace_contribution_dir_for_scope(
-            Some(&owner),
+            Some(&scope),
         ));
     }
 

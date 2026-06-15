@@ -64,7 +64,16 @@ pub(super) fn onboard_manifest() -> Result<CapabilityManifest, ExtensionError> {
          redacted traces and (2) chosen whether to include redacted message text and \
          redacted tool payloads. Pass confirmed=true only when both consents were given \
          in this conversation.",
-        vec![EffectKind::Network, EffectKind::ExternalWrite],
+        // Onboarding persists device-key material (reads the standing policy,
+        // writes the per-tenant Ed25519 keypair + policy.json), so the effect
+        // model must declare the local filesystem read/write, not just the
+        // network enrollment POST.
+        vec![
+            EffectKind::ReadFilesystem,
+            EffectKind::WriteFilesystem,
+            EffectKind::Network,
+            EffectKind::ExternalWrite,
+        ],
         PermissionMode::Ask,
         Some(ResourceProfile {
             default_estimate: ResourceEstimate {
@@ -112,8 +121,12 @@ pub(super) fn profile_token_manifest() -> Result<CapabilityManifest, ExtensionEr
          their public profile from the agent. Use this token only for browser/manual \
          profile setup. It is scoped only to community profile management; it cannot \
          submit traces.",
+        // Persists the minted token to a 0600 local file (out-of-band delivery,
+        // keeping the bearer credential off the model surface), so the effect
+        // model must declare the local filesystem write.
         vec![
             EffectKind::ReadFilesystem,
+            EffectKind::WriteFilesystem,
             EffectKind::Network,
             EffectKind::ExternalWrite,
         ],
