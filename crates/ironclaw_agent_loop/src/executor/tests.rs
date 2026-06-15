@@ -1617,8 +1617,10 @@ async fn no_progress_skips_nudge_when_gate_disabled() {
 async fn budget_iteration_limit_nudges_to_completed_when_gate_enabled() {
     // Gate ON at the iteration-limit boundary: instead of failing closed, issue
     // one tool-free nudge and complete with the synthesized reply.
-    let host = MockHost::new(vec![reply_response_with_text("Final answer from budget nudge.")])
-        .with_driver_nudges_enabled();
+    let host = MockHost::new(vec![reply_response_with_text(
+        "Final answer from budget nudge.",
+    )])
+    .with_driver_nudges_enabled();
     let family = family_with_compaction_strategy(DefaultCompactionStrategy {
         deadline_ms: 1,
         ..Default::default()
@@ -1641,7 +1643,11 @@ async fn budget_iteration_limit_nudges_to_completed_when_gate_enabled() {
         .await
         .expect("budget stage");
 
-    assert_eq!(host.model_requests().len(), 1, "budget nudge should issue one model call");
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "budget nudge should issue one model call"
+    );
     assert!(
         matches!(step, BudgetStep::Exit(LoopExit::Completed(_))),
         "budget nudge should complete, not fail closed"
@@ -1652,8 +1658,7 @@ async fn budget_iteration_limit_nudges_to_completed_when_gate_enabled() {
 async fn nudge_respects_one_shot_cap() {
     // With the cap already spent, the no-progress exit must not issue a model
     // call and falls back to the canned reply.
-    let host = MockHost::new(vec![reply_response_with_text("unused")])
-        .with_driver_nudges_enabled();
+    let host = MockHost::new(vec![reply_response_with_text("unused")]).with_driver_nudges_enabled();
     let family = crate::families::default();
     let ctx = StageContext {
         planner: family.planner(),

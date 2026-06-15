@@ -18,10 +18,9 @@ use super::{
 };
 
 /// Instruction injected by the final-answer nudge — drive the model to produce a
-/// closing answer with no tools available.
-pub(super) const FINAL_ANSWER_NUDGE: &str = "You have not given the user a final answer yet. \
-Based on the work you have already done, give your final answer to the user now. \
-Do not call any tools.";
+/// closing answer with no tools available. Template lives in a prompt file so it
+/// stays reviewable and versioned with the rest of the prompt surface.
+pub(super) const FINAL_ANSWER_NUDGE: &str = include_str!("../../prompts/final_answer_nudge.md");
 
 /// Driver-specific "final-answer" nudge: when the loop would otherwise end a turn
 /// with no real assistant answer (empty/trailed-off reply, model-call budget
@@ -52,13 +51,16 @@ pub(super) async fn try_final_answer_nudge(
         return Ok(None);
     }
 
-    // Build a tool-free prompt bundle: leaving `surface_version`/`capability_view`
-    // as `None` makes the host render no tools, so the model must answer in prose.
+    // Build the prompt-context request, then suppress tools. Clearing
+    // `surface_version`/`capability_view` here only strips tools from the prompt
+    // *text*; the empty capability view set on the model request below (not these
+    // `None`s) is what actually forces a tool-free provider call. See the comment
+    // on `LoopModelRequest.capability_view` construction further down.
     let context_plan = ctx.planner.context().plan_context_request(state).await;
     let mut request = context_plan.request;
     request.surface_version = None;
     request.capability_view = None;
-    let safe_body = LoopSafeSummary::new(FINAL_ANSWER_NUDGE.to_string()).map_err(|_| {
+    let safe_body = LoopSafeSummary::new(FINAL_ANSWER_NUDGE.trim().to_string()).map_err(|_| {
         AgentLoopExecutorError::PlannerContract {
             detail: "final-answer nudge body was invalid",
         }
@@ -104,7 +106,12 @@ pub(super) async fn try_final_answer_nudge(
             // this keeps `DefaultReplyAdmissionStrategy`'s protections (blank
             // text, provider-transcript artifacts) as the single gate before
             // anything is finalized into the transcript.
-            match ctx.planner.reply_admission().admit_reply(state, &reply).await {
+            match ctx
+                .planner
+                .reply_admission()
+                .admit_reply(state, &reply)
+                .await
+            {
                 ReplyAdmissionOutcome::AcceptFinal => {
                     // Preserve the canonical assistant-reply accounting so the
                     // diminishing-returns window sees the nudge turn's output
