@@ -22,9 +22,11 @@ function attachmentsFromRecord(record, threadId) {
     const kind = ref.kind || attachmentKindFromMime(ref.mime_type);
     // Any landed attachment can serve its bytes — for an image thumbnail or
     // for click-to-preview of any kind. A ref without a storage_key never
-    // landed, so there are no bytes to fetch.
+    // landed, so there are no bytes to fetch. Require every addressing part so
+    // a malformed record yields a plain card (no fetch) rather than throwing in
+    // `attachmentUrl` mid-projection.
     const fetch_url =
-      threadId && ref.storage_key
+      threadId && ref.storage_key && record.message_id && ref.id
         ? attachmentUrl({
             threadId,
             messageId: record.message_id,

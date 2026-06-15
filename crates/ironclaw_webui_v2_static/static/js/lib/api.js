@@ -278,7 +278,13 @@ export function fetchTimeline({ threadId, limit, cursor } = {}) {
 
 // Path for one landed attachment's bytes. The (thread, message, attachment)
 // triple addresses it: an attachment id is only unique within its message.
+// Fails fast on a missing part rather than building a path with the literal
+// "undefined" — this URL feeds `fetchAttachmentBlob`, which attaches the bearer,
+// so an unintended path must never be requested.
 export function attachmentUrl({ threadId, messageId, attachmentId } = {}) {
+  if (!threadId || !messageId || !attachmentId) {
+    throw new Error("attachmentUrl requires threadId, messageId, and attachmentId");
+  }
   return (
     `${V2_BASE}/threads/${encodeURIComponent(threadId)}` +
     `/messages/${encodeURIComponent(messageId)}` +

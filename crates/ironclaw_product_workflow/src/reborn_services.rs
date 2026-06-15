@@ -2052,6 +2052,18 @@ impl RebornServicesApi for RebornServices {
         // scope the history actually lives under — for a trigger-fired thread
         // that is the creator's scope, not the caller's session scope, so the
         // reader addresses the right project mount.
+        //
+        // This loads the whole thread history to find one ref, so it is
+        // O(messages) per fetch. Acceptable for now: the cost equals the
+        // timeline load already incurred when the thread is open, and the
+        // browser caches each attachment (private max-age plus the resolved
+        // data/blob URL), so it is one fetch per attachment per session. A
+        // single-message fast path would need a new scope-validated "load one
+        // message *record* by id" service method — `load_context_messages`
+        // projects to `ContextMessage`, which carries only image refs (no
+        // filename, no non-image kinds), so it can't resolve an arbitrary
+        // attachment. Left as a follow-up rather than widening the thread
+        // service contract here.
         let (thread_scope, history) = self
             .resolve_thread_history_for_caller(caller, &scope)
             .await?;

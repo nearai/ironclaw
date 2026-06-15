@@ -110,6 +110,14 @@ test("attachmentUrl encodes the (thread, message, attachment) triple", () => {
   );
 });
 
+test("attachmentUrl fails fast when a part is missing", () => {
+  // Never build a `.../undefined/...` path that would later carry the bearer.
+  assert.throws(() => attachmentUrl({ messageId: "m1", attachmentId: "a1" }));
+  assert.throws(() => attachmentUrl({ threadId: "t1", attachmentId: "a1" }));
+  assert.throws(() => attachmentUrl({ threadId: "t1", messageId: "m1" }));
+  assert.throws(() => attachmentUrl());
+});
+
 // Regression: the thumbnail must be a `data:` URL, never a `blob:` object URL.
 // The SPA's CSP is `img-src 'self' data:`, so a blob URL was refused and the
 // thumbnail never rendered. Reverting to `URL.createObjectURL` would throw here.
@@ -127,6 +135,9 @@ test("fetchAttachmentDataUrl returns a data URL and never mints a blob URL", asy
     });
   // Keep the real `URL` constructor (the same-origin guard needs `new URL`);
   // only poison `createObjectURL` so a blob-URL regression fails the test.
+  // Save/restore the previous value so we don't leak global state into other
+  // tests (order-independence).
+  const priorCreateObjectURL = globalThis.URL.createObjectURL;
   globalThis.URL.createObjectURL = () => {
     throw new Error("blob: URLs violate the SPA CSP img-src 'self' data:");
   };
@@ -137,12 +148,14 @@ test("fetchAttachmentDataUrl returns a data URL and never mints a blob URL", asy
     }
   };
 
-  const url = await fetchAttachmentDataUrl(
-    attachmentUrl({ threadId: "t1", messageId: "m1", attachmentId: "a1" }),
-  );
-
-  assert.ok(url.startsWith("data:"), `expected a data URL, got ${url}`);
-  delete globalThis.URL.createObjectURL;
+  try {
+    const url = await fetchAttachmentDataUrl(
+      attachmentUrl({ threadId: "t1", messageId: "m1", attachmentId: "a1" }),
+    );
+    assert.ok(url.startsWith("data:"), `expected a data URL, got ${url}`);
+  } finally {
+    globalThis.URL.createObjectURL = priorCreateObjectURL;
+  }
 });
 
 // The bearer is a critical sink: an off-origin attachment URL must be rejected
