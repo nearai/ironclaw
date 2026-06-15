@@ -237,11 +237,22 @@ export function queryOperatorLogs({
 
 // --- Messages ---
 
-export function sendMessage({ threadId, content, clientActionId: clientId }) {
+// `attachments` is an array of `WebUiInboundAttachment`
+// (`{ mime_type, filename, data_base64 }`). Omitted from the body when
+// empty so a text-only send keeps the original wire shape.
+export function sendMessage({
+  threadId,
+  content,
+  attachments = [],
+  clientActionId: clientId,
+}) {
   const body = {
     client_action_id: clientId || clientActionId(),
     content,
   };
+  if (attachments.length > 0) {
+    body.attachments = attachments;
+  }
   return apiFetch(
     `${V2_BASE}/threads/${encodeURIComponent(threadId)}/messages`,
     {

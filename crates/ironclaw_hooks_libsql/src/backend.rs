@@ -278,12 +278,13 @@ impl LibSqlPredicateStateBackend {
                     });
                 }
 
-                // 4. Per-tenant LRU quota: only relevant when inserting a NEW
-                //    key (a fresh PRIMARY KEY). Mirror the in-memory backend's
-                //    "evict before insert when at quota" semantics, ranking the
-                //    tenant's keys by oldest-front (MIN(occurred_at)).
+                // 4. Per-tenant aggregate LRU quota: only relevant when
+                //    inserting a NEW key (a fresh PRIMARY KEY). Mirror the
+                //    in-memory backend's "evict before insert when at quota"
+                //    semantics, ranking the tenant's keys across both typed
+                //    tables by oldest-front (MIN(occurred_at)).
                 if !key_exists(&conn, table, &key_hash).await? {
-                    evicted += enforce_caps(&conn, table, &scope).await?;
+                    evicted += enforce_caps(&conn, &scope).await?;
                 }
 
                 // 5. Insert (table-specific shape via the spec). The dedup
@@ -587,12 +588,12 @@ async fn key_exists(
 
 /// Enforce the per-tenant [`MAX_KEYS_PER_TENANT`] distinct-key quota before
 /// inserting a NEW key. A tenant is a distinct `scope_hash`; its keys are the
-/// distinct `key_hash` values under that scope, each key's "front timestamp"
-/// being its `min(occurred_at)`. The victim is the tenant's key with the
-/// smallest front timestamp — the durable equivalent of the in-memory
-/// `min_by_key(front ts)` LRU. Returns the number of keys evicted (one
-/// increment per evicted bucket, matching the in-memory backend's `evictions`
-/// semantics).
+/// distinct `key_hash` values under that scope across BOTH typed tables, each
+/// key's "front timestamp" being its `min(occurred_at)`. The victim is the
+/// tenant's key with the smallest front timestamp — the durable equivalent of
+/// the in-memory `min_by_key(front ts)` LRU. Returns the number of keys evicted
+/// (one increment per evicted bucket, matching the in-memory backend's
+/// `evictions` semantics).
 ///
 /// # No global cap (parity with the Postgres backend)
 ///
@@ -608,15 +609,15 @@ async fn key_exists(
 ///
 /// # Reaper requirement — quota counts un-reaped expired rows
 ///
-/// The `COUNT(DISTINCT key_hash) WHERE scope_hash = ?1` below counts EVERY
-/// stored row for the tenant, including expired rows from OTHER keys: the
-/// per-key window trim in `record_*` only deletes `WHERE key_hash = ?1`, never
-/// sibling keys. So a tenant with many idle short-window keys can read at
-/// `MAX_KEYS_PER_TENANT` and trip LRU eviction (advancing `evictions_observed`)
-/// even though its *active* key count is lower. The evicted keys are already
-/// expired, so gate correctness is unaffected, but operators MUST schedule a
-/// periodic [`PredicateStateBackend::evict_older_than`] reaper to keep the
-/// quota aligned with the active key count. See
+/// The unioned distinct-key count below counts EVERY stored row for the tenant
+/// across both tables, including expired rows from OTHER keys: the per-key
+/// window trim in `record_*` only deletes `WHERE key_hash = ?1`, never sibling
+/// keys. So a tenant with many idle short-window keys can read at
+/// `MAX_KEYS_PER_TENANT` and trip LRU eviction (advancing
+/// `evictions_observed`) even though its *active* key count is lower. The
+/// evicted keys are already expired, so gate correctness is unaffected, but
+/// operators MUST schedule a periodic [`PredicateStateBackend::evict_older_than`]
+/// reaper to keep the quota aligned with the active key count. See
 /// `ironclaw_hooks/docs/successors/03-persistent-counter.md` (Reaper
 /// requirement). This is NOT fixed by a behavior change here: counting only
 /// in-window rows would require a window per key, which the quota does not have.
@@ -624,25 +625,27 @@ async fn key_exists(
 /// [`MAX_HISTORY_KEYS`]: ironclaw_hooks::predicate_state::MAX_HISTORY_KEYS
 /// [`MAX_KEYS_PER_TENANT`]: ironclaw_hooks::predicate_state::MAX_KEYS_PER_TENANT
 /// [`PredicateStateBackend::evict_older_than`]: ironclaw_hooks::predicate_state::PredicateStateBackend::evict_older_than
-async fn enforce_caps(
-    conn: &Connection,
-    table: &str,
-    scope: &[u8],
-) -> Result<u64, PredicateBackendError> {
+async fn enforce_caps(conn: &Connection, scope: &[u8]) -> Result<u64, PredicateBackendError> {
     let mut evicted = 0u64;
 
     // Per-tenant quota (matches in-memory: a tenant at its cap evicts ITS OWN
     // oldest key so it can't push out other tenants). No global cap — see
     // the fn-level doc; durable backends reap by time, not a global key count.
     // The tenant grain is `scope_hash`; its keys are the distinct `key_hash`
-    // values under it.
+    // values under it across both typed tables.
     let tenant_keys = scalar_u32(
         conn,
-        &format!("SELECT count(DISTINCT key_hash) FROM {table} WHERE scope_hash = ?1"),
+        &format!(
+            "SELECT count(*) FROM (
+                 SELECT key_hash FROM {INVOCATIONS_TABLE} WHERE scope_hash = ?1
+                 UNION
+                 SELECT key_hash FROM {VALUES_TABLE} WHERE scope_hash = ?1
+             ) tenant_keys"
+        ),
         params![scope.to_vec()],
     )
     .await?;
-    if tenant_keys as usize >= MAX_KEYS_PER_TENANT && evict_oldest_key(conn, table, scope).await? {
+    if tenant_keys as usize >= MAX_KEYS_PER_TENANT && evict_oldest_key(conn, scope).await? {
         evicted += 1;
     }
     Ok(evicted)
@@ -652,14 +655,21 @@ async fn enforce_caps(
 /// (oldest-front victim selection). Returns true if a key was evicted. Always
 /// tenant-scoped: durable backends only enforce the per-tenant quota (no global
 /// cap — see [`enforce_caps`]).
-async fn evict_oldest_key(
-    conn: &Connection,
-    table: &str,
-    scope: &[u8],
-) -> Result<bool, PredicateBackendError> {
+async fn evict_oldest_key(conn: &Connection, scope: &[u8]) -> Result<bool, PredicateBackendError> {
     let select_victim = format!(
-        "SELECT key_hash FROM {table} WHERE scope_hash = ?1 \
-         GROUP BY key_hash ORDER BY min(occurred_at) ASC, key_hash ASC LIMIT 1"
+        "SELECT table_name, key_hash FROM (
+             SELECT 'invocation' AS table_name, key_hash, min(occurred_at) AS oldest_ts
+               FROM {INVOCATIONS_TABLE}
+              WHERE scope_hash = ?1
+              GROUP BY key_hash
+             UNION ALL
+             SELECT 'value' AS table_name, key_hash, min(occurred_at) AS oldest_ts
+               FROM {VALUES_TABLE}
+              WHERE scope_hash = ?1
+              GROUP BY key_hash
+         ) victims
+         ORDER BY oldest_ts ASC, table_name ASC, key_hash ASC
+         LIMIT 1"
     );
     let mut rows = conn
         .query(&select_victim, params![scope.to_vec()])
@@ -668,11 +678,21 @@ async fn evict_oldest_key(
     let Some(row) = rows.next().await.map_err(map_err)? else {
         return Ok(false);
     };
-    let victim: Vec<u8> = row.get_value(0).map_err(map_err).and_then(blob_value)?;
+    let victim_table_name: String = row.get(0).map_err(map_err)?;
+    let victim_table = match victim_table_name.as_str() {
+        "invocation" => INVOCATIONS_TABLE,
+        "value" => VALUES_TABLE,
+        other => {
+            return Err(PredicateBackendError::Unavailable(format!(
+                "unexpected predicate victim table tag: {other}"
+            )));
+        }
+    };
+    let victim: Vec<u8> = row.get_value(1).map_err(map_err).and_then(blob_value)?;
     drop(rows);
     conn.execute(
-        &format!("DELETE FROM {table} WHERE key_hash = ?1"),
-        params![victim],
+        &format!("DELETE FROM {victim_table} WHERE scope_hash = ?1 AND key_hash = ?2"),
+        params![scope.to_vec(), victim],
     )
     .await
     .map_err(map_err)?;

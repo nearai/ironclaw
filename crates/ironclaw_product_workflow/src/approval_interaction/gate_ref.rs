@@ -9,8 +9,8 @@ use crate::error::ProductWorkflowError;
 
 const APPROVAL_GATE_PREFIX: &str = "gate:approval-";
 
-pub fn is_approval_gate_ref(gate_ref: &GateRef) -> bool {
-    gate_ref.as_str().starts_with(APPROVAL_GATE_PREFIX)
+pub fn is_approval_gate_ref(gate_ref_str: &str) -> bool {
+    gate_ref_str.starts_with(APPROVAL_GATE_PREFIX)
 }
 
 pub fn approval_gate_ref(request_id: ApprovalRequestId) -> Result<GateRef, ProductWorkflowError> {
@@ -62,8 +62,8 @@ mod tests {
         let generic = GateRef::new("gate:approve-slack").expect("generic gate");
         let adjacent = GateRef::new("gate:approvalish-test").expect("adjacent gate");
 
-        assert!(is_approval_gate_ref(&typed));
-        assert!(!is_approval_gate_ref(&generic));
-        assert!(!is_approval_gate_ref(&adjacent));
+        assert!(is_approval_gate_ref(typed.as_str()));
+        assert!(!is_approval_gate_ref(generic.as_str()));
+        assert!(!is_approval_gate_ref(adjacent.as_str()));
     }
 }

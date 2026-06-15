@@ -641,12 +641,16 @@ fn compose_product_auth_services(
     ports: RebornProductAuthServicePorts,
     turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
     provider_composition: OAuthProviderComposition,
+    security_audit_sink: Option<Arc<dyn ironclaw_events::SecurityAuditSink>>,
 ) -> Arc<RebornProductAuthServices> {
     let ports = match provider_composition.client {
         Some(provider_client) => ports.with_provider_client(provider_client),
         None => ports,
     };
     let mut services = ports.into_services(auth_continuation_dispatcher(turn_coordinator));
+    if let Some(sink) = security_audit_sink {
+        services = services.with_security_audit_sink(sink);
+    }
     if let Some(registry) = provider_composition.dcr_registry {
         services = services.with_dcr_oauth_registry(registry);
     }
@@ -852,10 +856,14 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         Arc::clone(&secret_store),
         product_auth_runtime_ports.clone(),
     )?;
+    let security_audit_sink = services.security_audit_sink();
     let product_auth = match product_auth_ports {
-        Some(ports) => {
-            compose_product_auth_services(ports, turn_coordinator.clone(), provider_composition)
-        }
+        Some(ports) => compose_product_auth_services(
+            ports,
+            turn_coordinator.clone(),
+            provider_composition,
+            security_audit_sink.clone(),
+        ),
         None => {
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             {
@@ -881,6 +889,10 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
                     Some(registry) => services.with_oauth_gate_registry(registry),
                     None => services,
                 };
+                let services = match security_audit_sink.clone() {
+                    Some(sink) => services.with_security_audit_sink(sink),
+                    None => services,
+                };
                 Arc::new(services)
             }
             #[cfg(not(any(feature = "libsql", feature = "postgres")))]
@@ -894,6 +906,10 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
                 };
                 let services = match provider_composition.dcr_registry.clone() {
                     Some(registry) => services.with_dcr_oauth_registry(registry),
+                    None => services,
+                };
+                let services = match security_audit_sink.clone() {
+                    Some(sink) => services.with_security_audit_sink(sink),
                     None => services,
                 };
                 Arc::new(match provider_composition.gate_registry.clone() {
@@ -3024,6 +3040,7 @@ where
         production_wiring.runtime_process_binding,
     );
     let services = attach_wasm_runtime(services)?;
+    let security_audit_sink = services.security_audit_sink();
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
         Arc::new(services.turn_coordinator_for_production()?);
@@ -3044,6 +3061,7 @@ where
         product_auth_ports,
         turn_coordinator.clone(),
         provider_composition,
+        security_audit_sink,
     );
     let product_auth_ready = true;
     // Wire ProductAuthAccount runtime credential resolver before

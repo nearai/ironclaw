@@ -11,6 +11,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{CredentialAccountId, CredentialAccountProjection};
 use ironclaw_host_api::{AgentId, ApprovalRequestId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_adapters::{
@@ -23,7 +24,7 @@ use ironclaw_product_workflow::{
     AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, ApprovalInteractionDecision, ApprovalInteractionService,
     AuthInteractionDecision, AuthInteractionService, AutomationListRequest,
     AutomationProductFacade, CodexLoginStart, ExtensionCredentialSetupService,
-    ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest,
+    ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, InboundAttachmentLander,
     LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
     LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
     LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
@@ -61,10 +62,10 @@ use ironclaw_product_workflow::{
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
-    AppendToolResultReferenceRequest, ContextMessages, ContextWindow, CreateSummaryArtifactRequest,
-    EnsureThreadRequest, InMemorySessionThreadService, ListThreadsForScopeRequest,
-    ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
-    MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
+    AppendToolResultReferenceRequest, AttachmentKind, AttachmentRef, ContextMessages,
+    ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest, InMemorySessionThreadService,
+    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
+    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
     SessionThreadService, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
     ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
@@ -76,7 +77,7 @@ use ironclaw_turns::{
     InMemoryTurnStateStore, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
     ResumeTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
     SubmitTurnResponse, TurnActor, TurnCapacityResource, TurnCoordinator, TurnError, TurnId,
-    TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    TurnOriginKind, TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 use secrecy::SecretString;
 use serde_json::json;
@@ -159,6 +160,7 @@ fn fake_thread_history(owner: &WebUiAuthenticatedCaller, thread_id: &str) -> Thr
             tool_result_ref: None,
             tool_result_provider_call: None,
             content: Some("timeline from fake M2 port".to_string()),
+            attachments: Vec::new(),
             redaction_ref: None,
         }],
         summary_artifacts: vec![],
@@ -323,6 +325,14 @@ impl FakeTurnCoordinator {
             .map(|request| request.scope.clone())
     }
 
+    fn last_submission_origin_kind(&self) -> Option<TurnOriginKind> {
+        self.submissions
+            .lock()
+            .expect("lock")
+            .last()
+            .and_then(|request| request.product_context.as_ref().map(|c| c.origin))
+    }
+
     fn last_cancellation_scope(&self) -> Option<TurnScope> {
         self.cancellations
             .lock()
@@ -446,6 +456,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(17),
+            product_context: None,
         })
     }
 }
@@ -540,6 +551,7 @@ impl TurnCoordinator for BlockingSubmitCoordinator {
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(29),
+            product_context: None,
         })
     }
 }
@@ -1802,6 +1814,11 @@ async fn submit_turn_uses_facade_and_thread_history_without_route_store_access()
     assert_eq!(
         submission_scope.project_id.expect("project").as_str(),
         "project-alpha"
+    );
+    assert_eq!(
+        coordinator.last_submission_origin_kind(),
+        Some(TurnOriginKind::WebUi),
+        "WebUI submit must produce WebUi origin"
     );
 }
 
@@ -7972,4 +7989,208 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
         vec![second_visible_thread_id],
     );
     assert_eq!(second_page.next_cursor, None);
+}
+
+/// Test lander that records what it was asked to land and returns a ref per
+/// attachment with a deterministic `storage_key`, so the facade test can assert
+/// both that decode→land ran and that the returned refs reach the transcript.
+#[derive(Default)]
+struct RecordingLander {
+    landed: Mutex<Vec<(String, Vec<InboundAttachment>)>>,
+}
+
+#[async_trait]
+impl InboundAttachmentLander for RecordingLander {
+    async fn land(
+        &self,
+        _thread_scope: &ThreadScope,
+        message_id: &str,
+        attachments: Vec<InboundAttachment>,
+    ) -> Result<Vec<AttachmentRef>, RebornServicesError> {
+        let refs = attachments
+            .iter()
+            .enumerate()
+            .map(|(index, attachment)| AttachmentRef {
+                id: attachment.id.clone(),
+                // The real bridge derives kind from the MIME type; mirror that.
+                kind: ironclaw_common::kind_for_mime(&attachment.mime_type),
+                mime_type: attachment.mime_type.clone(),
+                filename: attachment.filename.clone(),
+                size_bytes: Some(attachment.bytes.len() as u64),
+                storage_key: Some(format!(
+                    "/workspace/attachments/test/{message_id}-{index}-landed"
+                )),
+                extracted_text: None,
+            })
+            .collect();
+        self.landed
+            .lock()
+            .expect("lander mutex")
+            .push((message_id.to_string(), attachments));
+        Ok(refs)
+    }
+}
+
+#[tokio::test]
+async fn submit_turn_lands_attachments_and_persists_refs_on_the_user_message() {
+    use base64::Engine;
+
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let lander = Arc::new(RecordingLander::default());
+    let services = RebornServices::new(Arc::clone(&threads), coordinator.clone())
+        .with_inbound_attachments(lander.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let pdf_b64 = base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.7 body");
+    services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-att",
+                "thread_id": "thread-alpha",
+                "content": "see attached",
+                "attachments": [{
+                    "mime_type": "application/pdf",
+                    "filename": "report.pdf",
+                    "data_base64": pdf_b64,
+                }],
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("submit succeeds");
+
+    // The lander was invoked with the decoded attachment bytes + metadata.
+    {
+        let landed = lander.landed.lock().expect("lander mutex");
+        assert_eq!(landed.len(), 1);
+        assert_eq!(landed[0].1.len(), 1);
+        assert_eq!(landed[0].1[0].mime_type, "application/pdf");
+        assert_eq!(landed[0].1[0].filename.as_deref(), Some("report.pdf"));
+        assert_eq!(landed[0].1[0].bytes, b"%PDF-1.7 body");
+    }
+
+    // The returned refs are persisted on the accepted user message.
+    let history = threads
+        .list_thread_history(ThreadHistoryRequest {
+            scope: thread_scope_for(&caller()),
+            thread_id: ThreadId::new("thread-alpha").unwrap(),
+        })
+        .await
+        .expect("history");
+    let user_message = history
+        .messages
+        .iter()
+        .find(|message| message.kind == MessageKind::User)
+        .expect("user message present");
+    assert_eq!(user_message.content.as_deref(), Some("see attached"));
+    assert_eq!(user_message.attachments.len(), 1);
+    let attachment_ref = &user_message.attachments[0];
+    assert_eq!(attachment_ref.kind, AttachmentKind::Document);
+    assert_eq!(attachment_ref.mime_type, "application/pdf");
+    assert_eq!(attachment_ref.filename.as_deref(), Some("report.pdf"));
+    assert!(
+        attachment_ref
+            .storage_key
+            .as_deref()
+            .is_some_and(|key| key.ends_with("-landed")),
+        "expected landed storage_key, got {:?}",
+        attachment_ref.storage_key
+    );
+}
+
+#[tokio::test]
+async fn get_timeline_returns_attachment_refs_on_the_user_message() {
+    use base64::Engine;
+
+    // The browser renders attachment cards from the timeline, and they must
+    // survive a page refresh. The browser's surface is `get_timeline`, not
+    // `list_thread_history`, so drive that path (test through the caller) and
+    // assert the projected `ThreadMessageRecord` still carries the refs.
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let lander = Arc::new(RecordingLander::default());
+    let services = RebornServices::new(Arc::clone(&threads), coordinator.clone())
+        .with_inbound_attachments(lander.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let csv_b64 = base64::engine::general_purpose::STANDARD.encode(b"a,b\n1,2\n");
+    services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-att",
+                "thread_id": "thread-alpha",
+                "content": "spreadsheet attached",
+                "attachments": [{
+                    "mime_type": "text/csv",
+                    "filename": "data.csv",
+                    "data_base64": csv_b64,
+                }],
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("submit succeeds");
+
+    let timeline = services
+        .get_timeline(
+            caller(),
+            RebornTimelineRequest {
+                thread_id: "thread-alpha".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("timeline");
+
+    let user_message = timeline
+        .messages
+        .iter()
+        .find(|message| message.kind == MessageKind::User)
+        .expect("user message present in timeline");
+    assert_eq!(user_message.attachments.len(), 1);
+    let attachment_ref = &user_message.attachments[0];
+    assert_eq!(attachment_ref.kind, AttachmentKind::Document);
+    assert_eq!(attachment_ref.mime_type, "text/csv");
+    assert_eq!(attachment_ref.filename.as_deref(), Some("data.csv"));
+    assert!(
+        attachment_ref
+            .storage_key
+            .as_deref()
+            .is_some_and(|key| !key.is_empty()),
+        "timeline ref must carry a non-empty storage_key so the agent can re-read it later"
+    );
+}
+
+#[tokio::test]
+async fn submit_turn_rejects_attachments_when_no_lander_is_wired() {
+    use base64::Engine;
+
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    // No `.with_inbound_attachments(...)`: a deployment without attachment
+    // support must reject rather than silently drop the files.
+    let services = RebornServices::new(threads, coordinator);
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let pdf_b64 = base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.7");
+    let err = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-att",
+                "thread_id": "thread-alpha",
+                "content": "see attached",
+                "attachments": [{
+                    "mime_type": "application/pdf",
+                    "data_base64": pdf_b64,
+                }],
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("attachments without a lander must be rejected");
+    assert_eq!(err.kind, RebornServicesErrorKind::ServiceUnavailable);
 }

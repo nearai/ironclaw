@@ -115,6 +115,9 @@ fn context_window_to_records(window: ContextWindow) -> Vec<ThreadMessageRecord> 
             tool_result_provider_call: message.tool_result_provider_call,
             content: Some(message.content),
             redaction_ref: None,
+            // Reconstructed-for-redaction record from a context window; the
+            // capture path carries no attachment refs of its own.
+            attachments: Vec::new(),
         })
         .collect()
 }
