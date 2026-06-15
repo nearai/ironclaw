@@ -3,7 +3,7 @@ use ironclaw_turns::{
     LoopCancelledReasonKind, LoopCompletionKind, LoopDiagnosticRef, LoopExit, LoopFailureKind,
     LoopGateRef, LoopResultRef, TurnRunId,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
         CapabilityCallCandidate, CapabilityFailureDetail, CapabilityFailureKind,
         CapabilityInputIssue, CapabilityInputIssueCode, CapabilityInputRef, CapabilityInputRepair,
         CapabilityOutcome, CapabilityRecoveryHint, CapabilityResultMessage, CapabilityResumeToken,
@@ -1539,6 +1539,153 @@ async fn exit_stage_no_progress_detected_finalizes_fallback_reply() {
 }
 
 #[tokio::test]
+async fn no_progress_nudge_synthesizes_reply_when_gate_enabled() {
+    // Gate ON + a model reply queued for the tool-free nudge call: the
+    // no-progress exit should issue ONE tool-free model call and finalize the
+    // synthesized reply instead of the canned fallback.
+    let host = MockHost::new(vec![reply_response_with_text("Here is the final answer.")])
+        .with_driver_nudges_enabled();
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = ExitStage
+        .process(
+            ctx,
+            ExitInput {
+                state,
+                kind: StopKind::NoProgressDetected,
+            },
+        )
+        .await
+        .expect("exit stage");
+
+    // Exactly one tool-free model call was issued (the nudge), with an empty
+    // capability view so the provider gets no tools.
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 1, "nudge should issue one model call");
+    assert_eq!(
+        requests[0]
+            .capability_view
+            .as_ref()
+            .map(|v| v.visible_capability_ids.len()),
+        Some(0),
+        "nudge model call must be tool-free (empty capability view)"
+    );
+    match exit {
+        LoopExit::Completed(completed) => {
+            assert_eq!(completed.reply_message_refs.len(), 1);
+            assert!(completed.final_checkpoint_id.is_some());
+        }
+        other => panic!("expected completed exit with synthesized reply, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn no_progress_skips_nudge_when_gate_disabled() {
+    // Gate OFF: no model call, canned fallback reply (production default).
+    let host = MockHost::new(vec![reply_response_with_text("unused")]);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = ExitStage
+        .process(
+            ctx,
+            ExitInput {
+                state,
+                kind: StopKind::NoProgressDetected,
+            },
+        )
+        .await
+        .expect("exit stage");
+
+    assert!(
+        host.model_requests().is_empty(),
+        "no nudge model call when gate disabled"
+    );
+    assert!(matches!(exit, LoopExit::Completed(_)));
+}
+
+#[tokio::test]
+async fn budget_iteration_limit_nudges_to_completed_when_gate_enabled() {
+    // Gate ON at the iteration-limit boundary: instead of failing closed, issue
+    // one tool-free nudge and complete with the synthesized reply.
+    let host = MockHost::new(vec![reply_response_with_text(
+        "Final answer from budget nudge.",
+    )])
+    .with_driver_nudges_enabled();
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy {
+        deadline_ms: 1,
+        ..Default::default()
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.iteration = family.planner().budget().iteration_limit(&state);
+
+    let step = BudgetStage
+        .process(
+            ctx,
+            BudgetInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("budget stage");
+
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "budget nudge should issue one model call"
+    );
+    assert!(
+        matches!(step, BudgetStep::Exit(LoopExit::Completed(_))),
+        "budget nudge should complete, not fail closed"
+    );
+}
+
+#[tokio::test]
+async fn nudge_respects_one_shot_cap() {
+    // With the cap already spent, the no-progress exit must not issue a model
+    // call and falls back to the canned reply.
+    let host = MockHost::new(vec![reply_response_with_text("unused")]).with_driver_nudges_enabled();
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.final_answer_nudges_used = 1;
+
+    let exit = ExitStage
+        .process(
+            ctx,
+            ExitInput {
+                state,
+                kind: StopKind::NoProgressDetected,
+            },
+        )
+        .await
+        .expect("exit stage");
+
+    assert!(
+        host.model_requests().is_empty(),
+        "capped nudge must not issue another model call"
+    );
+    assert!(matches!(exit, LoopExit::Completed(_)));
+}
+
+#[tokio::test]
 async fn exit_stage_aborted_exits_with_requested_failure_kind() {
     let host = MockHost::new(Vec::new());
     let family = crate::families::default();
@@ -1901,6 +2048,7 @@ async fn gate_stage_skips_and_continues_records_skipped_summary() {
                 gate_ref,
                 credential_requirements: Vec::new(),
                 approval_resume: None,
+                auth_resume: None,
             },
         )
         .await
@@ -1945,6 +2093,7 @@ async fn gate_stage_aborts_returns_failed_exit() {
                 gate_ref,
                 credential_requirements: Vec::new(),
                 approval_resume: None,
+                auth_resume: None,
             },
         )
         .await
@@ -3777,6 +3926,7 @@ async fn auth_gate_block_stores_pending_auth_resume() {
                 gate_ref: gate_ref.clone(),
                 credential_requirements: Vec::new(),
                 safe_summary: "auth required".to_string(),
+                auth_resume: None,
             }],
             stopped_on_suspension: true,
         },
@@ -3866,6 +4016,7 @@ async fn non_auth_gate_block_preserves_pending_auth_resume() {
         provider_replay: None,
         resume_token: None,
         prior_approval: None,
+        replay: None,
     };
     let mut initial_state = LoopExecutionState::initial_for_run(host.run_context());
     initial_state.pending_auth_resume = Some(seeded_auth_resume.clone());
@@ -3910,6 +4061,7 @@ async fn resume_after_auth_gate_redispatches_original_call_without_model_turn() 
                 gate_ref: gate_ref.clone(),
                 credential_requirements: Vec::new(),
                 safe_summary: "auth required".to_string(),
+                auth_resume: None,
             }],
             stopped_on_suspension: true,
         },
@@ -4066,6 +4218,7 @@ async fn auth_resume_provider_registration_failure_fails_before_invocation() {
                     gate_ref: gate_ref.clone(),
                     credential_requirements: Vec::new(),
                     safe_summary: "auth required".to_string(),
+                    auth_resume: None,
                 }],
                 stopped_on_suspension: true,
             },
@@ -4135,6 +4288,7 @@ async fn resume_with_still_missing_credentials_blocks_again_without_model_turn()
                 gate_ref: gate_ref.clone(),
                 credential_requirements: Vec::new(),
                 safe_summary: "auth required (phase 1)".to_string(),
+                auth_resume: None,
             }],
             stopped_on_suspension: true,
         },
@@ -4144,6 +4298,7 @@ async fn resume_with_still_missing_credentials_blocks_again_without_model_turn()
                 gate_ref: LoopGateRef::new("gate:auth-still-missing-2").expect("valid"),
                 credential_requirements: Vec::new(),
                 safe_summary: "auth required (phase 2 — still missing)".to_string(),
+                auth_resume: None,
             }],
             stopped_on_suspension: true,
         },
@@ -4275,6 +4430,7 @@ async fn gate_stage_skip_and_continue_clears_stale_pending_auth_resume() {
         provider_replay: None,
         resume_token: None,
         prior_approval: None,
+        replay: None,
     });
     let call = match provider_calls_response().output {
         ParentLoopOutput::CapabilityCalls(mut calls) => calls.remove(0),
@@ -4292,6 +4448,7 @@ async fn gate_stage_skip_and_continue_clears_stale_pending_auth_resume() {
                 gate_ref,
                 credential_requirements: Vec::new(),
                 approval_resume: None,
+                auth_resume: None,
             },
         )
         .await
@@ -4335,6 +4492,7 @@ async fn gate_stage_abort_clears_stale_pending_auth_resume() {
         provider_replay: None,
         resume_token: None,
         prior_approval: None,
+        replay: None,
     });
     let call = match provider_calls_response().output {
         ParentLoopOutput::CapabilityCalls(mut calls) => calls.remove(0),
@@ -4352,6 +4510,7 @@ async fn gate_stage_abort_clears_stale_pending_auth_resume() {
                 gate_ref,
                 credential_requirements: Vec::new(),
                 approval_resume: None,
+                auth_resume: None,
             },
         )
         .await
@@ -4398,6 +4557,7 @@ async fn gate_stage_skip_does_not_clear_auth_resume_for_different_capability() {
         provider_replay: None,
         resume_token: None,
         prior_approval: None,
+        replay: None,
     });
     // The call being dispatched through GateStage is capability_id() ("demo.echo"),
     // not the seeded "other.cap".
@@ -4417,6 +4577,7 @@ async fn gate_stage_skip_does_not_clear_auth_resume_for_different_capability() {
                 gate_ref,
                 credential_requirements: Vec::new(),
                 approval_resume: None,
+                auth_resume: None,
             },
         )
         .await
@@ -4530,6 +4691,7 @@ async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id
                 gate_ref: auth_gate_ref.clone(),
                 credential_requirements: Vec::new(),
                 safe_summary: "auth required after approval".to_string(),
+                auth_resume: None,
             }],
             stopped_on_suspension: true,
         },
@@ -4731,6 +4893,8 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
     let approval_request_id = ApprovalRequestId::new();
     let resume_token =
         CapabilityResumeToken::new("resume-token:corr-id-test").expect("valid token");
+    let auth_gate_resume_token =
+        CapabilityResumeToken::new("resume-token:corr-id-auth-gate").expect("valid token");
     let correlation_id = CorrelationId::new();
     let original_input_ref = CapabilityInputRef::new("input:corr-id-original").expect("valid");
     let completed_ref = LoopResultRef::new("result:corr-id-done").expect("valid");
@@ -4760,6 +4924,11 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
                 gate_ref: LoopGateRef::new("gate:corr-id-auth").expect("valid"),
                 credential_requirements: Vec::new(),
                 safe_summary: "auth required".to_string(),
+                auth_resume: Some(CapabilityAuthResume {
+                    resume_token: auth_gate_resume_token,
+                    prior_approval: None,
+                    replay: None,
+                }),
             }],
             stopped_on_suspension: true,
         },
@@ -4811,6 +4980,11 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
         .pending_auth_resume
         .as_ref()
         .expect("phase 2 BeforeBlock must carry pending_auth_resume");
+    assert_eq!(
+        pending_auth.resume_token.as_ref(),
+        Some(&resume_token),
+        "pending_auth_resume.resume_token must preserve the original approval invocation token"
+    );
     let pending_pa = pending_auth
         .prior_approval
         .as_ref()
@@ -4818,6 +4992,14 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
     assert_eq!(
         pending_pa.correlation_id, correlation_id,
         "pending_auth_resume.prior_approval.correlation_id must equal the approval's correlation_id"
+    );
+    let pending_replay = pending_auth
+        .replay
+        .as_ref()
+        .expect("pending_auth_resume.replay must be set when approval preceded auth");
+    assert_eq!(
+        pending_replay.input, approval_resume.input,
+        "pending_auth_resume.replay.input must preserve the approval replay input"
     );
 
     // Phase 3: auth-resume → Completed.
@@ -4834,6 +5016,10 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
         .auth_resume
         .as_ref()
         .expect("phase 3 invocation must carry auth_resume");
+    assert_eq!(
+        phase3_ar.resume_token, resume_token,
+        "phase 3 auth_resume.resume_token must preserve the original approval invocation token"
+    );
     let phase3_pa = phase3_ar
         .prior_approval
         .as_ref()
@@ -4841,6 +5027,14 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
     assert_eq!(
         phase3_pa.correlation_id, correlation_id,
         "phase 3 auth_resume.prior_approval.correlation_id must match the original approval correlation_id"
+    );
+    let phase3_replay = phase3_ar
+        .replay
+        .as_ref()
+        .expect("phase 3 auth_resume.replay must be set");
+    assert_eq!(
+        phase3_replay.input, approval_resume.input,
+        "phase 3 auth_resume.replay.input must match the original approval input"
     );
 }
 
@@ -4917,6 +5111,7 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
             approval_request_id,
             correlation_id,
         }),
+        replay: None,
     });
 
     // Two calls to the same capability_id — extracted from the two_calls_response fixture.
@@ -5237,6 +5432,7 @@ async fn auth_resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
                 gate_ref: LoopGateRef::new("gate:auth-sm-test-cap1").expect("valid"),
                 credential_requirements: Vec::new(),
                 safe_summary: "cap1 needs auth".to_string(),
+                auth_resume: None,
             }],
             stopped_on_suspension: true,
         },

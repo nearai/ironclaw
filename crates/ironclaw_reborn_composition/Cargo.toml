@@ -117,6 +117,7 @@ ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_outbound = { path = "../ironclaw_outbound" }
 ironclaw_processes = { path = "../ironclaw_processes" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
+ironclaw_product_adapter_registry = { path = "../ironclaw_product_adapter_registry" }
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
 ironclaw_product_workflow_storage = { path = "../ironclaw_product_workflow_storage", optional = true }
 ironclaw_reborn = { path = "../ironclaw_reborn" }

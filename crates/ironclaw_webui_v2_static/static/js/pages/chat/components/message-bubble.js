@@ -112,6 +112,9 @@ function MessageBubbleImpl({ message, onRetry }) {
 
   const timeLabel = formatTimestamp(timestamp);
   const showActions = (role === "assistant" || role === "user") && !isOptimistic;
+  const isNotice = role === "system" || role === "error";
+  const bubbleWidthClass = isUser ? "max-w-[85%]" : isNotice ? "mx-auto max-w-[85%]" : "w-full max-w-[85%]";
+  const contentWidthClass = isUser ? "" : "w-full min-w-0 max-w-full";
   // Persistent identity for the two conversational roles; system / error
   // stay as centered notices without an avatar.
   const showIdentity = role === "user" || role === "assistant";
@@ -122,9 +125,9 @@ function MessageBubbleImpl({ message, onRetry }) {
   return html`
     <div
       data-testid=${`msg-${role}`}
-      className=${["group flex flex-col", isUser ? "items-end" : "items-start"].join(" ")}
+      className=${["group flex w-full min-w-0 flex-col", isUser ? "items-end" : "items-start"].join(" ")}
     >
-      <div className="flex min-w-0 max-w-[85%] flex-col gap-2">
+      <div className=${["flex min-w-0 flex-col gap-2", bubbleWidthClass].join(" ")}>
         ${showIdentity &&
         html`
           <div
@@ -142,6 +145,7 @@ function MessageBubbleImpl({ message, onRetry }) {
         <div
           className=${[
             "text-base leading-7",
+            contentWidthClass,
             ROLE_STYLES[role] || ROLE_STYLES.assistant,
             isOptimistic ? "opacity-70" : "",
           ].join(" ")}

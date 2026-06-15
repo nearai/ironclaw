@@ -48,10 +48,9 @@ export const SETTINGS_SUB_ROUTES = [
 ];
 
 export const EXTENSIONS_SUB_ROUTES = [
-  { id: "installed", labelKey: "extensions.installed", icon: "bolt" },
+  { id: "registry", labelKey: "extensions.registry", icon: "plus" },
   { id: "channels", labelKey: "extensions.channels", icon: "send" },
   { id: "mcp", labelKey: "extensions.mcp", icon: "pulse" },
-  { id: "registry", labelKey: "extensions.registry", icon: "plus" },
 ];
 
 export const ADMIN_SUB_ROUTES = [
