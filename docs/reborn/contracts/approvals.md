@@ -262,11 +262,10 @@ This slice intentionally keeps approval resolution narrow:
   project, when present) and is channel-agnostic — a WebUI grant is honored for
   a Slack message resolving to the same `(user, agent)`. Migration note:
   legacy no-project policies persisted with thread-scoped keys/paths before
-  this change are not discovered by the new thread-agnostic lookup and remain
-  orphaned until cleanup tooling runs; recommended remediation is a revoke
-  sweep to delete legacy thread-scoped records or a migration/rekey that drops
-  `thread_id` into the new tenant/user/agent/project scope where possible,
-  run after deploy during rollout
+  this change are read through a compatibility fallback when the caller still
+  has the original thread id; recommended cleanup remains a revoke sweep to
+  delete legacy thread-scoped records or a migration/rekey that drops
+  `thread_id` into the new tenant/user/agent/project scope where possible
 - persistent approval is fail-closed by manifest policy: the current default
   only allows durable reuse for capabilities whose manifest
   `default_permission` is `allow`; `ask` and `deny` remain one-shot approval

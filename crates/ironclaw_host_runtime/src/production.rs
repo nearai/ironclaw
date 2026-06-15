@@ -987,16 +987,18 @@ impl DefaultHostRuntime {
             return;
         }
         let scope = PersistentApprovalScope::from_resource_scope(&context.resource_scope);
+        let lookup_scope = context.resource_scope.clone();
         let lookup_results = join_all(persistent_approval_grantees(context).into_iter().map(
             |grantee| {
                 let policies = Arc::clone(policies);
+                let lookup_scope = lookup_scope.clone();
                 let key = PersistentApprovalPolicyKey {
                     scope: scope.clone(),
                     action,
                     capability_id: capability_id.clone(),
                     grantee,
                 };
-                async move { policies.lookup(&key).await }
+                async move { policies.lookup_with_scope(&lookup_scope, &key).await }
             },
         ))
         .await;

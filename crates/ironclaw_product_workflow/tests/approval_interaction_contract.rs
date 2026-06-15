@@ -874,6 +874,47 @@ async fn drive_always_allow(
     assert_eq!(coordinator.resumption_count(), 1);
 }
 
+async fn drive_spawn_always_allow(
+    store: Arc<dyn PersistentApprovalPolicyStore>,
+    request: ApprovalRequest,
+    gate_scope: ResourceScope,
+    idempotency: &str,
+) {
+    let request_actor = TurnActor::new(gate_scope.user_id.clone());
+    let request_scope = TurnScope::new(
+        gate_scope.tenant_id.clone(),
+        gate_scope.agent_id.clone(),
+        gate_scope.project_id.clone(),
+        gate_scope
+            .thread_id
+            .clone()
+            .expect("gate scope must carry a thread id"),
+    );
+    let (service, resolver, coordinator, run_id, gate_ref) =
+        service_fixture_with_scope(request, gate_scope);
+    let service = service.with_persistent_policy_store(store);
+
+    let response = service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: request_scope,
+            actor: request_actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: ApprovalInteractionDecision::AlwaysAllow,
+            idempotency_key: IdempotencyKey::new(idempotency).expect("idempotency"),
+        })
+        .await
+        .expect("always allow");
+
+    assert!(matches!(
+        response,
+        ResolveApprovalInteractionResponse::Approved(_)
+    ));
+    assert_eq!(resolver.approval_count(), 0);
+    assert_eq!(resolver.spawn_approval_count(), 1);
+    assert_eq!(coordinator.resumption_count(), 1);
+}
+
 /// Acceptance criterion 1: an "always allow" granted while resolving a gate in
 /// thread 1 (no project) is reused for the same capability in thread 2 without a
 /// gate. Covered against both InMemory and Filesystem stores because the
@@ -892,6 +933,36 @@ async fn always_allow_grants_reuse_in_new_thread_without_project() {
         let key = PersistentApprovalPolicyKey::new(
             &thread_two,
             PersistentApprovalAction::Dispatch,
+            capability,
+            Principal::User(UserId::new("user-alpha").expect("user")),
+        );
+        let policy = store
+            .lookup(&key)
+            .await
+            .expect("persistent policy lookup")
+            .expect("persistent policy active in new thread");
+        assert!(policy.active_grant().is_some());
+    }
+}
+
+/// Acceptance criterion 2: a spawn-capability "always allow" is persisted as a
+/// reusable policy and can be matched again from a later thread with the same
+/// user/agent/project scope.
+#[tokio::test]
+async fn always_allow_spawn_grants_reuse_in_new_thread_without_project() {
+    for (store, idempotency) in caller_level_store_pair("spawn-reuse") {
+        let request = spawn_approval_request("start the worker");
+        let capability = match request.action.as_ref() {
+            Action::SpawnCapability { capability, .. } => capability.clone(),
+            _ => panic!("test request should be spawn"),
+        };
+        let thread_one = no_project_scope("user-alpha", Some("agent-a"), "thread-1");
+        drive_spawn_always_allow(Arc::clone(&store), request, thread_one, &idempotency).await;
+
+        let thread_two = no_project_scope("user-alpha", Some("agent-a"), "thread-2");
+        let key = PersistentApprovalPolicyKey::new(
+            &thread_two,
+            PersistentApprovalAction::SpawnCapability,
             capability,
             Principal::User(UserId::new("user-alpha").expect("user")),
         );

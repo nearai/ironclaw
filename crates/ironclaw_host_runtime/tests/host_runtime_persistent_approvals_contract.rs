@@ -7,12 +7,13 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_approvals::{
-    InMemoryPersistentApprovalPolicyStore, PersistentApprovalAction, PersistentApprovalPolicy,
-    PersistentApprovalPolicyError, PersistentApprovalPolicyInput, PersistentApprovalPolicyKey,
-    PersistentApprovalPolicyStore,
+    FilesystemPersistentApprovalPolicyStore, InMemoryPersistentApprovalPolicyStore,
+    PersistentApprovalAction, PersistentApprovalPolicy, PersistentApprovalPolicyError,
+    PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
 };
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_filesystem::{CasExpectation, ContentType, Entry, InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime, RuntimeCapabilityRequest,
@@ -121,6 +122,103 @@ async fn default_runtime_uses_user_grantee_persistent_policy_as_dispatch_authori
         })
         .await
         .expect("seed user persistent policy");
+    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies;
+
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher.clone(),
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()))
+    .with_run_state(run_state)
+    .with_approval_requests(approval_requests)
+    .with_persistent_approval_policies(policy_store);
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context,
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "hello"}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, capability_id());
+            assert_eq!(completed.output, json!({"ok": true}));
+        }
+        other => panic!("expected Completed outcome, got {:?}", other),
+    }
+    assert!(dispatcher.has_request());
+}
+
+#[tokio::test]
+async fn default_runtime_uses_legacy_thread_scoped_policy_as_dispatch_authority() {
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let scoped = scoped_approval_fs();
+    let policies = Arc::new(FilesystemPersistentApprovalPolicyStore::new(Arc::clone(
+        &scoped,
+    )));
+    let mut context = execution_context_without_grants();
+    let legacy_thread = ThreadId::new("thread-legacy").unwrap();
+    context.project_id = None;
+    context.thread_id = Some(legacy_thread.clone());
+    context.resource_scope.project_id = None;
+    context.resource_scope.thread_id = Some(legacy_thread);
+
+    let canonical_key = PersistentApprovalPolicyKey::new(
+        &context.resource_scope,
+        PersistentApprovalAction::Dispatch,
+        capability_id(),
+        Principal::Extension(context.extension_id.clone()),
+    );
+    let legacy_key = PersistentApprovalPolicyKey {
+        scope: {
+            let mut legacy_scope = canonical_key.scope.clone();
+            legacy_scope.thread_id = context.resource_scope.thread_id.clone();
+            legacy_scope
+        },
+        action: canonical_key.action,
+        capability_id: canonical_key.capability_id.clone(),
+        grantee: canonical_key.grantee.clone(),
+    };
+    let policy = PersistentApprovalPolicy {
+        key: legacy_key.clone(),
+        grant_id: CapabilityGrantId::new(),
+        approved_by: Principal::User(context.user_id.clone()),
+        constraints: GrantConstraints {
+            allowed_effects: vec![EffectKind::DispatchCapability],
+            mounts: MountView::default(),
+            network: NetworkPolicy::default(),
+            secrets: Vec::new(),
+            resource_ceiling: None,
+            expires_at: None,
+            max_invocations: None,
+        },
+        source_approval_request_id: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        revoked_at: None,
+    };
+    scoped
+        .put(
+            &context.resource_scope,
+            &legacy_policy_path_for_test(&legacy_key),
+            Entry::bytes(serde_json::to_vec_pretty(&policy).expect("serialize policy"))
+                .with_content_type(ContentType::json()),
+            CasExpectation::Absent,
+        )
+        .await
+        .expect("seed legacy policy");
     let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies;
 
     let runtime = DefaultHostRuntime::new(
@@ -782,6 +880,48 @@ fn execution_context_without_grants() -> ExecutionContext {
         MountView::default(),
     )
     .unwrap()
+}
+
+fn scoped_approval_fs() -> Arc<ScopedFilesystem<InMemoryBackend>> {
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/approvals").unwrap(),
+        VirtualPath::new("/approvals").unwrap(),
+        MountPermissions {
+            read: true,
+            write: true,
+            delete: false,
+            list: true,
+            execute: false,
+        },
+    )])
+    .expect("approval mount");
+    Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(InMemoryBackend::new()),
+        mounts,
+    ))
+}
+
+fn legacy_policy_path_for_test(key: &PersistentApprovalPolicyKey) -> ScopedPath {
+    let mut segments = Vec::new();
+    if let Some(agent_id) = &key.scope.agent_id {
+        segments.push(format!("agents/{agent_id}"));
+    }
+    if let Some(project_id) = &key.scope.project_id {
+        segments.push(format!("projects/{project_id}"));
+    } else if let Some(thread_id) = &key.scope.thread_id {
+        segments.push(format!("threads/{thread_id}"));
+    }
+    let scope_path = if segments.is_empty() {
+        "scope".to_string()
+    } else {
+        segments.join("/")
+    };
+    let digest = sha256_digest_token(&serde_json::to_vec(key).expect("serialize key"));
+    let digest = digest.strip_prefix("sha256:").unwrap_or(digest.as_str());
+    ScopedPath::new(format!(
+        "/approvals/persistent/{scope_path}/dispatch/{digest}.json"
+    ))
+    .expect("legacy policy path")
 }
 
 fn local_manifest_trust_policy() -> HostTrustPolicy {
