@@ -58,6 +58,7 @@ HEADED=1 pytest scenarios/
 | `test_dom_resource_limits.py` | DOM pruning at MAX_DOM_MESSAGES cap, no setInterval timer leaks across SSE reconnect cycles, streaming message preservation during pruning |
 | `test_reborn_webui_v2_smoke.py` | Reborn WebChat v2 (`ironclaw-reborn serve`) shell load, bearer/`?token=` auth scope, text turns, timeline pagination, SSE run lifecycle, thread list/delete |
 | `test_reborn_webui_v2_tool_gates.py` | Reborn v2 capability path: tool-turn dispatch + `tool_result_reference`, run cancellation, approval-gate approve/deny via `resolve_gate` |
+| `test_reborn_webui_v2_streaming.py` | Reborn v2 transports/protocol edges: WebSocket fanout + same-origin/bearer gate, SSE `Last-Event-ID` resume, per-caller SSE concurrency-cap 429, oversized-body 413, malformed-id 400 |
 
 ## `helpers.py`
 
