@@ -23,9 +23,11 @@ use ironclaw_host_api::{
     RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeKind,
 };
 use ironclaw_reborn_traces::contribution::{
-    ProfileAttributionToken, StandingTraceContributionPolicy, TraceCreditReport,
-    TraceUploadAuthMode, mint_profile_attribution_token_for_scope, read_trace_policy_for_scope,
-    set_community_profile_for_scope, trace_contribution_dir_for_scope, trace_scope_key,
+    COMMUNITY_PROFILE_BIO_MAX_BYTES, COMMUNITY_PROFILE_HANDLE_MAX_CHARS,
+    COMMUNITY_PROFILE_HANDLE_MIN_CHARS, ProfileAttributionToken, StandingTraceContributionPolicy,
+    TraceCreditReport, TraceUploadAuthMode, mint_profile_attribution_token_for_scope,
+    read_trace_policy_for_scope, set_community_profile_for_scope, trace_contribution_dir_for_scope,
+    trace_scope_key,
 };
 use ironclaw_reborn_traces::onboarding::{
     OnboardConsents, OnboardError, OnboardHttpResponse, OnboardOutcome, OnboardingHttpSink,
@@ -221,12 +223,29 @@ fn parse_profile_set_input(
         .map(str::trim)
         .filter(|handle| !handle.is_empty())
         .ok_or_else(input_error)?;
+    // Enforce the manifest's declared schema at parse time (don't rely on the
+    // setter to bounce it deeper): handle is 3-32 ASCII letters/digits/`-`/`_`.
+    // All-ASCII, so char count == byte length.
+    if display_handle.len() < COMMUNITY_PROFILE_HANDLE_MIN_CHARS
+        || display_handle.len() > COMMUNITY_PROFILE_HANDLE_MAX_CHARS
+        || !display_handle
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(input_error());
+    }
     let bio = input
         .get("bio")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|bio| !bio.is_empty())
         .map(str::to_string);
+    // Bio is capped at the declared byte limit.
+    if let Some(bio) = &bio
+        && bio.len() > COMMUNITY_PROFILE_BIO_MAX_BYTES
+    {
+        return Err(input_error());
+    }
     let confirmed = input
         .get("confirmed")
         .and_then(Value::as_bool)
@@ -437,7 +456,12 @@ it's safe to retry.",
             "MalformedResponse",
             "The onboarding server's response was malformed; contact the operator.",
         ),
-        OnboardError::DeviceKey(_) | OnboardError::Persist { .. } => (
+        OnboardError::DeviceKey(_) => (
+            "DeviceKeyError",
+            "Couldn't establish the local device key for onboarding; the device-key state \
+may be missing or malformed. Re-run onboarding with a fresh invite.",
+        ),
+        OnboardError::Persist { .. } => (
             "PersistError",
             "Couldn't save onboarding state locally; check disk and permissions, then retry.",
         ),
@@ -580,26 +604,44 @@ pub(super) async fn dispatch_profile_token(
 /// file keeps the secret off the model surface while the manual browser-setup
 /// flow can still read it.
 fn persist_profile_token(scope: &str, token: &ProfileAttributionToken) -> std::io::Result<PathBuf> {
+    use std::io::Write as _;
+
     let dir = trace_contribution_dir_for_scope(Some(scope));
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("profile_token.jwt");
-    // Create with 0600 so the credential is not world-readable.
-    #[cfg(unix)]
-    {
-        use std::io::Write as _;
-        use std::os::unix::fs::OpenOptionsExt as _;
+
+    // Write atomically: a unique 0600 temp file (per-write uuid name so
+    // concurrent mints don't race on a fixed temp path), fsync, then rename
+    // onto the final path. A reader of `profile_token.jwt` therefore only ever
+    // sees a complete token, never a half-written or overwritten credential —
+    // the same temp+rename discipline the codebase uses for other credential
+    // writes.
+    let temp_path = dir.join(format!("profile_token.jwt.{}.tmp", uuid::Uuid::new_v4()));
+    let write_temp = || -> std::io::Result<()> {
+        #[cfg(unix)]
+        let mut file = {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temp_path)?
+        };
+        #[cfg(not(unix))]
         let mut file = std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&path)?;
+            .create_new(true)
+            .open(&temp_path)?;
         file.write_all(token.access_token.as_bytes())?;
-        file.sync_all()?;
+        file.sync_all()
+    };
+    if let Err(error) = write_temp() {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
     }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(&path, token.access_token.as_bytes())?;
+    if let Err(error) = std::fs::rename(&temp_path, &path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
     }
     Ok(path)
 }
@@ -866,6 +908,49 @@ mod tests {
         assert_eq!(result["enrolled"], json!(false));
         assert_eq!(result["consent_required"], json!(true));
         assert!(result["message"].as_str().is_some_and(|m| !m.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn dispatch_onboard_confirmed_without_host_egress_is_network_denied() {
+        // The agent onboard path MUST route through host network egress and must
+        // never fall back to a direct client. `test_request` wires
+        // `runtime_http_egress: None`, so a confirmed onboard fails closed with
+        // NetworkDenied (host-runtime miswiring guard).
+        let request = test_request(json!({
+            "invite_url": "https://tc.example.com/onboard#TESTCODE",
+            "confirmed": true,
+        }));
+        let error = dispatch_onboard(&request)
+            .await
+            .expect_err("confirmed onboard without host egress must fail closed");
+        assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::NetworkDenied));
+    }
+
+    #[test]
+    fn parse_profile_set_input_enforces_handle_and_bio_schema_limits() {
+        // Too short, too long, and disallowed characters are rejected.
+        assert!(parse_profile_set_input(&json!({"display_handle": "ab"})).is_err());
+        assert!(parse_profile_set_input(&json!({"display_handle": "a".repeat(33)})).is_err());
+        assert!(parse_profile_set_input(&json!({"display_handle": "has space"})).is_err());
+        assert!(parse_profile_set_input(&json!({"display_handle": "emoji😀"})).is_err());
+        // Bio over the declared byte cap is rejected.
+        assert!(
+            parse_profile_set_input(&json!({
+                "display_handle": "pilot_zaki",
+                "bio": "x".repeat(COMMUNITY_PROFILE_BIO_MAX_BYTES + 1)
+            }))
+            .is_err()
+        );
+        // A handle at each boundary + a max-length bio is accepted.
+        assert!(parse_profile_set_input(&json!({"display_handle": "abc"})).is_ok());
+        assert!(parse_profile_set_input(&json!({"display_handle": "a".repeat(32)})).is_ok());
+        assert!(
+            parse_profile_set_input(&json!({
+                "display_handle": "pilot-zaki_1",
+                "bio": "x".repeat(COMMUNITY_PROFILE_BIO_MAX_BYTES)
+            }))
+            .is_ok()
+        );
     }
 
     // ── onboard_success_value tests ───────────────────────────────────────────
