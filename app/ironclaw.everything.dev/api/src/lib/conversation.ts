@@ -45,34 +45,6 @@ export interface ConversationSendAck {
   eventCursor?: number;
 }
 
-export type ConversationEventType =
-  | "snapshot"
-  | "messages_changed"
-  | "message_added"
-  | "run_pending"
-  | "run_finished"
-  | "error"
-  | "keep_alive"
-  | "accepted"
-  | "running"
-  | "gate"
-  | "auth_required"
-  | "failed"
-  | "cancelled"
-  | "final_reply"
-  | "capability_progress"
-  | "capability_activity"
-  | "capability_display_preview";
-
-export interface ConversationEvent {
-  type: ConversationEventType;
-  threadId: string;
-  messages?: ConversationMessage[];
-  message?: ConversationMessage;
-  runId?: string;
-  error?: string;
-}
-
 export function normalizeThread(raw: any): ConversationThread {
   const scope = raw.scope ?? {};
   return {
@@ -87,8 +59,14 @@ export function normalizeThread(raw: any): ConversationThread {
   };
 }
 
-function roleFromKind(kind: string): "user" | "assistant" {
-  if (kind === "user") return "user";
+function roleFromKind(raw: any): "user" | "assistant" {
+  const kind = raw.kind ?? raw.Kind ?? "";
+  const role = raw.role ?? raw.Role;
+  if (role === "user" || role === "assistant") return role;
+  const lower = kind.toLowerCase();
+  if (lower === "user" || lower === "user_message") return "user";
+  if (lower === "assistant" || lower === "assistant_message" || lower === "tool_result") return "assistant";
+  if (raw.actorId ?? raw.actor_id) return "user";
   return "assistant";
 }
 
@@ -102,7 +80,7 @@ export function normalizeTimelineEntry(raw: any, threadId: string): Conversation
   return {
     id: raw.messageId ?? raw.message_id ?? raw.id ?? "",
     threadId,
-    role: roleFromKind(raw.kind ?? ""),
+    role: roleFromKind(raw),
     text: raw.content ?? "",
     createdAt: raw.createdAt ?? raw.created_at ?? null,
     status: statusFromString(raw.status),
@@ -127,17 +105,4 @@ export function normalizeTimelinePage(raw: any, threadId: string): ConversationM
     hasMore: meta.hasMore ?? meta.has_more ?? false,
     total: meta.total ?? data.length,
   };
-}
-
-export function diffMessageSets(
-  prev: Set<string>,
-  next: ConversationMessage[],
-): ConversationMessage[] {
-  const added: ConversationMessage[] = [];
-  for (const msg of next) {
-    if (!prev.has(msg.id)) {
-      added.push(msg);
-    }
-  }
-  return added;
 }

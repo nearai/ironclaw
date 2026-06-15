@@ -1,6 +1,7 @@
+import type { StreamChunk } from "@tanstack/ai";
 import type { UIMessage } from "@tanstack/ai/client";
 import { useChat } from "@tanstack/ai-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import type { ApiClient } from "@/app";
 import type { StagedAttachment } from "@/lib/attachments";
 
@@ -9,14 +10,11 @@ interface RunState {
     | "idle"
     | "submitted"
     | "running"
-    | "finalizing"
     | "awaiting_approval"
     | "auth_required"
     | "failed"
-    | "cancelled"
-    | "disconnected";
+    | "cancelled";
   runId?: string;
-  replyMessageId?: string;
   message?: string;
   gateRef?: string;
   gateHeadline?: string;
@@ -27,8 +25,6 @@ interface RunState {
   authUrl?: string;
   activeToolName?: string;
 }
-
-export type { RunState };
 
 function messageTextContent(message: UIMessage): string {
   return message.parts
@@ -86,13 +82,15 @@ export function useIronclawChat(
       if (kind === "swallowed") {
         console.debug("[chat.custom.swallowed]", base);
       } else {
-        console.warn("[chat.custom.unhandled]", base);
+        console.warn(`[chat.custom.unhandled] event="${name}"`, base.value);
       }
     },
     [debugCustomFlows, threadId],
   );
 
-  const initialMessagesRef = useRef(initialMessages);
+  if (debugCustomFlows) {
+    console.debug(`[useIronclawChat] seed: ${initialMessages.length} msgs`, initialMessages.map((m) => ({ id: m.id, role: m.role })));
+  }
 
   const chat = useChat({
     threadId,
@@ -105,7 +103,7 @@ export function useIronclawChat(
       lastSentContentRef.current = content;
       lastSentAttachmentsRef.current = attachments ?? [];
 
-      onRunStateChangeRef.current({ phase: "submitted", message: undefined, replyMessageId: undefined, activeToolName: undefined });
+      onRunStateChangeRef.current({ phase: "submitted", message: undefined, activeToolName: undefined });
 
       const accepted = await apiClient.conversation.sendMessage({
         threadId,
@@ -126,12 +124,21 @@ export function useIronclawChat(
 
       activeRunIdRef.current = accepted.runId ?? accepted.activeRunId ?? null;
 
-      for await (const chunk of live as AsyncIterable<any>) {
+      for await (const chunk of live as AsyncIterable<StreamChunk>) {
         if (signal.aborted) return;
         yield chunk;
       }
     },
-    onChunk: (chunk: any) => {
+    onChunk: (chunk: StreamChunk) => {
+      if (debugCustomFlows) {
+        if (chunk.type === "TEXT_MESSAGE_CONTENT") {
+          console.debug(`[chat.chunk] type=${chunk.type} delta=${(chunk as any).delta?.slice(0, 80)}`);
+        } else if (chunk.type === "TOOL_CALL_START") {
+          console.debug(`[chat.chunk] type=${chunk.type} parentMessageId=${(chunk as any).parentMessageId} toolCallName=${(chunk as any).toolCallName}`);
+        } else {
+          console.debug(`[chat.chunk] type=${chunk.type}`);
+        }
+      }
       if (chunk.type === "CUSTOM") {
         if (chunk.name === "approval-requested") {
           logCustomFlow("swallowed", chunk.name, chunk.value);
@@ -141,13 +148,13 @@ export function useIronclawChat(
       }
 
       if (chunk.type === "RUN_STARTED") {
-        activeRunIdRef.current = chunk.runId ?? activeRunIdRef.current;
+        const { runId } = chunk;
+        activeRunIdRef.current = runId ?? activeRunIdRef.current;
         setRunState((prev) => ({
           ...prev,
           phase: "running",
-          runId: chunk.runId ?? prev.runId,
+          runId: runId ?? prev.runId,
           message: undefined,
-          replyMessageId: undefined,
           gateRef: undefined,
           gateHeadline: undefined,
           gateBody: undefined,
@@ -172,11 +179,9 @@ export function useIronclawChat(
       if (chunk.type === "RUN_FINISHED") {
         setRunState((prev) => {
           if (prev.phase === "failed" || prev.phase === "cancelled") return prev;
-          if (prev.phase === "finalizing") return prev;
           return {
             ...prev,
             phase: "idle",
-            replyMessageId: undefined,
             activeToolName: undefined,
             gateRef: undefined,
             gateHeadline: undefined,
@@ -196,7 +201,7 @@ export function useIronclawChat(
         setRunState((prev) => ({
           ...prev,
           phase: "awaiting_approval",
-          gateRef: typeof payload?.approval === "object" && payload?.approval !== null ? String((payload.approval as { id?: unknown }).id ?? "") : undefined,
+          gateRef: typeof payload?.approval === "object" && payload?.approval !== null ? String((payload.approval as Record<string, unknown>).id ?? "") : undefined,
           gateHeadline: typeof payload?.headline === "string" ? payload.headline : prev.gateHeadline,
           gateBody: typeof payload?.body === "string" ? payload.body : prev.gateBody,
           activeToolName: typeof payload?.toolName === "string" ? payload.toolName : prev.activeToolName,
@@ -266,7 +271,6 @@ export function useIronclawChat(
       if (eventType === "ironclaw.final-reply") {
         setRunState((prev) => ({
           ...prev,
-          phase: "finalizing",
           activeToolName: undefined,
         }));
         return;
@@ -301,13 +305,6 @@ export function useIronclawChat(
     },
   });
 
-  useEffect(() => {
-    if (initialMessages.length > 0 && initialMessages !== initialMessagesRef.current) {
-      initialMessagesRef.current = initialMessages;
-      chat.setMessages(initialMessages);
-    }
-  }, [initialMessages, chat]);
-
   const sendMessageWithAttachments = useCallback(
     (content: string, attachments?: StagedAttachment[]) => {
       pendingAttachmentsRef.current = attachments ?? [];
@@ -340,19 +337,7 @@ export function useIronclawChat(
   }, [chat.sendMessage]);
 
   const idle = useCallback(() => {
-    setRunState({ phase: "idle", activeToolName: undefined, replyMessageId: undefined });
-  }, []);
-
-  const completeFinalization = useCallback(() => {
-    setRunState((prev) => {
-      if (prev.phase !== "finalizing") return prev;
-      return {
-        ...prev,
-        phase: "idle",
-        activeToolName: undefined,
-        replyMessageId: undefined,
-      };
-    });
+    setRunState({ phase: "idle", activeToolName: undefined });
   }, []);
 
   return {
@@ -364,7 +349,6 @@ export function useIronclawChat(
     resolveGate,
     retry,
     idle,
-    completeFinalization,
     runState,
   };
 }

@@ -2,7 +2,20 @@ import { Link } from "@tanstack/react-router";
 import { PanelLeft, Settings, SlidersHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useIronclawStatus } from "@/hooks/use-ironclaw-status";
-import type { ThreadState } from "@/hooks/use-thread-state";
+interface ThreadState {
+  thread: {
+    threadId: string;
+    title?: string | null;
+    scope?: {
+      tenantId: string;
+      agentId: string;
+      projectId?: string;
+    };
+    createdByActorId?: string;
+  };
+  messages: Array<Record<string, unknown>>;
+  summaryArtifacts?: Array<Record<string, unknown>>;
+}
 
 interface ChatIdentityBarProps {
   threadState: ThreadState | null;

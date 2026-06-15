@@ -100,7 +100,15 @@ function transformKeys(obj: unknown): unknown {
 }
 
 function mapThreadEntry(m: any): z.infer<typeof TimelineEntrySchema> {
-  const role = m.kind === "User" ? "user" : m.kind === "System" ? "system" : "assistant";
+  const kind = m.kind ?? "";
+  const role = (() => {
+    const lower = kind.toLowerCase();
+    if (lower === "user" || lower === "user_message") return "user";
+    if (lower === "system") return "system";
+    if (lower === "assistant" || lower === "assistant_message" || lower === "tool_result") return "assistant";
+    if (m.actor_id ?? m.actorId) return "user";
+    return "assistant";
+  })();
   return {
     messageId: m.message_id,
     threadId: m.thread_id,
@@ -645,7 +653,7 @@ export class IronclawService {
         };
 
         try {
-          while (!sessionEnded) {
+          while (eventQueue.length > 0 || !sessionEnded) {
             if (eventQueue.length > 0) {
               yield eventQueue.shift()!;
             } else {

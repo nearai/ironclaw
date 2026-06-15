@@ -1,4 +1,5 @@
-import type { MessagePart } from "@tanstack/ai";
+import type { MessagePart, UIMessage } from "@tanstack/ai";
+import type { ConversationMessageType } from "../../../api/src/contract";
 
 export interface IronclawToolResultEnvelope {
   title: string;
@@ -163,4 +164,72 @@ export function restMessageToParts(
   }
 
   return [{ type: "text" as const, content: trimmed }];
+}
+
+export function messagesToUIMessages(
+  rawMessages: ConversationMessageType[],
+): UIMessage[] {
+  const result: UIMessage[] = [];
+  let i = 0;
+  while (i < rawMessages.length) {
+    const raw = rawMessages[i];
+
+    if (raw.role !== "assistant") {
+      result.push({
+        id: raw.id,
+        role: raw.role,
+        parts: restMessageToParts(raw.role, raw.text ?? "", { toolCallIdFallback: raw.id }),
+        createdAt: raw.createdAt ? new Date(raw.createdAt) : undefined,
+      });
+      i++;
+      continue;
+    }
+
+    const runId = raw.runId;
+    if (!runId) {
+      result.push({
+        id: raw.id,
+        role: "assistant",
+        parts: restMessageToParts("assistant", raw.text ?? "", { toolCallIdFallback: raw.id }),
+        createdAt: raw.createdAt ? new Date(raw.createdAt) : undefined,
+      });
+      i++;
+      continue;
+    }
+
+    const group: ConversationMessageType[] = [];
+    while (i < rawMessages.length && rawMessages[i].role === "assistant" && rawMessages[i].runId === runId) {
+      group.push(rawMessages[i]);
+      i++;
+    }
+
+    const allParts: MessagePart[] = [];
+    let groupCreatedAt: string | null = null;
+    for (const g of group) {
+      const parts = restMessageToParts("assistant", g.text ?? "", { toolCallIdFallback: g.id });
+      const textParts = parts.filter((p): p is MessagePart & { type: "text" } => p.type === "text");
+      const toolParts = parts.filter((p) => p.type === "tool-call" || p.type === "tool-result");
+      const otherParts = parts.filter((p) => p.type !== "text" && p.type !== "tool-call" && p.type !== "tool-result");
+
+      if (toolParts.length > 0 || otherParts.length > 0) {
+        allParts.push(...toolParts, ...otherParts);
+      }
+      if (textParts.length > 0) {
+        allParts.push(...textParts);
+      }
+      if (g.createdAt && (!groupCreatedAt || g.createdAt > groupCreatedAt)) {
+        groupCreatedAt = g.createdAt;
+      }
+    }
+
+    if (allParts.length > 0) {
+      result.push({
+        id: runId ? `assistant:${runId}` : group[0].id,
+        role: "assistant",
+        parts: allParts,
+        createdAt: groupCreatedAt ? new Date(groupCreatedAt) : undefined,
+      });
+    }
+  }
+  return result;
 }

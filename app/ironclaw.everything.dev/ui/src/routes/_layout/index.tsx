@@ -15,7 +15,7 @@ import {
   Wrench,
   Zap,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { useApiClient } from "@/app";
 import { ChatIdentityBar } from "@/components/chat-identity-bar";
@@ -26,11 +26,11 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { type ConversationThread, useConversationThreads } from "@/hooks/use-conversation";
+import type { AttachmentLimits, StagedAttachment } from "@/lib/attachments";
 import { useIronclawChat } from "@/hooks/use-ironclaw-chat";
 import { useIronclawStatus } from "@/hooks/use-ironclaw-status";
 import { useVerboseMode } from "@/hooks/use-verbose-mode";
-import { openIronclawEventSource } from "@/lib/ironclaw-sse";
-import { restMessageToParts } from "@/lib/ironclaw-message-parts";
+import { messagesToUIMessages } from "@/lib/ironclaw-message-parts";
 
 export const Route = createFileRoute("/_layout/")({
   component: ChatPage,
@@ -56,22 +56,13 @@ function toolIconForName(name: string) {
   return Wrench;
 }
 
-function ChatArea({
-  threadId,
-  threadMeta,
-  threadMetaError,
-  onOpenMobileSidebar,
-  onToggleDesktopSidebar,
-  attachmentCapabilities,
-  verbose,
-  onToggleVerbose,
-}: {
+function ChatArea(props: {
   threadId: string;
   threadMeta: ThreadMeta | null;
   threadMetaError: string | null;
   onOpenMobileSidebar?: () => void;
   onToggleDesktopSidebar?: () => void;
-  attachmentCapabilities?: any;
+  attachmentCapabilities?: AttachmentLimits | null;
   verbose: boolean;
   onToggleVerbose: () => void;
 }) {
@@ -82,181 +73,77 @@ function ChatArea({
     const params = new URLSearchParams(window.location.search);
     const loginTicket = params.get("loginTicket");
     if (!loginTicket) return;
-
     params.delete("loginTicket");
-    const newUrl = window.location.pathname + (params.toString() ? `?${params}` : "");
-    window.history.replaceState(null, "", newUrl);
-
-    apiClient.ironclaw.auth.exchangeLoginTicket({ loginTicket }).catch((err: unknown) => {
-      console.error("[ChatArea] failed to exchange login ticket:", err);
-    });
+    window.history.replaceState(null, "", window.location.pathname + (params.toString() ? `?${params}` : ""));
+    apiClient.ironclaw.auth.exchangeLoginTicket({ loginTicket }).catch(() => {});
   }, [apiClient]);
 
   const fetchThreadMessages = useCallback(async () => {
-    const page = await apiClient.conversation.getMessages({ threadId, limit: 100 });
-    return (page.messages ?? []).map((m: any) => ({
-      id: m.id,
-      role: m.role,
-      parts: restMessageToParts(m.role, m.text ?? "", { toolCallIdFallback: m.id }),
-      createdAt: m.createdAt ? new Date(m.createdAt) : undefined,
-    })) as UIMessage[];
-  }, [apiClient, threadId]);
+    const page = await apiClient.conversation.getMessages({ threadId: props.threadId, limit: 100 });
+    return messagesToUIMessages(page.messages ?? []);
+  }, [apiClient, props.threadId]);
 
   useEffect(() => {
     let cancelled = false;
     setLoadingInitial(true);
     setInitialMessages([]);
-
     (async () => {
       try {
         const messages = await fetchThreadMessages();
-        if (cancelled) return;
-        setInitialMessages(messages);
-      } catch (err) {
-        console.error("[ChatArea] initial message load failed", err);
-      }
+        if (!cancelled) setInitialMessages(messages);
+      } catch {}
       if (!cancelled) setLoadingInitial(false);
     })();
-
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [fetchThreadMessages]);
 
+  if (loadingInitial) {
+    return (
+      <>
+        <ChatIdentityBar
+          threadState={null}
+          onOpenMobileSidebar={props.onOpenMobileSidebar}
+          onToggleDesktopSidebar={props.onToggleDesktopSidebar}
+          verbose={props.verbose}
+          onToggleVerbose={props.onToggleVerbose}
+        />
+        <ChatMessageList loading><div /></ChatMessageList>
+      </>
+    );
+  }
+
+  return <ChatAreaCore {...props} initialMessages={initialMessages} />;
+}
+
+function ChatAreaCore({
+  threadId,
+  threadMeta,
+  threadMetaError,
+  onOpenMobileSidebar,
+  onToggleDesktopSidebar,
+  attachmentCapabilities,
+  verbose,
+  onToggleVerbose,
+  initialMessages,
+}: {
+  threadId: string;
+  threadMeta: ThreadMeta | null;
+  threadMetaError: string | null;
+  onOpenMobileSidebar?: () => void;
+  onToggleDesktopSidebar?: () => void;
+  attachmentCapabilities?: AttachmentLimits | null;
+  verbose: boolean;
+  onToggleVerbose: () => void;
+  initialMessages: UIMessage[];
+}) {
+  const apiClient = useApiClient();
   const chat = useIronclawChat(threadId, apiClient, initialMessages, verbose);
   const isBusy =
-    chat.runState.phase === "submitted" ||
-    chat.runState.phase === "running" ||
-    chat.runState.phase === "finalizing" ||
-    chat.runState.phase === "awaiting_approval" ||
-    chat.runState.phase === "auth_required";
-  const wasBusyRef = useRef(false);
-  const skipNextBusySyncRef = useRef(false);
-  const baselineAssistantCountRef = useRef(
-    chat.messages.filter((m) => m.role === "assistant").length,
-  );
-
-  const replaceMessagesWithHistory = useCallback(async () => {
-    try {
-      const fresh = await fetchThreadMessages();
-      chat.setMessages(fresh);
-    } catch (err) {
-      console.error("[ChatArea] sync failed", err);
-    }
-  }, [fetchThreadMessages, chat.setMessages]);
-
-  useEffect(() => {
-    if (wasBusyRef.current && !isBusy) {
-      wasBusyRef.current = false;
-      if (skipNextBusySyncRef.current) {
-        skipNextBusySyncRef.current = false;
-        return;
-      }
-      replaceMessagesWithHistory();
-      return;
-    }
-    wasBusyRef.current = isBusy;
-  }, [isBusy, replaceMessagesWithHistory]);
-
-  useEffect(() => {
-    if (chat.runState.phase !== "finalizing") return;
-
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-
-    const hasCanonicalAssistantReply = (messages: UIMessage[]) =>
-      messages.some(
-        (m) =>
-          m.role === "assistant" &&
-          m.parts?.some((p: any) => p.type === "text" && p.content?.trim()),
-      );
-
-    const pollHistory = async () => {
-      try {
-        const fresh = await fetchThreadMessages();
-        if (cancelled) return;
-        if (hasCanonicalAssistantReply(fresh)) {
-          chat.setMessages(fresh);
-          skipNextBusySyncRef.current = true;
-          chat.completeFinalization();
-          return;
-        }
-      } catch (err) {
-        console.error("[ChatArea] finalization sync failed", err);
-      }
-
-      if (!cancelled) {
-        timer = setTimeout(pollHistory, 250);
-      }
-    };
-
-    void pollHistory();
-
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-    };
-  }, [chat.runState.phase, fetchThreadMessages, chat.completeFinalization, chat.setMessages]);
-
-  useEffect(() => {
-    const applySnapshot = (data: unknown) => {
-      const frame = data as Record<string, unknown>;
-      const rawMessages = (frame.messages ?? []) as any[];
-
-      const hasAssistantReply = rawMessages.some(
-        (m: any) => m.role === "assistant" && m.text?.trim(),
-      );
-
-      if (isBusy && !hasAssistantReply) return;
-
-      const mapped = rawMessages.map((m) => ({
-        id: m.id,
-        role: m.role,
-        parts: restMessageToParts(m.role, m.text ?? "", { toolCallIdFallback: m.id }),
-        createdAt: m.createdAt ? new Date(m.createdAt) : undefined,
-      })) as UIMessage[];
-      if (mapped.length > 0) {
-        chat.setMessages(mapped);
-      }
-    };
-
-    const handle = openIronclawEventSource({
-      threadId,
-      onSnapshot: applySnapshot,
-      onUpdate: applySnapshot,
-      onEvent: () => {},
-    });
-
-    return () => handle.close();
-  }, [threadId, isBusy, chat.setMessages]);
-
-  useEffect(() => {
-    if (chat.runState.phase !== "submitted") return;
-    baselineAssistantCountRef.current = chat.messages.filter(
-      (m) => m.role === "assistant",
-    ).length;
-  }, [chat.runState.phase, chat.messages]);
-
-  useEffect(() => {
-    if (!isBusy) return;
-    const currentCount = chat.messages.filter(
-      (m) => m.role === "assistant",
-    ).length;
-    if (currentCount > baselineAssistantCountRef.current) {
-      skipNextBusySyncRef.current = true;
-      chat.idle();
-    }
-  }, [isBusy, chat.messages, chat.idle]);
-
-  useEffect(() => {
-    if (chat.runState.phase !== "disconnected") return;
-    if (isBusy) return;
-
-    replaceMessagesWithHistory();
-  }, [chat.runState.phase, isBusy, replaceMessagesWithHistory]);
+    chat.runState.phase === "submitted" || chat.runState.phase === "running" ||
+    chat.runState.phase === "awaiting_approval" || chat.runState.phase === "auth_required";
 
   const handleSend = useCallback(
-    (content: string, attachments?: any[]) => {
+    (content: string, attachments?: StagedAttachment[]) => {
       if (!content.trim() || isBusy) return;
       chat.sendMessage(content, attachments);
     },
@@ -265,37 +152,21 @@ function ChatArea({
 
   const messages = chat.messages;
   const runState = chat.runState;
-  const isEmpty = messages.length === 0 && !isBusy && !loadingInitial;
-
-  const lastAssistantHasText = messages
-    .filter((m) => m.role === "assistant")
-    .slice(-1)[0]
-    ?.parts?.some((p) => p.type === "text" && p.content?.trim())
-    ?? false;
+  const currentRunMessageId = runState.runId ? `assistant:${runState.runId}` : null;
+  const currentRunHasText = currentRunMessageId
+    ? messages.some(
+        (m) => m.id === currentRunMessageId &&
+          m.parts.some((p) => p.type === "text" && ((p as { content?: string }).content?.trim()?.length ?? 0) > 0),
+      )
+    : false;
 
   const showLoading = runState.phase !== "idle" && runState.phase !== "failed" && runState.phase !== "cancelled";
-
-  const toolActive = runState.activeToolName && !lastAssistantHasText;
+  const toolActive = runState.activeToolName && !currentRunHasText;
   const ProgressIcon = runState.phase === "awaiting_approval" || runState.phase === "auth_required"
-    ? ShieldCheck
-    : toolActive
-      ? toolIconForName(runState.activeToolName!)
-    : null;
+    ? ShieldCheck : toolActive ? toolIconForName(runState.activeToolName!) : null;
 
   const threadState = threadMeta
-    ? {
-        thread: {
-          threadId: threadMeta.threadId,
-          title: threadMeta.title,
-          scope: {
-            tenantId: threadMeta.scope.tenantId,
-            agentId: threadMeta.scope.agentId,
-            projectId: threadMeta.scope.projectId,
-          },
-          createdByActorId: threadMeta.createdByActorId,
-        },
-        messages: [],
-      }
+    ? { thread: { threadId: threadMeta.threadId, title: threadMeta.title, scope: { tenantId: threadMeta.scope.tenantId, agentId: threadMeta.scope.agentId, projectId: threadMeta.scope.projectId }, createdByActorId: threadMeta.createdByActorId }, messages: [] }
     : null;
 
   return (
@@ -308,33 +179,35 @@ function ChatArea({
         verbose={verbose}
         onToggleVerbose={onToggleVerbose}
       />
-
       {runState.phase === "awaiting_approval" ? (
         <div className="flex w-full items-center gap-2 border-b border-amber-500/20 bg-amber-500/5 px-4 py-2 text-xs text-amber-600">
           <ShieldCheck size={12} className="shrink-0" />
-          <span className="flex-1">{runState.gateHeadline ?? "Approval required — see below"}</span>
+          <span className="flex-1">{runState.gateHeadline ?? "Approval required"}</span>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 border-amber-500/30 bg-amber-500/10 px-2.5 text-xs font-medium text-amber-600 hover:bg-amber-500/20"
+            onClick={() => runState.gateRef && chat.resolveGate(runState.gateRef, true)}
+          >
+            Approve
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 border-amber-500/30 bg-amber-500/10 px-2.5 text-xs font-medium text-amber-600 hover:bg-amber-500/20"
+            onClick={() => runState.gateRef && chat.resolveGate(runState.gateRef, false)}
+          >
+            Deny
+          </Button>
         </div>
       ) : runState.phase === "auth_required" ? (
         <div className="flex w-full items-center gap-2 border-b border-blue-500/20 bg-blue-500/5 px-4 py-2 text-xs text-blue-600">
           <ShieldCheck size={12} className="shrink-0" />
           <span className="flex-1">{runState.authHeadline ?? "Authentication required"}</span>
           {runState.authUrl ? (
-            <a
-              href={runState.authUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="rounded border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 font-medium hover:bg-blue-500/20 transition-colors"
-            >
-              Authorize
-            </a>
+            <a href={runState.authUrl} target="_blank" rel="noreferrer" className="rounded border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 font-medium hover:bg-blue-500/20 transition-colors">Authorize</a>
           ) : null}
-          <button
-            type="button"
-            onClick={() => chat.retry()}
-            className="rounded border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 font-medium hover:bg-blue-500/20 transition-colors"
-          >
-            Resume run
-          </button>
+          <button type="button" onClick={() => chat.retry()} className="rounded border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 font-medium hover:bg-blue-500/20 transition-colors">Resume run</button>
         </div>
       ) : runState.phase === "failed" ? (
         <div className="flex w-full items-center gap-2 border-b border-destructive/20 bg-destructive/5 px-4 py-2 text-xs text-destructive">
@@ -342,36 +215,22 @@ function ChatArea({
           <span className="flex-1 truncate">{runState.message ?? "Run failed"}</span>
         </div>
       ) : runState.phase === "cancelled" ? (
-        <div className="flex w-full items-center gap-2 border-b border-border bg-muted/30 px-4 py-2 text-xs text-muted-foreground">
-          <span>Run was cancelled</span>
-        </div>
+        <div className="flex w-full items-center gap-2 border-b border-border bg-muted/30 px-4 py-2 text-xs text-muted-foreground"><span>Run was cancelled</span></div>
       ) : null}
 
       <ChatMessageList
-        loading={loadingInitial}
         streamLoading={isBusy}
-        empty={isEmpty}
-        emptyMessage={
-          threadMetaError ? "Failed to load thread" : "No messages yet. Send a message to start."
-        }
+        empty={initialMessages.length === 0 && !isBusy}
+        emptyMessage={threadMetaError ? "Failed to load thread" : "No messages yet. Send a message to start."}
       >
-        {messages
-          .filter((m) => m.parts.length > 0)
-          .map((message) => (
-            <ChatMessage
-              key={message.id}
-              message={message}
-              onApproveTool={chat.resolveGate}
-              verbose={verbose}
-            />
-          ))}
+        {messages.filter((m) => m.parts.length > 0).map((message) => (
+          <ChatMessage key={message.id} message={message} verbose={verbose} />
+        ))}
         {showLoading ? (
           <div className="flex items-start gap-3">
             <div className="rounded-2xl rounded-bl-sm bg-muted px-4 py-2.5">
               <div className="flex items-center gap-2">
-                {ProgressIcon ? (
-                  <ProgressIcon size={11} className="text-muted-foreground/60 shrink-0" />
-                ) : null}
+                {ProgressIcon ? <ProgressIcon size={11} className="text-muted-foreground/60 shrink-0" /> : null}
                 <div className="flex items-center gap-1">
                   <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/40 [animation-delay:0ms]" />
                   <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/40 [animation-delay:150ms]" />
@@ -383,13 +242,7 @@ function ChatArea({
         ) : null}
       </ChatMessageList>
 
-      <ChatInput
-        onSend={handleSend}
-        onStop={chat.stop}
-        placeholder="Type a message..."
-        isSending={isBusy}
-        attachmentCapabilities={attachmentCapabilities}
-      />
+      <ChatInput onSend={handleSend} onStop={chat.stop} placeholder="Type a message..." isSending={isBusy} attachmentCapabilities={attachmentCapabilities} />
     </>
   );
 }

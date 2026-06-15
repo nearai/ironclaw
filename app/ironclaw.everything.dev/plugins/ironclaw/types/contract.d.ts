@@ -1993,3 +1993,10 @@ export declare const contract: {
     };
 };
 export type ContractType = typeof contract;
+export type ChatEvent = z.infer<typeof ChatEventSchema>;
+export type AcceptedResponse = z.infer<typeof AcceptedResponseSchema>;
+export type TimelineEntry = z.infer<typeof TimelineEntrySchema>;
+export type Thread = z.infer<typeof ThreadSchema>;
+export type Session = z.infer<typeof SessionSchema>;
+export type GateResolution = z.infer<typeof GateResolutionSchema>;
+export type ThreadCreate = z.infer<typeof ThreadCreateSchema>;

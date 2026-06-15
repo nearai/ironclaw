@@ -81,7 +81,7 @@ const ConversationMessagePageSchema = z.object({
 
 export const ConversationSendAckSchema = z.object({
   threadId: z.string(),
-  runId: z.string(),
+  runId: z.string().optional(),
   acceptedMessageRef: z.string(),
   pendingMessageId: z.string(),
   submittedAt: z.string(),
@@ -99,11 +99,15 @@ export const ConversationLiveChunkSchema = z.object({
     "TOOL_CALL_START",
     "TOOL_CALL_ARGS",
     "TOOL_CALL_END",
+    "TEXT_MESSAGE_START",
+    "TEXT_MESSAGE_CONTENT",
+    "TEXT_MESSAGE_END",
     "CUSTOM",
   ]),
   threadId: z.string(),
   runId: z.string().optional(),
   messageId: z.string().optional(),
+  parentMessageId: z.string().optional(),
   role: z.enum(["assistant", "tool"]).optional(),
   toolCallId: z.string().optional(),
   toolCallName: z.string().optional(),
@@ -129,83 +133,12 @@ export const ConversationEventSchema = z.object({
     "run_finished",
     "error",
     "keep_alive",
-    "accepted",
-    "running",
-    "gate",
-    "auth_required",
-    "failed",
-    "cancelled",
-    "final_reply",
-    "capability_progress",
-    "capability_activity",
-    "capability_display_preview",
   ]),
   threadId: z.string(),
   messages: z.array(ConversationMessageSchema).optional(),
   message: ConversationMessageSchema.optional(),
   runId: z.string().optional(),
   error: z.string().optional(),
-  ack: z
-    .object({
-      outcome: z.string(),
-      runId: z.string().optional(),
-      activeRunId: z.string().optional(),
-      acceptedMessageRef: z.string(),
-      status: z.string(),
-      eventCursor: z.number().optional(),
-    })
-    .optional(),
-  progress: z.object({ kind: z.string(), turnRunId: z.string().optional() }).optional(),
-  activity: z
-    .object({
-      invocationId: z.string(),
-      capabilityId: z.string(),
-      status: z.string(),
-      updatedAt: z.string(),
-    })
-    .optional(),
-  preview: z
-    .object({
-      invocationId: z.string(),
-      capabilityId: z.string(),
-      status: z.string(),
-      title: z.string(),
-      outputSummary: z.string().optional(),
-      outputPreview: z.string().optional(),
-      truncated: z.boolean(),
-    })
-    .optional(),
-  reply: z.object({ text: z.string(), turnRunId: z.string() }).optional(),
-  prompt: z
-    .object({ turnRunId: z.string(), gateRef: z.string().optional(), headline: z.string(), body: z.string() })
-    .optional(),
-  authPrompt: z
-    .object({
-      turnRunId: z.string(),
-      authRequestRef: z.string(),
-      headline: z.string(),
-      body: z.string(),
-      authorizationUrl: z.string().optional(),
-    })
-    .optional(),
-  response: z
-    .object({
-      runId: z.string(),
-      status: z.string(),
-      eventCursor: z.number(),
-      alreadyTerminal: z.boolean(),
-    })
-    .optional(),
-  runState: z
-    .object({
-      turnId: z.string(),
-      runId: z.string(),
-      status: z.string(),
-      eventCursor: z.number(),
-      acceptedMessageRef: z.string(),
-      failure: z.unknown().optional(),
-    })
-    .optional(),
 });
 
 export const contract = oc.router({
@@ -332,21 +265,11 @@ export const contract = oc.router({
       .output(eventIterator(ConversationLiveChunkSchema))
       .errors({ UNAUTHORIZED, NOT_FOUND }),
 
-    stream: oc
-      .route({
-        method: "GET",
-        path: "/conversation/threads/{threadId}/events",
-        summary: "Subscribe to conversation changes",
-      })
-      .input(
-        z.object({
-          threadId: z.string(),
-          afterCursor: z.string().optional(),
-        }),
-      )
-      .output(eventIterator(ConversationEventSchema))
-      .errors({ UNAUTHORIZED, NOT_FOUND }),
   },
 });
 
 export type ContractType = typeof contract;
+
+export type ConversationLiveChunkType = z.infer<typeof ConversationLiveChunkSchema>;
+export type ConversationMessageType = z.infer<typeof ConversationMessageSchema>;
+export type ConversationMessagePageType = z.infer<typeof ConversationMessagePageSchema>;

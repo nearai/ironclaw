@@ -18,7 +18,6 @@ import {
 import { createAuthMiddleware } from "./lib/auth";
 import { normalizeThread, normalizeTimelinePage } from "./lib/conversation";
 import { createConversationLiveHandler } from "./lib/conversation-live";
-import { createConversationStreamHandler } from "./lib/conversation-stream";
 import type { PluginsClient } from "./lib/plugins-types.gen";
 
 function generateId(): string {
@@ -665,7 +664,7 @@ export default createPlugin.withPlugins<PluginsClient>()({
             });
             return {
               threadId: input.threadId,
-              runId: raw.runId ?? raw.activeRunId ?? "",
+              runId: raw.runId ?? raw.activeRunId ?? undefined,
               outcome: raw.outcome,
               status: raw.status,
               activeRunId: raw.activeRunId,
@@ -679,8 +678,6 @@ export default createPlugin.withPlugins<PluginsClient>()({
         live: builder.conversation.live
           .use(requireAuth)
           .handler(createConversationLiveHandler(s)),
-
-        stream: builder.conversation.stream.use(requireAuth).handler(createConversationStreamHandler(s)),
       },
     };
   },

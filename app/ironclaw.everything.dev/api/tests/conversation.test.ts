@@ -84,60 +84,73 @@ describe("normalizeTimelineEntry", () => {
     const result = normalizeTimelineEntry(raw, "t-1");
     expect(result.attachments).toEqual([]);
   });
+
+  it.each([
+    { kind: "user", expectedRole: "user" },
+    { kind: "User", expectedRole: "user" },
+    { kind: "user_message", expectedRole: "user" },
+    { kind: "assistant", expectedRole: "assistant" },
+    { kind: "Assistant", expectedRole: "assistant" },
+    { kind: "assistant_message", expectedRole: "assistant" },
+    { kind: "tool_result", expectedRole: "assistant" },
+  ])("normalizes kind=$kind to role=$expectedRole", ({ kind, expectedRole }) => {
+    const raw = {
+      message_id: "msg-role-1",
+      thread_id: "t-1",
+      kind,
+      content: "test",
+      status: "finalized",
+      sequence: 0,
+    };
+    const result = normalizeTimelineEntry(raw, "t-1");
+    expect(result.role).toBe(expectedRole);
+  });
+
+  it("prefers raw.role over kind when present", () => {
+    const raw = {
+      message_id: "msg-role-2",
+      thread_id: "t-1",
+      kind: "assistant",
+      role: "user",
+      content: "forced user text",
+      status: "finalized",
+      sequence: 0,
+    };
+    const result = normalizeTimelineEntry(raw, "t-1");
+    expect(result.role).toBe("user");
+  });
+
+  it("treats unknown kind with actorId as user", () => {
+    const raw = {
+      message_id: "msg-unknown-actor",
+      thread_id: "t-1",
+      kind: "unknown_custom_kind",
+      actor_id: "someone",
+      content: "custom content",
+      status: "finalized",
+      sequence: 0,
+    };
+    const result = normalizeTimelineEntry(raw, "t-1");
+    expect(result.role).toBe("user");
+  });
+
+  it("never coerces user-like rows into assistant", () => {
+    for (const kind of ["user", "User", "user_message"]) {
+      const raw = {
+        message_id: `msg-nope-${kind}`,
+        thread_id: "t-1",
+        kind,
+        content: "user text",
+        status: "finalized",
+        sequence: 0,
+      };
+      const result = normalizeTimelineEntry(raw, "t-1");
+      expect(result.role).toBe("user");
+    }
+  });
 });
 
 describe("ConversationEventSchema", () => {
-  it("accepts a gate event", () => {
-    const input = {
-      type: "gate",
-      threadId: "t-1",
-      prompt: {
-        turnRunId: "run-1",
-        gateRef: "gate-1",
-        headline: "Approve action?",
-        body: "The agent wants to send an email",
-      },
-    };
-    const result = ConversationEventSchema.parse(input);
-    expect(result.type).toBe("gate");
-    expect(result.prompt?.headline).toBe("Approve action?");
-  });
-
-  it("accepts an auth_required event", () => {
-    const input = {
-      type: "auth_required",
-      threadId: "t-1",
-      authPrompt: {
-        turnRunId: "run-1",
-        authRequestRef: "auth-1",
-        headline: "GitHub Login",
-        body: "Please authorize access to GitHub",
-        authorizationUrl: "https://github.com/login/oauth/authorize",
-      },
-    };
-    const result = ConversationEventSchema.parse(input);
-    expect(result.type).toBe("auth_required");
-    expect(result.authPrompt?.headline).toBe("GitHub Login");
-  });
-
-  it("accepts a failed event with runState", () => {
-    const input = {
-      type: "failed",
-      threadId: "t-1",
-      runState: {
-        turnId: "turn-1",
-        runId: "run-1",
-        status: "failed",
-        eventCursor: 5,
-        acceptedMessageRef: "msg-1",
-        failure: { message: "LLM provider error" },
-      },
-    };
-    const result = ConversationEventSchema.parse(input);
-    expect(result.type).toBe("failed");
-    expect(result.runState?.status).toBe("failed");
-  });
-
   it("accepts a snapshot event", () => {
     const input = {
       type: "snapshot",
