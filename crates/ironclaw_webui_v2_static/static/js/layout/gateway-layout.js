@@ -118,6 +118,7 @@ export function GatewayLayout({ token, profile, isChecking = false, isAdmin, onS
         <${PageHeader}
           threadsState=${threadsState}
           onToggleSidebar=${sidebar.toggle}
+          isAdmin=${isAdmin}
         />
         <main className="min-h-0 min-w-0 flex-1 overflow-hidden">
           ${statusQuery.error &&

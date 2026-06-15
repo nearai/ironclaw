@@ -70,7 +70,7 @@ export function useLogs() {
       if (requestId !== requestIdRef.current) return;
       if (TERMINAL_UNSUPPORTED_STATUSES.has(err?.status)) {
         setEntries([]);
-        setError(null);
+        setError(err);
         setIsUnsupported(true);
         return;
       }

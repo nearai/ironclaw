@@ -93,6 +93,13 @@ function AdminRoute({ auth }) {
   return html`<${AdminPage} />`;
 }
 
+function OperatorRoute({ auth, children }) {
+  if (!auth.isAdmin) {
+    return html`<${Navigate} to=${defaultRoute} replace />`;
+  }
+  return children;
+}
+
 export function App() {
   const auth = useAuthSession();
 
@@ -121,7 +128,7 @@ export function App() {
           <${Route} path="automations" element=${html`<${AutomationsPage} />`} />
           <${Route} path="extensions" element=${html`<${ExtensionsPage} />`} />
           <${Route} path="extensions/:tab" element=${html`<${ExtensionsPage} />`} />
-          <${Route} path="logs" element=${html`<${LogsPage} />`} />
+          <${Route} path="logs" element=${html`<${OperatorRoute} auth=${auth}><${LogsPage} /><//>`} />
           <${Route} path="settings" element=${html`<${SettingsPage} />`} />
           <${Route} path="settings/:tab" element=${html`<${SettingsPage} />`} />
           <${Route} path="admin" element=${html`<${AdminRoute} auth=${auth} />`} />

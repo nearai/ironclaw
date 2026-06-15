@@ -25,6 +25,7 @@ function depsChanged(previous, next) {
 function createHookHarness({ search = "" } = {}) {
   const calls = [];
   const intervals = [];
+  const harness = { rejectWith: null };
   let location = { search };
   let hookIndex = 0;
   const hooks = [];
@@ -86,6 +87,9 @@ function createHookHarness({ search = "" } = {}) {
     }),
     queryOperatorLogs: async (request) => {
       calls.push(request);
+      if (harness.rejectWith) {
+        throw harness.rejectWith;
+      }
       return { entries: [{ id: String(calls.length) }] };
     },
     setInterval: (fn, ms) => {
@@ -98,7 +102,7 @@ function createHookHarness({ search = "" } = {}) {
 
   vm.runInNewContext(useLogsSourceForTest(), context);
 
-  return {
+  return Object.assign(harness, {
     calls,
     intervals,
     render() {
@@ -117,7 +121,7 @@ function createHookHarness({ search = "" } = {}) {
     setSearch(nextSearch) {
       location = { search: nextSearch };
     },
-  };
+  });
 }
 
 test("useLogs reloads scoped logs once when scope changes while paused", async () => {
@@ -141,5 +145,20 @@ test("useLogs reloads scoped logs once when scope changes while paused", async (
   assert.equal(result.paused, true);
   assert.equal(harness.calls.length, 2);
   assert.equal(harness.calls[1].threadId, "thread-b");
+  assert.equal(harness.intervals.length, 1);
+});
+
+test("useLogs surfaces operator-log permission failures instead of empty logs", async () => {
+  const forbidden = Object.assign(new Error("Forbidden"), { status: 403 });
+  const harness = createHookHarness();
+  harness.rejectWith = forbidden;
+
+  let result = harness.render();
+  await harness.runEffects();
+  result = harness.render();
+
+  assert.equal(result.entries.length, 0);
+  assert.equal(result.error, forbidden);
+  assert.equal(result.status, "error");
   assert.equal(harness.intervals.length, 1);
 });
