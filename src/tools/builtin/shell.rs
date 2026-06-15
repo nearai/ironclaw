@@ -399,7 +399,7 @@ fn is_env_assignment(token: &str) -> bool {
         .is_some_and(|(name, _)| !name.is_empty() && !name.contains('/') && !name.contains('\\'))
 }
 
-fn shell_script_arg<'a>(tokens: &'a [String], start: usize) -> Option<&'a str> {
+fn shell_script_arg(tokens: &[String], start: usize) -> Option<&str> {
     let mut idx = start;
     while idx < tokens.len() {
         let token = tokens[idx].as_str();
