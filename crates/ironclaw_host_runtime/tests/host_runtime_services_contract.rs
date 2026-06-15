@@ -8273,13 +8273,15 @@ async fn invoke_capability_no_credential_requirement_with_wired_store_proceeds_n
     );
 }
 
-/// A secret store that always returns `Err` from `metadata()` — used to verify
-/// that a transient backend failure causes the pre-flight to skip (return None)
-/// rather than short-circuit with AuthRequired.
-struct AlwaysErrorSecretStore;
+/// An always-erroring secret store that ALSO counts `metadata()` invocations, so a
+/// test can prove WHERE in the pipeline the store was probed. Every method still errors.
+#[derive(Default)]
+struct CountingErrorSecretStore {
+    metadata_calls: Arc<AtomicUsize>,
+}
 
 #[async_trait]
-impl SecretStore for AlwaysErrorSecretStore {
+impl SecretStore for CountingErrorSecretStore {
     async fn put(
         &self,
         _scope: ResourceScope,
@@ -8296,6 +8298,7 @@ impl SecretStore for AlwaysErrorSecretStore {
         _scope: &ResourceScope,
         _handle: &SecretHandle,
     ) -> Result<Option<SecretMetadata>, SecretStoreError> {
+        self.metadata_calls.fetch_add(1, Ordering::SeqCst);
         Err(SecretStoreError::StoreUnavailable {
             reason: "simulated backend failure".to_string(),
         })
@@ -8351,49 +8354,42 @@ impl SecretStore for AlwaysErrorSecretStore {
     }
 }
 
-/// When the secret store's `metadata()` returns `Err`, the pre-flight must be
-/// skipped entirely — the flow must NOT short-circuit with `AuthRequired`
-/// as if the credential were absent. The store error must not burn a user auth
-/// interaction; the dispatch-time manifest `runtime_credentials` obligation check
-/// is the enforcement backstop.
+/// A transient secret-store `metadata()` error must NOT let an uncredentialed call
+/// through. Two layers are proven:
 ///
-/// Test design (Fix 1 fidelity):
+/// 1. **Pre-flight (ordering) fails open.** On the first `invoke_capability`, the
+///    pre-flight probes the (erroring) store and must NOT short-circuit with
+///    `AuthRequired` — a store error is not a missing credential. The flow proceeds
+///    to the approval gate (`ApprovalRequired`); dispatch is not reached.
+/// 2. **Dispatch-time obligation backstop fails closed.** After approval, the run is
+///    resumed with a grant that DOES include the required `script_api_token` handle
+///    plus the `UseSecret` effect, so dispatch authorization PASSES and control
+///    reaches `BuiltinObligationHandler::preflight_secret_injection`. That backstop
+///    re-probes the store via `metadata()` — which errors — and fails closed
+///    (`secret_obligation_failed`), so the resumed call is `Failed`.
 ///
-/// - `SCRIPT_WITH_CREDENTIAL_MANIFEST` declares `runtime_credentials` with
-///   `script_api_token` (`required = true`). The secret is genuinely absent
-///   from the always-erroring store.
-/// - `ApprovalThenGrantAuthorizer` requires approval on the first call (no
-///   grants), then grants on resume. This authorizer injects NO secret
-///   obligation of its own — so the only credential enforcement on the resume
-///   path comes from the manifest `runtime_credentials` backstop inside
-///   `BuiltinObligationHandler`.
-///
-/// Flow asserted:
-/// 1. First `invoke_capability`: pre-flight sees a store error, skips (returns
-///    None), flow reaches the approval gate → `ApprovalRequired`.
-/// 2. After approval, `resume_capability` is called. The manifest backstop
-///    (BuiltinObligationHandler reading `runtime_credentials`) tries to inject
-///    the `script_api_token` credential; the secret is absent → the backstop
-///    returns `AuthorizationRequiresAuth` → outcome is `AuthRequired`.
-///
-/// This confirms that the manifest backstop — not a test-authorizer-injected
-/// obligation — is what enforces the missing credential on the resumed path.
-/// A previous version of this test used `ApprovalThenSecretObligationAuthorizer`
-/// which injected its own `InjectSecretOnce` obligation; that masked whether the
-/// manifest backstop actually fires.
+/// To prove the resume failure comes from the obligation backstop and not from a
+/// premature authorization denial (both surface as `RuntimeFailureKind::Authorization`),
+/// the store counts `metadata()` calls. The counter is reset after step 1, so a
+/// non-zero count after resume can only come from the obligation handler probing the
+/// store — `resume_capability` does not itself run the pre-flight. `ApprovalThenGrantAuthorizer`
+/// injects no secret obligation of its own; enforcement is the manifest
+/// `runtime_credentials` backstop.
 #[tokio::test]
 async fn invoke_capability_secret_store_error_skips_preflight() {
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
     let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
     let script_runtime = Arc::new(RecordingScriptExecutor::default());
+    // Counts metadata() probes so we can prove the obligation backstop ran on resume.
+    let metadata_calls = Arc::new(AtomicUsize::new(0));
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_WITH_CREDENTIAL_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
-        // ApprovalThenGrantAuthorizer: grants on resume but injects NO secret
-        // obligation of its own.  Credential enforcement on the resume path must
-        // come solely from the manifest runtime_credentials backstop.
+        // ApprovalThenGrantAuthorizer: requires approval first, grants on resume, and
+        // injects NO secret obligation of its own. Credential enforcement on the resume
+        // path comes solely from the manifest runtime_credentials backstop.
         Arc::new(ApprovalThenGrantAuthorizer),
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
@@ -8405,10 +8401,12 @@ async fn invoke_capability_secret_store_error_skips_preflight() {
     .with_run_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases))
-    // Wire the always-erroring store — pre-flight must skip on Err, not return AuthRequired.
-    // The secret is also genuinely absent (AlwaysErrorSecretStore never stores),
-    // so the manifest backstop will catch it on resume.
-    .with_secret_store(Arc::new(AlwaysErrorSecretStore))
+    // Wire the erroring, call-counting store — the pre-flight must skip on Err (not
+    // return AuthRequired), and the dispatch-time obligation backstop must fail closed
+    // when it re-probes the same erroring store on resume.
+    .with_secret_store(Arc::new(CountingErrorSecretStore {
+        metadata_calls: Arc::clone(&metadata_calls),
+    }))
     .with_script_runtime(Arc::clone(&script_runtime));
     let runtime = services.host_runtime_for_local_testing();
     let context = execution_context_without_grants();
@@ -8456,17 +8454,22 @@ async fn invoke_capability_secret_store_error_skips_preflight() {
         "script executor must not be reached when blocked at approval gate"
     );
 
+    // Reset the metadata probe counter: any probe observed from here on can only
+    // come from the resume path's obligation handler (resume does not run pre-flight).
+    metadata_calls.store(0, Ordering::SeqCst);
+
     // Step 2: approve WITH the required secret handle granted, so dispatch
     // authorization PASSES and the resumed call reaches the dispatch-time credential
     // backstop inside the obligation handler (not the earlier grant-matching gate).
     // The grant lists `script_api_token` (the manifest's required runtime_credential)
-    // plus the UseSecret effect, so the authorizer emits the secret-injection
-    // obligation. On resume, BuiltinObligationHandler::preflight_secret_injection
-    // probes the AlwaysErrorSecretStore via `metadata()`, which errors — and the
-    // backstop FAILS CLOSED (`secret_obligation_failed`) instead of injecting. This is
-    // the exact PR contract: a transient store error during the pre-flight skip cannot
-    // let an uncredentialed call execute, because the dispatch-time obligation backstop
-    // re-checks presence and fails closed on the same store error.
+    // plus the UseSecret effect, so grant evaluation against the manifest emits the
+    // secret-injection obligation (ApprovalThenGrantAuthorizer adds no obligation of its
+    // own). On resume, BuiltinObligationHandler::preflight_secret_injection probes the
+    // erroring store via `metadata()`, which errors — and the backstop FAILS CLOSED
+    // (`secret_obligation_failed`) instead of injecting. This is the exact PR contract:
+    // a transient store error during the pre-flight skip cannot let an uncredentialed
+    // call execute, because the dispatch-time obligation backstop re-checks presence and
+    // fails closed on the same store error.
     services
         .approval_resolver()
         .expect("approval resolver should be configured")
@@ -8499,13 +8502,21 @@ async fn invoke_capability_secret_store_error_skips_preflight() {
         .await
         .unwrap();
 
-    // The dispatch-time obligation backstop (BuiltinObligationHandler::
-    // preflight_secret_injection) re-probes the required secret via `metadata()`.
-    // Against AlwaysErrorSecretStore that probe errors and the handler fails closed
-    // (`secret_obligation_failed`), so the resumed dispatch is blocked — proving a
-    // transient store error in the pre-flight skip path does not allow an
-    // uncredentialed call to execute. ApprovalThenGrantAuthorizer injects no secret
-    // obligation itself; the enforcement is the manifest runtime_credentials backstop.
+    // Prove the resume actually reached the obligation backstop: it must have probed
+    // the store via `metadata()` at least once on the resume path. A premature
+    // authorization denial (the wrong reason) would block BEFORE the obligation handler
+    // and never probe the store — so this distinguishes the two even though both map to
+    // `RuntimeFailureKind::Authorization`.
+    assert!(
+        metadata_calls.load(Ordering::SeqCst) >= 1,
+        "resume must reach the dispatch-time obligation backstop and re-probe the store; \
+         a zero metadata count means authorization was denied before the backstop ran"
+    );
+
+    // The backstop re-probes the required secret via `metadata()`. Against the erroring
+    // store that probe fails, and the handler fails closed (`secret_obligation_failed`),
+    // so the resumed dispatch is blocked — proving a transient store error in the
+    // pre-flight skip path does not allow an uncredentialed call to execute.
     match &resumed {
         RuntimeCapabilityOutcome::Failed(failure) => {
             assert_eq!(

@@ -2699,6 +2699,60 @@ required = false
         );
     }
 
+    /// A REQUIRED `product_auth_account`-source credential must NOT be pushed into
+    /// `required_secrets` (its handle is only an injection slot that the account
+    /// resolver stages later, so a pre-flight `metadata()` probe would false-positive
+    /// `AuthRequired` for an already-connected account). It MUST still surface in
+    /// `credential_requirements` so the auth payload can describe the product-auth need.
+    #[test]
+    fn credential_requirements_extraction_excludes_required_product_auth_account() {
+        const MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "script"
+name = "Script With Product-Auth Credential"
+version = "0.1.0"
+description = "Script extension that requires a product-auth account credential"
+trust = "untrusted"
+
+[runtime]
+kind = "script"
+runner = "sandboxed_process"
+command = "echo"
+args = []
+
+[[capabilities]]
+id = "script.echo"
+description = "Echo through Script"
+effects = ["dispatch_capability", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/test/input.v1.json"
+output_schema_ref = "schemas/test/output.v1.json"
+prompt_doc_ref = "prompts/test.md"
+
+[[capabilities.runtime_credentials]]
+handle = "github_runtime_token"
+source = { type = "product_auth_account", provider = "github" }
+audience = { scheme = "https", host_pattern = "api.github.com" }
+target = { type = "header", name = "authorization", prefix = "Bearer " }
+required = true
+"#;
+        let descriptor = build_descriptor_for_manifest(MANIFEST);
+
+        let (required_secrets, credential_requirements) =
+            capability_credential_requirements(&descriptor);
+
+        assert!(
+            required_secrets.is_empty(),
+            "a required product_auth_account credential must be excluded from required_secrets \
+             (the slot handle is not a presence-checkable secret); got {required_secrets:?}"
+        );
+        assert!(
+            !credential_requirements.is_empty(),
+            "a required product_auth_account credential must still surface in credential_requirements"
+        );
+    }
+
     #[test]
     fn runtime_failure_summary_is_bounded_and_blank_messages_are_not_safe() {
         let blank = RuntimeCapabilityFailure::new(
