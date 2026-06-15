@@ -59,6 +59,7 @@ HEADED=1 pytest scenarios/
 | `test_reborn_webui_v2_smoke.py` | Reborn WebChat v2 (`ironclaw-reborn serve`) shell load, bearer/`?token=` auth scope, text turns, timeline pagination, SSE run lifecycle, thread list/delete |
 | `test_reborn_webui_v2_tool_gates.py` | Reborn v2 capability path: tool-turn dispatch + `tool_result_reference`, run cancellation, approval-gate approve/deny via `resolve_gate` |
 | `test_reborn_webui_v2_streaming.py` | Reborn v2 transports/protocol edges: WebSocket fanout + same-origin/bearer gate, SSE `Last-Event-ID` resume, per-caller SSE concurrency-cap 429, oversized-body 413, malformed-id 400 |
+| `test_reborn_webui_v2_management.py` | Reborn v2 management surfaces: extension list/registry/setup/install-activate-remove, skills list/search/install round-trip, LLM provider upsert/set-active/test-connection/list-models/delete against the mock, automations + connectable-channels read projections |
 
 ## `helpers.py`
 
