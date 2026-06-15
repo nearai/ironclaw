@@ -158,7 +158,7 @@ async fn default_runtime_uses_user_grantee_persistent_policy_as_dispatch_authori
 }
 
 #[tokio::test]
-async fn default_runtime_uses_legacy_thread_scoped_policy_as_dispatch_authority() {
+async fn default_runtime_uses_legacy_thread_scoped_policy_after_thread_change() {
     let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
@@ -169,11 +169,14 @@ async fn default_runtime_uses_legacy_thread_scoped_policy_as_dispatch_authority(
         &scoped,
     )));
     let mut context = execution_context_without_grants();
-    let legacy_thread = ThreadId::new("thread-legacy").unwrap();
+    let legacy_thread = ThreadId::new("thread-original").unwrap();
+    let current_thread = ThreadId::new("thread-current").unwrap();
     context.project_id = None;
-    context.thread_id = Some(legacy_thread.clone());
+    context.thread_id = Some(current_thread.clone());
     context.resource_scope.project_id = None;
-    context.resource_scope.thread_id = Some(legacy_thread);
+    context.resource_scope.thread_id = Some(current_thread);
+    let mut legacy_resource_scope = context.resource_scope.clone();
+    legacy_resource_scope.thread_id = Some(legacy_thread);
 
     let canonical_key = PersistentApprovalPolicyKey::new(
         &context.resource_scope,
@@ -184,7 +187,7 @@ async fn default_runtime_uses_legacy_thread_scoped_policy_as_dispatch_authority(
     let legacy_key = PersistentApprovalPolicyKey {
         scope: {
             let mut legacy_scope = canonical_key.scope.clone();
-            legacy_scope.thread_id = context.resource_scope.thread_id.clone();
+            legacy_scope.thread_id = legacy_resource_scope.thread_id.clone();
             legacy_scope
         },
         action: canonical_key.action,
@@ -211,7 +214,7 @@ async fn default_runtime_uses_legacy_thread_scoped_policy_as_dispatch_authority(
     };
     scoped
         .put(
-            &context.resource_scope,
+            &legacy_resource_scope,
             &legacy_policy_path_for_test(&legacy_key),
             Entry::bytes(serde_json::to_vec_pretty(&policy).expect("serialize policy"))
                 .with_content_type(ContentType::json()),

@@ -20,6 +20,9 @@ use thiserror::Error;
 const POLICY_PREFIX: &str = "/approvals/persistent";
 const POLICY_PATH_CACHE_MAX_ENTRIES: usize = 1024;
 const POLICY_CAS_RETRY_ATTEMPTS: usize = 3;
+const LEGACY_POLICY_SCAN_MAX_THREADS: usize = 1024;
+const LEGACY_POLICY_SCAN_MAX_ACTION_DIRS: usize = 8;
+const LEGACY_POLICY_SCAN_MAX_POLICIES_PER_ACTION: usize = 1024;
 const PERSISTENT_APPROVAL_GRANT_ISSUER: &str = "persistent-approval";
 
 /// Returns whether an extension manifest permission mode may be upgraded by an
@@ -437,10 +440,24 @@ where
         let legacy_path = legacy_policy_path(&legacy_key)?;
         let legacy_scope = resource_scope_for_policy_key(&legacy_key);
 
-        Ok(self
+        if let Some(policy) = self
             .lookup_versioned_at(&legacy_key, &legacy_scope, &legacy_path)
             .await?
-            .map(|(policy, _version)| policy))
+            .map(|(policy, _version)| policy)
+        {
+            return Ok(Some(policy));
+        }
+
+        if scope.project_id.is_none()
+            && scope.thread_id.is_some()
+            && let Some((policy, _version)) = self
+                .lookup_legacy_no_project_thread_scoped(scope, key)
+                .await?
+        {
+            return Ok(Some(policy));
+        }
+
+        Ok(None)
     }
 
     async fn revoke(
@@ -530,6 +547,82 @@ where
         deserialize_versioned_policy(key, versioned)
     }
 
+    async fn lookup_legacy_no_project_thread_scoped(
+        &self,
+        scope: &ResourceScope,
+        key: &PersistentApprovalPolicyKey,
+    ) -> Result<Option<(PersistentApprovalPolicy, RecordVersion)>, PersistentApprovalPolicyError>
+    {
+        let Some(root) = legacy_thread_root_path(&key.scope)? else {
+            return Ok(None);
+        };
+
+        let thread_dirs = match self
+            .filesystem
+            .list_dir_bounded(scope, &root, LEGACY_POLICY_SCAN_MAX_THREADS)
+            .await
+        {
+            Ok(entries) => entries,
+            Err(FilesystemError::NotFound { .. }) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+
+        for thread_dir in thread_dirs
+            .into_iter()
+            .filter(|entry| entry.file_type == ironclaw_filesystem::FileType::Directory)
+        {
+            let action_root = scoped_child_path(&root, &thread_dir.name)?;
+            let action_dirs = match self
+                .filesystem
+                .list_dir_bounded(scope, &action_root, LEGACY_POLICY_SCAN_MAX_ACTION_DIRS)
+                .await
+            {
+                Ok(entries) => entries,
+                Err(FilesystemError::NotFound { .. }) => continue,
+                Err(error) => return Err(error.into()),
+            };
+
+            for action_dir in action_dirs
+                .into_iter()
+                .filter(|entry| entry.file_type == ironclaw_filesystem::FileType::Directory)
+            {
+                if action_dir.name != key.action.as_path_segment() {
+                    continue;
+                }
+
+                let policy_dir = scoped_child_path(&action_root, &action_dir.name)?;
+                let policy_entries = match self
+                    .filesystem
+                    .list_dir_bounded(
+                        scope,
+                        &policy_dir,
+                        LEGACY_POLICY_SCAN_MAX_POLICIES_PER_ACTION,
+                    )
+                    .await
+                {
+                    Ok(entries) => entries,
+                    Err(FilesystemError::NotFound { .. }) => continue,
+                    Err(error) => return Err(error.into()),
+                };
+
+                for policy_entry in policy_entries
+                    .into_iter()
+                    .filter(|entry| entry.file_type == ironclaw_filesystem::FileType::File)
+                {
+                    let policy_path = scoped_child_path(&policy_dir, &policy_entry.name)?;
+                    let Some(versioned) = self.filesystem.get(scope, &policy_path).await? else {
+                        continue;
+                    };
+                    if let Some(policy) = deserialize_legacy_versioned_policy(key, versioned)? {
+                        return Ok(Some(policy));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
     fn mutation_lock(&self, key: &PersistentApprovalPolicyKey) -> Arc<tokio::sync::Mutex<()>> {
         let mut locks = self
             .mutation_locks
@@ -617,6 +710,18 @@ fn deserialize_versioned_policy(
             expected = ?key,
             "persistent approval policy key mismatch"
         );
+        Ok(None)
+    }
+}
+
+fn deserialize_legacy_versioned_policy(
+    key: &PersistentApprovalPolicyKey,
+    versioned: VersionedEntry,
+) -> Result<Option<(PersistentApprovalPolicy, RecordVersion)>, PersistentApprovalPolicyError> {
+    let policy = deserialize::<PersistentApprovalPolicy>(&versioned.entry.body)?;
+    if legacy_policy_matches_lookup(&policy.key, key) {
+        Ok(Some((policy, versioned.version)))
+    } else {
         Ok(None)
     }
 }
@@ -722,6 +827,42 @@ fn legacy_thread_scoped_key(
         capability_id: key.capability_id.clone(),
         grantee: key.grantee.clone(),
     })
+}
+
+fn legacy_thread_root_path(
+    scope: &PersistentApprovalScope,
+) -> Result<Option<ScopedPath>, PersistentApprovalPolicyError> {
+    if scope.project_id.is_some() {
+        return Ok(None);
+    }
+
+    let mut path = String::from(POLICY_PREFIX);
+    if let Some(agent_id) = &scope.agent_id {
+        path.push_str(&format!("/agents/{agent_id}"));
+    }
+    path.push_str("/threads");
+    Ok(Some(ScopedPath::new(path).map_err(invalid_path)?))
+}
+
+fn scoped_child_path(
+    parent: &ScopedPath,
+    child: &str,
+) -> Result<ScopedPath, PersistentApprovalPolicyError> {
+    ScopedPath::new(format!("{parent}/{child}")).map_err(invalid_path)
+}
+
+fn legacy_policy_matches_lookup(
+    stored: &PersistentApprovalPolicyKey,
+    expected: &PersistentApprovalPolicyKey,
+) -> bool {
+    stored.action == expected.action
+        && stored.capability_id == expected.capability_id
+        && stored.grantee == expected.grantee
+        && stored.scope.tenant_id == expected.scope.tenant_id
+        && stored.scope.user_id == expected.scope.user_id
+        && stored.scope.agent_id == expected.scope.agent_id
+        && stored.scope.project_id == expected.scope.project_id
+        && stored.scope.thread_id.is_some()
 }
 
 fn serialize<T>(value: &T) -> Result<Vec<u8>, PersistentApprovalPolicyError>
@@ -1139,6 +1280,61 @@ mod tests {
             .await
             .expect("lookup legacy policy")
             .expect("legacy thread-scoped policy still reachable");
+
+        assert_eq!(reloaded, policy);
+        assert!(reloaded.active_grant().is_some());
+    }
+
+    #[tokio::test]
+    async fn filesystem_no_project_legacy_thread_scoped_policy_survives_thread_change() {
+        // Regression for the unresolved PR review comment on #4835:
+        // the current thread may differ from the one that originally stored
+        // the legacy no-project approval, but lookup_with_scope should still
+        // recover the record by scanning the thread-scoped legacy layout.
+        let backend = Arc::new(InMemoryBackend::new());
+        let scoped = scoped_fs(Arc::clone(&backend), "tenant-a", "alice");
+        let store = FilesystemPersistentApprovalPolicyStore::new(Arc::clone(&scoped));
+        let legacy_scope = scope(None, Some("thread-original"));
+        let lookup_scope = scope(None, Some("thread-current"));
+        let canonical_key = key_for(&lookup_scope);
+        let legacy_key = PersistentApprovalPolicyKey {
+            scope: PersistentApprovalScope {
+                thread_id: legacy_scope.thread_id.clone(),
+                ..PersistentApprovalScope::from_resource_scope(&legacy_scope)
+            },
+            action: canonical_key.action,
+            capability_id: canonical_key.capability_id.clone(),
+            grantee: canonical_key.grantee.clone(),
+        };
+        let policy = PersistentApprovalPolicy {
+            key: legacy_key.clone(),
+            grant_id: CapabilityGrantId::new(),
+            approved_by: Principal::User(UserId::new("alice").unwrap()),
+            constraints: GrantConstraints {
+                allowed_effects: vec![EffectKind::DispatchCapability],
+                mounts: MountView::default(),
+                network: NetworkPolicy::default(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
+                expires_at: None,
+                max_invocations: None,
+            },
+            source_approval_request_id: Some(ApprovalRequestId::new()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            revoked_at: None,
+        };
+        let legacy_path = legacy_policy_path(&legacy_key).expect("legacy path");
+        store
+            .write_policy_raw(&legacy_scope, &legacy_path, &policy, CasExpectation::Absent)
+            .await
+            .expect("write legacy policy");
+
+        let reloaded = store
+            .lookup_with_scope(&lookup_scope, &canonical_key)
+            .await
+            .expect("lookup legacy policy")
+            .expect("legacy thread-scoped policy still reachable after thread change");
 
         assert_eq!(reloaded, policy);
         assert!(reloaded.active_grant().is_some());
