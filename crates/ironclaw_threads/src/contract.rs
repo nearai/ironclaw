@@ -418,3 +418,39 @@ pub struct UpdateThreadGoalRequest {
     pub thread_id: ThreadId,
     pub goal: ThreadGoal,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scope(owner: Option<UserId>) -> ThreadScope {
+        ThreadScope {
+            tenant_id: TenantId::new("acme").unwrap(),
+            agent_id: AgentId::new("agent-1").unwrap(),
+            project_id: None,
+            owner_user_id: owner,
+            mission_id: None,
+        }
+    }
+
+    #[test]
+    fn to_resource_scope_falls_back_to_system_sentinel_user_without_owner() {
+        // PR review finding #4: drive the real caller. An ownerless thread
+        // scope must resolve `user_id` to the system sentinel, while the real
+        // tenant keeps the scope from classifying as fully system.
+        let resource = scope(None).to_resource_scope();
+        assert_eq!(
+            resource.user_id.as_str(),
+            ironclaw_host_api::SYSTEM_RESERVED_ID
+        );
+        assert_eq!(resource.tenant_id.as_str(), "acme");
+        assert!(!resource.is_system());
+    }
+
+    #[test]
+    fn to_resource_scope_uses_explicit_owner_when_present() {
+        let resource = scope(Some(UserId::new("alice").unwrap())).to_resource_scope();
+        assert_eq!(resource.user_id.as_str(), "alice");
+        assert!(!resource.is_system());
+    }
+}

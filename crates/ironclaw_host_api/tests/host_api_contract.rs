@@ -219,7 +219,7 @@ fn system_resource_scope_round_trips_through_json() {
     assert_eq!(decoded.user_id.as_str(), SYSTEM_RESERVED_ID);
 
     // Sentinel stays unreachable through ordinary construction; only
-    // `from_trusted` may produce it, so user input can never collide.
+    // `system_sentinel()` may mint it, so user input can never collide.
     assert!(TenantId::new(SYSTEM_RESERVED_ID).is_err());
     assert!(UserId::new(SYSTEM_RESERVED_ID).is_err());
 }
@@ -237,13 +237,18 @@ fn system_sentinel_constructor_produces_the_reserved_value() {
 }
 
 #[test]
-fn non_opted_in_id_kinds_reject_system_sentinel_on_the_wire() {
-    // Only TenantId and UserId may admit the sentinel during deserialization
-    // (see `accepts_system_sentinel` in ids.rs). Every other id kind must
-    // reject it — a regression in the macro would silently widen the
-    // authority-elevation surface, so each kind asserts independently.
+fn bare_id_kinds_reject_system_sentinel_on_the_wire() {
+    // SECURITY GUARD (PR review finding #1): NO bare id type — not even the
+    // sentinel-aware TenantId/UserId — admits the sentinel during its own
+    // `Deserialize`. Sentinel admission lives exclusively on `ResourceScope`'s
+    // field-level `deserialize_with` (a TRUSTED-PERSISTENCE shape). A bare
+    // TenantId/UserId decoded from an untrusted body must reject the sentinel,
+    // otherwise any endpoint deserializing one becomes an authority-elevation
+    // vector. Each kind asserts independently so a macro regression is caught.
     let raw = json!(SYSTEM_RESERVED_ID);
 
+    assert!(serde_json::from_value::<TenantId>(raw.clone()).is_err());
+    assert!(serde_json::from_value::<UserId>(raw.clone()).is_err());
     assert!(serde_json::from_value::<AgentId>(raw.clone()).is_err());
     assert!(serde_json::from_value::<ProjectId>(raw.clone()).is_err());
     assert!(serde_json::from_value::<MissionId>(raw.clone()).is_err());

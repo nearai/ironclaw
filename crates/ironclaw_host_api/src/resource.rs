@@ -29,7 +29,20 @@ pub const SYSTEM_RESERVED_ID: &str = "\x1fSYSTEM\x1f";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceScope {
+    // SECURITY: `ResourceScope` is a TRUSTED-PERSISTENCE shape. It is serialized
+    // into durable records (e.g. system-scoped secret entries) and read back; it
+    // is NEVER deserialized from an untrusted HTTP request body. A persisted
+    // system scope must round-trip, so these two fields admit the sentinel via
+    // their own `deserialize_with`. The exception stays scoped to these two
+    // fields only — the shared id `Deserialize` keeps rejecting the sentinel's
+    // control bytes everywhere else (locked by
+    // `non_opted_in_id_kinds_reject_system_sentinel_on_the_wire` and the bare
+    // TenantId/UserId wire-rejection tests), so untrusted input can never mint a
+    // sentinel-bearing id. Do not add a bare `TenantId`/`UserId`/`ResourceScope`
+    // field to any untrusted request DTO.
+    #[serde(deserialize_with = "deserialize_system_aware_tenant_id")]
     pub tenant_id: TenantId,
+    #[serde(deserialize_with = "deserialize_system_aware_user_id")]
     pub user_id: UserId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<AgentId>,
@@ -37,6 +50,30 @@ pub struct ResourceScope {
     pub mission_id: Option<MissionId>,
     pub thread_id: Option<ThreadId>,
     pub invocation_id: InvocationId,
+}
+
+fn deserialize_system_aware_tenant_id<'de, D>(deserializer: D) -> Result<TenantId, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    if raw == SYSTEM_RESERVED_ID {
+        Ok(TenantId::system_sentinel())
+    } else {
+        TenantId::new(raw).map_err(serde::de::Error::custom)
+    }
+}
+
+fn deserialize_system_aware_user_id<'de, D>(deserializer: D) -> Result<UserId, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    if raw == SYSTEM_RESERVED_ID {
+        Ok(UserId::system_sentinel())
+    } else {
+        UserId::new(raw).map_err(serde::de::Error::custom)
+    }
 }
 
 impl ResourceScope {

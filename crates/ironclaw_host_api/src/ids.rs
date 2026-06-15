@@ -105,7 +105,12 @@ macro_rules! string_id {
     ($name:ident, $kind:literal, $validator:ident, accepts_system_sentinel) => {
         string_id!(@build $name, $kind, $validator);
         string_id!(@sentinel_constructor $name);
-        string_id!(@deserialize_with_sentinel $name);
+        // Wire deserialize stays STRICT even for sentinel-aware id kinds: a
+        // bare `TenantId`/`UserId` decoded from untrusted JSON must reject the
+        // sentinel. Sentinel admission is scoped to `ResourceScope`'s own
+        // field-level `deserialize_with` (a TRUSTED-PERSISTENCE shape), never
+        // to the id type itself. See `ResourceScope` docs in resource.rs.
+        string_id!(@deserialize_strict $name);
     };
     (@build $name:ident, $kind:literal, $validator:ident) => {
         #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -118,10 +123,11 @@ macro_rules! string_id {
                 Ok(Self(value))
             }
 
-            /// Construct without validation. Reserved for sentinel values
-            /// that intentionally contain bytes the validator rejects (e.g.
-            /// [`crate::SYSTEM_RESERVED_ID`]), so no caller-supplied
-            /// identifier can collide with them.
+            /// Construct without validation. For non-sentinel trusted string
+            /// rehydration (e.g. DB row values handed over from a typed
+            /// upstream). To mint the system sentinel
+            /// ([`crate::SYSTEM_RESERVED_ID`]), use `system_sentinel()` instead
+            /// — it is the single `git grep`-able authority-elevating path.
             pub fn from_trusted(value: String) -> Self {
                 Self(value)
             }
@@ -178,22 +184,6 @@ macro_rules! string_id {
             /// no authority decision may key on a single field.
             pub fn system_sentinel() -> Self {
                 Self::from_trusted(crate::SYSTEM_RESERVED_ID.to_string())
-            }
-        }
-    };
-    (@deserialize_with_sentinel $name:ident) => {
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: serde::Deserializer<'de>,
-            {
-                let value = String::deserialize(deserializer)?;
-                // Admit the system sentinel; `Self::new` rejects its
-                // control bytes, so JSON round-trip needs an explicit bypass.
-                if value == crate::SYSTEM_RESERVED_ID {
-                    return Ok(Self::system_sentinel());
-                }
-                Self::new(value).map_err(serde::de::Error::custom)
             }
         }
     };

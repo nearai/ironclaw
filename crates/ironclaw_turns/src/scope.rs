@@ -150,4 +150,39 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn to_resource_scope_falls_back_to_system_sentinel_user_without_owner() {
+        // PR review finding #3: drive the real caller. A turn scope anchored at
+        // tenant level with no explicit owner must resolve `user_id` to the
+        // system sentinel — and because the tenant is a real id, the resulting
+        // scope must NOT classify as fully system (is_system needs both fields).
+        let scope = TurnScope::new(
+            TenantId::new("acme").unwrap(),
+            None,
+            None,
+            ThreadId::new("thread-1").unwrap(),
+        );
+        let resource = scope.to_resource_scope();
+        assert_eq!(
+            resource.user_id.as_str(),
+            ironclaw_host_api::SYSTEM_RESERVED_ID
+        );
+        assert_eq!(resource.tenant_id.as_str(), "acme");
+        assert!(!resource.is_system());
+    }
+
+    #[test]
+    fn to_resource_scope_uses_explicit_owner_when_present() {
+        let scope = TurnScope::new_with_owner(
+            TenantId::new("acme").unwrap(),
+            None,
+            None,
+            ThreadId::new("thread-1").unwrap(),
+            Some(UserId::new("alice").unwrap()),
+        );
+        let resource = scope.to_resource_scope();
+        assert_eq!(resource.user_id.as_str(), "alice");
+        assert!(!resource.is_system());
+    }
 }
