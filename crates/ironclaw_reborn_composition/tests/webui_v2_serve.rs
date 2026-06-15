@@ -1361,19 +1361,20 @@ async fn trace_credits_missing_bearer_returns_401() {
 #[tokio::test]
 async fn trace_credits_reports_enrolled_for_caller_with_enabled_policy() {
     use ironclaw_reborn_traces::contribution::{
-        StandingTraceContributionPolicy, write_trace_policy_for_scope,
+        StandingTraceContributionPolicy, trace_scope_key, write_trace_policy_for_scope,
     };
 
-    // The authenticated user id IS the trace scope; write an enabled
-    // standing policy for a unique per-test scope and assert the route
-    // reflects enrollment for that caller only.
+    // Trace state is keyed by the tenant-scoped composite, so enroll under
+    // `trace_scope_key(TENANT, user)` and assert the route reflects enrollment
+    // for that caller only.
     let user_id = unique_trace_credits_user();
-    let _cleanup = TraceScopeCleanup(user_id.clone());
+    let scope = trace_scope_key(TENANT, user_id.as_str());
+    let _cleanup = TraceScopeCleanup(scope.clone());
     let policy = StandingTraceContributionPolicy {
         enabled: true,
         ..StandingTraceContributionPolicy::default()
     };
-    write_trace_policy_for_scope(Some(user_id.as_str()), &policy).expect("write trace policy");
+    write_trace_policy_for_scope(Some(scope.as_str()), &policy).expect("write trace policy");
 
     let (app, _services) = build_app_with_authenticator(Arc::new(FixedUserToken {
         user_id: user_id.clone(),
