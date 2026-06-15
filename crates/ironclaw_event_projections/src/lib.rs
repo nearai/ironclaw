@@ -1326,8 +1326,10 @@ impl ReplayEventProjectionService {
     /// This is the bounded-memory replacement for collecting the entire
     /// prefix into a `Vec`. The fold visits each page in sequence and only
     /// retains state for invocations the caller already saw in the current
-    /// page, so allocation is `O(touched.len())` regardless of how many
-    /// runtime events the stream has produced. A hard cap of
+    /// page plus direct child capability activities of touched parent runs.
+    /// Emitted capability activities are bounded by `capability_activity_output_limit`
+    /// after the fold, so one terminal run event cannot return an unbounded
+    /// historical child-activity set. A hard cap of
     /// [`STATE_REPLAY_MAX_EVENTS`] events scanned per call protects against
     /// pathological histories — when exceeded, the caller is told to rebase.
     async fn fold_runtime_prefix(
@@ -1335,8 +1337,11 @@ impl ReplayEventProjectionService {
         scope: &ProjectionScope,
         until: EventCursor,
         touched: &HashSet<InvocationId>,
+        capability_activity_output_limit: usize,
     ) -> Result<RuntimeProjectionState, ProjectionError> {
-        let mut state = RuntimeProjectionState::without_capability_activity_output_limit();
+        let mut state = RuntimeProjectionState::with_capability_activity_output_limit(
+            capability_activity_output_limit,
+        );
         if touched.is_empty() || until == EventCursor::origin() {
             return Ok(state);
         }
@@ -1442,6 +1447,7 @@ impl EventProjectionService for ReplayEventProjectionService {
         request: ProjectionRequest,
     ) -> Result<ProjectionReplay, ProjectionError> {
         let scope = request.scope.clone();
+        let limit = request.limit;
         let page = self.read_runtime(request).await?;
         let capability_activity_transitions = page
             .entries
@@ -1457,7 +1463,7 @@ impl EventProjectionService for ReplayEventProjectionService {
             (Vec::new(), Vec::new())
         } else {
             let folded = self
-                .fold_runtime_prefix(&scope, page.next_cursor.runtime, &touched_runs)
+                .fold_runtime_prefix(&scope, page.next_cursor.runtime, &touched_runs, limit)
                 .await?;
             folded.into_parts()
         };

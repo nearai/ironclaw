@@ -8,6 +8,8 @@ use crate::{
     RunStatusProjection,
 };
 
+const CANCELLED_ACTIVITY_ERROR_KIND: &str = "cancelled";
+
 pub(crate) struct RuntimeProjectionState {
     runs: HashMap<InvocationId, RunStatusProjection>,
     capability_activities: HashMap<InvocationId, CapabilityActivityProjection>,
@@ -15,14 +17,6 @@ pub(crate) struct RuntimeProjectionState {
 }
 
 impl RuntimeProjectionState {
-    pub(crate) fn without_capability_activity_output_limit() -> Self {
-        Self {
-            runs: HashMap::new(),
-            capability_activities: HashMap::new(),
-            capability_activity_output_limit: None,
-        }
-    }
-
     pub(crate) fn with_capability_activity_output_limit(limit: usize) -> Self {
         Self {
             runs: HashMap::new(),
@@ -283,7 +277,8 @@ fn apply_loop_terminal_to_child_activities(
         return;
     };
     let run_id = event.scope.invocation_id;
-    let sanitized_error_kind = event.error_kind.clone().map(sanitize_error_kind);
+    let terminal_error_kind =
+        child_activity_error_kind_for_loop_terminal(event.kind, event.error_kind.as_deref());
     for activity in activities.values_mut() {
         if activity.run_id != Some(run_id) || activity_is_terminal(activity.status) {
             continue;
@@ -291,8 +286,8 @@ fn apply_loop_terminal_to_child_activities(
         activity.status = status;
         if status == CapabilityActivityStatus::Completed {
             activity.error_kind = None;
-        } else if sanitized_error_kind.is_some() {
-            activity.error_kind = sanitized_error_kind.clone();
+        } else if let Some(error_kind) = terminal_error_kind.clone() {
+            activity.error_kind = Some(error_kind);
         }
         activity.last_cursor = entry.cursor;
         activity.updated_at = event.timestamp;
@@ -307,6 +302,22 @@ fn child_activity_status_for_loop_terminal(
         RuntimeEventKind::LoopCancelled | RuntimeEventKind::LoopFailed => {
             Some(CapabilityActivityStatus::Failed)
         }
+        _ => None,
+    }
+}
+
+fn child_activity_error_kind_for_loop_terminal(
+    kind: RuntimeEventKind,
+    error_kind: Option<&str>,
+) -> Option<String> {
+    match kind {
+        RuntimeEventKind::LoopCompleted => None,
+        RuntimeEventKind::LoopCancelled => Some(
+            error_kind
+                .map(sanitize_error_kind)
+                .unwrap_or_else(|| CANCELLED_ACTIVITY_ERROR_KIND.to_string()),
+        ),
+        RuntimeEventKind::LoopFailed => error_kind.map(sanitize_error_kind),
         _ => None,
     }
 }

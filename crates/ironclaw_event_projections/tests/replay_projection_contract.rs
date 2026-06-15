@@ -1099,6 +1099,10 @@ async fn replay_projection_marks_capability_activity_failed_when_loop_is_cancell
         snapshot.capability_activities[0].status,
         CapabilityActivityStatus::Failed
     );
+    assert_eq!(
+        snapshot.capability_activities[0].error_kind.as_deref(),
+        Some("cancelled")
+    );
     assert_eq!(snapshot.capability_activities[0].capability_id, capability);
 
     let replay = service
@@ -1124,6 +1128,62 @@ async fn replay_projection_marks_capability_activity_failed_when_loop_is_cancell
         replay.capability_activities[0].status,
         CapabilityActivityStatus::Failed
     );
+    assert_eq!(
+        replay.capability_activities[0].error_kind.as_deref(),
+        Some("cancelled")
+    );
+}
+
+#[tokio::test]
+async fn replay_projection_updates_bound_loop_cancelled_child_activities() {
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let service = ReplayEventProjectionService::new(Arc::clone(&log));
+    let run_invocation = InvocationId::new();
+    let run_scope = scope_for_thread_with_invocation(
+        ThreadId::new("thread-tool-activity-cancelled-window").unwrap(),
+        run_invocation,
+    );
+    let capability = capability_id();
+    let mut last_child_cursor = EventCursor::origin();
+
+    for _ in 0..5 {
+        let mut child_scope = run_scope.clone();
+        child_scope.invocation_id = InvocationId::new();
+        let mut requested =
+            RuntimeEvent::capability_activity_requested(child_scope, capability.clone());
+        requested.parent_invocation_id = Some(run_invocation);
+        last_child_cursor = log.append(requested).await.unwrap().cursor;
+    }
+    log.append(RuntimeEvent::loop_cancelled(
+        run_scope.clone(),
+        capability.clone(),
+    ))
+    .await
+    .unwrap();
+
+    let projection_scope = ProjectionScope::from_resource_scope(&run_scope);
+    let replay = service
+        .updates(ProjectionRequest {
+            scope: projection_scope.clone(),
+            after: Some(ProjectionCursor::for_scope(
+                projection_scope,
+                last_child_cursor,
+            )),
+            limit: 2,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(replay.updates.len(), 1);
+    assert_eq!(
+        replay.capability_activities.len(),
+        2,
+        "updates must not emit every historical child activity when one terminal run event is touched"
+    );
+    assert!(replay.capability_activities.iter().all(|activity| {
+        activity.status == CapabilityActivityStatus::Failed
+            && activity.error_kind.as_deref() == Some("cancelled")
+    }));
 }
 
 #[tokio::test]
