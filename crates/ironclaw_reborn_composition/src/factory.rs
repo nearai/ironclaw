@@ -47,8 +47,8 @@ use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
 use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
 use ironclaw_host_api::runtime_policy::{FilesystemBackendKind, ProcessBackendKind, SecretMode};
 use ironclaw_host_api::{
-    EffectKind, ExtensionId, HostPath, MountPermissions, MountView, PackageId, RuntimeHttpEgress,
-    UserId, VirtualPath,
+    AgentId, EffectKind, ExtensionId, HostPath, MountPermissions, MountView, PackageId,
+    RuntimeHttpEgress, TenantId, UserId, VirtualPath,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{HostApiError, MountAlias, MountGrant, ResourceScope};
@@ -72,7 +72,9 @@ use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRu
 ))]
 use ironclaw_outbound::{InMemoryDeliveredGateRouteStore, InMemoryTriggeredRunDeliveryStore};
 use ironclaw_processes::ProcessServices;
-use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
+use ironclaw_product_workflow::{
+    LifecycleProductSurfaceContext, ProductAuthTurnGateResumeDispatcher,
+};
 use ironclaw_resources::InMemoryResourceGovernor;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_resources::{
@@ -121,6 +123,7 @@ use crate::local_dev_mounts::{
 use crate::mcp::hosted_http_mcp_runtime;
 use crate::product_auth_providers::{OAuthProviderComposition, compose_provider_client};
 use crate::product_auth_runtime_credentials::ProductAuthRuntimeCredentialResolver;
+use crate::runtime_input::RebornRuntimeIdentity;
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
     RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornReadinessDiagnostic,
@@ -392,7 +395,7 @@ pub struct RebornLocalDevApprovalTestParts {
 }
 
 pub(crate) struct RebornLocalRuntimeServices {
-    pub(crate) owner_user_id: UserId,
+    pub(crate) extension_lifecycle_surface_context: LifecycleProductSurfaceContext,
     pub(crate) approval_requests: Arc<LocalDevApprovalRequestStore>,
     pub(crate) capability_leases: Arc<LocalDevCapabilityLeaseStore>,
     // Used in approval_test_support (cfg(test) only); suppress the dead-code
@@ -1202,6 +1205,26 @@ fn copy_local_dev_legacy_skill_entry(
     Ok(())
 }
 
+fn local_dev_extension_lifecycle_surface_context(
+    owner_user_id: UserId,
+) -> Result<LifecycleProductSurfaceContext, RebornBuildError> {
+    let identity = RebornRuntimeIdentity::reborn_cli();
+    let tenant_id =
+        TenantId::new(identity.tenant_id).map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        })?;
+    let agent_id =
+        AgentId::new(identity.agent_id).map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        })?;
+    Ok(LifecycleProductSurfaceContext {
+        tenant_id,
+        user_id: owner_user_id,
+        agent_id: Some(agent_id),
+        project_id: None,
+    })
+}
+
 #[cfg(feature = "libsql")]
 fn build_local_dev_store_graph(
     input: RebornLocalDevStoreGraphInput,
@@ -1269,11 +1292,13 @@ fn build_local_dev_store_graph(
         })?;
     #[cfg(feature = "slack-v2-host-beta")]
     let host_state_filesystem = local_dev_slack_host_state_filesystem(Arc::clone(&filesystem));
+    let extension_lifecycle_surface_context =
+        local_dev_extension_lifecycle_surface_context(owner_user_id.clone())?;
     let skill_management =
-        build_local_skill_management_port(owner_user_id.clone(), Arc::clone(&filesystem))?;
+        build_local_skill_management_port(owner_user_id, Arc::clone(&filesystem))?;
     let outbound_stores = local_dev_outbound_store(Arc::clone(&filesystem));
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
-        owner_user_id,
+        extension_lifecycle_surface_context,
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
         capability_policy: Arc::clone(&capability_policy),
@@ -1390,13 +1415,15 @@ fn build_local_dev_store_graph(
         })?;
     #[cfg(all(feature = "postgres", feature = "slack-v2-host-beta"))]
     let host_state_filesystem = local_dev_slack_host_state_filesystem(Arc::clone(&filesystem));
+    let extension_lifecycle_surface_context =
+        local_dev_extension_lifecycle_surface_context(owner_user_id.clone())?;
     let skill_management =
-        build_local_skill_management_port(owner_user_id.clone(), Arc::clone(&filesystem))?;
+        build_local_skill_management_port(owner_user_id, Arc::clone(&filesystem))?;
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let trigger_conversation_services = local_dev_trigger_conversation_services();
     let outbound_stores = local_dev_outbound_store(Arc::clone(&filesystem));
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
-        owner_user_id,
+        extension_lifecycle_surface_context,
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
         capability_policy: Arc::clone(&capability_policy),

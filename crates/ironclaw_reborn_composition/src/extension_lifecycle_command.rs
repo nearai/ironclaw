@@ -1,15 +1,12 @@
-use ironclaw_host_api::{AgentId, TenantId};
 use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
     LifecyclePhase, LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-    LifecycleProductPayload, LifecycleProductResponse, LifecycleProductSurfaceContext,
-    ProductWorkflowError,
+    LifecycleProductPayload, LifecycleProductResponse, ProductWorkflowError,
 };
 use thiserror::Error;
 
-use crate::factory::{RebornLocalRuntimeServices, RebornServices};
+use crate::factory::RebornServices;
 use crate::lifecycle::RebornLocalLifecycleFacade;
-use crate::runtime_input::RebornRuntimeIdentity;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RebornExtensionLifecycleCommand {
@@ -47,12 +44,9 @@ pub async fn execute_reborn_extension_lifecycle_command(
             product_auth.runtime_credential_account_selection_service(),
         );
     }
-    Ok(facade
-        .execute(
-            extension_lifecycle_surface_context(local_runtime)?,
-            command.into_action()?,
-        )
-        .await?)
+    let context =
+        LifecycleProductContext::Surface(local_runtime.extension_lifecycle_surface_context.clone());
+    Ok(facade.execute(context, command.into_action()?).await?)
 }
 
 pub fn render_reborn_extension_lifecycle_response(
@@ -117,26 +111,6 @@ impl RebornExtensionLifecycleCommand {
                 package_ref: extension_package_ref(id)?,
             },
         })
-    }
-}
-
-fn extension_lifecycle_surface_context(
-    local_runtime: &RebornLocalRuntimeServices,
-) -> Result<LifecycleProductContext, ProductWorkflowError> {
-    let identity = RebornRuntimeIdentity::reborn_cli();
-    Ok(LifecycleProductContext::Surface(
-        LifecycleProductSurfaceContext {
-            tenant_id: TenantId::new(identity.tenant_id).map_err(invalid_surface_context)?,
-            user_id: local_runtime.owner_user_id.clone(),
-            agent_id: Some(AgentId::new(identity.agent_id).map_err(invalid_surface_context)?),
-            project_id: None,
-        },
-    ))
-}
-
-fn invalid_surface_context(error: impl std::fmt::Display) -> ProductWorkflowError {
-    ProductWorkflowError::InvalidBindingRequest {
-        reason: error.to_string(),
     }
 }
 
