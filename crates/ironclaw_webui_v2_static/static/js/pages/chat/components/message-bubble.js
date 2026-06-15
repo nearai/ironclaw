@@ -181,7 +181,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
             </div>
           `}
 
-          ${(role === "assistant" || role === "user") &&
+          ${role === "assistant" &&
           html`<${ProjectFileChips}
             threadId=${threadId}
             content=${typeof content === "string" ? content : ""}

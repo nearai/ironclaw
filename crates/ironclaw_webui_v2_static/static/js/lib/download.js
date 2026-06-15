@@ -12,7 +12,12 @@ export function saveBlob(blob, filename) {
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
-  } finally {
+    // Defer revocation: revoking synchronously after click() races the
+    // browser's async download manager and breaks downloads in Chrome/
+    // Firefox/Safari (the URL is freed before the blob is resolved).
+    setTimeout(() => URL.revokeObjectURL(url), 100);
+  } catch (e) {
     URL.revokeObjectURL(url);
+    throw e;
   }
 }

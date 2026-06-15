@@ -44,10 +44,9 @@ use ironclaw_product_workflow::{
     RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
     RebornTraceHoldAuthorizeResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
     WebUiAttachmentCapabilities, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, webui_attachment_capabilities,
+    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, webui_attachment_capabilities,
 };
 use serde::{Deserialize, Serialize};
 
@@ -235,7 +234,17 @@ pub async fn read_project_file(
         )
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .body(Body::from(file.bytes))
-        .map_err(|_| WebUiV2HttpError::from(RebornServicesError::internal()))
+        .map_err(|error| {
+            // Keep the client response sanitized (bare 500), but log the
+            // builder cause so a malformed download header is diagnosable
+            // server-side rather than vanishing into an opaque internal error.
+            tracing::debug!(
+                target = "ironclaw_webui_v2::project_fs",
+                error = %error,
+                "failed to build project-file download response",
+            );
+            WebUiV2HttpError::from(RebornServicesError::internal())
+        })
 }
 
 /// Produce a `Content-Disposition` filename that cannot inject header bytes or

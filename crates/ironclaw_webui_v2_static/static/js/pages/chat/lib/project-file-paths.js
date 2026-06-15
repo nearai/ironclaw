@@ -15,9 +15,10 @@ export function extractWorkspaceFilePaths(content) {
   const seen = new Set();
   const paths = [];
   for (const match of content.matchAll(WORKSPACE_FILE_PATH)) {
-    // Trailing punctuation often rides along when a path ends a sentence or
-    // closes a markdown link.
-    const path = match[0].replace(/[.,;:)\]]+$/, "");
+    // The regex ends at `\.[A-Za-z0-9]+`, so a match always terminates on an
+    // alphanumeric character — trailing sentence/link punctuation (`. , ) ]`)
+    // is never captured and needs no stripping here.
+    const path = match[0];
     if (!seen.has(path)) {
       seen.add(path);
       paths.push(path);

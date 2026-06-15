@@ -9,6 +9,7 @@
 //! `storage_key` is exactly such a path), but nothing here is
 //! attachment-specific.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -52,9 +53,12 @@ impl<F: RootFilesystem> ProjectScopedFilesystemReader<F> {
     /// workspace mount is the only reachable surface.
     fn confine(&self, path: &str) -> Result<ScopedPath, ProjectFsError> {
         let scoped = ScopedPath::new(path).map_err(|_| ProjectFsError::InvalidPath)?;
-        let value = scoped.as_str();
-        let under_workspace = value == self.workspace_alias
-            || value.starts_with(&format!("{}/", self.workspace_alias));
+        // Component-wise containment via `Path::strip_prefix` so a sibling like
+        // `/workspaceother` cannot pass a naive string-prefix check. `Ok` covers
+        // both the alias root itself and any descendant under it.
+        let under_workspace = Path::new(scoped.as_str())
+            .strip_prefix(Path::new(&self.workspace_alias))
+            .is_ok();
         if !under_workspace {
             return Err(ProjectFsError::Denied);
         }
@@ -105,6 +109,16 @@ impl<F: RootFilesystem> ProjectFilesystemReader for ProjectScopedFilesystemReade
             .read_bytes(&scope, &file)
             .await
             .map_err(map_filesystem_error)?;
+        // Re-check the realized length: a concurrent write can grow the file
+        // between the `stat` guard above and this read, so the stat-time size
+        // cap alone does not bound what we actually materialized.
+        let read_len = bytes.len() as u64;
+        if read_len > self.max_read_bytes {
+            return Err(ProjectFsError::TooLarge {
+                size: read_len,
+                max: self.max_read_bytes,
+            });
+        }
         let path_str = file.as_str().to_string();
         let filename = file_name_of(&path_str);
         let mime_type = mime_for_path(&path_str);
@@ -167,14 +181,16 @@ fn map_kind(file_type: FileType) -> ProjectFsEntryKind {
     }
 }
 
+fn file_name_str(path: &str) -> Option<&str> {
+    path.rsplit('/').find(|segment| !segment.is_empty())
+}
+
 fn file_name_of(path: &str) -> Option<String> {
-    path.rsplit('/')
-        .find(|segment| !segment.is_empty())
-        .map(|segment| segment.to_string())
+    file_name_str(path).map(|segment| segment.to_string())
 }
 
 fn mime_for_path(path: &str) -> String {
-    file_name_of(path)
+    file_name_str(path)
         .and_then(|name| {
             name.rsplit_once('.')
                 .and_then(|(_, ext)| ironclaw_common::mime_for_extension(ext))
