@@ -5,8 +5,11 @@
 //! `<attachments>` block so the model can reason about the files: documents and
 //! audio contribute their extracted text / transcript, and every attachment
 //! contributes its stored project path (`storage_key`) so the agent can
-//! `file_read` it. Image pixels reach the model through a separate multimodal
-//! path; here an image contributes a pointer to its stored file.
+//! `file_read` it. Image pixels reach a vision-capable model through the
+//! multimodal path (the model port reads the bytes back and the gateway sends
+//! them as `ContentPart::ImageUrl`; see `ContextMessage::image_attachments`);
+//! this textual block contributes a pointer to the stored file, which is the
+//! fallback a text-only model relies on.
 
 use ironclaw_common::{AttachmentKind, AttachmentRef};
 
