@@ -1481,7 +1481,7 @@ mod tests {
         InMemoryBackend,
     };
     use ironclaw_host_api::{
-        EffectKind, HostPortCatalog, RuntimeCredentialAccountSetup,
+        EffectKind, HostPortCatalog, PermissionMode, RuntimeCredentialAccountSetup,
         RuntimeCredentialRequirementSource,
     };
 
@@ -1591,6 +1591,47 @@ mod tests {
                 "{query} should discover every GSuite package; got {ids:?}"
             );
         }
+    }
+
+    #[test]
+    fn bundled_github_read_only_capabilities_default_allow_without_relaxing_writes() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").unwrap();
+        let github = catalog.resolve(&package_ref).unwrap();
+        let mut allowed_read_only = BTreeSet::new();
+        let mut asked_effectful = BTreeSet::new();
+
+        for capability in &github.package.manifest.capabilities {
+            let has_effectful_boundary = capability.effects.iter().any(|effect| {
+                matches!(
+                    effect,
+                    EffectKind::DispatchCapability | EffectKind::ExternalWrite
+                )
+            });
+            if has_effectful_boundary {
+                assert_eq!(
+                    capability.default_permission,
+                    PermissionMode::Ask,
+                    "{} should still ask before effectful GitHub actions",
+                    capability.id
+                );
+                asked_effectful.insert(capability.id.as_str());
+            } else {
+                assert_eq!(
+                    capability.default_permission,
+                    PermissionMode::Allow,
+                    "{} should not require an extra approval prompt for GitHub reads",
+                    capability.id
+                );
+                allowed_read_only.insert(capability.id.as_str());
+            }
+        }
+
+        assert!(allowed_read_only.contains("github.get_repo"));
+        assert!(allowed_read_only.contains("github.list_branches"));
+        assert!(asked_effectful.contains("github.create_issue"));
+        assert!(asked_effectful.contains("github.handle_webhook"));
     }
 
     #[test]
