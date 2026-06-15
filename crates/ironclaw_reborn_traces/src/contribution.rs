@@ -6477,6 +6477,133 @@ pub fn read_local_trace_records_for_scope(
     Ok(records)
 }
 
+/// The credit projection for one scope: the aggregate report plus the
+/// manual-review holds awaiting authorization. This is what the WebUI credits
+/// surfaces poll for.
+#[derive(Debug, Clone)]
+pub struct ScopedCreditView {
+    pub report: TraceCreditReport,
+    pub manual_review_holds: Vec<TraceQueueHold>,
+}
+
+/// Cheap change-detection signature of a scope's on-disk credit inputs.
+/// `None` for an absent file. Computing the signature is a couple of `stat`s;
+/// reading + parsing the full submissions history is what we avoid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CreditViewSignature {
+    records: Option<(std::time::SystemTime, u64)>,
+    holds: u64,
+}
+
+struct CreditViewCacheEntry {
+    signature: CreditViewSignature,
+    view: ScopedCreditView,
+}
+
+/// Per-scope memoization of the computed credit view, keyed by the on-disk
+/// signature of the inputs. Bounds polling cost to O(new submissions): when the
+/// submissions file and held-trace sidecars are unchanged since the last
+/// computation (the steady-state polling case), the request is a couple of
+/// `stat`s + a clone, NOT a full-history read/parse/aggregate.
+static CREDIT_VIEW_CACHE: LazyLock<std::sync::Mutex<HashMap<String, CreditViewCacheEntry>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Hard cap so the cache can't grow one entry per historical caller forever
+/// (same bound the trace-queue flush worker observes). Cleared wholesale on
+/// overflow — entries are pure memoization and recompute on demand.
+const CREDIT_VIEW_CACHE_MAX_SCOPES: usize = 4096;
+
+fn path_change_signature(path: &Path) -> Option<(std::time::SystemTime, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta.modified().ok()?;
+    Some((mtime, meta.len()))
+}
+
+/// Cheap signature over the scope's `*.held.json` sidecars (manual-review
+/// holds): a hash of each sidecar's (name, len, mtime). Scanning the directory
+/// entries' metadata is far cheaper than reading + parsing each sidecar.
+fn holds_change_signature(scope: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let dir = trace_queue_dir(Some(scope));
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return 0;
+    };
+    let mut items: Vec<(String, u64, Option<std::time::SystemTime>)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_str()?.to_string();
+            if !name.ends_with(".held.json") {
+                return None;
+            }
+            let meta = entry.metadata().ok();
+            Some((
+                name,
+                meta.as_ref().map(|m| m.len()).unwrap_or(0),
+                meta.and_then(|m| m.modified().ok()),
+            ))
+        })
+        .collect();
+    // Sort so the signature is order-independent across `read_dir` orderings.
+    items.sort();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    items.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn current_credit_view_signature(scope: &str) -> CreditViewSignature {
+    CreditViewSignature {
+        records: path_change_signature(&trace_records_path(Some(scope))),
+        holds: holds_change_signature(scope),
+    }
+}
+
+/// Build the scope's credit view, memoized by the on-disk input signature.
+///
+/// On a cache hit (inputs unchanged since the last computation) this clones the
+/// cached view after a couple of `stat`s. On a miss it reads + aggregates the
+/// records and re-scans holds once, then caches the result. Genuine read/parse
+/// failures propagate (a missing file is already softened to the zero/empty
+/// state inside the underlying readers).
+pub fn scoped_credit_view(scope: &str) -> anyhow::Result<ScopedCreditView> {
+    let signature = current_credit_view_signature(scope);
+    {
+        let cache = match CREDIT_VIEW_CACHE.lock() {
+            Ok(cache) => cache,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(entry) = cache.get(scope)
+            && entry.signature == signature
+        {
+            return Ok(entry.view.clone());
+        }
+    }
+
+    // Miss: recompute once.
+    let records = read_local_trace_records_for_scope(Some(scope))?;
+    let report = trace_credit_report(&records);
+    let manual_review_holds = manual_review_holds_for_scope(Some(scope))?;
+    let view = ScopedCreditView {
+        report,
+        manual_review_holds,
+    };
+
+    let mut cache = match CREDIT_VIEW_CACHE.lock() {
+        Ok(cache) => cache,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if cache.len() >= CREDIT_VIEW_CACHE_MAX_SCOPES && !cache.contains_key(scope) {
+        cache.clear();
+    }
+    cache.insert(
+        scope.to_string(),
+        CreditViewCacheEntry {
+            signature,
+            view: view.clone(),
+        },
+    );
+    Ok(view)
+}
+
 pub fn trace_credit_summary(records: &[LocalTraceSubmissionRecord]) -> CreditSummary {
     let report = trace_credit_report(records);
     CreditSummary {
@@ -9590,6 +9717,48 @@ mod tests {
             last_credit_notice_at,
             credit_notice_state: TraceCreditNoticeState::default(),
         }
+    }
+
+    #[test]
+    fn scoped_credit_view_reflects_record_changes_via_signature() {
+        let scope = format!("scoped-credit-view-{}", Uuid::new_v4());
+
+        // No records yet -> zero report.
+        let view = scoped_credit_view(&scope).expect("empty view");
+        assert_eq!(view.report.submissions_total, 0);
+        assert!(view.manual_review_holds.is_empty());
+
+        // One submitted record -> view reflects it (cache miss, recompute).
+        write_local_trace_records_for_scope(
+            Some(&scope),
+            &[submitted_credit_record(1.0, None, None, Vec::new())],
+        )
+        .expect("write one record");
+        let view = scoped_credit_view(&scope).expect("one-record view");
+        assert_eq!(view.report.submissions_total, 1);
+        assert_eq!(view.report.submissions_submitted, 1);
+
+        // A repeated call with no change returns the same view (cache hit path).
+        assert_eq!(
+            scoped_credit_view(&scope).expect("cache-hit view").report,
+            view.report
+        );
+
+        // Changing the records file changes its signature -> the cached view is
+        // invalidated and recomputed, so the new total is reflected (a stale
+        // cache would still report 1).
+        write_local_trace_records_for_scope(
+            Some(&scope),
+            &[
+                submitted_credit_record(1.0, None, None, Vec::new()),
+                submitted_credit_record(2.0, None, None, Vec::new()),
+            ],
+        )
+        .expect("write two records");
+        let view = scoped_credit_view(&scope).expect("two-record view");
+        assert_eq!(view.report.submissions_total, 2);
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
     }
 
     #[test]

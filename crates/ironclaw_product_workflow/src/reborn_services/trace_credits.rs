@@ -9,8 +9,7 @@
 
 use chrono::{DateTime, Utc};
 use ironclaw_reborn_traces::contribution::{
-    authorize_manual_review_hold_for_scope, manual_review_holds_for_scope,
-    read_local_trace_records_for_scope, read_trace_policy_for_scope, trace_credit_report,
+    authorize_manual_review_hold_for_scope, read_trace_policy_for_scope, scoped_credit_view,
 };
 use serde::{Deserialize, Serialize};
 
@@ -99,16 +98,19 @@ pub(super) fn authorize_trace_hold_for_user(
 pub(super) fn local_trace_credits_for_user(
     scope: &str,
 ) -> Result<RebornTraceCreditsResponse, String> {
-    let scope = Some(scope);
     // `{:#}` preserves the underlying error chain so the caller's sanitized 500
     // still leaves a useful server-side trail.
-    let enrolled = read_trace_policy_for_scope(scope)
+    let enrolled = read_trace_policy_for_scope(Some(scope))
         .map_err(|e| format!("{e:#}"))?
         .enabled;
-    let records = read_local_trace_records_for_scope(scope).map_err(|e| format!("{e:#}"))?;
-    let report = trace_credit_report(&records);
-    let holds: Vec<RebornTraceHold> = manual_review_holds_for_scope(scope)
-        .map_err(|e| format!("{e:#}"))?
+    // The aggregate report + manual-review holds come from `scoped_credit_view`,
+    // which memoizes the full-history read/aggregate by the on-disk input
+    // signature — so steady polling on an unchanged history is a couple of
+    // `stat`s, not an O(total submissions) rebuild per request.
+    let view = scoped_credit_view(scope).map_err(|e| format!("{e:#}"))?;
+    let report = view.report;
+    let holds: Vec<RebornTraceHold> = view
+        .manual_review_holds
         .into_iter()
         .map(|hold| RebornTraceHold {
             submission_id: hold.submission_id.to_string(),

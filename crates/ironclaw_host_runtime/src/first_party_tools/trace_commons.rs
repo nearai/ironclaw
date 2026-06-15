@@ -524,18 +524,15 @@ pub(super) async fn dispatch_credits(
         request.scope.tenant_id.as_str(),
         request.scope.user_id.as_str(),
     );
-    // A MISSING submissions file is already softened to `Ok(Vec::new())`
-    // ("nothing submitted yet") inside `read_local_trace_records_for_scope`, so
-    // an `Err` here is a genuine read/parse failure (unreadable or corrupt
-    // records file). Do NOT mask it as "no records" — that would hide
-    // corruption/permission issues and under-report an active contributor.
-    // Report the read failure honestly (mirrors `dispatch_status`).
-    match ironclaw_reborn_traces::contribution::read_local_trace_records_for_scope(Some(
-        scope.as_str(),
-    )) {
-        Ok(records) => Ok(format_credits(
-            &ironclaw_reborn_traces::contribution::trace_credit_report(&records),
-        )),
+    // `scoped_credit_view` memoizes the full-history read/aggregate by the
+    // on-disk input signature, so repeated calls on an unchanged history are
+    // cheap. A MISSING submissions file is already softened to the zero state
+    // inside the underlying readers, so an `Err` here is a genuine read/parse
+    // failure (unreadable or corrupt records). Do NOT mask it as "no records" —
+    // that would hide corruption/permission issues and under-report an active
+    // contributor. Report the read failure honestly (mirrors `dispatch_status`).
+    match ironclaw_reborn_traces::contribution::scoped_credit_view(scope.as_str()) {
+        Ok(view) => Ok(format_credits(&view.report)),
         Err(error) => {
             tracing::debug!(%error, "trace commons credits: local records read failed");
             Ok(json!({

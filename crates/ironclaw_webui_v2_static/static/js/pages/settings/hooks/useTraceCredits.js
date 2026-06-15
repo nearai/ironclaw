@@ -7,15 +7,13 @@ export function useTraceCredits() {
     queryKey: ["trace-credits"],
     queryFn: fetchTraceCredits,
     // Credits change slowly (capture -> score gate -> submit -> server
-    // accept). Each fetch rebuilds the full credit view server-side (reads and
-    // rescans the entire local history + ships all holds), so an aggressive
-    // poll turns an open tab into steady O(history) background work. Keep the
-    // surfaces live via a focus refetch (immediate when the user returns) plus
-    // an infrequent interval, dedupe redundant focus refetches with staleTime,
-    // and never poll while the tab is hidden. A mutation (authorize) still
-    // invalidates immediately for prompt updates.
-    // TODO: incrementalize the server-side credit view so polling cost is
-    // bounded by new submissions rather than total history.
+    // accept). The server-side credit view is now memoized by the on-disk
+    // input signature (see `scoped_credit_view`), so a poll on an unchanged
+    // history is a couple of `stat`s, not an O(total submissions) rebuild.
+    // Keep the surfaces live via a focus refetch (immediate when the user
+    // returns) plus an infrequent interval, dedupe redundant focus refetches
+    // with staleTime, and never poll while the tab is hidden; a mutation
+    // (authorize) still invalidates immediately for prompt updates.
     refetchInterval: 300_000,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
