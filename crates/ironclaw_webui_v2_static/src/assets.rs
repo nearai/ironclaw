@@ -371,4 +371,40 @@ mod tests {
             "OAuth setup must refresh setup state before waiting for popup close"
         );
     }
+
+    #[test]
+    fn extension_registry_keeps_installed_entries_visible_first() {
+        let use_extensions = asset_text("js/pages/extensions/hooks/useExtensions.js");
+        let registry_tab = asset_text("js/pages/extensions/components/registry-tab.js");
+        let extensions_page = asset_text("js/pages/extensions/extensions-page.js");
+        let routes = asset_text("js/app/routes.js");
+        let schema = asset_text("js/pages/extensions/lib/extensions-schema.js");
+
+        assert!(
+            use_extensions.contains("catalogEntries"),
+            "extensions hook should expose a merged installed-plus-registry catalog"
+        );
+        assert!(
+            use_extensions
+                .contains("if (a.installed !== b.installed) return a.installed ? -1 : 1;"),
+            "merged extension catalog should sort installed entries before available entries"
+        );
+        assert!(
+            registry_tab.contains("installedEntries") && registry_tab.contains("availableEntries"),
+            "registry tab should render installed and available sections from one catalog"
+        );
+        assert!(
+            registry_tab.contains("<${ExtensionCard}") && registry_tab.contains("<${RegistryCard}"),
+            "installed registry entries should keep management actions while available entries keep install actions"
+        );
+        assert!(
+            extensions_page.contains("tab = \"registry\"")
+                && extensions_page.contains("to=\"/extensions/registry\""),
+            "extensions page should default and redirect to the unified registry surface"
+        );
+        assert!(
+            !routes.contains("id: \"installed\"") && !schema.contains("id: \"installed\""),
+            "installed should no longer be a separate extensions navigation tab"
+        );
+    }
 }

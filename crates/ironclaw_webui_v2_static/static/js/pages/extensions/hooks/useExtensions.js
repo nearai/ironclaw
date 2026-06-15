@@ -18,6 +18,21 @@ import {
 const OAUTH_SETUP_REFRESH_MS = 2000;
 const OAUTH_SETUP_TIMEOUT_MS = 10 * 60 * 1000;
 
+function packageId(item) {
+  return item?.package_ref?.id || "";
+}
+
+function displayName(item) {
+  return item?.display_name || packageId(item);
+}
+
+function catalogSort(a, b) {
+  if (a.installed !== b.installed) return a.installed ? -1 : 1;
+  return displayName(a.extension || a.entry).localeCompare(
+    displayName(b.extension || b.entry)
+  );
+}
+
 export function useExtensions() {
   const queryClient = useQueryClient();
 
@@ -126,6 +141,27 @@ export function useExtensions() {
   const extensions = extensionsQuery.data?.extensions || [];
   const registry = registryQuery.data?.entries || [];
   const connectableChannels = connectableChannelsQuery.data?.channels || [];
+  const extensionById = new Map(extensions.map((extension) => [packageId(extension), extension]));
+  const registryIds = new Set(registry.map((entry) => packageId(entry)));
+  const catalogEntries = [
+    ...registry.map((entry) => {
+      const extension = extensionById.get(packageId(entry)) || null;
+      return {
+        id: packageId(entry),
+        installed: Boolean(extension || entry.installed),
+        entry,
+        extension,
+      };
+    }),
+    ...extensions
+      .filter((extension) => !registryIds.has(packageId(extension)))
+      .map((extension) => ({
+        id: packageId(extension),
+        installed: true,
+        entry: null,
+        extension,
+      })),
+  ].sort(catalogSort);
 
   const channels = extensions.filter((e) => e.kind === "wasm_channel");
   const mcpServers = extensions.filter((e) => e.kind === "mcp_server");
@@ -154,6 +190,7 @@ export function useExtensions() {
     mcpRegistry,
     toolRegistry,
     registry,
+    catalogEntries,
     connectableChannels,
     isLoading,
     isBusy,
