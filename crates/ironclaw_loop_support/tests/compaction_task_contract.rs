@@ -630,6 +630,55 @@ async fn compaction_port_accepts_terminal_cut_point_that_is_rejected_busy() {
 }
 
 #[tokio::test]
+async fn compaction_port_trims_summary_span_when_cut_point_is_rejected_busy() {
+    // Regression: when drop_through_seq points at a RejectedBusy terminal, the
+    // persisted summary's end_sequence must be the last MODEL-VISIBLE sequence
+    // (1), NOT drop_through_seq (2).  If end_sequence were 2 the backend would
+    // classify the summary as covering a non-visible message and skip it
+    // (summary_covers_hidden_content), producing a dead artifact.
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user("visible-before-rejected").await; // seq 1
+    let rejected_id = fixture.append_user("rejected-busy-terminal").await; // seq 2
+    fixture
+        .threads
+        .mark_message_rejected_busy(&fixture.scope, &fixture.thread_id, rejected_id)
+        .await
+        .unwrap();
+    let port = fixture.port(
+        "summary",
+        Arc::new(CleanInjectionScanner),
+        Arc::new(CleanLeakScanner),
+    );
+
+    // drop_through_seq = 2 (the RejectedBusy message is the cut point).
+    port.compact_loop_context(fixture.request(2))
+        .await
+        .expect("RejectedBusy terminal cut point should compact successfully");
+
+    let history = fixture
+        .threads
+        .list_thread_history(ironclaw_threads::ThreadHistoryRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    let summary = history
+        .summary_artifacts
+        .first()
+        .expect("summary artifact should be persisted");
+    assert_eq!(
+        summary.start_sequence, 1,
+        "start_sequence should be 1 (first message in range)",
+    );
+    assert_eq!(
+        summary.end_sequence, 1,
+        "end_sequence must be 1 (last model-visible seq), not 2 (RejectedBusy cut point), \
+         so the backend does not skip the summary via summary_covers_hidden_content",
+    );
+}
+
+#[tokio::test]
 async fn compaction_port_rejects_terminal_cut_point_that_is_capability_preview() {
     // Regression: when drop_through_seq points directly at a CapabilityDisplayPreview
     // message, validation must return InvalidCutPoint.  SkipEphemeral(CapabilityDisplayPreview)

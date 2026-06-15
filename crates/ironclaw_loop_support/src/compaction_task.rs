@@ -361,19 +361,23 @@ where
             return Ok(defer_compaction(reason));
         }
 
-        // A range whose every message was skipped (e.g. only a terminal RejectedBusy)
-        // has nothing model-visible to summarize. Proceeding to build_input/inference
-        // would persist a meaningless empty summary artifact; reject as an invalid cut
-        // point instead.
-        if validated_messages.is_empty() {
-            return Err(CompactionError::InvalidCutPoint);
-        }
+        // The summary span ends at the last model-visible message so it does not cover
+        // trailing non-visible terminal messages (e.g. RejectedBusy), which would make
+        // the backend skip the replacement summary (summary_covers_hidden_content).
+        //
+        // An empty `validated_messages` means the range had nothing model-visible to
+        // summarize (e.g. only a terminal RejectedBusy). That is not a valid cut point —
+        // proceeding to build_input/inference would persist a meaningless empty summary.
+        let last_visible_seq = match validated_messages.last() {
+            Some(message) => message.sequence,
+            None => return Err(CompactionError::InvalidCutPoint),
+        };
 
         Ok(CompactionRangeDecision::Ready(ValidatedCompactionRange {
             thread_id: request.thread_id.clone(),
             thread_scope,
             start_sequence: start_exclusive.saturating_add(1),
-            end_sequence: request.drop_through_seq,
+            end_sequence: last_visible_seq,
             messages: validated_messages,
         }))
     }
