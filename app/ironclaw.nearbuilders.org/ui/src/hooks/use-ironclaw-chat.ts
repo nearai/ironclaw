@@ -104,7 +104,7 @@ function createIronclawStream({
               }
 
               if (event.type === "error") {
-                console.error("[createIronclawStream] server error event", event);
+                console.error("[createIronclawStream] normalized SSE error — run may still be processing on backend", typeof (event as any).error === "string" ? (event as any).error : String(event));
                 fail(typeof (event as any).error === "string" ? (event as any).error : "Run failed");
                 return;
               }

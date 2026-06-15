@@ -579,7 +579,6 @@ export class IronclawService {
               const raw = JSON.parse(e.data);
               const event = transformEvent(raw);
               if (event.cursor) cursor = event.cursor;
-               // console.debug("[ironclaw-sservice] event from backend", { type: event.type, cursor: event.cursor });
               push(event);
             } catch {
               /* skip parse errors */

@@ -53,17 +53,13 @@ const hStream = (
 ) =>
   async function* ({ input, signal, context }: any) {
     const ic = services.ironclaw(context);
-    console.log("[stream] start", { input });
     try {
       const events = await select(ic)(input);
       for await (const event of events) {
         if (signal?.aborted) break;
-        console.log("[stream] event", { type: event.type, cursor: (event as any).cursor });
         yield event;
       }
-      console.log("[stream] end");
     } catch (error) {
-      console.error("[stream] error:", error);
       throw error;
     }
   };
@@ -124,11 +120,14 @@ const hConversationStream = (
               }
             }
           } catch {
-            // if timeline refetch fails, skip this event
           }
         }
       }
     } catch (error) {
+      console.error("[hConvStream] raw stream validation error — sending error event to client:", {
+        message: error instanceof Error ? error.message : String(error),
+        code: (error as any)?.code,
+      });
       yield {
         type: "error",
         threadId,

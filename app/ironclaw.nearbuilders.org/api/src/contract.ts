@@ -68,7 +68,7 @@ const ConversationSendAckSchema = z.object({
   acceptedMessageRef: z.string(),
   pendingMessageId: z.string(),
   submittedAt: z.string(),
-  eventCursor: z.string().optional(),
+  eventCursor: z.number().optional(),
 });
 
 const ConversationEventSchema = z.object({
