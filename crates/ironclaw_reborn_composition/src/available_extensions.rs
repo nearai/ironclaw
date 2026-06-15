@@ -124,11 +124,9 @@ fn onboarding(package_id: &str) -> Option<LifecycleExtensionOnboarding> {
         )),
         "notion" => Some(onboarding_message(
             "Notion needs OAuth authorization before MCP tools can run.",
-            Some(
-                "Install Notion first. Activation will open the OAuth prompt for the workspace IronClaw should access.",
-            ),
+            Some("Authorize the Notion workspace that IronClaw should access."),
             None,
-            "Install Notion, then activate it to open OAuth and publish its MCP tools.",
+            "After authorization completes, activate Notion to publish its MCP tools.",
         )),
         "nearai" => Some(onboarding_message(
             "NEAR AI needs an API key before its MCP tools can run.",
@@ -1621,13 +1619,13 @@ mod tests {
                 onboarding.credential_next_step.is_some(),
                 "{extension_id} must include the next user step"
             );
-            if matches!(extension_id, "gmail" | "google-calendar") {
+            if matches!(extension_id, "gmail" | "google-calendar" | "notion") {
                 assert!(
                     onboarding
                         .credential_instructions
                         .as_deref()
                         .is_some_and(|instructions| {
-                            instructions.contains("Authorize the Google account")
+                            instructions.starts_with("Authorize ")
                                 && !instructions.contains("Install")
                         }),
                     "{extension_id} configure onboarding should not repeat install-first copy"
