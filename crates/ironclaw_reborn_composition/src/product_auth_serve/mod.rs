@@ -30,14 +30,15 @@ use ironclaw_auth::{
     AuthInteractionId, AuthProductError, AuthProductScope, AuthProviderId, AuthSessionId,
     AuthSurface, AuthorizationCodeHash, CredentialAccountChoiceRequest, CredentialAccountId,
     CredentialAccountLabel, CredentialAccountListPage, CredentialAccountListRequest,
-    CredentialAccountOwnerScope, CredentialAccountProjection, CredentialAccountSelectionRequest,
-    CredentialAccountStatus, CredentialAccountUpdateBinding, CredentialRecoveryProjection,
-    CredentialRecoveryRequest, CredentialRefreshReport, CredentialRefreshRequest,
-    GOOGLE_PROVIDER_ID, GoogleOAuthCallbackState, GoogleOAuthRouteConfig, OAuthAuthorizationCode,
+    CredentialAccountProjection, CredentialAccountSelectionRequest, CredentialAccountStatus,
+    CredentialAccountUpdateBinding, CredentialRecoveryProjection, CredentialRecoveryRequest,
+    CredentialRefreshReport, CredentialRefreshRequest, GOOGLE_PROVIDER_ID,
+    GoogleOAuthCallbackState, GoogleOAuthRouteConfig, OAuthAuthorizationCode,
     OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash,
     PkceVerifierSecret, ProviderScope, SecretCleanupAction, SecretCleanupReport,
-    SecretCleanupRequest, Timestamp, TurnRunRef, build_google_authorization_url,
-    parse_google_callback_scopes, parse_google_requested_scopes, pkce_s256_challenge,
+    SecretCleanupRequest, Timestamp, TurnRunRef, binding_scope_owns_account,
+    build_google_authorization_url, parse_google_callback_scopes, parse_google_requested_scopes,
+    pkce_s256_challenge,
 };
 use ironclaw_host_api::NetworkMethod;
 use ironclaw_host_api::ingress::{
@@ -898,11 +899,9 @@ pub(super) async fn scoped_update_binding_for_requester(
         )
         .await;
     match account {
-        Ok(account) if CredentialAccountOwnerScope::from_scope(&owner_scope).matches(&account) => {
-            Ok(Some(CredentialAccountUpdateBinding::from_projection(
-                &account.projection(),
-            )))
-        }
+        Ok(account) if binding_scope_owns_account(&scope, &account) => Ok(Some(
+            CredentialAccountUpdateBinding::from_projection(&account.projection()),
+        )),
         Ok(_) => Ok(None),
         Err(AuthProductError::CredentialMissing) => Ok(None),
         Err(AuthProductError::CrossScopeDenied) => Ok(None),
