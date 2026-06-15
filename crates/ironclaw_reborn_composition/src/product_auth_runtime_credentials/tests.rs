@@ -200,6 +200,66 @@ async fn runtime_selection_still_enforces_provider_scope_gate() {
 }
 
 #[tokio::test]
+async fn binding_does_not_cross_session_boundary() {
+    // session_id is path-segmenting for the bind/update WRITE path: an account
+    // stored under one session must not be bound by a flow targeting a
+    // different (or no) session, or the callback — which updates the account at
+    // the flow scope's session path — could never write it. `accounts_for_owner`
+    // wildcards session when the flow session is `None`, so the bind selection
+    // must re-impose exact session equality.
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let session_scope = owner_auth_scope("alice")
+        .with_session_id(ironclaw_auth::AuthSessionId::new("sess-a").unwrap());
+    ConfiguredAccount::new(session_scope, "google")
+        .create(&accounts)
+        .await;
+    let selector = selector_for(accounts);
+
+    // A reconnect carrying NO session must not bind the session-scoped account.
+    let no_session = owner_auth_scope("alice");
+    let error = selector
+        .select_configured_account_for_binding(
+            CredentialAccountSelectionRequest::new(
+                no_session.clone(),
+                AuthProviderId::new("google").unwrap(),
+            )
+            .for_extension(ExtensionId::new("google-calendar").unwrap()),
+            no_session,
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error, AuthProductError::CredentialMissing);
+}
+
+#[tokio::test]
+async fn binding_matches_account_within_same_session() {
+    // The flip side of `binding_does_not_cross_session_boundary`: a reconnect on
+    // the SAME session still binds the owner's existing account.
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let session_scope = owner_auth_scope("alice")
+        .with_session_id(ironclaw_auth::AuthSessionId::new("sess-a").unwrap());
+    let created = ConfiguredAccount::new(session_scope.clone(), "google")
+        .create(&accounts)
+        .await;
+    let selector = selector_for(accounts);
+
+    let bound = selector
+        .select_configured_account_for_binding(
+            CredentialAccountSelectionRequest::new(
+                session_scope.clone(),
+                AuthProviderId::new("google").unwrap(),
+            )
+            .for_extension(ExtensionId::new("google-calendar").unwrap()),
+            session_scope,
+        )
+        .await
+        .expect("same-session reconnect must bind the existing account");
+
+    assert_eq!(bound.id, created.id);
+}
+
+#[tokio::test]
 async fn resolver_returns_configured_product_auth_access_secret() {
     let accounts = Arc::new(InMemoryAuthProductServices::new());
     let scope =

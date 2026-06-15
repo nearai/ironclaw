@@ -250,7 +250,8 @@ enum AccountSelectionPurpose<'a> {
         setup: &'a RuntimeCredentialAccountSetup,
         provider_scopes: &'a [ProviderScope],
     },
-    /// OAuth bind — match the owner's existing account regardless of scopes.
+    /// OAuth bind — match the owner's existing account regardless of scopes,
+    /// but only within the flow's own `session_id` (see the filter below).
     Binding,
 }
 
@@ -279,7 +280,16 @@ impl ProductAuthRuntimeCredentialAccountSelector {
                             setup,
                             provider_scopes,
                         } => account_has_provider_scopes(account, setup, provider_scopes),
-                        AccountSelectionPurpose::Binding => true,
+                        // Bind/update is session-segmented on disk and the
+                        // callback updates the account at the flow scope's
+                        // session path. `accounts_for_owner` wildcards session
+                        // when the owner session is `None` (enumerates every
+                        // session), so require exact session equality here or a
+                        // reconnect could select — and then fail to update — a
+                        // different session's account.
+                        AccountSelectionPurpose::Binding => {
+                            account.scope.session_id.as_ref() == lookup.scope.session_id.as_ref()
+                        }
                     }
                     && account_visible_from_runtime_scope(account, runtime_scope)
             })

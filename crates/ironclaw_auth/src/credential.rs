@@ -590,8 +590,19 @@ impl CredentialAccountOwnerScope {
 /// and `session_id` matched (it is path-segmenting), while dropping
 /// `invocation_id`/`thread_id`/`mission_id`. Requester authorization is enforced
 /// separately by the callers; this is only the owner-boundary check.
+///
+/// `session_id` is compared for **exact** equality (including `None == None`),
+/// NOT wildcarded the way `CredentialAccountOwnerScope::matches` wildcards a
+/// `None` owner session for runtime reads. The bind/update *write* path is
+/// session-segmented on disk (`product_auth_durable` keys account records by
+/// `session_id`), and the update reads the account at the flow scope's session
+/// path — so binding a `None`-session flow to a `Some(session)` account (or two
+/// different sessions) would select a record the callback can never update.
+/// Require exact session equality so a cross-session account is never bound.
 pub fn binding_scope_owns_account(scope: &AuthProductScope, account: &CredentialAccount) -> bool {
-    CredentialAccountOwnerScope::from_scope(&scope.to_credential_owner()).matches(account)
+    let owner_scope = scope.to_credential_owner();
+    CredentialAccountOwnerScope::from_scope(&owner_scope).matches(account)
+        && account.scope.session_id.as_ref() == owner_scope.session_id.as_ref()
 }
 
 /// Read-only credential-account projection source for account owner queries.
