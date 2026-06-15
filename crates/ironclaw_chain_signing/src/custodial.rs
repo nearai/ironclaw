@@ -198,6 +198,22 @@ where
             });
         }
 
+        // --- KMS curve-capability gate (mainnet path only). This is a
+        //     pure-configuration check (it depends only on the wired backend
+        //     and the family's native curve), so it runs in pre-flight, before
+        //     `claim_grant` and the `Signing` ledger advance: a refusal here is
+        //     side-effect-free — it does NOT burn the one-shot grant nor wedge
+        //     the ledger, leaving a clean retryable state so the request can
+        //     succeed after an ed25519-capable KMS is wired (Codex P2). The alg
+        //     is the family's native curve — the same one each `sign_*` arm
+        //     passes to the backend, kept in sync via
+        //     `ChainFamily::signing_alg`. ---
+        if path == SigningPath::Kms
+            && let Some(alg) = requested_family.signing_alg()
+        {
+            self.require_kms_supporting(bound_chain, alg)?;
+        }
+
         // --- Enforcement point #1: sign-time approved-tx-hash re-check. ---
         // Recompute the binding hash FROM THE PERSISTED decoded tx and compare
         // to the approved hash. Any post-approval mutation of `decoded` diverges
@@ -292,7 +308,7 @@ where
                             reason: "internal: missing resolved KMS key_ref".to_string(),
                         })?;
                 let raw = self
-                    .require_kms()?
+                    .require_kms_supporting(req.chain.as_str(), SignatureAlg::Secp256k1)?
                     .sign_digest(key_ref, &digest.0, SignatureAlg::Secp256k1)
                     .await?;
                 crate::evm::sign::bind_kms_signature(digest, &raw, bound)?
@@ -362,7 +378,7 @@ where
                             reason: "internal: missing resolved KMS key_ref".to_string(),
                         })?;
                 let raw = self
-                    .require_kms()?
+                    .require_kms_supporting(req.chain.as_str(), SignatureAlg::Ed25519)?
                     .sign_digest(key_ref, &digest, SignatureAlg::Ed25519)
                     .await?;
                 crate::solana::sign::bind_kms_signature(&digest, &raw, fee_payer)?
@@ -422,7 +438,7 @@ where
                             reason: "internal: missing resolved KMS key_ref".to_string(),
                         })?;
                 let raw = self
-                    .require_kms()?
+                    .require_kms_supporting(req.chain.as_str(), SignatureAlg::Ed25519)?
                     .sign_digest(key_ref, &digest, SignatureAlg::Ed25519)
                     .await?;
                 crate::near::sign::bind_kms_signature(&digest, &raw, expected_pubkey)?
@@ -461,6 +477,35 @@ where
             .ok_or_else(|| ChainSigningError::ShipGateRefused {
                 reason: "mainnet KMS path required but no KMS backend wired".to_string(),
             })
+    }
+
+    /// Borrow the wired KMS backend AND assert it can sign the chain's native
+    /// curve, failing closed otherwise. This runs on the mainnet/KMS path BEFORE
+    /// any digest crosses the boundary: a curve-limited cloud backend (e.g. AWS
+    /// KMS, which signs secp256k1 but not ed25519) is refused for the ed25519
+    /// mainnet chains here rather than via a downstream runtime sign error — and
+    /// never via a hot-key fallback. `LocalKmsSigner` supports both curves, so it
+    /// passes for every chain.
+    ///
+    // follow-up: when the stack integrates `ironclaw_attested_runtime`'s
+    // `CustodialMainnetShipGate` (PR10), this curve-capability check composes
+    // with — and is independent of — the `CUSTODIAL_MAINNET_ENABLED` env flag and
+    // the "require BOTH flag AND wired KMS" composition that live at that layer.
+    fn require_kms_supporting(
+        &self,
+        chain: &str,
+        alg: SignatureAlg,
+    ) -> Result<&Arc<dyn KmsSigner>, ChainSigningError> {
+        let kms = self.require_kms()?;
+        if !kms.supports_alg(alg) {
+            return Err(ChainSigningError::ShipGateRefused {
+                reason: format!(
+                    "mainnet {chain} requires a KMS backend that can sign {alg:?}; configured \
+                     backend cannot"
+                ),
+            });
+        }
+        Ok(kms)
     }
 
     /// Borrow the binding's KMS key reference or fail closed.
