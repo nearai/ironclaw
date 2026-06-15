@@ -306,7 +306,7 @@ effects = ["network", "use_secret"]
 runtime_credentials = [
   { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
-default_permission = "allow"
+default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/github/search_code.input.v1.json"
 output_schema_ref = "schemas/github/raw_output.v1.json"

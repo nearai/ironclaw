@@ -1600,20 +1600,22 @@ mod tests {
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").unwrap();
         let github = catalog.resolve(&package_ref).unwrap();
         let mut allowed_read_only = BTreeSet::new();
-        let mut asked_effectful = BTreeSet::new();
+        let mut ask_required = BTreeSet::new();
+        let sensitive_token_backed_reads = BTreeSet::from(["github.search_code"]);
 
         for capability in &github.package.manifest.capabilities {
             let requires_explicit_approval = capability.effects.iter().any(|effect| {
                 effect.is_write() || matches!(effect, EffectKind::DispatchCapability)
-            });
+            }) || sensitive_token_backed_reads
+                .contains(capability.id.as_str());
             if requires_explicit_approval {
                 assert_eq!(
                     capability.default_permission,
                     PermissionMode::Ask,
-                    "{} should still ask before effectful GitHub actions",
+                    "{} should still ask before effectful or broad token-backed GitHub actions",
                     capability.id
                 );
-                asked_effectful.insert(capability.id.as_str());
+                ask_required.insert(capability.id.as_str());
             } else {
                 assert_eq!(
                     capability.default_permission,
@@ -1627,8 +1629,9 @@ mod tests {
 
         assert!(allowed_read_only.contains("github.get_repo"));
         assert!(allowed_read_only.contains("github.list_branches"));
-        assert!(asked_effectful.contains("github.create_issue"));
-        assert!(asked_effectful.contains("github.handle_webhook"));
+        assert!(ask_required.contains("github.search_code"));
+        assert!(ask_required.contains("github.create_issue"));
+        assert!(ask_required.contains("github.handle_webhook"));
     }
 
     #[test]
