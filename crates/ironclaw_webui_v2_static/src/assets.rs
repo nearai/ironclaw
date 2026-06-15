@@ -353,6 +353,40 @@ mod tests {
     }
 
     #[test]
+    fn extension_config_modal_hides_activate_for_active_extensions() {
+        let extension_actions = asset_text("js/pages/extensions/lib/extension-actions.js");
+        assert!(extension_actions.contains("export function extensionIsActive"));
+        assert!(extension_actions.contains("state === \"active\" || state === \"ready\""));
+        assert!(
+            extension_actions.contains("setupReadyForActivation({ extension"),
+            "setup readiness must receive lifecycle state, not only setup fields"
+        );
+        assert!(
+            extension_actions.contains("extensionIsActive(extension)"),
+            "active extensions must not be considered ready for another activation"
+        );
+
+        let extension_card = asset_text("js/pages/extensions/components/extension-card.js");
+        assert!(extension_card.contains("activationStatus: ext.activation_status"));
+        assert!(extension_card.contains("onboardingState: ext.onboarding_state"));
+
+        let configure_modal = asset_text("js/pages/extensions/components/configure-modal.js");
+        assert!(configure_modal.contains("const isActive = extensionIsActive(extension);"));
+        assert!(
+            configure_modal.contains("const canActivate = setupReadyForActivation({ extension"),
+            "the modal Activate button must be gated by lifecycle-aware setup readiness"
+        );
+        assert!(configure_modal.contains("extensions.activeConfigured"));
+
+        let regression = source_text("js/pages/extensions/lib/extension-actions.test.mjs");
+        assert!(
+            regression.contains("extensionIsActive accepts card payload lifecycle fields"),
+            "caller-visible card payload lifecycle fields need JS regression coverage"
+        );
+        assert!(regression.contains("extension: { active: true }"));
+    }
+
+    #[test]
     fn extension_oauth_setup_refreshes_while_popup_is_open() {
         let use_extensions = asset_text("js/pages/extensions/hooks/useExtensions.js");
 
