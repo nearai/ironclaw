@@ -357,6 +357,11 @@ struct RuntimeOutcomeConversion<'a> {
     outcome: RuntimeCapabilityOutcome,
 }
 
+struct CapabilityReplayInput<'a> {
+    input: &'a Value,
+    estimate: &'a ResourceEstimate,
+}
+
 impl<'a> RuntimeOutcomeCompletion<'a> {
     fn conversion(&self) -> RuntimeOutcomeConversion<'a> {
         RuntimeOutcomeConversion {
@@ -1267,8 +1272,8 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 safe_summary: "capability provider trust is unavailable".to_string(),
             }));
         };
-        let (input, estimate) = if let Some(resume) = request.approval_resume.as_ref() {
-            (resume.input.clone(), resume.estimate.clone())
+        let (input, estimate) = if let Some(replay) = invocation_replay_input(&request) {
+            (replay.input.clone(), replay.estimate.clone())
         } else {
             let input = self
                 .input_resolver
@@ -1953,6 +1958,43 @@ fn loop_surface_version(
     })
 }
 
+fn runtime_resume_replay<'a>(
+    input: Option<&'a Value>,
+    estimate: Option<&'a ResourceEstimate>,
+    gate_kind: &'static str,
+) -> Result<CapabilityReplayInput<'a>, AgentLoopHostError> {
+    let input = input.ok_or_else(|| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Internal,
+            format!("{gate_kind} resume replay input is unavailable"),
+        )
+    })?;
+    let estimate = estimate.ok_or_else(|| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Internal,
+            format!("{gate_kind} resume replay estimate is unavailable"),
+        )
+    })?;
+    Ok(CapabilityReplayInput { input, estimate })
+}
+
+fn invocation_replay_input(request: &CapabilityInvocation) -> Option<CapabilityReplayInput<'_>> {
+    if let Some(resume) = request.approval_resume.as_ref() {
+        return Some(CapabilityReplayInput {
+            input: &resume.input,
+            estimate: &resume.estimate,
+        });
+    }
+    request
+        .auth_resume
+        .as_ref()
+        .and_then(|resume| resume.replay.as_ref())
+        .map(|replay| CapabilityReplayInput {
+            input: &replay.input,
+            estimate: &replay.estimate,
+        })
+}
+
 async fn runtime_outcome_to_loop(
     run_context: &LoopRunContext,
     result_writer: &(dyn LoopCapabilityResultWriter + Send + Sync),
@@ -1980,18 +2022,7 @@ async fn runtime_outcome_to_loop(
             })
         }
         RuntimeCapabilityOutcome::ApprovalRequired(gate) => {
-            let input = conversion.input.ok_or_else(|| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::Internal,
-                    "approval resume replay input is unavailable",
-                )
-            })?;
-            let estimate = conversion.estimate.ok_or_else(|| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::Internal,
-                    "approval resume replay estimate is unavailable",
-                )
-            })?;
+            let replay = runtime_resume_replay(conversion.input, conversion.estimate, "approval")?;
             CapabilityOutcome::ApprovalRequired {
                 gate_ref: loop_gate_ref("approval", gate.approval_request_id.to_string())?,
                 safe_summary: blocked_summary(gate.reason).to_string(),
@@ -2000,16 +2031,27 @@ async fn runtime_outcome_to_loop(
                     resume_token: resume_token_from_invocation_id(conversion.invocation_id)?,
                     correlation_id: conversion.correlation_id,
                     input_ref: conversion.input_ref.clone(),
-                    input: input.clone(),
-                    estimate: estimate.clone(),
+                    input: replay.input.clone(),
+                    estimate: replay.estimate.clone(),
                 }),
             }
         }
-        RuntimeCapabilityOutcome::AuthRequired(gate) => CapabilityOutcome::AuthRequired {
-            gate_ref: loop_gate_ref("auth", gate.gate_id.to_string())?,
-            credential_requirements: gate.credential_requirements,
-            safe_summary: blocked_summary(gate.reason).to_string(),
-        },
+        RuntimeCapabilityOutcome::AuthRequired(gate) => {
+            let replay = runtime_resume_replay(conversion.input, conversion.estimate, "auth")?;
+            CapabilityOutcome::AuthRequired {
+                gate_ref: loop_gate_ref("auth", gate.gate_id.to_string())?,
+                credential_requirements: gate.credential_requirements,
+                safe_summary: blocked_summary(gate.reason).to_string(),
+                auth_resume: Some(ironclaw_turns::run_profile::CapabilityAuthResume {
+                    resume_token: resume_token_from_invocation_id(conversion.invocation_id)?,
+                    prior_approval: None,
+                    replay: Some(ironclaw_turns::run_profile::CapabilityAuthResumeReplay {
+                        input: replay.input.clone(),
+                        estimate: replay.estimate.clone(),
+                    }),
+                }),
+            }
+        }
         RuntimeCapabilityOutcome::ResourceBlocked(gate) => CapabilityOutcome::ResourceBlocked {
             gate_ref: loop_gate_ref("resource", gate.gate_id.to_string())?,
             safe_summary: blocked_summary(gate.reason).to_string(),
@@ -5666,6 +5708,7 @@ mod tests {
             auth_resume: Some(CapabilityAuthResume {
                 resume_token,
                 prior_approval: None,
+                replay: None,
             }),
         };
 

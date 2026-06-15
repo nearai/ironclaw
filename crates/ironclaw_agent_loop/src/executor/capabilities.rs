@@ -4,7 +4,8 @@ use async_trait::async_trait;
 use ironclaw_turns::{
     LoopFailureKind, LoopResultRef,
     run_profile::{
-        CapabilityApprovalResume, CapabilityBatchInvocation, CapabilityCallCandidate,
+        AuthResumeApprovalIdentity, CapabilityApprovalResume, CapabilityAuthResume,
+        CapabilityAuthResumeReplay, CapabilityBatchInvocation, CapabilityCallCandidate,
         CapabilityFailureKind, CapabilityOutcome, CapabilityProgress, CapabilityResultMessage,
         LoopDriverNoteKind, LoopProgressEvent, VisibleCapabilitySurface,
     },
@@ -342,6 +343,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                             gate_ref: shared_gate_ref,
                             credential_requirements: Vec::new(),
                             approval_resume: None,
+                            auth_resume: None,
                         },
                     )
                     .await?
@@ -496,6 +498,7 @@ impl CapabilityStage {
                             gate_ref,
                             credential_requirements: Vec::new(),
                             approval_resume,
+                            auth_resume: None,
                         },
                     )
                     .await
@@ -503,14 +506,12 @@ impl CapabilityStage {
             CapabilityOutcome::AuthRequired {
                 gate_ref,
                 credential_requirements,
+                auth_resume,
                 ..
             } => {
-                // When the invocation already passed an approval gate, carry the
-                // approval identity into GateStage so GateStage can propagate it
-                // into the pending_auth_resume slot.  The resume_token encodes the
-                // original invocation_id; without it, auth re-dispatch would mint a
-                // fresh invocation_id and the fingerprinted approval lease (scoped
-                // to the original invocation_id) would never match.
+                // When the invocation already passed an approval gate, carry that
+                // identity into the auth resume contract before handing off to the
+                // generic gate persistence stage.
                 //
                 // Extract BEFORE clearing so the data is still present.
                 let prior_approval = state
@@ -522,6 +523,7 @@ impl CapabilityStage {
                 // outcomes GateStage re-populates the record when it blocks.
                 clear_matching_pending_approval_resume(&mut state, &call);
                 clear_matching_pending_auth_resume(&mut state, &call);
+                let auth_resume = auth_resume_for_gate(auth_resume, prior_approval.as_ref());
                 GateStage
                     .process(
                         ctx,
@@ -532,6 +534,7 @@ impl CapabilityStage {
                             gate_ref,
                             credential_requirements,
                             approval_resume: prior_approval,
+                            auth_resume,
                         },
                     )
                     .await
@@ -547,6 +550,7 @@ impl CapabilityStage {
                             gate_ref,
                             credential_requirements: Vec::new(),
                             approval_resume: None,
+                            auth_resume: None,
                         },
                     )
                     .await
@@ -914,6 +918,37 @@ fn clear_matching_pending_approval_resume(
         .is_some_and(|resume| resume.capability_id == call.capability_id)
     {
         state.pending_approval_resume = None;
+    }
+}
+
+fn auth_resume_for_gate(
+    mut auth_resume: Option<CapabilityAuthResume>,
+    prior_approval: Option<&CapabilityApprovalResume>,
+) -> Option<CapabilityAuthResume> {
+    let Some(prior_approval) = prior_approval else {
+        return auth_resume;
+    };
+
+    let prior_identity = || AuthResumeApprovalIdentity {
+        approval_request_id: prior_approval.approval_request_id,
+        correlation_id: prior_approval.correlation_id,
+    };
+    let prior_replay = || CapabilityAuthResumeReplay {
+        input: prior_approval.input.clone(),
+        estimate: prior_approval.estimate.clone(),
+    };
+
+    match auth_resume.as_mut() {
+        Some(resume) => {
+            resume.prior_approval.get_or_insert_with(prior_identity);
+            resume.replay.get_or_insert_with(prior_replay);
+            auth_resume
+        }
+        None => Some(CapabilityAuthResume {
+            resume_token: prior_approval.resume_token.clone(),
+            prior_approval: Some(prior_identity()),
+            replay: Some(prior_replay()),
+        }),
     }
 }
 
