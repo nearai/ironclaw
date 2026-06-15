@@ -67,14 +67,14 @@ mod tests {
     use super::*;
     use crate::local_dev_capability_policy::local_dev_capability_policy;
 
-    /// Assert a Trace Commons capability with the given descriptor `effects`
-    /// is allowed under local-dev WITHOUT a REPL approval gate — i.e. it is on
-    /// the TOML approval-gate exemption list. Dropping the exemption makes this
-    /// fail.
-    async fn assert_trace_commons_skips_approval_gate(
+    /// Run the local-dev authorizer for a Trace Commons capability with the
+    /// given descriptor `effects` and return its decision. Asserts up front that
+    /// the effects WOULD require an approval gate without an exemption, so a
+    /// "skips gate" assertion can't pass via a non-gating default policy.
+    async fn trace_commons_authorize_decision(
         capability_id: &str,
         effects: Vec<EffectKind>,
-    ) {
+    ) -> ironclaw_host_api::Decision {
         let capability_id = CapabilityId::new(capability_id).expect("capability id");
         let descriptor = CapabilityDescriptor {
             id: capability_id,
@@ -105,11 +105,9 @@ mod tests {
             MountView::default(),
         )
         .expect("execution context");
-        // Guard against a false positive: prove these effects WOULD require an
-        // approval gate without the capability exemption. Otherwise — if the
-        // effects stopped gating under the default policy — the test would still
-        // return `Allow` even after the TOML exemption was removed, no longer
-        // proving the exemption is the allow path.
+        // These effects must be gate-worthy without an exemption, so the
+        // skips-gate vs requires-gate distinction is driven by the exemption
+        // list, not by a non-gating default policy.
         assert!(
             local_dev_effects_require_approval(None, policy.as_ref(), &effects),
             "test must use effects that require approval without the capability exemption"
@@ -124,26 +122,23 @@ mod tests {
             evaluated_at: chrono::Utc::now(),
         };
         let authorizer = local_dev_authorizer(None, policy);
-
-        let decision = authorizer
+        authorizer
             .authorize_dispatch_with_trust(
                 &context,
                 &descriptor,
                 &ResourceEstimate::default(),
                 &trust_decision,
             )
-            .await;
-
-        assert!(
-            matches!(decision, ironclaw_host_api::Decision::Allow { .. }),
-            "{} is consented in the agent turn and should not require a REPL approval gate, got {decision:?}",
-            descriptor.id.as_str()
-        );
+            .await
     }
 
     #[tokio::test]
-    async fn local_dev_trace_commons_profile_set_skips_approval_gate() {
-        assert_trace_commons_skips_approval_gate(
+    async fn local_dev_trace_commons_profile_set_requires_approval_gate() {
+        // profile_set publishes a PUBLIC community profile and is deliberately
+        // NOT on the approval-gate exemption list: a model-controlled
+        // `confirmed=true` is not sufficient consent for a public external
+        // write, so it must hit the runtime approval gate.
+        let decision = trace_commons_authorize_decision(
             TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
             vec![
                 EffectKind::ReadFilesystem,
@@ -152,14 +147,22 @@ mod tests {
             ],
         )
         .await;
+        assert!(
+            matches!(
+                decision,
+                ironclaw_host_api::Decision::RequireApproval { .. }
+            ),
+            "profile_set (public external write, not exempt) must require an approval gate, got {decision:?}"
+        );
     }
 
     #[tokio::test]
     async fn local_dev_trace_commons_onboard_skips_approval_gate() {
-        // The onboard exemption (not profile_set) was the actual fix; cover it
-        // with its real network + external_write + filesystem-write effects so
-        // dropping the TOML exemption fails here.
-        assert_trace_commons_skips_approval_gate(
+        // onboard IS exempt (it runs its own in-turn confirmed=true consent
+        // before the network POST). Cover it with its real
+        // network + external_write + filesystem-write effects so dropping the
+        // TOML exemption fails here.
+        let decision = trace_commons_authorize_decision(
             TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
             vec![
                 EffectKind::ReadFilesystem,
@@ -169,5 +172,9 @@ mod tests {
             ],
         )
         .await;
+        assert!(
+            matches!(decision, ironclaw_host_api::Decision::Allow { .. }),
+            "onboard is consented in-turn and exempt, so it should not require a REPL approval gate, got {decision:?}"
+        );
     }
 }

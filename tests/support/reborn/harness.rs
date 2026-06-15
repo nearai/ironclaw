@@ -1714,6 +1714,11 @@ impl HostRuntimeCapabilityHarness {
             vec![
                 EffectKind::DispatchCapability,
                 EffectKind::ReadFilesystem,
+                // onboard + profile_token persist device-key material
+                // (Ed25519 keypair + policy.json), so the harness allow-set
+                // must grant WriteFilesystem or those capabilities are filtered
+                // out of the model-visible surface.
+                EffectKind::WriteFilesystem,
                 EffectKind::Network,
                 EffectKind::ExternalWrite,
             ],

@@ -157,7 +157,13 @@ pub(super) fn profile_set_manifest() -> Result<CapabilityManifest, ExtensionErro
             EffectKind::Network,
             EffectKind::ExternalWrite,
         ],
-        PermissionMode::Allow,
+        // Ask, not Allow: publishing a public community profile is an external
+        // write to a public surface. The tool's `confirmed=true` input is
+        // model-controlled (a prompt-injected model could supply it), so the
+        // runtime approval gate — user-controlled consent — is the primary
+        // control, with `confirmed=true` as defense-in-depth. profile_set is
+        // also deliberately NOT on the local-dev approval-gate exemption list.
+        PermissionMode::Ask,
         Some(ResourceProfile {
             default_estimate: ResourceEstimate {
                 wall_clock_ms: Some(15_000),
