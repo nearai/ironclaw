@@ -165,10 +165,12 @@ function MessageBubbleImpl({ message, onRetry }) {
           ${attachments && attachments.length > 0 && html`
             <div className="mt-2 flex flex-col gap-1.5">
               ${attachments.map((att, i) => html`
-                <div key=${i} className="flex items-center gap-2 rounded-md border border-iron-700 bg-iron-900/50 px-3 py-2 text-xs">
-                  <${Icon} name="file" className="h-3.5 w-3.5 text-signal" />
+                <div key=${att.id || i} className="flex items-center gap-2 rounded-md border border-iron-700 bg-iron-900/50 px-3 py-2 text-xs">
+                  ${att.preview_url
+                    ? html`<img src=${att.preview_url} alt=${att.filename || "attachment"} className="h-9 w-9 shrink-0 rounded object-cover" />`
+                    : html`<${Icon} name="file" className="h-3.5 w-3.5 shrink-0 text-signal" />`}
                   <span className="truncate">${att.filename || "attachment"}</span>
-                  <span className="ml-auto shrink-0 text-iron-200">${att.mime_type} ${att.size_label ? " / " + att.size_label : ""}</span>
+                  <span className="ml-auto shrink-0 text-iron-200">${att.mime_type}${att.size_label ? " / " + att.size_label : ""}</span>
                 </div>
               `)}
             </div>

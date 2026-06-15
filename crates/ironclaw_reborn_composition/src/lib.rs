@@ -32,6 +32,7 @@ mod available_extensions;
 mod budget;
 mod budget_events;
 mod bundled_skills;
+mod communication_context;
 mod default_system_prompt;
 mod error;
 mod extension_activation_credentials;

@@ -61,21 +61,21 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityInvocation, CapabilityOutcome,
-        FinalizeAssistantMessage, HookMilestoneSink, HostManagedLoopModelPort,
-        HostManagedLoopPromptPort, InMemoryInstructionMaterializationStore,
-        InstructionBundleMaterializedMessage, InstructionMaterializationStore,
-        InstructionSafetyContext, LoadCheckpointPayloadRequest, LoadedCheckpointPayload,
-        LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort,
-        LoopCompactionRequest, LoopContextBundle, LoopContextPort, LoopContextRequest,
-        LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort,
-        LoopModelBudgetAccountant, LoopModelPolicyGuard, LoopModelPort, LoopModelRequest,
-        LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
-        LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopRunInfoPort, LoopRuntimeContext, LoopTranscriptPort, NoOpBudgetAccountant,
-        NoOpPolicyGuard, ProviderToolCall, ProviderToolDefinition, RunScopedHookMilestoneSink,
-        StageCheckpointPayloadRequest, SystemInferencePort, UpdateAssistantDraft,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        CommunicationContextProvider, FinalizeAssistantMessage, HookMilestoneSink,
+        HostManagedLoopModelPort, HostManagedLoopPromptPort,
+        InMemoryInstructionMaterializationStore, InstructionBundleMaterializedMessage,
+        InstructionMaterializationStore, InstructionSafetyContext, LoadCheckpointPayloadRequest,
+        LoadedCheckpointPayload, LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort,
+        LoopCheckpointPort, LoopCheckpointRequest, LoopCompactionError, LoopCompactionOutcome,
+        LoopCompactionPort, LoopCompactionRequest, LoopContextBundle, LoopContextPort,
+        LoopContextRequest, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
+        LoopInputCursor, LoopInputPort, LoopModelBudgetAccountant, LoopModelPolicyGuard,
+        LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort,
+        LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort,
+        LoopRunContext, LoopRunInfoPort, LoopRuntimeContext, LoopTranscriptPort,
+        NoOpBudgetAccountant, NoOpPolicyGuard, ProviderToolCall, ProviderToolDefinition,
+        RunScopedHookMilestoneSink, StageCheckpointPayloadRequest, SystemInferencePort,
+        UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::ClaimedTurnRun,
 };
@@ -947,6 +947,7 @@ where
     event_subscription: Option<EventTriggeredHookSubscription>,
     safety_context: InstructionSafetyContext,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
+    communication_context_provider: Option<Arc<dyn CommunicationContextProvider>>,
     input_queue: Option<Arc<dyn HostInputQueue>>,
     profiled_capabilities: Option<ProfiledCapabilityHostRuntime>,
     subagent_prompt_composer: Option<SubagentPromptComposer>,
@@ -1010,6 +1011,7 @@ where
             event_subscription: None,
             safety_context,
             identity_context_source: None,
+            communication_context_provider: None,
             input_queue: None,
             profiled_capabilities: None,
             subagent_prompt_composer: None,
@@ -1269,6 +1271,14 @@ where
         self
     }
 
+    pub fn with_communication_context_provider(
+        mut self,
+        provider: Arc<dyn CommunicationContextProvider>,
+    ) -> Self {
+        self.communication_context_provider = Some(provider);
+        self
+    }
+
     pub fn with_profiled_capability_port_factory(
         mut self,
         capability_factory: Arc<dyn LoopCapabilityPortFactory>,
@@ -1357,6 +1367,22 @@ where
 
         let max_messages = self.config.max_messages.max(1);
         let run_context = self.attach_model_route_snapshot(request.loop_run_context)?;
+
+        // Kick off the advisory communication-context fetch immediately so its
+        // latency + timeout budget overlaps the gate/dispatcher construction and
+        // capability-surface computation below, rather than blocking prompt
+        // construction. Joined (and stamped with `delivery_tools_visible`) at the
+        // prompt-build site once the surface is known.
+        let communication_fetch = self
+            .communication_context_provider
+            .as_ref()
+            .map(|provider| {
+                provider.begin_communication_context(
+                    run_context.scope.clone(),
+                    run_context.actor().cloned(),
+                )
+            });
+
         let context_window_cache = Arc::new(ThreadContextWindowCache::default());
         let mut context_adapter = ThreadBackedLoopContextPort::new(
             Arc::clone(&self.thread_service),
@@ -1489,12 +1515,31 @@ where
                 hooked
             };
         }
-        capabilities
+        let visible_surface = capabilities
             .visible_capabilities(VisibleCapabilityRequest)
             .await
             .map_err(|error| RebornLoopDriverHostError::InvalidRequest {
                 reason: error.safe_summary,
             })?;
+        // The rendered guidance names BOTH the lister and the setter; require both
+        // capabilities to be visible before setting the flag, so we never prompt
+        // the model to call a tool that is not actually in the surface.
+        let delivery_tools_visible = {
+            let ids: std::collections::HashSet<&str> = visible_surface
+                .descriptors
+                .iter()
+                .map(|d| d.capability_id.as_str())
+                .collect();
+            ids.contains("builtin.outbound_delivery_target_set")
+                && ids.contains("builtin.outbound_delivery_targets_list")
+        };
+        // Join the fetch started at loop entry and stamp the surface-derived
+        // `delivery_tools_visible` flag. In the common case the fetch has already
+        // resolved during the work above, so this adds no critical-path latency.
+        let communication = match communication_fetch {
+            Some(fetch) => fetch.resolve(delivery_tools_visible).await,
+            None => None,
+        };
         let prompt_authority = LoopPromptBundleAuthority::shared();
         let surface_state_for_prompt = Arc::clone(&surface_state);
         let prompt_port = HostManagedLoopPromptPort::new(
@@ -1511,6 +1556,8 @@ where
         .with_runtime_context(LoopRuntimeContext {
             loop_started_at_utc: chrono::Utc::now(),
             user_timezone: None,
+            communication,
+            product_context: run_context.product_context.clone(),
         });
         let mut prompt: Arc<dyn LoopPromptPort> = Arc::new(prompt_port);
         if let Some(dispatcher) = per_build_dispatcher.as_ref() {
@@ -1994,6 +2041,9 @@ where
         if let Some(snapshot) = claimed.state.resolved_model_route.clone() {
             loop_run_context = loop_run_context.with_resolved_model_route(snapshot);
         }
+        if let Some(product_context) = claimed.state.product_context.clone() {
+            loop_run_context = loop_run_context.with_product_context(product_context);
+        }
         let request = RebornLoopDriverHostRequest {
             claimed_run: claimed.clone(),
             loop_run_context,
@@ -2265,6 +2315,13 @@ fn turn_error_to_host_error(error: TurnError) -> AgentLoopHostError {
                 &error,
             )
         }
+        TurnError::InvalidRunOriginAdapter => ironclaw_loop_support::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "request",
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "checkpoint state request contains an invalid run origin adapter",
+            &error,
+        ),
     }
 }
 
