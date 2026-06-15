@@ -538,7 +538,10 @@ async fn reborn_trace_trace_commons_first_party_tools_parity() {
             calls: vec![RebornScriptedProviderToolCall::new(
                 profile_token.clone(),
                 "call_trace_commons_profile_token",
-                serde_json::json!({}),
+                // confirmed=true clears the hard mint-consent gate so the call
+                // reaches the enrollment check (NotEnrolled here, deterministic,
+                // no network — this scope never onboarded).
+                serde_json::json!({ "confirmed": true }),
             )],
             expected_tool_results: Vec::new(),
         },

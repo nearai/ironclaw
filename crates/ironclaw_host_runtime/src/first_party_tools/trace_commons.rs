@@ -118,7 +118,8 @@ pub(super) fn profile_token_manifest() -> Result<CapabilityManifest, ExtensionEr
          Prefer trace_commons.profile_set when the user wants to create or update \
          their public profile from the agent. Use this token only for browser/manual \
          profile setup. It is scoped only to community profile management; it cannot \
-         submit traces.",
+         submit traces. Pass confirmed=true only after the user has explicitly asked \
+         to mint a manual/browser token in this conversation.",
         // Persists the minted token to a 0600 local file (out-of-band delivery,
         // keeping the bearer credential off the model surface), so the effect
         // model must declare the local filesystem write.
@@ -578,6 +579,27 @@ pub(crate) fn format_credits(report: &TraceCreditReport) -> Value {
 pub(super) async fn dispatch_profile_token(
     request: &FirstPartyCapabilityRequest,
 ) -> Result<Value, FirstPartyCapabilityError> {
+    // Consent gate: minting persists a bearer profile-management credential.
+    // The runtime approval gate (PermissionMode::Ask) can be auto-approved in
+    // local-yolo, so this in-turn confirmed=true check is the hard fail-closed
+    // boundary — mirroring dispatch_onboard / dispatch_profile_set. Never mint a
+    // credential without explicit per-conversation confirmation.
+    let confirmed = request
+        .input
+        .get("confirmed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !confirmed {
+        return Ok(json!({
+            "minted": false,
+            "consent_required": true,
+            "message": "Minting a Trace Commons profile-management token persists a bearer \
+        credential for manual/browser setup. Prefer trace_commons.profile_set to set the public \
+        profile directly. If the user explicitly wants a manual token, confirm with them first, \
+        then call again with confirmed=true."
+        }));
+    }
+
     let scope = trace_scope_key(
         request.scope.tenant_id.as_str(),
         request.scope.user_id.as_str(),
@@ -660,10 +682,14 @@ fn format_profile_token(token: &ProfileAttributionToken) -> Value {
         "expires_in": token.expires_in,
         "consent_scope": "public_attribution",
         "allowed_uses": [],
-        "profile_url": "https://tracecommons.ai/profile",
+        // No profile URL is surfaced here: the token is a bearer credential
+        // scoped to the user's ENROLLED issuer (which may be self-hosted or
+        // loopback). Naming a fixed origin would risk steering the user to
+        // paste the token at the wrong host. The enrolled profile flow / local
+        // UI/CLI knows the correct origin out of band.
         "message": "Prefer asking the agent to set your public profile directly with a pseudonymous handle. \
     For browser/manual setup only, use the local Trace Commons UI or CLI to open the private profile-token \
-    file, then paste its contents into https://tracecommons.ai/profile without a Bearer prefix. \
+    file, then continue through your enrolled Trace Commons profile flow (do not paste it at any other origin). \
     The token is not shown here because it is a credential and must not appear in the conversation."
     })
 }
@@ -759,7 +785,9 @@ fn profile_set_success_value(input: &ProfileSetToolInput) -> Value {
         "updated": true,
         "display_handle": input.display_handle.as_str(),
         "bio": input.bio.as_deref(),
-        "profile_url": "https://tracecommons.ai/profile",
+        // No fixed profile URL: the profile was published to the user's enrolled
+        // issuer (possibly self-hosted/loopback), so naming tracecommons.ai here
+        // would misdirect a self-hosted user.
         "message": "Your public Trace Commons profile handle is set. It may appear on the leaderboard after the next snapshot.",
     })
 }
@@ -1260,7 +1288,19 @@ mod tests {
             v["bio"],
             json!(Some("Trace Commons pilot contributor".to_string()))
         );
-        assert_eq!(v["profile_url"], json!("https://tracecommons.ai/profile"));
+        // No fixed profile URL is surfaced — the profile lives on the user's
+        // enrolled (possibly self-hosted) issuer, so naming a fixed origin
+        // would misdirect a self-hosted user.
+        assert!(
+            v.get("profile_url").is_none(),
+            "no fixed profile URL may be surfaced on the success result"
+        );
+        assert!(
+            !serde_json::to_string(&v)
+                .unwrap()
+                .contains("tracecommons.ai"),
+            "the hardcoded tracecommons.ai origin must not appear in output"
+        );
         assert!(
             v["message"]
                 .as_str()
@@ -1283,8 +1323,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_profile_token_without_enrollment_returns_onboard_guidance() {
+    async fn dispatch_profile_token_without_confirmed_returns_consent_required_no_mint() {
+        // No confirmed=true: the hard consent gate must short-circuit before
+        // any token is minted or persisted (a bearer credential), even though
+        // the runtime Ask gate could be auto-approved in local-yolo.
         let request = test_request(json!({}));
+        let result = dispatch_profile_token(&request).await.unwrap();
+        assert_eq!(result["minted"], json!(false));
+        assert_eq!(result["consent_required"], json!(true));
+        assert!(
+            result.get("token_delivery").is_none(),
+            "no token may be minted before consent"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_profile_token_without_enrollment_returns_onboard_guidance() {
+        let request = test_request(json!({ "confirmed": true }));
         let result = dispatch_profile_token(&request).await.unwrap();
         assert_eq!(result["minted"], json!(false));
         assert_eq!(result["error_code"], json!("NotEnrolled"));

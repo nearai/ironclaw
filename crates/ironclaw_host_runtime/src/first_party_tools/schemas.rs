@@ -216,7 +216,12 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         }),
         "schemas/builtin/trace_commons-profile_token.input.v1.json" => json!({
             "type": "object",
-            "properties": {},
+            "properties": {
+                "confirmed": {
+                    "type": "boolean",
+                    "description": "Must be true only after the user has explicitly asked to mint a manual/browser profile-management token in this conversation (default: false)"
+                }
+            },
             "additionalProperties": false
         }),
         "schemas/builtin/trace_commons-profile_set.input.v1.json" => json!({
