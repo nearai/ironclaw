@@ -117,7 +117,13 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
       : ext.onboarding?.credential_next_step || ext.onboarding?.credential_instructions) ||
     null;
 
-  const configurePayload = { packageRef: ext.package_ref, displayName };
+  const configurePayload = {
+    packageRef: ext.package_ref,
+    displayName,
+    active: ext.active,
+    activationStatus: ext.activation_status,
+    onboardingState: ext.onboarding_state,
+  };
 
   const primaryActions = [];
   const overflowActions = [];
