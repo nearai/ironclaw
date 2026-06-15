@@ -89,7 +89,7 @@ export function automationSummary(automations) {
   const next = automations
     .filter(
       (automation) =>
-        isBrowserActive(automation) && nextRunTimestamp(automation) !== null,
+        isBrowserActive(automation) && nextRunTimestamp(automation) != null,
     )
     .sort(
       (a, b) =>
