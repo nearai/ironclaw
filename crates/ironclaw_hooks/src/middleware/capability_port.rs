@@ -507,6 +507,7 @@ impl HookedLoopCapabilityPort {
                         gate_ref,
                         credential_requirements: Vec::new(),
                         safe_summary: reason.as_str().to_string(),
+                        auth_resume: None,
                     }),
                     Err(_) => Some(fail_closed_gate_ref_unavailable(reason.as_str())),
                 }

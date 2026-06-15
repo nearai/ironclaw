@@ -432,6 +432,7 @@ registerPack("ja", {
   // Settings — channels tab
   "channels.builtIn": "組み込みチャネル",
   "channels.messaging": "メッセージングチャネル",
+  "channels.availableChannels": "利用可能なチャネル",
   "channels.mcpServers": "MCP サーバー",
   "channels.webGateway": "Web Gateway",
   "channels.webGatewayDesc": "SSE ストリーミング対応ブラウザチャット",
@@ -441,6 +442,7 @@ registerPack("ja", {
   "channels.cliDesc": "TUI または簡易 REPL の端末インターフェース",
   "channels.repl": "REPL",
   "channels.replDesc": "テスト用の最小 read-eval-print ループ",
+  "channels.slack": "Slack",
   "channels.slackDesc": "DM とアプリメンション用のテナントアプリチャネル",
   "channels.slackDetail": "テナント Slack アプリのインストール",
   "channels.statusOn": "オン",
@@ -959,6 +961,7 @@ registerPack("ja", {
   "extensions.moreActions": "その他のアクション",
   "extensions.kind.wasm_tool": "WASM ツール",
   "extensions.kind.wasm_channel": "チャネル",
+  "extensions.kind.channel": "チャネル",
   "extensions.kind.mcp_server": "MCP サーバー",
   "extensions.kind.first_party": "ファーストパーティ",
   "extensions.kind.system": "システム",

@@ -262,3 +262,9 @@ capability = "builtin.trace_commons.profile_set"
 effects = ["dispatch_capability", "read_filesystem", "network", "external_write"]
 mounts = "ambient"
 network = "local_dev_wildcard"
+
+[[grants]]
+capability = "builtin.outbound_delivery_target_set"
+effects = ["dispatch_capability", "external_write"]
+mounts = "ambient"
+network = "default"

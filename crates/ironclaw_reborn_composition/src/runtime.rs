@@ -2377,6 +2377,7 @@ pub async fn build_reborn_runtime(
             model_gateway,
             milestone_sink.clone(),
             skill_activation_source.clone(),
+            None,
         )
         .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
         (
