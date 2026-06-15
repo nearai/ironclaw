@@ -80,8 +80,8 @@ function ChatArea({
   const [loadingInitial, setLoadingInitial] = useState(true);
 
   const fetchThreadMessages = useCallback(async () => {
-    const page = await (apiClient as any).conversation.getMessages({ threadId, limit: 100 });
-    return (page?.messages ?? []).map((m: any) => ({
+    const page = await apiClient.conversation.getMessages({ threadId, limit: 100 });
+    return (page.messages ?? []).map((m: any) => ({
       id: m.id,
       role: m.role,
       parts: restMessageToParts(m.role, m.text ?? ""),
@@ -111,62 +111,74 @@ function ChatArea({
   }, [fetchThreadMessages]);
 
   const chat = useIronclawChat(threadId, apiClient, initialMessages);
-  const syncKnownIdsRef = useRef<Set<string>>(new Set());
-
-  useEffect(() => {
-    syncKnownIdsRef.current = new Set(chat.messages.map((m) => m.id));
-  }, [chat.messages]);
-
-  useEffect(() => {
-    const syncMessages = async () => {
-      try {
-        const fresh = await fetchThreadMessages();
-        const known = syncKnownIdsRef.current;
-        const hasNew = fresh.some((m) => !known.has(m.id));
-        if (hasNew) {
-          chat.setMessages(fresh);
-        }
-      } catch (err) {
-        console.error("[ChatArea] projection sync failed", err);
-      }
-    };
-
-    const handle = openIronclawEventSource({
-      threadId,
-      onSnapshot: syncMessages,
-      onUpdate: syncMessages,
-      onEvent: (envelope) => {
-        console.debug("[ChatArea] unhandled sse event", envelope.event.type);
-      },
-    });
-
-    return () => handle.close();
-  }, [threadId, fetchThreadMessages, chat.setMessages]);
-
   const isBusy =
     chat.runState.phase === "submitted" ||
     chat.runState.phase === "running" ||
     chat.runState.phase === "finalizing" ||
     chat.runState.phase === "awaiting_approval" ||
     chat.runState.phase === "auth_required";
+  const wasBusyRef = useRef(false);
+  const syncKnownIdsRef = useRef<Set<string>>(new Set());
+
+  const replaceMessagesWithHistory = useCallback(async () => {
+    try {
+      const fresh = await fetchThreadMessages();
+      const known = syncKnownIdsRef.current;
+      const hasNew = fresh.some((m) => !known.has(m.id));
+      if (hasNew) {
+        chat.setMessages(fresh);
+      }
+    } catch (err) {
+      console.error("[ChatArea] sync failed", err);
+    }
+  }, [fetchThreadMessages, chat.setMessages]);
+
+  useEffect(() => {
+    syncKnownIdsRef.current = new Set(chat.messages.map((m) => m.id));
+  }, [chat.messages]);
+
+  useEffect(() => {
+    if (wasBusyRef.current && !isBusy) {
+      wasBusyRef.current = false;
+      replaceMessagesWithHistory();
+      return;
+    }
+    wasBusyRef.current = isBusy;
+  }, [isBusy, replaceMessagesWithHistory]);
+
+  useEffect(() => {
+    if (isBusy) return;
+
+    const applySnapshot = (data: unknown) => {
+      const frame = data as Record<string, unknown>;
+      const rawMessages = (frame.messages ?? []) as any[];
+      const mapped = rawMessages.map((m) => ({
+        id: m.id,
+        role: m.role,
+        parts: restMessageToParts(m.role, m.text ?? ""),
+        createdAt: m.createdAt ? new Date(m.createdAt) : undefined,
+      })) as UIMessage[];
+      if (mapped.length > 0) {
+        chat.setMessages(mapped);
+      }
+    };
+
+    const handle = openIronclawEventSource({
+      threadId,
+      onSnapshot: applySnapshot,
+      onUpdate: applySnapshot,
+      onEvent: () => {},
+    });
+
+    return () => handle.close();
+  }, [threadId, isBusy, chat.setMessages]);
 
   useEffect(() => {
     if (chat.runState.phase !== "disconnected") return;
     if (isBusy) return;
 
-    void (async () => {
-      try {
-        const fresh = await fetchThreadMessages();
-        const known = syncKnownIdsRef.current;
-        const hasNew = fresh.some((m) => !known.has(m.id));
-        if (hasNew) {
-          chat.setMessages(fresh);
-        }
-      } catch (err) {
-        console.error("[ChatArea] error recovery sync failed", err);
-      }
-    })();
-  }, [chat.runState.phase, isBusy, chat.setMessages, fetchThreadMessages]);
+    replaceMessagesWithHistory();
+  }, [chat.runState.phase, isBusy, replaceMessagesWithHistory]);
 
   const handleSend = useCallback(
     (content: string, attachments?: any[]) => {

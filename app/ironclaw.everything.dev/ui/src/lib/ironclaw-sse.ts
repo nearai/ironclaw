@@ -1,11 +1,8 @@
-import type { ApiClient } from "@/app";
-
-type StreamEventIter = Awaited<ReturnType<ApiClient["ironclaw"]["threads"]["streamEvents"]>>;
-type StreamEvent = StreamEventIter extends AsyncIterable<infer T> ? T : never;
-
-export type { StreamEvent };
-
-export const V2_EVENT_NAMES = [
+export const CONVERSATION_EVENT_NAMES = [
+  "snapshot",
+  "messages_changed",
+  "message_added",
+  "run_finished",
   "accepted",
   "running",
   "capability_progress",
@@ -16,11 +13,11 @@ export const V2_EVENT_NAMES = [
   "final_reply",
   "cancelled",
   "failed",
-  "projection_snapshot",
-  "projection_update",
   "keep_alive",
   "error",
 ] as const;
+
+export type ConversationEventName = (typeof CONVERSATION_EVENT_NAMES)[number];
 
 export type IronclawSseStatus =
   | "idle"
@@ -31,7 +28,10 @@ export type IronclawSseStatus =
   | "disconnected";
 
 export interface IronclawSseEnvelope {
-  event: StreamEvent;
+  event: {
+    type: ConversationEventName | string;
+    [key: string]: unknown;
+  };
   lastEventId: string | null;
 }
 
@@ -87,16 +87,13 @@ export function openIronclawEventSource({
 
     const type = (frame.type as string) || fallbackType;
     const envelope: IronclawSseEnvelope = {
-      event: {
-        type,
-        ...frame,
-      } as StreamEvent,
+      event: { type, ...frame },
       lastEventId: event.lastEventId || null,
     };
 
-    if (type === "snapshot" || type === "projection_snapshot") {
+    if (type === "snapshot") {
       onSnapshot?.(frame);
-    } else if (type === "messages_changed" || type === "projection_update") {
+    } else if (type === "messages_changed") {
       onUpdate?.(frame);
     }
 
@@ -104,7 +101,7 @@ export function openIronclawEventSource({
   };
 
   const handlers = new Map<string, (event: Event) => void>();
-  for (const name of V2_EVENT_NAMES) {
+  for (const name of CONVERSATION_EVENT_NAMES) {
     const handler = (event: Event) => dispatchFrame(event as MessageEvent, name);
     handlers.set(name, handler);
     es.addEventListener(name, handler);

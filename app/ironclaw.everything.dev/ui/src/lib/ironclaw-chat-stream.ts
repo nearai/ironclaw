@@ -79,7 +79,7 @@ export async function* createIronclawChatStream({
   const afterCursor = accepted.eventCursor != null ? String(accepted.eventCursor) : undefined;
   const activeToolCalls = new Map<string, { toolCallId: string; toolName: string }>();
   const pendingPreviews = new Map<string, PendingPreview>();
-  const upstream = await apiClient.ironclaw.threads.streamEvents({ id: threadId, afterCursor });
+  const upstream = await apiClient.conversation.stream({ threadId, afterCursor });
 
   onRunStarted(runId);
   onRunStateChange({

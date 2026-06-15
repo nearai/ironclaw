@@ -16,15 +16,8 @@ import {
   tenantCredentials,
 } from "./db/schema";
 import { createAuthMiddleware } from "./lib/auth";
-import {
-  type ConversationEvent,
-  type ConversationMessage,
-  type ConversationMessagePage,
-  diffMessageSets,
-  normalizeThread,
-  normalizeTimelineEntry,
-  normalizeTimelinePage,
-} from "./lib/conversation";
+import { normalizeThread, normalizeTimelinePage } from "./lib/conversation";
+import { createConversationStreamHandler } from "./lib/conversation-stream";
 import type { PluginsClient } from "./lib/plugins-types.gen";
 
 function generateId(): string {
@@ -79,97 +72,6 @@ function transformKeys(obj: unknown): unknown {
   }
   return result;
 }
-
-const hConversationStream = (services: { ironclaw: (ctx: any) => Ic }) =>
-  async function* ({ input, signal, context }: any) {
-    const ic = services.ironclaw(context);
-    const threadId = input.threadId;
-    const afterCursor = input.afterCursor;
-    const knownIds = new Set<string>();
-    let snapshotYielded = false;
-
-    try {
-      const rawStream = await ic.threads.streamEvents({
-        id: threadId,
-        afterCursor,
-      });
-
-      for await (const rawEvent of rawStream as AsyncIterable<Record<string, unknown>>) {
-        if (signal?.aborted) break;
-
-        try {
-          const type = rawEvent.type as string;
-
-          if (type === "keep_alive") {
-            yield { type: "keep_alive", threadId } satisfies ConversationEvent;
-            continue;
-          }
-
-          if (type === "projection_snapshot" || type === "projection_update") {
-            try {
-              const rawPage = await ic.threads.getTimeline({ id: threadId, limit: 100 });
-              const page = normalizeTimelinePage(rawPage, threadId);
-
-              if (!snapshotYielded) {
-                snapshotYielded = true;
-                for (const msg of page.messages) {
-                  knownIds.add(msg.id);
-                }
-                yield {
-                  type: "snapshot",
-                  threadId,
-                  messages: page.messages,
-                } satisfies ConversationEvent;
-                continue;
-              }
-
-              const added = diffMessageSets(knownIds, page.messages);
-              if (added.length > 0) {
-                for (const msg of added) {
-                  knownIds.add(msg.id);
-                }
-                yield {
-                  type: "messages_changed",
-                  threadId,
-                  messages: page.messages,
-                } satisfies ConversationEvent;
-                for (const msg of added) {
-                  yield { type: "message_added", threadId, message: msg } satisfies ConversationEvent;
-
-                  if (msg.role === "assistant") {
-                    yield {
-                      type: "run_finished",
-                      threadId,
-                      runId: msg.runId ?? undefined,
-                    } satisfies ConversationEvent;
-                  }
-                }
-              }
-            } catch (e) {
-              console.error("[hConvStream] projection sync failed:", e);
-            }
-            continue;
-          }
-
-          const { cursor: _, ...rest } = rawEvent;
-          yield {
-            type,
-            threadId,
-            ...rest,
-          } as unknown as ConversationEvent;
-        } catch (error) {
-          console.error("[hConvStream] skipping invalid event:", error);
-        }
-      }
-    } catch (error) {
-      console.error("[hConvStream] stream connection error:", error);
-      yield {
-        type: "error",
-        threadId,
-        error: error instanceof Error ? error.message : String(error),
-      } satisfies ConversationEvent;
-    }
-  };
 
 export default createPlugin.withPlugins<PluginsClient>()({
   variables: z.object({}),
@@ -773,7 +675,7 @@ export default createPlugin.withPlugins<PluginsClient>()({
             };
           }),
 
-        stream: builder.conversation.stream.use(requireAuth).handler(hConversationStream(s)),
+        stream: builder.conversation.stream.use(requireAuth).handler(createConversationStreamHandler(s)),
       },
     };
   },

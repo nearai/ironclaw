@@ -3,11 +3,10 @@ import type {
   IronclawEventSourceHandle,
   IronclawSseEnvelope,
   IronclawSseStatus,
-  StreamEvent,
 } from "@/lib/ironclaw-sse";
 import { openIronclawEventSource } from "@/lib/ironclaw-sse";
 
-export type { IronclawSseEnvelope, IronclawSseStatus, StreamEvent };
+export type { IronclawSseEnvelope, IronclawSseStatus };
 
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30000;

@@ -65,8 +65,8 @@ export function useIronclawChat(
 
       onRunStateChangeRef.current({ phase: "submitted", message: undefined, replyMessageId: undefined, activeToolName: undefined });
 
-      const accepted = await apiClient.ironclaw.threads.sendMessage({
-        id: threadId,
+      const accepted = await apiClient.conversation.sendMessage({
+        threadId,
         content,
         clientActionId: `ui-${crypto.randomUUID()}`,
         attachments: attachments?.map((a) => ({
