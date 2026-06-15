@@ -436,6 +436,7 @@ fn turn_run_state_actor_is_serde_backward_compatible() {
         failure: None,
         event_cursor: EventCursor(1),
         product_context: None,
+        auth_resume_disposition: None,
     };
 
     let legacy_wire = serde_json::to_value(&state).unwrap();
@@ -486,6 +487,7 @@ fn turn_checkpoint_public_status_does_not_expose_checkpoint_payload() {
         failure: None,
         event_cursor: EventCursor(1),
         product_context: None,
+        auth_resume_disposition: None,
     };
     let event = TurnLifecycleEvent {
         cursor: EventCursor(2),

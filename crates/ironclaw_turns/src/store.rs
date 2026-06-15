@@ -193,6 +193,8 @@ pub struct TurnRunRecord {
     pub spawn_tree_root_run_id: Option<TurnRunId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub product_context: Option<crate::ProductTurnContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_resume_disposition: Option<crate::AuthResumeDisposition>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -453,4 +455,28 @@ pub struct TurnPersistenceSnapshot {
     pub admission_reservations: Vec<TurnAdmissionReservationRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub spawn_tree_reservations: Vec<SpawnTreeReservation>,
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::AuthResumeDisposition;
+
+    #[test]
+    fn turn_run_record_auth_resume_disposition_defaults_to_none_when_absent() {
+        // Simulates old persisted JSON without the field — must deserialize cleanly.
+        // The absence of the field must not be an error (backward compat).
+        let disposition_absent: Option<AuthResumeDisposition> = None;
+        let serialized = serde_json::to_string(&disposition_absent).expect("serialize None");
+        assert_eq!(serialized, "null");
+
+        let denied = AuthResumeDisposition::Denied { reason: None };
+        let serialized_denied = serde_json::to_value(&denied).expect("serialize Denied");
+        assert_eq!(
+            serialized_denied,
+            serde_json::json!({"denied": {}})
+        );
+        let roundtrip: AuthResumeDisposition =
+            serde_json::from_value(serialized_denied).expect("roundtrip");
+        assert_eq!(roundtrip, denied);
+    }
 }

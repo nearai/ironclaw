@@ -550,6 +550,8 @@ pub struct LoopRunContext {
     pub checkpoint_schema_version: RunProfileVersion,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub product_context: Option<ProductTurnContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_resume_disposition: Option<crate::AuthResumeDisposition>,
 }
 
 impl LoopRunContext {
@@ -578,6 +580,7 @@ impl LoopRunContext {
             checkpoint_schema_id,
             checkpoint_schema_version,
             product_context: None,
+            auth_resume_disposition: None,
         }
     }
 
@@ -602,6 +605,14 @@ impl LoopRunContext {
 
     pub fn with_product_context(mut self, product_context: ProductTurnContext) -> Self {
         self.product_context = Some(product_context);
+        self
+    }
+
+    pub fn with_auth_resume_disposition(
+        mut self,
+        disposition: Option<crate::AuthResumeDisposition>,
+    ) -> Self {
+        self.auth_resume_disposition = disposition;
         self
     }
 }

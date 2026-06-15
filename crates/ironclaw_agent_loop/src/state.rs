@@ -167,6 +167,10 @@ pub struct PendingAuthResume {
     /// a consumed or cross-run input ref after the user completes auth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay: Option<ironclaw_turns::run_profile::CapabilityAuthResumeReplay>,
+    /// Set when the user denied this auth gate. The loop surfaces a
+    /// model-visible failure for the parked call instead of re-dispatching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<ironclaw_turns::AuthResumeDisposition>,
 }
 
 impl LoopExecutionState {
@@ -716,6 +720,7 @@ mod tests {
             resume_token: None,
             prior_approval: None,
             replay: None,
+            disposition: None,
         });
         let payload = encode_payload(&state);
         let restored =
@@ -832,6 +837,7 @@ mod tests {
                 input: serde_json::json!({"query": "is:unread"}),
                 estimate: ResourceEstimate::default(),
             }),
+            disposition: None,
         });
 
         // Round-trip: all optional fields must survive encode/decode.

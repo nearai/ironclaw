@@ -457,6 +457,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
             failure: None,
             event_cursor: EventCursor(17),
             product_context: None,
+            auth_resume_disposition: None,
         })
     }
 }
@@ -552,6 +553,7 @@ impl TurnCoordinator for BlockingSubmitCoordinator {
             failure: None,
             event_cursor: EventCursor(29),
             product_context: None,
+            auth_resume_disposition: None,
         })
     }
 }

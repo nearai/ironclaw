@@ -21,8 +21,8 @@ use ironclaw_product_workflow::{
     ProductWorkflowError, ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
-    GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef, ResumeTurnPrecondition,
+    AcceptedMessageRef, AuthResumeDisposition, CancelRunRequest, CancelRunResponse, EventCursor,
+    GateRef, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef, ResumeTurnPrecondition,
     ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef,
     SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnId,
     TurnRunId, TurnRunState, TurnScope, TurnStatus,
@@ -318,6 +318,7 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             failure: None,
             event_cursor: EventCursor(47),
             product_context: None,
+            auth_resume_disposition: None,
         })
     }
 }
@@ -710,7 +711,7 @@ async fn credential_provided_rejects_completed_flow_without_account_id() {
 }
 
 #[tokio::test]
-async fn denied_auth_cancels_flow_and_run() {
+async fn denied_auth_on_parked_gate_cancels_flow_and_resumes_with_denial_disposition() {
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let scope = turn_scope("alice", "thread-a");
     let run_id = TurnRunId::new();
@@ -737,15 +738,27 @@ async fn denied_auth_cancels_flow_and_run() {
             idempotency_key: IdempotencyKey::new("auth-action-deny").unwrap(),
         })
         .await
-        .expect("deny auth");
+        .expect("deny auth on parked gate");
 
+    // Parked deny must resume (not cancel) so the model can surface the denial.
     assert!(matches!(
         response,
-        ResolveAuthInteractionResponse::Canceled(_)
+        ResolveAuthInteractionResponse::DenialResumed(_)
     ));
+    // The OAuth flow must be cancelled.
     assert_eq!(flow_manager.cancellations().len(), 1);
-    assert_eq!(coordinator.cancellations().len(), 1);
-    assert!(coordinator.resumes().is_empty());
+    // The run must be resumed, NOT cancelled.
+    let resumes = coordinator.resumes();
+    assert_eq!(resumes.len(), 1);
+    assert_eq!(
+        resumes[0].precondition,
+        ResumeTurnPrecondition::BlockedAuthGate
+    );
+    assert!(matches!(
+        resumes[0].auth_resume_disposition,
+        Some(AuthResumeDisposition::Denied { reason: None })
+    ));
+    assert!(coordinator.cancellations().is_empty());
 }
 
 #[tokio::test]

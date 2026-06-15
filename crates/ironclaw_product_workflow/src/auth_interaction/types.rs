@@ -350,6 +350,9 @@ pub struct ResolveAuthInteractionRequest {
 pub enum ResolveAuthInteractionResponse {
     Resumed(ResumeTurnResponse),
     Canceled(CancelRunResponse),
+    /// Run was resumed carrying a denial disposition (auth flow cancelled,
+    /// run re-queued) so the loop surfaces the denial to the model.
+    DenialResumed(ResumeTurnResponse),
 }
 
 pub(super) fn is_pending_auth_status(status: AuthFlowStatus) -> bool {

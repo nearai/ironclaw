@@ -2044,6 +2044,8 @@ where
         if let Some(product_context) = claimed.state.product_context.clone() {
             loop_run_context = loop_run_context.with_product_context(product_context);
         }
+        loop_run_context = loop_run_context
+            .with_auth_resume_disposition(claimed.state.auth_resume_disposition.clone());
         let request = RebornLoopDriverHostRequest {
             claimed_run: claimed.clone(),
             loop_run_context,

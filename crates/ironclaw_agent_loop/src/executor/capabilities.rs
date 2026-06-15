@@ -130,6 +130,65 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             )
             .await;
 
+        // A run resumed from a user-DENIED auth gate must NOT re-dispatch the
+        // parked capability — the credential is still missing, so re-dispatch
+        // would re-check it and re-block (infinite auth/deny loop). Surface a
+        // model-visible authorization failure (retry forbidden) so the model
+        // sees the denial and continues.
+        //
+        // We call `handle_capability_error` directly rather than routing through
+        // `handle_capability_outcome(Failed(Authorization, ...))` because
+        // `capability_failed_summary` builds the prefix
+        // `"capability failed with authorization: "` which contains the
+        // substring `"authorization:"` — a term forbidden by
+        // `validate_loop_safe_summary`. We bypass that construction by using
+        // `SanitizedStrategySummary::from_trusted_static` for the planner
+        // summary while still building the model observation via
+        // `model_visible_capability_failure_observation`, which uses
+        // `error_kind.as_str()` directly and is not subject to that check.
+        if matches!(
+            state.pending_auth_resume.as_ref().and_then(|p| p.disposition.as_ref()),
+            Some(ironclaw_turns::AuthResumeDisposition::Denied { .. })
+        ) {
+            for call in visible_calls {
+                push_call_signature_once(&mut state, &mut signatures, &call)?;
+                let failure = ironclaw_turns::run_profile::CapabilityFailure {
+                    error_kind: CapabilityFailureKind::Authorization,
+                    safe_summary: String::new(),
+                    detail: None,
+                };
+                state
+                    .recent_failure_kinds
+                    .push(capability_failure_kind(&failure.error_kind));
+                let model_observation =
+                    Some(model_visible_capability_failure_observation(&failure));
+                let summary = CapabilityErrorSummary {
+                    class: capability_error_class(&failure.error_kind),
+                    safe_summary: SanitizedStrategySummary::from_trusted_static(
+                        "auth gate denied by user",
+                    ),
+                    diagnostic_ref: None,
+                };
+                match self
+                    .handle_capability_error(
+                        ctx,
+                        state,
+                        call,
+                        summary,
+                        model_observation,
+                        &mut capability_batch,
+                    )
+                    .await?
+                {
+                    BatchStep::Continue(next) => state = *next,
+                    BatchStep::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
+                }
+            }
+            return self
+                .completed_turn(ctx, state, result_refs_start, capability_batch)
+                .await;
+        }
+
         let mut pending_approval_resume = state.pending_approval_resume.clone();
         let mut pending_auth_resume = state.pending_auth_resume.clone();
         let batch_result = ctx

@@ -6,8 +6,9 @@ use ironclaw_auth::{
     CredentialAccountId, CredentialSelectionInput,
 };
 use ironclaw_turns::{
-    CancelRunRequest, GateRef, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
-    SanitizedCancelReason, TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnStatus,
+    AuthResumeDisposition, CancelRunRequest, GateRef, GetRunStateRequest, ResumeTurnPrecondition,
+    ResumeTurnRequest, SanitizedCancelReason, TurnCoordinator, TurnError, TurnErrorCategory,
+    TurnRunId, TurnStatus,
 };
 
 use super::types::is_pending_auth_status;
@@ -176,6 +177,7 @@ impl DefaultAuthInteractionService {
                 source_binding_ref: state.source_binding_ref,
                 reply_target_binding_ref: state.reply_target_binding_ref,
                 idempotency_key: request.idempotency_key,
+                auth_resume_disposition: None,
             })
             .await
             .map_err(map_auth_resume_error)?;
@@ -207,12 +209,14 @@ impl DefaultAuthInteractionService {
         AuthGateRecord::new(gate.run_id(), gate.gate_ref().clone(), completed)
     }
 
-    async fn cancel_auth(
+    /// Cancel the OAuth flow if it is in an active (non-terminal) status.
+    /// Returns `Err(StaleAuth)` if the flow is already `Completed` (caller
+    /// should use the resume path instead).  No-ops for already-terminal
+    /// statuses (Failed / Expired / Canceled).
+    async fn cancel_auth_flow_if_active(
         &self,
-        request: ResolveAuthInteractionRequest,
-        gate: AuthGateRecord,
-        run_id: TurnRunId,
-    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
+        gate: &AuthGateRecord,
+    ) -> Result<(), ProductWorkflowError> {
         match gate.status() {
             AuthFlowStatus::Pending
             | AuthFlowStatus::AwaitingUser
@@ -228,7 +232,50 @@ impl DefaultAuthInteractionService {
                 return Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth));
             }
         }
+        Ok(())
+    }
+
+    async fn cancel_auth(
+        &self,
+        request: ResolveAuthInteractionRequest,
+        gate: AuthGateRecord,
+        run_id: TurnRunId,
+    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
+        self.cancel_auth_flow_if_active(&gate).await?;
         self.cancel_auth_run(request, run_id).await
+    }
+
+    async fn resume_denied_auth(
+        &self,
+        request: ResolveAuthInteractionRequest,
+        gate: AuthGateRecord,
+        run_id: TurnRunId,
+    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
+        self.cancel_auth_flow_if_active(&gate).await?;
+        let state = self
+            .turn_coordinator
+            .get_run_state(GetRunStateRequest {
+                scope: request.scope.clone(),
+                run_id,
+            })
+            .await
+            .map_err(map_auth_resume_error)?;
+        let response = self
+            .turn_coordinator
+            .resume_turn(ResumeTurnRequest {
+                scope: request.scope,
+                actor: request.actor,
+                run_id,
+                gate_resolution_ref: request.gate_ref,
+                precondition: ResumeTurnPrecondition::BlockedAuthGate,
+                source_binding_ref: state.source_binding_ref,
+                reply_target_binding_ref: state.reply_target_binding_ref,
+                idempotency_key: request.idempotency_key,
+                auth_resume_disposition: Some(AuthResumeDisposition::Denied { reason: None }),
+            })
+            .await
+            .map_err(map_auth_resume_error)?;
+        Ok(ResolveAuthInteractionResponse::DenialResumed(response))
     }
 
     async fn cancel_auth_run(
@@ -322,7 +369,7 @@ impl AuthInteractionService for DefaultAuthInteractionService {
         ) {
             (BlockedGateState::ParkedOnGate, AuthInteractionDecision::Deny) => {
                 let gate = self.refresh_gate(&gate).await?;
-                self.cancel_auth(request, gate, run_id).await
+                self.resume_denied_auth(request, gate, run_id).await
             }
             (
                 BlockedGateState::ParkedOnGate,
