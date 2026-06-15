@@ -21,6 +21,13 @@ const NO_EXPOSURE_SENSITIVE_HEADER_DENIED_CODE: &str = "no_exposure_sensitive_he
 const NO_EXPOSURE_MANUAL_CREDENTIALS_DENIED_CODE: &str = "no_exposure_manual_credentials_denied";
 const NO_EXPOSURE_REQUEST_LEAK_BLOCKED_CODE: &str = "no_exposure_request_leak_blocked";
 const NO_EXPOSURE_RESPONSE_LEAK_BLOCKED_CODE: &str = "no_exposure_response_leak_blocked";
+const CREDENTIAL_CHANNEL_DIRECT_LEASE_DENIED_CODE: &str = "credential_channel_direct_lease_denied";
+const CREDENTIAL_CHANNEL_CAPABILITY_MISMATCH_CODE: &str = "credential_channel_capability_mismatch";
+const CREDENTIAL_CHANNEL_UNAVAILABLE_CODE: &str = "credential_channel_unavailable";
+const CREDENTIAL_CHANNEL_BACKEND_UNAVAILABLE_CODE: &str = "credential_channel_backend_unavailable";
+const CREDENTIAL_CHANNEL_TARGET_INVALID_CODE: &str = "credential_channel_target_invalid";
+const CREDENTIAL_CHANNEL_HOST_MEDIATED_INJECTIONS_DENIED_CODE: &str =
+    "credential_channel_host_mediated_injections_denied";
 
 pub use host_port::{
     HostRuntimeCredentialMaterial, HostRuntimeHttpEgressPort, HostRuntimeHttpEgressRequest,
@@ -173,26 +180,19 @@ impl<N, S> HostHttpEgressService<N, S> {
         self.body_store.as_ref()
     }
 
-    fn record_no_exposure_block(
+    /// Record a blocked egress attempt at the security boundary that owns
+    /// the failure, when the error maps to an audit code and a sink is wired.
+    fn record_egress_block(
         &self,
         error: &RuntimeHttpEgressError,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
     ) {
-        let Some(code) = no_exposure_audit_code(error) else {
-            return;
-        };
-        let Some(sink) = &self.security_audit_sink else {
-            return;
-        };
-        sink.record(
-            SecurityAuditEvent::new(
-                SecurityBoundary::NoExposureGuard,
-                SecurityDecision::Blocked,
-                code,
-            )
-            .with_capability_id(capability_id.clone())
-            .with_scope(scope.clone()),
+        record_egress_block_to_sink(
+            self.security_audit_sink.as_deref(),
+            error,
+            scope,
+            capability_id,
         );
     }
 }
@@ -213,7 +213,7 @@ where
         match result {
             Ok(response) => Ok(response),
             Err(error) => {
-                self.record_no_exposure_block(error.error(), &scope, &capability_id);
+                self.record_egress_block(error.error(), &scope, &capability_id);
                 if error.should_discard_staged_policy() {
                     self.discard_staged_policy(&scope, &capability_id);
                 }
@@ -242,7 +242,7 @@ where
         match result {
             Ok(response) => Ok(response),
             Err(error) => {
-                self.record_no_exposure_block(error.error(), &scope, &capability_id);
+                self.record_egress_block(error.error(), &scope, &capability_id);
                 if error.should_discard_staged_policy() {
                     self.discard_staged_policy(&scope, &capability_id);
                 }
@@ -332,6 +332,101 @@ fn no_exposure_audit_code(error: &RuntimeHttpEgressError) -> Option<&'static str
     }
 }
 
+/// Resolve the security boundary and audit code for a blocked egress error.
+///
+/// `Credential` errors belong to the credential-channel boundary; request and
+/// response sanitization blocks belong to the no-exposure boundary. The two
+/// mappers match disjoint `RuntimeHttpEgressError` variants, so at most one
+/// produces a code for any given error.
+fn egress_block_audit(error: &RuntimeHttpEgressError) -> Option<(SecurityBoundary, &'static str)> {
+    if let Some(code) = no_exposure_audit_code(error) {
+        return Some((SecurityBoundary::NoExposureGuard, code));
+    }
+    credential_channel_audit_code(error).map(|code| (SecurityBoundary::CredentialChannel, code))
+}
+
+/// Record a blocked egress attempt to the given security audit sink, when the
+/// error maps to an audit code and a sink is wired.
+///
+/// Shared by `HostHttpEgressService::record_egress_block` (in-`execute` blocks)
+/// and `host_port::HostRuntimeHttpEgressPort` (host-mediated early credential
+/// rejections), so both paths record identical credential-boundary audit
+/// events from the same boundary/code resolver.
+pub(super) fn record_egress_block_to_sink(
+    sink: Option<&dyn SecurityAuditSink>,
+    error: &RuntimeHttpEgressError,
+    scope: &ResourceScope,
+    capability_id: &CapabilityId,
+) {
+    let Some(sink) = sink else {
+        return;
+    };
+    let Some((boundary, code)) = egress_block_audit(error) else {
+        return;
+    };
+    sink.record(
+        SecurityAuditEvent::new(boundary, SecurityDecision::Blocked, code)
+            .with_capability_id(capability_id.clone())
+            .with_scope(scope.clone()),
+    );
+}
+
+/// Map a pipeline error to a credential-channel security-audit code.
+///
+/// The variant match is exhaustive on purpose: adding a new
+/// `RuntimeHttpEgressError` variant is a compile error here, forcing an
+/// explicit decision about whether it represents a credential-channel block.
+/// The reason strings come from the shared `credential::REASON_*` constants
+/// used by the producer sites, so a reason rename cannot desynchronize
+/// producer and mapper. Every credential producer reason must map to a code;
+/// reason strings cannot be matched exhaustively, so the fallback logs at
+/// debug level to surface a producer/mapper desync.
+fn credential_channel_audit_code(error: &RuntimeHttpEgressError) -> Option<&'static str> {
+    match error {
+        RuntimeHttpEgressError::Credential { reason } => match reason.as_str() {
+            credential::REASON_DIRECT_LEASE_DENIED => {
+                Some(CREDENTIAL_CHANNEL_DIRECT_LEASE_DENIED_CODE)
+            }
+            credential::REASON_CAPABILITY_MISMATCH => {
+                Some(CREDENTIAL_CHANNEL_CAPABILITY_MISMATCH_CODE)
+            }
+            credential::REASON_REQUIRED_CREDENTIAL_UNAVAILABLE
+            | credential::REASON_CREDENTIAL_UNAVAILABLE
+            | credential::REASON_LEASE_UNAVAILABLE
+            | credential::REASON_LEASE_CONSUMED
+            | credential::REASON_LEASE_REVOKED
+            | credential::REASON_CREDENTIAL_EXPIRED => Some(CREDENTIAL_CHANNEL_UNAVAILABLE_CODE),
+            credential::REASON_INJECTION_STORE_UNAVAILABLE
+            | credential::REASON_STORE_MISCONFIGURED
+            | credential::REASON_STORE_UNAVAILABLE => {
+                Some(CREDENTIAL_CHANNEL_BACKEND_UNAVAILABLE_CODE)
+            }
+            credential::REASON_TARGET_INVALID
+            | credential::REASON_HEADER_VALUE_INVALID
+            | credential::REASON_PATH_PLACEHOLDER_INVALID
+            | credential::REASON_PATH_VALUE_INVALID
+            | credential::REASON_PATH_REQUIRES_HTTPS
+            | credential::REASON_NO_PATH_SEGMENTS
+            | credential::REASON_PLACEHOLDER_NOT_FOUND
+            | credential::REASON_PLACEHOLDER_NOT_UNIQUE
+            | credential::REASON_TARGET_URL_INVALID => Some(CREDENTIAL_CHANNEL_TARGET_INVALID_CODE),
+            credential::REASON_HOST_MEDIATED_INJECTIONS_DENIED => {
+                Some(CREDENTIAL_CHANNEL_HOST_MEDIATED_INJECTIONS_DENIED_CODE)
+            }
+            other => {
+                tracing::debug!(
+                    reason = other,
+                    "credential egress block reason has no security audit code mapping"
+                );
+                None
+            }
+        },
+        RuntimeHttpEgressError::Request { .. }
+        | RuntimeHttpEgressError::Network { .. }
+        | RuntimeHttpEgressError::Response { .. } => None,
+    }
+}
+
 pub(super) fn runtime_network_error(
     unsafe_raw_diagnostics_allowed: bool,
     error: NetworkHttpError,
@@ -379,7 +474,8 @@ pub(super) fn runtime_response(
 mod tests {
     use super::*;
     use ironclaw_host_api::{
-        InvocationId, NetworkMethod, NetworkPolicy as ApiNetworkPolicy, RuntimeKind, TenantId,
+        InvocationId, NetworkMethod, NetworkPolicy as ApiNetworkPolicy, RuntimeCredentialInjection,
+        RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeKind, SecretHandle, TenantId,
         UserId,
     };
     use ironclaw_network::{NetworkHttpResponse, NetworkUsage};
@@ -500,5 +596,110 @@ mod tests {
         };
 
         assert_eq!(no_exposure_audit_code(&error), None);
+    }
+
+    /// Regression guard for the credential producer/mapper contract: every
+    /// reason a `credential.rs` producer can emit must map to a non-`None`
+    /// credential-channel audit code. If a producer reason constant is added
+    /// or renamed without updating `credential_channel_audit_code`, this test
+    /// fails instead of audit recording silently disappearing.
+    #[test]
+    fn every_credential_producer_reason_maps_to_audit_code() {
+        let producer_reasons = [
+            credential::REASON_DIRECT_LEASE_DENIED,
+            credential::REASON_CAPABILITY_MISMATCH,
+            credential::REASON_REQUIRED_CREDENTIAL_UNAVAILABLE,
+            credential::REASON_CREDENTIAL_UNAVAILABLE,
+            credential::REASON_LEASE_UNAVAILABLE,
+            credential::REASON_LEASE_CONSUMED,
+            credential::REASON_LEASE_REVOKED,
+            credential::REASON_CREDENTIAL_EXPIRED,
+            credential::REASON_INJECTION_STORE_UNAVAILABLE,
+            credential::REASON_STORE_MISCONFIGURED,
+            credential::REASON_STORE_UNAVAILABLE,
+            credential::REASON_TARGET_INVALID,
+            credential::REASON_HEADER_VALUE_INVALID,
+            credential::REASON_PATH_PLACEHOLDER_INVALID,
+            credential::REASON_PATH_VALUE_INVALID,
+            credential::REASON_PATH_REQUIRES_HTTPS,
+            credential::REASON_NO_PATH_SEGMENTS,
+            credential::REASON_PLACEHOLDER_NOT_FOUND,
+            credential::REASON_PLACEHOLDER_NOT_UNIQUE,
+            credential::REASON_TARGET_URL_INVALID,
+        ];
+        for reason in producer_reasons {
+            let error = RuntimeHttpEgressError::Credential {
+                reason: reason.to_string(),
+            };
+            assert!(
+                credential_channel_audit_code(&error).is_some(),
+                "credential reason has no audit code mapping: {reason}"
+            );
+            assert!(
+                matches!(
+                    egress_block_audit(&error),
+                    Some((SecurityBoundary::CredentialChannel, _))
+                ),
+                "credential reason does not resolve to the credential channel boundary: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_lease_producer_maps_to_audit_code() {
+        let mut request = sample_request();
+        request.credential_injections = vec![RuntimeCredentialInjection {
+            handle: SecretHandle::new("api-token").unwrap(),
+            source: RuntimeCredentialSource::SecretStoreLease,
+            target: RuntimeCredentialTarget::Header {
+                name: "authorization".to_string(),
+                prefix: Some("Bearer ".to_string()),
+            },
+            required: true,
+        }];
+
+        let error = credential::validate_sources_for_request(&request)
+            .expect_err("direct secret-store leases should be denied");
+
+        assert_eq!(
+            credential_channel_audit_code(&error),
+            Some(CREDENTIAL_CHANNEL_DIRECT_LEASE_DENIED_CODE)
+        );
+    }
+
+    #[test]
+    fn capability_mismatch_producer_maps_to_audit_code() {
+        let mut request = sample_request();
+        request.credential_injections = vec![RuntimeCredentialInjection {
+            handle: SecretHandle::new("api-token").unwrap(),
+            source: RuntimeCredentialSource::StagedObligation {
+                capability_id: CapabilityId::new("other.http").unwrap(),
+            },
+            target: RuntimeCredentialTarget::Header {
+                name: "authorization".to_string(),
+                prefix: Some("Bearer ".to_string()),
+            },
+            required: true,
+        }];
+
+        let error = credential::validate_sources_for_request(&request)
+            .expect_err("cross-capability staged credentials should be denied");
+
+        assert_eq!(
+            credential_channel_audit_code(&error),
+            Some(CREDENTIAL_CHANNEL_CAPABILITY_MISMATCH_CODE)
+        );
+    }
+
+    #[test]
+    fn non_credential_errors_have_no_credential_channel_audit_code() {
+        let error = RuntimeHttpEgressError::Network {
+            reason: "network_policy_missing".to_string(),
+            request_bytes: 0,
+            response_bytes: 0,
+        };
+
+        assert_eq!(credential_channel_audit_code(&error), None);
+        assert!(egress_block_audit(&error).is_none());
     }
 }

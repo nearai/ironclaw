@@ -10,6 +10,52 @@ use std::sync::LazyLock;
 
 use crate::obligations::RuntimeSecretInjectionStore;
 
+/// Stable reason tokens for credential-channel egress blocks.
+///
+/// These constants are the single source of truth for the reason strings
+/// carried by `RuntimeHttpEgressError::Credential` at the producer sites in
+/// this module and matched by the security-audit mapper in
+/// `super::credential_channel_audit_code`. Never inline these strings at
+/// either site: a rename here updates producer and mapper together.
+pub(super) const REASON_DIRECT_LEASE_DENIED: &str =
+    "direct secret-store leases are unavailable for production runtime egress";
+pub(super) const REASON_CAPABILITY_MISMATCH: &str =
+    "staged credential capability does not match request capability";
+pub(super) const REASON_REQUIRED_CREDENTIAL_UNAVAILABLE: &str =
+    "required credential is unavailable";
+pub(super) const REASON_CREDENTIAL_UNAVAILABLE: &str = "credential is unavailable";
+pub(super) const REASON_LEASE_UNAVAILABLE: &str = "credential lease is unavailable";
+pub(super) const REASON_LEASE_CONSUMED: &str = "credential lease was already used";
+pub(super) const REASON_LEASE_REVOKED: &str = "credential lease was revoked";
+pub(super) const REASON_CREDENTIAL_EXPIRED: &str = "credential expired";
+pub(super) const REASON_INJECTION_STORE_UNAVAILABLE: &str =
+    "runtime credential injection store unavailable";
+pub(super) const REASON_STORE_MISCONFIGURED: &str = "credential store is misconfigured";
+pub(super) const REASON_STORE_UNAVAILABLE: &str = "credential store unavailable";
+pub(super) const REASON_TARGET_INVALID: &str = "credential injection target is invalid";
+pub(super) const REASON_HEADER_VALUE_INVALID: &str = "credential injection header value is invalid";
+pub(super) const REASON_PATH_PLACEHOLDER_INVALID: &str =
+    "credential injection path placeholder is invalid";
+pub(super) const REASON_PATH_VALUE_INVALID: &str = "credential injection path value is invalid";
+pub(super) const REASON_PATH_REQUIRES_HTTPS: &str =
+    "credential injection path placeholder requires HTTPS";
+pub(super) const REASON_NO_PATH_SEGMENTS: &str =
+    "credential injection target URL has no path segments";
+pub(super) const REASON_PLACEHOLDER_NOT_FOUND: &str =
+    "credential injection path placeholder was not found";
+pub(super) const REASON_PLACEHOLDER_NOT_UNIQUE: &str =
+    "credential injection path placeholder must appear exactly once";
+pub(super) const REASON_TARGET_URL_INVALID: &str = "credential injection target URL is invalid";
+/// Reason carried when the host-mediated egress port rejects a request that
+/// carries caller-provided credential injections. The host-mediated port stages
+/// host-held material itself and never accepts caller-supplied injections, so
+/// this is an early credential-boundary block before delegating into the
+/// shared `RuntimeHttpEgress::execute` pipeline. Produced in
+/// `super::host_port::HostRuntimeHttpEgressPort::execute` and matched by
+/// `super::credential_channel_audit_code`.
+pub(super) const REASON_HOST_MEDIATED_INJECTIONS_DENIED: &str =
+    "host-mediated HTTP egress does not accept caller-provided credential injections";
+
 #[derive(Clone, PartialEq, Eq)]
 enum CredentialCacheKey {
     SecretStoreLease {
@@ -55,15 +101,13 @@ impl<'a> CredentialSourceStrategy<'a> {
                 // Production egress accepts one-shot staged obligations only;
                 // direct store leases are retained behind crate-local tests for
                 // legacy mapping coverage, not as a runtime path.
-                reason: "direct secret-store leases are unavailable for production runtime egress"
-                    .to_string(),
+                reason: REASON_DIRECT_LEASE_DENIED.to_string(),
             }),
             Self::StagedObligation { capability_id }
                 if *capability_id != &request.capability_id =>
             {
                 Err(RuntimeHttpEgressError::Credential {
-                    reason: "staged credential capability does not match request capability"
-                        .to_string(),
+                    reason: REASON_CAPABILITY_MISMATCH.to_string(),
                 })
             }
             Self::StagedObligation { .. } => Ok(()),
@@ -216,7 +260,7 @@ where
         // required. `required` is per-injection, not per-cache-entry.
         if cache[idx].value.is_none() && injection.required {
             return Err(RuntimeHttpEgressError::Credential {
-                reason: "required credential is unavailable".to_string(),
+                reason: REASON_REQUIRED_CREDENTIAL_UNAVAILABLE.to_string(),
             });
         }
         return Ok(cache[idx].value.as_ref());
@@ -246,7 +290,7 @@ fn staged_secret_for_injection(
         Ok(Some(material)) => Ok(Some(material)),
         Ok(None) => missing_runtime_credential(injection.required),
         Err(_) => Err(RuntimeHttpEgressError::Credential {
-            reason: "runtime credential injection store unavailable".to_string(),
+            reason: REASON_INJECTION_STORE_UNAVAILABLE.to_string(),
         }),
     }
 }
@@ -260,7 +304,7 @@ fn missing_runtime_credential(
 ) -> Result<Option<SecretMaterial>, RuntimeHttpEgressError> {
     if required {
         Err(RuntimeHttpEgressError::Credential {
-            reason: "required credential is unavailable".to_string(),
+            reason: REASON_REQUIRED_CREDENTIAL_UNAVAILABLE.to_string(),
         })
     } else {
         Ok(None)
@@ -326,17 +370,15 @@ where
 
 fn sanitized_secret_error(error: &SecretStoreError) -> String {
     match error {
-        SecretStoreError::UnknownSecret { .. } => "credential is unavailable".to_string(),
-        SecretStoreError::UnknownLease { .. } => "credential lease is unavailable".to_string(),
-        SecretStoreError::LeaseConsumed { .. } => "credential lease was already used".to_string(),
-        SecretStoreError::LeaseRevoked { .. } => "credential lease was revoked".to_string(),
+        SecretStoreError::UnknownSecret { .. } => REASON_CREDENTIAL_UNAVAILABLE.to_string(),
+        SecretStoreError::UnknownLease { .. } => REASON_LEASE_UNAVAILABLE.to_string(),
+        SecretStoreError::LeaseConsumed { .. } => REASON_LEASE_CONSUMED.to_string(),
+        SecretStoreError::LeaseRevoked { .. } => REASON_LEASE_REVOKED.to_string(),
         SecretStoreError::LeaseExpired { .. } | SecretStoreError::SecretExpired => {
-            "credential expired".to_string()
+            REASON_CREDENTIAL_EXPIRED.to_string()
         }
-        SecretStoreError::BackendMisconfigured { .. } => {
-            "credential store is misconfigured".to_string()
-        }
-        SecretStoreError::StoreUnavailable { .. } => "credential store unavailable".to_string(),
+        SecretStoreError::BackendMisconfigured { .. } => REASON_STORE_MISCONFIGURED.to_string(),
+        SecretStoreError::StoreUnavailable { .. } => REASON_STORE_UNAVAILABLE.to_string(),
     }
 }
 
@@ -349,7 +391,7 @@ fn apply_credential_injection(
     target
         .validate_declaration()
         .map_err(|_| RuntimeHttpEgressError::Credential {
-            reason: "credential injection target is invalid".to_string(),
+            reason: REASON_TARGET_INVALID.to_string(),
         })?;
     match target {
         RuntimeCredentialTarget::Header { name, prefix } => {
@@ -359,7 +401,7 @@ fn apply_credential_injection(
             };
             if injected.chars().any(char::is_control) {
                 return Err(RuntimeHttpEgressError::Credential {
-                    reason: "credential injection header value is invalid".to_string(),
+                    reason: REASON_HEADER_VALUE_INVALID.to_string(),
                 });
             }
             request.headers.push((name.clone(), injected));
@@ -371,23 +413,23 @@ fn apply_credential_injection(
         RuntimeCredentialTarget::PathPlaceholder { placeholder } => {
             if !is_rfc3986_unreserved_segment(placeholder) {
                 return Err(RuntimeHttpEgressError::Credential {
-                    reason: "credential injection path placeholder is invalid".to_string(),
+                    reason: REASON_PATH_PLACEHOLDER_INVALID.to_string(),
                 });
             }
             if !is_rfc3986_unreserved_segment(value) {
                 return Err(RuntimeHttpEgressError::Credential {
-                    reason: "credential injection path value is invalid".to_string(),
+                    reason: REASON_PATH_VALUE_INVALID.to_string(),
                 });
             }
             let url = parsed_request_url(&request.url, parsed_url)?;
             if url.scheme() != "https" {
                 return Err(RuntimeHttpEgressError::Credential {
-                    reason: "credential injection path placeholder requires HTTPS".to_string(),
+                    reason: REASON_PATH_REQUIRES_HTTPS.to_string(),
                 });
             }
             let Some(_) = url.path_segments() else {
                 return Err(RuntimeHttpEgressError::Credential {
-                    reason: "credential injection target URL has no path segments".to_string(),
+                    reason: REASON_NO_PATH_SEGMENTS.to_string(),
                 });
             };
             let path = url.path().to_string();
@@ -399,14 +441,13 @@ fn apply_credential_injection(
             match placeholder_count {
                 0 => {
                     return Err(RuntimeHttpEgressError::Credential {
-                        reason: "credential injection path placeholder was not found".to_string(),
+                        reason: REASON_PLACEHOLDER_NOT_FOUND.to_string(),
                     });
                 }
                 1 => {}
                 _ => {
                     return Err(RuntimeHttpEgressError::Credential {
-                        reason: "credential injection path placeholder must appear exactly once"
-                            .to_string(),
+                        reason: REASON_PLACEHOLDER_NOT_UNIQUE.to_string(),
                     });
                 }
             }
@@ -435,14 +476,14 @@ fn parsed_request_url<'a>(
         *parsed_url =
             Some(
                 url::Url::parse(raw_url).map_err(|_| RuntimeHttpEgressError::Credential {
-                    reason: "credential injection target URL is invalid".to_string(),
+                    reason: REASON_TARGET_URL_INVALID.to_string(),
                 })?,
             );
     }
     parsed_url
         .as_mut()
         .ok_or_else(|| RuntimeHttpEgressError::Credential {
-            reason: "credential injection target URL is invalid".to_string(),
+            reason: REASON_TARGET_URL_INVALID.to_string(),
         })
 }
 

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use ironclaw_capabilities::{
     CapabilityObligationHandler, CapabilityObligationPhase, CapabilityObligationRequest,
 };
+use ironclaw_events::SecurityAuditSink;
 use ironclaw_host_api::{
     CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, MountView, Obligation,
     ResourceEstimate, ResourceScope, RuntimeCredentialInjection, RuntimeCredentialSource,
@@ -11,6 +12,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_secrets::SecretMaterial;
 
+use super::{credential, record_egress_block_to_sink};
 use crate::obligations::RuntimeSecretInjectionStore;
 
 /// Canonical host-runtime one-shot secret material staging port.
@@ -68,6 +70,7 @@ pub struct HostRuntimeHttpEgressPort {
     runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
     obligation_handler: Arc<dyn CapabilityObligationHandler>,
     secret_stager: RuntimeSecretMaterialStager,
+    security_audit_sink: Option<Arc<dyn SecurityAuditSink>>,
 }
 
 pub struct HostRuntimeHttpEgressRequest {
@@ -94,7 +97,18 @@ impl HostRuntimeHttpEgressPort {
             runtime_http_egress,
             obligation_handler,
             secret_stager,
+            security_audit_sink: None,
         }
+    }
+
+    /// Wire the security audit sink so host-mediated early credential
+    /// rejections are recorded identically to in-pipeline credential blocks.
+    pub(crate) fn with_security_audit_sink(
+        mut self,
+        sink: Option<Arc<dyn SecurityAuditSink>>,
+    ) -> Self {
+        self.security_audit_sink = sink;
+        self
     }
 
     pub async fn execute(
@@ -102,10 +116,16 @@ impl HostRuntimeHttpEgressPort {
         mut request: HostRuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
         if !request.request.credential_injections.is_empty() {
-            return Err(RuntimeHttpEgressError::Credential {
-                reason: "host-mediated HTTP egress does not accept caller-provided credential injections"
-                    .to_string(),
-            });
+            let error = RuntimeHttpEgressError::Credential {
+                reason: credential::REASON_HOST_MEDIATED_INJECTIONS_DENIED.to_string(),
+            };
+            record_egress_block_to_sink(
+                self.security_audit_sink.as_deref(),
+                &error,
+                &request.request.scope,
+                &request.request.capability_id,
+            );
+            return Err(error);
         }
         self.authorize_network_egress(&request).await?;
         let staged_scope = request.request.scope.clone();
@@ -236,6 +256,9 @@ mod tests {
     use ironclaw_capabilities::{
         CapabilityObligationError, CapabilityObligationFailureKind, CapabilityObligationRequest,
     };
+    use ironclaw_events::{
+        InMemorySecurityAuditSink, SecurityAuditSink, SecurityBoundary, SecurityDecision,
+    };
     use ironclaw_host_api::{
         InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
         RuntimeHttpEgressResponse, UserId,
@@ -344,6 +367,58 @@ mod tests {
 
         assert!(matches!(error, RuntimeHttpEgressError::Credential { .. }));
         assert_eq!(egress.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn host_runtime_http_egress_records_audit_event_on_caller_provided_injection_rejection() {
+        let egress = Arc::new(RecordingRuntimeHttpEgress::ok());
+        let sink = Arc::new(InMemorySecurityAuditSink::new());
+        let sink_dyn: Arc<dyn SecurityAuditSink> = sink.clone();
+        let port = host_port(egress.clone(), Arc::new(AllowObligations), secret_store())
+            .with_security_audit_sink(Some(sink_dyn));
+        let mut request = host_request();
+        let scope = request.request.scope.clone();
+        let capability_id = request.request.capability_id.clone();
+        request
+            .request
+            .credential_injections
+            .push(RuntimeCredentialInjection {
+                handle: secret_handle(),
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: capability_id.clone(),
+                },
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            });
+
+        let error = port
+            .execute(request)
+            .await
+            .expect_err("caller-provided credential injections must be rejected");
+
+        assert!(matches!(error, RuntimeHttpEgressError::Credential { .. }));
+        assert_eq!(egress.calls(), 0);
+
+        // The host-mediated early rejection must be audited identically to the
+        // in-`execute` credential-channel block path (codex P2).
+        let events = sink.snapshot();
+        assert_eq!(
+            events.len(),
+            1,
+            "early host-mediated credential rejection should record exactly one audit event"
+        );
+        let event = &events[0];
+        assert_eq!(event.boundary, SecurityBoundary::CredentialChannel);
+        assert_eq!(event.decision, SecurityDecision::Blocked);
+        assert_eq!(
+            event.code,
+            "credential_channel_host_mediated_injections_denied"
+        );
+        assert_eq!(event.capability_id.as_ref(), Some(&capability_id));
+        assert_eq!(event.scope.as_ref(), Some(&scope));
     }
 
     #[tokio::test]

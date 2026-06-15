@@ -1871,7 +1871,9 @@ async fn host_http_egress_borrows_staged_network_policy_before_transport() {
         },
     });
     let network_recorder = network.requests.clone();
-    let services = test_obligation_services();
+    let security_audit_sink = Arc::new(InMemorySecurityAuditSink::new());
+    let security_audit_sink_dyn: Arc<dyn SecurityAuditSink> = security_audit_sink.clone();
+    let services = test_obligation_services().with_security_audit_sink(security_audit_sink_dyn);
     let scope = sample_scope();
     let capability_id = sample_capability_id();
     let staged_policy = sample_policy();
@@ -1900,6 +1902,14 @@ async fn host_http_egress_borrows_staged_network_policy_before_transport() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].policy, staged_policy);
     drop(requests);
+
+    // A successful egress is not a blocked security boundary crossing, so the
+    // registered sink must record nothing.
+    assert!(
+        security_audit_sink.is_empty(),
+        "successful egress must not record any security audit events, got {:?}",
+        security_audit_sink.snapshot()
+    );
 }
 
 #[tokio::test]
@@ -1915,7 +1925,9 @@ async fn production_host_http_egress_rejects_direct_secret_store_lease_before_tr
         },
     });
     let network_recorder = network.requests.clone();
-    let services = test_obligation_services();
+    let security_audit_sink = Arc::new(InMemorySecurityAuditSink::new());
+    let security_audit_sink_dyn: Arc<dyn SecurityAuditSink> = security_audit_sink.clone();
+    let services = test_obligation_services().with_security_audit_sink(security_audit_sink_dyn);
     let scope = sample_scope();
     let capability_id = sample_capability_id();
     let handle = SecretHandle::new("api-token").unwrap();
@@ -1931,8 +1943,8 @@ async fn production_host_http_egress_rejects_direct_secret_store_lease_before_tr
     let error = service
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Mcp,
-            scope,
-            capability_id,
+            scope: scope.clone(),
+            capability_id: capability_id.clone(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -1960,6 +1972,13 @@ async fn production_host_http_egress_rejects_direct_secret_store_lease_before_tr
             if reason == "direct secret-store leases are unavailable for production runtime egress"
     ));
     assert!(network_recorder.lock().unwrap().is_empty());
+    let events = security_audit_sink.snapshot();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].boundary, SecurityBoundary::CredentialChannel);
+    assert_eq!(events[0].decision, SecurityDecision::Blocked);
+    assert_eq!(events[0].code, "credential_channel_direct_lease_denied");
+    assert_eq!(events[0].capability_id.as_ref(), Some(&capability_id));
+    assert_eq!(events[0].scope.as_ref(), Some(&scope));
 }
 
 #[tokio::test]
@@ -2013,8 +2032,8 @@ async fn production_host_http_egress_discards_staged_policy_when_direct_secret_s
     let retry = service
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Mcp,
-            scope,
-            capability_id,
+            scope: scope.clone(),
+            capability_id: capability_id.clone(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -2053,7 +2072,9 @@ async fn production_host_http_egress_rejects_cross_capability_staged_credentials
         },
     });
     let network_recorder = network.requests.clone();
-    let services = test_obligation_services();
+    let security_audit_sink = Arc::new(InMemorySecurityAuditSink::new());
+    let security_audit_sink_dyn: Arc<dyn SecurityAuditSink> = security_audit_sink.clone();
+    let services = test_obligation_services().with_security_audit_sink(security_audit_sink_dyn);
     let scope = sample_scope();
     let capability_id = sample_capability_id();
     let other_capability_id = CapabilityId::new("other.http").unwrap();
@@ -2071,8 +2092,8 @@ async fn production_host_http_egress_rejects_cross_capability_staged_credentials
     let error = service
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Mcp,
-            scope,
-            capability_id,
+            scope: scope.clone(),
+            capability_id: capability_id.clone(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -2102,6 +2123,13 @@ async fn production_host_http_egress_rejects_cross_capability_staged_credentials
             if reason == "staged credential capability does not match request capability"
     ));
     assert!(network_recorder.lock().unwrap().is_empty());
+    let events = security_audit_sink.snapshot();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].boundary, SecurityBoundary::CredentialChannel);
+    assert_eq!(events[0].decision, SecurityDecision::Blocked);
+    assert_eq!(events[0].code, "credential_channel_capability_mismatch");
+    assert_eq!(events[0].capability_id.as_ref(), Some(&capability_id));
+    assert_eq!(events[0].scope.as_ref(), Some(&scope));
 }
 
 #[tokio::test]

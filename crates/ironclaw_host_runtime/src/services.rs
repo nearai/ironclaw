@@ -475,11 +475,14 @@ where
     /// Returns a host-mediated HTTP egress port that owns network-obligation
     /// authorization and one-shot host-held credential staging.
     pub fn host_runtime_http_egress_port(&self) -> Option<HostRuntimeHttpEgressPort> {
-        Some(HostRuntimeHttpEgressPort::new(
-            self.runtime_http_egress()?,
-            self.obligation_handler(),
-            self.runtime_secret_material_stager(),
-        ))
+        Some(
+            HostRuntimeHttpEgressPort::new(
+                self.runtime_http_egress()?,
+                self.obligation_handler(),
+                self.runtime_secret_material_stager(),
+            )
+            .with_security_audit_sink(self.security_audit_sink.clone()),
+        )
     }
 
     /// Returns the canonical host-runtime egress/obligation ports for
