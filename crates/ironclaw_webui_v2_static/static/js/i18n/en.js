@@ -690,9 +690,10 @@ registerPack("en", {
   "automations.summary.paused": "Paused",
   "automations.summary.pausedDetail": "Schedules not currently expected to run.",
   "automations.summary.running": "Running now",
-  "automations.summary.runningDetail": "Runs currently in progress.",
+  "automations.summary.runningDetail": "Automations with a run in progress.",
   "automations.summary.failures": "Failures",
-  "automations.summary.failuresDetail": "Failed runs in the visible history.",
+  "automations.summary.failuresDetail":
+    "Automations with a failed run in recent history.",
   "automations.summary.nextRun": "Next run",
   "automations.summary.none": "None",
   "automations.summary.nextRunDetail": "Soonest scheduled run in this list.",

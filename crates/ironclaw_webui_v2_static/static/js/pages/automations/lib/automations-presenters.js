@@ -78,18 +78,19 @@ export function filterAutomations(automations, filter) {
 
 export function automationSummary(automations) {
   const active = automations.filter((automation) => isBrowserActive(automation)).length;
-  const running = automations.reduce(
-    (count, automation) =>
-      count + automation.recent_runs.filter((run) => run.status === "running").length,
-    0,
-  );
-  const failures = automations.reduce(
-    (count, automation) =>
-      count + automation.recent_runs.filter((run) => run.status === "error").length,
-    0,
-  );
+  // Count automations (not individual runs) so each card matches the
+  // same-named filter tab, which filters automations via has_running_run /
+  // has_failed_runs.
+  const running = automations.filter((automation) => automation.has_running_run).length;
+  const failures = automations.filter((automation) => automation.has_failed_runs).length;
+  // Only automations that will actually fire contribute to "soonest next run".
+  // Paused triggers keep their stored next_run_at slot, but they won't run, so
+  // surfacing their time here would imply a run that never happens.
   const next = automations
-    .filter((automation) => nextRunTimestamp(automation) !== null)
+    .filter(
+      (automation) =>
+        isBrowserActive(automation) && nextRunTimestamp(automation) !== null,
+    )
     .sort(
       (a, b) =>
         (a.next_run_timestamp ?? Number.MAX_SAFE_INTEGER) -
