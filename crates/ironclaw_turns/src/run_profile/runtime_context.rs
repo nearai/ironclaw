@@ -1112,4 +1112,36 @@ mod tests {
             text.len()
         );
     }
+
+    // --- CommunicationContextFetch::resolve JoinError degradation ---
+
+    #[tokio::test]
+    async fn fetch_join_error_without_actor_resolves_to_none() {
+        // A task that panics yields a `JoinError`. With `actor_present = false`
+        // the slice is not applicable, so resolve must degrade to `None` rather
+        // than fabricating an `Unknown` communication slice for an actorless run.
+        let handle = tokio::spawn(async { panic!("simulated communication fetch failure") });
+        let fetch = CommunicationContextFetch::from_handle(handle, false);
+        let resolved = fetch.resolve(false).await;
+        assert!(
+            resolved.is_none(),
+            "actorless JoinError must degrade to None, got {resolved:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_join_error_with_actor_resolves_to_unknown() {
+        // With `actor_present = true` the same `JoinError` must degrade to a
+        // `Some(Unknown…)` slice so the actor-present / no-actor distinction is
+        // preserved on the failure path.
+        let handle = tokio::spawn(async { panic!("simulated communication fetch failure") });
+        let fetch = CommunicationContextFetch::from_handle(handle, true);
+        let resolved = fetch
+            .resolve(false)
+            .await
+            .expect("actor-present JoinError must degrade to Some(Unknown)");
+        assert_eq!(resolved.connected_channels, ConnectedChannelsState::Unknown);
+        assert_eq!(resolved.delivery_target, DeliveryTargetState::Unknown);
+        assert!(!resolved.delivery_tools_visible);
+    }
 }

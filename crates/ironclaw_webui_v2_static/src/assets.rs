@@ -156,6 +156,45 @@ mod tests {
     }
 
     #[test]
+    fn markdown_code_blocks_keep_horizontal_scroll_local_to_block() {
+        let renderer = asset_text("js/pages/chat/components/markdown-renderer.js");
+        assert!(renderer.contains("wrap.className = \"markdown-code-frame\";"));
+        assert!(renderer.contains("pre.style.overflowX = \"auto\";"));
+        assert!(renderer.contains("pre.style.overflowY = \"hidden\";"));
+        assert!(!renderer.contains("pre.style.overflow = \"hidden\";"));
+        assert!(!renderer.contains("codeEl.style.whiteSpace"));
+
+        let styles = asset_text("styles/app.css");
+        assert!(styles.contains(".markdown-body {\n  max-width: 100%;\n  min-width: 0;\n}"));
+        assert!(styles.contains(".markdown-code-frame {\n  position: relative;"));
+        assert!(styles.contains("width: 100%;\n  max-width: 100%;\n  min-width: 0;"));
+        assert!(styles.contains("overflow: hidden;"));
+        assert!(styles.contains("border-radius: 8px; box-sizing: border-box; width: 100%;"));
+        assert!(styles.contains("overflow-x: auto; white-space: pre; margin-bottom: 0.75em;"));
+        assert!(styles.contains("display: inline; background: transparent; padding: 0;"));
+        assert!(styles.contains("font-size: 0.9em; line-height: 1.65; white-space: inherit;"));
+        assert!(!styles.contains("width: max-content"));
+
+        let message_list = asset_text("js/pages/chat/components/message-list.js");
+        assert!(message_list.contains("relative flex min-h-0 min-w-0 flex-1"));
+        assert!(message_list.contains("flex min-w-0 flex-1 overflow-y-auto"));
+        assert!(!message_list.contains("overflow-x-hidden"));
+        assert!(message_list.contains("mx-auto flex w-full min-w-0 max-w-5xl flex-col"));
+
+        let message_bubble = asset_text("js/pages/chat/components/message-bubble.js");
+        assert!(message_bubble.contains("group flex w-full min-w-0 flex-col"));
+        assert!(message_bubble.contains(
+            "const bubbleWidthClass = isUser ? \"max-w-[85%]\" : isNotice ? \"mx-auto max-w-[85%]\" : \"w-full max-w-[85%]\";"
+        ));
+        assert!(
+            message_bubble.contains(
+                "const contentWidthClass = isUser ? \"\" : \"w-full min-w-0 max-w-full\";"
+            )
+        );
+        assert!(message_bubble.contains("contentWidthClass,"));
+    }
+
+    #[test]
     fn chat_connect_action_assets_render_slack_pairing_and_extensions_channel_picker() {
         let chat = asset_text("js/pages/chat/chat.js");
         assert!(chat.contains("ChannelConnectCard"));
@@ -172,7 +211,7 @@ mod tests {
         assert!(picker.contains("saveSlackAllowedChannels(channels)"));
 
         let channels_tab = asset_text("js/pages/extensions/components/channels-tab.js");
-        assert!(channels_tab.contains("slackBuiltinStatus"));
+        assert!(channels_tab.contains("showLegacySlackConnectActions"));
         assert!(channels_tab.contains("admin_managed_channels"));
         assert!(channels_tab.contains("inbound_proof_code"));
         assert!(channels_tab.contains("SlackChannelPicker"));
@@ -369,6 +408,52 @@ mod tests {
                 "refreshSetupState();\n        if (\n          setupIsConfigured() ||\n          (popup && popup.closed)"
             ),
             "OAuth setup must refresh setup state before waiting for popup close"
+        );
+    }
+
+    #[test]
+    fn extension_registry_keeps_installed_entries_visible_first() {
+        let use_extensions = asset_text("js/pages/extensions/hooks/useExtensions.js");
+        let registry_tab = asset_text("js/pages/extensions/components/registry-tab.js");
+        let extensions_page = asset_text("js/pages/extensions/extensions-page.js");
+        let routes = asset_text("js/app/routes.js");
+        let schema = asset_text("js/pages/extensions/lib/extensions-schema.js");
+
+        assert!(
+            use_extensions.contains("catalogEntries"),
+            "extensions hook should expose a merged installed-plus-registry catalog"
+        );
+        assert!(
+            use_extensions.contains("catalogId(\"registry\", entry, index)")
+                && use_extensions.contains("catalogId(\"installed\", extension, index)"),
+            "merged extension catalog should use stable fallback keys for id-less entries"
+        );
+        assert!(
+            use_extensions
+                .contains("if (a.installed !== b.installed) return a.installed ? -1 : 1;")
+                && use_extensions.contains("displayName(a.entry || a.extension)"),
+            "merged extension catalog should sort installed entries before available entries"
+        );
+        assert!(
+            registry_tab.contains("installedEntries") && registry_tab.contains("availableEntries"),
+            "registry tab should render installed and available sections from one catalog"
+        );
+        assert!(
+            registry_tab.contains("return entry.entry || entry.extension || {};"),
+            "registry search should prefer richer registry metadata when installed entries are available"
+        );
+        assert!(
+            registry_tab.contains("<${ExtensionCard}") && registry_tab.contains("<${RegistryCard}"),
+            "installed registry entries should keep management actions while available entries keep install actions"
+        );
+        assert!(
+            extensions_page.contains("tab = \"registry\"")
+                && extensions_page.contains("to=\"/extensions/registry\""),
+            "extensions page should default and redirect to the unified registry surface"
+        );
+        assert!(
+            !routes.contains("id: \"installed\"") && !schema.contains("id: \"installed\""),
+            "installed should no longer be a separate extensions navigation tab"
         );
     }
 }

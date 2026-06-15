@@ -120,6 +120,18 @@ impl MockHost {
         }
     }
 
+    /// Enable driver-specific nudges on the run profile (gates the final-answer
+    /// nudge at the budget / no-progress exit boundaries).
+    pub(super) fn with_driver_nudges_enabled(mut self) -> Self {
+        // Flip the flag in-place so this composes with other context-level
+        // builders (e.g. `with_require_final_checkpoint`) regardless of order.
+        self.context
+            .resolved_run_profile
+            .steering_policy
+            .allow_driver_specific_nudges = true;
+        self
+    }
+
     pub(super) fn with_prompt_surface_version(
         mut self,
         version: Option<CapabilitySurfaceVersion>,
@@ -1185,6 +1197,8 @@ pub(super) fn test_run_context() -> LoopRunContext {
         steering_policy: SteeringPolicy {
             allow_steering: false,
             allow_interrupt: true,
+            // Off by default; tests that exercise the nudge flip it in-place via
+            // `MockHost::with_driver_nudges_enabled`.
             allow_driver_specific_nudges: false,
         },
         cancellation_policy: CancellationPolicy {

@@ -43,9 +43,9 @@ use ironclaw_filesystem::{
     MountDescriptor, RootFilesystem, StorageClass,
 };
 use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
-use ironclaw_host_api::runtime_policy::{FilesystemBackendKind, ProcessBackendKind, SecretMode};
+use ironclaw_host_api::runtime_policy::{
+    EffectiveRuntimePolicy, FilesystemBackendKind, ProcessBackendKind, SecretMode,
+};
 use ironclaw_host_api::{
     EffectKind, ExtensionId, HostPath, MountPermissions, MountView, PackageId, RuntimeHttpEgress,
     UserId, VirtualPath,
@@ -109,6 +109,8 @@ use ironclaw_turns::{
 };
 
 use crate::RebornProductAuthServicePorts;
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::available_extensions::slack_manifest_digest;
 use crate::default_system_prompt::seed_default_system_prompt;
 use crate::input::{RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
@@ -394,6 +396,7 @@ pub struct RebornLocalDevApprovalTestParts {
 pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) approval_requests: Arc<LocalDevApprovalRequestStore>,
     pub(crate) capability_leases: Arc<LocalDevCapabilityLeaseStore>,
+    pub(crate) runtime_policy: Option<EffectiveRuntimePolicy>,
     // Used in approval_test_support (cfg(test) only); suppress the dead-code
     // lint on non-test builds where that module is not compiled in.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -567,6 +570,7 @@ struct RebornLocalDevStoreGraph {
 struct RebornLocalDevStoreGraphInput {
     filesystem: Arc<LocalDevRootFilesystem>,
     owner_user_id: UserId,
+    runtime_policy: Option<EffectiveRuntimePolicy>,
     skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     workspace_mounts: MountView,
@@ -785,6 +789,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let mut store_graph = build_local_dev_store_graph(RebornLocalDevStoreGraphInput {
         filesystem: Arc::clone(&filesystem),
         owner_user_id,
+        runtime_policy: runtime_policy.clone(),
         skill_filesystem,
         workspace_filesystem,
         workspace_mounts: runtime_workspace_mounts,
@@ -1208,6 +1213,7 @@ fn build_local_dev_store_graph(
     let RebornLocalDevStoreGraphInput {
         filesystem,
         owner_user_id,
+        runtime_policy,
         skill_filesystem,
         workspace_filesystem,
         workspace_mounts,
@@ -1274,6 +1280,7 @@ fn build_local_dev_store_graph(
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
+        runtime_policy,
         capability_policy: Arc::clone(&capability_policy),
         persistent_approval_policies: Arc::clone(&persistent_approval_policies),
         turn_state: Arc::clone(&turn_state),
@@ -1341,6 +1348,7 @@ fn build_local_dev_store_graph(
     let RebornLocalDevStoreGraphInput {
         filesystem,
         owner_user_id,
+        runtime_policy,
         skill_filesystem,
         workspace_filesystem,
         workspace_mounts,
@@ -1396,6 +1404,7 @@ fn build_local_dev_store_graph(
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
+        runtime_policy,
         capability_policy: Arc::clone(&capability_policy),
         persistent_approval_policies: Arc::clone(&persistent_approval_policies),
         turn_state: Arc::clone(&turn_state),
@@ -2283,7 +2292,8 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
         local_dev_capability_policy().map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("local-dev capability policy is invalid: {error}"),
         })?;
-    HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(vec![
+    #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(unused_mut))]
+    let mut entries = vec![
         AdminEntry::for_local_manifest(
             policy.provider.id,
             policy.provider.manifest_path,
@@ -2372,9 +2382,22 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
             notion_mcp_allowed_effects(),
             None,
         ),
-    ]))])
-    .map_err(|error| RebornBuildError::InvalidConfig {
-        reason: format!("built-in first-party trust policy is invalid: {error}"),
+    ];
+    #[cfg(feature = "slack-v2-host-beta")]
+    entries.push(AdminEntry::for_local_manifest(
+        PackageId::new("slack").map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("Slack first-party package id is invalid: {error}"),
+        })?,
+        "/system/extensions/slack/manifest.toml".to_string(),
+        Some(slack_manifest_digest()),
+        HostTrustAssignment::first_party(),
+        Vec::new(),
+        None,
+    ));
+    HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(entries))]).map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("built-in first-party trust policy is invalid: {error}"),
+        }
     })
 }
 
@@ -3314,6 +3337,7 @@ mod tests {
         Arc::new(RebornLocalRuntimeServices {
             approval_requests: Arc::clone(&base_runtime.approval_requests),
             capability_leases: Arc::clone(&base_runtime.capability_leases),
+            runtime_policy: base_runtime.runtime_policy.clone(),
             capability_policy: Arc::clone(&base_runtime.capability_policy),
             persistent_approval_policies: Arc::clone(&base_runtime.persistent_approval_policies),
             turn_state: Arc::clone(&base_runtime.turn_state),
@@ -4854,6 +4878,88 @@ mod tests {
         assert!(
             std::ptr::addr_eq(pref_ptr, delivery_ptr),
             "outbound_preferences and triggered_run_delivery must share one allocation"
+        );
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    fn slack_identity(
+        manifest_path: &str,
+        digest: Option<String>,
+    ) -> ironclaw_host_api::PackageIdentity {
+        ironclaw_host_api::PackageIdentity::new(
+            ironclaw_host_api::PackageId::new("slack").expect("slack package id"),
+            ironclaw_host_api::PackageSource::LocalManifest {
+                path: manifest_path.to_string(),
+            },
+            digest,
+            None,
+        )
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn builtin_first_party_trust_policy_includes_slack_local_manifest_entry() {
+        let policy = builtin_first_party_trust_policy().expect("trust policy");
+        let expected_digest = slack_manifest_digest();
+
+        let matching = ironclaw_trust::TrustPolicy::evaluate(
+            &policy,
+            &ironclaw_trust::TrustPolicyInput {
+                identity: slack_identity(
+                    "/system/extensions/slack/manifest.toml",
+                    Some(expected_digest.clone()),
+                ),
+                requested_trust: ironclaw_host_api::RequestedTrustClass::FirstPartyRequested,
+                requested_authority: Default::default(),
+            },
+        )
+        .expect("matching slack identity should evaluate");
+
+        assert_eq!(matching.effective_trust.class(), TrustClass::FirstParty);
+        assert_eq!(
+            matching.provenance,
+            ironclaw_trust::TrustProvenance::AdminConfig
+        );
+
+        let wrong_digest = ironclaw_trust::TrustPolicy::evaluate(
+            &policy,
+            &ironclaw_trust::TrustPolicyInput {
+                identity: slack_identity(
+                    "/system/extensions/slack/manifest.toml",
+                    Some(
+                        "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                            .to_string(),
+                    ),
+                ),
+                requested_trust: ironclaw_host_api::RequestedTrustClass::FirstPartyRequested,
+                requested_authority: Default::default(),
+            },
+        )
+        .expect("wrong digest slack identity should evaluate");
+
+        assert_eq!(wrong_digest.effective_trust.class(), TrustClass::Sandbox);
+        assert_eq!(
+            wrong_digest.provenance,
+            ironclaw_trust::TrustProvenance::Default
+        );
+
+        let wrong_path = ironclaw_trust::TrustPolicy::evaluate(
+            &policy,
+            &ironclaw_trust::TrustPolicyInput {
+                identity: slack_identity(
+                    "/system/extensions/slack/other-manifest.toml",
+                    Some(expected_digest),
+                ),
+                requested_trust: ironclaw_host_api::RequestedTrustClass::FirstPartyRequested,
+                requested_authority: Default::default(),
+            },
+        )
+        .expect("wrong path slack identity should evaluate");
+
+        assert_eq!(wrong_path.effective_trust.class(), TrustClass::Sandbox);
+        assert_eq!(
+            wrong_path.provenance,
+            ironclaw_trust::TrustProvenance::Default
         );
     }
 }

@@ -4,9 +4,10 @@ use async_trait::async_trait;
 use ironclaw_turns::{
     LoopFailureKind, LoopResultRef,
     run_profile::{
-        CapabilityBatchInvocation, CapabilityCallCandidate, CapabilityFailureKind,
-        CapabilityOutcome, CapabilityProgress, CapabilityResultMessage, LoopDriverNoteKind,
-        LoopProgressEvent, VisibleCapabilitySurface,
+        AuthResumeApprovalIdentity, CapabilityApprovalResume, CapabilityAuthResume,
+        CapabilityAuthResumeReplay, CapabilityBatchInvocation, CapabilityCallCandidate,
+        CapabilityFailureKind, CapabilityOutcome, CapabilityProgress, CapabilityResultMessage,
+        LoopDriverNoteKind, LoopProgressEvent, VisibleCapabilitySurface,
     },
 };
 
@@ -342,6 +343,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                             gate_ref: shared_gate_ref,
                             credential_requirements: Vec::new(),
                             approval_resume: None,
+                            auth_resume: None,
                         },
                     )
                     .await?
@@ -496,6 +498,7 @@ impl CapabilityStage {
                             gate_ref,
                             credential_requirements: Vec::new(),
                             approval_resume,
+                            auth_resume: None,
                         },
                     )
                     .await
@@ -503,14 +506,12 @@ impl CapabilityStage {
             CapabilityOutcome::AuthRequired {
                 gate_ref,
                 credential_requirements,
+                auth_resume,
                 ..
             } => {
-                // When the invocation already passed an approval gate, carry the
-                // approval identity into GateStage so GateStage can propagate it
-                // into the pending_auth_resume slot.  The resume_token encodes the
-                // original invocation_id; without it, auth re-dispatch would mint a
-                // fresh invocation_id and the fingerprinted approval lease (scoped
-                // to the original invocation_id) would never match.
+                // When the invocation already passed an approval gate, carry that
+                // identity into the auth resume contract before handing off to the
+                // generic gate persistence stage.
                 //
                 // Extract BEFORE clearing so the data is still present.
                 let prior_approval = state
@@ -522,6 +523,7 @@ impl CapabilityStage {
                 // outcomes GateStage re-populates the record when it blocks.
                 clear_matching_pending_approval_resume(&mut state, &call);
                 clear_matching_pending_auth_resume(&mut state, &call);
+                let auth_resume = auth_resume_for_gate(auth_resume, prior_approval.as_ref());
                 GateStage
                     .process(
                         ctx,
@@ -532,6 +534,7 @@ impl CapabilityStage {
                             gate_ref,
                             credential_requirements,
                             approval_resume: prior_approval,
+                            auth_resume,
                         },
                     )
                     .await
@@ -547,6 +550,7 @@ impl CapabilityStage {
                             gate_ref,
                             credential_requirements: Vec::new(),
                             approval_resume: None,
+                            auth_resume: None,
                         },
                     )
                     .await
@@ -634,6 +638,49 @@ impl CapabilityStage {
         mut model_observation: Option<ironclaw_turns::run_profile::ModelVisibleToolObservation>,
         capability_batch: &mut CapabilityBatchTurnSummary,
     ) -> Result<BatchStep, AgentLoopExecutorError> {
+        // Snapshot resume-origin flags for this call BEFORE clearing the pending
+        // slots.
+        //
+        // Safety invariants:
+        //   S1: A resume-origin failure must never surface as scope_mismatch /
+        //       terminal "Capability: unavailable".
+        //   S2: A side-effecting capability must never be silently re-executed by
+        //       a retry — the first resume dispatch already hit the backend.
+        //
+        // Part C-sub-A (primary guard): when this failure originated from an
+        // approval-resume OR auth-resume dispatch (`is_resume_origin == true`), we
+        // intercept any `RecoveryOutcome::Retry` outcome below and redirect it to
+        // `ToolErrorResult` instead.  This:
+        //   - Kills scope_mismatch (S1): no retry ever reaches the cross-run
+        //     input_ref without the resume context.
+        //   - Prevents double-exec (S2): the backend is not invoked a second time.
+        //   - Surfaces the real error to the model so the user can re-approve /
+        //     re-authenticate.
+        //
+        // Auth-resume note: `PendingAuthResume` carries `input_ref` only (no
+        // inline `input` value); a non-resume retry dispatched through
+        // `capability_invocation_from_candidate(call.clone(), None)` would reach
+        // the product adapter's `ensure_ref_scoped_to_run` check without the auth
+        // context and fail with `ScopeMismatch`.  The same surface-and-continue
+        // redirect is therefore the correct fix for both resume origins.
+        //
+        // Part A (belt-and-suspenders): if a retry IS dispatched (only possible
+        // when `is_resume_origin == false`, i.e. non-resume path), we always pass
+        // `None` as before.  If this logic ever changes to allow a resume-origin
+        // retry, the approval/auth context must be threaded into
+        // `capability_invocation_from_candidate` so the retry cannot reach the host
+        // without its resume context.
+        let captured_approval_resume: Option<CapabilityApprovalResume> = state
+            .pending_approval_resume
+            .as_ref()
+            .filter(|r| r.capability_id == call.capability_id)
+            .map(|r| r.to_approval_resume());
+        let captured_auth_resume_origin: bool = state
+            .pending_auth_resume
+            .as_ref()
+            .is_some_and(|r| r.capability_id == call.capability_id);
+        let is_resume_origin = captured_approval_resume.is_some() || captured_auth_resume_origin;
+
         clear_matching_pending_approval_resume(&mut state, &call);
         clear_matching_pending_auth_resume(&mut state, &call);
         for _ in 0..MAX_CAPABILITY_RETRIES {
@@ -692,6 +739,30 @@ impl CapabilityStage {
                     recovery, alter, ..
                 } => {
                     state.recovery_state = recovery;
+
+                    // Part C-sub-A: a resume-origin retryable failure must not be
+                    // silently re-dispatched.  The first dispatch already contacted
+                    // the backend (side-effect risk) and a retry without the
+                    // approval/auth context would cause scope_mismatch.  Surface
+                    // the real error to the model as a clean tool error and
+                    // continue the loop so the user can re-approve / re-auth.
+                    if is_resume_origin {
+                        append_blocked_capability_error_result(
+                            ctx.host,
+                            &mut state,
+                            &call,
+                            &summary,
+                            model_observation,
+                            capability_batch,
+                        )
+                        .await?;
+                        match CheckpointStage.cancel_if_requested(ctx, state).await? {
+                            CancelCheck::Continue(next) => state = *next,
+                            CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
+                        }
+                        return Ok(BatchStep::Continue(Box::new(state)));
+                    }
+
                     match CheckpointStage.cancel_if_requested(ctx, state).await? {
                         CancelCheck::Continue(next) => state = *next,
                         CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
@@ -711,6 +782,11 @@ impl CapabilityStage {
                             })?,
                         )
                         .await;
+                    // Part A: Non-resume-origin retry.  `is_resume_origin` is
+                    // `false` here (the Part C-sub-A guard above short-circuited
+                    // for both approval-resume and auth-resume cases), so passing
+                    // `None` is correct and safe — there is no cross-run input_ref
+                    // to protect.
                     let retry_result = ctx
                         .host
                         .invoke_capability(capability_invocation_from_candidate(call.clone(), None))
@@ -842,6 +918,38 @@ fn clear_matching_pending_approval_resume(
         .is_some_and(|resume| resume.capability_id == call.capability_id)
     {
         state.pending_approval_resume = None;
+    }
+}
+
+fn auth_resume_for_gate(
+    mut auth_resume: Option<CapabilityAuthResume>,
+    prior_approval: Option<&CapabilityApprovalResume>,
+) -> Option<CapabilityAuthResume> {
+    let Some(prior_approval) = prior_approval else {
+        return auth_resume;
+    };
+
+    let prior_identity = || AuthResumeApprovalIdentity {
+        approval_request_id: prior_approval.approval_request_id,
+        correlation_id: prior_approval.correlation_id,
+    };
+    let prior_replay = || CapabilityAuthResumeReplay {
+        input: prior_approval.input.clone(),
+        estimate: prior_approval.estimate.clone(),
+    };
+
+    match auth_resume.as_mut() {
+        Some(resume) => {
+            resume.resume_token = prior_approval.resume_token.clone();
+            resume.prior_approval.get_or_insert_with(prior_identity);
+            resume.replay.get_or_insert_with(prior_replay);
+            auth_resume
+        }
+        None => Some(CapabilityAuthResume {
+            resume_token: prior_approval.resume_token.clone(),
+            prior_approval: Some(prior_identity()),
+            replay: Some(prior_replay()),
+        }),
     }
 }
 
