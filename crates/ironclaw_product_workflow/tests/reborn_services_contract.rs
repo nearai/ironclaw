@@ -8517,6 +8517,7 @@ async fn rejected_busy_mark_failure_reconciles_via_replay_and_returns_rejected_b
     }
 }
 
+// ---------------------------------------------------------------------------
 // Legacy DeferredBusy mark-failure reconcile path: mark_message_rejected_busy errors
 // → replay returns legacy DeferredBusy (non-terminal) → predicate does NOT match
 // → original mark error surfaces as Unavailable, not a false-terminal RejectedBusy
