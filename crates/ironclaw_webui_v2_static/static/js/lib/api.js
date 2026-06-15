@@ -286,13 +286,15 @@ export function attachmentUrl({ threadId, messageId, attachmentId } = {}) {
   );
 }
 
-// Fetch an attachment's bytes with the session bearer and return an object URL
+// Fetch an attachment's bytes with the session bearer and return a `data:` URL
 // suitable for an `<img>` src. `<img>` cannot send an Authorization header, so
-// (unlike SSE, which uses a `?token=` shim) the bytes are fetched here and
-// wrapped in a blob URL. The caller owns the returned URL and must
-// `URL.revokeObjectURL` it when the element unmounts. Throws on a non-OK
-// response so the caller can fall back to a placeholder.
-export async function fetchAttachmentObjectUrl(path) {
+// (unlike SSE, which uses a `?token=` shim) the bytes are fetched here. We
+// return a `data:` URL rather than a `blob:` object URL on purpose: the SPA's
+// CSP is `img-src 'self' data:` (matching the optimistic compose-time preview,
+// which is also a data URL), so a `blob:` src would be refused — and a data URL
+// needs no `revokeObjectURL` lifecycle. Throws on a non-OK response so the
+// caller can fall back to a placeholder.
+export async function fetchAttachmentDataUrl(path) {
   const token = readStoredToken();
   const headers = new Headers();
   if (token) {
@@ -307,7 +309,12 @@ export async function fetchAttachmentObjectUrl(path) {
     );
   }
   const blob = await response.blob();
-  return URL.createObjectURL(blob);
+  return await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error("attachment read failed"));
+    reader.readAsDataURL(blob);
+  });
 }
 
 // --- Streaming (SSE) ---

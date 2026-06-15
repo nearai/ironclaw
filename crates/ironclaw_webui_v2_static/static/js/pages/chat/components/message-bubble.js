@@ -5,14 +5,14 @@ import { Avatar } from "./avatar.js";
 import { Icon } from "../../../design-system/icons.js";
 import { useT } from "../../../lib/i18n.js";
 import { toast } from "../../../lib/toast.js";
-import { fetchAttachmentObjectUrl } from "../../../lib/api.js";
+import { fetchAttachmentDataUrl } from "../../../lib/api.js";
 
 /* Thumbnail for one message attachment. An optimistic (just-sent) image
    carries a local data URL in `preview_url` and renders immediately. A
    persisted image instead carries a `fetch_url`: `<img>` cannot send the
-   session bearer, so the bytes are fetched here and wrapped in a blob URL
-   (revoked on unmount). Anything else — non-images, unlanded refs, or a failed
-   fetch — falls back to the file icon. */
+   session bearer, so the bytes are fetched here and turned into a data URL
+   (the SPA's CSP allows `data:` images, not `blob:`). Anything else —
+   non-images, unlanded refs, or a failed fetch — falls back to the file icon. */
 function AttachmentThumbnail({ att }) {
   const [resolvedUrl, setResolvedUrl] = React.useState(att.preview_url || null);
 
@@ -21,22 +21,15 @@ function AttachmentThumbnail({ att }) {
     // the authenticated byte fetch.
     if (att.preview_url || !att.fetch_url) return undefined;
     let cancelled = false;
-    let objectUrl = null;
-    fetchAttachmentObjectUrl(att.fetch_url)
+    fetchAttachmentDataUrl(att.fetch_url)
       .then((url) => {
-        if (cancelled) {
-          URL.revokeObjectURL(url);
-          return;
-        }
-        objectUrl = url;
-        setResolvedUrl(url);
+        if (!cancelled) setResolvedUrl(url);
       })
       .catch(() => {
         /* Leave the file-icon fallback in place on any read failure. */
       });
     return () => {
       cancelled = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [att.preview_url, att.fetch_url]);
 

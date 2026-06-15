@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { deleteThread, listAutomations } from "./api.js";
+import {
+  attachmentUrl,
+  deleteThread,
+  fetchAttachmentDataUrl,
+  listAutomations,
+} from "./api.js";
 
 test("listAutomations reads through the v2 automations route", async () => {
   const calls = [];
@@ -95,4 +100,44 @@ test("deleteThread rejects before fetch when thread id is missing", async () => 
   await assert.rejects(deleteThread(), /threadId is required/);
 
   assert.equal(fetchCalled, false);
+});
+
+test("attachmentUrl encodes the (thread, message, attachment) triple", () => {
+  assert.equal(
+    attachmentUrl({ threadId: "t 1", messageId: "m/1", attachmentId: "a:1" }),
+    "/api/webchat/v2/threads/t%201/messages/m%2F1/attachments/a%3A1",
+  );
+});
+
+// Regression: the thumbnail must be a `data:` URL, never a `blob:` object URL.
+// The SPA's CSP is `img-src 'self' data:`, so a blob URL was refused and the
+// thumbnail never rendered. Reverting to `URL.createObjectURL` would throw here.
+test("fetchAttachmentDataUrl returns a data URL and never mints a blob URL", async () => {
+  globalThis.sessionStorage = {
+    getItem: () => "token-1",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async () =>
+    new Response(new Uint8Array([1, 2, 3, 4]), {
+      status: 200,
+      headers: { "content-type": "image/png" },
+    });
+  globalThis.URL = {
+    createObjectURL: () => {
+      throw new Error("blob: URLs violate the SPA CSP img-src 'self' data:");
+    },
+  };
+  globalThis.FileReader = class {
+    readAsDataURL() {
+      this.result = "data:image/png;base64,AQIDBA==";
+      if (this.onload) this.onload();
+    }
+  };
+
+  const url = await fetchAttachmentDataUrl(
+    attachmentUrl({ threadId: "t1", messageId: "m1", attachmentId: "a1" }),
+  );
+
+  assert.ok(url.startsWith("data:"), `expected a data URL, got ${url}`);
 });
