@@ -769,23 +769,27 @@ function appendDisplayGroup(container, titleText, rows) {
 
 function traceCommonsCreditRows(report) {
   var delta = report.delayed_credit_delta || 0;
-  var submittedStr = String(report.submissions_submitted || 0) + ' submitted of '
-    + String(report.submissions_total || 0) + ' total';
+  var submittedStr = I18n.t('traceCommons.submissionsSummary', {
+    submitted: String(report.submissions_submitted || 0),
+    total: String(report.submissions_total || 0),
+  });
   if (report.submissions_accepted !== undefined && report.submissions_accepted !== null) {
-    submittedStr += ', ' + String(report.submissions_accepted) + ' accepted';
+    submittedStr += I18n.t('traceCommons.submissionsAcceptedSuffix', {
+      accepted: String(report.submissions_accepted),
+    });
   }
   var syncAt = report.last_credit_sync_at || null;
   return [
-    { label: 'Pending credit', value: (report.pending_credit || 0).toFixed(2),
-      description: 'Earned but not yet finalized' },
-    { label: 'Final credit', value: (report.final_credit || 0).toFixed(2),
-      description: 'Confirmed credit' },
-    { label: 'Delayed ledger', value: (delta >= 0 ? '+' : '') + delta.toFixed(2),
-      description: 'Can still change after review' },
-    { label: 'Submissions', value: submittedStr },
-    { label: 'Last synced',
-      value: syncAt ? new Date(syncAt).toLocaleString() : 'never',
-      description: 'Local view as of last sync' },
+    { label: I18n.t('traceCommons.pendingCredit'), value: (report.pending_credit || 0).toFixed(2),
+      description: I18n.t('traceCommons.pendingCreditDesc') },
+    { label: I18n.t('traceCommons.finalCredit'), value: (report.final_credit || 0).toFixed(2),
+      description: I18n.t('traceCommons.finalCreditDesc') },
+    { label: I18n.t('traceCommons.delayedLedger'), value: (delta >= 0 ? '+' : '') + delta.toFixed(2),
+      description: I18n.t('traceCommons.delayedLedgerDesc') },
+    { label: I18n.t('traceCommons.submissions'), value: submittedStr },
+    { label: I18n.t('traceCommons.lastSynced'),
+      value: syncAt ? new Date(syncAt).toLocaleString() : I18n.t('traceCommons.never'),
+      description: I18n.t('traceCommons.lastSyncedDesc') },
   ];
 }
 
@@ -801,17 +805,17 @@ function loadTraceCommonsCredits() {
     container.innerHTML = '';
 
     if (!report.submissions_total) {
-      container.innerHTML = '<div class="empty-state">No Trace Commons contributions yet. Once you opt in and contribute redacted traces, your credits will appear here.</div>';
+      container.innerHTML = '<div class="empty-state">' + escapeHtml(I18n.t('traceCommons.empty')) + '</div>';
       return;
     }
 
-    appendDisplayGroup(container, 'Trace Commons Credits', traceCommonsCreditRows(report));
+    appendDisplayGroup(container, I18n.t('traceCommons.creditsTitle'), traceCommonsCreditRows(report));
 
     var explanations = (report.explanation_lines && report.explanation_lines.length)
       ? report.explanation_lines
       : (summary.recent_explanations || []);
     if (explanations.length) {
-      var exGroup = appendDisplayGroup(container, 'Recent Credit Explanations', []);
+      var exGroup = appendDisplayGroup(container, I18n.t('traceCommons.recentExplanations'), []);
       var exList = document.createElement('ul');
       exList.style.margin = '4px 0 0 16px';
       exList.style.padding = '0';
@@ -827,7 +831,7 @@ function loadTraceCommonsCredits() {
     var caveat = document.createElement('div');
     caveat.className = 'settings-description';
     caveat.style.marginTop = '12px';
-    caveat.textContent = 'Local view as of last sync — the authoritative credit ledger is server-side. Final credit can change after privacy review, replay/eval, duplicate checks, and downstream utility scoring.';
+    caveat.textContent = I18n.t('traceCommons.caveat');
     container.appendChild(caveat);
   }).catch(function(err) {
     container.innerHTML = '<div class="empty-state">' + I18n.t('common.loadFailed') + ': ' + escapeHtml(err.message) + '</div>';

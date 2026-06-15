@@ -110,8 +110,10 @@ Idempotency and conflicts:
   keys (§2.2) so this case is attacker-only, but the server enforces it
   regardless.
 
-Wire types (request/response structs, error codes) live in
-`crates/trace-commons-protocol`, which both repos already depend on.
+Wire types (request/response structs, error codes) live locally in
+`crates/ironclaw_reborn_traces/src/onboarding/protocol.rs`. There is no shared
+`trace-commons-protocol` crate; the issuer/server side mirrors these definitions
+in its own repo rather than sharing a published crate.
 
 ### 1.2 Upload-claim issuance: device-key auth branch
 

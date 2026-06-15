@@ -86,15 +86,14 @@ Extend the trace-credit facade and the
   // ...existing TraceCreditReport fields...
   "manual_review_hold_count": 2,
   "holds": [
-    { "submission_id": "uuid", "reason": "manual review required because residual privacy risk is high",
-      "captured_at": "2026-06-10T23:00:00Z", "score": 0.0 }
+    { "submission_id": "uuid", "reason": "manual review required because residual privacy risk is high" }
   ]
 }
 ```
 
-Sourced from `read_trace_queue_holds_for_scope` filtered to
-`TraceQueueHoldKind::ManualReview`. No raw trace content in the response —
-`submission_id`, reason, timestamp, score only.
+Sourced from `manual_review_holds_for_scope` filtered to
+`TraceQueueHoldKind::ManualReview`. No raw trace content in the response — each
+`RebornTraceHold` carries only `submission_id` and `reason`.
 
 ### Slice 3 — UI (frontend)
 

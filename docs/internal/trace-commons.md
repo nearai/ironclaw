@@ -65,8 +65,10 @@ Pieces:
   `WorkloadTokenEnv` path is unchanged and remains the default; old policy files
   deserialize as `WorkloadTokenEnv`.
 - **Engine tools**: `builtin.trace_commons.onboard` (consent-gated — refuses
-  unless `confirmed=true`, after the agent gathers the two consents per
-  `prompts/builtin/trace-commons-onboard.md`) and `builtin.trace_commons.status`
+  unless `confirmed=true`, after the agent gathers the two consents per the
+  tool's own description in
+  `crates/ironclaw_host_runtime/src/first_party_tools/trace_commons.rs`) and
+  `builtin.trace_commons.status`
   (read-only enrollment state). Both route through the standard first-party
   dispatch pipeline. Onboarding outputs carry only the public `device_key_id`
   hash — never key material.

@@ -45,6 +45,11 @@ ask_destructive = [
     "financial",
 ]
 exempt_capabilities = [
+    # Onboarding posts redacted traces only after the first-party tool's own
+    # `confirmed=true` consent gate runs in-turn (see dispatch_onboard). The REPL
+    # approval gate would otherwise block this network+external_write capability
+    # before that consent flow can execute, so it is exempted here.
+    "builtin.trace_commons.onboard",
     # The user chooses the public handle/bio in-turn before the agent invokes
     # this first-party Trace Commons profile update. REPL approval prompts are
     # tracked separately; keep this exemption narrow so other external writes

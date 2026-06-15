@@ -6,8 +6,10 @@
 //! therefore a fresh `LazyLock` for `ironclaw_base_dir()`. `IRONCLAW_BASE_DIR`
 //! is set to a tempdir as the very first action so the LazyLock picks it up.
 //!
-//! Both tests share the tempdir (base dir is process-wide); they use different
-//! mock ports / invite codes / user scopes to avoid cross-test interference.
+//! All tests share the tempdir (base dir is process-wide); they use different
+//! mock ports / invite codes and, critically, a distinct per-test user scope
+//! (passed into `execution_context_with_network`) so onboarding state written
+//! by one test cannot bleed into another running concurrently.
 
 use std::{
     net::SocketAddr,
@@ -204,11 +206,15 @@ fn capability_id(value: &str) -> CapabilityId {
     CapabilityId::new(value).unwrap()
 }
 
-fn dispatch_grant_with_network(capability: &str, network: NetworkPolicy) -> CapabilityGrant {
+fn dispatch_grant_with_network(
+    caller_extension_id: &str,
+    capability: &str,
+    network: NetworkPolicy,
+) -> CapabilityGrant {
     CapabilityGrant {
         id: CapabilityGrantId::new(),
         capability: capability_id(capability),
-        grantee: Principal::Extension(ExtensionId::new("caller").unwrap()),
+        grantee: Principal::Extension(ExtensionId::new(caller_extension_id).unwrap()),
         issued_by: Principal::HostRuntime,
         constraints: GrantConstraints {
             allowed_effects: builtin_effects(),
@@ -223,13 +229,27 @@ fn dispatch_grant_with_network(capability: &str, network: NetworkPolicy) -> Capa
 }
 
 /// `execution_context` granting the given capability with network allowed.
-fn execution_context_with_network(capability: &str, network: NetworkPolicy) -> ExecutionContext {
+///
+/// The base dir is process-wide across this test binary, so onboarding state
+/// is keyed by `user_id`. Each test must pass a distinct `user_id` (and
+/// matching `caller_extension_id`) so its enrollment state cannot bleed into
+/// another test running concurrently in the same process.
+fn execution_context_with_network(
+    user_id: &str,
+    caller_extension_id: &str,
+    capability: &str,
+    network: NetworkPolicy,
+) -> ExecutionContext {
     let capability_set = CapabilitySet {
-        grants: vec![dispatch_grant_with_network(capability, network)],
+        grants: vec![dispatch_grant_with_network(
+            caller_extension_id,
+            capability,
+            network,
+        )],
     };
     ExecutionContext::local_default(
-        UserId::new("user").unwrap(),
-        ExtensionId::new("caller").unwrap(),
+        UserId::new(user_id).unwrap(),
+        ExtensionId::new(caller_extension_id).unwrap(),
         RuntimeKind::FirstParty,
         TrustClass::FirstParty,
         capability_set,
@@ -239,8 +259,17 @@ fn execution_context_with_network(capability: &str, network: NetworkPolicy) -> E
 }
 
 /// Execution context granting a read-only capability (no network needed).
-fn execution_context_read_only(capability: &str) -> ExecutionContext {
-    execution_context_with_network(capability, NetworkPolicy::default())
+fn execution_context_read_only(
+    user_id: &str,
+    caller_extension_id: &str,
+    capability: &str,
+) -> ExecutionContext {
+    execution_context_with_network(
+        user_id,
+        caller_extension_id,
+        capability,
+        NetworkPolicy::default(),
+    )
 }
 
 /// Network policy that allows loopback HTTP to the mock issuer.
@@ -372,6 +401,8 @@ async fn onboard_then_status_through_dispatch() {
             "confirmed": true,
         }),
         execution_context_with_network(
+            "user_onboard_then_status",
+            "caller_onboard_then_status",
             TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
             allow_all_network_policy(),
         ),
@@ -429,7 +460,11 @@ async fn onboard_then_status_through_dispatch() {
         &rt,
         TRACE_COMMONS_STATUS_CAPABILITY_ID,
         json!({}),
-        execution_context_read_only(TRACE_COMMONS_STATUS_CAPABILITY_ID),
+        execution_context_read_only(
+            "user_onboard_then_status",
+            "caller_onboard_then_status",
+            TRACE_COMMONS_STATUS_CAPABILITY_ID,
+        ),
     )
     .await
     .expect("status dispatch must succeed");
@@ -493,6 +528,8 @@ async fn onboard_private_ip_blocked_by_network_policy() {
             "confirmed": true,
         }),
         execution_context_with_network(
+            "user_private_ip_blocked",
+            "caller_private_ip_blocked",
             TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
             deny_private_ip_network_policy(),
         ),
@@ -554,6 +591,8 @@ async fn onboard_unconfirmed_makes_no_network_call() {
             "confirmed": false,
         }),
         execution_context_with_network(
+            "user_unconfirmed_no_network",
+            "caller_unconfirmed_no_network",
             TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
             allow_all_network_policy(),
         ),

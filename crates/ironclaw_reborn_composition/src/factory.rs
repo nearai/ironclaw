@@ -1880,6 +1880,19 @@ fn validate_resolved_master_key(
 fn resolve_local_dev_secret_master_key(
     root: &Path,
 ) -> Result<ironclaw_secrets::SecretMaterial, RebornBuildError> {
+    let env_key = std::env::var(ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV).ok();
+    resolve_local_dev_secret_master_key_with_env(root, env_key)
+}
+
+/// Inner resolver that takes the `SECRETS_MASTER_KEY` env value as a parameter
+/// so the write-before-validate invariant can be exercised through this real
+/// caller in tests without mutating process-global env (which is racy under
+/// `cargo test`'s parallel harness).
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn resolve_local_dev_secret_master_key_with_env(
+    root: &Path,
+    env_key: Option<String>,
+) -> Result<ironclaw_secrets::SecretMaterial, RebornBuildError> {
     let key_path = root.join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH);
     match std::fs::read_to_string(&key_path) {
         Ok(existing) => {
@@ -1900,10 +1913,7 @@ fn resolve_local_dev_secret_master_key(
 
     // No cached file. Prefer an explicit env key (validated, so a bad value is
     // never persisted to the cached file); otherwise generate a fresh one.
-    match std::env::var(ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-    {
+    match env_key.filter(|value| !value.trim().is_empty()) {
         Some(env_key) => {
             let key = env_key.trim().to_string();
             validate_resolved_master_key(&key, &MasterKeySource::Env)?;
@@ -3769,13 +3779,24 @@ mod tests {
 
     /// An explicit but malformed `SECRETS_MASTER_KEY` env value (the actual
     /// root cause of the original report) must fail loud and name the env var.
-    /// Driven through the pure validator rather than mutating process env — the
-    /// resolver validates the env value before persisting it, so this also
-    /// guards the "never write a rejected key to the cached file" invariant.
+    /// Driven through the real caller `resolve_local_dev_secret_master_key`
+    /// (via its env-parameterized inner) so this also guards the
+    /// write-before-validate invariant: a rejected env key must never be
+    /// persisted to the cached `.reborn-local-dev-secrets-master-key` file.
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     #[test]
-    fn validate_resolved_master_key_rejects_malformed_env_with_source_context() {
-        let error = validate_resolved_master_key(&"0".repeat(64), &MasterKeySource::Env)
+    fn resolve_local_dev_secret_master_key_rejects_malformed_env_without_persisting() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let key_path = root.join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH);
+        assert!(
+            !key_path.exists(),
+            "precondition: cached key file must not exist yet"
+        );
+
+        // 64 zero chars: passes the length floor but has a single distinct byte,
+        // so the entropy check rejects it.
+        let error = resolve_local_dev_secret_master_key_with_env(root, Some("0".repeat(64)))
             .expect_err("malformed env master key must be rejected");
 
         match error {
@@ -3791,6 +3812,14 @@ mod tests {
             }
             other => panic!("expected InvalidConfig, got {other:?}"),
         }
+
+        // Write-before-validate regression guard: the rejected key must NOT have
+        // been persisted to the cached file.
+        assert!(
+            !key_path.exists(),
+            "rejected env master key must not be persisted to {}",
+            key_path.display()
+        );
     }
 
     /// A well-formed cached key file passes through unchanged.
