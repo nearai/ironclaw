@@ -1212,14 +1212,27 @@ impl BuiltinObligationHandler {
         }
         for handle in handles {
             // Fail closed on a store error: the dispatch-time backstop must never
-            // let an uncredentialed call through on a transient failure.
-            let exists = secret_present(
+            // let an uncredentialed call through on a transient failure. Preserve the
+            // cause as a server-side trail (`SecretStoreError` Display carries no raw
+            // secret material — handles/reasons only); the caller still receives the
+            // opaque, sanitized secret-obligation failure.
+            let exists = match secret_present(
                 secret_store.as_ref(),
                 &request.context.resource_scope,
                 handle,
             )
             .await
-            .map_err(|_| secret_obligation_failed())?;
+            {
+                Ok(exists) => exists,
+                Err(error) => {
+                    tracing::debug!(
+                        secret_handle = handle.as_str(),
+                        error = %error,
+                        "dispatch-time secret presence probe failed; failing closed at the obligation backstop"
+                    );
+                    return Err(secret_obligation_failed());
+                }
+            };
             if !exists {
                 return Err(CapabilityObligationError::AuthRequired {
                     credential_requirements: Vec::new(),

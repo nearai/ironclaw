@@ -1531,15 +1531,17 @@ impl DefaultHostRuntime {
                         credential_requirements,
                     ));
                 }
-                Err(_) => {
+                Err(error) => {
                     // Fail-open: a transient store error must not masquerade as a
                     // missing credential and burn a user auth interaction. Skip the
                     // pre-flight entirely — the dispatch-time obligation check is the
                     // enforcement backstop and will catch genuine absences at execution
-                    // time.
+                    // time. The cause is logged (sanitized; SecretStoreError carries no
+                    // raw secret material) so a backend outage still leaves a trail.
                     tracing::debug!(
                         capability_id = %capability_id,
                         secret_handle = handle.as_str(),
+                        error = %error,
                         "credential pre-flight: secret store metadata query failed; skipping pre-flight (dispatch-time check enforces)"
                     );
                     return None; // silent-ok: transient store error must not burn a user auth interaction; dispatch-time obligation check is the backstop
