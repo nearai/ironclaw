@@ -57,7 +57,8 @@ use crate::{
     RuntimeCapabilityCompleted, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
     RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeGateId,
     RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest,
-    VisibleCapabilitySurface, plan_capability, surface::CapabilityCatalog,
+    VisibleCapabilitySurface, obligations::secret_present, plan_capability,
+    surface::CapabilityCatalog,
 };
 
 /// Default production wiring for [`HostRuntime`].
@@ -1508,11 +1509,17 @@ impl DefaultHostRuntime {
         }
 
         for handle in &required_secrets {
-            match secret_store.metadata(scope, handle).await {
-                Ok(Some(_)) => {
-                    // Secret present — continue checking
+            // `secret_present` is the single owner of the presence rule, shared with
+            // the dispatch-time obligation backstop (obligations::preflight_secret_injection)
+            // so the two paths cannot drift on "what counts as a present credential".
+            // The happy path intentionally re-checks at dispatch time; this pre-flight
+            // read is only for gate ordering. (Accepted double-read; the backstop is the
+            // authority — see the thread on collapsing it.)
+            match secret_present(secret_store.as_ref(), scope, handle).await {
+                Ok(true) => {
+                    // Secret present — continue checking.
                 }
-                Ok(None) => {
+                Ok(false) => {
                     tracing::debug!(
                         capability_id = %capability_id,
                         secret_handle = handle.as_str(),
