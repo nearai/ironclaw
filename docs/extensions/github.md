@@ -53,7 +53,7 @@ ironclaw secret set github_token YOUR_TOKEN
 ```
 
 <Warning>
-Be sure to create a fine-grained personal access token with only the necessary permissions for your use case. When in doubt, choose the least permissive options, you can always create new tokens with different permissions later on
+Create a personal access token (classic) with only the necessary permissions for your use case. When in doubt, choose the least permissive options; you can always create new tokens with different permissions later on.
 </Warning>
 
 </Step>

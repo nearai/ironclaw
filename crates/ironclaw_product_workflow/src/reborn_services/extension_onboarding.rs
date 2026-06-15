@@ -216,6 +216,8 @@ mod tests {
         LifecycleExtensionSource, LifecyclePackageKind, LifecyclePackageRef,
     };
 
+    const GITHUB_CLASSIC_PAT_URL: &str = "https://github.com/settings/tokens/new";
+
     #[test]
     fn github_manual_token_projects_setup_required_message() {
         let extension = installed_extension(
@@ -226,8 +228,8 @@ mod tests {
             LifecycleExtensionRuntimeKind::WasmTool,
             Some(LifecycleExtensionOnboarding {
                 instructions: "GitHub needs a personal access token before its repository and pull request tools can run.".to_string(),
-                credential_instructions: Some("Create a GitHub personal access token with the repository permissions you want IronClaw to use, then paste it here.".to_string()),
-                setup_url: Some("https://github.com/settings/personal-access-tokens/new".to_string()),
+                credential_instructions: Some("Create a GitHub personal access token (classic) with the repository permissions you want IronClaw to use, then paste it here.".to_string()),
+                setup_url: Some(GITHUB_CLASSIC_PAT_URL.to_string()),
                 credential_next_step: Some("After saving the token, activate GitHub to publish its tools.".to_string()),
             }),
         );
@@ -251,7 +253,7 @@ mod tests {
                 .expect("onboarding payload")
                 .setup_url
                 .as_deref(),
-            Some("https://github.com/settings/personal-access-tokens/new")
+            Some(GITHUB_CLASSIC_PAT_URL)
         );
     }
 
@@ -331,8 +333,8 @@ mod tests {
             LifecycleExtensionRuntimeKind::WasmTool,
             Some(LifecycleExtensionOnboarding {
                 instructions: "GitHub needs a personal access token before its repository and pull request tools can run.".to_string(),
-                credential_instructions: Some("Create a GitHub personal access token with the repository permissions you want IronClaw to use, then paste it here.".to_string()),
-                setup_url: Some("https://github.com/settings/personal-access-tokens/new".to_string()),
+                credential_instructions: Some("Create a GitHub personal access token (classic) with the repository permissions you want IronClaw to use, then paste it here.".to_string()),
+                setup_url: Some(GITHUB_CLASSIC_PAT_URL.to_string()),
                 credential_next_step: Some("After saving the token, activate GitHub to publish its tools.".to_string()),
             }),
         );

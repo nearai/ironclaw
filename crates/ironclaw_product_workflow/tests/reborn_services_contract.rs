@@ -4217,7 +4217,11 @@ async fn list_extensions_projects_onboarding_payload_through_reborn_services() {
     let onboarding = extension.onboarding.as_ref().expect("onboarding payload");
     assert_eq!(
         onboarding.credential_instructions.as_deref(),
-        Some("Paste the GitHub token IronClaw should use.")
+        Some("Paste the GitHub personal access token (classic) IronClaw should use.")
+    );
+    assert_eq!(
+        onboarding.setup_url.as_deref(),
+        Some("https://github.com/settings/tokens/new")
     );
     assert_eq!(
         onboarding.credential_next_step.as_deref(),
@@ -7232,8 +7236,10 @@ fn extension_summary(
 fn onboarding_fixture() -> LifecycleExtensionOnboarding {
     LifecycleExtensionOnboarding {
         instructions: "GitHub needs a token before its tools can run.".to_string(),
-        credential_instructions: Some("Paste the GitHub token IronClaw should use.".to_string()),
-        setup_url: Some("https://github.com/settings/personal-access-tokens/new".to_string()),
+        credential_instructions: Some(
+            "Paste the GitHub personal access token (classic) IronClaw should use.".to_string(),
+        ),
+        setup_url: Some("https://github.com/settings/tokens/new".to_string()),
         credential_next_step: Some(
             "After saving the token, activate GitHub to publish its tools.".to_string(),
         ),

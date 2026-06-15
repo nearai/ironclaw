@@ -22,6 +22,7 @@ use crate::nearai_mcp::{
     NearAiMcpBootstrapConfig, NearAiMcpEndpoint, nearai_mcp_endpoint_from_env,
 };
 
+const GITHUB_CLASSIC_PAT_URL: &str = "https://github.com/settings/tokens/new";
 const GITHUB_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/github/manifest.toml");
 const GITHUB_WASM_MODULE: &[u8] =
@@ -105,9 +106,9 @@ fn onboarding(package_id: &str) -> Option<LifecycleExtensionOnboarding> {
         "github" => Some(onboarding_message(
             "GitHub needs a personal access token before its repository and pull request tools can run.",
             Some(
-                "Install GitHub first. Activation will open the secure credential prompt for a GitHub personal access token with the repository permissions you want IronClaw to use.",
+                "Install GitHub first. Activation will open the secure credential prompt for a GitHub personal access token (classic) with the repository permissions you want IronClaw to use.",
             ),
-            Some("https://github.com/settings/personal-access-tokens/new"),
+            Some(GITHUB_CLASSIC_PAT_URL),
             "Install GitHub, then activate it to open the token prompt and publish its tools.",
         )),
         "gmail" => Some(onboarding_message(
@@ -1633,6 +1634,33 @@ mod tests {
                 "{extension_id} onboarding should preserve install-then-activate ordering"
             );
         }
+    }
+
+    #[test]
+    fn bundled_github_onboarding_points_to_classic_personal_access_token() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").unwrap();
+        let summary = catalog.resolve(&package_ref).unwrap().summary();
+        let onboarding = summary.onboarding.expect("GitHub onboarding");
+
+        assert_eq!(
+            onboarding.setup_url.as_deref(),
+            Some(GITHUB_CLASSIC_PAT_URL)
+        );
+        assert!(
+            onboarding.credential_instructions.as_deref().is_some_and(
+                |instructions| instructions.contains("personal access token (classic)")
+            ),
+            "GitHub onboarding should ask for the currently supported Classic PAT shape"
+        );
+        assert!(
+            !onboarding
+                .setup_url
+                .as_deref()
+                .is_some_and(|url| url.contains("personal-access-tokens/new")),
+            "GitHub onboarding must not point users to the unsupported fine-grained PAT flow"
+        );
     }
 
     #[test]
