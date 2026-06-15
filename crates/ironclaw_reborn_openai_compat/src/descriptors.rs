@@ -43,7 +43,9 @@ fn chat_completions_descriptor() -> IngressRouteDescriptor {
         OPENAI_COMPAT_ROUTE_CHAT_COMPLETIONS,
         NetworkMethod::Post,
         OPENAI_COMPAT_PATTERN_CHAT_COMPLETIONS,
-        create_policy(),
+        // 14 MiB to admit base64-inline images (vision, #4644); the per-image
+        // decoded ceiling is enforced in the workflow.
+        create_policy(body_limit_kib(14 * 1024)),
     )
 }
 
@@ -52,7 +54,7 @@ fn responses_api_create_descriptor() -> IngressRouteDescriptor {
         OPENAI_COMPAT_ROUTE_RESPONSES_API_CREATE,
         NetworkMethod::Post,
         OPENAI_COMPAT_PATTERN_RESPONSES_API_CREATE,
-        create_policy(),
+        create_policy(body_limit_kib(1024)),
     )
 }
 
@@ -61,7 +63,7 @@ fn responses_v1_create_descriptor() -> IngressRouteDescriptor {
         OPENAI_COMPAT_ROUTE_RESPONSES_V1_CREATE,
         NetworkMethod::Post,
         OPENAI_COMPAT_PATTERN_RESPONSES_V1_CREATE,
-        create_policy(),
+        create_policy(body_limit_kib(1024)),
     )
 }
 
@@ -101,12 +103,12 @@ fn responses_v1_cancel_descriptor() -> IngressRouteDescriptor {
     )
 }
 
-fn create_policy() -> IngressPolicy {
+fn create_policy(body_limit: BodyLimitPolicy) -> IngressPolicy {
     IngressPolicy::new(IngressPolicyParts {
         listener_class: ListenerClass::LocalGateway,
         auth: bearer_required(),
         scope_source: IngressScopeSource::AuthenticatedCaller,
-        body_limit: body_limit_kib(1024),
+        body_limit,
         rate_limit: rate_limit_per_caller(60, 60),
         cors: CorsPolicy::HostConfiguredAllowlist,
         websocket_origin: WebSocketOriginPolicy::NotApplicable,
