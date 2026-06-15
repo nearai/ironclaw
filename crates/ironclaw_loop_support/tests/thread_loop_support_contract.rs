@@ -2857,8 +2857,8 @@ async fn model_port_resolves_thread_message_refs_and_delegates_to_gateway() {
 }
 
 /// Records every storage key the model port asks it to read and returns a fixed
-/// byte payload, so a test can assert the producer (`encode_image_parts`) both
-/// consulted the read port and base64-encoded what it returned.
+/// byte payload, so a test can assert the producer (`read_image_parts`) both
+/// consulted the read port and threaded the raw bytes it returned.
 struct StubImageReader {
     bytes: Vec<u8>,
     reads: Mutex<Vec<String>>,
@@ -2944,14 +2944,15 @@ async fn model_port_reads_image_attachment_bytes_into_model_image_parts() {
         &["/workspace/attachments/2026-06-14/m1-0-diagram.png".to_string()]
     );
 
-    // The producer base64-encoded the bytes the reader returned and threaded
-    // them to the gateway as a typed image part on the resolved user message.
+    // The producer threaded the raw bytes the reader returned to the gateway as
+    // a typed image part on the resolved user message (base64 encoding happens
+    // later, in the gateway, and only for a vision model).
     let calls = gateway.calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
     let image_parts = &calls[0].messages[0].image_parts;
     assert_eq!(image_parts.len(), 1);
     assert_eq!(image_parts[0].mime_type, "image/png");
-    assert_eq!(image_parts[0].data_base64, "AQIDBA==");
+    assert_eq!(image_parts[0].bytes, vec![1, 2, 3, 4]);
 }
 
 #[tokio::test]

@@ -489,6 +489,32 @@ pub struct ContextMessage {
     pub image_attachments: Vec<ContextImageAttachment>,
 }
 
+impl ContextMessage {
+    /// Project a model-visible transcript message into a [`ContextMessage`],
+    /// given its already-resolved `content`. This is the single place attachment
+    /// projection happens — the `<attachments>` text pointer is folded into
+    /// `content` and image references into `image_attachments` — so the two
+    /// backing stores (in-memory and filesystem) cannot drift on how a stored
+    /// message becomes model context. Callers own the `content` `Option` unwrap
+    /// because the two read paths handle absent content differently.
+    pub(crate) fn from_transcript_message(message: &ThreadMessageRecord, content: String) -> Self {
+        Self {
+            message_id: Some(message.message_id),
+            summary_id: None,
+            sequence: message.sequence,
+            kind: message.kind,
+            tool_result_provider_call: message.tool_result_provider_call.clone(),
+            content: crate::attachment_context::augment_model_content(
+                content,
+                &message.attachments,
+            ),
+            image_attachments: crate::attachment_context::model_image_attachments(
+                &message.attachments,
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextWindow {
     pub thread_id: ThreadId,

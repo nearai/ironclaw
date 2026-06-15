@@ -244,4 +244,45 @@ mod tests {
         assert!(out.contains("filename=\"a&quot;&amp;&lt;&gt;.txt\""));
         assert!(out.contains("a &lt; b &amp; c &gt; d"));
     }
+
+    fn image_ref(id: &str, storage_key: Option<&str>) -> AttachmentRef {
+        AttachmentRef {
+            id: id.to_string(),
+            kind: AttachmentKind::Image,
+            mime_type: "image/png".to_string(),
+            filename: Some("diagram.png".to_string()),
+            size_bytes: Some(4),
+            storage_key: storage_key.map(str::to_string),
+            extracted_text: None,
+        }
+    }
+
+    #[test]
+    fn model_image_attachments_keeps_only_landed_images() {
+        let attachments = vec![
+            image_ref(
+                "img-landed",
+                Some("/workspace/attachments/2026-06-14/m1-0.png"),
+            ),
+            // An image that never landed (no storage_key) has no bytes to read.
+            image_ref("img-unlanded", None),
+            // A non-image landed attachment is not part of the multimodal path.
+            doc_ref(Some("text")),
+        ];
+
+        let images = model_image_attachments(&attachments);
+
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].mime_type, "image/png");
+        assert_eq!(
+            images[0].storage_key,
+            "/workspace/attachments/2026-06-14/m1-0.png"
+        );
+    }
+
+    #[test]
+    fn model_image_attachments_empty_when_no_images() {
+        assert!(model_image_attachments(&[doc_ref(None)]).is_empty());
+        assert!(model_image_attachments(&[]).is_empty());
+    }
 }

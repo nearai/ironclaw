@@ -1278,6 +1278,18 @@ fn provider_tool_call_for_repair(tool_call: &ToolCall) -> ToolCall {
     }
 }
 
+/// Encode raw image bytes as a base64 `data:` URL a vision model can read
+/// inline. The model port carries undecorated bytes; this provider-format
+/// concern lives at the gateway boundary.
+fn image_data_url(mime_type: &str, bytes: &[u8]) -> String {
+    use base64::Engine;
+    format!(
+        "data:{};base64,{}",
+        mime_type,
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    )
+}
+
 fn convert_messages(
     messages: Vec<HostManagedModelMessage>,
     replay_identity: &ProviderReplayIdentity,
@@ -1301,17 +1313,15 @@ fn convert_messages(
                 } else {
                     // Multimodal: the text rides in `content`; `content_parts`
                     // carries only the image parts (the provider adapters
-                    // prepend the text). Each encoded image becomes a base64
-                    // `data:` URL the vision model can read inline.
+                    // prepend the text). Encoding to a base64 `data:` URL is a
+                    // provider-format concern, so it happens here at the gateway
+                    // — the model port carries only the raw bytes.
                     let parts = message
                         .image_parts
                         .iter()
                         .map(|image| ContentPart::ImageUrl {
                             image_url: ImageUrl {
-                                url: format!(
-                                    "data:{};base64,{}",
-                                    image.mime_type, image.data_base64
-                                ),
+                                url: image_data_url(&image.mime_type, &image.bytes),
                                 detail: None,
                             },
                         })
@@ -1713,7 +1723,7 @@ mod tests {
             "what is in this image?",
             vec![ironclaw_loop_support::HostManagedModelImagePart {
                 mime_type: "image/png".to_string(),
-                data_base64: "iVBORw0KGgo=".to_string(),
+                bytes: vec![1, 2, 3, 4],
             }],
         );
         let identity = ProviderReplayIdentity::new("openai", "gpt-4o").expect("identity");
@@ -1723,12 +1733,13 @@ mod tests {
         assert_eq!(converted.len(), 1);
         let chat = &converted[0];
         assert_eq!(chat.role, Role::User);
-        // Text rides in `content`; the image rides as a `data:` ImageUrl part.
+        // Text rides in `content`; the raw bytes are base64-encoded here at the
+        // gateway into a `data:` ImageUrl part.
         assert_eq!(chat.content, "what is in this image?");
         assert_eq!(chat.content_parts.len(), 1);
         match &chat.content_parts[0] {
             ContentPart::ImageUrl { image_url } => {
-                assert_eq!(image_url.url, "data:image/png;base64,iVBORw0KGgo=");
+                assert_eq!(image_url.url, "data:image/png;base64,AQIDBA==");
             }
             other => panic!("expected an ImageUrl part, got {other:?}"),
         }
@@ -1747,14 +1758,14 @@ mod tests {
 
     #[test]
     fn convert_messages_drops_image_parts_for_non_vision_model() {
-        // Even with encoded image parts present, a text-only model must not
-        // receive image content (it would error or ignore it); it keeps the
-        // text and relies on the transcript's `<attachments>` pointer.
+        // Even with image bytes present, a text-only model must not receive
+        // image content (it would error or ignore it); it keeps the text and
+        // relies on the transcript's `<attachments>` pointer.
         let message = user_message_with_images(
             "what is in this image?",
             vec![ironclaw_loop_support::HostManagedModelImagePart {
                 mime_type: "image/png".to_string(),
-                data_base64: "iVBORw0KGgo=".to_string(),
+                bytes: vec![1, 2, 3, 4],
             }],
         );
         let identity =

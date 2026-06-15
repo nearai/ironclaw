@@ -995,12 +995,25 @@ where
         self
     }
 
-    /// Read + base64-encode the image attachments on a model-visible message so
-    /// the gateway can attach them as multimodal parts for a vision model. Empty
-    /// when no read port is wired or the message has no images. Read failures
-    /// are logged and skipped — the image is dropped rather than failing the
-    /// turn; the textual `<attachments>` pointer remains either way.
-    async fn encode_image_parts(
+    /// Read the raw bytes of a model-visible message's image attachments so the
+    /// gateway can attach them as multimodal parts for a vision model. Returns
+    /// the bytes only — base64/`data:` URL formatting is a provider concern that
+    /// lives in the gateway, so this neutral adapter stays format-agnostic.
+    /// Empty when no read port is wired or the message has no images.
+    ///
+    /// The read is deliberately *not* gated on model vision capability here. The
+    /// authoritative model identity is `model_override`, resolved inside the
+    /// gateway from its routing policy, which can diverge from the run-context
+    /// route snapshot this port holds. Gating the read on the snapshot would
+    /// risk silently dropping images whenever the two disagree, so the single
+    /// authoritative vision gate lives in the gateway's `convert_messages`: a
+    /// text-only model simply discards these parts and keeps the `<attachments>`
+    /// text pointer. The only cost is a bounded read for the rare text-only +
+    /// image case.
+    ///
+    /// Read failures are logged and skipped — the image is dropped rather than
+    /// failing the turn; the textual `<attachments>` pointer remains either way.
+    async fn read_image_parts(
         &self,
         attachments: &[ironclaw_threads::ContextImageAttachment],
     ) -> Vec<HostManagedModelImagePart> {
@@ -1018,12 +1031,14 @@ where
                 .await
             {
                 Ok(bytes) => {
-                    use base64::Engine;
                     parts.push(HostManagedModelImagePart {
                         mime_type: attachment.mime_type.clone(),
-                        data_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                        bytes,
                     });
                 }
+                // silent-ok: an unreadable attachment is dropped, not fatal — the
+                // model still gets the text and the `<attachments>` pointer; the
+                // cause is logged here for diagnosis.
                 Err(error) => {
                     tracing::debug!(
                         storage_key = %attachment.storage_key,
@@ -1208,7 +1223,7 @@ where
                     continue;
                 };
                 let tool_result_content = tool_result_content_for_context_message(&message)?;
-                let image_parts = self.encode_image_parts(&message.image_attachments).await;
+                let image_parts = self.read_image_parts(&message.image_attachments).await;
                 messages.push(HostManagedModelMessage {
                     role: model_role_for_kind(message.kind),
                     content: message.content,
@@ -1370,7 +1385,7 @@ where
                 ));
             }
             let image_parts = self
-                .encode_image_parts(&context_message.image_attachments)
+                .read_image_parts(&context_message.image_attachments)
                 .await;
             resolved.push(HostManagedModelMessage {
                 role: durable_role,
@@ -1476,14 +1491,15 @@ pub struct HostManagedModelRequest {
 /// snapshot DTO here.
 pub type HostManagedModelRouteSnapshot = ironclaw_turns::run_profile::LoopModelRouteSnapshot;
 
-/// An image attachment already read back and base64-encoded, ready to become a
-/// multimodal content part for a vision-capable model. Populated only when the
-/// resolved model accepts images (see the model-message resolution path); the
-/// model gateway turns each into a `ContentPart::ImageUrl` data URL.
+/// An image attachment read back as raw bytes, ready to become a multimodal
+/// content part for a vision-capable model. The bytes are carried undecorated;
+/// base64 / `data:` URL formatting is a provider concern the model gateway owns
+/// (it turns each into a `ContentPart::ImageUrl` data URL) and only for a model
+/// that actually accepts images.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostManagedModelImagePart {
     pub mime_type: String,
-    pub data_base64: String,
+    pub bytes: Vec<u8>,
 }
 
 /// Reads attachment bytes for the current turn so the model port can build
@@ -1519,6 +1535,8 @@ impl std::fmt::Display for LoopAttachmentReadError {
     }
 }
 
+impl std::error::Error for LoopAttachmentReadError {}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostManagedModelMessage {
     pub role: HostManagedModelMessageRole,
@@ -1528,8 +1546,11 @@ pub struct HostManagedModelMessage {
     pub tool_result_provider_call: Option<ProviderToolCallReferenceEnvelope>,
     #[serde(default, skip)]
     pub tool_result_content: Option<HostManagedToolResultContent>,
-    /// Encoded image attachments for the multimodal path. Empty unless the
-    /// resolved model is vision-capable. Not serialized (transient turn data).
+    /// Raw image-attachment bytes for the multimodal path, populated for any
+    /// message that carries landed images. The gateway encodes and attaches
+    /// them only for a vision-capable model (text-only models discard them and
+    /// keep the `<attachments>` text pointer). Not serialized (transient turn
+    /// data).
     #[serde(default, skip)]
     pub image_parts: Vec<HostManagedModelImagePart>,
 }
