@@ -4836,7 +4836,19 @@ mod tests {
         let queued = |dir: &std::path::Path| -> Vec<std::path::PathBuf> {
             match std::fs::read_dir(dir) {
                 Ok(entries) => entries
-                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .map(|entry| {
+                        // Fail loud on a per-entry IO error too, so the test
+                        // can't silently drop a broken entry and still claim the
+                        // queue holds exactly one envelope.
+                        entry
+                            .unwrap_or_else(|error| {
+                                panic!(
+                                    "failed to read a trace queue entry in {}: {error}",
+                                    dir.display()
+                                )
+                            })
+                            .path()
+                    })
                     .filter(|path| {
                         path.file_name()
                             .and_then(|name| name.to_str())

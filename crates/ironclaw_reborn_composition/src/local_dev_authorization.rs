@@ -105,6 +105,15 @@ mod tests {
             MountView::default(),
         )
         .expect("execution context");
+        // Guard against a false positive: prove these effects WOULD require an
+        // approval gate without the capability exemption. Otherwise — if the
+        // effects stopped gating under the default policy — the test would still
+        // return `Allow` even after the TOML exemption was removed, no longer
+        // proving the exemption is the allow path.
+        assert!(
+            local_dev_effects_require_approval(None, policy.as_ref(), &effects),
+            "test must use effects that require approval without the capability exemption"
+        );
         let trust_decision = TrustDecision {
             effective_trust: EffectiveTrustClass::user_trusted(),
             authority_ceiling: AuthorityCeiling {

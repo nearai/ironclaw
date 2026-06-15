@@ -500,18 +500,25 @@ pub(super) async fn dispatch_credits(
         request.scope.tenant_id.as_str(),
         request.scope.user_id.as_str(),
     );
-    // A missing or unreadable submissions file is a normal "nothing submitted yet"
-    // state — map read errors to a soft fallback value, not a FirstPartyCapabilityError.
+    // A MISSING submissions file is already softened to `Ok(Vec::new())`
+    // ("nothing submitted yet") inside `read_local_trace_records_for_scope`, so
+    // an `Err` here is a genuine read/parse failure (unreadable or corrupt
+    // records file). Do NOT mask it as "no records" — that would hide
+    // corruption/permission issues and under-report an active contributor.
+    // Report the read failure honestly (mirrors `dispatch_status`).
     match ironclaw_reborn_traces::contribution::read_local_trace_records_for_scope(Some(
         scope.as_str(),
     )) {
         Ok(records) => Ok(format_credits(
             &ironclaw_reborn_traces::contribution::trace_credit_report(&records),
         )),
-        Err(_) => Ok(json!({
-            "enrolled_or_active": false,
-            "message": "No local Trace Commons submission records found for this user."
-        })),
+        Err(error) => {
+            tracing::debug!(%error, "trace commons credits: local records read failed");
+            Ok(json!({
+                "error_code": "RecordsReadFailed",
+                "message": "Could not read local Trace Commons submission records; the records file may be unreadable or corrupt."
+            }))
+        }
     }
 }
 
