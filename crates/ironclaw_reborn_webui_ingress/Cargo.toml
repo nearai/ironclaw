@@ -29,7 +29,7 @@ hex = "0.4.3"
 hmac = "0.12"
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", features = ["webui-v2-beta"] }
-jsonwebtoken = "9"
+jsonwebtoken = "10"
 parking_lot = "0.12"
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
