@@ -68,9 +68,9 @@ Concretely:
   construction must route through these rather than re-deriving the field strip
   inline.
 - OAuth/manual-token bind and the subsequent bound-account update resolve
-  through `ironclaw_auth::binding_scope_owns_account`, which strips
-  `invocation_id`/`thread_id`/`mission_id` but requires exact `session_id`
-  equality. Using full scope equality here (the prior `scope_matches`) forked a
+  through `ironclaw_auth::binding_scope_owns_account`, which clears
+  `thread_id`/`mission_id` and ignores `invocation_id` (not part of the owner
+  comparison) but requires exact `session_id` equality. Using full scope equality here (the prior `scope_matches`) forked a
   duplicate `UserReusable` account on every reconnect and bound credentials to
   the thread they were authorized in.
 - Requester authorization — which extension may *use* a non-`UserReusable`

@@ -94,6 +94,11 @@ impl ConfiguredAccount {
         }
     }
 
+    fn label(mut self, label: &str) -> Self {
+        self.inner.label = CredentialAccountLabel::new(label).unwrap();
+        self
+    }
+
     fn status(mut self, status: CredentialAccountStatus) -> Self {
         self.inner.status = status;
         self
@@ -973,11 +978,13 @@ async fn resolver_uses_most_recent_account_across_multiple_reusable_logins() {
     // Two reusable accounts for the same provider under distinct labels.
     // The second one is created later, so it is the most-recently-used.
     ConfiguredAccount::new(auth_scope.clone(), "github")
+        .label("personal github")
         .access_secret(Some(SecretHandle::new("personal-token").unwrap()))
         .create(&accounts)
         .await;
     tokio::time::sleep(std::time::Duration::from_millis(1)).await;
     ConfiguredAccount::new(auth_scope, "github")
+        .label("work github")
         .access_secret(Some(latest_secret.clone()))
         .create(&accounts)
         .await;

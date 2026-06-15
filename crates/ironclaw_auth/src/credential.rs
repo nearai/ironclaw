@@ -587,9 +587,10 @@ impl CredentialAccountOwnerScope {
 /// fields (the old `scope_matches` full-equality) rejected every legitimate
 /// reconnect and forked a duplicate account (#4935 defect A). This keeps
 /// tenant/user/agent/project hard-required (via [`CredentialAccountOwnerScope`])
-/// and `session_id` matched (it is path-segmenting), while dropping
-/// `invocation_id`/`thread_id`/`mission_id`. Requester authorization is enforced
-/// separately by the callers; this is only the owner-boundary check.
+/// and `session_id` matched (it is path-segmenting), while clearing
+/// `thread_id`/`mission_id` and ignoring `invocation_id` (which
+/// [`CredentialAccountOwnerScope`] does not compare). Requester authorization is
+/// enforced separately by the callers; this is only the owner-boundary check.
 ///
 /// `session_id` is compared for **exact** equality (including `None == None`),
 /// NOT wildcarded the way `CredentialAccountOwnerScope::matches` wildcards a

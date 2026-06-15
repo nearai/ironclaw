@@ -48,12 +48,14 @@ async fn resolver_resolves_google_capability_labeled_duplicates() {
     let gmail_scope = ProviderScope::new("https://www.googleapis.com/auth/gmail.modify").unwrap();
     let latest_secret = SecretHandle::new("calendar-surface-token").unwrap();
     ConfiguredAccount::new(auth_scope.clone(), "google")
+        .label("gmail google")
         .access_secret(Some(SecretHandle::new("gmail-surface-token").unwrap()))
         .scopes(&["https://www.googleapis.com/auth/gmail.modify"])
         .create(&accounts)
         .await;
     tokio::time::sleep(std::time::Duration::from_millis(1)).await;
     ConfiguredAccount::new(auth_scope, "google")
+        .label("google-calendar google")
         .access_secret(Some(latest_secret.clone()))
         .scopes(&["https://www.googleapis.com/auth/gmail.modify"])
         .create(&accounts)
