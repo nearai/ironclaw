@@ -548,7 +548,12 @@ async fn reborn_trace_trace_commons_first_party_tools_parity() {
                 "call_trace_commons_profile_set",
                 serde_json::json!({
                     "display_handle": "pilot_zaki",
-                    "bio": "Trace Commons pilot contributor"
+                    "bio": "Trace Commons pilot contributor",
+                    // confirmed=true clears the public-attribution consent gate so
+                    // the call reaches the enrollment check (which returns
+                    // NotEnrolled here, deterministically and with no network,
+                    // since this scope never onboarded).
+                    "confirmed": true
                 }),
             )],
             expected_tool_results: Vec::new(),
