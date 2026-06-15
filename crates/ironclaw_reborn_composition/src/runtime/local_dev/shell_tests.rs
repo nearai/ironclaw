@@ -74,18 +74,12 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
     .await
     .expect("local-dev services build");
     let runtime = services.host_runtime.clone().expect("host runtime");
-    let workspace_mounts = services
+    let local_runtime = services
         .local_runtime
         .as_ref()
-        .expect("local runtime substrate")
-        .workspace_mounts
-        .clone();
-    let memory_mounts = services
-        .local_runtime
-        .as_ref()
-        .expect("local runtime substrate")
-        .memory_mounts
-        .clone();
+        .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
+    let workspace_mounts = local_runtime.workspace_mounts.clone();
+    let memory_mounts = local_runtime.memory_mounts.clone();
     let policy = Arc::new(
         crate::local_dev_capability_policy::local_dev_capability_policy().expect("policy parses"),
     );
@@ -103,6 +97,10 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         result_writer,
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
         skill_activation_source: None,
+        outbound_preferences_facade: None,
+        outbound_delivery_target_set_requires_approval: false,
+        approval_requests: local_runtime.approval_requests.clone(),
+        capability_leases: local_runtime.capability_leases.clone(),
     };
     let run_context = run_context("shell-workdir").await;
     let port = factory
@@ -130,6 +128,7 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
             capability_id: CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability id"),
             input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .expect("shell invocation");

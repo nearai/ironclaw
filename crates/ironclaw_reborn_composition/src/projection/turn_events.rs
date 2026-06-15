@@ -448,7 +448,7 @@ async fn approval_gate_prompt(
         event,
         gate_ref_string,
         "Approval required",
-        is_approval_gate_ref(gate_ref),
+        is_approval_gate_ref(gate_ref.as_str()),
         context,
     )
 }

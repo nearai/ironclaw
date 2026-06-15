@@ -114,6 +114,7 @@ mod tests {
             capability_id: CapabilityId::new("cap.x").expect("ok"),
             input_ref: CapabilityInputRef::new("input:x").expect("ok"),
             approval_resume: None,
+            auth_resume: None,
         };
         assert!(resolver.resolve(&invocation).await.is_none());
     }

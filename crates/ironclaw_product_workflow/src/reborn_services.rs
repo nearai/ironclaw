@@ -12,6 +12,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, CredentialAccountId, CredentialAccountProjection,
     CredentialAccountUpdateBinding, ProviderScope,
@@ -22,9 +23,10 @@ use ironclaw_product_adapters::{
     ProjectionSubscriptionRequest,
 };
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest, MessageContent,
-    MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
-    SessionThreadService, ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
+    AcceptInboundMessageRequest, AcceptedInboundMessageReplay, AttachmentRef, EnsureThreadRequest,
+    MessageContent, MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadRecord, SessionThreadService, ThreadHistory, ThreadHistoryRequest,
+    ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
@@ -118,6 +120,18 @@ const OPERATOR_LOGS_CURSOR_MAX_BYTES: usize = 512;
 const OPERATOR_LOGS_TARGET_MAX_BYTES: usize = 256;
 const OPERATOR_LOGS_CONTEXT_MAX_BYTES: usize = 256;
 const OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX: &str = " ... [truncated]";
+
+const NOTICE_BLOCKED_APPROVAL: &str = "An approval gate is open on this thread — resolve it (approve or deny) before continuing, then resend your message.";
+const NOTICE_BLOCKED_AUTH: &str = "An authentication gate is open on this thread — complete authentication before continuing, then resend your message.";
+const NOTICE_BUSY_GENERIC: &str = "Ironclaw is still working on a previous message — resend yours once the current task finishes.";
+
+fn rejected_busy_notice(status: TurnStatus) -> String {
+    match status {
+        TurnStatus::BlockedApproval => NOTICE_BLOCKED_APPROVAL.to_string(),
+        TurnStatus::BlockedAuth => NOTICE_BLOCKED_AUTH.to_string(),
+        _ => NOTICE_BUSY_GENERIC.to_string(),
+    }
+}
 
 #[async_trait]
 pub trait ConnectableChannelsProductFacade: Send + Sync {
@@ -579,8 +593,8 @@ impl GateResolutionRoute {
 
     fn from_gate_shape(gate_ref: &GateRef, resolution: &WebUiGateResolution) -> Self {
         match (
-            is_approval_gate_ref(gate_ref),
-            is_auth_gate_ref(gate_ref),
+            is_approval_gate_ref(gate_ref.as_str()),
+            is_auth_gate_ref(gate_ref.as_str()),
             matches!(resolution, WebUiGateResolution::CredentialProvided { .. }),
         ) {
             (true, _, _) => Self::Approval,
@@ -1271,11 +1285,30 @@ pub trait RebornServicesApi: Send + Sync {
     }
 }
 
+/// Lands inbound attachment bytes into durable, agent-accessible storage and
+/// returns the transcript references to persist on the user message.
+///
+/// Injected by host composition, which owns the project-scoped filesystem
+/// authority. `message_id` is a stable per-message id (the idempotency key)
+/// used only to disambiguate the storage path; the implementation writes
+/// through the same `MountView` the agent's file tools resolve through, so
+/// landed bytes are readable by `file_read`/`list_dir` in later turns.
+#[async_trait]
+pub trait InboundAttachmentLander: Send + Sync {
+    async fn land(
+        &self,
+        thread_scope: &ThreadScope,
+        message_id: &str,
+        attachments: Vec<InboundAttachment>,
+    ) -> Result<Vec<AttachmentRef>, RebornServicesError>;
+}
+
 /// Default facade implementation composed at the WebUI boundary.
 #[derive(Clone)]
 pub struct RebornServices {
     thread_service: Arc<dyn SessionThreadService>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
+    inbound_attachments: Option<Arc<dyn InboundAttachmentLander>>,
     event_stream: Option<Arc<dyn ProjectionStream>>,
     lifecycle_facade: Arc<dyn LifecycleProductFacade>,
     automation_facade: Arc<dyn AutomationProductFacade>,
@@ -1302,6 +1335,7 @@ impl RebornServices {
         Self {
             thread_service,
             turn_coordinator,
+            inbound_attachments: None,
             event_stream: None,
             lifecycle_facade: Arc::new(UnsupportedLifecycleProductFacade::new_static(
                 "reborn_lifecycle_facade_unwired",
@@ -1327,6 +1361,17 @@ impl RebornServices {
 
     pub fn with_event_stream(mut self, event_stream: Arc<dyn ProjectionStream>) -> Self {
         self.event_stream = Some(event_stream);
+        self
+    }
+
+    /// Wire the port that lands inbound attachment bytes into project storage.
+    /// Without it, a send-message carrying attachments is rejected rather than
+    /// silently dropping the files.
+    pub fn with_inbound_attachments(
+        mut self,
+        inbound_attachments: Arc<dyn InboundAttachmentLander>,
+    ) -> Self {
+        self.inbound_attachments = Some(inbound_attachments);
         self
     }
 
@@ -1611,6 +1656,9 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         request: WebUiSendMessageRequest,
     ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
+        // Decode + budget inline attachment bytes before the request is
+        // consumed into the (bytes-free, serializable) command.
+        let attachments = request.decode_attachments()?;
         let command = request.into_command(caller)?;
         let WebUiInboundCommand::SendMessage {
             scope,
@@ -1663,6 +1711,23 @@ impl RebornServicesApi for RebornServices {
                         event_cursor: state.event_cursor,
                     });
                 }
+                MessageStatus::RejectedBusy => {
+                    // Idempotent re-rejection: the original busy rejection was
+                    // lost before it reached the client.  The blocking run may
+                    // already be finished, so we cannot recover its run-id or
+                    // cursor.  Return a RejectedBusy with None run metadata so
+                    // the client knows to resend rather than treating this as
+                    // a new submission.  Fabricating a run-id or status here
+                    // would give the client a reference it cannot query.
+                    return Ok(RebornSubmitTurnResponse::RejectedBusy {
+                        thread_id: replay.thread_id,
+                        accepted_message_ref: accepted_message_ref(replay.message_id.to_string())?,
+                        active_run_id: None,
+                        status: None,
+                        event_cursor: None,
+                        notice: NOTICE_BUSY_GENERIC.to_string(),
+                    });
+                }
                 MessageStatus::Accepted | MessageStatus::DeferredBusy => AcceptedWebUiMessage {
                     thread_id: replay.thread_id,
                     message_id: replay.message_id,
@@ -1683,6 +1748,26 @@ impl RebornServicesApi for RebornServices {
                 }
             }
         } else {
+            // Land attachment bytes (if any) into project storage before the
+            // message is accepted, recording each as a transcript reference.
+            // The stable per-message external_event_id is the path's message
+            // segment, so a same-day retry re-lands at the same path; the lander
+            // also partitions by UTC day, so a retry that crosses midnight UTC
+            // lands under the new day's directory (the earlier bytes are left
+            // addressable but unreferenced). Idempotency is enforced at message
+            // acceptance, not by the storage path.
+            let message_content = if attachments.is_empty() {
+                MessageContent::text(content.clone())
+            } else {
+                let lander = self
+                    .inbound_attachments
+                    .as_ref()
+                    .ok_or_else(|| RebornServicesError::service_unavailable(false))?;
+                let refs = lander
+                    .land(&thread_scope, &external_event_id, attachments)
+                    .await?;
+                MessageContent::with_attachments(content.clone(), refs)
+            };
             let accepted = self
                 .thread_service
                 .accept_inbound_message(AcceptInboundMessageRequest {
@@ -1692,7 +1777,7 @@ impl RebornServicesApi for RebornServices {
                     source_binding_id: Some(source_binding_id.clone()),
                     reply_target_binding_id: Some(source_binding_id.clone()),
                     external_event_id: Some(external_event_id),
-                    content: MessageContent::text(content.clone()),
+                    content: message_content,
                 })
                 .await
                 .map_err(map_thread_error)?;
@@ -1712,6 +1797,7 @@ impl RebornServicesApi for RebornServices {
             "webui-reply",
             &handoff.reply_target_binding_id,
         )?;
+        let product_context = ironclaw_product_context::resolve_web_ui(scope.product_owner(&actor));
         let submit = SubmitTurnRequest {
             scope: scope.clone(),
             actor,
@@ -1725,6 +1811,7 @@ impl RebornServicesApi for RebornServices {
             parent_run_id: None,
             subagent_depth: 0,
             spawn_tree_root_run_id: None,
+            product_context: Some(product_context),
         };
 
         self.record_skill_activation_message(&scope, &accepted_message_ref, &content)?;
@@ -1761,20 +1848,21 @@ impl RebornServicesApi for RebornServices {
             }
             Err(TurnError::ThreadBusy(busy)) => {
                 self.clear_skill_activation_message(&scope, &accepted_message_ref)?;
-                mark_message_deferred_busy_or_replay(
+                mark_message_rejected_busy_or_replay(
                     &*self.thread_service,
                     &thread_scope,
                     &handoff,
                     &client_action_id,
                 )
                 .await?;
-
-                Ok(RebornSubmitTurnResponse::DeferredBusy {
+                let notice = rejected_busy_notice(busy.status);
+                Ok(RebornSubmitTurnResponse::RejectedBusy {
                     thread_id: handoff.thread_id,
                     accepted_message_ref,
-                    active_run_id: busy.active_run_id,
-                    status: busy.status,
-                    event_cursor: busy.event_cursor,
+                    active_run_id: Some(busy.active_run_id),
+                    status: Some(busy.status),
+                    event_cursor: Some(busy.event_cursor),
+                    notice,
                 })
             }
             Err(error) => {
@@ -2655,24 +2743,30 @@ async fn mark_message_submitted_or_replay(
     }
 }
 
-async fn mark_message_deferred_busy_or_replay(
+async fn mark_message_rejected_busy_or_replay(
     thread_service: &dyn SessionThreadService,
     thread_scope: &ThreadScope,
     handoff: &AcceptedWebUiMessage,
     client_action_id: &IdempotencyKey,
 ) -> Result<(), RebornServicesError> {
     match thread_service
-        .mark_message_deferred_busy(thread_scope, &handoff.thread_id, handoff.message_id)
+        .mark_message_rejected_busy(thread_scope, &handoff.thread_id, handoff.message_id)
         .await
     {
         Ok(_) => Ok(()),
         Err(error) => {
+            // Only RejectedBusy is the terminal settled state here.
+            // DeferredBusy is non-terminal legacy — a later replay may
+            // resubmit it, so claiming it settled would violate the
+            // no-resubmit guarantee. Let a DeferredBusy replay fall
+            // through to the `_` arm so the original mark failure
+            // surfaces honestly instead of being masked as settled.
             reconcile_terminal_duplicate(
                 thread_service,
                 thread_scope,
                 handoff,
                 client_action_id,
-                |replay| replay.status == MessageStatus::DeferredBusy,
+                |replay| matches!(replay.status, MessageStatus::RejectedBusy),
                 error,
             )
             .await
@@ -3669,6 +3763,12 @@ fn map_thread_error(error: SessionThreadError) -> RebornServicesError {
         | SessionThreadError::OverlappingSummaryRange { .. } => {
             RebornServicesError::from_status(RebornServicesErrorCode::Conflict, 409, false)
         }
+        SessionThreadError::InvalidAttachment(_) => RebornServicesError::from_status_kind(
+            RebornServicesErrorCode::InvalidRequest,
+            RebornServicesErrorKind::Validation,
+            400,
+            false,
+        ),
         SessionThreadError::GeneratedThreadId(_)
         | SessionThreadError::Serialization(_)
         | SessionThreadError::Deserialization(_)

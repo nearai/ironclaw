@@ -827,6 +827,10 @@ pub enum ProductInboundAck {
         accepted_message_ref: AcceptedMessageRef,
         active_run_id: TurnRunId,
     },
+    RejectedBusy {
+        accepted_message_ref: AcceptedMessageRef,
+        active_run_id: Option<TurnRunId>,
+    },
     Rejected(ProductRejection),
     CommandResult {
         command: String,
@@ -843,6 +847,7 @@ impl ProductInboundAck {
         match self {
             Self::Accepted { .. }
             | Self::DeferredBusy { .. }
+            | Self::RejectedBusy { .. }
             | Self::Duplicate { .. }
             | Self::CommandResult { .. }
             | Self::NoOp => true,

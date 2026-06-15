@@ -48,9 +48,40 @@ export function clearDraft(key) {
   setDraft(key, "");
 }
 
+// In-memory staged-attachment drafts, parallel to the text drafts above. These
+// hold the decoded file objects (base64 bytes), which are far too large for
+// localStorage's ~5MB quota — so they live in memory: they survive navigating
+// between screens (SPA, no page reload) but, unlike text, NOT a full reload.
+// Keyed by the same `storageKey(...)` so they are namespaced per authenticated
+// user and isolated per conversation / the new-conversation slot.
+const stagedAttachments = new Map();
+
+/** Read the staged attachments for a key, or `[]` when none. */
+export function getStagedAttachments(key) {
+  return stagedAttachments.get(storageKey(key)) || [];
+}
+
+/** Persist (or, when empty, clear) the staged attachments for a key. */
+export function setStagedAttachments(key, attachments) {
+  const id = storageKey(key);
+  if (attachments && attachments.length > 0) {
+    stagedAttachments.set(id, attachments);
+  } else {
+    stagedAttachments.delete(id);
+  }
+}
+
+/** Clear the staged attachments for a key (e.g. after a successful send). */
+export function clearStagedAttachments(key) {
+  stagedAttachments.delete(storageKey(key));
+}
+
 /** Remove every persisted draft. Called on sign-out so unsent text can't
  * leak to a different user signing in on the same browser. */
 export function clearAllDrafts() {
+  // Staged attachments are in-memory only, but still per-user — drop them too
+  // so a signed-out user's files can't resurface for the next sign-in.
+  stagedAttachments.clear();
   try {
     const keys = [];
     for (let i = 0; i < window.localStorage.length; i += 1) {

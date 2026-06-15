@@ -118,6 +118,11 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
         http.effects,
         vec![EffectKind::DispatchCapability, EffectKind::Network]
     );
+    assert!(
+        http.description
+            .contains("Prefer GitHub extension capabilities"),
+        "builtin.http should steer GitHub repository API tasks toward the GitHub extension"
+    );
     let http_save = package
         .capabilities
         .iter()
@@ -130,6 +135,12 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             EffectKind::Network,
             EffectKind::WriteFilesystem
         ]
+    );
+    assert!(
+        http_save
+            .description
+            .contains("Prefer GitHub extension capabilities"),
+        "builtin.http.save should steer GitHub repository API tasks toward the GitHub extension"
     );
 
     let memory_write = package

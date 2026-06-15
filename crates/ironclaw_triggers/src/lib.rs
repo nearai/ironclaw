@@ -33,7 +33,7 @@ mod worker;
 pub use trusted_submit::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerMaterializedPrompt,
-    TriggerTrustedInboundBinding,
+    TriggerTrustedInboundBinding, is_trusted_trigger_adapter_kind,
 };
 
 const MIN_FIRE_CADENCE: Duration = Duration::from_secs(60);

@@ -1077,6 +1077,7 @@ impl Fixture {
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
+            product_context: None,
         };
         let claimed = ClaimedTurnRun {
             state,
@@ -1181,6 +1182,7 @@ fn invocation(
         input_ref: CapabilityInputRef::new(format!("input:{capability_id}"))
             .expect("input ref literal is valid"),
         approval_resume: None,
+        auth_resume: None,
     }
 }
 

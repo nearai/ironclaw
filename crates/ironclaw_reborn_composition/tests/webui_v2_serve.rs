@@ -2784,3 +2784,122 @@ async fn public_route_mount_is_merged_without_bearer_auth_and_keeps_descriptor_p
         .expect("oneshot");
     assert_eq!(protected.status(), StatusCode::UNAUTHORIZED);
 }
+
+// ─── Automations panel UI (fix/reborn-automations-ux) ─────────────────
+//
+// These lock the served automations SPA source shape so a regression that
+// drops one of the panel UX fixes fails here. Behavioral JS coverage needs a
+// browser harness this workspace does not own, so — per the existing
+// `static_*` precedent — we assert the shipped asset content instead.
+
+#[tokio::test]
+async fn static_automations_presenters_label_sub_hourly_schedules() {
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/js/pages/automations/lib/automations-presenters.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+
+    assert!(
+        body.contains("\"Every minute\""),
+        "presenters must label `* * * * *` as `Every minute` instead of `Custom schedule`"
+    );
+    assert!(
+        body.contains("Every ${step} minute"),
+        "presenters must label `*/N * * * *` as `Every N minutes`"
+    );
+    assert!(
+        body.contains("Hourly at :"),
+        "presenters must label `M * * * *` as an hourly cadence"
+    );
+}
+
+#[tokio::test]
+async fn static_automations_summary_reflows_cards_and_shrinks_next_run() {
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/js/pages/automations/components/automations-summary-strip.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+
+    assert!(
+        body.contains("lg:grid-cols-3"),
+        "summary strip must cap cards per row so detail text stays readable"
+    );
+    assert!(
+        !body.contains("xl:grid-cols-5"),
+        "summary strip must not force five cards into one row"
+    );
+    assert!(
+        body.contains("valueClassName"),
+        "the NEXT RUN card must pass a smaller value font so the date is not truncated"
+    );
+}
+
+#[tokio::test]
+async fn static_automations_run_row_spaces_action_button_icons() {
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/js/pages/automations/components/automation-recent-runs.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+
+    assert!(
+        body.contains("name=\"chat\" className=\"mr-1.5 h-4 w-4\""),
+        "the Open run button icon must be spaced away from its label"
+    );
+    assert!(
+        body.contains("name=\"file\" className=\"mr-1.5 h-4 w-4\""),
+        "the Logs button icon must be spaced away from its label"
+    );
+}
+
+#[tokio::test]
+async fn static_automations_delivery_surfaces_save_error_and_gates_slack_hint() {
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/js/pages/automations/components/automation-delivery-defaults-panel.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+
+    assert!(
+        body.contains("deliveryState.saveError"),
+        "the delivery panel must render the save error instead of swallowing it"
+    );
+    assert!(
+        body.contains("hasExternalTargets"),
+        "the Slack approval footnote must be gated on an external target existing"
+    );
+}

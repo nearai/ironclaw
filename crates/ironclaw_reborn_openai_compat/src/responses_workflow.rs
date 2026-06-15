@@ -10,6 +10,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::ack_helpers::internal_refs_from_ack;
+use crate::content_parts::{
+    content_array_item_text, non_text_part_marker, sanitize_product_text_fragment,
+};
 use crate::error::product_rejection_to_openai_error;
 use crate::identity::{
     OPENAI_COMPAT_ACTOR_KIND, OPENAI_COMPAT_ADAPTER_ID, OPENAI_COMPAT_INSTALLATION_ID,
@@ -902,6 +905,15 @@ fn accepted_ack_from_ack(
                     None,
                 ));
             }
+            ProductInboundAck::RejectedBusy { .. } => {
+                // terminal/settled, not retryable — client must issue a new request
+                return Err(OpenAiCompatHttpError::from_kind(
+                    429,
+                    false,
+                    crate::OpenAiCompatErrorKind::RateLimited,
+                    None,
+                ));
+            }
             ProductInboundAck::Rejected(rejection) => return Err(error_from_rejection(rejection)),
             ProductInboundAck::CommandResult { .. } | ProductInboundAck::NoOp => {
                 return Err(OpenAiCompatHttpError::internal());
@@ -921,6 +933,15 @@ fn accepted_cancel_ack_from_ack(mut ack: ProductInboundAck) -> Result<(), OpenAi
                 return Err(OpenAiCompatHttpError::from_kind(
                     429,
                     true,
+                    crate::OpenAiCompatErrorKind::RateLimited,
+                    None,
+                ));
+            }
+            ProductInboundAck::RejectedBusy { .. } => {
+                // terminal/settled, not retryable — client must issue a new request
+                return Err(OpenAiCompatHttpError::from_kind(
+                    429,
+                    false,
                     crate::OpenAiCompatErrorKind::RateLimited,
                     None,
                 ));
@@ -1051,10 +1072,6 @@ fn response_input_item_to_value(item: &OpenAiResponsesInputItem) -> serde_json::
     }
 }
 
-fn sanitize_product_text_fragment(value: &str) -> String {
-    value.replace(['\n', '\r', '\u{2028}', '\u{2029}'], " ")
-}
-
 fn response_role_name(role: OpenAiResponsesMessageRole) -> &'static str {
     match role {
         OpenAiResponsesMessageRole::System => "system",
@@ -1072,18 +1089,71 @@ fn content_value_to_text(content: &serde_json::Value) -> String {
             .filter_map(content_array_item_text)
             .collect::<Vec<_>>()
             .join(" "),
-        value if !value.is_null() => "[non_text_content]".to_string(),
+        // A bare object-form part (non-standard, but tolerated): run it through
+        // the same per-part logic so a typed part gets its specific marker (or
+        // text) instead of discarding the type for the generic marker.
+        value @ serde_json::Value::Object(_) => {
+            content_array_item_text(value).unwrap_or_else(|| non_text_part_marker(None).to_string())
+        }
+        value if !value.is_null() => non_text_part_marker(None).to_string(),
         _ => String::new(),
     }
 }
 
-fn content_array_item_text(value: &serde_json::Value) -> Option<String> {
-    let object = value.as_object()?;
-    match object.get("type").and_then(serde_json::Value::as_str) {
-        Some("text" | "input_text" | "output_text") => object
-            .get("text")
-            .and_then(serde_json::Value::as_str)
-            .map(sanitize_product_text_fragment),
-        _ => Some("[non_text_content]".to_string()),
+#[cfg(test)]
+mod tests {
+    use ironclaw_product_adapters::ProductInboundAck;
+    use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
+
+    use super::{accepted_ack_from_ack, accepted_cancel_ack_from_ack};
+
+    #[test]
+    fn deferred_busy_ack_is_retryable_429_on_create() {
+        let ack = ProductInboundAck::DeferredBusy {
+            accepted_message_ref: AcceptedMessageRef::new("msg:deferred-busy").expect("ref"),
+            active_run_id: TurnRunId::new(),
+        };
+        let err = accepted_ack_from_ack(ack).unwrap_err();
+        assert_eq!(err.status_code(), 429);
+        assert!(err.retryable(), "DeferredBusy must be retryable");
+    }
+
+    #[test]
+    fn rejected_busy_ack_is_non_retryable_429_on_create() {
+        let ack = ProductInboundAck::RejectedBusy {
+            accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy").expect("ref"),
+            active_run_id: None,
+        };
+        let err = accepted_ack_from_ack(ack).unwrap_err();
+        assert_eq!(err.status_code(), 429);
+        assert!(
+            !err.retryable(),
+            "RejectedBusy is terminal — must not be retryable"
+        );
+    }
+
+    #[test]
+    fn deferred_busy_ack_is_retryable_429_on_cancel() {
+        let ack = ProductInboundAck::DeferredBusy {
+            accepted_message_ref: AcceptedMessageRef::new("msg:deferred-busy").expect("ref"),
+            active_run_id: TurnRunId::new(),
+        };
+        let err = accepted_cancel_ack_from_ack(ack).unwrap_err();
+        assert_eq!(err.status_code(), 429);
+        assert!(err.retryable(), "DeferredBusy must be retryable");
+    }
+
+    #[test]
+    fn rejected_busy_ack_is_non_retryable_429_on_cancel() {
+        let ack = ProductInboundAck::RejectedBusy {
+            accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy").expect("ref"),
+            active_run_id: None,
+        };
+        let err = accepted_cancel_ack_from_ack(ack).unwrap_err();
+        assert_eq!(err.status_code(), 429);
+        assert!(
+            !err.retryable(),
+            "RejectedBusy is terminal — must not be retryable"
+        );
     }
 }
