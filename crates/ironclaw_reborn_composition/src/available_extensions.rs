@@ -105,10 +105,10 @@ fn onboarding(package_id: &str) -> Option<LifecycleExtensionOnboarding> {
         "github" => Some(onboarding_message(
             "GitHub needs a personal access token before its repository and pull request tools can run.",
             Some(
-                "Install GitHub first. Activation will open the secure credential prompt for a GitHub personal access token with the repository permissions you want IronClaw to use.",
+                "Create a GitHub personal access token with the repository permissions you want IronClaw to use, then paste it here.",
             ),
             Some("https://github.com/settings/personal-access-tokens/new"),
-            "Install GitHub, then activate it to open the token prompt and publish its tools.",
+            "After saving the token, activate GitHub to publish its tools.",
         )),
         "gmail" => Some(onboarding_message(
             "Gmail needs Google OAuth authorization before mail tools can run.",
@@ -130,11 +130,9 @@ fn onboarding(package_id: &str) -> Option<LifecycleExtensionOnboarding> {
         )),
         "nearai" => Some(onboarding_message(
             "NEAR AI needs an API key before its MCP tools can run.",
-            Some(
-                "Install NEAR AI first. Activation will open the secure credential prompt for the API key IronClaw should use.",
-            ),
+            Some("Paste the NEAR AI API key IronClaw should use."),
             None,
-            "Install NEAR AI, then activate it to open the API key prompt and publish its MCP tools.",
+            "After saving the API key, activate NEAR AI to publish its MCP tools.",
         )),
         "web-access" => Some(onboarding_message(
             "Web Access does not need credentials. Activate it to make web search and saved-result retrieval tools available.",
@@ -1640,6 +1638,28 @@ mod tests {
                                 && !step.contains("Install")
                         }),
                     "{extension_id} configure next step should describe post-authorization activation"
+                );
+            } else if matches!(extension_id, "github" | "nearai") {
+                assert!(
+                    onboarding
+                        .credential_instructions
+                        .as_deref()
+                        .is_some_and(|instructions| {
+                            (instructions.contains("Paste") || instructions.contains("paste"))
+                                && !instructions.contains("Install")
+                        }),
+                    "{extension_id} configure onboarding should describe token entry without install-first copy"
+                );
+                assert!(
+                    onboarding
+                        .credential_next_step
+                        .as_deref()
+                        .is_some_and(|step| {
+                            step.starts_with("After saving")
+                                && step.contains("activate")
+                                && !step.contains("Install")
+                        }),
+                    "{extension_id} configure next step should describe activation after saving credentials"
                 );
             } else {
                 assert!(
