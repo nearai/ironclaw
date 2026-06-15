@@ -111,12 +111,11 @@ export function createConversationStreamHandler(services: { ironclaw: (ctx: any)
 
         if (RUN_START_TYPES.has(type)) {
           runActive = true;
+          continue;
         }
 
         if (RUN_TERMINAL_TYPES.has(type)) {
           runActive = false;
-          const { cursor: _, ...rest } = rawEvent;
-          yield { type, threadId, ...rest } as unknown as ConversationEvent;
           if (needsReconcile && !signal?.aborted) {
             try {
               const page = await fetchTimelinePage(ic, threadId);
@@ -158,8 +157,7 @@ export function createConversationStreamHandler(services: { ironclaw: (ctx: any)
           continue;
         }
 
-        const { cursor: _, ...rest } = rawEvent;
-        yield { type, threadId, ...rest } as unknown as ConversationEvent;
+        continue;
       }
     } catch (error) {
       console.error("[convStream] stream connection error:", error);

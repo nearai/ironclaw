@@ -218,10 +218,10 @@ export const ChatEventSchema = z.object({
     .optional(),
   prompt: z
     .object({
-      turnRunId: z.string(),
-      gateRef: z.string(),
-      headline: z.string(),
-      body: z.string(),
+      turnRunId: z.string().catch(""),
+      gateRef: z.string().catch(""),
+      headline: z.string().catch(""),
+      body: z.string().catch(""),
       allowAlways: z.boolean().optional(),
       approvalContext: z
         .object({

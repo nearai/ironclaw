@@ -45,6 +45,8 @@ export function useIronclawChat(
 ) {
   const activeRunIdRef = useRef<string | null>(null);
   const pendingAttachmentsRef = useRef<StagedAttachment[]>([]);
+  const lastSentContentRef = useRef<string>("");
+  const lastSentAttachmentsRef = useRef<StagedAttachment[]>([]);
   const [runState, setRunState] = useState<RunState>({ phase: "idle" });
   const onRunStateChangeRef = useRef<(update: Partial<RunState>) => void>(() => {});
   const runStateRef = useRef<RunState>({ phase: "idle" });
@@ -100,6 +102,8 @@ export function useIronclawChat(
       const content = lastUser ? messageTextContent(lastUser) : "";
       const attachments = pendingAttachmentsRef.current;
       pendingAttachmentsRef.current = [];
+      lastSentContentRef.current = content;
+      lastSentAttachmentsRef.current = attachments ?? [];
 
       onRunStateChangeRef.current({ phase: "submitted", message: undefined, replyMessageId: undefined, activeToolName: undefined });
 
@@ -122,17 +126,12 @@ export function useIronclawChat(
 
       activeRunIdRef.current = accepted.runId ?? accepted.activeRunId ?? null;
 
-      console.debug("[fetcher] live obtained", typeof live, live);
-      let chunkIndex = 0;
       for await (const chunk of live as AsyncIterable<any>) {
         if (signal.aborted) return;
-        console.debug("[fetcher] chunk:", chunkIndex++, chunk.type, chunk);
         yield chunk;
       }
     },
     onChunk: (chunk: any) => {
-      console.debug("[onChunk]", chunk.type, chunk);
-
       if (chunk.type === "CUSTOM") {
         if (chunk.name === "approval-requested") {
           logCustomFlow("swallowed", chunk.name, chunk.value);
@@ -191,7 +190,6 @@ export function useIronclawChat(
       }
     },
     onCustomEvent: (eventType, data) => {
-      console.debug("[onCustomEvent]", eventType, data);
       const payload = data as Record<string, unknown> | undefined;
 
       if (eventType === "approval-requested") {
@@ -332,6 +330,19 @@ export function useIronclawChat(
     [apiClient, threadId],
   );
 
+  const retry = useCallback(() => {
+    const content = lastSentContentRef.current;
+    const attachments = lastSentAttachmentsRef.current;
+    if (content) {
+      pendingAttachmentsRef.current = attachments;
+      chat.sendMessage(content);
+    }
+  }, [chat.sendMessage]);
+
+  const idle = useCallback(() => {
+    setRunState({ phase: "idle", activeToolName: undefined, replyMessageId: undefined });
+  }, []);
+
   const completeFinalization = useCallback(() => {
     setRunState((prev) => {
       if (prev.phase !== "finalizing") return prev;
@@ -351,6 +362,8 @@ export function useIronclawChat(
     stop: chat.stop,
     setMessages: chat.setMessages,
     resolveGate,
+    retry,
+    idle,
     completeFinalization,
     runState,
   };

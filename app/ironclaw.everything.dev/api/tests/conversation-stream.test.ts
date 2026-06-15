@@ -67,17 +67,15 @@ function passthroughEvent(type: string) {
 }
 
 describe("createConversationStreamHandler", () => {
-  it("passes through accepted and running events", async () => {
+  it("skips accepted, running, and other runtime events", async () => {
     const { ic } = mockIc({
       events: [event("accepted"), event("running"), event("final_reply", { reply: { text: "ok" } })],
     });
     const handler = createConversationStreamHandler({ ironclaw: () => ic as any });
     const events = await collectEvents(handler, { threadId: "t-1" });
 
-    const types = events.map((e) => e.type);
-    expect(types).toContain("accepted");
-    expect(types).toContain("running");
-    expect(types).toContain("final_reply");
+    // Runtime events are no longer forwarded by the passive stream
+    expect(events).toHaveLength(0);
   });
 
   it("forwards keep_alive events unchanged", async () => {
@@ -156,7 +154,7 @@ describe("createConversationStreamHandler", () => {
     expect(getTimelineCallCount()).toBe(0);
   });
 
-  it("emits terminal events unchanged", async () => {
+  it("does not forward terminal events directly", async () => {
     const { ic } = mockIc({
       events: [
         event("failed", { runState: { status: "failed", failure: "error" } }),
@@ -166,9 +164,8 @@ describe("createConversationStreamHandler", () => {
     const handler = createConversationStreamHandler({ ironclaw: () => ic as any });
     const events = await collectEvents(handler, { threadId: "t-1" });
 
-    expect(events).toHaveLength(1);
-    expect(events[0]!.type).toBe("failed");
-    expect(events[0]!.runState).toBeDefined();
+    // Terminal events are no longer forwarded; reconcile is skipped since no projections were deferred
+    expect(events).toHaveLength(0);
   });
 
   it("handles error in stream connection", async () => {
@@ -187,7 +184,7 @@ describe("createConversationStreamHandler", () => {
     expect(events[0]!.error).toBe("connection lost");
   });
 
-  it("forwards unknown event types unchanged", async () => {
+  it("skips runtime events like capability_progress", async () => {
     const { ic } = mockIc({
       events: [event("capability_progress", { progress: { kind: "thinking" } })],
     });
@@ -195,8 +192,6 @@ describe("createConversationStreamHandler", () => {
     const handler = createConversationStreamHandler({ ironclaw: () => ic as any });
     const events = await collectEvents(handler, { threadId: "t-1" });
 
-    expect(events).toHaveLength(1);
-    expect(events[0]!.type).toBe("capability_progress");
-    expect(events[0]!.progress).toBeDefined();
+    expect(events).toHaveLength(0);
   });
 });

@@ -78,6 +78,19 @@ function ChatArea({
   const apiClient = useApiClient();
   const [initialMessages, setInitialMessages] = useState<UIMessage[]>([]);
   const [loadingInitial, setLoadingInitial] = useState(true);
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const loginTicket = params.get("loginTicket");
+    if (!loginTicket) return;
+
+    params.delete("loginTicket");
+    const newUrl = window.location.pathname + (params.toString() ? `?${params}` : "");
+    window.history.replaceState(null, "", newUrl);
+
+    apiClient.ironclaw.auth.exchangeLoginTicket({ loginTicket }).catch((err: unknown) => {
+      console.error("[ChatArea] failed to exchange login ticket:", err);
+    });
+  }, [apiClient]);
 
   const fetchThreadMessages = useCallback(async () => {
     const page = await apiClient.conversation.getMessages({ threadId, limit: 100 });
@@ -119,6 +132,9 @@ function ChatArea({
     chat.runState.phase === "auth_required";
   const wasBusyRef = useRef(false);
   const skipNextBusySyncRef = useRef(false);
+  const baselineAssistantCountRef = useRef(
+    chat.messages.filter((m) => m.role === "assistant").length,
+  );
 
   const replaceMessagesWithHistory = useCallback(async () => {
     try {
@@ -183,11 +199,16 @@ function ChatArea({
   }, [chat.runState.phase, fetchThreadMessages, chat.completeFinalization, chat.setMessages]);
 
   useEffect(() => {
-    if (isBusy) return;
-
     const applySnapshot = (data: unknown) => {
       const frame = data as Record<string, unknown>;
       const rawMessages = (frame.messages ?? []) as any[];
+
+      const hasAssistantReply = rawMessages.some(
+        (m: any) => m.role === "assistant" && m.text?.trim(),
+      );
+
+      if (isBusy && !hasAssistantReply) return;
+
       const mapped = rawMessages.map((m) => ({
         id: m.id,
         role: m.role,
@@ -208,6 +229,24 @@ function ChatArea({
 
     return () => handle.close();
   }, [threadId, isBusy, chat.setMessages]);
+
+  useEffect(() => {
+    if (chat.runState.phase !== "submitted") return;
+    baselineAssistantCountRef.current = chat.messages.filter(
+      (m) => m.role === "assistant",
+    ).length;
+  }, [chat.runState.phase, chat.messages]);
+
+  useEffect(() => {
+    if (!isBusy) return;
+    const currentCount = chat.messages.filter(
+      (m) => m.role === "assistant",
+    ).length;
+    if (currentCount > baselineAssistantCountRef.current) {
+      skipNextBusySyncRef.current = true;
+      chat.idle();
+    }
+  }, [isBusy, chat.messages, chat.idle]);
 
   useEffect(() => {
     if (chat.runState.phase !== "disconnected") return;
@@ -289,6 +328,13 @@ function ChatArea({
               Authorize
             </a>
           ) : null}
+          <button
+            type="button"
+            onClick={() => chat.retry()}
+            className="rounded border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 font-medium hover:bg-blue-500/20 transition-colors"
+          >
+            Resume run
+          </button>
         </div>
       ) : runState.phase === "failed" ? (
         <div className="flex w-full items-center gap-2 border-b border-destructive/20 bg-destructive/5 px-4 py-2 text-xs text-destructive">
