@@ -3864,6 +3864,8 @@ async fn non_auth_gate_block_preserves_pending_auth_resume() {
         input_ref: CapabilityInputRef::new("input:original").expect("valid"),
         effective_capability_ids: Vec::new(),
         provider_replay: None,
+        resume_token: None,
+        prior_approval: None,
     };
     let mut initial_state = LoopExecutionState::initial_for_run(host.run_context());
     initial_state.pending_auth_resume = Some(seeded_auth_resume.clone());
@@ -4271,6 +4273,8 @@ async fn gate_stage_skip_and_continue_clears_stale_pending_auth_resume() {
         input_ref: CapabilityInputRef::new("input:original").expect("valid"),
         effective_capability_ids: Vec::new(),
         provider_replay: None,
+        resume_token: None,
+        prior_approval: None,
     });
     let call = match provider_calls_response().output {
         ParentLoopOutput::CapabilityCalls(mut calls) => calls.remove(0),
@@ -4329,6 +4333,8 @@ async fn gate_stage_abort_clears_stale_pending_auth_resume() {
         input_ref: CapabilityInputRef::new("input:original-abort").expect("valid"),
         effective_capability_ids: Vec::new(),
         provider_replay: None,
+        resume_token: None,
+        prior_approval: None,
     });
     let call = match provider_calls_response().output {
         ParentLoopOutput::CapabilityCalls(mut calls) => calls.remove(0),
@@ -4390,6 +4396,8 @@ async fn gate_stage_skip_does_not_clear_auth_resume_for_different_capability() {
         input_ref: CapabilityInputRef::new("input:other-cap").expect("valid"),
         effective_capability_ids: Vec::new(),
         provider_replay: None,
+        resume_token: None,
+        prior_approval: None,
     });
     // The call being dispatched through GateStage is capability_id() ("demo.echo"),
     // not the seeded "other.cap".
@@ -4467,5 +4475,517 @@ async fn non_stale_batch_failure_stays_terminal() {
         AgentLoopExecutorError::HostUnavailable {
             stage: HostStage::Capability
         }
+    );
+}
+
+// ── Approval-then-auth resume: invocation_id preserved ───────────────────────
+
+#[tokio::test]
+async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id() {
+    // Regression test for the fix that makes auth-gate re-dispatch reuse the
+    // ORIGINAL invocation_id so a one-shot approval lease survives the auth gate.
+    //
+    // Without the fix: `capability_invocation_from_auth_resume_candidate` returned
+    // `auth_resume: None` because `pending_auth.resume_token` was never set.
+    // With the fix: `pending_auth.resume_token` carries the approval resume token and
+    // `auth_resume` is populated, allowing the host to match the fingerprinted lease.
+    //
+    // This test drives the full 3-phase executor path:
+    //   Phase 1: model → ApprovalRequired (with resume token) → Blocked
+    //   Phase 2: approval-resume re-dispatch → AuthRequired → Blocked
+    //   Phase 3: auth-resume re-dispatch → Completed
+    // and asserts that the phase-3 invocation carries the correct auth_resume.
+
+    let approval_request_id = ApprovalRequestId::new();
+    let resume_token =
+        CapabilityResumeToken::new("resume-token:approval-auth-test").expect("valid token");
+    let correlation_id = CorrelationId::new();
+    let original_input_ref =
+        CapabilityInputRef::new("input:approval-auth-original").expect("valid");
+    let auth_gate_ref = LoopGateRef::new("gate:auth-after-approval").expect("valid");
+    let completed_ref = LoopResultRef::new("result:auth-after-approval-done").expect("valid");
+
+    let approval_resume = CapabilityApprovalResume {
+        approval_request_id,
+        resume_token: resume_token.clone(),
+        correlation_id,
+        input_ref: original_input_ref.clone(),
+        input: serde_json::json!({ "message": "hello" }),
+        estimate: ResourceEstimate::default(),
+    };
+
+    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+        // Phase 1: approval gate blocks with resume metadata
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::ApprovalRequired {
+                gate_ref: LoopGateRef::new("gate:approval-then-auth").expect("valid"),
+                safe_summary: "approval required".to_string(),
+                approval_resume: Some(approval_resume.clone()),
+            }],
+            stopped_on_suspension: true,
+        },
+        // Phase 2: auth gate blocks after approval-resume re-dispatch
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::AuthRequired {
+                gate_ref: auth_gate_ref.clone(),
+                credential_requirements: Vec::new(),
+                safe_summary: "auth required after approval".to_string(),
+            }],
+            stopped_on_suspension: true,
+        },
+        // Phase 3: auth-resume re-dispatch completes
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Completed(
+                ironclaw_turns::run_profile::CapabilityResultMessage {
+                    result_ref: completed_ref.clone(),
+                    safe_summary: "completed after auth resume".to_string(),
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    terminate_hint: true,
+                    byte_len: 0,
+                },
+            )],
+            stopped_on_suspension: false,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+
+    // ── Phase 1: model turn → approval gate → Blocked ────────────────────────
+    let initial_state = LoopExecutionState::initial_for_run(host.run_context());
+    let phase1_exit = executor
+        .execute_family(&crate::families::default(), &host, initial_state)
+        .await
+        .expect("phase 1 must block on approval gate");
+    assert!(
+        matches!(phase1_exit, LoopExit::Blocked(_)),
+        "expected Blocked exit from approval gate; got {phase1_exit:?}"
+    );
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "phase 1 must make exactly one model call"
+    );
+
+    // BeforeBlock checkpoint carries pending_approval_resume with the resume token.
+    let phase1_bb = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+    let pending_approval = phase1_bb
+        .pending_approval_resume
+        .as_ref()
+        .expect("phase 1 BeforeBlock must carry pending_approval_resume");
+    assert_eq!(
+        pending_approval.resume_token, resume_token,
+        "phase 1 pending_approval_resume.resume_token must match the scripted token"
+    );
+    assert_eq!(
+        pending_approval.approval_request_id, approval_request_id,
+        "phase 1 pending_approval_resume.approval_request_id must match"
+    );
+
+    // ── Phase 2: approval-resume → auth gate → Blocked ───────────────────────
+    let phase2_exit = executor
+        .execute_family(&crate::families::default(), &host, phase1_bb)
+        .await
+        .expect("phase 2 must block on auth gate");
+    assert!(
+        matches!(phase2_exit, LoopExit::Blocked(_)),
+        "expected Blocked exit from auth gate; got {phase2_exit:?}"
+    );
+    // No new model call — approval-resume re-dispatched before the model.
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "phase 2 (approval-resume) must not trigger a new model call"
+    );
+
+    // BeforeBlock checkpoint for phase 2 carries pending_auth_resume.
+    // It must propagate the resume_token and prior_approval from the approval.
+    let phase2_bb_states: Vec<_> = host
+        .staged_payloads()
+        .into_iter()
+        .filter(|p| p.kind == LoopCheckpointKind::BeforeBlock)
+        .map(|p| {
+            LoopExecutionState::from_checkpoint_payload(&p.payload, CheckpointKind::BeforeBlock)
+                .expect("phase 2 BeforeBlock payload")
+        })
+        .collect();
+    assert!(
+        phase2_bb_states.len() >= 2,
+        "expected at least two BeforeBlock checkpoints (phase 1 + phase 2)"
+    );
+    let phase2_bb = phase2_bb_states.last().expect("at least one").clone();
+    let pending_auth = phase2_bb
+        .pending_auth_resume
+        .as_ref()
+        .expect("phase 2 BeforeBlock must carry pending_auth_resume");
+    assert_eq!(
+        pending_auth.resume_token,
+        Some(resume_token.clone()),
+        "pending_auth_resume.resume_token must carry the approval resume token"
+    );
+    let pending_auth_pa = pending_auth
+        .prior_approval
+        .as_ref()
+        .expect("pending_auth_resume.prior_approval must be set when approval preceded auth");
+    assert_eq!(
+        pending_auth_pa.approval_request_id, approval_request_id,
+        "pending_auth_resume.prior_approval.approval_request_id must match the approval request"
+    );
+
+    // ── Phase 3: auth-resume → Completed ─────────────────────────────────────
+    let phase3_exit = executor
+        .execute_family(&crate::families::default(), &host, phase2_bb)
+        .await
+        .expect("phase 3 must complete after auth resume");
+    assert!(
+        matches!(phase3_exit, LoopExit::Completed(_)),
+        "expected Completed exit after auth resume; got {phase3_exit:?}"
+    );
+    // Still no additional model call.
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "phase 3 (auth-resume) must not trigger a new model call"
+    );
+
+    // Three total batch invocations: phase 1 (approval block) + phase 2 (auth
+    // block) + phase 3 (completed).
+    let batch_invocations = host.batch_invocations();
+    assert_eq!(
+        batch_invocations.len(),
+        3,
+        "expected three batch invocations (phase 1 approval + phase 2 auth + phase 3 complete)"
+    );
+
+    // Phase 1 invocation: plain, no approval_resume and no auth_resume.
+    assert_eq!(
+        batch_invocations[0].invocations[0].approval_resume, None,
+        "phase 1 invocation must not carry approval_resume (set on the outcome, not the request)"
+    );
+    assert_eq!(
+        batch_invocations[0].invocations[0].auth_resume, None,
+        "phase 1 invocation must not carry auth_resume"
+    );
+
+    // Phase 2 invocation: this is the approval-resume re-dispatch.
+    // approval_resume is set; auth_resume is not (auth hasn't happened yet).
+    assert_eq!(
+        batch_invocations[1].invocations[0].auth_resume, None,
+        "phase 2 (approval-resume) invocation must not carry auth_resume"
+    );
+
+    // Phase 3 invocation: this is the auth-resume re-dispatch.
+    // auth_resume must be set and carry the original resume_token + prior_approval.
+    // Pre-fix: auth_resume would be None (resume_token was never propagated).
+    // Post-fix: auth_resume carries the token so the host can reuse the original
+    // invocation identifier and match the fingerprinted approval lease.
+    let phase3_auth_resume = batch_invocations[2].invocations[0]
+        .auth_resume
+        .as_ref()
+        .expect(
+            "phase 3 (auth-resume) invocation must carry auth_resume \
+                 (pre-fix: was None because resume_token was not propagated)",
+        );
+    assert_eq!(
+        phase3_auth_resume.resume_token, resume_token,
+        "auth_resume.resume_token must match the original approval resume token"
+    );
+    let phase3_pa = phase3_auth_resume
+        .prior_approval
+        .as_ref()
+        .expect("phase 3 auth_resume.prior_approval must be set");
+    assert_eq!(
+        phase3_pa.approval_request_id, approval_request_id,
+        "auth_resume.prior_approval.approval_request_id must match the original approval request id"
+    );
+    assert_eq!(
+        phase3_pa.correlation_id, correlation_id,
+        "auth_resume.prior_approval.correlation_id must match the original correlation id from the approval"
+    );
+
+    // Final state: pending_auth_resume cleared and result recorded.
+    let final_state = final_staged_state(&host);
+    assert!(
+        final_state.pending_auth_resume.is_none(),
+        "pending_auth_resume must be cleared after successful auth-resume re-dispatch"
+    );
+    assert_eq!(
+        final_state.result_refs,
+        vec![completed_ref],
+        "completed result ref must be recorded"
+    );
+}
+
+/// Verify that `pending_auth_resume.prior_approval.correlation_id` equals the
+/// approval's own `correlation_id` throughout the approval → auth-block → auth-resume
+/// pipeline.  This is the dedicated regression test for the correlation-id axis
+/// (the broader `auth_resume_after_approval_carries_resume_token_and_approval_request_id`
+/// test covers the other fields).
+#[tokio::test]
+async fn auth_resume_after_approval_carries_original_correlation_id() {
+    // The three-phase flow:
+    //   phase 1 — model turn → approval gate (records correlation_id in approval_resume)
+    //   phase 2 — approval-resume → auth gate → Blocked
+    //             (pending_auth_resume.prior_approval.correlation_id must equal approval's)
+    //   phase 3 — auth-resume → Completed
+    //             (phase-3 invocation.auth_resume.prior_approval.correlation_id must match)
+
+    let approval_request_id = ApprovalRequestId::new();
+    let resume_token =
+        CapabilityResumeToken::new("resume-token:corr-id-test").expect("valid token");
+    let correlation_id = CorrelationId::new();
+    let original_input_ref = CapabilityInputRef::new("input:corr-id-original").expect("valid");
+    let completed_ref = LoopResultRef::new("result:corr-id-done").expect("valid");
+
+    let approval_resume = CapabilityApprovalResume {
+        approval_request_id,
+        resume_token: resume_token.clone(),
+        correlation_id,
+        input_ref: original_input_ref.clone(),
+        input: serde_json::json!({ "message": "hello" }),
+        estimate: ResourceEstimate::default(),
+    };
+
+    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+        // Phase 1: approval gate blocks.
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::ApprovalRequired {
+                gate_ref: LoopGateRef::new("gate:corr-id-approval").expect("valid"),
+                safe_summary: "approval required".to_string(),
+                approval_resume: Some(approval_resume.clone()),
+            }],
+            stopped_on_suspension: true,
+        },
+        // Phase 2: auth gate blocks after approval-resume re-dispatch.
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::AuthRequired {
+                gate_ref: LoopGateRef::new("gate:corr-id-auth").expect("valid"),
+                credential_requirements: Vec::new(),
+                safe_summary: "auth required".to_string(),
+            }],
+            stopped_on_suspension: true,
+        },
+        // Phase 3: auth-resume re-dispatch completes.
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Completed(
+                ironclaw_turns::run_profile::CapabilityResultMessage {
+                    result_ref: completed_ref.clone(),
+                    safe_summary: "done".to_string(),
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    terminate_hint: true,
+                    byte_len: 0,
+                },
+            )],
+            stopped_on_suspension: false,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+
+    // Phase 1: model → approval gate.
+    let initial_state = LoopExecutionState::initial_for_run(host.run_context());
+    let phase1_exit = executor
+        .execute_family(&crate::families::default(), &host, initial_state)
+        .await
+        .expect("phase 1 must block on approval gate");
+    assert!(matches!(phase1_exit, LoopExit::Blocked(_)));
+
+    // Phase 2: approval-resume → auth gate.
+    let phase1_bb = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+    let phase2_exit = executor
+        .execute_family(&crate::families::default(), &host, phase1_bb)
+        .await
+        .expect("phase 2 must block on auth gate");
+    assert!(matches!(phase2_exit, LoopExit::Blocked(_)));
+
+    // KEY: pending_auth_resume.prior_approval.correlation_id must equal the
+    // original approval correlation_id written by the approval-gate outcome.
+    let phase2_bb_states: Vec<_> = host
+        .staged_payloads()
+        .into_iter()
+        .filter(|p| p.kind == LoopCheckpointKind::BeforeBlock)
+        .map(|p| {
+            LoopExecutionState::from_checkpoint_payload(&p.payload, CheckpointKind::BeforeBlock)
+                .expect("phase 2 BeforeBlock payload")
+        })
+        .collect();
+    let phase2_bb = phase2_bb_states.last().expect("at least one").clone();
+    let pending_auth = phase2_bb
+        .pending_auth_resume
+        .as_ref()
+        .expect("phase 2 BeforeBlock must carry pending_auth_resume");
+    let pending_pa = pending_auth
+        .prior_approval
+        .as_ref()
+        .expect("pending_auth_resume.prior_approval must be set when approval preceded auth");
+    assert_eq!(
+        pending_pa.correlation_id, correlation_id,
+        "pending_auth_resume.prior_approval.correlation_id must equal the approval's correlation_id"
+    );
+
+    // Phase 3: auth-resume → Completed.
+    let phase3_exit = executor
+        .execute_family(&crate::families::default(), &host, phase2_bb)
+        .await
+        .expect("phase 3 must complete");
+    assert!(matches!(phase3_exit, LoopExit::Completed(_)));
+
+    // Phase-3 invocation must carry prior_approval.correlation_id.
+    let batch_invocations = host.batch_invocations();
+    assert_eq!(batch_invocations.len(), 3);
+    let phase3_ar = batch_invocations[2].invocations[0]
+        .auth_resume
+        .as_ref()
+        .expect("phase 3 invocation must carry auth_resume");
+    let phase3_pa = phase3_ar
+        .prior_approval
+        .as_ref()
+        .expect("phase 3 auth_resume.prior_approval must be set");
+    assert_eq!(
+        phase3_pa.correlation_id, correlation_id,
+        "phase 3 auth_resume.prior_approval.correlation_id must match the original approval correlation_id"
+    );
+}
+
+// ── auth-resume slot consumed on first batch match (batch duplicate guard) ──
+
+#[tokio::test]
+async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_call() {
+    // Regression test: pending_auth_resume must be consumed on the FIRST batch
+    // call whose capability_id matches, not shared across all matching calls.
+    //
+    // Before the fix `pending_auth_resume` was accessed via `as_ref().filter(…)`
+    // (non-consuming), so two calls to the same capability_id in one batch would
+    // BOTH receive the same auth_resume — reusing one resume_token/invocation_id
+    // across distinct calls (correctness + security bug).
+    //
+    // After the fix `pending_auth_resume` uses `take_if` (consuming on first
+    // match), so only the FIRST matching call carries auth_resume; the second is
+    // a normal dispatch (auth_resume = None).
+    //
+    // We drive CapabilityStage directly (rather than the full executor) because
+    // when pending_auth_resume is set the executor routes through the single-call
+    // ResumeAuth prompt path — the two-call batch can only be exercised at the
+    // CapabilityStage boundary where the mapping loop lives.
+    let approval_request_id = ApprovalRequestId::new();
+    let resume_token =
+        CapabilityResumeToken::new("resume-token:batch-dup-guard").expect("valid token");
+    let correlation_id = CorrelationId::new();
+    let input_ref = CapabilityInputRef::new("input:batch-dup-guard").expect("valid");
+
+    // Two outcomes for the two calls; both complete so no suspension complicates things.
+    let host = MockHost::new(Vec::new()).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![
+                CapabilityOutcome::Completed(
+                    ironclaw_turns::run_profile::CapabilityResultMessage {
+                        result_ref: LoopResultRef::new("result:first").expect("valid"),
+                        safe_summary: "first done".to_string(),
+                        progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                        terminate_hint: false,
+                        byte_len: 0,
+                    },
+                ),
+                CapabilityOutcome::Completed(
+                    ironclaw_turns::run_profile::CapabilityResultMessage {
+                        result_ref: LoopResultRef::new("result:second").expect("valid"),
+                        safe_summary: "second done".to_string(),
+                        progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                        terminate_hint: false,
+                        byte_len: 0,
+                    },
+                ),
+            ],
+            stopped_on_suspension: false,
+        },
+    ]);
+
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+
+    // State with pending_auth_resume set — capability_id() matches both calls below.
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.pending_auth_resume = Some(PendingAuthResume {
+        gate_ref: LoopGateRef::new("gate:batch-dup-auth").expect("valid"),
+        capability_id: capability_id(),
+        surface_version: surface_version(),
+        input_ref: input_ref.clone(),
+        effective_capability_ids: vec![],
+        provider_replay: None,
+        resume_token: Some(resume_token.clone()),
+        prior_approval: Some(crate::state::AuthResumeApprovalIdentity {
+            approval_request_id,
+            correlation_id,
+        }),
+    });
+
+    // Two calls to the same capability_id — extracted from the two_calls_response fixture.
+    let calls = match two_calls_response().output {
+        ParentLoopOutput::CapabilityCalls(calls) => calls,
+        ParentLoopOutput::AssistantReply(_) => panic!("expected calls fixture"),
+    };
+
+    let surface = ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+        &host,
+        VisibleCapabilityRequest,
+    )
+    .await
+    .expect("visible surface");
+
+    let step = CapabilityStage
+        .process(
+            ctx,
+            CapabilityInput {
+                state,
+                surface,
+                calls,
+            },
+        )
+        .await
+        .expect("capability stage");
+
+    let final_state = match step {
+        TurnCompletedStep::Continue { state, .. } => state,
+        TurnCompletedStep::Exit(exit) => {
+            panic!("expected Continue from CapabilityStage; got Exit({exit:?})")
+        }
+    };
+    assert!(
+        final_state.pending_auth_resume.is_none(),
+        "pending_auth_resume must be consumed after the auth-resume slot is dispatched"
+    );
+
+    let batch_invocations = host.batch_invocations();
+    assert_eq!(
+        batch_invocations.len(),
+        1,
+        "expected exactly one batch invocation"
+    );
+    let invocations = &batch_invocations[0].invocations;
+    assert_eq!(invocations.len(), 2, "batch must have two calls");
+
+    // First call: auth_resume is set (slot consumed here).
+    let first_auth = invocations[0]
+        .auth_resume
+        .as_ref()
+        .expect("first batch call must carry auth_resume (pre-fix: both carried it)");
+    assert_eq!(
+        first_auth.resume_token, resume_token,
+        "first call auth_resume.resume_token must match"
+    );
+    let first_pa = first_auth
+        .prior_approval
+        .as_ref()
+        .expect("first call auth_resume.prior_approval must be set");
+    assert_eq!(
+        first_pa.approval_request_id, approval_request_id,
+        "first call auth_resume.prior_approval.approval_request_id must match"
+    );
+
+    // Second call: auth_resume must be None — slot was consumed by the first call.
+    assert_eq!(
+        invocations[1].auth_resume, None,
+        "second batch call must NOT carry auth_resume — slot must be consumed on first match \
+         (pre-fix: was Some, reusing the same resume_token)"
     );
 }

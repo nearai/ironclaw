@@ -130,3 +130,64 @@ test("messagesFromTimeline: finalized assistant records are marked as final repl
   assert.equal(messages[1].id, "msg-draft");
   assert.equal(messages[1].isFinalReply, false);
 });
+
+// Refresh-persistence contract (#3272): the timeline returns
+// `ThreadMessageRecord.attachments`; the projection must surface them as
+// render cards so they survive a reload / thread switch.
+test("messagesFromTimeline: projects attachment refs into render cards", () => {
+  const messages = messagesFromTimeline([
+    {
+      message_id: "m1",
+      kind: "user",
+      content: "see attached",
+      sequence: 1,
+      status: "accepted",
+      attachments: [
+        {
+          id: "att-1",
+          kind: "document",
+          mime_type: "application/pdf",
+          filename: "report.pdf",
+          size_bytes: 2048,
+          storage_key: "attachments/2026-06-10/m1-0-report.pdf",
+          extracted_text: "quarterly numbers",
+        },
+      ],
+    },
+  ]);
+
+  assert.equal(messages.length, 1);
+  // The timeline carries refs only — bytes stay behind the project mount —
+  // so `preview_url` is null and the card renders from metadata.
+  assert.deepEqual(messages[0].attachments, [
+    {
+      id: "att-1",
+      filename: "report.pdf",
+      mime_type: "application/pdf",
+      kind: "document",
+      size_label: "2 KB",
+      preview_url: null,
+    },
+  ]);
+});
+
+test("messagesFromTimeline: derives attachment kind from MIME when omitted", () => {
+  const messages = messagesFromTimeline([
+    {
+      message_id: "m2",
+      kind: "user",
+      content: "pic",
+      sequence: 1,
+      attachments: [{ id: "a", mime_type: "image/png", filename: "p.png" }],
+    },
+  ]);
+  assert.equal(messages[0].attachments[0].kind, "image");
+  assert.equal(messages[0].attachments[0].size_label, "");
+});
+
+test("messagesFromTimeline: attachments are undefined when a record has none", () => {
+  const messages = messagesFromTimeline([
+    { message_id: "m3", kind: "user", content: "text only", sequence: 1 },
+  ]);
+  assert.equal(messages[0].attachments, undefined);
+});

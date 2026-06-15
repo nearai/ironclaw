@@ -91,6 +91,28 @@ impl RebornServicesError {
         Self::from_status(RebornServicesErrorCode::Internal, 500, false)
     }
 
+    /// Sanitized internal (500) error for host-composition adapters that
+    /// implement workflow ports from outside this crate. The struct fields are
+    /// public, but new construction sites should route through one constructor
+    /// rather than hand-rolling the status/kind pairing.
+    pub fn internal() -> Self {
+        Self::from_status(RebornServicesErrorCode::Internal, 500, false)
+    }
+
+    /// Build a sanitized internal (500) error from a backend cause, logging the
+    /// cause so a 500 can never leave a boundary silently.
+    ///
+    /// Use this anywhere a backend error is converted into the user-facing
+    /// surface and the cause would otherwise be dropped — i.e. instead of the
+    /// `.map_err(|_| RebornServicesError::…internal…)` footgun, which discards
+    /// the error binding and produces an undiagnosable 500. The wire response
+    /// stays sanitized (the cause is logged, never serialized to the client);
+    /// the gateway boundary additionally logs the HTTP fact for every 5xx.
+    pub fn internal_from(source: impl std::fmt::Display) -> Self {
+        tracing::error!(error = %source, "internal service error");
+        Self::from_status(RebornServicesErrorCode::Internal, 500, false)
+    }
+
     pub(super) fn service_unavailable(retryable: bool) -> Self {
         Self::from_status_kind(
             RebornServicesErrorCode::Unavailable,

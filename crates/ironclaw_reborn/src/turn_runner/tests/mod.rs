@@ -130,6 +130,7 @@ fn test_run_state(scope: TurnScope, status: TurnStatus) -> TurnRunState {
         credential_requirements: Vec::new(),
         failure: None,
         event_cursor: EventCursor(0),
+        product_context: None,
     }
 }
 

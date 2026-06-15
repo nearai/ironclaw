@@ -39,10 +39,10 @@ use ironclaw_product_workflow::{
     RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
     RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
     RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest,
+    WebUiAttachmentCapabilities, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, webui_attachment_capabilities,
 };
 use serde::{Deserialize, Serialize};
 
@@ -56,6 +56,11 @@ pub struct WebUiV2SessionResponse {
     pub tenant_id: String,
     pub user_id: String,
     pub capabilities: WebUiV2Capabilities,
+    /// Inline-attachment contract (allowed `accept` tokens + size budgets)
+    /// the browser advertises on its file picker. Generated from the shared
+    /// format registry so the picker can never drift from the server's
+    /// allowed set; the send-message decode remains authoritative.
+    pub attachments: WebUiAttachmentCapabilities,
 }
 
 /// `GET /api/webchat/v2/session`
@@ -67,6 +72,7 @@ pub async fn get_session(
         tenant_id: caller.tenant_id.to_string(),
         user_id: caller.user_id.to_string(),
         capabilities,
+        attachments: webui_attachment_capabilities(),
     })
 }
 

@@ -31,6 +31,7 @@ mod system_inference;
 
 pub use crate::CapabilityActivityId;
 
+pub use crate::ProductTurnContext;
 pub use compaction::{
     CompactionInitiator, LoopCompactionError, LoopCompactionMode, LoopCompactionOutcome,
     LoopCompactionPort, LoopCompactionRequest, LoopCompactionResponse, LoopSummaryArtifactId,
@@ -42,9 +43,10 @@ pub use driver::{
 };
 pub use host::{
     AgentLoopDriverHost, AgentLoopHost, AgentLoopHostError, AgentLoopHostErrorKind,
-    AgentLoopHostErrorReasonKind, AppendCapabilityResultRef, AssistantReply, BatchPolicyKind,
-    BeginAssistantDraft, CapabilityApprovalResume, CapabilityBatchInvocation,
-    CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDenied, CapabilityDeniedReasonKind,
+    AgentLoopHostErrorReasonKind, AppendCapabilityResultRef, AssistantReply,
+    AuthResumeApprovalIdentity, BatchPolicyKind, BeginAssistantDraft, CapabilityApprovalResume,
+    CapabilityAuthResume, CapabilityBatchInvocation, CapabilityBatchOutcome,
+    CapabilityCallCandidate, CapabilityDenied, CapabilityDeniedReasonKind,
     CapabilityDeniedReasonKindValue, CapabilityDescriptorView, CapabilityFailure,
     CapabilityFailureKind, CapabilityFailureKindValue, CapabilityInputRef, CapabilityInvocation,
     CapabilityOutcome, CapabilityProgress, CapabilityResultMessage, CapabilityResumeToken,
@@ -110,7 +112,11 @@ pub use resolver::{
     InMemoryRunProfileRegistry, InMemoryRunProfileResolver, RunProfileDefinition,
     RunProfileRegistryError, RunProfileResolutionRequest, RunProfileResolver,
 };
-pub use runtime_context::LoopRuntimeContext;
+pub use runtime_context::{
+    CommunicationContextFetch, CommunicationContextProvider, CommunicationRuntimeContext,
+    ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState, DeliveryTargetSummary,
+    LoopRuntimeContext,
+};
 pub use skill_context::{
     InstalledSkillSnapshot, NoopSkillContextSource, SkillActivationState, SkillContextBudget,
     SkillContextError, SkillContextService, SkillContextSnippet, SkillContextSource,
