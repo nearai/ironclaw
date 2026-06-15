@@ -5,7 +5,7 @@ use chrono::Utc;
 use futures::future::try_join_all;
 use ironclaw_outbound::{
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
-    OutboundError,
+    OutboundError, WriteCommunicationPreferenceRequest,
 };
 use ironclaw_product_workflow::{
     OutboundPreferencesProductFacade, RebornOutboundDeliveryModality,
@@ -150,7 +150,7 @@ impl RebornOutboundPreferencesFacade {
     /// This key and target-provider scope intentionally share the same
     /// verified caller identity.
     fn key(caller: &WebUiAuthenticatedCaller) -> CommunicationPreferenceKey {
-        CommunicationPreferenceKey::new(caller.tenant_id.clone(), caller.user_id.clone())
+        CommunicationPreferenceKey::personal(caller.tenant_id.clone(), caller.user_id.clone())
     }
 }
 
@@ -165,7 +165,8 @@ impl OutboundPreferencesProductFacade for RebornOutboundPreferencesFacade {
             .load_communication_preference(Self::key(&caller))
             .await
             .map_err(map_outbound_repository_error)?;
-        self.response_for_record(&caller, record.as_ref()).await
+        self.response_for_record(&caller, record.as_ref().map(|record| &record.record))
+            .await
     }
 
     async fn set_outbound_preferences(
@@ -174,6 +175,7 @@ impl OutboundPreferencesProductFacade for RebornOutboundPreferencesFacade {
         request: RebornSetOutboundPreferencesRequest,
     ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
         let key = Self::key(&caller);
+        let scope = key.scope.clone();
         let resolved_final_reply_target = match request.final_reply_target_id.as_ref() {
             Some(target_id) => Some(self.resolve_final_reply_target(&caller, target_id).await?),
             None => None,
@@ -181,38 +183,40 @@ impl OutboundPreferencesProductFacade for RebornOutboundPreferencesFacade {
         let final_reply_target = resolved_final_reply_target
             .as_ref()
             .map(|entry| entry.reply_target_binding_ref.clone());
-        let tenant_id = caller.tenant_id.clone();
+        let existing = self
+            .preferences
+            .load_communication_preference(key)
+            .await
+            .map_err(map_outbound_repository_error)?;
         let user_id = caller.user_id.clone();
         let updated_at = Utc::now();
         let updated = self
             .preferences
-            .update_communication_preference(
-                key,
-                Box::new(move |existing| {
-                    Ok(CommunicationPreferenceRecord {
-                        tenant_id: tenant_id.clone(),
-                        user_id: user_id.clone(),
-                        final_reply_target: final_reply_target.clone(),
-                        progress_target: existing
-                            .as_ref()
-                            .and_then(|record| record.progress_target.clone()),
-                        approval_prompt_target: existing
-                            .as_ref()
-                            .and_then(|record| record.approval_prompt_target.clone()),
-                        auth_prompt_target: existing
-                            .as_ref()
-                            .and_then(|record| record.auth_prompt_target.clone()),
-                        default_modality: existing
-                            .as_ref()
-                            .and_then(|record| record.default_modality),
-                        updated_at,
-                        updated_by: user_id.clone(),
-                    })
-                }),
-            )
+            .write_communication_preference(WriteCommunicationPreferenceRequest {
+                expected_version: existing.as_ref().map(|existing| existing.version),
+                record: CommunicationPreferenceRecord {
+                    scope,
+                    final_reply_target,
+                    progress_target: existing
+                        .as_ref()
+                        .and_then(|record| record.record.progress_target.clone()),
+                    approval_prompt_target: existing
+                        .as_ref()
+                        .and_then(|record| record.record.approval_prompt_target.clone()),
+                    auth_prompt_target: existing
+                        .as_ref()
+                        .and_then(|record| record.record.auth_prompt_target.clone()),
+                    default_modality: existing
+                        .as_ref()
+                        .and_then(|record| record.record.default_modality),
+                    updated_at,
+                    updated_by: user_id.clone(),
+                },
+            })
             .await
             .map_err(map_outbound_repository_error)?;
-        self.response_for_record(&caller, Some(&updated)).await
+        self.response_for_record(&caller, Some(&updated.record))
+            .await
     }
 
     async fn list_outbound_delivery_targets(
@@ -293,7 +297,8 @@ mod tests {
 
     use ironclaw_host_api::{TenantId, UserId};
     use ironclaw_outbound::{
-        CommunicationModality, CommunicationPreferenceRepository, InMemoryOutboundStateStore,
+        CommunicationModality, CommunicationPreferenceRepository, CommunicationPreferenceVersion,
+        DeliveryDefaultScope, InMemoryOutboundStateStore, VersionedCommunicationPreferenceRecord,
     };
 
     use super::*;
@@ -363,15 +368,14 @@ mod tests {
         async fn load_communication_preference(
             &self,
             _key: CommunicationPreferenceKey,
-        ) -> Result<Option<CommunicationPreferenceRecord>, OutboundError> {
+        ) -> Result<Option<VersionedCommunicationPreferenceRecord>, OutboundError> {
             Err(OutboundError::Backend)
         }
 
-        async fn update_communication_preference(
+        async fn write_communication_preference(
             &self,
-            _key: CommunicationPreferenceKey,
-            _update: ironclaw_outbound::CommunicationPreferenceUpdate,
-        ) -> Result<CommunicationPreferenceRecord, OutboundError> {
+            _request: WriteCommunicationPreferenceRequest,
+        ) -> Result<VersionedCommunicationPreferenceRecord, OutboundError> {
             Err(OutboundError::Backend)
         }
     }
@@ -390,22 +394,56 @@ mod tests {
         async fn load_communication_preference(
             &self,
             _key: CommunicationPreferenceKey,
-        ) -> Result<Option<CommunicationPreferenceRecord>, OutboundError> {
+        ) -> Result<Option<VersionedCommunicationPreferenceRecord>, OutboundError> {
             Ok(None)
         }
 
-        async fn update_communication_preference(
+        async fn write_communication_preference(
             &self,
-            key: CommunicationPreferenceKey,
-            mut update: ironclaw_outbound::CommunicationPreferenceUpdate,
-        ) -> Result<CommunicationPreferenceRecord, OutboundError> {
-            let record = update(None)?;
-            if record.key() != key {
-                return Err(OutboundError::InvalidRequest {
-                    reason: "communication preference update key mismatch",
-                });
-            }
+            _request: WriteCommunicationPreferenceRequest,
+        ) -> Result<VersionedCommunicationPreferenceRecord, OutboundError> {
             Err(OutboundError::Backend)
+        }
+    }
+
+    struct CasConflictingPreferenceRepository;
+
+    #[async_trait]
+    impl CommunicationPreferenceRepository for CasConflictingPreferenceRepository {
+        async fn put_communication_preference(
+            &self,
+            _record: CommunicationPreferenceRecord,
+        ) -> Result<(), OutboundError> {
+            Err(OutboundError::CasConflict)
+        }
+
+        async fn load_communication_preference(
+            &self,
+            _key: CommunicationPreferenceKey,
+        ) -> Result<Option<VersionedCommunicationPreferenceRecord>, OutboundError> {
+            Ok(Some(VersionedCommunicationPreferenceRecord {
+                record: CommunicationPreferenceRecord {
+                    scope: DeliveryDefaultScope::personal(
+                        tenant("tenant-alpha"),
+                        user("user-alpha"),
+                    ),
+                    final_reply_target: None,
+                    progress_target: None,
+                    approval_prompt_target: None,
+                    auth_prompt_target: None,
+                    default_modality: None,
+                    updated_at: Utc::now(),
+                    updated_by: user("user-alpha"),
+                },
+                version: CommunicationPreferenceVersion::from_raw(1),
+            }))
+        }
+
+        async fn write_communication_preference(
+            &self,
+            _request: WriteCommunicationPreferenceRequest,
+        ) -> Result<VersionedCommunicationPreferenceRecord, OutboundError> {
+            Err(OutboundError::CasConflict)
         }
     }
 
@@ -519,12 +557,13 @@ mod tests {
             .expect("stored record");
         assert_eq!(
             stored
+                .record
                 .final_reply_target
                 .as_ref()
                 .map(|target| target.as_str()),
             Some("reply:slack-alpha")
         );
-        assert!(stored.default_modality.is_none());
+        assert!(stored.record.default_modality.is_none());
 
         let error = facade
             .set_outbound_preferences(
@@ -590,6 +629,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_preferences_maps_write_cas_conflict_to_conflict() {
+        let provider = Arc::new(FakeTargetProvider::default());
+        provider.insert(
+            "user-alpha",
+            target_entry("slack-alpha", "reply:slack-alpha", true),
+        );
+        let facade = RebornOutboundPreferencesFacade::new(
+            Arc::new(CasConflictingPreferenceRepository),
+            provider,
+        );
+
+        let error = facade
+            .set_outbound_preferences(
+                caller("tenant-alpha", "user-alpha"),
+                RebornSetOutboundPreferencesRequest {
+                    final_reply_target_id: Some(target_id("slack-alpha")),
+                },
+            )
+            .await
+            .expect_err("conflicting preference write");
+
+        assert_eq!(error.code, RebornServicesErrorCode::Conflict);
+        assert_eq!(error.kind, RebornServicesErrorKind::Conflict);
+        assert_eq!(error.status_code, 409);
+        assert!(!error.retryable);
+    }
+
+    #[tokio::test]
     async fn set_preferences_with_none_target_on_new_user_creates_empty_record() {
         let store = Arc::new(InMemoryOutboundStateStore::default());
         let provider = Arc::new(FakeTargetProvider::default());
@@ -614,11 +681,11 @@ mod tests {
             .await
             .expect("load stored record")
             .expect("stored record");
-        assert!(stored.final_reply_target.is_none());
-        assert!(stored.progress_target.is_none());
-        assert!(stored.approval_prompt_target.is_none());
-        assert!(stored.auth_prompt_target.is_none());
-        assert!(stored.default_modality.is_none());
+        assert!(stored.record.final_reply_target.is_none());
+        assert!(stored.record.progress_target.is_none());
+        assert!(stored.record.approval_prompt_target.is_none());
+        assert!(stored.record.auth_prompt_target.is_none());
+        assert!(stored.record.default_modality.is_none());
     }
 
     #[tokio::test]
@@ -689,9 +756,10 @@ mod tests {
             .await
             .expect("load stored record")
             .expect("stored record");
-        assert!(stored.final_reply_target.is_none());
+        assert!(stored.record.final_reply_target.is_none());
         assert_eq!(
             stored
+                .record
                 .progress_target
                 .as_ref()
                 .map(|target| target.as_str()),
@@ -699,6 +767,7 @@ mod tests {
         );
         assert_eq!(
             stored
+                .record
                 .approval_prompt_target
                 .as_ref()
                 .map(|target| target.as_str()),
@@ -706,12 +775,16 @@ mod tests {
         );
         assert_eq!(
             stored
+                .record
                 .auth_prompt_target
                 .as_ref()
                 .map(|target| target.as_str()),
             Some("reply:auth")
         );
-        assert_eq!(stored.default_modality, Some(CommunicationModality::Voice));
+        assert_eq!(
+            stored.record.default_modality,
+            Some(CommunicationModality::Voice)
+        );
     }
 
     #[tokio::test]
@@ -805,6 +878,7 @@ mod tests {
             .expect("stored record");
         assert_eq!(
             stored
+                .record
                 .final_reply_target
                 .as_ref()
                 .map(|target| target.as_str()),
@@ -910,8 +984,7 @@ mod tests {
     ) {
         store
             .put_communication_preference(CommunicationPreferenceRecord {
-                tenant_id: tenant(tenant_id),
-                user_id: user(user_id),
+                scope: DeliveryDefaultScope::personal(tenant(tenant_id), user(user_id)),
                 final_reply_target,
                 progress_target: Some(reply_ref("reply:progress")),
                 approval_prompt_target: Some(reply_ref("reply:approval")),

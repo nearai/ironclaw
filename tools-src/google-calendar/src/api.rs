@@ -82,6 +82,30 @@ fn parse_event_time(v: &serde_json::Value) -> EventTime {
     }
 }
 
+/// Format Unix-epoch milliseconds as an RFC3339 UTC timestamp without fractional
+/// seconds (e.g. `2026-06-08T21:04:00Z`), suitable for the Calendar API's
+/// `timeMin`/`timeMax`. Uses Howard Hinnant's civil-from-days algorithm so it
+/// needs no date/time dependency.
+fn epoch_millis_to_rfc3339(millis: u64) -> String {
+    let secs = (millis / 1000) as i64;
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400);
+    let (hour, minute, second) = (tod / 3600, (tod % 3600) / 60, tod % 60);
+
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { year + 1 } else { year };
+
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
 /// List events from a calendar.
 pub fn list_events(
     calendar_id: &str,
@@ -96,9 +120,19 @@ pub fn list_events(
         "orderBy=startTime".to_string(),
     ];
 
-    if let Some(t) = time_min {
-        params.push(format!("timeMin={}", url_encode(t)));
-    }
+    // Always send timeMin, defaulting to "now" so list_events returns UPCOMING
+    // events. With orderBy=startTime and no timeMin, Google returns the OLDEST
+    // events in the calendar first — almost never what the caller wants. Callers
+    // pass an explicit (earlier) time_min only to reach past/historical events.
+    let now_min;
+    let effective_time_min: &str = match time_min {
+        Some(t) => t,
+        None => {
+            now_min = epoch_millis_to_rfc3339(host::now_millis());
+            &now_min
+        }
+    };
+    params.push(format!("timeMin={}", url_encode(effective_time_min)));
     if let Some(t) = time_max {
         params.push(format!("timeMax={}", url_encode(t)));
     }
@@ -323,3 +357,22 @@ fn url_encode(s: &str) -> String {
 }
 
 const HEX: [u8; 16] = *b"0123456789ABCDEF";
+
+#[cfg(test)]
+mod tests {
+    use super::epoch_millis_to_rfc3339;
+
+    #[test]
+    fn epoch_millis_to_rfc3339_formats_utc() {
+        assert_eq!(epoch_millis_to_rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(
+            epoch_millis_to_rfc3339(1_780_952_649_000),
+            "2026-06-08T21:04:09Z"
+        );
+        // Sub-second milliseconds are truncated (no fractional seconds).
+        assert_eq!(
+            epoch_millis_to_rfc3339(1_780_952_649_999),
+            "2026-06-08T21:04:09Z"
+        );
+    }
+}

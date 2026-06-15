@@ -108,6 +108,8 @@ pub struct WebUiListThreadsRequest {
 pub struct WebUiListAutomationsRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_limit: Option<u32>,
 }
 
 /// Browser body for WebUI extension-setup interaction.
