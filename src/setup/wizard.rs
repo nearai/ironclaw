@@ -4733,11 +4733,17 @@ mod tests {
 
         let _backend_guard = EnvGuard::set("DATABASE_BACKEND", "libsql");
         let _path_guard = EnvGuard::set("LIBSQL_PATH", db_path.to_str().unwrap());
-        // Ensure no postgres env interferes
-        let _pg_guard = EnvGuard::clear("DATABASE_URL");
 
         let mut wizard = SetupWizard::new();
         wizard.config.quick = true;
+
+        // `SetupWizard::new()` reloads the bootstrap `~/.ironclaw/.env` via
+        // dotenvy, which sets any currently-unset variable. Clear `DATABASE_URL`
+        // *after* that reload so a developer's postgres `~/.ironclaw/.env` can't
+        // repopulate it and force `auto_setup_database` down the postgres path,
+        // leaving the libsql `db_backend` unset. (The base dir is `LazyLock`
+        // cached, so redirecting HOME / IRONCLAW_BASE_DIR is not reliable here.)
+        let _pg_guard = EnvGuard::clear("DATABASE_URL");
 
         wizard.auto_setup_database().await.unwrap();
 
