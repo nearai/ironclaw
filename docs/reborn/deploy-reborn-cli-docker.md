@@ -111,6 +111,11 @@ To seed a custom config instead of the bundled default, mount it under
 start, the entrypoint copies that file into `$IRONCLAW_REBORN_HOME/config.toml`;
 later starts preserve the existing home config.
 
+Railway provides `RAILWAY_PUBLIC_DOMAIN`, and Reborn uses it as the hosted
+WebUI OAuth base URL when `IRONCLAW_REBORN_WEBUI_BASE_URL` is unset. Set
+`IRONCLAW_REBORN_WEBUI_BASE_URL` explicitly when using a custom public domain or
+when you need to override Railway's generated domain.
+
 For public WebUI Google login, use the Reborn WebUI SSO variables and an HTTPS
 base URL that matches the deployed Railway domain:
 
@@ -128,6 +133,11 @@ Register this WebUI login callback in the Google OAuth client:
 ```text
 https://<railway-domain>/auth/callback/google
 ```
+
+Notion MCP and other product-auth OAuth setup flows use the same hosted WebUI
+base URL for provider callbacks. On Railway this means their redirect URIs use
+`https://$RAILWAY_PUBLIC_DOMAIN/...` by default instead of a local listener
+address.
 
 Product-auth Google credentials are a separate flow. Configure
 `IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI` only when the deployment should let

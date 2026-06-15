@@ -241,9 +241,12 @@ impl ServeCommand {
 
         let listen_addr = SocketAddr::new(host, port);
         reject_non_loopback_privileged_local_runtime(host, &runtime_input)?;
-        if let Some(callback_origin) =
-            webui_oauth_callback_origin(listen_addr, canonical_host.as_deref())
-        {
+        let public_base_url = crate::commands::serve_sso::webui_public_base_url_from_env();
+        if let Some(callback_origin) = webui_oauth_callback_origin(
+            listen_addr,
+            public_base_url.as_deref(),
+            canonical_host.as_deref(),
+        ) {
             let services = runtime_input.services.take().ok_or_else(|| {
                 anyhow!("WebChat v2 serve requires Reborn runtime services before OAuth wiring")
             })?;
@@ -567,8 +570,12 @@ fn with_notion_dcr_oauth_backend(
 
 fn webui_oauth_callback_origin(
     listen_addr: SocketAddr,
+    public_base_url: Option<&str>,
     canonical_host: Option<&str>,
 ) -> Option<String> {
+    if let Some(base_url) = public_base_url {
+        return Some(base_url.trim_end_matches('/').to_string());
+    }
     if let Some(host) = canonical_host {
         return Some(format!(
             "{}://{}",
@@ -983,7 +990,8 @@ mod tests {
     #[test]
     fn webui_oauth_callback_origin_uses_loopback_http() {
         assert_eq!(
-            webui_oauth_callback_origin(SocketAddr::from(([127, 0, 0, 1], 3000)), None).as_deref(),
+            webui_oauth_callback_origin(SocketAddr::from(([127, 0, 0, 1], 3000)), None, None)
+                .as_deref(),
             Some("http://127.0.0.1:3000")
         );
     }
@@ -991,7 +999,8 @@ mod tests {
     #[test]
     fn webui_oauth_callback_origin_maps_unspecified_bind_to_localhost() {
         assert_eq!(
-            webui_oauth_callback_origin(SocketAddr::from(([0, 0, 0, 0], 3000)), None).as_deref(),
+            webui_oauth_callback_origin(SocketAddr::from(([0, 0, 0, 0], 3000)), None, None)
+                .as_deref(),
             Some("http://localhost:3000")
         );
     }
@@ -1001,7 +1010,7 @@ mod tests {
         let listen_addr = SocketAddr::new(IpAddr::from_str("::1").unwrap(), 3000);
 
         assert_eq!(
-            webui_oauth_callback_origin(listen_addr, None).as_deref(),
+            webui_oauth_callback_origin(listen_addr, None, None).as_deref(),
             Some("http://[::1]:3000")
         );
     }
@@ -1009,11 +1018,11 @@ mod tests {
     #[test]
     fn webui_oauth_callback_origin_skips_unstable_or_non_loopback_origin() {
         assert_eq!(
-            webui_oauth_callback_origin(SocketAddr::from(([127, 0, 0, 1], 0)), None),
+            webui_oauth_callback_origin(SocketAddr::from(([127, 0, 0, 1], 0)), None, None),
             None
         );
         assert_eq!(
-            webui_oauth_callback_origin(SocketAddr::from(([192, 168, 1, 42], 3000)), None),
+            webui_oauth_callback_origin(SocketAddr::from(([192, 168, 1, 42], 3000)), None, None),
             None
         );
     }
@@ -1023,6 +1032,7 @@ mod tests {
         assert_eq!(
             webui_oauth_callback_origin(
                 SocketAddr::from(([0, 0, 0, 0], 3000)),
+                None,
                 Some("app.example.com"),
             )
             .as_deref(),
@@ -1035,6 +1045,7 @@ mod tests {
         assert_eq!(
             webui_oauth_callback_origin(
                 SocketAddr::from(([0, 0, 0, 0], 3000)),
+                None,
                 Some("127.0.0.1:3000"),
             )
             .as_deref(),
@@ -1045,9 +1056,22 @@ mod tests {
     #[test]
     fn webui_oauth_callback_origin_brackets_ipv6_canonical_host() {
         assert_eq!(
-            webui_oauth_callback_origin(SocketAddr::from(([0, 0, 0, 0], 3000)), Some("::1"))
+            webui_oauth_callback_origin(SocketAddr::from(([0, 0, 0, 0], 3000)), None, Some("::1"))
                 .as_deref(),
             Some("http://[::1]")
+        );
+    }
+
+    #[test]
+    fn webui_oauth_callback_origin_prefers_public_base_url_for_hosted_oauth() {
+        assert_eq!(
+            webui_oauth_callback_origin(
+                SocketAddr::from(([0, 0, 0, 0], 8080)),
+                Some("https://qa-ironclaw.up.railway.app/"),
+                Some("internal.example.com"),
+            )
+            .as_deref(),
+            Some("https://qa-ironclaw.up.railway.app")
         );
     }
 
@@ -1080,10 +1104,39 @@ mod tests {
             RebornBuildInput::local_dev("notion-dcr-owner", dir.path().join("local-dev")),
             webui_oauth_callback_origin(
                 SocketAddr::from(([0, 0, 0, 0], 3000)),
+                None,
                 Some("app.example.com"),
             )
             .as_deref()
             .expect("canonical callback origin"),
+        )
+        .expect("notion dcr wiring");
+        let services = ironclaw_reborn_composition::build_reborn_services(services_input)
+            .await
+            .expect("reborn services build");
+
+        assert!(
+            services
+                .product_auth
+                .as_ref()
+                .and_then(|product_auth| product_auth.as_auth_challenge_provider())
+                .is_some(),
+            "serve wiring must expose the DCR-backed auth challenge provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn webui_serve_wires_notion_dcr_with_public_base_url_origin() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services_input = with_notion_dcr_oauth_backend(
+            RebornBuildInput::local_dev("notion-dcr-owner", dir.path().join("local-dev")),
+            webui_oauth_callback_origin(
+                SocketAddr::from(([0, 0, 0, 0], 8080)),
+                Some("https://qa-ironclaw.up.railway.app/"),
+                None,
+            )
+            .as_deref()
+            .expect("public callback origin"),
         )
         .expect("notion dcr wiring");
         let services = ironclaw_reborn_composition::build_reborn_services(services_input)
