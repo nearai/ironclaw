@@ -954,6 +954,7 @@ impl RebornServicesApi for StubServices {
     ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
         Ok(RebornListAutomationsResponse {
             automations: Vec::new(),
+            scheduler_enabled: true,
         })
     }
 
