@@ -3,7 +3,7 @@ use ironclaw_turns::{
     LoopCancelledReasonKind, LoopCompletionKind, LoopDiagnosticRef, LoopExit, LoopFailureKind,
     LoopGateRef, LoopResultRef, TurnRunId,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
         CapabilityCallCandidate, CapabilityFailureDetail, CapabilityFailureKind,
         CapabilityInputIssue, CapabilityInputIssueCode, CapabilityInputRef, CapabilityInputRepair,
         CapabilityOutcome, CapabilityRecoveryHint, CapabilityResultMessage, CapabilityResumeToken,
@@ -4746,6 +4746,8 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
     let approval_request_id = ApprovalRequestId::new();
     let resume_token =
         CapabilityResumeToken::new("resume-token:corr-id-test").expect("valid token");
+    let auth_gate_resume_token =
+        CapabilityResumeToken::new("resume-token:corr-id-auth-gate").expect("valid token");
     let correlation_id = CorrelationId::new();
     let original_input_ref = CapabilityInputRef::new("input:corr-id-original").expect("valid");
     let completed_ref = LoopResultRef::new("result:corr-id-done").expect("valid");
@@ -4775,7 +4777,11 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
                 gate_ref: LoopGateRef::new("gate:corr-id-auth").expect("valid"),
                 credential_requirements: Vec::new(),
                 safe_summary: "auth required".to_string(),
-                auth_resume: None,
+                auth_resume: Some(CapabilityAuthResume {
+                    resume_token: auth_gate_resume_token,
+                    prior_approval: None,
+                    replay: None,
+                }),
             }],
             stopped_on_suspension: true,
         },
@@ -4827,6 +4833,11 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
         .pending_auth_resume
         .as_ref()
         .expect("phase 2 BeforeBlock must carry pending_auth_resume");
+    assert_eq!(
+        pending_auth.resume_token.as_ref(),
+        Some(&resume_token),
+        "pending_auth_resume.resume_token must preserve the original approval invocation token"
+    );
     let pending_pa = pending_auth
         .prior_approval
         .as_ref()
@@ -4858,6 +4869,10 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
         .auth_resume
         .as_ref()
         .expect("phase 3 invocation must carry auth_resume");
+    assert_eq!(
+        phase3_ar.resume_token, resume_token,
+        "phase 3 auth_resume.resume_token must preserve the original approval invocation token"
+    );
     let phase3_pa = phase3_ar
         .prior_approval
         .as_ref()

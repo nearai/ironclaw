@@ -940,6 +940,7 @@ fn auth_resume_for_gate(
 
     match auth_resume.as_mut() {
         Some(resume) => {
+            resume.resume_token = prior_approval.resume_token.clone();
             resume.prior_approval.get_or_insert_with(prior_identity);
             resume.replay.get_or_insert_with(prior_replay);
             auth_resume
