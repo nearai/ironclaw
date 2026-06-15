@@ -3342,6 +3342,9 @@ mod tests {
             )
             .expect("mount failing backend");
         Arc::new(RebornLocalRuntimeServices {
+            extension_lifecycle_surface_context: base_runtime
+                .extension_lifecycle_surface_context
+                .clone(),
             approval_requests: Arc::clone(&base_runtime.approval_requests),
             capability_leases: Arc::clone(&base_runtime.capability_leases),
             capability_policy: Arc::clone(&base_runtime.capability_policy),
