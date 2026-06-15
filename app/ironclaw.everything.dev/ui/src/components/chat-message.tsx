@@ -34,11 +34,9 @@ export function ChatMessage({ message, isOptimistic, status, verbose }: ChatMess
   };
 
   const toolResultMap = new Map<string, ToolResultPart>();
-  const allToolCalls: ToolCallPart[] = [];
 
   for (const p of message.parts) {
     if (p.type === "tool-result") toolResultMap.set(p.toolCallId, p);
-    if (p.type === "tool-call") allToolCalls.push(p);
   }
 
   const textContent = message.parts
@@ -100,13 +98,20 @@ export function ChatMessage({ message, isOptimistic, status, verbose }: ChatMess
   const blocks = buildBlocks();
 
   return (
-    <div className={cn("group flex w-full", isUser ? "justify-end" : "justify-start")}>
+    <div className={cn("group flex w-full gap-2", isUser ? "justify-end" : "justify-start items-end")}>
+      {!isUser && (
+        <img
+          src="/logo.png"
+          alt="IronClaw"
+          className="shrink-0 w-6 h-6 sm:w-7 sm:h-7 mb-0.5 transition-transform duration-300 ease-out hover:scale-125 hover:-rotate-12 hover:drop-shadow-[0_0_8px_rgba(17,145,240,0.6)] cursor-pointer"
+        />
+      )}
       <div
         className={cn(
-          "max-w-[90%] sm:max-w-[80%] lg:max-w-[70%] min-w-0",
+          "max-w-[85%] sm:max-w-[78%] lg:max-w-[70%] min-w-0",
           isUser
-            ? "rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-sm text-primary-foreground space-y-2"
-            : "rounded-2xl rounded-bl-md text-sm text-foreground bg-muted px-4 py-2.5 space-y-2",
+            ? "rounded-2xl rounded-br-sm bg-primary px-4 py-2.5 text-sm text-primary-foreground space-y-2"
+            : "rounded-2xl rounded-bl-sm text-sm text-foreground bg-muted px-4 py-2.5 space-y-2",
           isOptimistic && "opacity-70",
           isFailed && "border border-destructive/50 bg-destructive/5",
         )}

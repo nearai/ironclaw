@@ -77,7 +77,7 @@ function Layout() {
 
   return (
     <TooltipProvider>
-      <div className="h-screen w-full flex overflow-hidden bg-background text-foreground">
+      <div className="h-[100dvh] w-full flex overflow-hidden bg-background text-foreground">
         {isAuthenticated && (
           <aside className="hidden sm:flex h-full shrink-0 w-16 flex-col items-center border-r border-border bg-card animate-fade-in">
             <div className="flex-1 w-full overflow-y-auto flex flex-col items-center gap-1.5 py-4 min-h-0">
@@ -105,7 +105,7 @@ function Layout() {
                 const Icon = item.icon;
                 const active = isActive(item);
                 const isIronclaw = item.to === "/setup";
-                const className = `relative flex items-center justify-center w-10 h-10 border-2 border-outset border-border-strong shadow-sm transition-all duration-200 ease-out hover:shadow-md ${active ? "bg-foreground text-background" : "bg-card text-foreground hover:bg-muted"}`;
+                const className = `relative flex items-center justify-center w-10 h-10 border-2 border-outset border-border-strong shadow-sm transition-all duration-200 ease-out hover:shadow-md touch-manipulation ${active ? "bg-foreground text-background" : "bg-card text-foreground hover:bg-muted"}`;
 
                 const statusDotColor =
                   connectionStatus === "connected"
@@ -140,7 +140,7 @@ function Layout() {
 
         <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
           <div className="shrink-0 flex items-center justify-center py-1.5 px-3 bg-yellow-300 border-b border-yellow-400">
-            <span className="text-[11px] font-bold tracking-wide text-yellow-950 text-center">
+            <span className="text-[10px] sm:text-[11px] font-bold tracking-wide text-yellow-950 text-center leading-snug">
               Beta database will be wiped periodically. Do not save data you want to keep.
             </span>
           </div>
@@ -157,12 +157,12 @@ function Layout() {
               </div>
             )}
 
-            <div className="flex items-center justify-between px-4 sm:px-6 h-12">
+            <div className="flex items-center justify-between px-3 sm:px-6 h-11 sm:h-12">
               {isAuthenticated ? (
                 <div className="flex items-center gap-2 text-xs text-muted-foreground font-mono min-w-0">
                   <Link
                     aria-label={`${appName} home`}
-                    className="sm:hidden flex items-center justify-center w-8 h-8"
+                    className="sm:hidden flex items-center justify-center w-7 h-7 touch-manipulation"
                     to="/"
                     preload="intent"
                   >
@@ -173,15 +173,15 @@ function Layout() {
                     />
                   </Link>
 
-                  <div className="hidden sm:flex items-center gap-2">
+                  <div className="hidden sm:flex items-center gap-2 min-w-0">
                     {gatewayId && (
                       <>
-                        <span>{gatewayId}</span>
-                        <span>/</span>
+                        <span className="shrink-0">{gatewayId}</span>
+                        <span className="shrink-0">/</span>
                       </>
                     )}
-                    <span>{runtime?.accountId ?? account}</span>
-                    <span>/</span>
+                    <span className="shrink-0">{runtime?.accountId ?? account}</span>
+                    <span className="shrink-0">/</span>
                     <span className="truncate">
                       {pathname === "/" ? "chat" : pathname.slice(1).split("/").join(" / ")}
                     </span>
@@ -191,33 +191,35 @@ function Layout() {
                 <Link
                   to="/login"
                   aria-label={`${appName} home`}
-                  className="flex items-center justify-center w-10 h-10 transition-opacity duration-200 hover:opacity-70"
+                  className="flex items-center justify-center w-9 h-9 touch-manipulation transition-opacity duration-200 hover:opacity-70"
                 >
-                  <svg
-                    viewBox="0 0 24 24"
-                    fill="currentColor"
-                    className="w-5 h-5 text-foreground"
-                    aria-label={`${appName} logo`}
-                  >
-                    <title>{appName}</title>
-                    <circle cx="12" cy="12" r="10" />
-                  </svg>
+                  <img
+                    src="/logo.png"
+                    alt={`${appName} logo`}
+                    className="w-full h-full object-contain"
+                  />
                 </Link>
               )}
 
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
                 {isAuthenticated && <IronclawStatus />}
                 <UserNav />
               </div>
             </div>
           </header>
 
-          <main className="flex-1 w-full min-h-0 overflow-hidden flex flex-col pb-[3.75rem] sm:pb-0">
+          <main
+            className={`flex-1 w-full min-h-0 flex flex-col ${pathname !== "/" ? "overflow-y-auto" : "overflow-hidden"}`}
+            style={isAuthenticated && pathname !== "/" ? { paddingBottom: "calc(3.5rem + env(safe-area-inset-bottom, 0px))" } : undefined}
+          >
             <Outlet />
           </main>
 
           {pathname !== "/" && (
-            <footer className="shrink-0 flex justify-center py-6 sm:pb-6">
+            <footer
+              className="shrink-0 flex justify-center py-6"
+              style={{ paddingBottom: isAuthenticated ? "calc(1.5rem + env(safe-area-inset-bottom, 0px))" : undefined }}
+            >
               <a
                 href="https://near.dev"
                 target="_blank"
@@ -245,16 +247,16 @@ function Layout() {
           )}
 
           {isAuthenticated && (
-            <nav className="fixed bottom-0 left-0 right-0 sm:hidden border-t border-border bg-card animate-fade-in z-40">
+            <nav className="fixed bottom-0 left-0 right-0 sm:hidden border-t border-border bg-card/95 backdrop-blur-sm animate-fade-in z-40">
               <div
-                className="flex items-center justify-around px-2 pt-2"
-                style={{ paddingBottom: "calc(0.5rem + env(safe-area-inset-bottom, 0px))" }}
+                className="flex items-center justify-around px-1"
+                style={{ paddingTop: "0.375rem", paddingBottom: "calc(0.375rem + env(safe-area-inset-bottom, 0px))" }}
               >
                 {visibleItems.map((item) => {
                   const Icon = item.icon;
                   const active = isActive(item);
                   const isIronclaw = item.to === "/setup";
-                  const className = `flex flex-col items-center justify-center gap-0.5 p-1.5 transition-colors duration-200 ${active ? "text-foreground" : "text-muted-foreground"}`;
+                  const className = `flex flex-col items-center justify-center gap-0.5 px-3 py-1.5 min-w-[3rem] transition-colors duration-200 touch-manipulation ${active ? "text-foreground" : "text-muted-foreground"}`;
 
                   const statusDotColor =
                     connectionStatus === "connected"
@@ -266,19 +268,19 @@ function Layout() {
                   return (
                     <Link key={item.label} to={item.to} preload="intent" className={className}>
                       <div className="relative">
-                        <Icon className="w-4 h-4" />
+                        <Icon className="w-[18px] h-[18px]" />
                         {isIronclaw && (
                           <span
                             className={`absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full border border-card ${statusDotColor}`}
                           />
                         )}
                       </div>
-                      <span className="text-[10px]">{item.label}</span>
+                      <span className="text-[10px] font-medium">{item.label}</span>
                     </Link>
                   );
                 })}
 
-                <div className="flex flex-col items-center justify-center p-1.5">
+                <div className="flex flex-col items-center justify-center px-3 py-1.5 min-w-[3rem]">
                   <ThemeToggle />
                 </div>
               </div>

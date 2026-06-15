@@ -5,6 +5,7 @@ import { useMemo } from "react";
 import type { Organization } from "@/app";
 import { sessionQueryOptions, useAuthClient } from "@/app";
 import { OrgSwitcher } from "@/components";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -36,6 +37,23 @@ export function UserNav() {
   const activeOrg = useMemo(() => {
     return organizations?.find((org) => org.id === activeOrgId);
   }, [organizations, activeOrgId]);
+
+  const nearAccountId = auth.near.getAccountId();
+
+  const { data: nearProfile } = useQuery({
+    queryKey: ["near-profile", nearAccountId],
+    queryFn: async () => {
+      const res = await auth.near.getProfile(nearAccountId ?? "");
+      return (res as any)?.data || null;
+    },
+    enabled: !!nearAccountId,
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const nearAvatarUrl = nearProfile?.image?.url
+    ?? (nearProfile?.image?.ipfs_cid
+      ? `https://ipfs.near.social/ipfs/${nearProfile.image.ipfs_cid}`
+      : null);
 
   const { connectionMode, switchMode } = useConnectionMode();
 
@@ -92,14 +110,26 @@ export function UserNav() {
         <DropdownMenuTrigger asChild>
           <button
             type="button"
-            className="w-6 h-6 rounded-full! bg-foreground transition-all duration-200 ease-out hover:shadow-lg hover:scale-110 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-            title="menu"
-          />
+            className="w-6 h-6 rounded-full! transition-all duration-200 ease-out hover:shadow-lg hover:scale-110 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+            title={nearProfile?.name ?? nearAccountId ?? "menu"}
+          >
+            <Avatar className="w-6 h-6">
+              {nearAvatarUrl ? (
+                <AvatarImage src={nearAvatarUrl} alt={nearProfile?.name ?? nearAccountId ?? "User"} />
+              ) : null}
+              <AvatarFallback className="bg-foreground text-background text-[10px] font-medium">
+                {(nearProfile?.name ?? user.email ?? user.id).charAt(0).toUpperCase()}
+              </AvatarFallback>
+            </Avatar>
+          </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-56">
           <DropdownMenuLabel>
             <div className="space-y-1">
               <p className="text-xs text-muted-foreground">signed in as</p>
+              {nearProfile?.name && (
+                <p className="truncate text-sm font-medium">{nearProfile.name}</p>
+              )}
               <p className="truncate text-sm font-normal">{user.email || user.id}</p>
             </div>
           </DropdownMenuLabel>

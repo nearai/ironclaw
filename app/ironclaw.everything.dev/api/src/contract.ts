@@ -91,6 +91,38 @@ export const ConversationSendAckSchema = z.object({
   activeRunId: z.string().optional(),
 });
 
+export const ConversationChatMessagePartSchema = z.object({
+  type: z.enum(["text", "tool-call", "tool-result", "thinking"]),
+  content: z.string().optional(),
+  toolCallId: z.string().optional(),
+  toolName: z.string().optional(),
+  args: z.string().optional(),
+  state: z.string().optional(),
+  output: z.unknown().optional(),
+});
+
+export const ConversationChatMessageSchema = z.object({
+  id: z.string(),
+  role: z.enum(["user", "assistant"]),
+  content: z.string().optional(),
+  parts: z.array(ConversationChatMessagePartSchema).optional(),
+  createdAt: z.string().optional(),
+});
+
+const ThreadChatInputSchema = z.object({
+  threadId: z.string(),
+  messages: z.array(ConversationChatMessageSchema),
+  forwardedProps: z.record(z.string(), z.unknown()).optional(),
+  clientActionId: z.string().optional(),
+});
+
+const ThreadApproveInputSchema = z.object({
+  threadId: z.string(),
+  runId: z.string(),
+  gateRef: z.string(),
+  approved: z.boolean(),
+});
+
 export const ConversationLiveChunkSchema = z.object({
   type: z.enum([
     "RUN_STARTED",
@@ -263,6 +295,26 @@ export const contract = oc.router({
         }),
       )
       .output(eventIterator(ConversationLiveChunkSchema))
+      .errors({ UNAUTHORIZED, NOT_FOUND }),
+
+    threadChat: oc
+      .route({
+        method: "POST",
+        path: "/conversation/threads/{threadId}/chat",
+        summary: "Send a message and stream AG-UI compliant events (TanStack AI bridge)",
+      })
+      .input(ThreadChatInputSchema)
+      .output(eventIterator(ConversationLiveChunkSchema))
+      .errors({ UNAUTHORIZED, NOT_FOUND }),
+
+    threadApprove: oc
+      .route({
+        method: "POST",
+        path: "/conversation/threads/{threadId}/approve",
+        summary: "Approve or deny a gate/prompt",
+      })
+      .input(ThreadApproveInputSchema)
+      .output(z.object({ success: z.boolean() }))
       .errors({ UNAUTHORIZED, NOT_FOUND }),
 
   },

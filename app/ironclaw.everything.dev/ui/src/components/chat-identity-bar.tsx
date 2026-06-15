@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { PanelLeft, Settings, SlidersHorizontal } from "lucide-react";
+import { Copy, PanelLeft, Settings, SlidersHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useIronclawStatus } from "@/hooks/use-ironclaw-status";
 interface ThreadState {
@@ -24,6 +24,7 @@ interface ChatIdentityBarProps {
   activeThreadTitle?: string;
   verbose?: boolean;
   onToggleVerbose?: () => void;
+  onCopyConversation?: () => void;
 }
 
 export function ChatIdentityBar({
@@ -33,6 +34,7 @@ export function ChatIdentityBar({
   activeThreadTitle,
   verbose,
   onToggleVerbose,
+  onCopyConversation,
 }: ChatIdentityBarProps) {
   const { status: connectionStatus } = useIronclawStatus();
 
@@ -88,6 +90,17 @@ export function ChatIdentityBar({
         )}
       </div>
       <div className="flex items-center gap-1 shrink-0">
+        {onCopyConversation && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 text-muted-foreground"
+            onClick={onCopyConversation}
+            title="Copy conversation"
+          >
+            <Copy size={12} />
+          </Button>
+        )}
         {onToggleVerbose && (
           <Button
             variant="ghost"

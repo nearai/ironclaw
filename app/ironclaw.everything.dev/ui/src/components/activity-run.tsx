@@ -62,6 +62,7 @@ function summarizeTools(tools: ToolItem[]): string {
 
 function toolStatus(item: ToolItem): "running" | "success" | "error" {
   if (item.result?.state === "error") return "error";
+  if (!item.result) return "running";
   const state = item.call.state;
   switch (state) {
     case "awaiting-input":
@@ -163,7 +164,8 @@ function ToolDetailPanel({
   const tabs: { id: string; label: string; content: React.ReactNode }[] = [];
 
   if (resultContent) {
-    tabs.push({ id: "result", label: "Result", content: <RichResult text={resultContent} /> });
+    const displayText = envelope?.output ?? resultContent;
+    tabs.push({ id: "result", label: "Result", content: <RichResult text={displayText} /> });
   }
   if (envelope?.inputSummary) {
     tabs.push({ id: "input", label: "Input", content: <p className="text-xs text-muted-foreground/80">{envelope.inputSummary}</p> });
@@ -220,14 +222,29 @@ function ToolRunRow({
   const resultContent =
     item.result && typeof item.result.content === "string" ? item.result.content : null;
   const envelope = parseIronclawToolResultEnvelope(item.result?.content ?? item.call.output);
-  const displayName = envelope?.title ?? item.call.name;
-  const hasDetails = !!(resultContent || envelope?.inputSummary || verbose);
+
+  const inputFromArgs = (() => {
+    if (envelope?.inputSummary) return envelope.inputSummary;
+    try {
+      const args = JSON.parse(item.call.arguments);
+      return typeof args.input === "string" && args.input.length > 0 ? args.input : null;
+    } catch {
+      return null;
+    }
+  })();
+
+  const detailEnvelope = envelope ?? (inputFromArgs
+    ? { title: item.call.name, inputSummary: inputFromArgs, output: "", outputKind: null as string | null, truncated: false }
+    : null);
+
+  const displayName = detailEnvelope?.title ?? item.call.name;
+  const hasDetails = !!(resultContent || detailEnvelope?.inputSummary || verbose);
 
   return (
     <div className="flex flex-col">
       <button
         type="button"
-        onClick={() => setExpanded(!expanded)}
+        onClick={() => hasDetails && setExpanded(!expanded)}
         aria-expanded={expanded}
         className="v2-button flex w-full items-center gap-2 border-0 bg-transparent px-1 py-1.5 text-left text-xs"
       >
@@ -256,7 +273,7 @@ function ToolRunRow({
       </button>
       {expanded && hasDetails && (
         <ToolDetailPanel
-          envelope={envelope}
+          envelope={detailEnvelope}
           resultContent={resultContent}
           verbose={verbose}
         />

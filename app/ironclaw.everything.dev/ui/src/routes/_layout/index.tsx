@@ -1,21 +1,17 @@
 import type { UIMessage } from "@tanstack/ai-react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import {
-  AlertCircle,
-  FileText,
-  Globe,
+  ChevronLeft,
+  ChevronRight,
   MessageSquare,
-  Monitor,
   Plus,
   RefreshCw,
   ShieldCheck,
-  Terminal,
   Trash2,
   Unplug,
-  Wrench,
   Zap,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useApiClient } from "@/app";
 import { ChatIdentityBar } from "@/components/chat-identity-bar";
@@ -26,8 +22,8 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { type ConversationThread, useConversationThreads } from "@/hooks/use-conversation";
-import type { AttachmentLimits, StagedAttachment } from "@/lib/attachments";
-import { useIronclawChat } from "@/hooks/use-ironclaw-chat";
+import type { AttachmentLimits } from "@/lib/attachments";
+import { useThreadChat } from "@/hooks/use-thread-chat";
 import { useIronclawStatus } from "@/hooks/use-ironclaw-status";
 import { useVerboseMode } from "@/hooks/use-verbose-mode";
 import { messagesToUIMessages } from "@/lib/ironclaw-message-parts";
@@ -36,24 +32,16 @@ export const Route = createFileRoute("/_layout/")({
   component: ChatPage,
 });
 
+const SIDEBAR_MIN_WIDTH = 200;
+const SIDEBAR_MAX_WIDTH = 480;
+const SIDEBAR_DEFAULT_WIDTH = 272;
+const SIDEBAR_COLLAPSED_WIDTH = 40;
+
 interface ThreadMeta {
   threadId: string;
   title: string | null;
   scope: { tenantId: string; agentId: string; projectId?: string };
   createdByActorId: string;
-}
-
-function toolIconForName(name: string) {
-  const n = name.toLowerCase();
-  if (n.includes("file") || n.includes("read") || n.includes("write") || n.includes("path"))
-    return FileText;
-  if (n.includes("web") || n.includes("search") || n.includes("fetch") || n.includes("http") || n.includes("url"))
-    return Globe;
-  if (n.includes("shell") || n.includes("bash") || n.includes("terminal") || n.includes("exec") || n.includes("code") || n.includes("run"))
-    return Terminal;
-  if (n.includes("browser") || n.includes("screenshot") || n.includes("page") || n.includes("click"))
-    return Monitor;
-  return Wrench;
 }
 
 function ChatArea(props: {
@@ -136,34 +124,19 @@ function ChatAreaCore({
   onToggleVerbose: () => void;
   initialMessages: UIMessage[];
 }) {
-  const apiClient = useApiClient();
-  const chat = useIronclawChat(threadId, apiClient, initialMessages, verbose);
-  const isBusy =
-    chat.runState.phase === "submitted" || chat.runState.phase === "running" ||
-    chat.runState.phase === "awaiting_approval" || chat.runState.phase === "auth_required";
+  const chat = useThreadChat({ threadId, initialMessages });
+  const isBusy = chat.isLoading;
 
   const handleSend = useCallback(
-    (content: string, attachments?: StagedAttachment[]) => {
+    (content: string) => {
       if (!content.trim() || isBusy) return;
-      chat.sendMessage(content, attachments);
+      chat.sendMessage(content);
     },
     [chat.sendMessage, isBusy],
   );
 
-  const messages = chat.messages;
-  const runState = chat.runState;
-  const currentRunMessageId = runState.runId ? `assistant:${runState.runId}` : null;
-  const currentRunHasText = currentRunMessageId
-    ? messages.some(
-        (m) => m.id === currentRunMessageId &&
-          m.parts.some((p) => p.type === "text" && ((p as { content?: string }).content?.trim()?.length ?? 0) > 0),
-      )
-    : false;
-
-  const showLoading = runState.phase !== "idle" && runState.phase !== "failed" && runState.phase !== "cancelled";
-  const toolActive = runState.activeToolName && !currentRunHasText;
-  const ProgressIcon = runState.phase === "awaiting_approval" || runState.phase === "auth_required"
-    ? ShieldCheck : toolActive ? toolIconForName(runState.activeToolName!) : null;
+  const firstPendingApproval = chat.pendingApprovals[0];
+  const showLoading = chat.isLoading || chat.error != null;
 
   const threadState = threadMeta
     ? { thread: { threadId: threadMeta.threadId, title: threadMeta.title, scope: { tenantId: threadMeta.scope.tenantId, agentId: threadMeta.scope.agentId, projectId: threadMeta.scope.projectId }, createdByActorId: threadMeta.createdByActorId }, messages: [] }
@@ -178,44 +151,29 @@ function ChatAreaCore({
         activeThreadTitle={threadMeta?.title ?? `Thread ${threadId.slice(0, 8)}`}
         verbose={verbose}
         onToggleVerbose={onToggleVerbose}
+        onCopyConversation={chat.copyConversation}
       />
-      {runState.phase === "awaiting_approval" ? (
+      {firstPendingApproval ? (
         <div className="flex w-full items-center gap-2 border-b border-amber-500/20 bg-amber-500/5 px-4 py-2 text-xs text-amber-600">
           <ShieldCheck size={12} className="shrink-0" />
-          <span className="flex-1">{runState.gateHeadline ?? "Approval required"}</span>
+          <span className="flex-1 min-w-0 truncate">{firstPendingApproval.headline}</span>
           <Button
             size="sm"
             variant="outline"
-            className="h-7 border-amber-500/30 bg-amber-500/10 px-2.5 text-xs font-medium text-amber-600 hover:bg-amber-500/20"
-            onClick={() => runState.gateRef && chat.resolveGate(runState.gateRef, true)}
+            className="h-7 shrink-0 border-amber-500/30 bg-amber-500/10 px-2.5 text-xs font-medium text-amber-600 hover:bg-amber-500/20"
+            onClick={() => chat.runId && chat.resolveGate(chat.runId, firstPendingApproval.gateRef, true)}
           >
             Approve
           </Button>
           <Button
             size="sm"
             variant="outline"
-            className="h-7 border-amber-500/30 bg-amber-500/10 px-2.5 text-xs font-medium text-amber-600 hover:bg-amber-500/20"
-            onClick={() => runState.gateRef && chat.resolveGate(runState.gateRef, false)}
+            className="h-7 shrink-0 border-amber-500/30 bg-amber-500/10 px-2.5 text-xs font-medium text-amber-600 hover:bg-amber-500/20"
+            onClick={() => chat.runId && chat.resolveGate(chat.runId, firstPendingApproval.gateRef, false)}
           >
             Deny
           </Button>
         </div>
-      ) : runState.phase === "auth_required" ? (
-        <div className="flex w-full items-center gap-2 border-b border-blue-500/20 bg-blue-500/5 px-4 py-2 text-xs text-blue-600">
-          <ShieldCheck size={12} className="shrink-0" />
-          <span className="flex-1">{runState.authHeadline ?? "Authentication required"}</span>
-          {runState.authUrl ? (
-            <a href={runState.authUrl} target="_blank" rel="noreferrer" className="rounded border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 font-medium hover:bg-blue-500/20 transition-colors">Authorize</a>
-          ) : null}
-          <button type="button" onClick={() => chat.retry()} className="rounded border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 font-medium hover:bg-blue-500/20 transition-colors">Resume run</button>
-        </div>
-      ) : runState.phase === "failed" ? (
-        <div className="flex w-full items-center gap-2 border-b border-destructive/20 bg-destructive/5 px-4 py-2 text-xs text-destructive">
-          <AlertCircle size={12} className="shrink-0" />
-          <span className="flex-1 truncate">{runState.message ?? "Run failed"}</span>
-        </div>
-      ) : runState.phase === "cancelled" ? (
-        <div className="flex w-full items-center gap-2 border-b border-border bg-muted/30 px-4 py-2 text-xs text-muted-foreground"><span>Run was cancelled</span></div>
       ) : null}
 
       <ChatMessageList
@@ -223,19 +181,19 @@ function ChatAreaCore({
         empty={initialMessages.length === 0 && !isBusy}
         emptyMessage={threadMetaError ? "Failed to load thread" : "No messages yet. Send a message to start."}
       >
-        {messages.filter((m) => m.parts.length > 0).map((message) => (
+        {chat.messages.filter((m: any) => m.parts.length > 0).map((message: any) => (
           <ChatMessage key={message.id} message={message} verbose={verbose} />
         ))}
         {showLoading ? (
-          <div className="flex items-start gap-3">
+          <div className="flex items-end gap-2">
+            <div className="shrink-0 w-6 h-6 sm:w-7 sm:h-7 rounded-full overflow-hidden border border-border bg-card flex items-center justify-center mb-0.5">
+              <img src="/logo.png" alt="IronClaw" className="w-full h-full object-contain p-0.5" />
+            </div>
             <div className="rounded-2xl rounded-bl-sm bg-muted px-4 py-2.5">
-              <div className="flex items-center gap-2">
-                {ProgressIcon ? <ProgressIcon size={11} className="text-muted-foreground/60 shrink-0" /> : null}
-                <div className="flex items-center gap-1">
-                  <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/40 [animation-delay:0ms]" />
-                  <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/40 [animation-delay:150ms]" />
-                  <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/40 [animation-delay:300ms]" />
-                </div>
+              <div className="flex items-center gap-1">
+                <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/40 [animation-delay:0ms]" />
+                <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/40 [animation-delay:150ms]" />
+                <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/40 [animation-delay:300ms]" />
               </div>
             </div>
           </div>
@@ -326,7 +284,35 @@ function ChatPage() {
   );
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT_WIDTH);
   const [sheetOpen, setSheetOpen] = useState(false);
+  const isResizing = useRef(false);
+  const startX = useRef(0);
+  const startWidth = useRef(0);
+
+  const handleResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isResizing.current = true;
+    startX.current = e.clientX;
+    startWidth.current = sidebarWidth;
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!isResizing.current) return;
+      const delta = ev.clientX - startX.current;
+      const newWidth = Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, startWidth.current + delta));
+      setSidebarWidth(newWidth);
+      if (newWidth <= SIDEBAR_MIN_WIDTH + 20 && !sidebarOpen) setSidebarOpen(true);
+    };
+
+    const onMouseUp = () => {
+      isResizing.current = false;
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+    };
+
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  }, [sidebarWidth, sidebarOpen]);
 
   const statusDotClass =
     connectionStatus === "connected"
@@ -336,7 +322,7 @@ function ChatPage() {
         : "bg-destructive";
 
   const threadListContent = (
-    <ScrollArea className="flex-1">
+    <ScrollArea className="flex-1 min-h-0">
       <div className="space-y-0.5 p-2">
         {isDisconnected ? (
           <div className="flex flex-col items-center gap-3 px-2 py-6 text-center">
@@ -384,14 +370,14 @@ function ChatPage() {
                   setSheetOpen(false);
                 }
               }}
-              className={`group flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors cursor-pointer ${
+              className={`group flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-sm transition-colors cursor-pointer touch-manipulation ${
                 activeThreadId === thread.threadId
                   ? "bg-accent text-accent-foreground"
-                  : "text-muted-foreground hover:bg-muted"
+                  : "text-muted-foreground hover:bg-muted active:bg-muted"
               }`}
             >
               <MessageSquare size={14} className="shrink-0" />
-              <span className="flex-1 truncate">
+              <span className="flex-1 truncate text-xs">
                 {thread.title ?? `Thread ${thread.threadId.slice(0, 8)}`}
               </span>
               <button
@@ -400,9 +386,10 @@ function ChatPage() {
                   e.stopPropagation();
                   deleteThread(thread.threadId);
                 }}
-                className="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
+                className="shrink-0 p-1 -m-1 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity touch-manipulation"
+                aria-label="Delete thread"
               >
-                <Trash2 size={12} className="text-muted-foreground hover:text-destructive" />
+                <Trash2 size={12} className="text-muted-foreground/40 hover:text-destructive transition-colors" />
               </button>
             </div>
           ))
@@ -411,7 +398,41 @@ function ChatPage() {
     </ScrollArea>
   );
 
-  const sidebarHeader = (
+  const desktopSidebarHeader = (
+    <div className="flex items-center justify-between border-b border-border px-3 py-2.5 shrink-0">
+      <div className="flex items-center gap-1.5 min-w-0">
+        <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${statusDotClass}`} />
+        {sidebarOpen && (
+          <span className="text-xs font-medium text-muted-foreground truncate">Threads</span>
+        )}
+      </div>
+      <div className="flex items-center gap-1 shrink-0">
+        {sidebarOpen && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            onClick={createThread}
+            disabled={isDisconnected}
+            title={isDisconnected ? "Connect IronClaw first" : "New thread"}
+          >
+            <Plus size={14} />
+          </Button>
+        )}
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7 shrink-0"
+          onClick={() => setSidebarOpen((v) => !v)}
+          title={sidebarOpen ? "Collapse sidebar" : "Expand sidebar"}
+        >
+          {sidebarOpen ? <ChevronLeft size={14} /> : <ChevronRight size={14} />}
+        </Button>
+      </div>
+    </div>
+  );
+
+  const mobileSidebarHeader = (
     <div className="flex items-center justify-between border-b border-border px-3 py-2.5 shrink-0">
       <div className="flex items-center gap-1.5">
         <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${statusDotClass}`} />
@@ -433,20 +454,61 @@ function ChatPage() {
   return (
     <div className="flex h-full w-full overflow-hidden">
       <div
-        className={`hidden lg:flex h-full shrink-0 flex-col border-r border-border bg-card transition-all duration-200 overflow-hidden ${
-          sidebarOpen ? "w-72" : "w-0"
-        }`}
+        className="hidden lg:flex h-full shrink-0 flex-col border-r border-border bg-card transition-[width] duration-200 overflow-hidden relative"
+        style={{ width: sidebarOpen ? sidebarWidth : SIDEBAR_COLLAPSED_WIDTH }}
       >
-        {sidebarHeader}
-        {threadListContent}
+        {desktopSidebarHeader}
+        {sidebarOpen ? (
+          <>
+            {threadListContent}
+            <div
+              onMouseDown={handleResizeStart}
+              className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-primary/30 active:bg-primary/50 transition-colors z-10 group"
+              title="Drag to resize"
+            >
+              <div className="absolute right-0 top-0 bottom-0 w-3 -translate-x-1" />
+            </div>
+          </>
+        ) : (
+          <div className="flex flex-col items-center gap-1 py-2">
+            {threads.slice(0, 8).map((thread) => (
+              <button
+                key={thread.threadId}
+                type="button"
+                onClick={() => {
+                  openThread(thread.threadId);
+                  setSidebarOpen(true);
+                }}
+                className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors touch-manipulation ${
+                  activeThreadId === thread.threadId
+                    ? "bg-accent text-accent-foreground"
+                    : "text-muted-foreground hover:bg-muted"
+                }`}
+                title={thread.title ?? `Thread ${thread.threadId.slice(0, 8)}`}
+              >
+                <MessageSquare size={13} />
+              </button>
+            ))}
+            {!isDisconnected && (
+              <button
+                type="button"
+                onClick={createThread}
+                className="w-8 h-8 rounded-lg flex items-center justify-center text-muted-foreground hover:bg-muted transition-colors touch-manipulation mt-1"
+                title="New thread"
+              >
+                <Plus size={13} />
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       <Sheet open={sheetOpen} onOpenChange={setSheetOpen}>
-        <SheetContent side="left" className="flex w-72 flex-col p-0 lg:hidden">
+        <SheetContent side="left" className="flex flex-col p-0 lg:hidden w-[min(320px,85vw)]">
           <SheetHeader className="sr-only">
             <SheetTitle>Threads</SheetTitle>
           </SheetHeader>
-          {sidebarHeader}
+          {mobileSidebarHeader}
           {threadListContent}
         </SheetContent>
       </Sheet>
@@ -459,14 +521,14 @@ function ChatPage() {
             threadMeta={activeThreadMeta}
             threadMetaError={null}
             onOpenMobileSidebar={() => setSheetOpen(true)}
-            onToggleDesktopSidebar={() => setSidebarOpen(!sidebarOpen)}
+            onToggleDesktopSidebar={() => setSidebarOpen((v) => !v)}
             attachmentCapabilities={attachmentCapabilities}
             verbose={verbose}
             onToggleVerbose={toggleVerbose}
           />
         ) : isDisconnected ? (
-          <div className="flex h-full items-center justify-center">
-            <div className="text-center space-y-4 max-w-xs px-4">
+          <div className="flex h-full items-center justify-center px-4">
+            <div className="text-center space-y-4 max-w-xs w-full">
               <div className="flex h-14 w-14 items-center justify-center rounded-full border border-border bg-muted mx-auto">
                 <Unplug className="h-6 w-6 text-muted-foreground" />
               </div>
@@ -487,7 +549,7 @@ function ChatPage() {
                   <button
                     type="button"
                     onClick={() => refetchStatus()}
-                    className="inline-flex items-center gap-2 rounded-full border border-primary/40 bg-primary/5 px-4 py-2 text-sm font-medium text-primary hover:bg-primary/10 transition-colors"
+                    className="inline-flex items-center gap-2 rounded-full border border-primary/40 bg-primary/5 px-4 py-2.5 text-sm font-medium text-primary hover:bg-primary/10 transition-colors touch-manipulation"
                   >
                     <RefreshCw size={14} />
                     Reconnect
@@ -495,7 +557,7 @@ function ChatPage() {
                 )}
                 <Link
                   to="/setup"
-                  className="inline-flex items-center gap-2 rounded-full border border-border bg-card px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground hover:border-border-strong transition-colors"
+                  className="inline-flex items-center gap-2 rounded-full border border-border bg-card px-4 py-2.5 text-sm font-medium text-muted-foreground hover:text-foreground hover:border-border-strong transition-colors touch-manipulation"
                 >
                   <Zap size={14} />
                   Setup guide
@@ -504,8 +566,8 @@ function ChatPage() {
             </div>
           </div>
         ) : threads.length === 0 && threadsQuery.isSuccess ? (
-          <div className="flex h-full items-center justify-center">
-            <div className="text-center space-y-4 max-w-xs px-4">
+          <div className="flex h-full items-center justify-center px-4">
+            <div className="text-center space-y-4 max-w-xs w-full">
               <div className="flex h-14 w-14 items-center justify-center rounded-full border border-border bg-muted mx-auto">
                 <MessageSquare className="h-6 w-6 text-muted-foreground" />
               </div>
@@ -518,7 +580,7 @@ function ChatPage() {
               <button
                 type="button"
                 onClick={createThread}
-                className="inline-flex items-center gap-2 rounded-full border border-primary/40 bg-primary/5 px-4 py-2 text-sm font-medium text-primary hover:bg-primary/10 transition-colors"
+                className="inline-flex items-center gap-2 rounded-full border border-primary/40 bg-primary/5 px-4 py-2.5 text-sm font-medium text-primary hover:bg-primary/10 transition-colors touch-manipulation"
               >
                 <Plus size={14} />
                 New thread
@@ -526,12 +588,20 @@ function ChatPage() {
             </div>
           </div>
         ) : (
-          <div className="flex h-full items-center justify-center">
-            <div className="text-center">
+          <div className="flex h-full items-center justify-center px-4">
+            <div className="text-center space-y-3">
               <MessageSquare className="mx-auto h-8 w-8 text-muted-foreground" />
-              <p className="mt-2 text-sm text-muted-foreground">
+              <p className="text-sm text-muted-foreground">
                 Select a thread or create a new one
               </p>
+              <button
+                type="button"
+                onClick={() => setSheetOpen(true)}
+                className="lg:hidden inline-flex items-center gap-2 rounded-full border border-border bg-card px-4 py-2.5 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors touch-manipulation"
+              >
+                <MessageSquare size={14} />
+                View threads
+              </button>
             </div>
           </div>
         )}

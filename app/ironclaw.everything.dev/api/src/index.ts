@@ -17,7 +17,7 @@ import {
 } from "./db/schema";
 import { createAuthMiddleware } from "./lib/auth";
 import { normalizeThread, normalizeTimelinePage } from "./lib/conversation";
-import { createConversationLiveHandler } from "./lib/conversation-live";
+import { createThreadChatBridge } from "./lib/conversation-live";
 import type { PluginsClient } from "./lib/plugins-types.gen";
 
 function generateId(): string {
@@ -677,7 +677,28 @@ export default createPlugin.withPlugins<PluginsClient>()({
 
         live: builder.conversation.live
           .use(requireAuth)
-          .handler(createConversationLiveHandler(s)),
+          .handler(async () => {
+            throw new ORPCError("BAD_REQUEST", {
+              message: "The live endpoint is deprecated. Use conversation.threadChat instead.",
+            });
+          }),
+
+        threadChat: builder.conversation.threadChat
+          .use(requireAuth)
+          .handler(createThreadChatBridge(s)),
+
+        threadApprove: builder.conversation.threadApprove
+          .use(requireAuth)
+          .handler(async ({ input, context }: any) => {
+            const ic = s.ironclaw({ ...context, userId: context.userId });
+            await ic.threads.resolveGate({
+              id: input.threadId,
+              runId: input.runId,
+              gateRef: input.gateRef,
+              resolution: input.approved ? "approved" : "denied",
+            });
+            return { success: true };
+          }),
       },
     };
   },

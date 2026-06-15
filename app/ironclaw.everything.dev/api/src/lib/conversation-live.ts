@@ -126,27 +126,33 @@ function createChunk(chunk: LiveChunk): LiveChunk {
   return chunk;
 }
 
-export function createConversationLiveHandler(services: { ironclaw: (ctx: any) => any }) {
+export function createThreadChatBridge(services: { ironclaw: (ctx: any) => any }) {
   return async function* ({ input, signal, context }: any) {
     const ic = services.ironclaw(context);
     const threadId = input.threadId as string;
-    const expectedRunId = (input.runId as string | undefined) ?? undefined;
-    const afterCursor = (input.afterCursor as string | undefined) ?? undefined;
-    const runIdFallback = expectedRunId ?? crypto.randomUUID();
-    const upstream = await ic.threads.streamEvents({ id: threadId, afterCursor });
+    const messages = (input.messages ?? []) as any[];
+    const clientActionId = (input.clientActionId as string | undefined) ?? `bridge-${crypto.randomUUID()}`;
+    const forwardedProps = input.forwardedProps as Record<string, unknown> | undefined;
+
+    const lastUserMsg = [...messages].reverse().find((m: any) => m.role === "user");
+    const content = (lastUserMsg?.content as string) ?? "";
+    const attachments = (forwardedProps?.attachments as any[] | undefined) ?? undefined;
+
+    const ack = await ic.threads.sendMessage({ id: threadId, content, clientActionId, attachments });
+    const ackRunId: string | undefined = ack.runId ?? ack.activeRunId;
+    const eventCursor = ack.eventCursor;
+
+    const upstream = await ic.threads.streamEvents({ id: threadId, afterCursor: String(eventCursor) });
     const pendingPreviews = new Map<string, ChatEvent["preview"]>();
     const activeToolCalls = new Set<string>();
     let runStarted = false;
-    let runMatched = !expectedRunId;
-    let boundRunId: string | undefined = expectedRunId || undefined;
     let terminalTextEmitted = false;
-    let seenRunIds = new Set<string>();
     let seenTextIds = new Set<string>();
 
     const emitRunStarted = (runId: string | undefined) => {
       if (runStarted) return;
       runStarted = true;
-      return createChunk({ type: "RUN_STARTED", threadId, runId: runId ?? runIdFallback });
+      return createChunk({ type: "RUN_STARTED", threadId, runId: runId ?? ackRunId ?? crypto.randomUUID() });
     };
 
     const emitCustom = (name: string, value: unknown, runId?: string): LiveChunk =>
@@ -201,14 +207,7 @@ export function createConversationLiveHandler(services: { ironclaw: (ctx: any) =
         if (signal?.aborted) break;
 
         const type = raw.type;
-        const eventRunId = extractEventRunId(raw) ?? expectedRunId ?? runIdFallback;
-
-        if (!runMatched) {
-          if (!eventRunId || eventRunId !== expectedRunId) continue;
-          runMatched = true;
-          boundRunId = eventRunId;
-          console.log(`[live] bound to runId=${boundRunId}`);
-        }
+        const eventRunId = extractEventRunId(raw) ?? ackRunId ?? crypto.randomUUID();
 
         if (type === "accepted" || type === "running") {
           const chunk = emitRunStarted(eventRunId);
@@ -355,9 +354,6 @@ export function createConversationLiveHandler(services: { ironclaw: (ctx: any) =
             yield createChunk({ type: "TEXT_MESSAGE_START", threadId, runId: eventRunId, messageId: msgId, role: "assistant" });
             yield createChunk({ type: "TEXT_MESSAGE_CONTENT", threadId, runId: eventRunId, messageId: msgId, delta: text });
             yield createChunk({ type: "TEXT_MESSAGE_END", threadId, runId: eventRunId, messageId: msgId });
-            console.log(`[live] terminal: runId=${eventRunId} path=final_reply with text`);
-          } else {
-            console.log(`[live] terminal: runId=${eventRunId} path=final_reply no text`);
           }
           yield createChunk({ type: "RUN_FINISHED", threadId, runId: eventRunId, finishReason: "stop" });
           return;
@@ -370,13 +366,8 @@ export function createConversationLiveHandler(services: { ironclaw: (ctx: any) =
           const chunk = emitRunStarted(eventRunId);
           if (chunk) yield chunk;
           yield emitCustom("ironclaw.failed", { runId: eventRunId, message, runState }, eventRunId);
-          const isMainRun = boundRunId === undefined || eventRunId === boundRunId;
-          if (isMainRun) {
-            yield createChunk({ type: "RUN_ERROR", threadId, runId: eventRunId, message });
-            return;
-          }
-          console.log(`[live] sub-run failed: runId=${eventRunId}`);
-          continue;
+          yield createChunk({ type: "RUN_ERROR", threadId, runId: eventRunId, message });
+          return;
         }
 
         if (type === "cancelled") {
@@ -384,13 +375,8 @@ export function createConversationLiveHandler(services: { ironclaw: (ctx: any) =
           const chunk = emitRunStarted(eventRunId);
           if (chunk) yield chunk;
           yield emitCustom("ironclaw.cancelled", { runId: eventRunId, ...response }, eventRunId);
-          const isMainRun = boundRunId === undefined || eventRunId === boundRunId;
-          if (isMainRun) {
-            yield createChunk({ type: "RUN_FINISHED", threadId, runId: eventRunId, finishReason: null });
-            return;
-          }
-          console.log(`[live] sub-run cancelled: runId=${eventRunId}`);
-          continue;
+          yield createChunk({ type: "RUN_FINISHED", threadId, runId: eventRunId, finishReason: null });
+          return;
         }
 
         if (type === "projection_snapshot" || type === "projection_update") {
@@ -415,7 +401,7 @@ export function createConversationLiveHandler(services: { ironclaw: (ctx: any) =
               if (tx) {
                 const txId = tx.id as string | undefined;
                 const body = tx.body as string | undefined;
-                const txRunId = (tx.runId ?? tx.run_id ?? extractEventRunId(raw) ?? expectedRunId ?? runIdFallback) as string;
+                const txRunId = (tx.runId ?? tx.run_id ?? extractEventRunId(raw) ?? ackRunId ?? crypto.randomUUID()) as string;
                 if (txId && body) textItems.push({ id: txId, body, runId: txRunId });
                 continue;
               }
@@ -437,19 +423,11 @@ export function createConversationLiveHandler(services: { ironclaw: (ctx: any) =
               }
             }
 
-            console.log(`[live] projection frame: boundRunId=${boundRunId ?? "none"} runStatuses=${runStatuses.length} text=${textItems.length} thinking=${thinkingItems.length} caps=${capActivities.length} gates=${gateItems.length}`);
-
-            // Determine effective runId from collected items
-            const projRunId = runStatuses.length > 0
-              ? runStatuses[0]!.runId
-              : textItems.length > 0
-                ? textItems[0]!.runId
-                : extractEventRunId(raw) ?? expectedRunId ?? runIdFallback;
+            const projRunId = ackRunId ?? crypto.randomUUID();
 
             const ikChunk = emitRunStarted(projRunId);
             if (ikChunk) yield ikChunk;
 
-            // Emit thinking items
             for (const th of thinkingItems) {
               yield emitCustom("ironclaw.thinking", {
                 body: th.body,
@@ -458,7 +436,6 @@ export function createConversationLiveHandler(services: { ironclaw: (ctx: any) =
               }, projRunId);
             }
 
-            // Emit capability activities
             for (const ca of capActivities) {
               const invocationId = (ca.invocationId ?? ca.invocation_id) as string | undefined;
               const capId = ((ca.capabilityId ?? ca.capability_id) as string) || "tool";
@@ -494,7 +471,6 @@ export function createConversationLiveHandler(services: { ironclaw: (ctx: any) =
               }
             }
 
-            // Emit gate items
             for (const g of gateItems) {
               const gateRef = (g.gateRef ?? g.gate_ref) as string | undefined;
               const headline = (g.headline as string) || "Approval required";
@@ -508,7 +484,6 @@ export function createConversationLiveHandler(services: { ironclaw: (ctx: any) =
               }
             }
 
-            // Emit text items (deduped by runId:textId composite key)
             for (const tx of textItems) {
               const dedupeKey = `${tx.runId}:${tx.id}`;
               if (seenTextIds.has(dedupeKey)) continue;
@@ -520,65 +495,42 @@ export function createConversationLiveHandler(services: { ironclaw: (ctx: any) =
               yield createChunk({ type: "TEXT_MESSAGE_END", threadId, runId: tx.runId, messageId: msgId });
             }
 
-            // Emit terminal status last (after all other items)
             for (const rs of runStatuses) {
+              if (rs.runId !== ackRunId) continue;
               const { runId, status: st } = rs;
-              if (!seenRunIds.has(runId)) {
-                seenRunIds.add(runId);
-                yield emitCustom("ironclaw.running", { runId, status: st }, runId);
-              }
               const isTerminal = ["completed", "succeeded", "failed", "cancelled", "recovery_required"].includes(st);
               const isFailed = ["failed", "recovery_required"].includes(st);
-              const isMainRun = boundRunId === undefined || runId === boundRunId;
               if (isTerminal) {
                 if (isFailed) {
                   const msg = (rs.raw.failureSummary ?? rs.raw.failure_summary) as string ?? `Run ${st}`;
                   yield emitCustom("ironclaw.failed", { runId, message: msg, runState: rs.raw }, runId);
-                  if (isMainRun) {
-                    yield createChunk({ type: "RUN_ERROR", threadId, runId, message: msg });
-                    console.log(`[live] main run terminal: runId=${runId} status=${st} path=error`);
-                    return;
-                  }
-                  console.log(`[live] sub-run terminal: runId=${runId} status=${st}`);
-                  continue;
+                  yield createChunk({ type: "RUN_ERROR", threadId, runId, message: msg });
+                  return;
                 }
                 if (st === "cancelled") {
                   yield emitCustom("ironclaw.cancelled", { runId }, runId);
-                  if (isMainRun) {
-                    yield createChunk({ type: "RUN_FINISHED", threadId, runId, finishReason: null });
-                    console.log(`[live] main run terminal: runId=${runId} status=cancelled`);
-                    return;
-                  }
-                  console.log(`[live] sub-run terminal: runId=${runId} status=cancelled`);
-                  continue;
-                }
-                if (isMainRun) {
-                  if (!terminalTextEmitted) {
-                    try {
-                      const raw = await ic.threads.getTimeline({ id: threadId, limit: 10 });
-                      const entries: any[] = raw.data ?? [];
-                      const assistantText = findAssistantTextForRun(entries, runId);
-                      if (assistantText) {
-                        terminalTextEmitted = true;
-                        const msgId = assistantMessageId(runId);
-                        yield createChunk({ type: "TEXT_MESSAGE_START", threadId, runId, messageId: msgId, role: "assistant" });
-                        yield createChunk({ type: "TEXT_MESSAGE_CONTENT", threadId, runId, messageId: msgId, delta: assistantText });
-                        yield createChunk({ type: "TEXT_MESSAGE_END", threadId, runId, messageId: msgId });
-                        console.log(`[live] main run terminal: runId=${runId} path=timeline_reconcile`);
-                      } else {
-                        console.log(`[live] main run terminal: runId=${runId} path=no_text`);
-                      }
-                    } catch {
-                      console.log(`[live] main run terminal: runId=${runId} path=reconcile_error`);
-                    }
-                  }
-                  yield emitCustom("ironclaw.finished", { runId, status: st }, runId);
-                  yield createChunk({ type: "RUN_FINISHED", threadId, runId, finishReason: "stop" });
-                  console.log(`[live] main run terminal: runId=${runId} status=${st} path=completed`);
+                  yield createChunk({ type: "RUN_FINISHED", threadId, runId, finishReason: null });
                   return;
                 }
-                // Sub-run completion — don't terminate, just log
-                console.log(`[live] sub-run terminal: runId=${runId} status=${st}`);
+                if (!terminalTextEmitted) {
+                  try {
+                    const raw = await ic.threads.getTimeline({ id: threadId, limit: 10 });
+                    const entries: any[] = raw.data ?? [];
+                    const assistantText = findAssistantTextForRun(entries, runId);
+                    if (assistantText) {
+                      terminalTextEmitted = true;
+                      const msgId = assistantMessageId(runId);
+                      yield createChunk({ type: "TEXT_MESSAGE_START", threadId, runId, messageId: msgId, role: "assistant" });
+                      yield createChunk({ type: "TEXT_MESSAGE_CONTENT", threadId, runId, messageId: msgId, delta: assistantText });
+                      yield createChunk({ type: "TEXT_MESSAGE_END", threadId, runId, messageId: msgId });
+                    }
+                  } catch {
+                    // reconcile failed, proceed
+                  }
+                }
+                yield emitCustom("ironclaw.finished", { runId, status: st }, runId);
+                yield createChunk({ type: "RUN_FINISHED", threadId, runId, finishReason: "stop" });
+                return;
               }
             }
           }
@@ -593,7 +545,7 @@ export function createConversationLiveHandler(services: { ironclaw: (ctx: any) =
           try {
             const raw = await ic.threads.getTimeline({ id: threadId, limit: 10 });
             const entries: any[] = raw.data ?? [];
-            const targetRunId = expectedRunId ?? runIdFallback;
+            const targetRunId = ackRunId ?? crypto.randomUUID();
             const assistantText = findAssistantTextForRun(entries, targetRunId);
             if (assistantText) {
               terminalTextEmitted = true;
@@ -601,20 +553,16 @@ export function createConversationLiveHandler(services: { ironclaw: (ctx: any) =
               yield createChunk({ type: "TEXT_MESSAGE_START", threadId, runId: targetRunId, messageId: msgId, role: "assistant" });
               yield createChunk({ type: "TEXT_MESSAGE_CONTENT", threadId, runId: targetRunId, messageId: msgId, delta: assistantText });
               yield createChunk({ type: "TEXT_MESSAGE_END", threadId, runId: targetRunId, messageId: msgId });
-              console.log(`[live] stream-end reconcile: runId=${targetRunId} path=timeline_reconcile`);
-            } else {
-              console.log(`[live] stream-end reconcile: runId=${targetRunId} path=no_text`);
             }
           } catch {
-            console.log(`[live] stream-end reconcile: error`);
+            // reconcile failed, proceed
           }
         }
-        yield createChunk({ type: "RUN_FINISHED", threadId, runId: expectedRunId ?? runIdFallback, finishReason: "stop" });
-        console.log(`[live] stream-end reconcile: runId=${expectedRunId ?? runIdFallback} path=finished`);
+        yield createChunk({ type: "RUN_FINISHED", threadId, runId: ackRunId ?? crypto.randomUUID(), finishReason: "stop" });
       }
     } catch (error) {
       if (signal?.aborted) return;
-      yield createChunk({ type: "RUN_ERROR", threadId, runId: expectedRunId ?? runIdFallback, message: normalizeMessage(error) });
+      yield createChunk({ type: "RUN_ERROR", threadId, runId: ackRunId ?? crypto.randomUUID(), message: normalizeMessage(error) });
     } finally {
       if (typeof upstream.return === "function") {
         try {

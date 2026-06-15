@@ -7,7 +7,7 @@
   "staging": {
     "domain": "dev.ironclaw..everything.dev"
   },
-  "repository": "https://github.com/nearai/ironclaw",
+  "repository": "https://github.com/nearbuilders/ironclaw",
   "ci": {
     "railway": {
       "service": "app"
@@ -23,15 +23,15 @@
         "ALLOW_UNTRUSTED_SSR",
         "CSP_STRICT"
       ],
-      "production": "https://elliot-braem-4908-host-ironclaw-nearbuilders-f0dd72904-ze.zephyrcloud.app",
+      "production": "https://elliot-braem-4939-host-ironclaw-nearbuilders-8ccf6aea7-ze.zephyrcloud.app",
       "integrity": "sha384-uzbBU2DfN9ozBwVXUPjGyv+w29xMfBYmNTYnKuQLsxvzNTufAO6PWH6QrpPa51bB"
     },
     "ui": {
       "development": "local:ui",
-      "ssr": "https://elliot-braem-4905-ui-ironclaw-nearbuilders-af3c84f8b-ze.zephyrcloud.app",
-      "ssrIntegrity": "sha384-UY/BrfqoHkc5WM/dHojMmberM3gZSL2M+ZpWq6XndzyZULbvc+fQWEERZlMvrHNx",
-      "production": "https://elliot-braem-4904-ui-ironclaw-nearbuilders-97e3b3354-ze.zephyrcloud.app",
-      "integrity": "sha384-ezam6Sowb928gqQ5C1WuOXw7ZsHFyaBrqHjH/RpuJJVy0T4EKAydgHR8v052gQXM"
+      "ssr": "https://elliot-braem-4936-ui-ironclaw-nearbuilders-927853c84-ze.zephyrcloud.app",
+      "ssrIntegrity": "sha384-VE+zFf3RNb/k7cmvLsx7jv5fbzXFkoH0E6qRAm6Pa+i1tyukzR3C0OwaKBwrWj8C",
+      "production": "https://elliot-braem-4935-ui-ironclaw-nearbuilders-7f3b1b0f1-ze.zephyrcloud.app",
+      "integrity": "sha384-Xl/sdCzLNNsj/5UnahfCzLOOr4tYHJxtpQcdelbN0DhYlexJkubQG9Bi25/FnVrD"
     },
     "api": {
       "development": "local:api",
@@ -39,8 +39,8 @@
         "API_DATABASE_URL",
         "IRONCLAW_BASE_URL"
       ],
-      "production": "https://elliot-braem-4906-api-ironclaw-nearbuilders-e073eccf0-ze.zephyrcloud.app",
-      "integrity": "sha384-y9M4ciAzmVoRYp9I1JqZMIxqe/PEQBDqnR7cErBRhQ4Vx2JfsBMGCNZg7cDFESxp"
+      "production": "https://elliot-braem-4937-api-ironclaw-nearbuilders-b0e39a027-ze.zephyrcloud.app",
+      "integrity": "sha384-8NGal8rGSGjBPYAPSSIXHNYStx9dnbWXZO2DgLJJ9GTx+8M9uHgPeS2+GWO96oDU"
     }
   },
   "plugins": {
@@ -53,7 +53,7 @@
         "IRONCLAW_BASE_URL",
         "IRONCLAW_API_TOKEN"
       ],
-      "production": "https://elliot-braem-4907-every-plugin-ironclaw-ironclaw--26f5fe632-ze.zephyrcloud.app",
+      "production": "https://elliot-braem-4938-every-plugin-ironclaw-ironclaw--770c82e6d-ze.zephyrcloud.app",
       "integrity": "sha384-Qa3PzOv3QpwTcmsPeaaIg8fCHwDRK5c9AWFognsEUS49YnDHT7K3Ekxv4+xGaW9f"
     }
   }
