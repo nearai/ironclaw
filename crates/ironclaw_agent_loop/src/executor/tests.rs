@@ -4989,3 +4989,349 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
          (pre-fix: was Some, reusing the same resume_token)"
     );
 }
+
+// ── Resume-origin Backend failure must not die as scope_mismatch ─────────────
+
+/// Regression test for the terminal `scope_mismatch` / `HostUnavailable` failure
+/// that surfaces when a capability's approval-resume dispatch returns a transient
+/// `Backend` error.
+///
+/// # Bug (capabilities.rs, pre-fix)
+///
+/// 1. Executor dispatches the capability with `approval_resume` set (batch path).
+/// 2. Host returns `Failed(Backend)`.
+/// 3. `handle_capability_error` clears `state.pending_approval_resume` BEFORE
+///    asking the planner for a recovery outcome.
+/// 4. Planner returns `RecoveryOutcome::Retry`.
+/// 5. Retry dispatch calls `invoke_capability(…, None)` — `approval_resume` is
+///    dropped.
+/// 6. MockHost `invoke_capability` has no scripted outcome → returns
+///    `Err(Internal, "single script exhausted")` → `capability_host_error` →
+///    `AgentLoopExecutorError::HostUnavailable { stage: Capability }`.
+///    In production the host would instead fail with `ScopeMismatch` because the
+///    original run's `input_ref` has no approval context to validate against.
+///
+/// # Fix (Part C-sub-A)
+///
+/// When the failure originated from an approval-resume dispatch, intercept
+/// `RecoveryOutcome::Retry` and redirect it to `ToolErrorResult` instead.
+/// The model sees the real backend error and the user can re-approve — no retry
+/// of the side effect, no scope_mismatch.
+///
+/// # What this test asserts (observable, not implementation detail)
+///
+/// - **Pre-fix (RED)**: `execute_family` on Phase 2 returns
+///   `Err(AgentLoopExecutorError::HostUnavailable { stage: HostStage::Capability })`
+///   — the run terminally dies.
+/// - **Post-fix (GREEN)**: `execute_family` on Phase 2 returns `Ok(LoopExit::Completed(_))`
+///   — the model sees the backend error as a tool result, issues a final reply,
+///   and the run completes cleanly.
+#[tokio::test]
+async fn resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
+    let cap1_request_id = ApprovalRequestId::new();
+    let cap1_resume_token =
+        CapabilityResumeToken::new("resume-token:sm-test-cap1").expect("valid token");
+    let cap1_correlation_id = CorrelationId::new();
+    let cap1_input_ref =
+        CapabilityInputRef::new("input:run-original:sm-cap1-uuid").expect("valid input ref");
+
+    let cap1_approval_resume = CapabilityApprovalResume {
+        approval_request_id: cap1_request_id,
+        resume_token: cap1_resume_token,
+        correlation_id: cap1_correlation_id,
+        input_ref: cap1_input_ref.clone(),
+        input: serde_json::json!({"action": "cap1"}),
+        estimate: ResourceEstimate::default(),
+    };
+
+    // Phase 1 model response: issues cap1 with original-run input_ref.
+    let cap1_model_response = ironclaw_turns::run_profile::LoopModelResponse {
+        chunks: Vec::new(),
+        safe_reasoning_deltas: Vec::new(),
+        output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+            surface_version: surface_version(),
+            capability_id: capability_id(),
+            input_ref: cap1_input_ref,
+            effective_capability_ids: vec![capability_id()],
+            provider_replay: None,
+        }]),
+        effective_model_profile_id: ironclaw_turns::run_profile::ModelProfileId::new("model")
+            .expect("valid"),
+        usage: None,
+    };
+
+    // Batch outcomes:
+    //   [0] Phase 1: cap1 → ApprovalRequired → gate blocked.
+    //   [1] Phase 2: cap1 approval-resume → Failed(Backend) — the bug trigger.
+    let batch_outcomes = vec![
+        // [0] cap1 → ApprovalRequired (gate blocked).
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::ApprovalRequired {
+                gate_ref: LoopGateRef::new("gate:sm-test-cap1").expect("valid"),
+                safe_summary: "cap1 needs approval".to_string(),
+                approval_resume: Some(cap1_approval_resume),
+            }],
+            stopped_on_suspension: true,
+        },
+        // [1] cap1 approval-resume → Backend failure.
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Failed(
+                ironclaw_turns::run_profile::CapabilityFailure {
+                    error_kind: CapabilityFailureKind::Backend,
+                    safe_summary: "transient backend error during cap1 resume".to_string(),
+                    detail: None,
+                },
+            )],
+            stopped_on_suspension: false,
+        },
+    ];
+
+    // Phase 1: one model turn (cap1); Phase 2: after Backend→ToolErrorResult
+    // the loop continues and needs a model turn to issue the final reply.
+    let host = MockHost::new(vec![
+        cap1_model_response, // Phase 1: issues cap1
+        reply_response(),    // Phase 2 (post-fix): model sees tool error, issues reply
+    ])
+    .with_batch_outcomes(batch_outcomes);
+    // Deliberately NO single_outcomes: pre-fix, the retry would consume one and
+    // get `Err(Internal)` → HostUnavailable.  Post-fix, no retry is attempted.
+
+    let executor = CanonicalAgentLoopExecutor;
+
+    // ── Phase 1: cap1 → ApprovalRequired → Blocked ───────────────────────────
+    let initial_state = LoopExecutionState::initial_for_run(host.run_context());
+    let phase1_exit = executor
+        .execute_family(&crate::families::default(), &host, initial_state)
+        .await
+        .expect("phase 1 must succeed (blocks on cap1 gate)");
+    assert!(
+        matches!(phase1_exit, LoopExit::Blocked(_)),
+        "phase 1 must block on cap1 approval gate; got {phase1_exit:?}"
+    );
+
+    // Recover the BeforeBlock checkpoint state to use as Phase 2 input.
+    let phase1_bb = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+    assert!(
+        phase1_bb.pending_approval_resume.is_some(),
+        "phase 1 BeforeBlock must carry pending_approval_resume"
+    );
+    assert_eq!(
+        phase1_bb
+            .pending_approval_resume
+            .as_ref()
+            .unwrap()
+            .approval_request_id,
+        cap1_request_id,
+        "phase 1 BeforeBlock pending_approval_resume must be for cap1"
+    );
+
+    // ── Phase 2: approve cap1 → approval-resume → Backend failure ─────────────
+    //
+    // BUG TRIGGER: the batch returns Failed(Backend) for the approval-resume
+    // dispatch.  On unfixed code:
+    //   handle_capability_error clears pending_approval_resume at L637 BEFORE
+    //   recovery decides → retry fires with None → invoke_capability has no
+    //   scripted outcome → Err(Internal) → HostUnavailable.
+    //
+    // After fix (Part C-sub-A):
+    //   Resume-origin Backend failure is intercepted before any retry → surfaced
+    //   as ToolErrorResult → loop continues → model issues final reply → Done.
+    let phase2_result = executor
+        .execute_family(&crate::families::default(), &host, phase1_bb)
+        .await;
+
+    // Primary assertion: the run must NOT die as HostUnavailable.
+    // Pre-fix this panics; post-fix it passes.
+    let phase2_exit = phase2_result.expect(
+        "REGRESSION: resume-origin Backend failure must not kill the run as HostUnavailable. \
+         Pre-fix: handle_capability_error clears pending_approval_resume BEFORE recovery \
+         decides to retry → retry fires invoke_capability with approval_resume=None → \
+         single script exhausted → HostUnavailable (in production: ScopeMismatch). \
+         Fix: intercept Retry for resume-origin failures and surface as ToolErrorResult \
+         so the model can re-approve without a terminal run death.",
+    );
+
+    // Post-fix: the model saw the tool error, issued a final reply → Completed.
+    assert!(
+        matches!(phase2_exit, LoopExit::Completed(_)),
+        "phase 2 must complete the run after Backend→ToolErrorResult; got {phase2_exit:?}"
+    );
+
+    // No single invoke_capability calls should have been made: the C-sub-A guard
+    // prevents the retry dispatch entirely for resume-origin failures.
+    assert!(
+        host.single_invocations().is_empty(),
+        "no single invoke_capability call must be made for a resume-origin Backend failure \
+         (retry is suppressed to avoid double-exec)"
+    );
+}
+
+/// Regression test for the terminal `scope_mismatch` / `HostUnavailable` failure
+/// that surfaces when a capability's **auth-resume** dispatch returns a transient
+/// `Backend` error.
+///
+/// # Bug (capabilities.rs, pre-fix)
+///
+/// 1. Phase 1: executor dispatches the capability; host returns `AuthRequired`.
+///    GateStage stores `pending_auth_resume` in the BeforeBlock checkpoint.
+/// 2. Phase 2: executor detects `pending_auth_resume` in the prompt stage,
+///    re-dispatches the capability via `invoke_capability_batch(auth_resume=…)`.
+/// 3. Host returns `Failed(Backend)` for the re-dispatch.
+/// 4. `handle_capability_error` clears `state.pending_auth_resume` at ~L667
+///    BEFORE asking the planner for a recovery outcome.
+/// 5. Planner returns `RecoveryOutcome::Retry`.
+/// 6. Retry calls `invoke_capability(…)` (single, non-batch) with no auth context.
+///    MockHost has no scripted single outcome → `Err(Internal, "single script
+///    exhausted")` → `capability_host_error` → `HostUnavailable { stage: Capability }`.
+///    In production the product adapter would instead fail with `ScopeMismatch`
+///    because the original run's `input_ref` has no auth context to validate against.
+///
+/// # Fix (Part C-sub-A extended to auth-resume)
+///
+/// Before clearing `pending_auth_resume`, snapshot whether this failure is
+/// auth-resume-origin (`captured_auth_resume_origin`).  When `is_resume_origin`
+/// is true (either approval- or auth-resume origin), intercept
+/// `RecoveryOutcome::Retry` and redirect it to `ToolErrorResult` instead.
+/// The model sees the real backend error and the user can re-authenticate —
+/// no retry of the side effect, no scope_mismatch.
+///
+/// # What this test asserts (observable, not implementation detail)
+///
+/// - **Pre-fix (RED)**: Phase 2 `execute_family` returns
+///   `Err(AgentLoopExecutorError::HostUnavailable { stage: HostStage::Capability })`
+///   — the run terminally dies.
+/// - **Post-fix (GREEN)**: Phase 2 returns `Ok(LoopExit::Completed(_))` — the
+///   model sees the backend error as a tool result, issues a final reply, and
+///   the run completes cleanly.
+#[tokio::test]
+async fn auth_resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
+    let cap1_input_ref =
+        CapabilityInputRef::new("input:run-original:auth-sm-cap1-uuid").expect("valid input ref");
+
+    // Phase 1 model response: issues cap1 with original-run input_ref.
+    // (No provider_replay — this is a non-provider-backed auth resume, so
+    // Phase 2 reuses the stored input_ref directly via
+    // pending_auth_resume_staged_input_candidate.)
+    let cap1_model_response = ironclaw_turns::run_profile::LoopModelResponse {
+        chunks: Vec::new(),
+        safe_reasoning_deltas: Vec::new(),
+        output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+            surface_version: surface_version(),
+            capability_id: capability_id(),
+            input_ref: cap1_input_ref,
+            effective_capability_ids: vec![capability_id()],
+            provider_replay: None,
+        }]),
+        effective_model_profile_id: ironclaw_turns::run_profile::ModelProfileId::new("model")
+            .expect("valid"),
+        usage: None,
+    };
+
+    // Batch outcomes:
+    //   [0] Phase 1: cap1 → AuthRequired → gate blocked.
+    //   [1] Phase 2: cap1 auth-resume → Failed(Backend) — the bug trigger.
+    let batch_outcomes = vec![
+        // [0] Phase 1: cap1 → AuthRequired (gate blocked).
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::AuthRequired {
+                gate_ref: LoopGateRef::new("gate:auth-sm-test-cap1").expect("valid"),
+                credential_requirements: Vec::new(),
+                safe_summary: "cap1 needs auth".to_string(),
+            }],
+            stopped_on_suspension: true,
+        },
+        // [1] Phase 2: cap1 auth-resume → Backend failure.
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Failed(
+                ironclaw_turns::run_profile::CapabilityFailure {
+                    error_kind: CapabilityFailureKind::Backend,
+                    safe_summary: "transient backend error during cap1 auth-resume".to_string(),
+                    detail: None,
+                },
+            )],
+            stopped_on_suspension: false,
+        },
+    ];
+
+    // Phase 1: one model turn (cap1); Phase 2: after Backend→ToolErrorResult
+    // the loop continues and needs a model turn to issue the final reply.
+    // (Auth-resume Phase 2 skips the model for the capability re-dispatch but
+    // needs a model call AFTER the error is surfaced for the final reply.)
+    let host = MockHost::new(vec![
+        cap1_model_response, // Phase 1: issues cap1
+        reply_response(),    // Phase 2 (post-fix): model sees tool error, issues reply
+    ])
+    .with_batch_outcomes(batch_outcomes);
+    // Deliberately NO single_outcomes: pre-fix, the retry would consume one and
+    // get `Err(Internal)` → HostUnavailable.  Post-fix, no retry is attempted.
+
+    let executor = CanonicalAgentLoopExecutor;
+
+    // ── Phase 1: cap1 → AuthRequired → Blocked ──────────────────────────────
+    let initial_state = LoopExecutionState::initial_for_run(host.run_context());
+    let phase1_exit = executor
+        .execute_family(&crate::families::default(), &host, initial_state)
+        .await
+        .expect("phase 1 must succeed (blocks on cap1 auth gate)");
+    assert!(
+        matches!(phase1_exit, LoopExit::Blocked(_)),
+        "phase 1 must block on cap1 auth gate; got {phase1_exit:?}"
+    );
+
+    // Recover the BeforeBlock checkpoint state to use as Phase 2 input.
+    let phase1_bb = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+    assert!(
+        phase1_bb.pending_auth_resume.is_some(),
+        "phase 1 BeforeBlock must carry pending_auth_resume"
+    );
+    assert_eq!(
+        phase1_bb
+            .pending_auth_resume
+            .as_ref()
+            .unwrap()
+            .capability_id,
+        capability_id(),
+        "phase 1 BeforeBlock pending_auth_resume must be for cap1"
+    );
+
+    // ── Phase 2: OAuth completes → auth-resume → Backend failure ────────────
+    //
+    // BUG TRIGGER: the batch returns Failed(Backend) for the auth-resume
+    // dispatch.  On unfixed code:
+    //   handle_capability_error clears pending_auth_resume at ~L667 BEFORE
+    //   recovery decides → retry fires with None → invoke_capability has no
+    //   scripted outcome → Err(Internal) → HostUnavailable.
+    //
+    // After fix (Part C-sub-A extended to auth-resume):
+    //   Auth-resume-origin Backend failure is intercepted before any retry →
+    //   surfaced as ToolErrorResult → loop continues → model issues final
+    //   reply → Done.
+    let phase2_result = executor
+        .execute_family(&crate::families::default(), &host, phase1_bb)
+        .await;
+
+    // Primary assertion: the run must NOT die as HostUnavailable.
+    // Pre-fix this panics; post-fix it passes.
+    let phase2_exit = phase2_result.expect(
+        "REGRESSION: auth-resume-origin Backend failure must not kill the run as \
+         HostUnavailable. Pre-fix: handle_capability_error clears pending_auth_resume \
+         BEFORE recovery decides to retry → retry fires invoke_capability with \
+         auth_resume=None → single script exhausted → HostUnavailable (in production: \
+         ScopeMismatch). Fix: intercept Retry for auth-resume-origin failures and \
+         surface as ToolErrorResult so the model can re-auth without a terminal run death.",
+    );
+
+    // Post-fix: the model saw the tool error, issued a final reply → Completed.
+    assert!(
+        matches!(phase2_exit, LoopExit::Completed(_)),
+        "phase 2 must complete the run after Backend→ToolErrorResult; got {phase2_exit:?}"
+    );
+
+    // No single invoke_capability calls should have been made: the C-sub-A guard
+    // prevents the retry dispatch entirely for auth-resume-origin failures.
+    assert!(
+        host.single_invocations().is_empty(),
+        "no single invoke_capability call must be made for an auth-resume-origin Backend \
+         failure (retry is suppressed to avoid double-exec)"
+    );
+}

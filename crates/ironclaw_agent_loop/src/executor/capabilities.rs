@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use ironclaw_turns::{
     LoopFailureKind, LoopResultRef,
     run_profile::{
-        CapabilityBatchInvocation, CapabilityCallCandidate, CapabilityFailureKind,
-        CapabilityOutcome, CapabilityProgress, CapabilityResultMessage, LoopDriverNoteKind,
-        LoopProgressEvent, VisibleCapabilitySurface,
+        CapabilityApprovalResume, CapabilityBatchInvocation, CapabilityCallCandidate,
+        CapabilityFailureKind, CapabilityOutcome, CapabilityProgress, CapabilityResultMessage,
+        LoopDriverNoteKind, LoopProgressEvent, VisibleCapabilitySurface,
     },
 };
 
@@ -634,6 +634,49 @@ impl CapabilityStage {
         mut model_observation: Option<ironclaw_turns::run_profile::ModelVisibleToolObservation>,
         capability_batch: &mut CapabilityBatchTurnSummary,
     ) -> Result<BatchStep, AgentLoopExecutorError> {
+        // Snapshot resume-origin flags for this call BEFORE clearing the pending
+        // slots.
+        //
+        // Safety invariants:
+        //   S1: A resume-origin failure must never surface as scope_mismatch /
+        //       terminal "Capability: unavailable".
+        //   S2: A side-effecting capability must never be silently re-executed by
+        //       a retry — the first resume dispatch already hit the backend.
+        //
+        // Part C-sub-A (primary guard): when this failure originated from an
+        // approval-resume OR auth-resume dispatch (`is_resume_origin == true`), we
+        // intercept any `RecoveryOutcome::Retry` outcome below and redirect it to
+        // `ToolErrorResult` instead.  This:
+        //   - Kills scope_mismatch (S1): no retry ever reaches the cross-run
+        //     input_ref without the resume context.
+        //   - Prevents double-exec (S2): the backend is not invoked a second time.
+        //   - Surfaces the real error to the model so the user can re-approve /
+        //     re-authenticate.
+        //
+        // Auth-resume note: `PendingAuthResume` carries `input_ref` only (no
+        // inline `input` value); a non-resume retry dispatched through
+        // `capability_invocation_from_candidate(call.clone(), None)` would reach
+        // the product adapter's `ensure_ref_scoped_to_run` check without the auth
+        // context and fail with `ScopeMismatch`.  The same surface-and-continue
+        // redirect is therefore the correct fix for both resume origins.
+        //
+        // Part A (belt-and-suspenders): if a retry IS dispatched (only possible
+        // when `is_resume_origin == false`, i.e. non-resume path), we always pass
+        // `None` as before.  If this logic ever changes to allow a resume-origin
+        // retry, the approval/auth context must be threaded into
+        // `capability_invocation_from_candidate` so the retry cannot reach the host
+        // without its resume context.
+        let captured_approval_resume: Option<CapabilityApprovalResume> = state
+            .pending_approval_resume
+            .as_ref()
+            .filter(|r| r.capability_id == call.capability_id)
+            .map(|r| r.to_approval_resume());
+        let captured_auth_resume_origin: bool = state
+            .pending_auth_resume
+            .as_ref()
+            .is_some_and(|r| r.capability_id == call.capability_id);
+        let is_resume_origin = captured_approval_resume.is_some() || captured_auth_resume_origin;
+
         clear_matching_pending_approval_resume(&mut state, &call);
         clear_matching_pending_auth_resume(&mut state, &call);
         for _ in 0..MAX_CAPABILITY_RETRIES {
@@ -692,6 +735,30 @@ impl CapabilityStage {
                     recovery, alter, ..
                 } => {
                     state.recovery_state = recovery;
+
+                    // Part C-sub-A: a resume-origin retryable failure must not be
+                    // silently re-dispatched.  The first dispatch already contacted
+                    // the backend (side-effect risk) and a retry without the
+                    // approval/auth context would cause scope_mismatch.  Surface
+                    // the real error to the model as a clean tool error and
+                    // continue the loop so the user can re-approve / re-auth.
+                    if is_resume_origin {
+                        append_blocked_capability_error_result(
+                            ctx.host,
+                            &mut state,
+                            &call,
+                            &summary,
+                            model_observation,
+                            capability_batch,
+                        )
+                        .await?;
+                        match CheckpointStage.cancel_if_requested(ctx, state).await? {
+                            CancelCheck::Continue(next) => state = *next,
+                            CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
+                        }
+                        return Ok(BatchStep::Continue(Box::new(state)));
+                    }
+
                     match CheckpointStage.cancel_if_requested(ctx, state).await? {
                         CancelCheck::Continue(next) => state = *next,
                         CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
@@ -711,6 +778,11 @@ impl CapabilityStage {
                             })?,
                         )
                         .await;
+                    // Part A: Non-resume-origin retry.  `is_resume_origin` is
+                    // `false` here (the Part C-sub-A guard above short-circuited
+                    // for both approval-resume and auth-resume cases), so passing
+                    // `None` is correct and safe — there is no cross-run input_ref
+                    // to protect.
                     let retry_result = ctx
                         .host
                         .invoke_capability(capability_invocation_from_candidate(call.clone(), None))
