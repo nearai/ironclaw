@@ -88,13 +88,25 @@ pub(crate) struct MutableOutboundDeliveryTargetRegistry {
     providers: RwLock<BTreeMap<String, Arc<dyn OutboundDeliveryTargetProvider>>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutboundDeliveryTargetRegistrationOutcome {
+    Registered,
+    Replaced,
+}
+
 impl std::fmt::Debug for MutableOutboundDeliveryTargetRegistry {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let provider_count = self
-            .providers
-            .read()
-            .map(|providers| providers.len())
-            .unwrap_or_default();
+        let provider_count = match self.providers.read() {
+            Ok(providers) => providers.len(),
+            Err(error) => {
+                tracing::debug!(
+                    target = "ironclaw::reborn::outbound_preferences",
+                    error = ?error,
+                    "outbound target registry read lock failed during debug formatting"
+                );
+                0
+            }
+        };
         formatter
             .debug_struct("MutableOutboundDeliveryTargetRegistry")
             .field("providers", &provider_count)
@@ -116,15 +128,20 @@ impl MutableOutboundDeliveryTargetRegistry {
         &self,
         provider_key: impl Into<String>,
         provider: Arc<dyn OutboundDeliveryTargetProvider>,
-    ) -> bool {
-        let Ok(mut providers) = self.providers.write() else {
-            tracing::warn!(
+    ) -> Result<OutboundDeliveryTargetRegistrationOutcome, RebornServicesError> {
+        let mut providers = self.providers.write().map_err(|error| {
+            tracing::debug!(
                 target = "ironclaw::reborn::outbound_preferences",
-                "outbound target registry lock failed while registering provider"
+                error = ?error,
+                "outbound target registry write lock failed"
             );
-            return false;
+            outbound_target_registry_error()
+        })?;
+        let outcome = match providers.insert(provider_key.into(), provider) {
+            Some(_) => OutboundDeliveryTargetRegistrationOutcome::Replaced,
+            None => OutboundDeliveryTargetRegistrationOutcome::Registered,
         };
-        providers.insert(provider_key.into(), provider).is_none()
+        Ok(outcome)
     }
 
     fn providers(
@@ -133,7 +150,14 @@ impl MutableOutboundDeliveryTargetRegistry {
         self.providers
             .read()
             .map(|providers| providers.values().cloned().collect())
-            .map_err(|_| outbound_target_registry_error())
+            .map_err(|error| {
+                tracing::debug!(
+                    target = "ironclaw::reborn::outbound_preferences",
+                    error = ?error,
+                    "outbound target registry read lock failed"
+                );
+                outbound_target_registry_error()
+            })
     }
 }
 

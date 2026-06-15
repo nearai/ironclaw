@@ -96,7 +96,7 @@ use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore, builtin_ext
 use crate::local_dev_capability_policy::local_dev_capability_policy;
 use crate::outbound_preferences::{
     MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetProvider,
-    RebornOutboundPreferencesFacade,
+    OutboundDeliveryTargetRegistrationOutcome, RebornOutboundPreferencesFacade,
 };
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::runtime_input::{
@@ -1096,14 +1096,18 @@ impl RebornRuntime {
         &self,
         provider_key: impl Into<String>,
         provider: Arc<dyn OutboundDeliveryTargetProvider>,
-    ) -> bool {
+    ) -> Result<OutboundDeliveryTargetRegistrationOutcome, RebornRuntimeError> {
         let Some(registry) = self.outbound_delivery_target_registry.as_ref() else {
-            tracing::debug!(
-                "register_outbound_delivery_target_provider: local runtime registry unavailable"
-            );
-            return false;
+            return Err(RebornRuntimeError::InvalidArgument {
+                reason: "outbound delivery target registry unavailable for this runtime"
+                    .to_string(),
+            });
         };
-        registry.register_provider(provider_key, provider)
+        registry
+            .register_provider(provider_key, provider)
+            .map_err(|error| RebornRuntimeError::InvalidArgument {
+                reason: format!("outbound delivery target provider registration failed: {error}"),
+            })
     }
 
     #[cfg(feature = "slack-v2-host-beta")]

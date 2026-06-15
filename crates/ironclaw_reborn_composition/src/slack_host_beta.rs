@@ -37,7 +37,9 @@ use secrecy::{ExposeSecret, SecretString};
 use thiserror::Error;
 
 use crate::RebornRuntime;
-use crate::outbound_preferences::OutboundDeliveryTargetProvider;
+use crate::outbound_preferences::{
+    OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome,
+};
 use crate::slack_actor_identity::SlackUserIdentityActorResolver;
 use crate::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteStore, SlackChannelRouteSubjectResolver,
@@ -241,6 +243,8 @@ pub enum SlackHostBetaBuildError {
     RuntimeHttpEgressUnavailable,
     #[error("Slack host-beta requires durable host state")]
     DurableHostStateUnavailable,
+    #[error("Slack host-beta outbound delivery target registration failed: {reason}")]
+    OutboundDeliveryTargetRegistration { reason: String },
     #[error(
         "Slack host-beta personal binding requires [slack].api_app_id for tenant app-scoped pairing"
     )]
@@ -462,15 +466,23 @@ pub fn build_slack_host_beta_mounts(
             channel_route_store,
             Arc::clone(&personal_dm_target_store),
         ));
-    let registered = runtime.register_outbound_delivery_target_provider(
-        SLACK_V2_ADAPTER_ID,
-        Arc::clone(&outbound_delivery_target_provider),
-    );
-    if !registered {
-        tracing::debug!(
-            target = "ironclaw::reborn::slack_host_beta",
-            "Slack outbound delivery target provider replaced an existing registration"
-        );
+    match runtime
+        .register_outbound_delivery_target_provider(
+            SLACK_V2_ADAPTER_ID,
+            Arc::clone(&outbound_delivery_target_provider),
+        )
+        .map_err(
+            |error| SlackHostBetaBuildError::OutboundDeliveryTargetRegistration {
+                reason: error.to_string(),
+            },
+        )? {
+        OutboundDeliveryTargetRegistrationOutcome::Registered => {}
+        OutboundDeliveryTargetRegistrationOutcome::Replaced => {
+            tracing::debug!(
+                target = "ironclaw::reborn::slack_host_beta",
+                "Slack outbound delivery target provider replaced an existing registration"
+            );
+        }
     }
     Ok(SlackHostBetaMounts {
         events,

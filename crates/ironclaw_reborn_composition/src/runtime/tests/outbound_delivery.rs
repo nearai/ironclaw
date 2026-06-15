@@ -19,7 +19,10 @@ use ironclaw_turns::{
 
 use crate::RebornCompositionProfile;
 use crate::input::RebornBuildInput;
-use crate::outbound_preferences::{OutboundDeliveryTargetEntry, OutboundDeliveryTargetProvider};
+use crate::outbound_preferences::{
+    OutboundDeliveryTargetEntry, OutboundDeliveryTargetProvider,
+    OutboundDeliveryTargetRegistrationOutcome,
+};
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
 
 use super::build_reborn_runtime;
@@ -219,7 +222,10 @@ async fn local_dev_runtime_selects_outbound_delivery_target_before_trigger_creat
             },
         }),
     );
-    assert!(registered, "test Slack target provider should register");
+    assert_eq!(
+        registered.expect("test Slack target provider should register"),
+        OutboundDeliveryTargetRegistrationOutcome::Registered
+    );
 
     let conversation = runtime.new_conversation().await.expect("conversation");
     let reply = tokio::time::timeout(
