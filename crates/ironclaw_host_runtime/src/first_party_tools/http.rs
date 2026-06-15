@@ -503,7 +503,10 @@ mod body_tests {
         // GET. Both empty must be accepted as "no body", not rejected by the
         // mutual-exclusion check.
         let input = json!({ "method": "get", "body": "", "body_base64": "" });
-        assert_eq!(body(&input).expect("empty fields accepted"), Vec::<u8>::new());
+        assert_eq!(
+            body(&input).expect("empty fields accepted"),
+            Vec::<u8>::new()
+        );
     }
 
     #[test]
