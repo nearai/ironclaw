@@ -402,6 +402,7 @@ registerPack("hi", {
   // Settings — channels tab
   "channels.builtIn": "अंतर्निहित चैनल",
   "channels.messaging": "संदेश चैनल",
+  "channels.availableChannels": "उपलब्ध चैनल",
   "channels.mcpServers": "MCP सर्वर",
   "channels.webGateway": "वेब Gateway",
   "channels.webGatewayDesc": "SSE streaming के साथ browser-based chat",
@@ -411,6 +412,7 @@ registerPack("hi", {
   "channels.cliDesc": "TUI या simple REPL के साथ terminal interface",
   "channels.repl": "REPL",
   "channels.replDesc": "Testing के लिए minimal read-eval-print loop",
+  "channels.slack": "Slack",
   "channels.slackDesc": "DM और ऐप मेंशन के लिए टेनेंट ऐप चैनल",
   "channels.slackDetail": "टेनेंट Slack ऐप इंस्टॉल",
   "channels.statusOn": "on",
@@ -929,6 +931,7 @@ registerPack("hi", {
   "extensions.moreActions": "अधिक क्रियाएं",
   "extensions.kind.wasm_tool": "WASM टूल",
   "extensions.kind.wasm_channel": "चैनल",
+  "extensions.kind.channel": "चैनल",
   "extensions.kind.mcp_server": "MCP सर्वर",
   "extensions.kind.first_party": "प्रथम-पक्ष",
   "extensions.kind.system": "सिस्टम",

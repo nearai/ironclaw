@@ -74,9 +74,36 @@ fn scoped_path_input(path: &str) -> String {
         DEFAULT_SCOPED_ROOT.to_string()
     } else if path.starts_with('/') {
         path.to_string()
+    } else if let Some(scoped_workspace_path) = workspace_scoped_alias(path) {
+        scoped_workspace_path
     } else {
-        format!("{}/{}", DEFAULT_SCOPED_ROOT, path.trim_start_matches("./"))
+        let relative = path.trim_start_matches("./");
+        format!("{DEFAULT_SCOPED_ROOT}/{relative}")
     }
+}
+
+fn workspace_scoped_alias(path: &str) -> Option<String> {
+    let path = strip_leading_current_dir_segments(path);
+    if path == "workspace" {
+        return Some(DEFAULT_SCOPED_ROOT.to_string());
+    }
+
+    path.strip_prefix("workspace/")
+        .map(|relative| relative.trim_start_matches('/'))
+        .map(|relative| {
+            if relative.is_empty() {
+                DEFAULT_SCOPED_ROOT.to_string()
+            } else {
+                format!("{DEFAULT_SCOPED_ROOT}/{relative}")
+            }
+        })
+}
+
+fn strip_leading_current_dir_segments(mut path: &str) -> &str {
+    while let Some(stripped) = path.strip_prefix("./") {
+        path = stripped;
+    }
+    path
 }
 
 pub(super) fn operation_allowed(

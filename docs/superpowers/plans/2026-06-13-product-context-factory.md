@@ -96,10 +96,15 @@ pub enum TurnSurfaceType {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunOriginAdapter(String);
 
+/// Mirrors `AdapterKind`'s validation bound in `ironclaw_conversations` so that
+/// any valid `AdapterKind` always converts without silent narrowing. If
+/// `AdapterKind`'s limit changes, update this constant to match.
+const MAX_RUN_ORIGIN_ADAPTER_BYTES: usize = 512;
+
 impl RunOriginAdapter {
     pub fn new(value: impl Into<String>) -> Result<Self, crate::TurnError> {
         let value = value.into();
-        if value.is_empty() || value.len() > 256 {
+        if value.is_empty() || value.len() > MAX_RUN_ORIGIN_ADAPTER_BYTES {
             return Err(crate::TurnError::InvalidRunOriginAdapter);
         }
         Ok(Self(value))
@@ -139,7 +144,7 @@ pub struct ProductTurnContext {
 - [ ] **Step 4: Add the error variant** — in `crates/ironclaw_turns/src/status.rs` (find the `TurnError` enum; if errors live elsewhere, grep `enum TurnError`), add:
 
 ```rust
-    #[error("invalid run-origin adapter: must be 1..=256 bytes")]
+    #[error("invalid run-origin adapter: must be 1..=512 bytes")]
     InvalidRunOriginAdapter,
 ```
 

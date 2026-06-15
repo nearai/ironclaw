@@ -3,7 +3,7 @@ use ironclaw_turns::{
     LoopCancelledReasonKind, LoopCompletionKind, LoopDiagnosticRef, LoopExit, LoopFailureKind,
     LoopGateRef, LoopResultRef, TurnRunId,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
         CapabilityCallCandidate, CapabilityFailureDetail, CapabilityFailureKind,
         CapabilityInputIssue, CapabilityInputIssueCode, CapabilityInputRef, CapabilityInputRepair,
         CapabilityOutcome, CapabilityRecoveryHint, CapabilityResultMessage, CapabilityResumeToken,
@@ -1539,6 +1539,153 @@ async fn exit_stage_no_progress_detected_finalizes_fallback_reply() {
 }
 
 #[tokio::test]
+async fn no_progress_nudge_synthesizes_reply_when_gate_enabled() {
+    // Gate ON + a model reply queued for the tool-free nudge call: the
+    // no-progress exit should issue ONE tool-free model call and finalize the
+    // synthesized reply instead of the canned fallback.
+    let host = MockHost::new(vec![reply_response_with_text("Here is the final answer.")])
+        .with_driver_nudges_enabled();
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = ExitStage
+        .process(
+            ctx,
+            ExitInput {
+                state,
+                kind: StopKind::NoProgressDetected,
+            },
+        )
+        .await
+        .expect("exit stage");
+
+    // Exactly one tool-free model call was issued (the nudge), with an empty
+    // capability view so the provider gets no tools.
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 1, "nudge should issue one model call");
+    assert_eq!(
+        requests[0]
+            .capability_view
+            .as_ref()
+            .map(|v| v.visible_capability_ids.len()),
+        Some(0),
+        "nudge model call must be tool-free (empty capability view)"
+    );
+    match exit {
+        LoopExit::Completed(completed) => {
+            assert_eq!(completed.reply_message_refs.len(), 1);
+            assert!(completed.final_checkpoint_id.is_some());
+        }
+        other => panic!("expected completed exit with synthesized reply, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn no_progress_skips_nudge_when_gate_disabled() {
+    // Gate OFF: no model call, canned fallback reply (production default).
+    let host = MockHost::new(vec![reply_response_with_text("unused")]);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = ExitStage
+        .process(
+            ctx,
+            ExitInput {
+                state,
+                kind: StopKind::NoProgressDetected,
+            },
+        )
+        .await
+        .expect("exit stage");
+
+    assert!(
+        host.model_requests().is_empty(),
+        "no nudge model call when gate disabled"
+    );
+    assert!(matches!(exit, LoopExit::Completed(_)));
+}
+
+#[tokio::test]
+async fn budget_iteration_limit_nudges_to_completed_when_gate_enabled() {
+    // Gate ON at the iteration-limit boundary: instead of failing closed, issue
+    // one tool-free nudge and complete with the synthesized reply.
+    let host = MockHost::new(vec![reply_response_with_text(
+        "Final answer from budget nudge.",
+    )])
+    .with_driver_nudges_enabled();
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy {
+        deadline_ms: 1,
+        ..Default::default()
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.iteration = family.planner().budget().iteration_limit(&state);
+
+    let step = BudgetStage
+        .process(
+            ctx,
+            BudgetInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("budget stage");
+
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "budget nudge should issue one model call"
+    );
+    assert!(
+        matches!(step, BudgetStep::Exit(LoopExit::Completed(_))),
+        "budget nudge should complete, not fail closed"
+    );
+}
+
+#[tokio::test]
+async fn nudge_respects_one_shot_cap() {
+    // With the cap already spent, the no-progress exit must not issue a model
+    // call and falls back to the canned reply.
+    let host = MockHost::new(vec![reply_response_with_text("unused")]).with_driver_nudges_enabled();
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.final_answer_nudges_used = 1;
+
+    let exit = ExitStage
+        .process(
+            ctx,
+            ExitInput {
+                state,
+                kind: StopKind::NoProgressDetected,
+            },
+        )
+        .await
+        .expect("exit stage");
+
+    assert!(
+        host.model_requests().is_empty(),
+        "capped nudge must not issue another model call"
+    );
+    assert!(matches!(exit, LoopExit::Completed(_)));
+}
+
+#[tokio::test]
 async fn exit_stage_aborted_exits_with_requested_failure_kind() {
     let host = MockHost::new(Vec::new());
     let family = crate::families::default();
@@ -1901,6 +2048,7 @@ async fn gate_stage_skips_and_continues_records_skipped_summary() {
                 gate_ref,
                 credential_requirements: Vec::new(),
                 approval_resume: None,
+                auth_resume: None,
             },
         )
         .await
@@ -1945,6 +2093,7 @@ async fn gate_stage_aborts_returns_failed_exit() {
                 gate_ref,
                 credential_requirements: Vec::new(),
                 approval_resume: None,
+                auth_resume: None,
             },
         )
         .await
@@ -3777,6 +3926,7 @@ async fn auth_gate_block_stores_pending_auth_resume() {
                 gate_ref: gate_ref.clone(),
                 credential_requirements: Vec::new(),
                 safe_summary: "auth required".to_string(),
+                auth_resume: None,
             }],
             stopped_on_suspension: true,
         },
@@ -3866,6 +4016,7 @@ async fn non_auth_gate_block_preserves_pending_auth_resume() {
         provider_replay: None,
         resume_token: None,
         prior_approval: None,
+        replay: None,
     };
     let mut initial_state = LoopExecutionState::initial_for_run(host.run_context());
     initial_state.pending_auth_resume = Some(seeded_auth_resume.clone());
@@ -3910,6 +4061,7 @@ async fn resume_after_auth_gate_redispatches_original_call_without_model_turn() 
                 gate_ref: gate_ref.clone(),
                 credential_requirements: Vec::new(),
                 safe_summary: "auth required".to_string(),
+                auth_resume: None,
             }],
             stopped_on_suspension: true,
         },
@@ -4066,6 +4218,7 @@ async fn auth_resume_provider_registration_failure_fails_before_invocation() {
                     gate_ref: gate_ref.clone(),
                     credential_requirements: Vec::new(),
                     safe_summary: "auth required".to_string(),
+                    auth_resume: None,
                 }],
                 stopped_on_suspension: true,
             },
@@ -4135,6 +4288,7 @@ async fn resume_with_still_missing_credentials_blocks_again_without_model_turn()
                 gate_ref: gate_ref.clone(),
                 credential_requirements: Vec::new(),
                 safe_summary: "auth required (phase 1)".to_string(),
+                auth_resume: None,
             }],
             stopped_on_suspension: true,
         },
@@ -4144,6 +4298,7 @@ async fn resume_with_still_missing_credentials_blocks_again_without_model_turn()
                 gate_ref: LoopGateRef::new("gate:auth-still-missing-2").expect("valid"),
                 credential_requirements: Vec::new(),
                 safe_summary: "auth required (phase 2 — still missing)".to_string(),
+                auth_resume: None,
             }],
             stopped_on_suspension: true,
         },
@@ -4275,6 +4430,7 @@ async fn gate_stage_skip_and_continue_clears_stale_pending_auth_resume() {
         provider_replay: None,
         resume_token: None,
         prior_approval: None,
+        replay: None,
     });
     let call = match provider_calls_response().output {
         ParentLoopOutput::CapabilityCalls(mut calls) => calls.remove(0),
@@ -4292,6 +4448,7 @@ async fn gate_stage_skip_and_continue_clears_stale_pending_auth_resume() {
                 gate_ref,
                 credential_requirements: Vec::new(),
                 approval_resume: None,
+                auth_resume: None,
             },
         )
         .await
@@ -4335,6 +4492,7 @@ async fn gate_stage_abort_clears_stale_pending_auth_resume() {
         provider_replay: None,
         resume_token: None,
         prior_approval: None,
+        replay: None,
     });
     let call = match provider_calls_response().output {
         ParentLoopOutput::CapabilityCalls(mut calls) => calls.remove(0),
@@ -4352,6 +4510,7 @@ async fn gate_stage_abort_clears_stale_pending_auth_resume() {
                 gate_ref,
                 credential_requirements: Vec::new(),
                 approval_resume: None,
+                auth_resume: None,
             },
         )
         .await
@@ -4398,6 +4557,7 @@ async fn gate_stage_skip_does_not_clear_auth_resume_for_different_capability() {
         provider_replay: None,
         resume_token: None,
         prior_approval: None,
+        replay: None,
     });
     // The call being dispatched through GateStage is capability_id() ("demo.echo"),
     // not the seeded "other.cap".
@@ -4417,6 +4577,7 @@ async fn gate_stage_skip_does_not_clear_auth_resume_for_different_capability() {
                 gate_ref,
                 credential_requirements: Vec::new(),
                 approval_resume: None,
+                auth_resume: None,
             },
         )
         .await
@@ -4530,6 +4691,7 @@ async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id
                 gate_ref: auth_gate_ref.clone(),
                 credential_requirements: Vec::new(),
                 safe_summary: "auth required after approval".to_string(),
+                auth_resume: None,
             }],
             stopped_on_suspension: true,
         },
@@ -4731,6 +4893,8 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
     let approval_request_id = ApprovalRequestId::new();
     let resume_token =
         CapabilityResumeToken::new("resume-token:corr-id-test").expect("valid token");
+    let auth_gate_resume_token =
+        CapabilityResumeToken::new("resume-token:corr-id-auth-gate").expect("valid token");
     let correlation_id = CorrelationId::new();
     let original_input_ref = CapabilityInputRef::new("input:corr-id-original").expect("valid");
     let completed_ref = LoopResultRef::new("result:corr-id-done").expect("valid");
@@ -4760,6 +4924,11 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
                 gate_ref: LoopGateRef::new("gate:corr-id-auth").expect("valid"),
                 credential_requirements: Vec::new(),
                 safe_summary: "auth required".to_string(),
+                auth_resume: Some(CapabilityAuthResume {
+                    resume_token: auth_gate_resume_token,
+                    prior_approval: None,
+                    replay: None,
+                }),
             }],
             stopped_on_suspension: true,
         },
@@ -4811,6 +4980,11 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
         .pending_auth_resume
         .as_ref()
         .expect("phase 2 BeforeBlock must carry pending_auth_resume");
+    assert_eq!(
+        pending_auth.resume_token.as_ref(),
+        Some(&resume_token),
+        "pending_auth_resume.resume_token must preserve the original approval invocation token"
+    );
     let pending_pa = pending_auth
         .prior_approval
         .as_ref()
@@ -4818,6 +4992,14 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
     assert_eq!(
         pending_pa.correlation_id, correlation_id,
         "pending_auth_resume.prior_approval.correlation_id must equal the approval's correlation_id"
+    );
+    let pending_replay = pending_auth
+        .replay
+        .as_ref()
+        .expect("pending_auth_resume.replay must be set when approval preceded auth");
+    assert_eq!(
+        pending_replay.input, approval_resume.input,
+        "pending_auth_resume.replay.input must preserve the approval replay input"
     );
 
     // Phase 3: auth-resume → Completed.
@@ -4834,6 +5016,10 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
         .auth_resume
         .as_ref()
         .expect("phase 3 invocation must carry auth_resume");
+    assert_eq!(
+        phase3_ar.resume_token, resume_token,
+        "phase 3 auth_resume.resume_token must preserve the original approval invocation token"
+    );
     let phase3_pa = phase3_ar
         .prior_approval
         .as_ref()
@@ -4841,6 +5027,14 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
     assert_eq!(
         phase3_pa.correlation_id, correlation_id,
         "phase 3 auth_resume.prior_approval.correlation_id must match the original approval correlation_id"
+    );
+    let phase3_replay = phase3_ar
+        .replay
+        .as_ref()
+        .expect("phase 3 auth_resume.replay must be set");
+    assert_eq!(
+        phase3_replay.input, approval_resume.input,
+        "phase 3 auth_resume.replay.input must match the original approval input"
     );
 }
 
@@ -4917,6 +5111,7 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
             approval_request_id,
             correlation_id,
         }),
+        replay: None,
     });
 
     // Two calls to the same capability_id — extracted from the two_calls_response fixture.
@@ -4987,5 +5182,352 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
         invocations[1].auth_resume, None,
         "second batch call must NOT carry auth_resume — slot must be consumed on first match \
          (pre-fix: was Some, reusing the same resume_token)"
+    );
+}
+
+// ── Resume-origin Backend failure must not die as scope_mismatch ─────────────
+
+/// Regression test for the terminal `scope_mismatch` / `HostUnavailable` failure
+/// that surfaces when a capability's approval-resume dispatch returns a transient
+/// `Backend` error.
+///
+/// # Bug (capabilities.rs, pre-fix)
+///
+/// 1. Executor dispatches the capability with `approval_resume` set (batch path).
+/// 2. Host returns `Failed(Backend)`.
+/// 3. `handle_capability_error` clears `state.pending_approval_resume` BEFORE
+///    asking the planner for a recovery outcome.
+/// 4. Planner returns `RecoveryOutcome::Retry`.
+/// 5. Retry dispatch calls `invoke_capability(…, None)` — `approval_resume` is
+///    dropped.
+/// 6. MockHost `invoke_capability` has no scripted outcome → returns
+///    `Err(Internal, "single script exhausted")` → `capability_host_error` →
+///    `AgentLoopExecutorError::HostUnavailable { stage: Capability }`.
+///    In production the host would instead fail with `ScopeMismatch` because the
+///    original run's `input_ref` has no approval context to validate against.
+///
+/// # Fix (Part C-sub-A)
+///
+/// When the failure originated from an approval-resume dispatch, intercept
+/// `RecoveryOutcome::Retry` and redirect it to `ToolErrorResult` instead.
+/// The model sees the real backend error and the user can re-approve — no retry
+/// of the side effect, no scope_mismatch.
+///
+/// # What this test asserts (observable, not implementation detail)
+///
+/// - **Pre-fix (RED)**: `execute_family` on Phase 2 returns
+///   `Err(AgentLoopExecutorError::HostUnavailable { stage: HostStage::Capability })`
+///   — the run terminally dies.
+/// - **Post-fix (GREEN)**: `execute_family` on Phase 2 returns `Ok(LoopExit::Completed(_))`
+///   — the model sees the backend error as a tool result, issues a final reply,
+///   and the run completes cleanly.
+#[tokio::test]
+async fn resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
+    let cap1_request_id = ApprovalRequestId::new();
+    let cap1_resume_token =
+        CapabilityResumeToken::new("resume-token:sm-test-cap1").expect("valid token");
+    let cap1_correlation_id = CorrelationId::new();
+    let cap1_input_ref =
+        CapabilityInputRef::new("input:run-original:sm-cap1-uuid").expect("valid input ref");
+
+    let cap1_approval_resume = CapabilityApprovalResume {
+        approval_request_id: cap1_request_id,
+        resume_token: cap1_resume_token,
+        correlation_id: cap1_correlation_id,
+        input_ref: cap1_input_ref.clone(),
+        input: serde_json::json!({"action": "cap1"}),
+        estimate: ResourceEstimate::default(),
+    };
+
+    // Phase 1 model response: issues cap1 with original-run input_ref.
+    let cap1_model_response = ironclaw_turns::run_profile::LoopModelResponse {
+        chunks: Vec::new(),
+        safe_reasoning_deltas: Vec::new(),
+        output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+            surface_version: surface_version(),
+            capability_id: capability_id(),
+            input_ref: cap1_input_ref,
+            effective_capability_ids: vec![capability_id()],
+            provider_replay: None,
+        }]),
+        effective_model_profile_id: ironclaw_turns::run_profile::ModelProfileId::new("model")
+            .expect("valid"),
+        usage: None,
+    };
+
+    // Batch outcomes:
+    //   [0] Phase 1: cap1 → ApprovalRequired → gate blocked.
+    //   [1] Phase 2: cap1 approval-resume → Failed(Backend) — the bug trigger.
+    let batch_outcomes = vec![
+        // [0] cap1 → ApprovalRequired (gate blocked).
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::ApprovalRequired {
+                gate_ref: LoopGateRef::new("gate:sm-test-cap1").expect("valid"),
+                safe_summary: "cap1 needs approval".to_string(),
+                approval_resume: Some(cap1_approval_resume),
+            }],
+            stopped_on_suspension: true,
+        },
+        // [1] cap1 approval-resume → Backend failure.
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Failed(
+                ironclaw_turns::run_profile::CapabilityFailure {
+                    error_kind: CapabilityFailureKind::Backend,
+                    safe_summary: "transient backend error during cap1 resume".to_string(),
+                    detail: None,
+                },
+            )],
+            stopped_on_suspension: false,
+        },
+    ];
+
+    // Phase 1: one model turn (cap1); Phase 2: after Backend→ToolErrorResult
+    // the loop continues and needs a model turn to issue the final reply.
+    let host = MockHost::new(vec![
+        cap1_model_response, // Phase 1: issues cap1
+        reply_response(),    // Phase 2 (post-fix): model sees tool error, issues reply
+    ])
+    .with_batch_outcomes(batch_outcomes);
+    // Deliberately NO single_outcomes: pre-fix, the retry would consume one and
+    // get `Err(Internal)` → HostUnavailable.  Post-fix, no retry is attempted.
+
+    let executor = CanonicalAgentLoopExecutor;
+
+    // ── Phase 1: cap1 → ApprovalRequired → Blocked ───────────────────────────
+    let initial_state = LoopExecutionState::initial_for_run(host.run_context());
+    let phase1_exit = executor
+        .execute_family(&crate::families::default(), &host, initial_state)
+        .await
+        .expect("phase 1 must succeed (blocks on cap1 gate)");
+    assert!(
+        matches!(phase1_exit, LoopExit::Blocked(_)),
+        "phase 1 must block on cap1 approval gate; got {phase1_exit:?}"
+    );
+
+    // Recover the BeforeBlock checkpoint state to use as Phase 2 input.
+    let phase1_bb = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+    assert!(
+        phase1_bb.pending_approval_resume.is_some(),
+        "phase 1 BeforeBlock must carry pending_approval_resume"
+    );
+    assert_eq!(
+        phase1_bb
+            .pending_approval_resume
+            .as_ref()
+            .unwrap()
+            .approval_request_id,
+        cap1_request_id,
+        "phase 1 BeforeBlock pending_approval_resume must be for cap1"
+    );
+
+    // ── Phase 2: approve cap1 → approval-resume → Backend failure ─────────────
+    //
+    // BUG TRIGGER: the batch returns Failed(Backend) for the approval-resume
+    // dispatch.  On unfixed code:
+    //   handle_capability_error clears pending_approval_resume at L637 BEFORE
+    //   recovery decides → retry fires with None → invoke_capability has no
+    //   scripted outcome → Err(Internal) → HostUnavailable.
+    //
+    // After fix (Part C-sub-A):
+    //   Resume-origin Backend failure is intercepted before any retry → surfaced
+    //   as ToolErrorResult → loop continues → model issues final reply → Done.
+    let phase2_result = executor
+        .execute_family(&crate::families::default(), &host, phase1_bb)
+        .await;
+
+    // Primary assertion: the run must NOT die as HostUnavailable.
+    // Pre-fix this panics; post-fix it passes.
+    let phase2_exit = phase2_result.expect(
+        "REGRESSION: resume-origin Backend failure must not kill the run as HostUnavailable. \
+         Pre-fix: handle_capability_error clears pending_approval_resume BEFORE recovery \
+         decides to retry → retry fires invoke_capability with approval_resume=None → \
+         single script exhausted → HostUnavailable (in production: ScopeMismatch). \
+         Fix: intercept Retry for resume-origin failures and surface as ToolErrorResult \
+         so the model can re-approve without a terminal run death.",
+    );
+
+    // Post-fix: the model saw the tool error, issued a final reply → Completed.
+    assert!(
+        matches!(phase2_exit, LoopExit::Completed(_)),
+        "phase 2 must complete the run after Backend→ToolErrorResult; got {phase2_exit:?}"
+    );
+
+    // No single invoke_capability calls should have been made: the C-sub-A guard
+    // prevents the retry dispatch entirely for resume-origin failures.
+    assert!(
+        host.single_invocations().is_empty(),
+        "no single invoke_capability call must be made for a resume-origin Backend failure \
+         (retry is suppressed to avoid double-exec)"
+    );
+}
+
+/// Regression test for the terminal `scope_mismatch` / `HostUnavailable` failure
+/// that surfaces when a capability's **auth-resume** dispatch returns a transient
+/// `Backend` error.
+///
+/// # Bug (capabilities.rs, pre-fix)
+///
+/// 1. Phase 1: executor dispatches the capability; host returns `AuthRequired`.
+///    GateStage stores `pending_auth_resume` in the BeforeBlock checkpoint.
+/// 2. Phase 2: executor detects `pending_auth_resume` in the prompt stage,
+///    re-dispatches the capability via `invoke_capability_batch(auth_resume=…)`.
+/// 3. Host returns `Failed(Backend)` for the re-dispatch.
+/// 4. `handle_capability_error` clears `state.pending_auth_resume` at ~L667
+///    BEFORE asking the planner for a recovery outcome.
+/// 5. Planner returns `RecoveryOutcome::Retry`.
+/// 6. Retry calls `invoke_capability(…)` (single, non-batch) with no auth context.
+///    MockHost has no scripted single outcome → `Err(Internal, "single script
+///    exhausted")` → `capability_host_error` → `HostUnavailable { stage: Capability }`.
+///    In production the product adapter would instead fail with `ScopeMismatch`
+///    because the original run's `input_ref` has no auth context to validate against.
+///
+/// # Fix (Part C-sub-A extended to auth-resume)
+///
+/// Before clearing `pending_auth_resume`, snapshot whether this failure is
+/// auth-resume-origin (`captured_auth_resume_origin`).  When `is_resume_origin`
+/// is true (either approval- or auth-resume origin), intercept
+/// `RecoveryOutcome::Retry` and redirect it to `ToolErrorResult` instead.
+/// The model sees the real backend error and the user can re-authenticate —
+/// no retry of the side effect, no scope_mismatch.
+///
+/// # What this test asserts (observable, not implementation detail)
+///
+/// - **Pre-fix (RED)**: Phase 2 `execute_family` returns
+///   `Err(AgentLoopExecutorError::HostUnavailable { stage: HostStage::Capability })`
+///   — the run terminally dies.
+/// - **Post-fix (GREEN)**: Phase 2 returns `Ok(LoopExit::Completed(_))` — the
+///   model sees the backend error as a tool result, issues a final reply, and
+///   the run completes cleanly.
+#[tokio::test]
+async fn auth_resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
+    let cap1_input_ref =
+        CapabilityInputRef::new("input:run-original:auth-sm-cap1-uuid").expect("valid input ref");
+
+    // Phase 1 model response: issues cap1 with original-run input_ref.
+    // (No provider_replay — this is a non-provider-backed auth resume, so
+    // Phase 2 reuses the stored input_ref directly via
+    // pending_auth_resume_staged_input_candidate.)
+    let cap1_model_response = ironclaw_turns::run_profile::LoopModelResponse {
+        chunks: Vec::new(),
+        safe_reasoning_deltas: Vec::new(),
+        output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+            surface_version: surface_version(),
+            capability_id: capability_id(),
+            input_ref: cap1_input_ref,
+            effective_capability_ids: vec![capability_id()],
+            provider_replay: None,
+        }]),
+        effective_model_profile_id: ironclaw_turns::run_profile::ModelProfileId::new("model")
+            .expect("valid"),
+        usage: None,
+    };
+
+    // Batch outcomes:
+    //   [0] Phase 1: cap1 → AuthRequired → gate blocked.
+    //   [1] Phase 2: cap1 auth-resume → Failed(Backend) — the bug trigger.
+    let batch_outcomes = vec![
+        // [0] Phase 1: cap1 → AuthRequired (gate blocked).
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::AuthRequired {
+                gate_ref: LoopGateRef::new("gate:auth-sm-test-cap1").expect("valid"),
+                credential_requirements: Vec::new(),
+                safe_summary: "cap1 needs auth".to_string(),
+                auth_resume: None,
+            }],
+            stopped_on_suspension: true,
+        },
+        // [1] Phase 2: cap1 auth-resume → Backend failure.
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Failed(
+                ironclaw_turns::run_profile::CapabilityFailure {
+                    error_kind: CapabilityFailureKind::Backend,
+                    safe_summary: "transient backend error during cap1 auth-resume".to_string(),
+                    detail: None,
+                },
+            )],
+            stopped_on_suspension: false,
+        },
+    ];
+
+    // Phase 1: one model turn (cap1); Phase 2: after Backend→ToolErrorResult
+    // the loop continues and needs a model turn to issue the final reply.
+    // (Auth-resume Phase 2 skips the model for the capability re-dispatch but
+    // needs a model call AFTER the error is surfaced for the final reply.)
+    let host = MockHost::new(vec![
+        cap1_model_response, // Phase 1: issues cap1
+        reply_response(),    // Phase 2 (post-fix): model sees tool error, issues reply
+    ])
+    .with_batch_outcomes(batch_outcomes);
+    // Deliberately NO single_outcomes: pre-fix, the retry would consume one and
+    // get `Err(Internal)` → HostUnavailable.  Post-fix, no retry is attempted.
+
+    let executor = CanonicalAgentLoopExecutor;
+
+    // ── Phase 1: cap1 → AuthRequired → Blocked ──────────────────────────────
+    let initial_state = LoopExecutionState::initial_for_run(host.run_context());
+    let phase1_exit = executor
+        .execute_family(&crate::families::default(), &host, initial_state)
+        .await
+        .expect("phase 1 must succeed (blocks on cap1 auth gate)");
+    assert!(
+        matches!(phase1_exit, LoopExit::Blocked(_)),
+        "phase 1 must block on cap1 auth gate; got {phase1_exit:?}"
+    );
+
+    // Recover the BeforeBlock checkpoint state to use as Phase 2 input.
+    let phase1_bb = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+    assert!(
+        phase1_bb.pending_auth_resume.is_some(),
+        "phase 1 BeforeBlock must carry pending_auth_resume"
+    );
+    assert_eq!(
+        phase1_bb
+            .pending_auth_resume
+            .as_ref()
+            .unwrap()
+            .capability_id,
+        capability_id(),
+        "phase 1 BeforeBlock pending_auth_resume must be for cap1"
+    );
+
+    // ── Phase 2: OAuth completes → auth-resume → Backend failure ────────────
+    //
+    // BUG TRIGGER: the batch returns Failed(Backend) for the auth-resume
+    // dispatch.  On unfixed code:
+    //   handle_capability_error clears pending_auth_resume at ~L667 BEFORE
+    //   recovery decides → retry fires with None → invoke_capability has no
+    //   scripted outcome → Err(Internal) → HostUnavailable.
+    //
+    // After fix (Part C-sub-A extended to auth-resume):
+    //   Auth-resume-origin Backend failure is intercepted before any retry →
+    //   surfaced as ToolErrorResult → loop continues → model issues final
+    //   reply → Done.
+    let phase2_result = executor
+        .execute_family(&crate::families::default(), &host, phase1_bb)
+        .await;
+
+    // Primary assertion: the run must NOT die as HostUnavailable.
+    // Pre-fix this panics; post-fix it passes.
+    let phase2_exit = phase2_result.expect(
+        "REGRESSION: auth-resume-origin Backend failure must not kill the run as \
+         HostUnavailable. Pre-fix: handle_capability_error clears pending_auth_resume \
+         BEFORE recovery decides to retry → retry fires invoke_capability with \
+         auth_resume=None → single script exhausted → HostUnavailable (in production: \
+         ScopeMismatch). Fix: intercept Retry for auth-resume-origin failures and \
+         surface as ToolErrorResult so the model can re-auth without a terminal run death.",
+    );
+
+    // Post-fix: the model saw the tool error, issued a final reply → Completed.
+    assert!(
+        matches!(phase2_exit, LoopExit::Completed(_)),
+        "phase 2 must complete the run after Backend→ToolErrorResult; got {phase2_exit:?}"
+    );
+
+    // No single invoke_capability calls should have been made: the C-sub-A guard
+    // prevents the retry dispatch entirely for auth-resume-origin failures.
+    assert!(
+        host.single_invocations().is_empty(),
+        "no single invoke_capability call must be made for an auth-resume-origin Backend \
+         failure (retry is suppressed to avoid double-exec)"
     );
 }

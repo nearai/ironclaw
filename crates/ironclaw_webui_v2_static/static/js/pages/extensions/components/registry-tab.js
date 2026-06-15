@@ -1,36 +1,48 @@
 import { React, html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
-import { RegistryCard } from "./extension-card.js";
+import { ExtensionCard, RegistryCard } from "./extension-card.js";
 
-function packageId(entry) {
-  return entry.package_ref?.id || "";
+function packageId(item) {
+  return item?.package_ref?.id || "";
+}
+
+function catalogItem(entry) {
+  return entry.entry || entry.extension || {};
 }
 
 export function RegistryTab({
-  toolRegistry,
-  channelRegistry,
-  mcpRegistry,
+  catalogEntries,
   onInstall,
+  onActivate,
+  onConfigure,
+  onRemove,
   isBusy,
 }) {
   const t = useT();
-  const allAvailable = [...toolRegistry, ...channelRegistry, ...mcpRegistry];
   const [filter, setFilter] = React.useState("");
+  const query = filter.trim().toLowerCase();
 
-  const filtered = filter
-    ? allAvailable.filter(
-        (e) =>
-          (e.display_name || packageId(e))
-            .toLowerCase()
-            .includes(filter.toLowerCase()) ||
-          (e.description || "").toLowerCase().includes(filter.toLowerCase()) ||
-          (e.keywords || []).some((kw) =>
-            kw.toLowerCase().includes(filter.toLowerCase())
+  const filtered = query
+    ? catalogEntries.filter((entry) => {
+        const item = catalogItem(entry);
+        return (
+          (item.display_name || packageId(item)).toLowerCase().includes(query) ||
+          (item.description || "").toLowerCase().includes(query) ||
+          (item.keywords || []).some((kw) =>
+            kw.toLowerCase().includes(query)
           )
-      )
-    : allAvailable;
+        );
+      })
+    : catalogEntries;
 
-  if (allAvailable.length === 0) {
+  const installedEntries = filtered.filter((entry) => entry.installed && entry.extension);
+  const registryOnlyInstalledEntries = filtered.filter(
+    (entry) => entry.installed && !entry.extension && entry.entry
+  );
+  const installedCount = installedEntries.length + registryOnlyInstalledEntries.length;
+  const availableEntries = filtered.filter((entry) => !entry.installed && entry.entry);
+
+  if (catalogEntries.length === 0) {
     return html`
       <div className="v2-panel rounded-[18px] p-6 sm:p-8">
         <h3 className="text-lg font-semibold text-white">
@@ -54,32 +66,73 @@ export function RegistryTab({
           className="h-9 flex-1 rounded-md border border-white/12 bg-white/[0.04] px-3 text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
         />
         <span className="font-mono text-[11px] text-iron-700">
-          ${filtered.length} / ${allAvailable.length}
+          ${filtered.length} / ${catalogEntries.length}
         </span>
       </div>
 
       <div className="v2-panel rounded-[18px] p-5 sm:p-6">
-        <h3
-          className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
-        >
-          ${t("ext.registry.availableTitle")}
-        </h3>
         ${filtered.length === 0
           ? html`<p className="py-4 text-sm text-iron-300">
               ${t("ext.registry.noMatch")}
             </p>`
-          : html`<div className="grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-3">
-              ${filtered.map(
-                (entry) => html`
-                  <${RegistryCard}
-                    key=${packageId(entry)}
-                    entry=${entry}
-                    onInstall=${onInstall}
-                    isBusy=${isBusy}
-                  />
-                `
-              )}
-            </div>`}
+          : html`
+              ${installedCount > 0 &&
+              html`
+                <h3
+                  className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
+                >
+                  ${t("extensions.installed")}
+                </h3>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+                  ${installedEntries.map(
+                    (entry) => html`
+                      <${ExtensionCard}
+                        key=${entry.id}
+                        ext=${entry.extension || entry.entry}
+                        onActivate=${onActivate}
+                        onConfigure=${onConfigure}
+                        onRemove=${onRemove}
+                        isBusy=${isBusy}
+                      />
+                    `
+                  )}
+                  ${registryOnlyInstalledEntries.map(
+                    (entry) => html`
+                      <${RegistryCard}
+                        key=${entry.id}
+                        entry=${entry.entry}
+                        statusLabel=${t("extensions.installed")}
+                        isBusy=${isBusy}
+                      />
+                    `
+                  )}
+                </div>
+              `}
+
+              ${availableEntries.length > 0 &&
+              html`
+                <h3
+                  className=${[
+                    "mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal",
+                    installedCount > 0 ? "mt-6" : "",
+                  ].join(" ")}
+                >
+                  ${t("ext.registry.availableTitle")}
+                </h3>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+                  ${availableEntries.map(
+                    (entry) => html`
+                      <${RegistryCard}
+                        key=${entry.id}
+                        entry=${entry.entry}
+                        onInstall=${onInstall}
+                        isBusy=${isBusy}
+                      />
+                    `
+                  )}
+                </div>
+              `}
+            `}
       </div>
     </div>
   `;

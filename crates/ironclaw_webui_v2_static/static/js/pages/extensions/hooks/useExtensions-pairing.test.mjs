@@ -18,7 +18,7 @@ function useExtensionsSourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { usePairing };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { useExtensions, usePairing };`;
 }
 
 function contextFor(mutationState, queryCalls) {
@@ -29,9 +29,11 @@ function contextFor(mutationState, queryCalls) {
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
+    listConnectableChannels: () => {},
     fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
+    isChannelExtensionKind: (kind) => kind === "wasm_channel" || kind === "channel",
     installExtension: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
@@ -74,4 +76,116 @@ test("usePairing can disable the legacy pairing request query for custom redeeme
 
   assert.equal(queryCalls.length, 1);
   assert.equal(queryCalls[0].enabled, false);
+});
+
+test("useExtensions places uninstalled wasm_channel registry entry in channelRegistry not toolRegistry", () => {
+  const context = {
+    ...contextFor(
+      { mutate: () => {}, isPending: false, isSuccess: false, isError: false },
+      []
+    ),
+    React: {
+      useCallback: (fn) => fn,
+      useEffect: () => {},
+      useRef: () => ({ current: null }),
+      useState: (initial) => [initial, () => {}],
+    },
+    useQuery: ({ queryKey }) => {
+      if (queryKey[0] === "extensions") {
+        return { data: { extensions: [] }, isLoading: false };
+      }
+      if (queryKey[0] === "extension-registry") {
+        return {
+          data: {
+            entries: [
+              { kind: "wasm_channel", package_ref: { id: "telegram" }, installed: false },
+            ],
+          },
+          isLoading: false,
+        };
+      }
+      if (queryKey[0] === "connectable-channels") {
+        return { data: { channels: [] }, isLoading: false };
+      }
+      return { data: {}, isLoading: false };
+    },
+  };
+  vm.runInNewContext(useExtensionsSourceForTest(), context);
+
+  const extensions = context.globalThis.__testExports.useExtensions();
+
+  assert.deepEqual(
+    extensions.channelRegistry.map((entry) => entry.package_ref.id),
+    ["telegram"],
+    "wasm_channel registry entry must appear in channelRegistry"
+  );
+  assert.deepEqual(
+    extensions.toolRegistry.map((entry) => entry.package_ref.id),
+    [],
+    "wasm_channel registry entry must NOT appear in toolRegistry"
+  );
+});
+
+test("useExtensions groups manifest-backed channels with channel entries", () => {
+  const context = {
+    ...contextFor(
+      { mutate: () => {}, isPending: false, isSuccess: false, isError: false },
+      []
+    ),
+    React: {
+      useCallback: (fn) => fn,
+      useEffect: () => {},
+      useRef: () => ({ current: null }),
+      useState: (initial) => [initial, () => {}],
+    },
+    useQuery: ({ queryKey }) => {
+      if (queryKey[0] === "extensions") {
+        return {
+          data: {
+            extensions: [
+              { kind: "channel", package_ref: { id: "slack" } },
+              { kind: "wasm_channel", package_ref: { id: "telegram" } },
+              { kind: "wasm_tool", package_ref: { id: "github" } },
+            ],
+          },
+          isLoading: false,
+        };
+      }
+      if (queryKey[0] === "extension-registry") {
+        return {
+          data: {
+            entries: [
+              { kind: "channel", package_ref: { id: "slack" }, installed: false },
+              { kind: "wasm_tool", package_ref: { id: "web-access" }, installed: false },
+            ],
+          },
+          isLoading: false,
+        };
+      }
+      if (queryKey[0] === "connectable-channels") {
+        return { data: { channels: [] }, isLoading: false };
+      }
+      return { data: {}, isLoading: false };
+    },
+  };
+  vm.runInNewContext(useExtensionsSourceForTest(), context);
+
+  const extensions = context.globalThis.__testExports.useExtensions();
+
+  assert.deepEqual(
+    extensions.channels.map((entry) => entry.package_ref.id),
+    ["slack", "telegram"]
+  );
+  assert.deepEqual(
+    extensions.tools.map((entry) => entry.package_ref.id),
+    ["github"]
+  );
+  assert.deepEqual(
+    extensions.channelRegistry.map((entry) => entry.package_ref.id),
+    ["slack"]
+  );
+  assert.deepEqual(
+    extensions.toolRegistry.map((entry) => entry.package_ref.id),
+    ["web-access"]
+  );
 });
