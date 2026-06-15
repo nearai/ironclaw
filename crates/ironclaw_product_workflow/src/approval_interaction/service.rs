@@ -268,17 +268,7 @@ impl DefaultApprovalInteractionService {
             input.action,
             input.capability_id.clone(),
             input.grantee.clone(),
-        )
-        .map_err(|error| {
-            tracing::warn!(
-                error = %error,
-                approval_request_id = %gate.request().id,
-                "persistent approval policy preparation failed"
-            );
-            ProductWorkflowError::Transient {
-                reason: "persistent approval policy unavailable".to_string(),
-            }
-        })?;
+        );
         Ok(PreparedAllowPolicy { input, key })
     }
 

@@ -451,6 +451,7 @@ mod tests {
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
             None,
             None,
+            None,
         )
         .expect("local-dev capability wiring");
 
@@ -1064,6 +1065,7 @@ mod tests {
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: Some(Arc::clone(&activation_source)),
+            trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_requests: local_runtime.approval_requests.clone(),
@@ -1182,6 +1184,7 @@ mod tests {
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
             Some(skill_context.activation_source),
             None,
+            None,
         )
         .expect("capability wiring");
         let port = wiring
@@ -1266,6 +1269,7 @@ mod tests {
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
+            trajectory_observer: None,
             outbound_preferences_facade: Some(outbound_preferences_facade),
             outbound_delivery_target_set_requires_approval: true,
             approval_requests: local_runtime.approval_requests.clone(),
@@ -1601,6 +1605,7 @@ mod tests {
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
             None,
             Some(outbound_preferences_facade),
+            None,
         )
         .expect("capability wiring");
         let port = wiring
@@ -1705,6 +1710,7 @@ mod tests {
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
+            trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_requests: local_runtime.approval_requests.clone(),
@@ -1801,6 +1807,7 @@ mod tests {
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
+            trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_requests: local_runtime.approval_requests.clone(),
@@ -2027,6 +2034,7 @@ mod tests {
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
+            trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_requests: local_runtime.approval_requests.clone(),
@@ -2123,6 +2131,7 @@ mod tests {
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
+            trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_requests: local_runtime.approval_requests.clone(),
@@ -2288,6 +2297,7 @@ mod tests {
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
             None,
             None,
+            None,
         )
         .expect("local-dev capability wiring");
         assert_github_capabilities_visible(&wiring, &run_context).await;
@@ -2322,6 +2332,7 @@ mod tests {
             ),
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
             None,
             None,
         )
@@ -2447,6 +2458,7 @@ mod tests {
             ),
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
             None,
             None,
         )
