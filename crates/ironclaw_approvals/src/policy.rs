@@ -12,7 +12,7 @@ use ironclaw_filesystem::{
 use ironclaw_host_api::{
     Action, ApprovalRequestId, CapabilityGrant, CapabilityGrantId, CapabilityId, GrantConstraints,
     HostApiError, PermissionMode, Principal, ProjectId, ResourceScope, ScopedPath, SystemServiceId,
-    TenantId, ThreadId, UserId, sha256_digest_token,
+    TenantId, UserId, sha256_digest_token,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -20,9 +20,6 @@ use thiserror::Error;
 const POLICY_PREFIX: &str = "/approvals/persistent";
 const POLICY_PATH_CACHE_MAX_ENTRIES: usize = 1024;
 const POLICY_CAS_RETRY_ATTEMPTS: usize = 3;
-const LEGACY_POLICY_SCAN_MAX_THREADS: usize = 1024;
-const LEGACY_POLICY_SCAN_MAX_ACTION_DIRS: usize = 8;
-const LEGACY_POLICY_SCAN_MAX_POLICIES_PER_ACTION: usize = 1024;
 const PERSISTENT_APPROVAL_GRANT_ISSUER: &str = "persistent-approval";
 
 /// Returns whether an extension manifest permission mode may be upgraded by an
@@ -96,14 +93,6 @@ pub struct PersistentApprovalScope {
     pub user_id: UserId,
     pub agent_id: Option<ironclaw_host_api::AgentId>,
     pub project_id: Option<ProjectId>,
-    /// Always `None`. The field is retained (rather than removed) purely to
-    /// preserve the policy digest: the digest is `serde_json::to_vec(key)`, and
-    /// pre-existing project-scoped policies serialized `"thread_id": null`.
-    /// Keeping the field means those digests are unchanged so old policies still
-    /// match. `thread_id` never participates in the persistent approval scope —
-    /// an "always allow" granted in one thread applies to all of that user's
-    /// threads with the same agent (and project, when present).
-    pub thread_id: Option<ThreadId>,
 }
 
 impl PersistentApprovalScope {
@@ -113,10 +102,6 @@ impl PersistentApprovalScope {
             user_id: scope.user_id.clone(),
             agent_id: scope.agent_id.clone(),
             project_id: scope.project_id.clone(),
-            // Intentionally always `None`: see the field doc-comment. The scope
-            // is (tenant_id, user_id, agent_id?, project_id?) and is thread- and
-            // channel-agnostic.
-            thread_id: None,
         }
     }
 }
@@ -205,9 +190,11 @@ pub trait PersistentApprovalPolicyStore: Send + Sync {
         key: &PersistentApprovalPolicyKey,
     ) -> Result<Option<PersistentApprovalPolicy>, PersistentApprovalPolicyError>;
 
-    /// Scope-aware lookup for compatibility with legacy filesystem policies
-    /// that were keyed by a concrete thread id before persistent approvals
-    /// became threadless.
+    /// Scope-aware lookup entry point used by authorization callers.
+    ///
+    /// Persistent approvals are keyed by tenant, user, optional agent, and
+    /// optional project only; the runtime scope is accepted so callers do not
+    /// need a separate path, but thread ids do not participate.
     async fn lookup_with_scope(
         &self,
         _scope: &ResourceScope,
@@ -421,45 +408,6 @@ where
             .map(|(policy, _version)| policy))
     }
 
-    async fn lookup_with_scope(
-        &self,
-        scope: &ResourceScope,
-        key: &PersistentApprovalPolicyKey,
-    ) -> Result<Option<PersistentApprovalPolicy>, PersistentApprovalPolicyError> {
-        if let Some(policy) = self
-            .lookup_versioned(key)
-            .await?
-            .map(|(policy, _version)| policy)
-        {
-            return Ok(Some(policy));
-        }
-
-        let Some(legacy_key) = legacy_thread_scoped_key(scope, key) else {
-            return Ok(None);
-        };
-        let legacy_path = legacy_policy_path(&legacy_key)?;
-        let legacy_scope = resource_scope_for_policy_key(&legacy_key);
-
-        if let Some(policy) = self
-            .lookup_versioned_at(&legacy_key, &legacy_scope, &legacy_path)
-            .await?
-            .map(|(policy, _version)| policy)
-        {
-            return Ok(Some(policy));
-        }
-
-        if scope.project_id.is_none()
-            && scope.thread_id.is_some()
-            && let Some((policy, _version)) = self
-                .lookup_legacy_no_project_thread_scoped(scope, key)
-                .await?
-        {
-            return Ok(Some(policy));
-        }
-
-        Ok(None)
-    }
-
     async fn revoke(
         &self,
         key: &PersistentApprovalPolicyKey,
@@ -545,82 +493,6 @@ where
             return Ok(None);
         };
         deserialize_versioned_policy(key, versioned)
-    }
-
-    async fn lookup_legacy_no_project_thread_scoped(
-        &self,
-        scope: &ResourceScope,
-        key: &PersistentApprovalPolicyKey,
-    ) -> Result<Option<(PersistentApprovalPolicy, RecordVersion)>, PersistentApprovalPolicyError>
-    {
-        let Some(root) = legacy_thread_root_path(&key.scope)? else {
-            return Ok(None);
-        };
-
-        let thread_dirs = match self
-            .filesystem
-            .list_dir_bounded(scope, &root, LEGACY_POLICY_SCAN_MAX_THREADS)
-            .await
-        {
-            Ok(entries) => entries,
-            Err(FilesystemError::NotFound { .. }) => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-
-        for thread_dir in thread_dirs
-            .into_iter()
-            .filter(|entry| entry.file_type == ironclaw_filesystem::FileType::Directory)
-        {
-            let action_root = scoped_child_path(&root, &thread_dir.name)?;
-            let action_dirs = match self
-                .filesystem
-                .list_dir_bounded(scope, &action_root, LEGACY_POLICY_SCAN_MAX_ACTION_DIRS)
-                .await
-            {
-                Ok(entries) => entries,
-                Err(FilesystemError::NotFound { .. }) => continue,
-                Err(error) => return Err(error.into()),
-            };
-
-            for action_dir in action_dirs
-                .into_iter()
-                .filter(|entry| entry.file_type == ironclaw_filesystem::FileType::Directory)
-            {
-                if action_dir.name != key.action.as_path_segment() {
-                    continue;
-                }
-
-                let policy_dir = scoped_child_path(&action_root, &action_dir.name)?;
-                let policy_entries = match self
-                    .filesystem
-                    .list_dir_bounded(
-                        scope,
-                        &policy_dir,
-                        LEGACY_POLICY_SCAN_MAX_POLICIES_PER_ACTION,
-                    )
-                    .await
-                {
-                    Ok(entries) => entries,
-                    Err(FilesystemError::NotFound { .. }) => continue,
-                    Err(error) => return Err(error.into()),
-                };
-
-                for policy_entry in policy_entries
-                    .into_iter()
-                    .filter(|entry| entry.file_type == ironclaw_filesystem::FileType::File)
-                {
-                    let policy_path = scoped_child_path(&policy_dir, &policy_entry.name)?;
-                    let Some(versioned) = self.filesystem.get(scope, &policy_path).await? else {
-                        continue;
-                    };
-                    if let Some(policy) = deserialize_legacy_versioned_policy(key, versioned)? {
-                        return Ok(Some(policy));
-                    }
-                }
-            }
-        }
-
-        Ok(None)
     }
 
     fn mutation_lock(&self, key: &PersistentApprovalPolicyKey) -> Arc<tokio::sync::Mutex<()>> {
@@ -714,18 +586,6 @@ fn deserialize_versioned_policy(
     }
 }
 
-fn deserialize_legacy_versioned_policy(
-    key: &PersistentApprovalPolicyKey,
-    versioned: VersionedEntry,
-) -> Result<Option<(PersistentApprovalPolicy, RecordVersion)>, PersistentApprovalPolicyError> {
-    let policy = deserialize::<PersistentApprovalPolicy>(&versioned.entry.body)?;
-    if legacy_policy_matches_lookup(&policy.key, key) {
-        Ok(Some((policy, versioned.version)))
-    } else {
-        Ok(None)
-    }
-}
-
 fn policy_path(
     key: &PersistentApprovalPolicyKey,
 ) -> Result<ScopedPath, PersistentApprovalPolicyError> {
@@ -739,45 +599,13 @@ fn policy_path(
     .map_err(invalid_path)
 }
 
-fn legacy_policy_path(
-    key: &PersistentApprovalPolicyKey,
-) -> Result<ScopedPath, PersistentApprovalPolicyError> {
-    ScopedPath::new(format!(
-        "{}/{}/{}/{}.json",
-        POLICY_PREFIX,
-        legacy_within_tenant_scope(&key.scope),
-        key.action.as_path_segment(),
-        policy_digest(key)?
-    ))
-    .map_err(invalid_path)
-}
-
 fn within_tenant_scope(scope: &PersistentApprovalScope) -> String {
     let mut segments = Vec::new();
     if let Some(agent_id) = &scope.agent_id {
         segments.push(format!("agents/{agent_id}"));
     }
-    // `thread_id` is always `None` (see `PersistentApprovalScope`), so the scope
-    // path only ever branches on `project_id`.
     if let Some(project_id) = &scope.project_id {
         segments.push(format!("projects/{project_id}"));
-    }
-    if segments.is_empty() {
-        "scope".to_string()
-    } else {
-        segments.join("/")
-    }
-}
-
-fn legacy_within_tenant_scope(scope: &PersistentApprovalScope) -> String {
-    let mut segments = Vec::new();
-    if let Some(agent_id) = &scope.agent_id {
-        segments.push(format!("agents/{agent_id}"));
-    }
-    if let Some(project_id) = &scope.project_id {
-        segments.push(format!("projects/{project_id}"));
-    } else if let Some(thread_id) = &scope.thread_id {
-        segments.push(format!("threads/{thread_id}"));
     }
     if segments.is_empty() {
         "scope".to_string()
@@ -805,64 +633,9 @@ fn resource_scope_for_policy_key(key: &PersistentApprovalPolicyKey) -> ResourceS
         agent_id: key.scope.agent_id.clone(),
         project_id: key.scope.project_id.clone(),
         mission_id: None,
-        thread_id: key.scope.thread_id.clone(),
+        thread_id: None,
         invocation_id: ironclaw_host_api::InvocationId::new(),
     }
-}
-
-fn legacy_thread_scoped_key(
-    scope: &ResourceScope,
-    key: &PersistentApprovalPolicyKey,
-) -> Option<PersistentApprovalPolicyKey> {
-    let thread_id = scope.thread_id.clone()?;
-    if key.scope.project_id.is_some() {
-        return None;
-    }
-
-    let mut legacy_scope = key.scope.clone();
-    legacy_scope.thread_id = Some(thread_id);
-    Some(PersistentApprovalPolicyKey {
-        scope: legacy_scope,
-        action: key.action,
-        capability_id: key.capability_id.clone(),
-        grantee: key.grantee.clone(),
-    })
-}
-
-fn legacy_thread_root_path(
-    scope: &PersistentApprovalScope,
-) -> Result<Option<ScopedPath>, PersistentApprovalPolicyError> {
-    if scope.project_id.is_some() {
-        return Ok(None);
-    }
-
-    let mut path = String::from(POLICY_PREFIX);
-    if let Some(agent_id) = &scope.agent_id {
-        path.push_str(&format!("/agents/{agent_id}"));
-    }
-    path.push_str("/threads");
-    Ok(Some(ScopedPath::new(path).map_err(invalid_path)?))
-}
-
-fn scoped_child_path(
-    parent: &ScopedPath,
-    child: &str,
-) -> Result<ScopedPath, PersistentApprovalPolicyError> {
-    ScopedPath::new(format!("{parent}/{child}")).map_err(invalid_path)
-}
-
-fn legacy_policy_matches_lookup(
-    stored: &PersistentApprovalPolicyKey,
-    expected: &PersistentApprovalPolicyKey,
-) -> bool {
-    stored.action == expected.action
-        && stored.capability_id == expected.capability_id
-        && stored.grantee == expected.grantee
-        && stored.scope.tenant_id == expected.scope.tenant_id
-        && stored.scope.user_id == expected.scope.user_id
-        && stored.scope.agent_id == expected.scope.agent_id
-        && stored.scope.project_id == expected.scope.project_id
-        && stored.scope.thread_id.is_some()
 }
 
 fn serialize<T>(value: &T) -> Result<Vec<u8>, PersistentApprovalPolicyError>
@@ -894,7 +667,7 @@ mod tests {
     use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{
         AgentId, EffectKind, GrantConstraints, HostPath, InvocationId, MountAlias, MountGrant,
-        MountPermissions, MountView, NetworkPolicy, ProjectId, VirtualPath,
+        MountPermissions, MountView, NetworkPolicy, ProjectId, ThreadId, VirtualPath,
     };
 
     use super::*;
@@ -1158,7 +931,7 @@ mod tests {
     #[test]
     fn policy_scope_prefers_project_over_thread() {
         // Project is still part of the scope; differing thread ids under the same
-        // project produce identical keys (project carried, thread_id always None).
+        // project produce identical keys.
         let scope_a = scope(Some("project-a"), Some("thread-a"));
         let scope_b = scope(Some("project-a"), Some("thread-b"));
 
@@ -1170,28 +943,20 @@ mod tests {
             derived_a.project_id,
             Some(ProjectId::new("project-a").unwrap())
         );
-        assert_eq!(derived_a.thread_id, None);
     }
 
     #[test]
-    fn project_scoped_policy_key_serialization_stays_digest_stable() {
-        // Criterion 5 (#4825): the persistent-approval digest is
-        // `serde_json::to_vec(key)` and the on-disk path derives from it.
-        // Pre-existing project-scoped policies serialized the scope with
-        // `"thread_id": null` (an old project-scoped scope already blanked
-        // thread_id). The field is intentionally retained (always `None`) so the
-        // serialization — and thus the digest and storage path — is byte-identical
-        // after the upgrade. If this breaks, pre-existing project-scoped
-        // "always allow" policies orphan.
+    fn project_scoped_policy_key_serialization_is_threadless() {
+        // Criterion 5 (#4825): persistent approvals intentionally ignore
+        // thread_id. There is no backward-compatibility read path for old local
+        // test records, so the key serialization should not retain thread_id.
         let key = key_for(&scope(Some("project-a"), Some("thread-ignored")));
         let json = serde_json::to_string(&key).expect("serialize policy key");
         assert!(
-            json.contains("\"thread_id\":null"),
-            "project-scoped key must serialize thread_id as null to preserve the digest; got {json}"
+            !json.contains("thread_id"),
+            "persistent approval keys must not serialize thread_id; got {json}"
         );
 
-        // Digest and tenant-scope path are independent of the originating thread,
-        // so a policy written before the upgrade is still located afterwards.
         let digest_thread_one =
             policy_digest(&key_for(&scope(Some("project-a"), Some("thread-1")))).expect("digest");
         let digest_thread_two =
@@ -1205,10 +970,9 @@ mod tests {
 
     #[tokio::test]
     async fn filesystem_project_scoped_policy_matches_in_new_thread_after_reload() {
-        // Criterion 5 (#4825): a project-scoped "always allow" persisted before
-        // thread_id was dropped from the scope must still match afterwards. A
-        // fresh store instance (simulating a restart/upgrade) looks the policy up
-        // from a DIFFERENT thread under the same project and finds it.
+        // Criterion 5 (#4825): a project-scoped "always allow" applies across
+        // threads in the same project. A fresh store instance looks the policy
+        // up from a different thread and finds it through the canonical path.
         let backend = Arc::new(InMemoryBackend::new());
         let scoped = scoped_fs(Arc::clone(&backend), "tenant-a", "alice");
         let store = FilesystemPersistentApprovalPolicyStore::new(Arc::clone(&scoped));
@@ -1230,116 +994,6 @@ mod tests {
         assert!(reloaded.active_grant().is_some());
     }
 
-    #[tokio::test]
-    async fn filesystem_no_project_legacy_thread_scoped_policy_matches_with_scope_lookup() {
-        // Criterion 5 (#4825): no-project persistent approvals that were stored
-        // under a concrete thread id before the scope became threadless still
-        // need to be found after the upgrade. The new scope-aware lookup should
-        // try the canonical key first, then fall back to the legacy thread-keyed
-        // filesystem record when the caller still has a thread id.
-        let backend = Arc::new(InMemoryBackend::new());
-        let scoped = scoped_fs(Arc::clone(&backend), "tenant-a", "alice");
-        let store = FilesystemPersistentApprovalPolicyStore::new(Arc::clone(&scoped));
-        let legacy_scope = scope(None, Some("thread-legacy"));
-        let canonical_key = key_for(&legacy_scope);
-        let legacy_key = PersistentApprovalPolicyKey {
-            scope: PersistentApprovalScope {
-                thread_id: legacy_scope.thread_id.clone(),
-                ..PersistentApprovalScope::from_resource_scope(&legacy_scope)
-            },
-            action: canonical_key.action,
-            capability_id: canonical_key.capability_id.clone(),
-            grantee: canonical_key.grantee.clone(),
-        };
-        let policy = PersistentApprovalPolicy {
-            key: legacy_key.clone(),
-            grant_id: CapabilityGrantId::new(),
-            approved_by: Principal::User(UserId::new("alice").unwrap()),
-            constraints: GrantConstraints {
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: MountView::default(),
-                network: NetworkPolicy::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: None,
-            },
-            source_approval_request_id: Some(ApprovalRequestId::new()),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            revoked_at: None,
-        };
-        let legacy_path = legacy_policy_path(&legacy_key).expect("legacy path");
-        store
-            .write_policy_raw(&legacy_scope, &legacy_path, &policy, CasExpectation::Absent)
-            .await
-            .expect("write legacy policy");
-
-        let reloaded = store
-            .lookup_with_scope(&legacy_scope, &canonical_key)
-            .await
-            .expect("lookup legacy policy")
-            .expect("legacy thread-scoped policy still reachable");
-
-        assert_eq!(reloaded, policy);
-        assert!(reloaded.active_grant().is_some());
-    }
-
-    #[tokio::test]
-    async fn filesystem_no_project_legacy_thread_scoped_policy_survives_thread_change() {
-        // Regression for the unresolved PR review comment on #4835:
-        // the current thread may differ from the one that originally stored
-        // the legacy no-project approval, but lookup_with_scope should still
-        // recover the record by scanning the thread-scoped legacy layout.
-        let backend = Arc::new(InMemoryBackend::new());
-        let scoped = scoped_fs(Arc::clone(&backend), "tenant-a", "alice");
-        let store = FilesystemPersistentApprovalPolicyStore::new(Arc::clone(&scoped));
-        let legacy_scope = scope(None, Some("thread-original"));
-        let lookup_scope = scope(None, Some("thread-current"));
-        let canonical_key = key_for(&lookup_scope);
-        let legacy_key = PersistentApprovalPolicyKey {
-            scope: PersistentApprovalScope {
-                thread_id: legacy_scope.thread_id.clone(),
-                ..PersistentApprovalScope::from_resource_scope(&legacy_scope)
-            },
-            action: canonical_key.action,
-            capability_id: canonical_key.capability_id.clone(),
-            grantee: canonical_key.grantee.clone(),
-        };
-        let policy = PersistentApprovalPolicy {
-            key: legacy_key.clone(),
-            grant_id: CapabilityGrantId::new(),
-            approved_by: Principal::User(UserId::new("alice").unwrap()),
-            constraints: GrantConstraints {
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: MountView::default(),
-                network: NetworkPolicy::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: None,
-            },
-            source_approval_request_id: Some(ApprovalRequestId::new()),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            revoked_at: None,
-        };
-        let legacy_path = legacy_policy_path(&legacy_key).expect("legacy path");
-        store
-            .write_policy_raw(&legacy_scope, &legacy_path, &policy, CasExpectation::Absent)
-            .await
-            .expect("write legacy policy");
-
-        let reloaded = store
-            .lookup_with_scope(&lookup_scope, &canonical_key)
-            .await
-            .expect("lookup legacy policy")
-            .expect("legacy thread-scoped policy still reachable after thread change");
-
-        assert_eq!(reloaded, policy);
-        assert!(reloaded.active_grant().is_some());
-    }
-
     #[test]
     fn policy_scope_without_project_is_thread_agnostic() {
         let scope_a = scope(None, Some("thread-a"));
@@ -1349,7 +1003,6 @@ mod tests {
         let derived_b = PersistentApprovalScope::from_resource_scope(&scope_b);
 
         assert_eq!(derived_a, derived_b);
-        assert_eq!(derived_a.thread_id, None);
     }
 
     #[test]
