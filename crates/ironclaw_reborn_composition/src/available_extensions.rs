@@ -79,6 +79,11 @@ pub(crate) struct AvailableExtensionPackage {
     pub(crate) package_ref: LifecyclePackageRef,
     pub(crate) manifest_toml: String,
     pub(crate) package: ExtensionPackage,
+    /// Surface kinds projected once from the manifest record at construction and
+    /// cached here. Deliberately not re-derived in `summary()`: the projection
+    /// (`product_adapter_sections`) needs the full `ExtensionManifestRecord`, and
+    /// each loader parses the manifest exactly once (see
+    /// `surface_kinds_from_manifest_record`). Keep in sync at construction.
     pub(crate) surface_kinds: Vec<LifecycleExtensionSurfaceKind>,
     pub(crate) assets: Vec<AvailableExtensionAsset>,
 }

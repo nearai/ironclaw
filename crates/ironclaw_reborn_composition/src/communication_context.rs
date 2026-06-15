@@ -90,34 +90,30 @@ async fn fetch_communication_context(
 
     let preferences_fut = outbound_preferences.get_outbound_preferences(caller.clone());
 
-    // Lifecycle fetch is only meaningful when classification is available.
-    // Skip the ExtensionList call entirely when the predicate is a stub so
-    // the 500 ms timeout budget is not consumed by a discarded result.
+    // Fetch the installed-extension list to classify channel surfaces. Skipped
+    // only when no lifecycle facade is wired (the slice then renders channels as
+    // `unknown`). Runs concurrently with the preferences fetch under the shared
+    // budget below.
     let lifecycle_fut = async {
-        if CHANNEL_CLASSIFICATION_AVAILABLE {
-            let lifecycle_context = lifecycle_facade.as_deref().map(|_| {
-                LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
+        match lifecycle_facade.as_deref() {
+            Some(facade) => {
+                let ctx = LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
                     tenant_id: caller.tenant_id.clone(),
                     user_id: caller.user_id.clone(),
                     agent_id: caller.agent_id.clone(),
                     project_id: caller.project_id.clone(),
-                })
-            });
-            match (&lifecycle_facade, lifecycle_context) {
-                (Some(facade), Some(ctx)) => Some(
+                });
+                Some(
                     facade
                         .execute(ctx, LifecycleProductAction::ExtensionList)
                         .await,
-                ),
-                _ => None,
+                )
             }
-        } else {
-            None
+            None => None,
         }
     };
 
-    // Both futures share a single 500 ms budget.  Lifecycle runs concurrently
-    // only when CHANNEL_CLASSIFICATION_AVAILABLE is true.
+    // Both futures share a single 500 ms budget and run concurrently.
     let combined_result = timeout(COMMUNICATION_CONTEXT_FETCH_TIMEOUT, async {
         join!(preferences_fut, lifecycle_fut)
     })
@@ -164,9 +160,8 @@ async fn fetch_communication_context(
     };
 
     let connected_channels = match lifecycle_result {
-        // `lifecycle_fut` only issues the ExtensionList call when
-        // CHANNEL_CLASSIFICATION_AVAILABLE is true, so a present response here
-        // means classification is on and the surface predicate is meaningful.
+        // A present response means a lifecycle facade was wired and returned the
+        // installed-extension list; classify each by its projected surface kind.
         Some(Ok(response)) => {
             let extensions = match response.payload {
                 Some(LifecycleProductPayload::ExtensionList { extensions, .. }) => extensions,
@@ -202,13 +197,6 @@ async fn fetch_communication_context(
         delivery_tools_visible: false,
     })
 }
-
-/// Whether channel-surface classification is available.
-///
-/// `true` since #4778's `ProductAdapter` surface projection landed, exposing
-/// `surface_kinds` on the lifecycle summary so channel extensions can be
-/// distinguished from tool extensions.
-const CHANNEL_CLASSIFICATION_AVAILABLE: bool = true;
 
 /// Whether a lifecycle extension exposes a channel surface (e.g. Slack).
 ///
