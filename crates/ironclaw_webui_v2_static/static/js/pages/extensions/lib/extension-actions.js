@@ -1,3 +1,5 @@
+import { isChannelExtensionKind } from "./extensions-schema.js";
+
 export function primaryExtensionAction(ext) {
   const state =
     ext?.onboarding_state ||
@@ -13,6 +15,15 @@ export function primaryExtensionAction(ext) {
   }
 
   if (ext?.kind === "wasm_channel") {
+    return null;
+  }
+
+  // Channel-surface kinds in a pairing state hand off to the pairing section;
+  // no primary Activate button should appear alongside the dedicated pairing UI.
+  if (
+    isChannelExtensionKind(ext?.kind) &&
+    (state === "pairing_required" || state === "pairing")
+  ) {
     return null;
   }
 
