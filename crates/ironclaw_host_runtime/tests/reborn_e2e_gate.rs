@@ -4,7 +4,10 @@ use support::legacy_capability_fixture_to_v2;
 
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use async_trait::async_trait;
@@ -19,13 +22,18 @@ use ironclaw_events::{
     DurableEventLog, EventStreamKey, InMemoryAuditSink, InMemoryDurableEventLog, InMemoryEventSink,
     ReadScope, RuntimeEventKind,
 };
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_extensions::{
+    CapabilityManifest, CapabilityVisibility, ExtensionManifest, ExtensionPackage,
+    ExtensionRegistry, ExtensionRuntime, MANIFEST_SCHEMA_VERSION, ManifestSource,
+};
 use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
-    BuiltinObligationServices, CapabilitySurfacePolicy, CapabilitySurfaceVersion, HostRuntime,
-    HostRuntimeServices, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeStatusRequest, SurfaceKind,
+    BuiltinObligationServices, CapabilitySurfacePolicy, CapabilitySurfaceVersion,
+    FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
+    FirstPartyCapabilityRequest, FirstPartyCapabilityResult, HostRuntime, HostRuntimeServices,
+    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
+    RuntimeFailureKind, RuntimeStatusRequest, SurfaceKind,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -994,6 +1002,221 @@ fn assert_failed_outcome(outcome: RuntimeCapabilityOutcome, expected: RuntimeFai
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => assert_eq!(failure.kind, expected),
         other => panic!("expected failed outcome {expected:?}, got {other:?}"),
+    }
+}
+
+/// Regression test: a Backend failure from a first-party handler after approval
+/// resume must surface as `RuntimeCapabilityOutcome::Failed(Backend)` rather
+/// than causing scope_mismatch or a terminal `HostUnavailable` run death.
+///
+/// Flow:
+///   1. `invoke_capability` with no grants → `ApprovalThenGrantAuthorizer` returns
+///      `ApprovalRequired`.
+///   2. Approve the dispatch so the capability lease exists.
+///   3. `resume_capability` → `OnceFailingFirstPartyHandler` returns a Backend error
+///      on its first call.
+///   4. Assert the outcome is `Failed(Backend)` (the fix in PR #4899).
+#[tokio::test]
+async fn reborn_e2e_gate_resume_backend_error_surfaces_as_failed_backend() {
+    let handler = Arc::new(OnceFailingFirstPartyHandler::new());
+    let first_party = FirstPartyCapabilityRegistry::new()
+        .with_handler(first_party_capability_id(), Arc::clone(&handler));
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let services = HostRuntimeServices::new(
+        Arc::new(first_party_registry_for_gate_test()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenGrantAuthorizer),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(first_party))
+    .with_trust_policy(Arc::new(first_party_trust_policy_for_gate_test()))
+    .with_run_state(Arc::clone(&run_state))
+    .with_approval_requests(approval_requests)
+    .with_capability_leases(Arc::clone(&capability_leases));
+    let runtime = services.host_runtime_for_local_testing();
+
+    // Step 1: invoke with no grants — should require approval.
+    let context = execution_context_without_grants_first_party();
+    let scope = context.resource_scope.clone();
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context.clone(),
+            first_party_capability_id(),
+            ResourceEstimate::default(),
+            serde_json::json!({"message": "status"}),
+            trust_decision_first_party(),
+        ))
+        .await
+        .unwrap();
+    let gate = match outcome {
+        RuntimeCapabilityOutcome::ApprovalRequired(gate) => gate,
+        other => panic!("expected approval gate for first-party capability, got {other:?}"),
+    };
+    assert_eq!(gate.capability_id, first_party_capability_id());
+    let approval_request_id = gate.approval_request_id;
+
+    // Step 2: approve the dispatch.
+    approve_dispatch_for_services(&services, &scope, approval_request_id).await;
+
+    // Step 3: resume — handler fails with Backend on the first call.
+    // Re-use the same context (same invocation_id) so the run state record
+    // (BlockedApproval) can be found by the capability host, consistent with
+    // how existing approval-resume tests drive the runtime.
+    let resume = runtime
+        .resume_capability(RuntimeCapabilityResumeRequest::new(
+            context,
+            approval_request_id,
+            first_party_capability_id(),
+            ResourceEstimate::default(),
+            serde_json::json!({"message": "status"}),
+            trust_decision_first_party(),
+        ))
+        .await
+        .unwrap();
+
+    // Step 4: assert Backend failure (the fix in PR #4899).
+    assert_failed_outcome(resume, RuntimeFailureKind::Backend);
+    assert!(
+        handler.has_been_called(),
+        "handler must have been called during resume dispatch"
+    );
+}
+
+/// A first-party handler that returns a Backend error on its first call and
+/// succeeds on subsequent calls.  Used to simulate the transient backend
+/// failure that previously caused scope_mismatch / HostUnavailable run death.
+struct OnceFailingFirstPartyHandler {
+    has_been_called: AtomicBool,
+}
+
+impl OnceFailingFirstPartyHandler {
+    fn new() -> Self {
+        Self {
+            has_been_called: AtomicBool::new(false),
+        }
+    }
+
+    fn has_been_called(&self) -> bool {
+        self.has_been_called.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl FirstPartyCapabilityHandler for OnceFailingFirstPartyHandler {
+    async fn dispatch(
+        &self,
+        _request: FirstPartyCapabilityRequest,
+    ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
+        let already_called = self.has_been_called.swap(true, Ordering::SeqCst);
+        if !already_called {
+            // First call: fail with Backend to exercise the resume-origin guard.
+            Err(FirstPartyCapabilityError::new(
+                RuntimeDispatchErrorKind::Backend,
+            ))
+        } else {
+            // Subsequent calls: succeed (should not be reached in this test).
+            Ok(FirstPartyCapabilityResult::new(
+                serde_json::json!({"status": "ok"}),
+                ResourceUsage::default(),
+            ))
+        }
+    }
+}
+
+fn first_party_capability_id() -> CapabilityId {
+    CapabilityId::new("host.status").unwrap()
+}
+
+fn first_party_provider_id() -> ExtensionId {
+    ExtensionId::new("host").unwrap()
+}
+
+fn first_party_registry_for_gate_test() -> ExtensionRegistry {
+    let package = ExtensionPackage::from_manifest(
+        ExtensionManifest {
+            schema_version: MANIFEST_SCHEMA_VERSION.to_string(),
+            id: first_party_provider_id(),
+            name: "Host".to_string(),
+            version: "0.1.0".to_string(),
+            description: "Host-owned first-party capabilities for gate test".to_string(),
+            source: ManifestSource::HostBundled,
+            requested_trust: RequestedTrustClass::FirstPartyRequested,
+            descriptor_trust_default: TrustClass::Sandbox,
+            runtime: ExtensionRuntime::FirstParty {
+                service: "host".to_string(),
+            },
+            host_apis: Vec::new(),
+            capabilities: vec![CapabilityManifest {
+                id: first_party_capability_id(),
+                implements: Vec::new(),
+                description: "Reports host status".to_string(),
+                effects: vec![EffectKind::DispatchCapability],
+                default_permission: PermissionMode::Allow,
+                visibility: CapabilityVisibility::Model,
+                input_schema_ref: CapabilityProfileSchemaRef::new(
+                    "schemas/host/status.input.v1.json",
+                )
+                .unwrap(),
+                output_schema_ref: CapabilityProfileSchemaRef::new(
+                    "schemas/host/status.output.v1.json",
+                )
+                .unwrap(),
+                prompt_doc_ref: Some(
+                    CapabilityProfileSchemaRef::new("prompts/host/status.md").unwrap(),
+                ),
+                required_host_ports: Vec::new(),
+                runtime_credentials: Vec::new(),
+                resource_profile: None,
+            }],
+            hooks: Vec::new(),
+        },
+        VirtualPath::new("/system/extensions/host").unwrap(),
+    )
+    .unwrap();
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    registry
+}
+
+fn first_party_trust_policy_for_gate_test() -> HostTrustPolicy {
+    HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(vec![
+        AdminEntry::for_local_manifest(
+            PackageId::new("host").unwrap(),
+            "/system/extensions/host/manifest.toml".to_string(),
+            None,
+            HostTrustAssignment::first_party(),
+            vec![EffectKind::DispatchCapability],
+            None,
+        ),
+    ]))])
+    .unwrap()
+}
+
+fn execution_context_without_grants_first_party() -> ExecutionContext {
+    ExecutionContext::local_default(
+        UserId::new("user").unwrap(),
+        ExtensionId::new("caller").unwrap(),
+        RuntimeKind::FirstParty,
+        TrustClass::FirstParty,
+        CapabilitySet::default(),
+        MountView::default(),
+    )
+    .unwrap()
+}
+
+fn trust_decision_first_party() -> TrustDecision {
+    TrustDecision {
+        effective_trust: EffectiveTrustClass::user_trusted(),
+        authority_ceiling: AuthorityCeiling {
+            allowed_effects: vec![EffectKind::DispatchCapability],
+            max_resource_ceiling: None,
+        },
+        provenance: TrustProvenance::Default,
+        evaluated_at: Utc::now(),
     }
 }
 

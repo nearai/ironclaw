@@ -5531,3 +5531,465 @@ async fn auth_resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
          failure (retry is suppressed to avoid double-exec)"
     );
 }
+
+/// Five-gate sequence: approve#1→OK, approve#2→OK, approve#3→Backend, deny, approve#4→OK.
+///
+/// Extended regression test that verifies the C-sub-A fix holds when two *clean*
+/// approval-resume cycles precede the Backend failure, and a final approval
+/// succeeds after a deny.  This exercises:
+/// - Two consecutive successful approval resumes before any error.
+/// - A Backend-on-resume that still surfaces as a clean ToolErrorResult (no retry).
+/// - A Denied that is cleanly rejected as a ToolErrorResult (not a Backend retry path).
+/// - A successful approval resume *after* the deny — proving the gate machinery
+///   recovered fully and is not poisoned by either the Backend or Denied outcome.
+///
+/// # Sequence (5 capability cycles in one session)
+///
+/// | Phase | Event | Expected outcome |
+/// |-------|-------|-----------------|
+/// | 1 | Model issues cap1 | `ApprovalRequired` → Blocked (gate 1) |
+/// | 2 | Approve gate 1 → cap1 resume → Completed; model issues cap2 (approve#2) | `ApprovalRequired` → Blocked (gate 2) |
+/// | 3 | Approve gate 2 → cap2 resume → Completed; model issues cap3 (approve#3) | `ApprovalRequired` → Blocked (gate 3) |
+/// | 4 | Approve gate 3 → cap3 resume → `Failed(Backend)` | C-sub-A: ToolErrorResult, loop continues; model→deny Denied; model→cap5 ApprovalRequired → Blocked (gate 5) |
+/// | 5 | Approve gate 5 → cap5 resume → Completed → final reply | `LoopExit::Completed` |
+///
+/// # What this test asserts
+///
+/// - Run never terminates with `HostUnavailable` / scope_mismatch at any point.
+/// - approve#1 (cap1) and approve#2 (cap2) both resume successfully (Completed).
+/// - approve#3 (cap3) Backend-on-resume surfaces as a clean model-visible tool
+///   error; loop continues; no single retry dispatch occurs.
+/// - The deny (cap4) is rejected cleanly as ToolErrorResult (not a Backend path).
+/// - approve#4 (cap5) resumes successfully (Completed) after the deny.
+/// - Run reaches `LoopExit::Completed`.
+/// - No `invoke_capability` single-path retry is made for the resume-origin Backend.
+#[tokio::test]
+async fn approve_sequence_backend_then_deny_then_approve_survives_and_completes() {
+    // ── shared IDs ────────────────────────────────────────────────────────────
+    // cap1: approve#1 → resume OK → Completed
+    let cap1_request_id = ApprovalRequestId::new();
+    let cap1_resume_token =
+        CapabilityResumeToken::new("resume-token:5g-cap1").expect("valid token");
+    let cap1_correlation_id = CorrelationId::new();
+    let cap1_input_ref =
+        CapabilityInputRef::new("input:run-original:5g-cap1-uuid").expect("valid input ref");
+
+    // cap2: approve#2 → resume OK → Completed (second clean approval)
+    let cap2_request_id = ApprovalRequestId::new();
+    let cap2_resume_token =
+        CapabilityResumeToken::new("resume-token:5g-cap2").expect("valid token");
+    let cap2_correlation_id = CorrelationId::new();
+    let cap2_input_ref =
+        CapabilityInputRef::new("input:run-original:5g-cap2-uuid").expect("valid input ref");
+
+    // cap3: approve#3 → resume Backend → ToolErrorResult (BUG TRIGGER)
+    let cap3_request_id = ApprovalRequestId::new();
+    let cap3_resume_token =
+        CapabilityResumeToken::new("resume-token:5g-cap3").expect("valid token");
+    let cap3_correlation_id = CorrelationId::new();
+    let cap3_input_ref =
+        CapabilityInputRef::new("input:run-original:5g-cap3-uuid").expect("valid input ref");
+
+    // cap4_deny: Denied(EmptySurface) → ToolErrorResult (no gate, no approval_resume)
+    let cap4_deny_input_ref =
+        CapabilityInputRef::new("input:run-original:5g-cap4deny-uuid").expect("valid input ref");
+
+    // cap5: approve#4 → resume OK → Completed (approval AFTER deny)
+    let cap5_request_id = ApprovalRequestId::new();
+    let cap5_resume_token =
+        CapabilityResumeToken::new("resume-token:5g-cap5").expect("valid token");
+    let cap5_correlation_id = CorrelationId::new();
+    let cap5_input_ref =
+        CapabilityInputRef::new("input:run-original:5g-cap5-uuid").expect("valid input ref");
+
+    // ── approval_resume metadata ──────────────────────────────────────────────
+    let cap1_approval_resume = CapabilityApprovalResume {
+        approval_request_id: cap1_request_id,
+        resume_token: cap1_resume_token,
+        correlation_id: cap1_correlation_id,
+        input_ref: cap1_input_ref.clone(),
+        input: serde_json::json!({"action": "cap1"}),
+        estimate: ResourceEstimate::default(),
+    };
+    let cap2_approval_resume = CapabilityApprovalResume {
+        approval_request_id: cap2_request_id,
+        resume_token: cap2_resume_token,
+        correlation_id: cap2_correlation_id,
+        input_ref: cap2_input_ref.clone(),
+        input: serde_json::json!({"action": "cap2"}),
+        estimate: ResourceEstimate::default(),
+    };
+    let cap3_approval_resume = CapabilityApprovalResume {
+        approval_request_id: cap3_request_id,
+        resume_token: cap3_resume_token,
+        correlation_id: cap3_correlation_id,
+        input_ref: cap3_input_ref.clone(),
+        input: serde_json::json!({"action": "cap3"}),
+        estimate: ResourceEstimate::default(),
+    };
+    let cap5_approval_resume = CapabilityApprovalResume {
+        approval_request_id: cap5_request_id,
+        resume_token: cap5_resume_token,
+        correlation_id: cap5_correlation_id,
+        input_ref: cap5_input_ref.clone(),
+        input: serde_json::json!({"action": "cap5"}),
+        estimate: ResourceEstimate::default(),
+    };
+
+    // ── model responses ───────────────────────────────────────────────────────
+    // Turn 1 (Phase 1): model issues cap1.
+    let cap1_model_response = ironclaw_turns::run_profile::LoopModelResponse {
+        chunks: Vec::new(),
+        safe_reasoning_deltas: Vec::new(),
+        output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+            surface_version: surface_version(),
+            capability_id: capability_id(),
+            input_ref: cap1_input_ref.clone(),
+            effective_capability_ids: vec![capability_id()],
+            provider_replay: None,
+        }]),
+        effective_model_profile_id: ironclaw_turns::run_profile::ModelProfileId::new("model")
+            .expect("valid"),
+        usage: None,
+    };
+    // Turn 2 (Phase 2): after cap1 resume OK, model issues cap2 (approve#2).
+    let cap2_model_response = ironclaw_turns::run_profile::LoopModelResponse {
+        chunks: Vec::new(),
+        safe_reasoning_deltas: Vec::new(),
+        output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+            surface_version: surface_version(),
+            capability_id: capability_id(),
+            input_ref: cap2_input_ref.clone(),
+            effective_capability_ids: vec![capability_id()],
+            provider_replay: None,
+        }]),
+        effective_model_profile_id: ironclaw_turns::run_profile::ModelProfileId::new("model")
+            .expect("valid"),
+        usage: None,
+    };
+    // Turn 3 (Phase 3): after cap2 resume OK, model issues cap3 (approve#3).
+    let cap3_model_response = ironclaw_turns::run_profile::LoopModelResponse {
+        chunks: Vec::new(),
+        safe_reasoning_deltas: Vec::new(),
+        output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+            surface_version: surface_version(),
+            capability_id: capability_id(),
+            input_ref: cap3_input_ref.clone(),
+            effective_capability_ids: vec![capability_id()],
+            provider_replay: None,
+        }]),
+        effective_model_profile_id: ironclaw_turns::run_profile::ModelProfileId::new("model")
+            .expect("valid"),
+        usage: None,
+    };
+    // Turn 4 (Phase 4a): after cap3 resume Backend→ToolErrorResult, model issues cap4_deny.
+    let cap4_deny_model_response = ironclaw_turns::run_profile::LoopModelResponse {
+        chunks: Vec::new(),
+        safe_reasoning_deltas: Vec::new(),
+        output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+            surface_version: surface_version(),
+            capability_id: capability_id(),
+            input_ref: cap4_deny_input_ref,
+            effective_capability_ids: vec![capability_id()],
+            provider_replay: None,
+        }]),
+        effective_model_profile_id: ironclaw_turns::run_profile::ModelProfileId::new("model")
+            .expect("valid"),
+        usage: None,
+    };
+    // Turn 5 (Phase 4b): after deny→ToolErrorResult, model issues cap5 (approve#4).
+    let cap5_model_response = ironclaw_turns::run_profile::LoopModelResponse {
+        chunks: Vec::new(),
+        safe_reasoning_deltas: Vec::new(),
+        output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+            surface_version: surface_version(),
+            capability_id: capability_id(),
+            input_ref: cap5_input_ref.clone(),
+            effective_capability_ids: vec![capability_id()],
+            provider_replay: None,
+        }]),
+        effective_model_profile_id: ironclaw_turns::run_profile::ModelProfileId::new("model")
+            .expect("valid"),
+        usage: None,
+    };
+
+    // ── batch outcomes (9 total) ──────────────────────────────────────────────
+    // [0] Phase 1:  cap1 → ApprovalRequired → Blocked (gate 1).
+    // [1] Phase 2:  cap1 resume → Completed.
+    // [2] Phase 2:  cap2 → ApprovalRequired → Blocked (gate 2).
+    // [3] Phase 3:  cap2 resume → Completed.
+    // [4] Phase 3:  cap3 → ApprovalRequired → Blocked (gate 3).
+    // [5] Phase 4:  cap3 resume → Failed(Backend) — BUG TRIGGER.
+    //               C-sub-A fix: ToolErrorResult; no single-path retry; loop continues.
+    // [6] Phase 4:  cap4_deny → Denied(EmptySurface) → ToolErrorResult.
+    // [7] Phase 4:  cap5 → ApprovalRequired → Blocked (gate 5).
+    // [8] Phase 5:  cap5 resume → Completed → final reply → Done.
+    let batch_outcomes = vec![
+        // [0] Phase 1: cap1 → ApprovalRequired → Blocked.
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::ApprovalRequired {
+                gate_ref: LoopGateRef::new("gate:5g-cap1").expect("valid"),
+                safe_summary: "cap1 needs approval".to_string(),
+                approval_resume: Some(cap1_approval_resume),
+            }],
+            stopped_on_suspension: true,
+        },
+        // [1] Phase 2: cap1 approval-resume → Completed.
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Completed(
+                ironclaw_turns::run_profile::CapabilityResultMessage {
+                    result_ref: LoopResultRef::new("result:5g-cap1").expect("valid"),
+                    safe_summary: "cap1 completed successfully".to_string(),
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    terminate_hint: false,
+                    byte_len: 0,
+                },
+            )],
+            stopped_on_suspension: false,
+        },
+        // [2] Phase 2 (continued): model issues cap2 → ApprovalRequired → Blocked.
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::ApprovalRequired {
+                gate_ref: LoopGateRef::new("gate:5g-cap2").expect("valid"),
+                safe_summary: "cap2 needs approval".to_string(),
+                approval_resume: Some(cap2_approval_resume),
+            }],
+            stopped_on_suspension: true,
+        },
+        // [3] Phase 3: cap2 approval-resume → Completed (clean second approve).
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Completed(
+                ironclaw_turns::run_profile::CapabilityResultMessage {
+                    result_ref: LoopResultRef::new("result:5g-cap2").expect("valid"),
+                    safe_summary: "cap2 completed successfully".to_string(),
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    terminate_hint: false,
+                    byte_len: 0,
+                },
+            )],
+            stopped_on_suspension: false,
+        },
+        // [4] Phase 3 (continued): model issues cap3 → ApprovalRequired → Blocked.
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::ApprovalRequired {
+                gate_ref: LoopGateRef::new("gate:5g-cap3").expect("valid"),
+                safe_summary: "cap3 needs approval".to_string(),
+                approval_resume: Some(cap3_approval_resume),
+            }],
+            stopped_on_suspension: true,
+        },
+        // [5] Phase 4: cap3 approval-resume → Failed(Backend). BUG TRIGGER.
+        // C-sub-A fix: intercepted as ToolErrorResult; loop continues.
+        // No single_outcomes entry — no retry is dispatched.
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Failed(
+                ironclaw_turns::run_profile::CapabilityFailure {
+                    error_kind: CapabilityFailureKind::Backend,
+                    safe_summary: "transient backend error during cap3 resume".to_string(),
+                    detail: None,
+                },
+            )],
+            stopped_on_suspension: false,
+        },
+        // [6] Phase 4 (continued): model issues cap4_deny → Denied(EmptySurface) → ToolErrorResult.
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Denied(
+                ironclaw_turns::run_profile::CapabilityDenied {
+                    reason_kind:
+                        ironclaw_turns::run_profile::CapabilityDeniedReasonKind::EmptySurface,
+                    safe_summary: "cap4_deny is not permitted by surface policy".to_string(),
+                },
+            )],
+            stopped_on_suspension: false,
+        },
+        // [7] Phase 4 (continued): model issues cap5 → ApprovalRequired → Blocked (gate 5).
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::ApprovalRequired {
+                gate_ref: LoopGateRef::new("gate:5g-cap5").expect("valid"),
+                safe_summary: "cap5 needs approval".to_string(),
+                approval_resume: Some(cap5_approval_resume),
+            }],
+            stopped_on_suspension: true,
+        },
+        // [8] Phase 5: cap5 approval-resume → Completed. terminate_hint: false so the loop
+        // continues to a model turn for the final reply, exercising the full round-trip.
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Completed(
+                ironclaw_turns::run_profile::CapabilityResultMessage {
+                    result_ref: LoopResultRef::new("result:5g-cap5").expect("valid"),
+                    safe_summary: "cap5 completed successfully".to_string(),
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    terminate_hint: false,
+                    byte_len: 0,
+                },
+            )],
+            stopped_on_suspension: false,
+        },
+    ];
+
+    // Model responses (in order):
+    //   Turn 1 (Phase 1):  cap1_model_response
+    //   Turn 2 (Phase 2):  cap2_model_response   (after cap1 resume OK)
+    //   Turn 3 (Phase 3):  cap3_model_response   (after cap2 resume OK)
+    //   Turn 4 (Phase 4a): cap4_deny_model_response (after cap3 resume Backend→ToolErrorResult)
+    //   Turn 5 (Phase 4b): cap5_model_response   (after deny→ToolErrorResult)
+    //   Turn 6 (Phase 5):  reply_response()       (after cap5 resume OK)
+    //
+    // Deliberately NO with_single_outcomes: the C-sub-A guard prevents any
+    // single-path retry dispatch for resume-origin Backend failures.
+    let host = MockHost::new(vec![
+        cap1_model_response,
+        cap2_model_response,
+        cap3_model_response,
+        cap4_deny_model_response,
+        cap5_model_response,
+        reply_response(),
+    ])
+    .with_batch_outcomes(batch_outcomes);
+
+    let executor = CanonicalAgentLoopExecutor;
+
+    // ── Phase 1: cap1 → ApprovalRequired → Blocked ───────────────────────────
+    let initial_state = LoopExecutionState::initial_for_run(host.run_context());
+    let phase1_exit = executor
+        .execute_family(&crate::families::default(), &host, initial_state)
+        .await
+        .expect("phase 1 must succeed (blocks on cap1 gate)");
+    assert!(
+        matches!(phase1_exit, LoopExit::Blocked(_)),
+        "phase 1 must block on cap1 approval gate; got {phase1_exit:?}"
+    );
+
+    let phase1_bb = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+    assert!(
+        phase1_bb.pending_approval_resume.is_some(),
+        "phase 1 BeforeBlock must carry pending_approval_resume for cap1"
+    );
+    assert_eq!(
+        phase1_bb
+            .pending_approval_resume
+            .as_ref()
+            .unwrap()
+            .approval_request_id,
+        cap1_request_id,
+        "phase 1 pending_approval_resume must be for cap1 (approve#1)"
+    );
+
+    // ── Phase 2: approve#1 (cap1) → Completed; model issues cap2 (approve#2) → Blocked ─────
+    let phase2_exit = executor
+        .execute_family(&crate::families::default(), &host, phase1_bb)
+        .await
+        .expect("phase 2 must succeed (cap1 resume Completed, blocks on cap2 gate)");
+    assert!(
+        matches!(phase2_exit, LoopExit::Blocked(_)),
+        "phase 2 must block on cap2 approval gate after cap1 completes; got {phase2_exit:?}"
+    );
+
+    let phase2_bb = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+    assert!(
+        phase2_bb.pending_approval_resume.is_some(),
+        "phase 2 BeforeBlock must carry pending_approval_resume for cap2 (approve#2)"
+    );
+    assert_eq!(
+        phase2_bb
+            .pending_approval_resume
+            .as_ref()
+            .unwrap()
+            .approval_request_id,
+        cap2_request_id,
+        "phase 2 pending_approval_resume must be for cap2 (approve#2)"
+    );
+
+    // ── Phase 3: approve#2 (cap2) → Completed; model issues cap3 (approve#3) → Blocked ─────
+    let phase3_exit = executor
+        .execute_family(&crate::families::default(), &host, phase2_bb)
+        .await
+        .expect("phase 3 must succeed (cap2 resume Completed, blocks on cap3 gate)");
+    assert!(
+        matches!(phase3_exit, LoopExit::Blocked(_)),
+        "phase 3 must block on cap3 approval gate after cap2 completes; got {phase3_exit:?}"
+    );
+
+    let phase3_bb = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+    assert!(
+        phase3_bb.pending_approval_resume.is_some(),
+        "phase 3 BeforeBlock must carry pending_approval_resume for cap3 (approve#3)"
+    );
+    assert_eq!(
+        phase3_bb
+            .pending_approval_resume
+            .as_ref()
+            .unwrap()
+            .approval_request_id,
+        cap3_request_id,
+        "phase 3 pending_approval_resume must be for cap3 (approve#3)"
+    );
+
+    // ── Phase 4: approve#3 (cap3) → Backend failure (BUG TRIGGER) ───────────
+    //
+    // cap3 resume returns Failed(Backend). C-sub-A fix intercepts this before
+    // any retry → ToolErrorResult → loop continues. Model then issues cap4_deny
+    // (Denied→ToolErrorResult) and cap5 (ApprovalRequired→Blocked).
+    //
+    // Pre-fix: this phase would return Err(HostUnavailable { stage: Capability })
+    // because handle_capability_error clears pending_approval_resume BEFORE
+    // recovery → retry fires with None → HostUnavailable / ScopeMismatch.
+    // Post-fix: phase 4 succeeds and blocks on cap5.
+    let phase4_result = executor
+        .execute_family(&crate::families::default(), &host, phase3_bb)
+        .await;
+
+    let phase4_exit = phase4_result.expect(
+        "REGRESSION: cap3 resume-origin Backend failure must not kill the run as HostUnavailable. \
+         C-sub-A fix must intercept Retry for resume-origin failures and surface as ToolErrorResult \
+         so the loop can continue through the deny and cap5 approval.",
+    );
+
+    // Phase 4 must block on cap5 after: cap3-Backend→ToolErrorResult, deny→ToolErrorResult.
+    assert!(
+        matches!(phase4_exit, LoopExit::Blocked(_)),
+        "phase 4 must block on cap5 approval gate after cap3 backend error and deny; \
+         got {phase4_exit:?}"
+    );
+
+    // No single invoke_capability retry must have been dispatched for the resume-origin failure.
+    assert!(
+        host.single_invocations().is_empty(),
+        "no single invoke_capability retry must be made for a resume-origin Backend failure \
+         (C-sub-A guard: retry suppressed, Backend error surfaced as ToolErrorResult)"
+    );
+
+    let phase4_bb = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+    assert!(
+        phase4_bb.pending_approval_resume.is_some(),
+        "phase 4 BeforeBlock must carry pending_approval_resume for cap5 (approve#4)"
+    );
+    assert_eq!(
+        phase4_bb
+            .pending_approval_resume
+            .as_ref()
+            .unwrap()
+            .approval_request_id,
+        cap5_request_id,
+        "phase 4 pending_approval_resume must be for cap5 (approve#4)"
+    );
+
+    // ── Phase 5: approve#4 (cap5) → Completed → final reply → Done ───────────
+    let phase5_exit = executor
+        .execute_family(&crate::families::default(), &host, phase4_bb)
+        .await
+        .expect("phase 5 (approve cap5) must complete the run");
+
+    assert!(
+        matches!(phase5_exit, LoopExit::Completed(_)),
+        "phase 5 (cap5 approval-resume) must complete the run; got {phase5_exit:?}"
+    );
+
+    // Total model calls: 6 (cap1, cap2, cap3, cap4_deny, cap5, final reply).
+    assert_eq!(
+        host.model_requests().len(),
+        6,
+        "full 5-gate sequence must make exactly 6 model calls: \
+         cap1 (gate1), cap2 (gate2), cap3 (gate3), cap3-backend+deny batch, cap5 (gate5), final reply"
+    );
+}
