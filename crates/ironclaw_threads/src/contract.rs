@@ -467,9 +467,11 @@ pub struct LoadContextMessagesRequest {
 ///
 /// This is a *reference*, never bytes: `storage_key` is the landed scoped path
 /// (e.g. `/workspace/attachments/...`); the turn layer reads the bytes back
-/// through the project filesystem authority only when the active model can
-/// actually accept images. The textual `<attachments>` pointer in
-/// [`ContextMessage::content`] remains the fallback for text-only models.
+/// through the project filesystem authority and hands them to the model
+/// gateway, which attaches them as image content only for a vision-capable
+/// model (the capability gate lives in the gateway, not at read time). The
+/// textual `<attachments>` pointer in [`ContextMessage::content`] remains the
+/// fallback for text-only models.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextImageAttachment {
     pub mime_type: String,
