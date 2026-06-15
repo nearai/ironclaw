@@ -163,7 +163,7 @@ async fn active_extension_capability_ids(
     extension_management
         .active_model_visible_capabilities()
         .await
-        .expect("active extension capabilities")
+        .expect("active extension capabilities") // safety: test-only helper asserts fixture setup.
         .into_iter()
         .map(|capability| capability.id.as_str().to_string())
         .collect()
@@ -173,7 +173,7 @@ fn execution_context_for_scope<'a>(
     resource_scope: ResourceScope,
     capability_ids: impl IntoIterator<Item = &'a str>,
 ) -> ExecutionContext {
-    let caller = ExtensionId::new("extension-tool-test-caller").expect("valid extension id");
+    let caller = ExtensionId::new("extension-tool-test-caller").expect("valid extension id"); // safety: static test extension id is valid.
     let context = ExecutionContext {
         invocation_id: resource_scope.invocation_id,
         correlation_id: ironclaw_host_api::CorrelationId::new(),
@@ -197,18 +197,18 @@ fn execution_context_for_scope<'a>(
         mounts: MountView::default(),
         resource_scope,
     };
-    context.validate().expect("valid execution context");
+    context.validate().expect("valid execution context"); // safety: test fixture builds a matching execution/resource scope.
     context
 }
 
 fn webui_gate_resource_scope() -> ResourceScope {
     ResourceScope {
-        tenant_id: TenantId::new("reborn-cli").expect("tenant"),
-        user_id: UserId::new("3eee560a-7fe5-474c-965a-67cb69df3d04").expect("user"),
-        agent_id: Some(ironclaw_host_api::AgentId::new("reborn-cli-agent").expect("agent")),
+        tenant_id: TenantId::new("reborn-cli").expect("tenant"), // safety: static test tenant id is valid.
+        user_id: UserId::new("3eee560a-7fe5-474c-965a-67cb69df3d04").expect("user"), // safety: static test user id is valid.
+        agent_id: Some(ironclaw_host_api::AgentId::new("reborn-cli-agent").expect("agent")), // safety: static test agent id is valid.
         project_id: None,
         mission_id: None,
-        thread_id: Some(ThreadId::new("80aa051d-7670-5534-a2c5-2c14339e8af7").expect("thread")),
+        thread_id: Some(ThreadId::new("80aa051d-7670-5534-a2c5-2c14339e8af7").expect("thread")), // safety: static test thread id is valid.
         invocation_id: InvocationId::new(),
     }
 }
@@ -216,7 +216,7 @@ fn webui_gate_resource_scope() -> ResourceScope {
 fn capability_grant(capability_id: &str, grantee: ExtensionId) -> CapabilityGrant {
     CapabilityGrant {
         id: CapabilityGrantId::new(),
-        capability: CapabilityId::new(capability_id).expect("valid capability id"),
+        capability: CapabilityId::new(capability_id).expect("valid capability id"), // safety: test passes known lifecycle capability ids.
         grantee: Principal::Extension(grantee),
         issued_by: Principal::HostRuntime,
         constraints: GrantConstraints {
