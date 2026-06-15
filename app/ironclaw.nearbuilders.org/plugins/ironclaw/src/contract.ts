@@ -1,0 +1,660 @@
+import { eventIterator, oc } from "every-plugin/orpc";
+import { z } from "every-plugin/zod";
+
+const Errors = {
+  UNAUTHORIZED: { status: 401, message: "Not authenticated" },
+  NOT_FOUND: { status: 404, message: "Resource not found" },
+  BAD_REQUEST: { status: 400, message: "Bad request" },
+  CONFLICT: { status: 409, message: "Resource conflict" },
+  GATEWAY_ERROR: { status: 502, message: "Ironclaw gateway error" },
+};
+
+export const SessionSchema = z.object({
+  tenantId: z.string(),
+  userId: z.string(),
+  capabilities: z.object({
+    operatorWebuiConfig: z.boolean(),
+  }),
+});
+
+export const ThreadScopeSchema = z.object({
+  tenantId: z.string(),
+  agentId: z.string(),
+  projectId: z.string().optional(),
+  ownerUserId: z.string().optional(),
+  missionId: z.string().optional(),
+});
+
+export const ThreadGoalSchema = z.object({
+  statement: z.string(),
+  refinedAtSequence: z.number(),
+  refinementCount: z.number(),
+});
+
+export const ThreadSchema = z.object({
+  threadId: z.string(),
+  scope: ThreadScopeSchema,
+  createdByActorId: z.string(),
+  title: z.string().optional(),
+  metadataJson: z.string().optional(),
+  goal: ThreadGoalSchema.optional(),
+});
+
+export const ThreadListSchema = z.object({
+  data: z.array(ThreadSchema),
+  meta: z.object({
+    total: z.number(),
+    hasMore: z.boolean(),
+    nextCursor: z.string().nullable(),
+  }),
+});
+
+export const ThreadCreateSchema = z.object({
+  threadId: z.string(),
+  title: z.string().optional(),
+});
+
+export const TimelineEntrySchema = z.object({
+  messageId: z.string(),
+  threadId: z.string(),
+  sequence: z.number(),
+  kind: z.string(),
+  status: z.string(),
+  actorId: z.string().optional(),
+  sourceBindingId: z.string().optional(),
+  replyTargetBindingId: z.string().optional(),
+  turnId: z.string().optional(),
+  turnRunId: z.string().optional(),
+  toolResultRef: z.string().optional(),
+  content: z.string().optional(),
+  redactionRef: z.string().optional(),
+  role: z.string().optional(),
+  createdAt: z.string().optional(),
+});
+
+export const TimelineSchema = z.object({
+  data: z.array(TimelineEntrySchema),
+  meta: z.object({
+    total: z.number(),
+    hasMore: z.boolean(),
+    nextCursor: z.string().nullable(),
+  }),
+});
+
+export const AcceptedResponseSchema = z.object({
+  outcome: z.string(),
+  threadId: z.string(),
+  acceptedMessageRef: z.string(),
+  runId: z.string().optional(),
+  activeRunId: z.string().optional(),
+  turnId: z.string().optional(),
+  status: z.string(),
+  resolvedRunProfileId: z.string().optional(),
+  resolvedRunProfileVersion: z.number().optional(),
+  eventCursor: z.number().optional(),
+});
+
+export const GateResolutionSchema = z.enum([
+  "approved", "denied", "credential_provided", "cancelled",
+]);
+
+export const ChatEventSchema = z.object({
+  cursor: z.string().optional(),
+  type: z.enum([
+    "accepted", "running", "capability_progress", "capability_activity",
+    "capability_display_preview", "gate", "auth_required",
+    "final_reply", "cancelled", "failed",
+    "projection_snapshot", "projection_update", "keep_alive",
+  ]),
+  ack: z.object({
+    outcome: z.string(),
+    threadId: z.string(),
+    runId: z.string().optional(),
+    activeRunId: z.string().optional(),
+    acceptedMessageRef: z.string(),
+    status: z.string(),
+    turnId: z.string().optional(),
+    eventCursor: z.number().optional(),
+  }).optional(),
+  progress: z.object({
+    kind: z.string(),
+    turnRunId: z.string().optional(),
+    generatedAt: z.string().optional(),
+  }).optional(),
+  activity: z.object({
+    invocationId: z.string(),
+    turnRunId: z.string().optional(),
+    threadId: z.string().optional(),
+    capabilityId: z.string(),
+    status: z.string(),
+    provider: z.string().optional(),
+    runtime: z.string().optional(),
+    processId: z.string().optional(),
+    outputBytes: z.number().optional(),
+    errorKind: z.string().optional(),
+    updatedAt: z.string(),
+  }).optional(),
+  preview: z.object({
+    timelineMessageId: z.string().optional(),
+    invocationId: z.string(),
+    turnRunId: z.string().optional(),
+    threadId: z.string().optional(),
+    capabilityId: z.string(),
+    status: z.string(),
+    title: z.string(),
+    subtitle: z.string().optional(),
+    inputSummary: z.string().optional(),
+    outputSummary: z.string().optional(),
+    outputPreview: z.string().optional(),
+    outputKind: z.string().optional(),
+    outputBytes: z.number().optional(),
+    resultRef: z.string().optional(),
+    truncated: z.boolean(),
+    updatedAt: z.string(),
+  }).optional(),
+  reply: z.object({
+    text: z.string(),
+    turnRunId: z.string(),
+    generatedAt: z.string(),
+  }).optional(),
+  prompt: z.object({
+    turnRunId: z.string(),
+    gateRef: z.string(),
+    headline: z.string(),
+    body: z.string(),
+    allowAlways: z.boolean().optional(),
+      approvalContext: z.object({
+        toolName: z.string(),
+        action: z.string(),
+        scope: z.string(),
+        reason: z.string().optional(),
+        destination: z.unknown().optional(),
+        details: z.array(z.unknown()).optional(),
+      }).optional(),
+  }).optional(),
+  authPrompt: z.object({
+    turnRunId: z.string(),
+    authRequestRef: z.string(),
+    headline: z.string(),
+    body: z.string(),
+    challengeKind: z.string().optional(),
+    provider: z.string().optional(),
+    accountLabel: z.string().optional(),
+    authorizationUrl: z.string().optional(),
+    expiresAt: z.string().optional(),
+  }).optional(),
+  response: z.object({
+    runId: z.string(),
+    status: z.string(),
+    eventCursor: z.number(),
+    alreadyTerminal: z.boolean(),
+  }).optional(),
+  runState: z.object({
+    turnId: z.string(),
+    runId: z.string(),
+    status: z.string(),
+    eventCursor: z.number(),
+    acceptedMessageRef: z.string(),
+    resolvedRunProfileId: z.string(),
+    resolvedRunProfileVersion: z.number(),
+    receivedAt: z.string(),
+    checkpointId: z.string().optional(),
+    gateRef: z.string().optional(),
+    failure: z.unknown().optional(),
+  }).optional(),
+  state: z.object({
+    threadId: z.string(),
+    items: z.array(z.unknown()),
+  }).optional(),
+});
+
+export const AuthProviderSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  type: z.string(),
+});
+
+export const AutomationSourceSchema = z.object({
+  type: z.literal("schedule"),
+  cron: z.string(),
+  timezone: z.string(),
+});
+
+export const AutomationRecentRunSchema = z.object({
+  runId: z.string().optional(),
+  threadId: z.string().optional(),
+  fireSlot: z.string().optional(),
+  status: z.string(),
+  submittedAt: z.string(),
+  completedAt: z.string().optional(),
+});
+
+export const AutomationSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  source: AutomationSourceSchema,
+  state: z.string(),
+  nextRunAt: z.string().optional(),
+  lastRunAt: z.string().optional(),
+  lastStatus: z.string().optional(),
+  recentRuns: z.array(AutomationRecentRunSchema).optional(),
+  isActive: z.boolean(),
+  createdAt: z.string().optional(),
+});
+
+export const OutboundPreferencesSchema = z.object({
+  finalReplyTarget: z.object({
+    targetId: z.string(),
+    channel: z.string(),
+    displayName: z.string(),
+    description: z.string().optional(),
+  }).optional(),
+  status: z.string().optional(),
+  modality: z.string().optional(),
+});
+
+export const OutboundTargetSummarySchema = z.object({
+  targetId: z.string(),
+  channel: z.string(),
+  displayName: z.string(),
+  description: z.string().optional(),
+});
+
+export const OutboundTargetCapabilitiesSchema = z.object({
+  finalReplies: z.boolean(),
+  gatePrompts: z.boolean(),
+  authPrompts: z.boolean(),
+});
+
+export const OutboundTargetSchema = z.object({
+  target: OutboundTargetSummarySchema,
+  capabilities: OutboundTargetCapabilitiesSchema,
+});
+
+export const LifecyclePackageRefSchema = z.object({
+  kind: z.string(),
+  id: z.string(),
+});
+
+export const ExtensionSchema = z.object({
+  packageRef: LifecyclePackageRefSchema,
+  displayName: z.string(),
+  kind: z.string(),
+  description: z.string(),
+  authenticated: z.boolean(),
+  active: z.boolean(),
+  tools: z.array(z.string()),
+  needsSetup: z.boolean(),
+  hasAuth: z.boolean(),
+  activationStatus: z.string().optional(),
+  activationError: z.string().optional(),
+  version: z.string().optional(),
+  onboardingState: z.string().optional(),
+  onboarding: z.object({
+    credentialInstructions: z.string().optional(),
+    setupUrl: z.string().optional(),
+    credentialNextStep: z.string().optional(),
+  }).optional(),
+});
+
+export const ExtensionRegistryEntrySchema = z.object({
+  packageRef: LifecyclePackageRefSchema,
+  displayName: z.string(),
+  kind: z.string(),
+  description: z.string(),
+  installed: z.boolean(),
+  keywords: z.array(z.string()),
+  version: z.string().optional(),
+});
+
+export const ExtensionActionResponseSchema = z.object({
+  success: z.boolean(),
+  message: z.string(),
+  activated: z.boolean().optional(),
+  authUrl: z.string().optional(),
+  awaitingToken: z.boolean().optional(),
+  instructions: z.string().optional(),
+  onboardingState: z.string().optional(),
+  onboarding: z.object({
+    credentialInstructions: z.string().optional(),
+    setupUrl: z.string().optional(),
+    credentialNextStep: z.string().optional(),
+  }).optional(),
+});
+
+export const ExtensionSetupSchema = z.object({
+  success: z.boolean(),
+  message: z.string().optional(),
+});
+
+export const ExtensionSetupDetailSchema = z.object({
+  packageRef: LifecyclePackageRefSchema,
+  phase: z.string(),
+  blockers: z.array(z.unknown()),
+  payload: z.unknown().optional(),
+  secrets: z.array(z.object({
+    name: z.string(),
+    provider: z.string(),
+    prompt: z.string(),
+    optional: z.boolean(),
+    provided: z.boolean(),
+    setup: z.union([
+      z.literal("manual_token"),
+      z.object({
+        kind: z.literal("oauth"),
+        accountLabel: z.string(),
+        scopes: z.array(z.string()),
+        invocationId: z.string(),
+      }),
+    ]),
+    credentialRef: z.string().optional(),
+  })),
+  fields: z.array(z.object({
+    name: z.string(),
+    prompt: z.string(),
+    optional: z.boolean(),
+    placeholder: z.string().optional(),
+  })),
+  onboarding: z.object({
+    credentialInstructions: z.string().optional(),
+    setupUrl: z.string().optional(),
+    credentialNextStep: z.string().optional(),
+  }).optional(),
+});
+
+export const SkillSchema = z.object({
+  name: z.string(),
+  description: z.string(),
+  version: z.string(),
+  trust: z.string(),
+  source: z.string(),
+  keywords: z.array(z.string()),
+  usageHint: z.string().optional(),
+  setupHint: z.string().optional(),
+  bundlePath: z.string().optional(),
+  installSourceUrl: z.string().optional(),
+  hasRequirements: z.boolean(),
+  hasScripts: z.boolean(),
+  canEdit: z.boolean(),
+  canDelete: z.boolean(),
+});
+
+export const SkillActionResponseSchema = z.object({
+  success: z.boolean(),
+  message: z.string(),
+});
+
+export const SkillContentResponseSchema = z.object({
+  name: z.string(),
+  content: z.string(),
+});
+
+export const SkillSearchResponseSchema = z.object({
+  catalog: z.array(z.unknown()),
+  installed: z.array(SkillSchema),
+  registryUrl: z.string(),
+  catalogError: z.string().optional(),
+});
+
+export const ConnectableChannelSchema = z.object({
+  channel: z.string(),
+  displayName: z.string(),
+  strategy: z.string(),
+  action: z.object({
+    title: z.string(),
+    instructions: z.string(),
+    inputPlaceholder: z.string(),
+    submitLabel: z.string(),
+    successMessage: z.string(),
+    errorMessage: z.string(),
+  }),
+  commandAliases: z.array(z.string()),
+});
+
+export const contract = oc.router({
+  ping: oc.route({ method: "GET", path: "/ping", summary: "Health check" }).output(
+    z.object({ status: z.literal("ok"), timestamp: z.iso.datetime() }),
+  ),
+
+  session: oc
+    .route({ method: "GET", path: "/session", summary: "Get current ironclaw session" })
+    .output(SessionSchema)
+    .errors(Errors),
+
+  threads: {
+    list: oc
+      .route({ method: "GET", path: "/threads", summary: "List threads" })
+      .input(z.object({
+        limit: z.number().optional(),
+        cursor: z.string().optional(),
+      }))
+      .output(ThreadListSchema)
+      .errors(Errors),
+
+    create: oc
+      .route({ method: "POST", path: "/threads", summary: "Create a new thread" })
+      .output(ThreadCreateSchema)
+      .errors(Errors),
+
+    delete: oc
+      .route({ method: "DELETE", path: "/threads/{id}", summary: "Delete a thread" })
+      .input(z.object({ id: z.string() }))
+      .output(z.object({ success: z.boolean() }))
+      .errors(Errors),
+
+    sendMessage: oc
+      .route({ method: "POST", path: "/threads/{id}/messages", summary: "Send a message" })
+      .input(z.object({
+        id: z.string(),
+        content: z.string(),
+        clientActionId: z.string().optional(),
+      }))
+      .output(AcceptedResponseSchema)
+      .errors(Errors),
+
+    getTimeline: oc
+      .route({ method: "GET", path: "/threads/{id}/timeline", summary: "Get thread timeline" })
+      .input(z.object({
+        id: z.string(),
+        limit: z.number().optional(),
+        cursor: z.string().optional(),
+      }))
+      .output(TimelineSchema)
+      .errors(Errors),
+
+    cancelRun: oc
+      .route({ method: "POST", path: "/threads/{id}/runs/{runId}/cancel", summary: "Cancel a run" })
+      .input(z.object({
+        id: z.string(),
+        runId: z.string(),
+      }))
+      .output(z.object({
+        success: z.boolean(),
+        runId: z.string().optional(),
+        status: z.string().optional(),
+        eventCursor: z.number().optional(),
+        alreadyTerminal: z.boolean().optional(),
+      }))
+      .errors(Errors),
+
+    resolveGate: oc
+      .route({
+        method: "POST",
+        path: "/threads/{id}/runs/{runId}/gates/{gateRef}/resolve",
+        summary: "Resolve an approval gate",
+      })
+      .input(z.object({
+        id: z.string(),
+        runId: z.string(),
+        gateRef: z.string(),
+        resolution: GateResolutionSchema,
+        always: z.boolean().optional(),
+      }))
+      .output(z.object({ success: z.boolean() }))
+      .errors(Errors),
+
+    streamEvents: oc
+      .route({
+        method: "GET",
+        path: "/threads/{id}/events",
+        summary: "Stream chat events via SSE",
+      })
+      .input(z.object({
+        id: z.string(),
+        afterCursor: z.string().optional(),
+      }))
+      .output(eventIterator(ChatEventSchema))
+      .errors(Errors),
+  },
+
+  automations: {
+    list: oc
+      .route({ method: "GET", path: "/automations", summary: "List automations" })
+      .input(z.object({
+        limit: z.number().optional(),
+        runLimit: z.number().optional(),
+      }))
+      .output(z.object({ data: z.array(AutomationSchema) }))
+      .errors(Errors),
+  },
+
+  outbound: {
+    getPreferences: oc
+      .route({ method: "GET", path: "/outbound/preferences", summary: "Get outbound preferences" })
+      .output(OutboundPreferencesSchema)
+      .errors(Errors),
+
+    setPreferences: oc
+      .route({ method: "POST", path: "/outbound/preferences", summary: "Set outbound preferences" })
+      .input(OutboundPreferencesSchema)
+      .output(z.object({ success: z.boolean() }))
+      .errors(Errors),
+
+    listTargets: oc
+      .route({ method: "GET", path: "/outbound/targets", summary: "List delivery targets" })
+      .output(z.object({ data: z.array(OutboundTargetSchema), nextCursor: z.string().nullable().optional() }))
+      .errors(Errors),
+  },
+
+  extensions: {
+    list: oc
+      .route({ method: "GET", path: "/extensions", summary: "List installed extensions" })
+      .output(z.object({ data: z.array(ExtensionSchema) }))
+      .errors(Errors),
+
+    listRegistry: oc
+      .route({ method: "GET", path: "/extensions/registry", summary: "List extension registry" })
+      .output(z.object({ data: z.array(ExtensionRegistryEntrySchema) }))
+      .errors(Errors),
+
+    install: oc
+      .route({ method: "POST", path: "/extensions/install", summary: "Install an extension" })
+      .input(z.object({ packageRef: LifecyclePackageRefSchema }))
+      .output(ExtensionActionResponseSchema)
+      .errors(Errors),
+
+    activate: oc
+      .route({ method: "POST", path: "/extensions/{name}/activate", summary: "Activate an extension" })
+      .input(z.object({ name: z.string() }))
+      .output(ExtensionActionResponseSchema)
+      .errors(Errors),
+
+    remove: oc
+      .route({ method: "POST", path: "/extensions/{name}/remove", summary: "Remove an extension" })
+      .input(z.object({ name: z.string() }))
+      .output(ExtensionActionResponseSchema)
+      .errors(Errors),
+
+    getSetup: oc
+      .route({ method: "GET", path: "/extensions/{name}/setup", summary: "Get extension setup state" })
+      .input(z.object({ name: z.string() }))
+      .output(ExtensionSetupDetailSchema)
+      .errors(Errors),
+
+    setup: oc
+      .route({
+        method: "POST",
+        path: "/extensions/{name}/setup",
+        summary: "Setup/configure an extension",
+      })
+      .input(z.object({
+        name: z.string(),
+        action: z.string(),
+        payload: z.record(z.string(), z.unknown()).optional(),
+      }))
+      .output(ExtensionSetupSchema)
+      .errors(Errors),
+  },
+
+  skills: {
+    list: oc
+      .route({ method: "GET", path: "/skills", summary: "List installed skills" })
+      .output(z.object({ data: z.array(SkillSchema), count: z.number() }))
+      .errors(Errors),
+
+    search: oc
+      .route({ method: "POST", path: "/skills/search", summary: "Search skill catalog" })
+      .input(z.object({ query: z.string() }))
+      .output(SkillSearchResponseSchema)
+      .errors(Errors),
+
+    install: oc
+      .route({ method: "POST", path: "/skills/install", summary: "Install a skill" })
+      .input(z.object({ name: z.string(), content: z.string().optional() }))
+      .output(SkillActionResponseSchema)
+      .errors(Errors),
+
+    get: oc
+      .route({ method: "GET", path: "/skills/{name}", summary: "Get skill content" })
+      .input(z.object({ name: z.string() }))
+      .output(SkillContentResponseSchema)
+      .errors(Errors),
+
+    update: oc
+      .route({ method: "PUT", path: "/skills/{name}", summary: "Update a skill" })
+      .input(z.object({ name: z.string(), content: z.string() }))
+      .output(SkillActionResponseSchema)
+      .errors(Errors),
+
+    remove: oc
+      .route({ method: "DELETE", path: "/skills/{name}", summary: "Remove a skill" })
+      .input(z.object({ name: z.string() }))
+      .output(SkillActionResponseSchema)
+      .errors(Errors),
+  },
+
+  channels: {
+    listConnectable: oc
+      .route({
+        method: "GET",
+        path: "/channels/connectable",
+        summary: "List connectable channels",
+      })
+      .output(z.object({ data: z.array(ConnectableChannelSchema) }))
+      .errors(Errors),
+  },
+
+  auth: {
+    listProviders: oc
+      .route({ method: "GET", path: "/auth/providers", summary: "List OAuth providers" })
+      .output(z.object({ data: z.array(AuthProviderSchema) }))
+      .errors(Errors),
+
+    exchangeLoginTicket: oc
+      .route({
+        method: "POST",
+        path: "/auth/session/exchange",
+        summary: "Exchange login ticket for bearer token",
+      })
+      .input(z.object({ loginTicket: z.string() }))
+      .output(z.object({ token: z.string() }))
+      .errors(Errors),
+
+    logout: oc
+      .route({ method: "POST", path: "/auth/logout", summary: "Logout / revoke session" })
+      .output(z.object({ success: z.boolean() }))
+      .errors(Errors),
+  },
+});
+
+export type ContractType = typeof contract;

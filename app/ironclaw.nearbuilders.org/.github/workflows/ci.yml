@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - ".changeset/**"
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      fail_on_critical_high:
+        description: "Fail the audit step on critical/high vulnerabilities"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-typecheck:
+    name: Lint and Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.2.20"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Run postinstall
+        run: bun run postinstall
+
+      - name: Security audit
+        id: audit
+        run: |
+          bun audit 2>&1 | tee audit-output.txt
+          if grep -qiE '(critical|high)' audit-output.txt; then
+            if [ "${{ inputs.fail_on_critical_high }}" = "true" ]; then
+              echo "::error::Critical or high vulnerabilities found — failing the audit"
+              exit 1
+            else
+              echo "::warning::Critical or high vulnerabilities found — see audit output"
+            fi
+          fi
+
+      - name: Run Biome lint and format check
+        run: bun biome ci .
+
+      - name: Run typecheck
+        run: bun typecheck

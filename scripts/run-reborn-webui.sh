@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 # Launch IronClaw Reborn with the everything-dev web UI.
 #
-# Default mode (tunnel): starts Reborn locally and auto-launches a tunnel
-# (cloudflared / ngrok / bore) so you can connect the deployed everything-dev
-# UI at https://app.ironclaw.everything.dev/settings/ironclaw.
+# Launches the standalone Reborn binary with the WebChat v2 web UI in
+# local-dev-yolo mode — skips onboarding, inherits host env, uses a fixed
+# bearer token and a default model route from env vars.
 #
-#   --local  starts the everything-dev dev stack locally instead (no tunnel).
-#            Requires the everything-dev project at app/ironclaw.everything.dev/
-#            to be set up with `cp .env.example .env && bun install`.
+# Handles the setup footguns from docs/reborn-binary.md for you:
+#   - keeps the Reborn home OUTSIDE the repo (serve uses the cwd as the
+#     local-dev workspace root and rejects overlap with it);
+#   - seeds the config file via `models set-provider`;
+#   - sets the WebUI user to the home's `[identity].default_owner` (falling
+#     back to `reborn-cli`, config init's default) so serve's owner check
+#     doesn't refuse to start.
 #
 # Usage:
-#   scripts/run-reborn-webui.sh                        # tunnel mode (default)
-#   scripts/run-reborn-webui.sh --local                # local everything-dev mode
+#   scripts/run-reborn-webui.sh                        # defaults below
 #   PROVIDER=openai scripts/run-reborn-webui.sh
 #   PROVIDER=anthropic MODEL=claude-sonnet-4-20250514 scripts/run-reborn-webui.sh
 #
@@ -25,7 +28,7 @@
 #   REBORN_PORT   listen port        (default: 3001)
 #   IRONCLAW_REBORN_HOME             (default: $HOME/.ironclaw-reborn-demo)
 #   IRONCLAW_REBORN_WEBUI_USER_ID    (default: home's [identity].default_owner)
-#   IRONCLAW_REBORN_WEBUI_TOKEN      (default: auto-generated random token)
+#   IRONCLAW_REBORN_WEBUI_TOKEN      (default: local-dev-token)
 #   NEARAI_MODEL                     (default: deepseek-ai/DeepSeek-V4-Flash)
 #   NEARAI_BASE_URL                  (default: https://cloud-api.near.ai)
 #   IRONCLAW_REBORN_PROFILE          (default: local-dev-yolo)
@@ -46,7 +49,7 @@ set -euo pipefail
 PROVIDER="${PROVIDER:-nearai}"
 MODEL="${MODEL:-}"
 REBORN_HOST="${REBORN_HOST:-127.0.0.1}"
-REBORN_PORT="${REBORN_PORT:-3001}"
+REBORN_PORT="${REBORN_PORT:-3000}"
 NEARAI_MODEL="${NEARAI_MODEL:-deepseek-ai/DeepSeek-V4-Flash}"
 NEARAI_BASE_URL="${NEARAI_BASE_URL:-https://cloud-api.near.ai}"
 IRONCLAW_REBORN_PROFILE="${IRONCLAW_REBORN_PROFILE:-local-dev-yolo}"
@@ -57,19 +60,6 @@ if [ "$REBORN_PORT" = "0" ]; then
   echo "error: REBORN_PORT=0 (kernel-assigned port) isn't usable with a tunnel." >&2
   echo "       Set a fixed REBORN_PORT, or run the test-harness form directly:" >&2
   echo "       cargo run -p ironclaw_reborn_cli --features webui-v2-beta -- serve --port 0" >&2
-  exit 1
-fi
-
-# Detect mode
-MODE="${1:-}"
-if [ "$MODE" = "--local" ]; then
-  MODE="local"
-elif [ "$MODE" = "--deployed" ]; then
-  MODE="tunnel"
-elif [ -z "$MODE" ] || [ "${MODE#--}" = "$MODE" ]; then
-  MODE="tunnel"
-else
-  echo "error: unknown flag '$MODE'. Use --local or --deployed." >&2
   exit 1
 fi
 
@@ -115,36 +105,7 @@ export IRONCLAW_TRIGGER_POLLER_ENABLED
 export NEARAI_BASE_URL
 export NEARAI_MODEL
 
-# Generate a random token by default (openssl is available on macOS/Linux).
-if [ -z "${IRONCLAW_REBORN_WEBUI_TOKEN:-}" ]; then
-  if command -v openssl &>/dev/null; then
-    IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"
-  else
-    IRONCLAW_REBORN_WEBUI_TOKEN="local-dev-token"
-  fi
-fi
-export IRONCLAW_REBORN_WEBUI_TOKEN
-
-# Resolve the API key env var name for the chosen provider.
-key_env=""
-if [ "$PROVIDER" = "nearai" ]; then
-  key_env="NEARAI_API_KEY"
-elif [ "$PROVIDER" = "openai" ]; then
-  key_env="OPENAI_API_KEY"
-elif [ "$PROVIDER" = "anthropic" ]; then
-  key_env="ANTHROPIC_API_KEY"
-fi
-
-# Prompt for API key if unset.
-if [ -n "$key_env" ] && [ -z "${!key_env:-}" ]; then
-  echo "==> $key_env is not set."
-  read -r -p "    Enter your $PROVIDER API key (or press Enter to skip and set it later): " api_key
-  if [ -n "$api_key" ]; then
-    export "$key_env=$api_key"
-  else
-    echo "    warning: no key provided. Turns will fail until you export $key_env." >&2
-  fi
-fi
+export IRONCLAW_REBORN_WEBUI_TOKEN="${IRONCLAW_REBORN_WEBUI_TOKEN:-local-dev-token}"
 
 CARGO=(cargo run -p ironclaw_reborn_cli --features webui-v2-beta --)
 
@@ -347,29 +308,4 @@ if [ "$MODE" = "local" ]; then
 
   cat << BANNER
 
-══════════════════════════════════════════════════════════════════
- IronClaw Reborn — MODE: LOCAL
-══════════════════════════════════════════════════════════════════
- The ironclaw plugin auto-discovers Reborn via IRONCLAW_BASE_URL.
- No settings configuration needed — just open the UI.
-
-  ┌─ Open ───────────────────────────────────────────────────┐
-  │                                                          │
-  │    http://localhost:3000                                  │
-  │                                                          │
-  │  The sidebar shows (●) Connected when ready.             │
-  └──────────────────────────────────────────────────────────┘
-
-  API        : http://$REBORN_HOST:$REBORN_PORT
-  Token      : $IRONCLAW_REBORN_WEBUI_TOKEN
-  Reborn home: $IRONCLAW_REBORN_HOME
-
-  Press Ctrl+C to stop
-
-BANNER
-
-  echo "==> Starting everything-dev dev stack..."
-  cd "$EVDEV_DIR"
-  bun run dev || true
-  cleanup
-fi
+exec "${CARGO[@]}" serve --confirm-host-access --host "$REBORN_HOST" --port "$REBORN_PORT"
