@@ -109,6 +109,8 @@ use ironclaw_turns::{
 };
 
 use crate::RebornProductAuthServicePorts;
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::available_extensions::slack_manifest_digest;
 use crate::default_system_prompt::seed_default_system_prompt;
 use crate::input::{RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
@@ -130,8 +132,7 @@ use crate::{
     available_extensions::{
         AvailableExtensionCatalog, gmail_manifest_digest, google_calendar_manifest_digest,
         google_docs_manifest_digest, google_drive_manifest_digest, google_sheets_manifest_digest,
-        google_slides_manifest_digest, notion_mcp_manifest_digest, slack_manifest_digest,
-        web_access_manifest_digest,
+        google_slides_manifest_digest, notion_mcp_manifest_digest, web_access_manifest_digest,
     },
     extension_installation_store::FilesystemExtensionInstallationStore,
     extension_lifecycle::{
@@ -2284,7 +2285,8 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
         local_dev_capability_policy().map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("local-dev capability policy is invalid: {error}"),
         })?;
-    HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(vec![
+    #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(unused_mut))]
+    let mut entries = vec![
         AdminEntry::for_local_manifest(
             policy.provider.id,
             policy.provider.manifest_path,
@@ -2373,19 +2375,22 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
             notion_mcp_allowed_effects(),
             None,
         ),
-        AdminEntry::for_local_manifest(
-            PackageId::new("slack").map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("Slack first-party package id is invalid: {error}"),
-            })?,
-            "/system/extensions/slack/manifest.toml".to_string(),
-            Some(slack_manifest_digest()),
-            HostTrustAssignment::first_party(),
-            Vec::new(),
-            None,
-        ),
-    ]))])
-    .map_err(|error| RebornBuildError::InvalidConfig {
-        reason: format!("built-in first-party trust policy is invalid: {error}"),
+    ];
+    #[cfg(feature = "slack-v2-host-beta")]
+    entries.push(AdminEntry::for_local_manifest(
+        PackageId::new("slack").map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("Slack first-party package id is invalid: {error}"),
+        })?,
+        "/system/extensions/slack/manifest.toml".to_string(),
+        Some(slack_manifest_digest()),
+        HostTrustAssignment::first_party(),
+        Vec::new(),
+        None,
+    ));
+    HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(entries))]).map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("built-in first-party trust policy is invalid: {error}"),
+        }
     })
 }
 
@@ -4874,7 +4879,7 @@ mod auth_tests;
 #[cfg(test)]
 mod local_dev_host_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "slack-v2-host-beta"))]
 mod trust_policy_tests {
     use super::*;
 

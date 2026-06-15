@@ -59,6 +59,7 @@ const WEB_ACCESS_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/web-access/manifest.toml");
 const NEARAI_MCP_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/nearai-mcp/manifest.toml");
+#[cfg(feature = "slack-v2-host-beta")]
 const SLACK_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/slack/manifest.toml");
 
@@ -273,7 +274,8 @@ impl AvailableExtensionCatalog {
     pub(crate) fn from_first_party_assets_with_nearai_mcp_config(
         nearai_mcp_config: Option<&NearAiMcpBootstrapConfig>,
     ) -> Result<Self, ProductWorkflowError> {
-        Ok(Self::from_packages(vec![
+        #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(unused_mut))]
+        let mut packages = vec![
             github_package()?,
             notion_mcp_package()?,
             web_access_package()?,
@@ -284,8 +286,10 @@ impl AvailableExtensionCatalog {
             google_sheets_package()?,
             google_slides_package()?,
             gmail_package()?,
-            slack_package()?,
-        ]))
+        ];
+        #[cfg(feature = "slack-v2-host-beta")]
+        packages.push(slack_package()?);
+        Ok(Self::from_packages(packages))
     }
 
     pub(crate) fn extend(&mut self, other: Self) {
@@ -459,6 +463,7 @@ fn gmail_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     bundled_extension_package("gmail", "Gmail", GMAIL_MANIFEST, gmail_assets())
 }
 
+#[cfg(feature = "slack-v2-host-beta")]
 fn slack_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     bundled_extension_package("slack", "Slack", SLACK_MANIFEST, slack_assets())
 }
@@ -495,6 +500,7 @@ pub(crate) fn web_access_manifest_digest() -> String {
     sha256_digest_token(WEB_ACCESS_MANIFEST.as_bytes())
 }
 
+#[cfg(feature = "slack-v2-host-beta")]
 pub(crate) fn slack_manifest_digest() -> String {
     sha256_digest_token(SLACK_MANIFEST.as_bytes())
 }
@@ -1298,6 +1304,7 @@ fn gmail_assets() -> Vec<AvailableExtensionAsset> {
     ]
 }
 
+#[cfg(feature = "slack-v2-host-beta")]
 fn slack_assets() -> Vec<AvailableExtensionAsset> {
     vec![bytes_asset("manifest.toml", SLACK_MANIFEST.as_bytes())]
 }
@@ -1829,6 +1836,7 @@ mod tests {
         assert!(upload_file.effects.contains(&EffectKind::ExternalWrite));
     }
 
+    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn bundled_slack_package_declares_product_adapter_channel_surface() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
@@ -1932,6 +1940,7 @@ handle = "web_token"
         assert!(google_sheets_manifest_digest().starts_with("sha256:"));
         assert!(google_slides_manifest_digest().starts_with("sha256:"));
         assert!(gmail_manifest_digest().starts_with("sha256:"));
+        #[cfg(feature = "slack-v2-host-beta")]
         assert!(slack_manifest_digest().starts_with("sha256:"));
     }
 
