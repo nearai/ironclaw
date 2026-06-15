@@ -528,6 +528,7 @@ impl RebornServicesApi for StubServices {
                 "Daily status",
                 "0 9 * * *",
             )],
+            scheduler_enabled: true,
         })
     }
 
@@ -1574,6 +1575,9 @@ async fn list_automations_forwards_query_limits_to_facade() {
         body["automations"][0]["recent_runs"][0]["status"],
         "running"
     );
+    // The scheduler status must survive handler serialization onto the wire so
+    // the browser can warn when scheduling is off.
+    assert_eq!(body["scheduler_enabled"], true);
 
     let calls = services
         .list_automations_calls

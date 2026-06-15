@@ -35,6 +35,11 @@ const AUTOMATION_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct RebornAutomationProductFacade {
     trigger_repository: Arc<dyn TriggerRepository>,
     backend_timeout: Duration,
+    /// Whether the background trigger poller is running. Surfaced to the WebUI
+    /// so the panel can warn that listed automations will not fire while
+    /// scheduling is off. Defaults to `true`; production wiring sets the real
+    /// value from runtime readiness.
+    scheduler_enabled: bool,
 }
 
 impl std::fmt::Debug for RebornAutomationProductFacade {
@@ -51,7 +56,15 @@ impl RebornAutomationProductFacade {
         Self {
             trigger_repository,
             backend_timeout: AUTOMATION_BACKEND_TIMEOUT,
+            scheduler_enabled: true,
         }
+    }
+
+    /// Set whether the background trigger poller (scheduler) is running. Wired
+    /// by WebUI composition from runtime readiness.
+    pub(crate) fn with_scheduler_enabled(mut self, scheduler_enabled: bool) -> Self {
+        self.scheduler_enabled = scheduler_enabled;
+        self
     }
 
     #[cfg(test)]
@@ -62,12 +75,17 @@ impl RebornAutomationProductFacade {
         Self {
             trigger_repository,
             backend_timeout,
+            scheduler_enabled: true,
         }
     }
 }
 
 #[async_trait::async_trait]
 impl AutomationProductFacade for RebornAutomationProductFacade {
+    fn scheduler_enabled(&self) -> bool {
+        self.scheduler_enabled
+    }
+
     async fn list_automations(
         &self,
         caller: ProductAgentBoundCaller,

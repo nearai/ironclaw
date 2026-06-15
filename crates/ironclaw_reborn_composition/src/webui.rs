@@ -166,9 +166,10 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         from_local
     };
     if let Some(repository) = automation_repository {
-        api = api.with_automation_product_facade(Arc::new(RebornAutomationProductFacade::new(
-            repository,
-        )));
+        api = api.with_automation_product_facade(Arc::new(
+            RebornAutomationProductFacade::new(repository)
+                .with_scheduler_enabled(services.readiness.workers.trigger_poller),
+        ));
     }
     if let Some(local_runtime) = &services.local_runtime {
         api = api.with_outbound_preferences_facade(Arc::new(RebornOutboundPreferencesFacade::new(
