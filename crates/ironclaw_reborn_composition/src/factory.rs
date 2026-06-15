@@ -4872,26 +4872,15 @@ mod tests {
             "outbound_preferences and triggered_run_delivery must share one allocation"
         );
     }
-}
 
-#[cfg(test)]
-mod auth_tests;
-#[cfg(test)]
-mod local_dev_host_tests;
-
-#[cfg(all(test, feature = "slack-v2-host-beta"))]
-mod trust_policy_tests {
-    use super::*;
-
-    use ironclaw_host_api::{
-        PackageId, PackageIdentity, PackageSource, RequestedTrustClass, TrustClass,
-    };
-    use ironclaw_trust::TrustPolicy;
-
-    fn slack_identity(manifest_path: &str, digest: Option<String>) -> PackageIdentity {
-        PackageIdentity::new(
-            PackageId::new("slack").expect("slack package id"),
-            PackageSource::LocalManifest {
+    #[cfg(feature = "slack-v2-host-beta")]
+    fn slack_identity(
+        manifest_path: &str,
+        digest: Option<String>,
+    ) -> ironclaw_host_api::PackageIdentity {
+        ironclaw_host_api::PackageIdentity::new(
+            ironclaw_host_api::PackageId::new("slack").expect("slack package id"),
+            ironclaw_host_api::PackageSource::LocalManifest {
                 path: manifest_path.to_string(),
             },
             digest,
@@ -4899,21 +4888,24 @@ mod trust_policy_tests {
         )
     }
 
+    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn builtin_first_party_trust_policy_includes_slack_local_manifest_entry() {
         let policy = builtin_first_party_trust_policy().expect("trust policy");
         let expected_digest = slack_manifest_digest();
 
-        let matching = policy
-            .evaluate(&ironclaw_trust::TrustPolicyInput {
+        let matching = ironclaw_trust::TrustPolicy::evaluate(
+            &policy,
+            &ironclaw_trust::TrustPolicyInput {
                 identity: slack_identity(
                     "/system/extensions/slack/manifest.toml",
                     Some(expected_digest.clone()),
                 ),
-                requested_trust: RequestedTrustClass::FirstPartyRequested,
+                requested_trust: ironclaw_host_api::RequestedTrustClass::FirstPartyRequested,
                 requested_authority: Default::default(),
-            })
-            .expect("matching slack identity should evaluate");
+            },
+        )
+        .expect("matching slack identity should evaluate");
 
         assert_eq!(matching.effective_trust.class(), TrustClass::FirstParty);
         assert_eq!(
@@ -4921,8 +4913,9 @@ mod trust_policy_tests {
             ironclaw_trust::TrustProvenance::AdminConfig
         );
 
-        let wrong_digest = policy
-            .evaluate(&ironclaw_trust::TrustPolicyInput {
+        let wrong_digest = ironclaw_trust::TrustPolicy::evaluate(
+            &policy,
+            &ironclaw_trust::TrustPolicyInput {
                 identity: slack_identity(
                     "/system/extensions/slack/manifest.toml",
                     Some(
@@ -4930,10 +4923,11 @@ mod trust_policy_tests {
                             .to_string(),
                     ),
                 ),
-                requested_trust: RequestedTrustClass::FirstPartyRequested,
+                requested_trust: ironclaw_host_api::RequestedTrustClass::FirstPartyRequested,
                 requested_authority: Default::default(),
-            })
-            .expect("wrong digest slack identity should evaluate");
+            },
+        )
+        .expect("wrong digest slack identity should evaluate");
 
         assert_eq!(wrong_digest.effective_trust.class(), TrustClass::Sandbox);
         assert_eq!(
@@ -4941,16 +4935,18 @@ mod trust_policy_tests {
             ironclaw_trust::TrustProvenance::Default
         );
 
-        let wrong_path = policy
-            .evaluate(&ironclaw_trust::TrustPolicyInput {
+        let wrong_path = ironclaw_trust::TrustPolicy::evaluate(
+            &policy,
+            &ironclaw_trust::TrustPolicyInput {
                 identity: slack_identity(
                     "/system/extensions/slack/other-manifest.toml",
                     Some(expected_digest),
                 ),
-                requested_trust: RequestedTrustClass::FirstPartyRequested,
+                requested_trust: ironclaw_host_api::RequestedTrustClass::FirstPartyRequested,
                 requested_authority: Default::default(),
-            })
-            .expect("wrong path slack identity should evaluate");
+            },
+        )
+        .expect("wrong path slack identity should evaluate");
 
         assert_eq!(wrong_path.effective_trust.class(), TrustClass::Sandbox);
         assert_eq!(
@@ -4959,3 +4955,8 @@ mod trust_policy_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod auth_tests;
+#[cfg(test)]
+mod local_dev_host_tests;
