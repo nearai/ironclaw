@@ -1918,6 +1918,27 @@ fn resolve_local_dev_secret_master_key_with_env(
     root: &Path,
     env_key: Option<String>,
 ) -> Result<ironclaw_secrets::SecretMaterial, RebornBuildError> {
+    // Reject an explicitly-set-but-empty env value UP FRONT, before the cached
+    // file read. Otherwise a rebuild where `.reborn-local-dev-secrets-master-key`
+    // already exists returns the cached key and silently ignores the operator's
+    // (bad) explicit env config — the empty-check below the cached read would
+    // never run. A trimmed-non-empty env value is normalized here once.
+    let env_key = match env_key {
+        Some(value) => {
+            let trimmed = value.trim().to_string();
+            if trimmed.is_empty() {
+                return Err(RebornBuildError::InvalidConfig {
+                    reason: format!(
+                        "local-dev secrets master key env var {} is set but empty",
+                        ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV
+                    ),
+                });
+            }
+            Some(trimmed)
+        }
+        None => None,
+    };
+
     let key_path = root.join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH);
     match std::fs::read_to_string(&key_path) {
         Ok(existing) => {
@@ -1936,22 +1957,11 @@ fn resolve_local_dev_secret_master_key_with_env(
         }
     }
 
-    // No cached file. Prefer an explicit env key (validated, so a bad value is
-    // never persisted to the cached file); otherwise generate a fresh one. A
-    // *set-but-empty* env value is an explicit-but-unusable configuration and
-    // must fail closed rather than collapse to "absent" and generate a key the
-    // operator never chose.
+    // No cached file. Prefer an explicit (already-validated-non-empty) env key,
+    // validated so a bad value is never persisted to the cached file; otherwise
+    // generate a fresh one.
     match env_key {
-        Some(env_key) => {
-            let key = env_key.trim().to_string();
-            if key.is_empty() {
-                return Err(RebornBuildError::InvalidConfig {
-                    reason: format!(
-                        "local-dev secrets master key env var {} is set but empty",
-                        ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV
-                    ),
-                });
-            }
+        Some(key) => {
             validate_resolved_master_key(&key, &MasterKeySource::Env)?;
             write_local_dev_secret_master_key(&key_path, &key)?;
             Ok(ironclaw_secrets::SecretMaterial::from(key))
@@ -3899,6 +3909,40 @@ mod tests {
                 key_path.display()
             );
         }
+    }
+
+    #[test]
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    fn resolve_local_dev_secret_master_key_rejects_empty_env_even_with_cached_file() {
+        // Regression: the empty-env rejection must run BEFORE the cached-file
+        // read, so an explicitly-set-but-empty SECRETS_MASTER_KEY fails closed
+        // on a rebuild even when `.reborn-local-dev-secrets-master-key` already
+        // exists — it must not be silently ignored in favor of the cached key.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let key_path = root.join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH);
+
+        // Seed a valid cached key first (no env value -> generated + persisted).
+        resolve_local_dev_secret_master_key_with_env(root, None)
+            .expect("seed a valid cached master key");
+        assert!(key_path.exists(), "precondition: cached key file exists");
+        let cached_before = std::fs::read_to_string(&key_path).expect("read cached key");
+
+        let error = resolve_local_dev_secret_master_key_with_env(root, Some("   ".to_string()))
+            .expect_err("empty env must fail closed even with a cached file");
+        match error {
+            RebornBuildError::InvalidConfig { reason } => assert!(
+                reason.contains(ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV),
+                "error must name the env var, got: {reason}"
+            ),
+            other => panic!("expected InvalidConfig, got {other:?}"),
+        }
+        // The cached key is left untouched (not silently returned, not rewritten).
+        assert_eq!(
+            std::fs::read_to_string(&key_path).expect("read cached key"),
+            cached_before,
+            "the cached key must be left unchanged when the env value is rejected"
+        );
     }
 
     /// A well-formed cached key file passes through unchanged.
