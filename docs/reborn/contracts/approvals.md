@@ -260,13 +260,10 @@ This slice intentionally keeps approval resolution narrow:
   `thread_id` never participates in the scope, so an "always allow" granted in
   one thread applies to all of that user's threads with the same agent (and
   project, when present) and is channel-agnostic — a WebUI grant is honored for
-  a Slack message resolving to the same `(user, agent)`. Migration note:
-  legacy no-project policies persisted with thread-scoped keys/paths before
-  this change are read through a bounded compatibility fallback that can match
-  old records from another thread under the same `(tenant, user, agent)`;
-  recommended cleanup remains a revoke sweep to delete legacy thread-scoped
-  records or a migration/rekey that drops `thread_id` into the new
-  tenant/user/agent/project scope where possible
+  a Slack message resolving to the same `(user, agent)`. Existing local
+  thread-scoped approval-policy files from pre-DB testing are intentionally not
+  migrated or read through a compatibility fallback; wipe local approval state
+  when moving to this scope shape
 - persistent approval is fail-closed by manifest policy: the current default
   only allows durable reuse for capabilities whose manifest
   `default_permission` is `allow`; `ask` and `deny` remain one-shot approval

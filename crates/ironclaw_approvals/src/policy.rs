@@ -190,19 +190,6 @@ pub trait PersistentApprovalPolicyStore: Send + Sync {
         key: &PersistentApprovalPolicyKey,
     ) -> Result<Option<PersistentApprovalPolicy>, PersistentApprovalPolicyError>;
 
-    /// Scope-aware lookup entry point used by authorization callers.
-    ///
-    /// Persistent approvals are keyed by tenant, user, optional agent, and
-    /// optional project only; the runtime scope is accepted so callers do not
-    /// need a separate path, but thread ids do not participate.
-    async fn lookup_with_scope(
-        &self,
-        _scope: &ResourceScope,
-        key: &PersistentApprovalPolicyKey,
-    ) -> Result<Option<PersistentApprovalPolicy>, PersistentApprovalPolicyError> {
-        self.lookup(key).await
-    }
-
     async fn revoke(
         &self,
         key: &PersistentApprovalPolicyKey,
@@ -982,10 +969,9 @@ mod tests {
             .await
             .expect("allow project-scoped policy");
 
-        let lookup_scope = scope(Some("project-a"), Some("thread-2"));
         let new_thread_key = key_for(&scope(Some("project-a"), Some("thread-2")));
         let reloaded = FilesystemPersistentApprovalPolicyStore::new(scoped)
-            .lookup_with_scope(&lookup_scope, &new_thread_key)
+            .lookup(&new_thread_key)
             .await
             .expect("lookup")
             .expect("pre-existing project-scoped policy still matches in a new thread");
