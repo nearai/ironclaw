@@ -104,21 +104,23 @@ impl<F: RootFilesystem> ProjectFilesystemReader for ProjectScopedFilesystemReade
             .await
             .map_err(map_filesystem_error)?;
         guard_readable_file(&stat, self.max_read_bytes)?;
+        // Enforce the size cap *at read time*, not just from the stat above: a
+        // concurrent write can grow the file between the guard and the read, so
+        // a bounded read is what actually prevents oversized content from being
+        // materialized. `Ok(None)` means the realized body exceeded the cap
+        // (a missing file surfaces as `Err(NotFound)`).
         let bytes = self
             .filesystem
-            .read_bytes(&scope, &file)
+            .read_bytes_bounded(&scope, &file, self.max_read_bytes as usize)
             .await
-            .map_err(map_filesystem_error)?;
-        // Re-check the realized length: a concurrent write can grow the file
-        // between the `stat` guard above and this read, so the stat-time size
-        // cap alone does not bound what we actually materialized.
-        let read_len = bytes.len() as u64;
-        if read_len > self.max_read_bytes {
-            return Err(ProjectFsError::TooLarge {
-                size: read_len,
+            .map_err(map_filesystem_error)?
+            .ok_or(ProjectFsError::TooLarge {
+                // The bounded read refuses without reporting the grown size; the
+                // stat-time guard already passed, so this only fires on a TOCTOU
+                // race. Report just over the cap rather than the stale stat size.
+                size: self.max_read_bytes.saturating_add(1),
                 max: self.max_read_bytes,
-            });
-        }
+            })?;
         let path_str = file.as_str().to_string();
         let filename = file_name_of(&path_str);
         let mime_type = mime_for_path(&path_str);
@@ -207,8 +209,13 @@ fn map_filesystem_error(error: FilesystemError) -> ProjectFsError {
         FilesystemError::PermissionDenied { .. }
         | FilesystemError::PathOutsideMount { .. }
         | FilesystemError::SymlinkEscape { .. } => ProjectFsError::Denied,
-        FilesystemError::MountNotFound { .. } | FilesystemError::Contract(_) => {
-            ProjectFsError::InvalidPath
+        // Caller-shaped validation (bad path shape, etc.) → 400.
+        FilesystemError::Contract(_) => ProjectFsError::InvalidPath,
+        // Server-side configuration, not a caller mistake: the workspace mount
+        // isn't wired, or the mount can't serve this op. Surface as
+        // retryable-unavailable (503) rather than blaming the caller with a 400.
+        FilesystemError::MountNotFound { .. } | FilesystemError::Unsupported { .. } => {
+            ProjectFsError::Unavailable
         }
         _ => ProjectFsError::Internal,
     }

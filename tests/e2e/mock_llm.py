@@ -1204,10 +1204,24 @@ def match_response(messages: list[dict]) -> str:
                         "chains to discover DeFi positions and classify them against known protocols."
                     )
 
+    explicit = _explicit_canned_response(content)
+    if explicit is not None:
+        return explicit
+    return DEFAULT_RESPONSE
+
+
+def _explicit_canned_response(content: str) -> str | None:
+    """Return the first ``CANNED_RESPONSES`` match for ``content``, or ``None``
+    when only the default would apply.
+
+    Lets a caller prefer a specific canned reply over a generic fallback
+    (e.g. the post-tool-call summary) without collapsing every unmatched
+    conversation into the default response.
+    """
     for pattern, response in CANNED_RESPONSES:
         if pattern.search(content):
             return response
-    return DEFAULT_RESPONSE
+    return None
 
 
 def _normalize_tool_calls(tool_name: str, value: object) -> list[dict]:
@@ -2007,6 +2021,16 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
                 if not stream:
                     return _text_response(cid, text)
                 return await _stream_text(request, cid, text)
+        # When the latest user message has an explicit canned reply (e.g. the v2
+        # download-chips flow: "produce a downloadable csv and pdf"), return it
+        # once its tool calls have run and `match_tool_call` has dedup'd them,
+        # instead of the generic multi-tool summary below. Only an explicit match
+        # wins — absent one we fall through to the summary.
+        explicit = _explicit_canned_response(_last_user_content(messages))
+        if explicit is not None:
+            if not stream:
+                return _text_response(cid, explicit)
+            return await _stream_text(request, cid, explicit)
         if len(tool_results) == 1:
             tr = tool_results[0]
             text = f"The {tr['name']} tool returned: {tr['content']}"

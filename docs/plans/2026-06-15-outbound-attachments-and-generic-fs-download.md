@@ -36,15 +36,15 @@ non-text surface needs native structured attachments (e.g. Slack file upload) �
 point a concrete consumer justifies the cost. The `attach_file` tool work explored this
 session was reverted.
 
-**Remaining (task 5 — frontend only):**
-- WebUI: extract project-path references (`/project/...`, `/workspace/...`) from an
-  assistant reply and render a **file-chip row** below the message — icon, filename,
-  size (via the `/files/stat` endpoint), download action.
+**Done (task 5 — frontend):**
+- WebUI: extracts `/workspace/...` path references from an assistant reply and renders a
+  **file-chip row** below the message — icon, filename, size (via the `/files/stat`
+  endpoint), download action. Chips render on assistant messages only.
 - Download via authenticated **blob fetch** against `/files/content?path=…` (the route
   is bearer-only — a plain `<a download href>` can't carry the bearer; fetch with the
   SPA's bearer → object URL → click → revoke), with `threadId` threaded to the chip.
 - Agent prompt: one line telling the agent to reference files it creates by their
-  `/project` path so they surface as downloads.
+  `/workspace/...` path so they surface as downloads.
 
 ---
 **Goal:** Let the Reborn agent produce files on the project filesystem (CSV, reports,

@@ -1317,6 +1317,10 @@ async fn read_body_bytes(response: axum::response::Response) -> Vec<u8> {
 }
 
 fn files_uri(thread_id: &str, suffix: &str, path: &str) -> String {
+    // test-only: `path` is interpolated raw into the query string, so paths used
+    // here must not contain URL-special characters (`&`, `#`, `?`, spaces). All
+    // current callers pass fixed `/workspace/...` constants that satisfy this; a
+    // future test needing special chars should URL-encode `path` first.
     format!("/api/webchat/v2/threads/{thread_id}/files{suffix}?path={path}")
 }
 
