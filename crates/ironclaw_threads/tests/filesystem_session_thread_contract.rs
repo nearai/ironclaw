@@ -227,6 +227,10 @@ async fn filesystem_store_persists_preview_history_while_hiding_it_from_context(
         .unwrap();
     assert_eq!(first.message_id, duplicate.message_id);
 
+    // A summary whose range contains only a CapabilityDisplayPreview (permanent
+    // non-visible, never resurfaces) IS now applied: the preview kind is safe
+    // to span.  The summary replaces seq 1 (User) through seq 2 (Preview) in
+    // the model context; the preview itself remains absent from context.
     service
         .create_summary_artifact(CreateSummaryArtifactRequest {
             scope: scope.clone(),
@@ -234,7 +238,7 @@ async fn filesystem_store_persists_preview_history_while_hiding_it_from_context(
             start_sequence: 1,
             end_sequence: 2,
             summary_kind: SummaryKind::Compaction,
-            content: MessageContent::text("summary must not replace preview range"),
+            content: MessageContent::text("run a tool summarized"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await
@@ -264,8 +268,11 @@ async fn filesystem_store_persists_preview_history_while_hiding_it_from_context(
         })
         .await
         .unwrap();
+    // Summary is now applied (CapabilityDisplayPreview is safe to span — permanent
+    // non-visible, never resurfaces).  Context shows the summary, not the raw User
+    // or the Preview.
     assert_eq!(context.messages.len(), 1);
-    assert_eq!(context.messages[0].kind, MessageKind::User);
+    assert_eq!(context.messages[0].kind, MessageKind::Summary);
 
     let direct_context = service
         .load_context_messages(LoadContextMessagesRequest {
@@ -1618,4 +1625,192 @@ async fn filesystem_accept_rejects_duplicate_attachment_ids() {
         .await
         .unwrap();
     assert!(history.messages.is_empty());
+}
+
+/// Mirrors `summary_spanning_interior_rejected_busy_is_applied` from the
+/// in-memory contract suite.  A compaction summary whose span contains an
+/// interior RejectedBusy message (permanently-terminal, never resurfaces)
+/// MUST be applied by the filesystem backend.
+#[tokio::test]
+async fn filesystem_summary_spanning_interior_rejected_busy_is_applied() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-rej-busy-sum", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("rej-busy-sum");
+
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-rej-busy-sum").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    // seq 1: visible user message
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("first"),
+        })
+        .await
+        .unwrap();
+
+    // seq 2: accepted then rejected-busy (permanently terminal, never resurfaces)
+    let second = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("rejected busy interior"),
+        })
+        .await
+        .unwrap();
+    service
+        .mark_message_rejected_busy(&scope, &thread.thread_id, second.message_id)
+        .await
+        .unwrap();
+
+    // seq 3: visible user message
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("third"),
+        })
+        .await
+        .unwrap();
+
+    // Summary spans [1..3] covering the interior RejectedBusy.  Must be applied.
+    service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 3,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("first and third summarized"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await
+        .unwrap();
+
+    let context = service
+        .load_context_window(LoadContextWindowRequest {
+            scope,
+            thread_id: thread.thread_id,
+            max_messages: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(context.messages.len(), 1, "summary must be applied");
+    assert_eq!(context.messages[0].kind, MessageKind::Summary);
+    assert_eq!(context.messages[0].content, "first and third summarized");
+}
+
+/// Mirrors `summary_spanning_interior_draft_is_not_applied` from the
+/// in-memory contract suite.  A compaction summary spanning a Draft
+/// (resurfaceable) message must still be suppressed by the filesystem backend.
+#[tokio::test]
+async fn filesystem_summary_spanning_interior_draft_is_not_applied() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-draft-sum", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("draft-sum");
+
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-draft-sum").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    // seq 1: visible user message
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("first"),
+        })
+        .await
+        .unwrap();
+
+    // seq 2: assistant Draft — resurfaceable, must block the summary.
+    service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-draft-sum".into(),
+            content: MessageContent::text("draft interior"),
+        })
+        .await
+        .unwrap();
+
+    // seq 3: visible user message
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("third"),
+        })
+        .await
+        .unwrap();
+
+    // Summary spans [1..3] covering the Draft at seq 2.  Must be suppressed.
+    service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 3,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("should not appear"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await
+        .unwrap();
+
+    let context = service
+        .load_context_window(LoadContextWindowRequest {
+            scope,
+            thread_id: thread.thread_id,
+            max_messages: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        context.messages.len(),
+        2,
+        "summary must be suppressed for draft-spanning range"
+    );
+    assert_eq!(context.messages[0].content, "first");
+    assert_eq!(context.messages[1].content, "third");
 }

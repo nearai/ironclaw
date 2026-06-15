@@ -2077,6 +2077,31 @@ fn history_summary_artifacts(
         .collect()
 }
 
+/// Returns true when a non-model-context-visible message within the summary
+/// span could later become model-visible (i.e. it is in a resurfaceable pending
+/// state).  Permanently-terminal non-visible messages (RejectedBusy, capability
+/// previews) never resurface, so a compaction summary spanning them is safe to
+/// apply — blocking it would silently drop a legitimate compacted range.
+///
+/// Resurfaceable statuses (must still block the summary):
+///   Draft | Interrupted | Superseded | DeferredBusy
+/// Permanent non-visible (must NOT block):
+///   RejectedBusy (terminal, user must explicitly resend)
+///   CapabilityDisplayPreview kind (never model-visible regardless of status)
+///
+/// Note: Redacted/Deleted keep their blocking role here — they were never
+/// model-visible and the separate `summary_covers_redacted_or_deleted_content`
+/// guard (used for history display) doesn't cover the context-build path.
+fn can_resurface_as_model_visible(message: &ThreadMessageRecord) -> bool {
+    matches!(
+        message.status,
+        MessageStatus::Draft
+            | MessageStatus::Interrupted
+            | MessageStatus::Superseded
+            | MessageStatus::DeferredBusy
+    )
+}
+
 fn summary_covers_hidden_content(
     messages: &[ThreadMessageRecord],
     summary: &SummaryArtifact,
@@ -2085,6 +2110,11 @@ fn summary_covers_hidden_content(
         summary.start_sequence <= message.sequence
             && message.sequence <= summary.end_sequence
             && !is_model_context_visible(message)
+            && (can_resurface_as_model_visible(message)
+                || matches!(
+                    message.status,
+                    MessageStatus::Redacted | MessageStatus::Deleted
+                ))
     })
 }
 
