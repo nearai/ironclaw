@@ -899,7 +899,21 @@ pub(super) async fn scoped_update_binding_for_requester(
         Ok(_) => Ok(None),
         Err(AuthProductError::CredentialMissing) => Ok(None),
         Err(AuthProductError::CrossScopeDenied) => Ok(None),
-        Err(AuthProductError::AccountSelectionRequired) => Ok(None),
+        // Ambiguous owner state (e.g. mixed reusable + extension-owned accounts):
+        // the selector cannot pick a single account to rebind. Start a fresh flow
+        // rather than hard-failing the reconnect — failing the start route would
+        // leave the owner unable to (re)connect at all, which is worse than the
+        // rare extra account. Log it so the ambiguous reconnect is observable and
+        // not silently conflated with the "no existing account" arms above.
+        Err(AuthProductError::AccountSelectionRequired) => {
+            tracing::warn!(
+                target: "ironclaw_reborn_composition::product_auth::oauth",
+                provider = %provider.as_str(),
+                requester_extension = %requester_extension.as_str(),
+                "owner has multiple eligible accounts; starting extension OAuth without an update binding"
+            );
+            Ok(None)
+        }
         Err(AuthProductError::BackendUnavailable) => {
             tracing::warn!(
                 target: "ironclaw_reborn_composition::product_auth::oauth",

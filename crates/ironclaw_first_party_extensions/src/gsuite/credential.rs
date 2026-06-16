@@ -833,6 +833,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolve_account_finds_owner_account_authorized_in_a_different_thread() {
+        // Regression for the owner-scoped known-account lookup in
+        // `account_by_id`: an account authorized in one thread must resolve by id
+        // from a different thread of the same owner. The `resolve()` path already
+        // has cross-thread coverage; this locks the same guarantee on the
+        // `resolve_account` / `account_by_id` path so a future change that
+        // reintroduces thread-bound lookup there cannot slip through.
+        let user = UserId::new("alice").unwrap();
+        let mut thread_a = ResourceScope::local_default(user.clone(), InvocationId::new()).unwrap();
+        thread_a.thread_id = Some(ThreadId::new("thread-a").unwrap());
+        let create_scope = AuthProductScope::new(thread_a, AuthSurface::Api);
+        let calendar_scope =
+            ProviderScope::new("https://www.googleapis.com/auth/calendar.readonly").unwrap();
+
+        let auth = Arc::new(InMemoryAuthProductServices::new());
+        let account = auth
+            .create_account(NewCredentialAccount {
+                scope: create_scope,
+                provider: google_provider_id().unwrap(),
+                label: CredentialAccountLabel::new("work google").unwrap(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::ExtensionOwned,
+                owner_extension: Some(ExtensionId::new("google-drive").unwrap()),
+                granted_extensions: Vec::new(),
+                access_secret: Some(SecretHandle::new("google-access-token").unwrap()),
+                refresh_secret: None,
+                scopes: vec![calendar_scope.clone()],
+            })
+            .await
+            .unwrap();
+        let resolver = GoogleCredentialResolver::new(auth.clone(), auth.clone());
+
+        let mut thread_b = ResourceScope::local_default(user, InvocationId::new()).unwrap();
+        thread_b.thread_id = Some(ThreadId::new("thread-b").unwrap());
+        let lookup_scope = AuthProductScope::new(thread_b.clone(), AuthSurface::Api);
+
+        let credential = resolver
+            .resolve_account(
+                &thread_b,
+                &lookup_scope,
+                &ExtensionId::new("google-calendar").unwrap(),
+                account.id,
+                &[calendar_scope],
+            )
+            .await
+            .expect("known account must resolve by id from a different thread");
+
+        assert_eq!(credential.account_id, account.id);
+    }
+
+    #[tokio::test]
     async fn refresh_reuses_gsuite_owned_google_account_from_durable_store() {
         let scope =
             ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
