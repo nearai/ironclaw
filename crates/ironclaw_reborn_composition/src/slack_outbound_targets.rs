@@ -1609,4 +1609,61 @@ mod tests {
             "ref with empty actor must NOT be identified as a personal DM"
         );
     }
+
+    /// Tests the two reject predicates not covered by the sibling tests:
+    ///
+    /// (a) A syntactically correct personal-DM ref whose `actor_kind` segment
+    ///     contains a non-Slack actor kind must return `false` — the predicate
+    ///     requires `actor_kind == SLACK_USER_ACTOR_KIND`.
+    ///
+    /// (b) A personal-DM ref with an EXTRA trailing segment appended after
+    ///     `actor` must return `false` — the predicate requires `rest.is_empty()`
+    ///     after consuming the `actor` segment.
+    #[test]
+    fn slack_reply_target_is_personal_dm_rejects_wrong_actor_kind_and_trailing_segments() {
+        fn seg(name: &str, value: &str) -> String {
+            format!("{}:{}:{};", name, value.len(), value)
+        }
+
+        // (a) Wrong actor_kind: use a non-Slack actor kind.
+        let raw_wrong_kind = format!(
+            "{}{}{}{}{}{}{}{}{}",
+            seg("adapter", "slack_v2"),
+            seg("installation", INSTALLATION),
+            seg("agent", AGENT),
+            seg("project", PROJECT),
+            seg("space", TEAM),
+            seg("conversation", "D0HOST"),
+            seg("topic", ""),
+            seg("actor_kind", "not_a_slack_user"),
+            seg("actor", SLACK_USER),
+        );
+        let binding_ref_wrong_kind =
+            slack_reply_target_binding_ref_from_raw(raw_wrong_kind).expect("builds syntactically");
+        assert!(
+            !slack_reply_target_is_personal_dm(&binding_ref_wrong_kind),
+            "actor_kind != slack_user must NOT be identified as a personal DM"
+        );
+
+        // (b) Extra trailing segment after the actor segment.
+        let raw_trailing = format!(
+            "{}{}{}{}{}{}{}{}{}{}",
+            seg("adapter", "slack_v2"),
+            seg("installation", INSTALLATION),
+            seg("agent", AGENT),
+            seg("project", PROJECT),
+            seg("space", TEAM),
+            seg("conversation", "D0HOST"),
+            seg("topic", ""),
+            seg("actor_kind", "slack_user"),
+            seg("actor", SLACK_USER),
+            seg("extra", "unexpected"),
+        );
+        let binding_ref_trailing =
+            slack_reply_target_binding_ref_from_raw(raw_trailing).expect("builds syntactically");
+        assert!(
+            !slack_reply_target_is_personal_dm(&binding_ref_trailing),
+            "trailing segment after actor must NOT be identified as a personal DM"
+        );
+    }
 }
