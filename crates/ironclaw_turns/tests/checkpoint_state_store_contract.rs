@@ -441,6 +441,7 @@ fn turn_run_state_actor_is_serde_backward_compatible() {
         event_cursor: EventCursor(1),
         product_context: None,
         auth_resume_disposition: None,
+        approval_resume_disposition: None,
     };
 
     let legacy_wire = serde_json::to_value(&state).unwrap();
@@ -492,6 +493,7 @@ fn turn_checkpoint_public_status_does_not_expose_checkpoint_payload() {
         event_cursor: EventCursor(1),
         product_context: None,
         auth_resume_disposition: None,
+        approval_resume_disposition: None,
     };
     let event = TurnLifecycleEvent {
         cursor: EventCursor(2),
@@ -842,6 +844,7 @@ fn turn_persistence_snapshot_legacy_run_defaults_auth_resume_disposition_to_none
         spawn_tree_root_run_id: None,
         product_context: None,
         auth_resume_disposition: None,
+        approval_resume_disposition: None,
     };
 
     // Serialize the snapshot — auth_resume_disposition must be absent in the output.

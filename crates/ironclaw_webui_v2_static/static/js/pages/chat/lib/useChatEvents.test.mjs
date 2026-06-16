@@ -452,6 +452,58 @@ test("useChatEvents: locally resolved approval gate is not restored by stale pro
   assert.deepEqual(harness.messages, []);
 });
 
+test("useChatEvents: locally resumed deny ignores stale projection without clearing run", () => {
+  const runId = "run-denied-resumed";
+  const gateRef = "gate:approval-denied";
+  const harness = createUseChatEventsHarness({
+    locallyResolvedGatesRef: {
+      current: new Map([
+        [`${runId}\n${gateRef}`, { resolution: "denied", outcome: "resumed" }],
+      ]),
+    },
+  });
+  harness.setCurrentActiveRun({
+    runId,
+    threadId: "thread-1",
+    status: "awaiting_gate",
+  });
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: runId, status: "blocked_approval" } },
+          {
+            gate: {
+              gate_ref: gateRef,
+              headline: "Approval required",
+              allow_always: true,
+            },
+          },
+          {
+            capability_activity: {
+              invocation_id: "invocation-denied",
+              turn_run_id: runId,
+              capability_id: "builtin.shell",
+              status: "running",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.pendingGate, null);
+  assert.equal(harness.isProcessing, true);
+  assert.deepEqual(plain(harness.activeRun), {
+    runId,
+    threadId: "thread-1",
+    status: "queued",
+  });
+  assert.deepEqual(harness.messages, []);
+});
+
 test("useChatEvents: stale terminal run status does not clear newer run", () => {
   const harness = createUseChatEventsHarness();
 

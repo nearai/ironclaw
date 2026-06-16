@@ -136,6 +136,7 @@ struct RunRecord {
     spawn_tree_root_run_id: Option<TurnRunId>,
     product_context: Option<crate::ProductTurnContext>,
     auth_resume_disposition: Option<crate::AuthResumeDisposition>,
+    approval_resume_disposition: Option<crate::ApprovalResumeDisposition>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -625,6 +626,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
             spawn_tree_root_run_id: None,
             product_context: request.product_context,
             auth_resume_disposition: None,
+            approval_resume_disposition: None,
         };
         inner.turns.insert(turn_id, turn_record);
         inner.active_locks.insert(
@@ -1045,6 +1047,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
             spawn_tree_root_run_id: Some(root_run_id),
             product_context: parent_product_context,
             auth_resume_disposition: None,
+            approval_resume_disposition: None,
         };
         inner.turns.insert(turn_id, turn_record);
         inner.active_locks.insert(
@@ -1476,6 +1479,7 @@ impl Inner {
                     spawn_tree_root_run_id: run.spawn_tree_root_run_id,
                     product_context: run.product_context,
                     auth_resume_disposition: run.auth_resume_disposition,
+                    approval_resume_disposition: run.approval_resume_disposition,
                 },
             );
         }
@@ -1942,6 +1946,7 @@ impl Inner {
             let now = Utc::now();
             record.status = TurnStatus::Queued;
             record.auth_resume_disposition = request.auth_resume_disposition.clone();
+            record.approval_resume_disposition = request.approval_resume_disposition.clone();
             record.gate_ref = None;
             record.credential_requirements = Vec::new();
             record.source_binding_ref = request.source_binding_ref.clone();
@@ -2597,6 +2602,7 @@ impl RunRecord {
             spawn_tree_root_run_id: self.spawn_tree_root_run_id,
             product_context: self.product_context.clone(),
             auth_resume_disposition: self.auth_resume_disposition.clone(),
+            approval_resume_disposition: self.approval_resume_disposition.clone(),
         }
     }
 
@@ -2621,6 +2627,7 @@ impl RunRecord {
             event_cursor: self.event_cursor,
             product_context: self.product_context.clone(),
             auth_resume_disposition: self.auth_resume_disposition.clone(),
+            approval_resume_disposition: self.approval_resume_disposition.clone(),
         }
     }
 }

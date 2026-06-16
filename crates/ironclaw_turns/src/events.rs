@@ -521,6 +521,7 @@ mod tests {
             event_cursor: EventCursor(1),
             product_context: None,
             auth_resume_disposition: None,
+            approval_resume_disposition: None,
         };
 
         let event = TurnLifecycleEvent::from_run_state(&state, TurnEventKind::Blocked, None);

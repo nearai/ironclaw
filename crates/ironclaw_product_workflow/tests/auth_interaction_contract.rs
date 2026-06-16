@@ -334,6 +334,7 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             event_cursor: EventCursor(47),
             product_context: None,
             auth_resume_disposition: self.auth_resume_disposition.lock().expect("lock").clone(),
+            approval_resume_disposition: None,
         })
     }
 }

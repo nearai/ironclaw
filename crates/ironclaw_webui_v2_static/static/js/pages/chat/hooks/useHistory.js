@@ -105,7 +105,9 @@ export function useHistory(threadId, options = {}) {
 
         // A full (non-paginated) load can be cached without the previous
         // state, so refresh the cache even if the user has since switched
-        // threads. Always under the issuing identity's key.
+        // threads. Always under the issuing identity's key. The active
+        // thread cache is refreshed again below after merging SSE-only
+        // activity cards that are not represented in the transcript timeline.
         if (!cursor) {
           putCache(key, { messages: renderable, nextCursor });
         }
@@ -116,8 +118,8 @@ export function useHistory(threadId, options = {}) {
           if (threadIdRef.current !== threadId) return prev;
           const merged = cursor
             ? mergePage(renderable, prev.messages)
-            : renderable;
-          if (cursor) putCache(key, { messages: merged, nextCursor });
+            : mergeFullRefresh(renderable, prev.messages);
+          putCache(key, { messages: merged, nextCursor });
           return {
             messages: merged,
             nextCursor,
@@ -186,4 +188,18 @@ export function useHistory(threadId, options = {}) {
 function mergePage(older, current) {
   const ids = new Set(current.map((m) => m.id));
   return [...older.filter((m) => !ids.has(m.id)), ...current];
+}
+
+function mergeFullRefresh(fresh, current) {
+  const ids = new Set(fresh.map((m) => m.id));
+  const preservedActivity = current.filter(
+    (message) => isRuntimeActivityMessage(message) && !ids.has(message.id),
+  );
+  return preservedActivity.length > 0
+    ? [...fresh, ...preservedActivity]
+    : fresh;
+}
+
+function isRuntimeActivityMessage(message) {
+  return message?.role === "tool_activity" || message?.role === "thinking";
 }

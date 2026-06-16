@@ -378,7 +378,7 @@ test("useChat.cancelRun clears local state before cancel request resolves", asyn
   await cancelPromise;
 });
 
-test("useChat.approve deny marks current run tool activity errored", async () => {
+test("useChat.approve deny resumes without locally mutating tool activity", async () => {
   const threadId = "thread-1";
   const runId = "run-1";
   const gateRef = "gate-1";
@@ -426,7 +426,7 @@ test("useChat.approve deny marks current run tool activity errored", async () =>
     resolveChannelConnectCommand,
     resolveGateRequest: async (request) => {
       resolveRequest = request;
-      return { status: "cancelled" };
+      return { outcome: "resumed", run_id: runId, status: "queued" };
     },
     sendMessage: async () => {
       throw new Error("sendMessage should not run");
@@ -461,12 +461,12 @@ test("useChat.approve deny marks current run tool activity errored", async () =>
     resolution: "denied",
     always: false,
   });
-  assert.equal(renderedMessages[0].toolStatus, "error");
-  assert.equal(renderedMessages[0].toolError, "cancelled");
-  assert.deepEqual(stateUpdates.slice(-3), [
+  assert.equal(renderedMessages[0].toolStatus, "running");
+  assert.equal(renderedMessages[0].toolError, undefined);
+  assert.deepEqual(JSON.parse(JSON.stringify(stateUpdates.slice(-3))), [
     { index: 5, value: null },
-    { index: 4, value: false },
-    { index: 2, value: null },
+    { index: 4, value: true },
+    { index: 2, value: { runId, threadId, status: "queued" } },
   ]);
 });
 

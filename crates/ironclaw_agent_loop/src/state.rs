@@ -20,7 +20,7 @@ pub use slots::{
 
 use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId, ResourceEstimate};
 use ironclaw_turns::{
-    LoopGateRef, LoopMessageRef, LoopResultRef,
+    ApprovalResumeDisposition, LoopGateRef, LoopMessageRef, LoopResultRef,
     run_profile::{
         CapabilityApprovalResume, CapabilityInputRef, CapabilityResumeToken,
         CapabilitySurfaceVersion, LoopInputCursor, LoopRunContext, ProviderToolCallReplay,
@@ -112,6 +112,11 @@ pub struct PendingApprovalResume {
     pub provider_replay: Option<ProviderToolCallReplay>,
     pub input: serde_json::Value,
     pub estimate: ResourceEstimate,
+    /// Set when the user denied this approval gate. The loop surfaces a
+    /// model-visible authorization failure for the parked call instead of
+    /// re-dispatching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<ApprovalResumeDisposition>,
 }
 
 impl PendingApprovalResume {
@@ -777,6 +782,45 @@ mod tests {
         assert_eq!(
             restored.pending_auth_resume, state.pending_auth_resume,
             "entire PendingAuthResume must round-trip without loss when disposition is Some(Denied)"
+        );
+    }
+
+    #[test]
+    fn pending_approval_resume_denied_disposition_round_trips_through_checkpoint_payload() {
+        let context = test_run_context();
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.pending_approval_resume = Some(PendingApprovalResume {
+            gate_ref: LoopGateRef::new("gate:approval-denied-test").expect("valid gate ref"),
+            capability_id: CapabilityId::new("gsuite.calendar.list_events").expect("valid cap id"),
+            approval_request_id: ApprovalRequestId::new(),
+            resume_token: CapabilityResumeToken::new("resume-token:approval-denied-test")
+                .expect("valid resume token"),
+            correlation_id: CorrelationId::new(),
+            surface_version: CapabilitySurfaceVersion::new("surface-v1")
+                .expect("valid surface version"),
+            input_ref: CapabilityInputRef::new("input:approval-denied-test")
+                .expect("valid input ref"),
+            effective_capability_ids: vec![],
+            provider_replay: None,
+            input: serde_json::json!({ "message": "needs approval" }),
+            estimate: ResourceEstimate::default(),
+            disposition: Some(ApprovalResumeDisposition::Denied),
+        });
+        let payload = encode_payload(&state);
+        let restored =
+            LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::BeforeBlock)
+                .expect("decode checkpoint payload");
+        assert_eq!(
+            restored
+                .pending_approval_resume
+                .as_ref()
+                .and_then(|r| r.disposition.as_ref()),
+            Some(&ApprovalResumeDisposition::Denied),
+            "PendingApprovalResume with Denied disposition must survive checkpoint encode/decode"
+        );
+        assert_eq!(
+            restored.pending_approval_resume, state.pending_approval_resume,
+            "entire PendingApprovalResume must round-trip without loss"
         );
     }
 

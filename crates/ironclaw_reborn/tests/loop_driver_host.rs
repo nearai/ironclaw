@@ -97,12 +97,12 @@ use ironclaw_trust::{
 use ironclaw_turns::{
     AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
     AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, CancelRunRequest, CancelRunResponse,
-    CheckpointStateStore, DefaultTurnCoordinator, EventCursor, GetCheckpointStateRequest,
-    GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, InMemoryCheckpointStateStore,
-    InMemoryLoopCheckpointStore, InMemoryRunProfileResolver, InMemoryTurnEventSink,
-    InMemoryTurnStateStore, InMemoryTurnStateStoreLimits, LoopBlocked, LoopBlockedKind,
-    LoopCheckpointRecord, LoopCheckpointStore, LoopCompleted, LoopCompletionKind, LoopExit,
-    LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, PutCheckpointStateRequest,
+    CapabilityActivityId, CheckpointStateStore, DefaultTurnCoordinator, EventCursor,
+    GetCheckpointStateRequest, GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey,
+    InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryRunProfileResolver,
+    InMemoryTurnEventSink, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits, LoopBlocked,
+    LoopBlockedKind, LoopCheckpointRecord, LoopCheckpointStore, LoopCompleted, LoopCompletionKind,
+    LoopExit, LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, PutCheckpointStateRequest,
     PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnRequest, RunProfileId,
     RunProfileRequest, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
     SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy,
@@ -525,6 +525,8 @@ async fn progress_port_routes_loop_progress_milestones() {
     let fixture = HostFixture::new("thread-progress-route", "hello progress").await;
     let host = fixture.build_host().await;
     let host_dyn: &(dyn AgentLoopDriverHost + Send + Sync) = &host;
+    let activity_id = CapabilityActivityId::new();
+    let capability_id = CapabilityId::new("demo.progress").expect("capability id");
 
     host_dyn
         .emit_loop_progress(LoopProgressEvent::IterationStarted { iteration: 2 })
@@ -545,6 +547,14 @@ async fn progress_port_routes_loop_progress_milestones() {
             denied_count: 1,
             gated_count: 1,
             failed_count: 0,
+        })
+        .await
+        .unwrap();
+    host_dyn
+        .emit_loop_progress(LoopProgressEvent::CapabilityActivityFailed {
+            activity_id,
+            capability_id: capability_id.clone(),
+            reason_kind: CapabilityFailureKind::Authorization,
         })
         .await
         .unwrap();
@@ -581,6 +591,16 @@ async fn progress_port_routes_loop_progress_milestones() {
     ));
     assert!(matches!(
         milestones[3].kind,
+        LoopHostMilestoneKind::CapabilityFailed {
+            activity_id: emitted_activity_id,
+            capability_id: ref emitted_capability_id,
+            provider: None,
+            runtime: None,
+            reason_kind: CapabilityFailureKind::Authorization,
+        } if emitted_activity_id == activity_id && *emitted_capability_id == capability_id
+    ));
+    assert!(matches!(
+        milestones[4].kind,
         LoopHostMilestoneKind::GateBlocked {
             iteration: 2,
             gate_kind: LoopGateKind::Approval,
@@ -746,6 +766,8 @@ async fn progress_event_serde_roundtrip_all_variants() {
         .expect("bundle ref");
     let surface_version = CapabilitySurfaceVersion::new("surface:v1").expect("surface version");
     let task_id = SystemInferenceTaskId::new();
+    let activity_id = CapabilityActivityId::new();
+    let capability_id = CapabilityId::new("demo.progress").expect("capability id");
 
     let events = vec![
         LoopProgressEvent::driver_note(LoopDriverNoteKind::Planning, "safe note").unwrap(),
@@ -770,6 +792,11 @@ async fn progress_event_serde_roundtrip_all_variants() {
             denied_count: 0,
             gated_count: 1,
             failed_count: 0,
+        },
+        LoopProgressEvent::CapabilityActivityFailed {
+            activity_id,
+            capability_id,
+            reason_kind: CapabilityFailureKind::Authorization,
         },
         LoopProgressEvent::GateBlocked {
             iteration: 1,
@@ -2300,6 +2327,7 @@ async fn turn_runner_blocks_on_approval_then_coordinator_resume_completes_same_r
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("resume-approval-once").unwrap(),
             auth_resume_disposition: None,
+            approval_resume_disposition: None,
         })
         .await
         .unwrap();
@@ -7749,6 +7777,7 @@ impl HostFixture {
             event_cursor: EventCursor(1),
             product_context: None,
             auth_resume_disposition: None,
+            approval_resume_disposition: None,
         };
         let claimed = ClaimedTurnRun {
             state,

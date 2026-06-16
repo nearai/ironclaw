@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use async_trait::async_trait;
 use ironclaw_turns::{
-    LoopFailureKind, LoopResultRef,
+    CapabilityActivityId, LoopFailureKind, LoopResultRef,
     run_profile::{
         AuthResumeApprovalIdentity, CapabilityApprovalResume, CapabilityAuthResume,
         CapabilityAuthResumeReplay, CapabilityBatchInvocation, CapabilityCallCandidate,
@@ -112,6 +112,75 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                 .await;
         }
 
+        // A run resumed from a user-DENIED approval gate must not re-dispatch
+        // the parked capability. Surface a model-visible Authorization failure
+        // for that tool call and continue the loop so the model can explain or
+        // choose a different path.
+        if let Some(pending) = state.pending_approval_resume.as_ref().filter(|p| {
+            matches!(
+                p.disposition.as_ref(),
+                Some(ironclaw_turns::ApprovalResumeDisposition::Denied)
+            )
+        }) {
+            let denied_cap_id = pending.capability_id.clone();
+            let mut denied_activity_id =
+                CapabilityActivityId::parse(pending.resume_token.as_str()).ok();
+            state.pending_approval_resume = None;
+            let (approval_denied_calls, remaining_calls): (Vec<_>, Vec<_>) = visible_calls
+                .into_iter()
+                .partition(|call| call.capability_id == denied_cap_id);
+
+            for call in approval_denied_calls {
+                emit_synthetic_capability_failure_progress(
+                    ctx,
+                    denied_activity_id.take(),
+                    &call,
+                    CapabilityFailureKind::Authorization,
+                )
+                .await;
+                push_call_signature_once(&mut state, &mut signatures, &call)?;
+                let failure = ironclaw_turns::run_profile::CapabilityFailure {
+                    error_kind: CapabilityFailureKind::Authorization,
+                    safe_summary: String::new(),
+                    detail: None,
+                };
+                state
+                    .recent_failure_kinds
+                    .push(capability_failure_kind(&failure.error_kind));
+                let model_observation =
+                    Some(model_visible_capability_failure_observation(&failure));
+                let summary = CapabilityErrorSummary {
+                    class: capability_error_class(&failure.error_kind),
+                    safe_summary: SanitizedStrategySummary::from_trusted_static(
+                        "approval gate denied by user",
+                    ),
+                    diagnostic_ref: None,
+                };
+                match self
+                    .handle_capability_error(
+                        ctx,
+                        state,
+                        call,
+                        summary,
+                        model_observation,
+                        &mut capability_batch,
+                    )
+                    .await?
+                {
+                    BatchStep::Continue(next) => state = *next,
+                    BatchStep::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
+                }
+            }
+
+            if remaining_calls.is_empty() {
+                return self
+                    .completed_turn(ctx, state, result_refs_start, capability_batch)
+                    .await;
+            }
+
+            visible_calls = remaining_calls;
+        }
+
         // A run resumed from a user-DENIED auth gate must not re-dispatch the
         // parked capability (still-missing credential → re-block → infinite loop).
         // Surface a model-visible Authorization failure (retry forbidden) for the
@@ -128,6 +197,10 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             )
         }) {
             let denied_cap_id = pending.capability_id.clone();
+            let mut denied_activity_id = pending
+                .resume_token
+                .as_ref()
+                .and_then(|token| CapabilityActivityId::parse(token.as_str()).ok());
             // Take ownership now that we've confirmed the disposition is Denied.
             // The unconditional take() below also covers the defensive case where
             // auth_denied_calls is empty — preventing a stale Denied disposition
@@ -138,6 +211,13 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                 .partition(|call| call.capability_id == denied_cap_id);
 
             for call in auth_denied_calls {
+                emit_synthetic_capability_failure_progress(
+                    ctx,
+                    denied_activity_id.take(),
+                    &call,
+                    CapabilityFailureKind::Authorization,
+                )
+                .await;
                 push_call_signature_once(&mut state, &mut signatures, &call)?;
                 let failure = ironclaw_turns::run_profile::CapabilityFailure {
                     error_kind: CapabilityFailureKind::Authorization,
@@ -1067,6 +1147,27 @@ async fn append_blocked_capability_error_result(
         capability_batch.record_result(signature, CapabilityProgress::Blocked, false);
     }
     Ok(())
+}
+
+async fn emit_synthetic_capability_failure_progress(
+    ctx: StageContext<'_>,
+    activity_id: Option<CapabilityActivityId>,
+    call: &CapabilityCallCandidate,
+    reason_kind: CapabilityFailureKind,
+) {
+    let Some(activity_id) = activity_id else {
+        return;
+    };
+    CheckpointStage
+        .emit_progress(
+            ctx,
+            LoopProgressEvent::CapabilityActivityFailed {
+                activity_id,
+                capability_id: call.capability_id.clone(),
+                reason_kind,
+            },
+        )
+        .await;
 }
 
 async fn append_completed_capability_result(

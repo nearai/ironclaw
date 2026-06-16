@@ -81,6 +81,7 @@ impl ExecutorStage<GateInput> for GateStage {
                         provider_replay: call.provider_replay.clone(),
                         input: resume.input,
                         estimate: resume.estimate,
+                        disposition: None,
                     });
                 if matches!(kind, GateKind::Auth) {
                     // CapabilityStage shapes auth-resume metadata; GateStage

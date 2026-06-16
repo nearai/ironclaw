@@ -132,6 +132,7 @@ fn test_run_state(scope: TurnScope, status: TurnStatus) -> TurnRunState {
         event_cursor: EventCursor(0),
         product_context: None,
         auth_resume_disposition: None,
+        approval_resume_disposition: None,
     }
 }
 

@@ -8,8 +8,8 @@ use ironclaw_approvals::{
 use ironclaw_host_api::{Action, Principal};
 use ironclaw_run_state::ApprovalStatus;
 use ironclaw_turns::{
-    CancelRunRequest, GateRef, ResumeTurnPrecondition, ResumeTurnRequest, SanitizedCancelReason,
-    TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnStatus,
+    ApprovalResumeDisposition, GateRef, ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator,
+    TurnError, TurnErrorCategory, TurnRunId, TurnStatus,
 };
 
 use super::gate_ref::{approval_reply_binding_ref, approval_source_binding_ref};
@@ -216,6 +216,7 @@ impl DefaultApprovalInteractionService {
                 reply_target_binding_ref: approval_reply_binding_ref(&request.gate_ref)?,
                 idempotency_key: request.idempotency_key,
                 auth_resume_disposition: None,
+                approval_resume_disposition: None,
             })
             .await
             .map_err(map_approval_resume_error)
@@ -315,12 +316,17 @@ impl DefaultApprovalInteractionService {
         }
         let response = self
             .turn_coordinator
-            .cancel_run(CancelRunRequest {
+            .resume_turn(ResumeTurnRequest {
                 scope: request.scope,
                 actor: request.actor,
                 run_id,
-                reason: SanitizedCancelReason::UserRequested,
+                gate_resolution_ref: request.gate_ref.clone(),
+                precondition: ResumeTurnPrecondition::BlockedApprovalGate,
+                source_binding_ref: approval_source_binding_ref(&request.gate_ref)?,
+                reply_target_binding_ref: approval_reply_binding_ref(&request.gate_ref)?,
                 idempotency_key: request.idempotency_key,
+                auth_resume_disposition: None,
+                approval_resume_disposition: Some(ApprovalResumeDisposition::Denied),
             })
             .await
             .map_err(map_approval_resume_error)?;
@@ -344,6 +350,7 @@ impl DefaultApprovalInteractionService {
                 reply_target_binding_ref: approval_reply_binding_ref(&request.gate_ref)?,
                 idempotency_key: request.idempotency_key,
                 auth_resume_disposition: None,
+                approval_resume_disposition: None,
             })
             .await
             .map_err(map_approval_resume_error)?;
@@ -357,12 +364,17 @@ impl DefaultApprovalInteractionService {
     ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
         let response = self
             .turn_coordinator
-            .cancel_run(CancelRunRequest {
+            .resume_turn(ResumeTurnRequest {
                 scope: request.scope,
                 actor: request.actor,
                 run_id,
-                reason: SanitizedCancelReason::UserRequested,
+                gate_resolution_ref: request.gate_ref.clone(),
+                precondition: ResumeTurnPrecondition::BlockedApprovalGate,
+                source_binding_ref: approval_source_binding_ref(&request.gate_ref)?,
+                reply_target_binding_ref: approval_reply_binding_ref(&request.gate_ref)?,
                 idempotency_key: request.idempotency_key,
+                auth_resume_disposition: None,
+                approval_resume_disposition: Some(ApprovalResumeDisposition::Denied),
             })
             .await
             .map_err(map_approval_resume_error)?;

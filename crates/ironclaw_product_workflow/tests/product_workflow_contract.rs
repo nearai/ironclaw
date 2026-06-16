@@ -254,12 +254,10 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
                     })
                 }
                 ApprovalInteractionDecision::Deny => {
-                    ResolveApprovalInteractionResponse::Denied(CancelRunResponse {
+                    ResolveApprovalInteractionResponse::Denied(ResumeTurnResponse {
                         run_id,
-                        status: TurnStatus::Cancelled,
+                        status: TurnStatus::Queued,
                         event_cursor: EventCursor(22),
-                        already_terminal: false,
-                        actor: None,
                     })
                 }
             },

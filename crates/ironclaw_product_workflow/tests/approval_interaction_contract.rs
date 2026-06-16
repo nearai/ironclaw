@@ -26,11 +26,11 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus, InMemoryApprovalRequestStore};
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
-    GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef, ResumeTurnPrecondition,
-    ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnId,
-    TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    AcceptedMessageRef, ApprovalResumeDisposition, CancelRunRequest, CancelRunResponse,
+    EventCursor, GateRef, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef,
+    ResumeTurnPrecondition, ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
+    TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 
 #[derive(Default)]
@@ -454,6 +454,14 @@ impl FakeTurnCoordinator {
             .last()
             .map(|request| request.run_id)
     }
+
+    fn last_resumption_approval_disposition(&self) -> Option<ApprovalResumeDisposition> {
+        self.resumptions
+            .lock()
+            .expect("lock")
+            .last()
+            .and_then(|request| request.approval_resume_disposition.clone())
+    }
 }
 
 #[async_trait]
@@ -515,6 +523,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
             event_cursor: EventCursor(17),
             product_context: None,
             auth_resume_disposition: None,
+            approval_resume_disposition: None,
         })
     }
 }
@@ -1597,7 +1606,7 @@ async fn already_approved_product_replay_without_run_hint_recovers_historical_ru
 }
 
 #[tokio::test]
-async fn already_denied_gate_cancels_without_reissuing_denial() {
+async fn already_denied_gate_resumes_without_reissuing_denial() {
     let (service, resolver, coordinator, run_id, gate_ref) = service_fixture_for_request_status(
         approval_request("delete a file"),
         ApprovalStatus::Denied,
@@ -1620,7 +1629,12 @@ async fn already_denied_gate_cancels_without_reissuing_denial() {
         ResolveApprovalInteractionResponse::Denied(_)
     ));
     assert_eq!(resolver.denial_count(), 0);
-    assert_eq!(coordinator.cancellation_count(), 1);
+    assert_eq!(coordinator.resumption_count(), 1);
+    assert_eq!(
+        coordinator.last_resumption_approval_disposition(),
+        Some(ApprovalResumeDisposition::Denied)
+    );
+    assert_eq!(coordinator.cancellation_count(), 0);
 }
 
 #[tokio::test]
@@ -1648,11 +1662,16 @@ async fn already_denied_replay_reaches_turn_coordinator_when_run_is_not_parked()
         ResolveApprovalInteractionResponse::Denied(_)
     ));
     assert_eq!(resolver.denial_count(), 0);
-    assert_eq!(coordinator.cancellation_count(), 1);
+    assert_eq!(coordinator.resumption_count(), 1);
+    assert_eq!(
+        coordinator.last_resumption_approval_disposition(),
+        Some(ApprovalResumeDisposition::Denied)
+    );
+    assert_eq!(coordinator.cancellation_count(), 0);
 }
 
 #[tokio::test]
-async fn deny_marks_pending_gate_denied_then_cancels_run() {
+async fn deny_marks_pending_gate_denied_then_resumes_run_with_denial_disposition() {
     let (service, resolver, coordinator, run_id, gate_ref) = service_fixture("delete a file");
     let response = service
         .resolve(ResolveApprovalInteractionRequest {
@@ -1672,7 +1691,16 @@ async fn deny_marks_pending_gate_denied_then_cancels_run() {
     ));
     assert_eq!(resolver.approval_count(), 0);
     assert_eq!(resolver.denial_count(), 1);
-    assert_eq!(coordinator.cancellation_count(), 1);
+    assert_eq!(coordinator.resumption_count(), 1);
+    assert_eq!(
+        coordinator.last_resumption_precondition(),
+        Some(ResumeTurnPrecondition::BlockedApprovalGate)
+    );
+    assert_eq!(
+        coordinator.last_resumption_approval_disposition(),
+        Some(ApprovalResumeDisposition::Denied)
+    );
+    assert_eq!(coordinator.cancellation_count(), 0);
 }
 
 #[tokio::test]

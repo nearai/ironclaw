@@ -481,6 +481,7 @@ where
                 // waiting on an unrelated approval/auth/resource gate.
                 precondition: ResumeTurnPrecondition::BlockedDependentRunGate,
                 auth_resume_disposition: None,
+                approval_resume_disposition: None,
             })
             .await
             .map(|_| ())
@@ -1792,6 +1793,7 @@ mod tests {
             event_cursor: EventCursor(1),
             product_context: None,
             auth_resume_disposition: None,
+            approval_resume_disposition: None,
         }
     }
 
@@ -1820,6 +1822,7 @@ mod tests {
             event_cursor: EventCursor(1),
             product_context: None,
             auth_resume_disposition: None,
+            approval_resume_disposition: None,
         }
     }
 
@@ -1861,6 +1864,7 @@ mod tests {
             spawn_tree_root_run_id,
             product_context: None,
             auth_resume_disposition: None,
+            approval_resume_disposition: None,
         }
     }
 
@@ -1901,6 +1905,7 @@ mod tests {
             spawn_tree_root_run_id: None,
             product_context: None,
             auth_resume_disposition: None,
+            approval_resume_disposition: None,
         }
     }
 
@@ -2384,6 +2389,7 @@ mod tests {
             event_cursor: EventCursor(1),
             product_context: None,
             auth_resume_disposition: None,
+            approval_resume_disposition: None,
         };
         let observer = SubagentCompletionObserver::new(
             Arc::new(BoundedSubagentGateResolutionStore::new()),

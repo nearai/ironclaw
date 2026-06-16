@@ -66,6 +66,8 @@ pub struct AgentLoopDriverResumeRequest {
     pub resolved_run_profile: ResolvedRunProfile,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_resume_disposition: Option<crate::AuthResumeDisposition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_resume_disposition: Option<crate::ApprovalResumeDisposition>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

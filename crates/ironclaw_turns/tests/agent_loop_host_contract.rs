@@ -2151,6 +2151,7 @@ async fn loop_prompt_bundle_public_serialization_hides_raw_content() {
         event_cursor: EventCursor(0),
         product_context: None,
         auth_resume_disposition: None,
+        approval_resume_disposition: None,
     };
     let public_json = serde_json::to_string(&(bundle, host.milestones(), status)).unwrap();
     assert!(public_json.contains("prompt_bundle_built"));
@@ -3812,6 +3813,7 @@ async fn turn_run_state_product_context_defaults_to_none_when_missing_from_json(
         event_cursor: EventCursor(0),
         product_context: None,
         auth_resume_disposition: None,
+        approval_resume_disposition: None,
     };
 
     // Serialize without the product_context field (simulate old wire).
@@ -3871,6 +3873,7 @@ async fn turn_run_state_auth_resume_disposition_defaults_to_none_when_missing_fr
         event_cursor: EventCursor(0),
         product_context: None,
         auth_resume_disposition: None,
+        approval_resume_disposition: None,
     };
 
     // Serialize, remove the auth_resume_disposition key (simulates a legacy checkpoint

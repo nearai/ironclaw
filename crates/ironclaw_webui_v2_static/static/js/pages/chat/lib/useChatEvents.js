@@ -287,22 +287,37 @@ function applyProjectionItems({
           streamActiveRunId &&
           streamActiveRunId !== runId,
       );
-      const isLocallyResolvedPromptStatus = Boolean(
-        runId &&
-          PROMPT_RUN_STATUSES.has(status) &&
-          isLocallyResolvedRun(locallyResolvedGatesRef, runId),
-      );
+      const locallyResolvedPromptState =
+        runId && PROMPT_RUN_STATUSES.has(status)
+          ? locallyResolvedStateForRun(locallyResolvedGatesRef, runId)
+          : null;
       if (isStaleLocalRunStatus || isStaleTerminalStatus) {
         continue;
       }
-      if (isLocallyResolvedPromptStatus) {
+      if (locallyResolvedPromptState) {
         clearPendingGateForRun(setPendingGate, runId, promptRunIdRef);
-        setIsProcessing(false);
-        if (activeRunRef?.current?.runId === runId) {
-          setActiveRun?.(null);
+        if (locallyResolvedPromptState.outcome === "resumed") {
+          setIsProcessing(true);
+          setActiveRun?.((current) =>
+            current && current.runId === runId
+              ? {
+                  ...current,
+                  status: current.status === "awaiting_gate"
+                    ? "queued"
+                    : current.status || "queued",
+                }
+              : { runId, threadId, status: "queued" },
+          );
+          activeRunId = runId;
+          if (latestRunIdRef) latestRunIdRef.current = runId;
+        } else {
+          setIsProcessing(false);
+          if (activeRunRef?.current?.runId === runId) {
+            setActiveRun?.(null);
+          }
+          activeRunId = null;
+          if (latestRunIdRef?.current === runId) latestRunIdRef.current = null;
         }
-        activeRunId = null;
-        if (latestRunIdRef?.current === runId) latestRunIdRef.current = null;
         continue;
       }
       if (runId) {
@@ -325,6 +340,7 @@ function applyProjectionItems({
         setIsProcessing(false);
         setPendingGate(null);
         setActiveRun?.(null);
+        clearLocallyResolvedRun(locallyResolvedGatesRef, runId);
         activeRunId = null;
         if (latestRunIdRef) latestRunIdRef.current = null;
         if (runId && promptRunIdRef?.current === runId) {
@@ -355,6 +371,7 @@ function applyProjectionItems({
         }
       } else if (!PROMPT_RUN_STATUSES.has(status)) {
         clearPendingGateForRun(setPendingGate, runId, promptRunIdRef);
+        clearLocallyResolvedRun(locallyResolvedGatesRef, runId);
         setIsProcessing(true);
       }
     }
@@ -526,13 +543,38 @@ function appendRunFailureMessage(
   });
 }
 
-function isLocallyResolvedRun(locallyResolvedGatesRef, runId) {
+function locallyResolvedStateForRun(locallyResolvedGatesRef, runId) {
   if (!runId) return false;
   const resolved = locallyResolvedGatesRef?.current;
-  return Boolean(
-    resolved &&
-      Array.from(resolved.keys()).some((key) => key.startsWith(`${runId}\n`)),
-  );
+  if (!resolved) return null;
+  for (const [key, value] of resolved.entries()) {
+    if (!key.startsWith(`${runId}\n`)) continue;
+    return normalizeLocallyResolvedState(value);
+  }
+  return null;
+}
+
+function normalizeLocallyResolvedState(value) {
+  if (value && typeof value === "object") {
+    return {
+      resolution: value.resolution || null,
+      outcome: value.outcome || null,
+    };
+  }
+  return { resolution: value || null, outcome: null };
+}
+
+function clearLocallyResolvedRun(locallyResolvedGatesRef, runId) {
+  if (!runId) return;
+  const resolved = locallyResolvedGatesRef?.current;
+  if (!resolved) return;
+  for (const key of Array.from(resolved.keys())) {
+    if (key.startsWith(`${runId}\n`)) resolved.delete(key);
+  }
+}
+
+function isLocallyResolvedRun(locallyResolvedGatesRef, runId) {
+  return Boolean(locallyResolvedStateForRun(locallyResolvedGatesRef, runId));
 }
 
 function isLocallyResolvedGate(locallyResolvedGatesRef, runId, gateRef) {

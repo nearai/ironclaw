@@ -324,6 +324,8 @@ pub struct TurnRunState {
     pub product_context: Option<ProductTurnContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_resume_disposition: Option<crate::AuthResumeDisposition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_resume_disposition: Option<crate::ApprovalResumeDisposition>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -19,9 +19,13 @@ function useHistorySourceForTest() {
       skippingImport = !line.trimEnd().endsWith(";");
       continue;
     }
-    lines.push(line.replace("export function useHistory", "function useHistory"));
+    lines.push(
+      line
+        .replace("export function clearHistoryCache", "function clearHistoryCache")
+        .replace("export function useHistory", "function useHistory"),
+    );
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { useHistory };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { clearHistoryCache, useHistory };`;
 }
 
 function createReactStub({ setCalls = [] } = {}) {
@@ -59,6 +63,7 @@ test("useHistory records a load error when timeline fetch fails", async () => {
     fetchTimeline: async () => {
       throw new Error("timeline unavailable");
     },
+    authScope: () => "test-user",
     globalThis: {},
     messagesFromTimeline: () => {
       throw new Error("failed timeline should not be transformed");
@@ -76,4 +81,64 @@ test("useHistory records a load error when timeline fetch fails", async () => {
     "Failed to load conversation history.",
   );
   assert.equal(consoleErrors.length, 1);
+});
+
+test("useHistory full refresh preserves SSE-only activity messages", async () => {
+  const threadId = "thread-activity";
+  const runId = "run-activity";
+  const setCalls = [];
+  const context = {
+    console,
+    fetchTimeline: async () => ({
+      messages: [
+        {
+          message_id: "assistant-1",
+          kind: "assistant",
+          status: "finalized",
+          content: "I could not search.",
+          turn_run_id: runId,
+        },
+      ],
+      next_cursor: null,
+    }),
+    globalThis: {},
+    messagesFromTimeline: () => [
+      {
+        id: "msg-assistant-1",
+        role: "assistant",
+        content: "I could not search.",
+        status: "finalized",
+        kind: "assistant",
+        isFinalReply: true,
+        turnRunId: runId,
+      },
+    ],
+    React: createReactStub({ setCalls }),
+    authScope: () => "test-user",
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  context.globalThis.__testExports.clearHistoryCache();
+  const history = context.globalThis.__testExports.useHistory(threadId, {});
+  await flushMicrotasks();
+
+  history.setMessages((messages) => [
+    ...messages,
+    {
+      id: "tool-search",
+      role: "tool_activity",
+      turnRunId: runId,
+      toolName: "web-access.search",
+      toolStatus: "error",
+      toolError: "authorization",
+    },
+  ]);
+  await history.loadHistory();
+  await flushMicrotasks();
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(setCalls.at(-1).messages.map((message) => message.id))),
+    ["msg-assistant-1", "tool-search"],
+  );
+  assert.equal(setCalls.at(-1).messages[1].toolStatus, "error");
 });

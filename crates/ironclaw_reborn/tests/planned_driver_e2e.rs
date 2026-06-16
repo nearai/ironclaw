@@ -67,6 +67,7 @@ fn resume_request(
         checkpoint_id,
         resolved_run_profile: context.resolved_run_profile.clone(),
         auth_resume_disposition: None,
+        approval_resume_disposition: None,
     }
 }
 

@@ -459,6 +459,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
             event_cursor: EventCursor(17),
             product_context: None,
             auth_resume_disposition: None,
+            approval_resume_disposition: None,
         })
     }
 }
@@ -555,6 +556,7 @@ impl TurnCoordinator for BlockingSubmitCoordinator {
             event_cursor: EventCursor(29),
             product_context: None,
             auth_resume_disposition: None,
+            approval_resume_disposition: None,
         })
     }
 }
@@ -600,12 +602,10 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
                 })
             }
             ApprovalInteractionDecision::Deny => {
-                ResolveApprovalInteractionResponse::Denied(CancelRunResponse {
+                ResolveApprovalInteractionResponse::Denied(ResumeTurnResponse {
                     run_id,
-                    status: TurnStatus::Cancelled,
+                    status: TurnStatus::Queued,
                     event_cursor: EventCursor(23),
-                    already_terminal: false,
-                    actor: None,
                 })
             }
         })

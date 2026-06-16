@@ -19,6 +19,14 @@ pub enum AuthResumeDisposition {
     Denied,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalResumeDisposition {
+    /// The user explicitly denied the approval gate. The executor surfaces this
+    /// to the model as an authorization failure rather than cancelling the run.
+    Denied,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResumeTurnPrecondition {
@@ -106,6 +114,8 @@ pub struct ResumeTurnRequest {
     pub precondition: ResumeTurnPrecondition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_resume_disposition: Option<AuthResumeDisposition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_resume_disposition: Option<ApprovalResumeDisposition>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,6 +157,7 @@ mod tests {
             idempotency_key: IdempotencyKey::new("idempotency-key").expect("valid idempotency key"),
             precondition: ResumeTurnPrecondition::default(),
             auth_resume_disposition: disposition,
+            approval_resume_disposition: None,
         }
     }
 
@@ -219,6 +230,33 @@ mod tests {
             roundtrip.auth_resume_disposition,
             Some(disposition),
             "auth_resume_disposition must round-trip correctly"
+        );
+    }
+
+    #[test]
+    fn resume_turn_request_approval_resume_disposition_serde_contract() {
+        let mut request = make_resume_request(None);
+        request.approval_resume_disposition = Some(ApprovalResumeDisposition::Denied);
+
+        let json_value = serde_json::to_value(&request).expect("serialize request");
+        assert_eq!(
+            json_value
+                .get("approval_resume_disposition")
+                .expect("approval_resume_disposition key must be present"),
+            "denied",
+            "approval_resume_disposition must serialize as snake_case"
+        );
+
+        let mut without = json_value;
+        without
+            .as_object_mut()
+            .expect("request serializes as object")
+            .remove("approval_resume_disposition");
+        let decoded: ResumeTurnRequest =
+            serde_json::from_value(without).expect("deserialize legacy request");
+        assert_eq!(
+            decoded.approval_resume_disposition, None,
+            "omitted approval_resume_disposition must default to None"
         );
     }
 }

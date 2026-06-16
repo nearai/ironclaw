@@ -166,6 +166,11 @@ impl AgentLoopDriver for PlannedDriver {
         {
             pending.disposition = Some(disposition);
         }
+        if let Some(disposition) = request.approval_resume_disposition.clone()
+            && let Some(pending) = initial.pending_approval_resume.as_mut()
+        {
+            pending.disposition = Some(disposition);
+        }
 
         self.executor
             .execute_family(self.family.as_ref(), host, initial)
@@ -540,6 +545,7 @@ mod tests {
                     checkpoint_id: TurnCheckpointId::new(),
                     resolved_run_profile: context.resolved_run_profile.clone(),
                     auth_resume_disposition: None,
+                    approval_resume_disposition: None,
                 },
                 &host,
             )
@@ -578,6 +584,7 @@ mod tests {
                     checkpoint_id,
                     resolved_run_profile: context.resolved_run_profile.clone(),
                     auth_resume_disposition: None,
+                    approval_resume_disposition: None,
                 },
                 &host,
             )
@@ -613,6 +620,7 @@ mod tests {
                     checkpoint_id: TurnCheckpointId::new(),
                     resolved_run_profile,
                     auth_resume_disposition: None,
+                    approval_resume_disposition: None,
                 },
                 &host,
             )
@@ -655,6 +663,7 @@ mod tests {
                     checkpoint_id,
                     resolved_run_profile: context.resolved_run_profile.clone(),
                     auth_resume_disposition: None,
+                    approval_resume_disposition: None,
                 },
                 &host,
             )
@@ -707,6 +716,7 @@ mod tests {
                     checkpoint_id,
                     resolved_run_profile: context.resolved_run_profile.clone(),
                     auth_resume_disposition: None,
+                    approval_resume_disposition: None,
                 },
                 &host,
             )
@@ -746,6 +756,7 @@ mod tests {
                     checkpoint_id,
                     resolved_run_profile: context.resolved_run_profile.clone(),
                     auth_resume_disposition: None,
+                    approval_resume_disposition: None,
                 },
                 &host,
             )
@@ -1036,6 +1047,37 @@ mod tests {
         state
     }
 
+    fn state_with_pending_approval_resume(
+        context: &LoopRunContext,
+    ) -> ironclaw_agent_loop::state::LoopExecutionState {
+        use ironclaw_agent_loop::state::PendingApprovalResume;
+        use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId, ResourceEstimate};
+        use ironclaw_turns::LoopGateRef;
+        use ironclaw_turns::run_profile::{
+            CapabilityInputRef, CapabilityResumeToken, CapabilitySurfaceVersion,
+        };
+
+        let mut state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(context);
+        state.pending_approval_resume = Some(PendingApprovalResume {
+            gate_ref: LoopGateRef::new("gate:test-approval-deny").expect("valid gate ref"),
+            capability_id: CapabilityId::new("test.capability").expect("valid capability id"),
+            approval_request_id: ApprovalRequestId::new(),
+            resume_token: CapabilityResumeToken::new("resume-token:test-approval-deny")
+                .expect("valid resume token"),
+            correlation_id: CorrelationId::new(),
+            surface_version: CapabilitySurfaceVersion::new("surface:v1")
+                .expect("valid surface version"),
+            input_ref: CapabilityInputRef::new("input:test-approval-deny")
+                .expect("valid input ref"),
+            effective_capability_ids: Vec::new(),
+            provider_replay: None,
+            input: serde_json::json!({ "message": "needs approval" }),
+            estimate: ResourceEstimate::default(),
+            disposition: None,
+        });
+        state
+    }
+
     /// Verifies that the `resume` method stamps `AuthResumeDisposition::Denied`
     /// onto `pending_auth_resume` when the run context carries a denial, then
     /// passes the modified state to the executor.
@@ -1088,6 +1130,7 @@ mod tests {
                     checkpoint_id,
                     resolved_run_profile: context.resolved_run_profile.clone(),
                     auth_resume_disposition: disposition,
+                    approval_resume_disposition: None,
                 },
                 &host,
             )
@@ -1160,6 +1203,54 @@ mod tests {
             matches!(disposition, AuthResumeDisposition::Denied),
             "disposition must be Denied after injection, got {disposition:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn resume_with_approval_deny_disposition_stamps_denial_onto_pending_approval_resume() {
+        use ironclaw_turns::ApprovalResumeDisposition;
+
+        let registry = build_loop_family_registry().expect("registry");
+        let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
+        let context = run_context_for_driver(&driver);
+        let disposition = Some(ApprovalResumeDisposition::Denied);
+
+        let staged_state = state_with_pending_approval_resume(&context);
+        let payload_bytes = serde_json::to_vec(&staged_state).expect("serialize checkpoint state");
+        let loaded = LoadedCheckpointPayload {
+            kind: LoopCheckpointKind::BeforeModel,
+            schema_id: context.checkpoint_schema_id.clone(),
+            schema_version: context.checkpoint_schema_version,
+            payload: RedactedCheckpointPayload::new(payload_bytes)
+                .expect("valid checkpoint payload"),
+        };
+        let checkpoint_id = TurnCheckpointId::new();
+        let (inner, _checkpoints) = MockAgentLoopDriverHost::builder()
+            .run_context(context.clone())
+            .build();
+        let host = ResumePayloadHost::new(inner, checkpoint_id, loaded);
+
+        let result = driver
+            .resume(
+                AgentLoopDriverResumeRequest {
+                    turn_id: context.turn_id,
+                    run_id: context.run_id,
+                    checkpoint_id,
+                    resolved_run_profile: context.resolved_run_profile.clone(),
+                    auth_resume_disposition: None,
+                    approval_resume_disposition: disposition,
+                },
+                &host,
+            )
+            .await;
+
+        if let ironclaw_turns::LoopExit::Blocked(_) =
+            result.expect("resume should produce a terminal loop exit")
+        {
+            panic!(
+                "resume with ApprovalResumeDisposition::Denied must not re-block on approval; \
+                 the executor must surface a model-visible denial and continue"
+            );
+        }
     }
 
     /// Confirm the injection is a no-op when the resume request carries no

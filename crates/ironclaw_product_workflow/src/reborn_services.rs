@@ -3324,7 +3324,7 @@ impl RebornServices {
                 Ok(RebornResolveGateResponse::Resumed(response.into()))
             }
             ResolveApprovalInteractionResponse::Denied(response) => {
-                Ok(RebornResolveGateResponse::Cancelled(response.into()))
+                Ok(RebornResolveGateResponse::Resumed(response.into()))
             }
         }
     }
@@ -3448,6 +3448,7 @@ impl RebornServices {
                         )?,
                         idempotency_key: client_action_id,
                         auth_resume_disposition: None,
+                        approval_resume_disposition: None,
                     })
                     .await
                     .map_err(map_turn_error)?;

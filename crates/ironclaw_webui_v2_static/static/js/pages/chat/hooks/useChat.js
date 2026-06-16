@@ -33,28 +33,6 @@ function resolvedGateKey(runId, gateRef) {
   return runId && gateRef ? `${runId}\n${gateRef}` : null;
 }
 
-function markRunToolsErrored(messages, runId) {
-  if (!runId) return messages;
-  let changed = false;
-  const next = messages.map((message) => {
-    if (
-      message.role !== "tool_activity" ||
-      message.turnRunId !== runId ||
-      message.toolStatus !== "running"
-    ) {
-      return message;
-    }
-    changed = true;
-    return {
-      ...message,
-      toolStatus: "error",
-      toolError: message.toolError || "cancelled",
-      updatedAt: message.updatedAt || new Date().toISOString(),
-    };
-  });
-  return changed ? next : messages;
-}
-
 async function withAuthTokenTimeout(task) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), AUTH_TOKEN_FLOW_TIMEOUT_MS);
@@ -461,7 +439,7 @@ export function useChat(threadId) {
       if (!runId || !gateRef) {
         throw new Error("resolveGate requires a pending gate with run_id and gate_ref");
       }
-      await resolveGateRequest({
+      const response = await resolveGateRequest({
         threadId,
         runId,
         gateRef,
@@ -469,18 +447,33 @@ export function useChat(threadId) {
         always: opts.always,
         credentialRef: opts.credentialRef,
       });
+      const responseResumed = response?.outcome === "resumed";
       const shouldContinueProcessing =
-        resolution === "approved" || resolution === "credential_provided";
-      if (!shouldContinueProcessing) {
+        responseResumed ||
+        resolution === "approved" ||
+        resolution === "credential_provided";
+      if (
+        !shouldContinueProcessing ||
+        resolution === "denied" ||
+        resolution === "cancelled"
+      ) {
         const key = resolvedGateKey(runId, gateRef);
         if (key) {
-          locallyResolvedGatesRef.current.set(key, resolution);
+          locallyResolvedGatesRef.current.set(key, {
+            resolution,
+            outcome: response?.outcome || null,
+          });
         }
-        setMessages((prev) => markRunToolsErrored(prev, runId));
       }
       setPendingGate(null);
       setIsProcessing(shouldContinueProcessing);
-      if (!shouldContinueProcessing) {
+      if (shouldContinueProcessing) {
+        setActiveRun({
+          runId: response?.run_id || runId,
+          threadId,
+          status: response?.status || "queued",
+        });
+      } else {
         setActiveRun(null);
       }
     },

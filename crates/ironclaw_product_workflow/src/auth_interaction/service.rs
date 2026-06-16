@@ -178,6 +178,7 @@ impl DefaultAuthInteractionService {
                 reply_target_binding_ref: state.reply_target_binding_ref,
                 idempotency_key: request.idempotency_key,
                 auth_resume_disposition: None,
+                approval_resume_disposition: None,
             })
             .await
             .map_err(map_auth_resume_error)?;
@@ -276,6 +277,7 @@ impl DefaultAuthInteractionService {
                 reply_target_binding_ref: state.reply_target_binding_ref,
                 idempotency_key: request.idempotency_key,
                 auth_resume_disposition: Some(AuthResumeDisposition::Denied),
+                approval_resume_disposition: None,
             })
             .await
             .map_err(map_auth_resume_error)?;
