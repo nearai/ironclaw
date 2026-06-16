@@ -501,6 +501,31 @@ mod tests {
         )
         .await
         .expect("install succeeds");
+
+        let installed_search = invoke_json(
+            &services,
+            EXTENSION_SEARCH_CAPABILITY_ID,
+            serde_json::json!({"query": "github"}),
+        )
+        .await
+        .expect("installed search succeeds");
+        let installed_extensions = installed_search["payload"]["extensions"]
+            .as_array()
+            .expect("extensions array");
+        let installed_github = installed_extensions
+            .iter()
+            .find(|extension| extension["package_ref"]["id"] == "github")
+            .expect("github search result");
+        assert_eq!(installed_github["installation_phase"], "installed");
+        assert!(
+            installed_github.get("credential_requirements").is_some(),
+            "installed inactive GitHub model-visible search results should expose PAT requirements"
+        );
+        assert!(
+            installed_github.get("onboarding").is_some(),
+            "installed inactive GitHub model-visible search results should retain setup onboarding"
+        );
+
         let activate_context = execution_context([EXTENSION_ACTIVATE_CAPABILITY_ID]);
         seed_configured_account(&services, &activate_context.resource_scope, "github").await;
 
@@ -528,6 +553,10 @@ mod tests {
             .find(|extension| extension["package_ref"]["id"] == "github")
             .expect("github search result");
         assert_eq!(github["installation_phase"], "active");
+        assert!(
+            github.get("credential_requirements").is_none(),
+            "active GitHub model-visible search results must not expose satisfied PAT requirements"
+        );
         assert!(
             github.get("onboarding").is_none(),
             "active GitHub model-visible search results must not expose stale PAT setup onboarding"

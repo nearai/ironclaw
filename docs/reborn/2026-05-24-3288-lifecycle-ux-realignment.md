@@ -55,7 +55,7 @@ of truth remains the owning service.
 - Model-visible extension search may include the redacted installation phase
   when local lifecycle state already knows it. It must not invent auth phases,
   and configured or active search results must not repeat stale credential setup
-  onboarding copy.
+  metadata or onboarding copy.
 
 ## Follow-ups
 

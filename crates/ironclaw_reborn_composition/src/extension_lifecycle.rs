@@ -181,7 +181,10 @@ impl RebornLocalExtensionManagementPort {
         &self,
         query: &str,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        let installed_phases = self.installed_phases().await?;
+        let installed_phases = {
+            let _operation_guard = self.operation_lock.lock().await;
+            self.installed_phases().await?
+        };
         let extensions = self.catalog.search(query);
         let summaries = extensions
             .into_iter()
@@ -1151,13 +1154,18 @@ fn search_summary(
         return summary;
     };
     summary.installation_phase = Some(phase);
-    if matches!(
-        phase,
-        LifecyclePhase::Configured | LifecyclePhase::Activating | LifecyclePhase::Active
-    ) {
+    if search_setup_is_complete(phase) {
+        summary.credential_requirements.clear();
         summary.onboarding = None;
     }
     summary
+}
+
+fn search_setup_is_complete(phase: LifecyclePhase) -> bool {
+    matches!(
+        phase,
+        LifecyclePhase::Configured | LifecyclePhase::Activating | LifecyclePhase::Active
+    )
 }
 
 fn map_extension_error(error: ExtensionError) -> ProductWorkflowError {
@@ -1827,6 +1835,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extension_lifecycle_search_propagates_installation_store_list_error() {
+        let (_dir, port, _active_registry, _failing_store, _trust_policy) =
+            extension_port_with_failing_store(
+                ExtensionRegistry::new(),
+                DeleteInstallationFailingStore::fail_list_installations(),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+
+        let error = port
+            .search("fixture")
+            .await
+            .expect_err("search reports installation-store list failure");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+    }
+
+    #[tokio::test]
     async fn active_extension_trust_policy_is_digest_pinned() {
         let (_dir, _storage_root, port, _active_registry, _installation_store, trust_policy) =
             extension_management_port_fixture_with_catalog_service_and_trust(
@@ -2196,6 +2224,34 @@ mod tests {
                 .is_none()
         );
 
+        let installed_search = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionSearch {
+                    query: "github".to_string(),
+                },
+            )
+            .await
+            .expect("search installed extension");
+        let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) =
+            installed_search.payload.as_ref()
+        else {
+            panic!("expected extension search payload");
+        };
+        let github = extensions
+            .iter()
+            .find(|extension| extension.package_ref.id.as_str() == "github")
+            .expect("github search result");
+        assert_eq!(github.installation_phase, Some(LifecyclePhase::Installed));
+        assert!(
+            !github.credential_requirements.is_empty(),
+            "installed inactive GitHub search results still need PAT requirements"
+        );
+        assert!(
+            github.onboarding.is_some(),
+            "installed inactive GitHub search results should retain setup onboarding"
+        );
+
         let activate = facade
             .execute(
                 lifecycle_surface_context(),
@@ -2246,6 +2302,10 @@ mod tests {
             .find(|extension| extension.package_ref.id.as_str() == "github")
             .expect("github search result");
         assert_eq!(github.installation_phase, Some(LifecyclePhase::Active));
+        assert!(
+            github.credential_requirements.is_empty(),
+            "active GitHub search results must not expose satisfied PAT requirements"
+        );
         assert!(
             github.onboarding.is_none(),
             "active GitHub search results must not expose stale PAT setup onboarding"
@@ -3386,6 +3446,7 @@ mod tests {
         inner: InMemoryExtensionInstallationStore,
         fail_manifest_delete: bool,
         fail_set_activation_enabled: bool,
+        fail_list_installations: bool,
     }
 
     impl DeleteInstallationFailingStore {
@@ -3394,6 +3455,7 @@ mod tests {
                 inner: InMemoryExtensionInstallationStore::default(),
                 fail_manifest_delete: true,
                 fail_set_activation_enabled: false,
+                fail_list_installations: false,
             }
         }
 
@@ -3402,6 +3464,16 @@ mod tests {
                 inner: InMemoryExtensionInstallationStore::default(),
                 fail_manifest_delete: false,
                 fail_set_activation_enabled: true,
+                fail_list_installations: false,
+            }
+        }
+
+        fn fail_list_installations() -> Self {
+            Self {
+                inner: InMemoryExtensionInstallationStore::default(),
+                fail_manifest_delete: false,
+                fail_set_activation_enabled: false,
+                fail_list_installations: true,
             }
         }
     }
@@ -3441,6 +3513,11 @@ mod tests {
         async fn list_installations(
             &self,
         ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
+            if self.fail_list_installations {
+                return Err(ExtensionInstallationError::InvalidInstallation {
+                    reason: "list installations failed".to_string(),
+                });
+            }
             self.inner.list_installations().await
         }
 
