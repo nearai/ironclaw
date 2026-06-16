@@ -81,18 +81,20 @@ mod learning {
     use crate::lifecycle::RebornLocalSkillManagementPort;
     use crate::projection::LiveProjectionPublisher;
 
-    /// Minimum substance for a completed run to be worth distilling into a
-    /// skill, mirroring engine v2's skill-extraction mission gate (>=5 steps and
-    /// >=3 tool actions). Transcript message count approximates "steps".
-    const MIN_TOOL_ACTIONS: usize = 3;
-    const MIN_TRANSCRIPT_MESSAGES: usize = 5;
+    /// Cheap pre-filter: skip the (paid) distillation LLM call on runs that
+    /// obviously can't yield a reusable skill (pure chat, a single lookup). The
+    /// *real* quality gate is the learning model's own `SKIP` judgement, so this
+    /// is kept lenient — an efficient agent may complete a skill-worthy,
+    /// multi-step task in only two tool calls (e.g. `shell` mkdir + batch write).
+    const MIN_TOOL_ACTIONS: usize = 2;
+    const MIN_TRANSCRIPT_MESSAGES: usize = 3;
     /// Recent-transcript bound for the eligibility read.
     const TRANSCRIPT_READ_LIMIT: usize = 64;
 
-    /// Token ceiling for a distilled `SKILL.md` (well above the 15KB skill cap).
-    const SKILL_LEARNING_MAX_TOKENS: u32 = 4096;
-    /// Low temperature: distillation should be near-deterministic.
-    const SKILL_LEARNING_TEMPERATURE: f32 = 0.2;
+    /// Output ceiling for a distilled `SKILL.md`. Generous: the learning model
+    /// may be a reasoning model that spends tokens on reasoning before emitting
+    /// the `SKILL.md`, so a tight cap would truncate the document.
+    const SKILL_LEARNING_MAX_TOKENS: u32 = 16384;
 
     /// User-facing note shown on the learned-skill bubble.
     const LEARNED_SKILL_FEEDBACK: &str =
@@ -287,6 +289,12 @@ mod learning {
                     .filter(|message| matches!(message.kind, MessageKind::ToolResultReference))
                     .count();
                 let message_count = window.messages.len();
+                tracing::debug!(
+                    run_id = ?run_id,
+                    tool_actions,
+                    message_count,
+                    "skill-learning: evaluating completed run for extraction"
+                );
                 if tool_actions < MIN_TOOL_ACTIONS || message_count < MIN_TRANSCRIPT_MESSAGES {
                     return;
                 }
@@ -438,8 +446,9 @@ mod learning {
             let request =
                 CompletionRequest::new(vec![ChatMessage::system(system), ChatMessage::user(user)])
                     .with_model(self.model.clone())
-                    .with_max_tokens(SKILL_LEARNING_MAX_TOKENS)
-                    .with_temperature(SKILL_LEARNING_TEMPERATURE);
+                    // No temperature override: reasoning models (e.g. gpt-5.x)
+                    // reject any non-default temperature with HTTP 400.
+                    .with_max_tokens(SKILL_LEARNING_MAX_TOKENS);
             let response = self
                 .provider
                 .complete(request)

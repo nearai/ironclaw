@@ -12,12 +12,15 @@ goal, the assistant's steps, and the tool calls/results. Tool actions appear as
 
 ## Your output — EXACTLY ONE of these two forms, and nothing else
 
-1. If the task is trivial (a simple question/answer, fewer than ~3 distinct tool
-   actions, or a one-off with no reusable procedure), output the single line:
+1. ONLY if the task was purely conversational — a question/answer or a single
+   lookup with no multi-step tool work at all — output the single line:
 
    `SKIP: <one short reason>`
 
-2. Otherwise, output ONLY a complete `SKILL.md` document — begin immediately with
+2. Otherwise — i.e. the run carried out ANY multi-step procedure with tools —
+   distill it, even if this particular instance was small. Capture the GENERAL,
+   repeatable procedure (the steps + the tools + the pitfalls), not the one-off
+   details. Output ONLY a complete `SKILL.md` document — begin immediately with
    the opening `---` of the frontmatter and end with the final line of the body.
    Do not wrap it in code fences. Do not add commentary before or after.
 
