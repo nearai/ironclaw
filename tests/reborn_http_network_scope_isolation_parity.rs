@@ -96,9 +96,22 @@ async fn reborn_http_network_scope_isolation_parity() {
         !denied_results.contains("accepted"),
         "denied scope must not inherit allowed scope HTTP response: {denied_results}"
     );
+    let denied_capability_results = denied.capability_results();
+    assert_eq!(
+        denied_capability_results.len(),
+        1,
+        "denied scope should persist exactly one failed HTTP capability result"
+    );
+    assert_eq!(denied_capability_results[0].capability_id, http);
+    let denied_result_text = capability_result_text(&denied);
     assert!(
-        denied.capability_results().is_empty(),
-        "denied scope must not persist a successful HTTP capability result"
+        denied_result_text.contains("\"ok\":false")
+            && denied_result_text.contains("\"error_kind\":\"network\""),
+        "denied scope should persist a failed network result: {denied_result_text}"
+    );
+    assert!(
+        !denied_result_text.contains("accepted"),
+        "denied scope must not persist a successful HTTP capability result: {denied_result_text}"
     );
 
     allowed.assert_model_exhausted();
