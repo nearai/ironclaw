@@ -2562,6 +2562,17 @@ pub async fn build_reborn_runtime(
             Arc::clone(&thread_service),
             Arc::clone(&trace_capture_scopes),
         ));
+    // Skill learning shares the turn-end seam with trace capture: every
+    // successful, substantive run becomes a skill-extraction candidate.
+    // Composed additively so the trace-capture path is unchanged.
+    let skill_learning_sink: Arc<dyn ironclaw_turns::TurnEventSink> = Arc::new(
+        crate::skill_learning::SkillLearningTurnEventSink::new(Arc::clone(&thread_service)),
+    );
+    let turn_event_sink: Arc<dyn ironclaw_turns::TurnEventSink> =
+        Arc::new(crate::skill_learning::CompositeTurnEventSink::new(vec![
+            trace_capture_sink,
+            skill_learning_sink,
+        ]));
 
     let communication_context_provider: Option<
         Arc<dyn ironclaw_turns::run_profile::CommunicationContextProvider>,
@@ -2649,7 +2660,7 @@ pub async fn build_reborn_runtime(
         model_budget_accountant,
         safety_context: None,
         hook_security_audit_sink: Some(Arc::new(ironclaw_events::TracingSecurityAuditSink)),
-        turn_event_sink: Some(trace_capture_sink),
+        turn_event_sink: Some(turn_event_sink),
         hook_dispatcher_builder_factory,
         communication_context_provider,
     };
