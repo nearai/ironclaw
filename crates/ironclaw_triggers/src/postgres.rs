@@ -10,11 +10,11 @@ use tokio_postgres::Row;
 use crate::{
     ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire,
     ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
-    FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerCompletionPolicy, TriggerError,
-    TriggerId, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord,
-    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
-    reject_failed_result_after_active_run, reject_non_future_next_run_at, reject_run_ref_rewrite,
-    trigger_run_history_status_text,
+    FireRetryableFailedRequest, FireTerminalFailedRequest, RunHistoryOutcome,
+    SanitizedFailureReason, TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord,
+    TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus,
+    TriggerSchedule, TriggerSourceKind, TriggerState, reject_failed_result_after_active_run,
+    reject_non_future_next_run_at, reject_run_ref_rewrite, trigger_run_history_status_text,
 };
 
 const TRIGGER_TABLE: &str = "trigger_records";
@@ -25,7 +25,8 @@ const TRIGGER_COLUMNS: &str = "\
     state, next_run_at, last_run_at, last_fired_slot, last_status, \
     active_fire_slot, active_run_ref, created_at";
 const TRIGGER_RUN_COLUMNS: &str = "\
-    tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at";
+    tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at, \
+    failure_reason";
 const TRIGGER_MIGRATION_ADVISORY_LOCK: i64 = 717_263_529;
 
 /// PostgreSQL-backed [`TriggerRepository`] storing trigger records.
@@ -612,8 +613,11 @@ impl TriggerRepository for PostgresTriggerRepository {
             request.trigger_id,
             request.fire_slot,
             None,
-            TriggerRunHistoryStatus::Error,
-            Utc::now(),
+            RunHistoryOutcome {
+                status: TriggerRunHistoryStatus::Error,
+                completed_at: Utc::now(),
+                failure_reason: request.failure_reason.clone(),
+            },
         )
         .await?;
         tx.commit()
@@ -676,8 +680,11 @@ impl TriggerRepository for PostgresTriggerRepository {
             request.trigger_id,
             request.fire_slot,
             None,
-            TriggerRunHistoryStatus::Error,
-            Utc::now(),
+            RunHistoryOutcome {
+                status: TriggerRunHistoryStatus::Error,
+                completed_at: Utc::now(),
+                failure_reason: request.failure_reason.clone(),
+            },
         )
         .await?;
         tx.commit()
@@ -745,8 +752,11 @@ impl TriggerRepository for PostgresTriggerRepository {
             request.trigger_id,
             request.fire_slot,
             None,
-            TriggerRunHistoryStatus::Error,
-            Utc::now(),
+            RunHistoryOutcome {
+                status: TriggerRunHistoryStatus::Error,
+                completed_at: Utc::now(),
+                failure_reason: request.failure_reason.clone(),
+            },
         )
         .await?;
         tx.commit()
@@ -797,8 +807,11 @@ impl TriggerRepository for PostgresTriggerRepository {
                     request.trigger_id,
                     request.fire_slot,
                     Some(request.run_id),
-                    request.status,
-                    Utc::now(),
+                    RunHistoryOutcome {
+                        status: request.status,
+                        completed_at: Utc::now(),
+                        failure_reason: None,
+                    },
                 )
                 .await?;
                 let record = row_to_record(&row)?;
@@ -1004,18 +1017,20 @@ async fn upsert_run_history(
     let status = trigger_run_history_status_text(run.status);
     let submitted_at = fmt_ts(&run.submitted_at);
     let completed_at = run.completed_at.as_ref().map(fmt_ts);
+    let failure_reason = run.failure_reason.as_ref().map(|reason| reason.as_str());
     client
         .execute(
             &format!(
                 "INSERT INTO {TRIGGER_RUN_TABLE} (
-                    tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at, failure_reason
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 ON CONFLICT (tenant_id, trigger_id, fire_slot) DO UPDATE SET
                     run_id = EXCLUDED.run_id,
                     thread_id = COALESCE(EXCLUDED.thread_id, {TRIGGER_RUN_TABLE}.thread_id),
                     status = EXCLUDED.status,
                     submitted_at = EXCLUDED.submitted_at,
-                    completed_at = EXCLUDED.completed_at"
+                    completed_at = EXCLUDED.completed_at,
+                    failure_reason = COALESCE(EXCLUDED.failure_reason, {TRIGGER_RUN_TABLE}.failure_reason)"
             ),
             &[
                 &run.tenant_id.as_str(),
@@ -1026,6 +1041,7 @@ async fn upsert_run_history(
                 &status,
                 &submitted_at,
                 &completed_at,
+                &failure_reason,
             ],
         )
         .await
@@ -1040,25 +1056,31 @@ async fn complete_run_history(
     trigger_id: TriggerId,
     fire_slot: Timestamp,
     run_id: Option<TurnRunId>,
-    status: TriggerRunHistoryStatus,
-    completed_at: Timestamp,
+    outcome: RunHistoryOutcome,
 ) -> Result<(), TriggerError> {
+    let RunHistoryOutcome {
+        status,
+        completed_at,
+        failure_reason,
+    } = outcome;
     let run_id_text = run_id.as_ref().map(ToString::to_string);
     let status = trigger_run_history_status_text(status);
     let fire_slot_text = fmt_ts(&fire_slot);
     let completed_at = fmt_ts(&completed_at);
     let submitted_at_fallback = completed_at.clone();
     let thread_id: Option<&str> = None;
+    let failure_reason = failure_reason.as_ref().map(|reason| reason.as_str());
     client
         .execute(
             &format!(
                 "INSERT INTO {TRIGGER_RUN_TABLE} (
-                    tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at, failure_reason
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 ON CONFLICT (tenant_id, trigger_id, fire_slot) DO UPDATE SET
                     run_id = COALESCE(trigger_run_history.run_id, EXCLUDED.run_id),
                     status = EXCLUDED.status,
-                    completed_at = EXCLUDED.completed_at"
+                    completed_at = EXCLUDED.completed_at,
+                    failure_reason = COALESCE(EXCLUDED.failure_reason, trigger_run_history.failure_reason)"
             ),
             &[
                 &tenant_id.as_str(),
@@ -1069,6 +1091,7 @@ async fn complete_run_history(
                 &status,
                 &submitted_at_fallback,
                 &completed_at,
+                &failure_reason,
             ],
         )
         .await
@@ -1126,6 +1149,8 @@ fn row_to_run_record(row: &Row) -> Result<TriggerRunRecord, TriggerError> {
     let completed_at = optional_text(row, "completed_at")?
         .map(|value| parse_timestamp(&value, "completed_at"))
         .transpose()?;
+    let failure_reason = optional_text(row, "failure_reason")?
+        .and_then(|value| SanitizedFailureReason::sanitize(&value));
     Ok(TriggerRunRecord {
         tenant_id,
         trigger_id,
@@ -1135,6 +1160,7 @@ fn row_to_run_record(row: &Row) -> Result<TriggerRunRecord, TriggerError> {
         status,
         submitted_at,
         completed_at,
+        failure_reason,
     })
 }
 
@@ -1382,6 +1408,7 @@ CREATE TABLE IF NOT EXISTS trigger_run_history (
     status TEXT NOT NULL,
     submitted_at TEXT NOT NULL,
     completed_at TEXT,
+    failure_reason TEXT,
     PRIMARY KEY (tenant_id, trigger_id, fire_slot)
 );
 
@@ -1395,4 +1422,7 @@ CREATE INDEX IF NOT EXISTS trigger_run_history_tenant_thread_id_idx
     ON trigger_run_history (tenant_id, thread_id);
 
 ALTER TABLE trigger_run_history ALTER COLUMN thread_id DROP NOT NULL;
+
+-- Sanitized pre-acceptance failure reason; nullable for running/successful rows.
+ALTER TABLE trigger_run_history ADD COLUMN IF NOT EXISTS failure_reason TEXT;
 "#;

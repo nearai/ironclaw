@@ -1105,6 +1105,7 @@ fn automation_info(automation_id: &str, name: &str, cron: &str) -> RebornAutomat
             status: RebornAutomationRecentRunStatus::Running,
             submitted_at: "2026-06-03T09:00:01Z".parse().expect("submitted at"),
             completed_at: None,
+            failure_reason: None,
         }],
         is_active: true,
         created_at: None,

@@ -298,6 +298,12 @@ fn map_recent_run(run: &TriggerRunRecord) -> Option<RebornAutomationRecentRunInf
         status,
         submitted_at: run.submitted_at,
         completed_at: run.completed_at,
+        // Sanitized pre-acceptance failure reason so the panel can explain a
+        // failed fire instead of only "No thread attached".
+        failure_reason: run
+            .failure_reason
+            .as_ref()
+            .map(|reason| reason.as_str().to_string()),
     })
 }
 

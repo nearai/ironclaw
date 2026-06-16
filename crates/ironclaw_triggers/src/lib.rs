@@ -435,12 +435,97 @@ pub enum TriggerRunHistoryStatus {
     Error,
 }
 
+/// Terminal completion applied to a run-history row: its status, when it
+/// completed, and (for error rows) the sanitized failure reason. Bundled so the
+/// backend `complete_run_history` writers stay within a readable argument count
+/// as the run-history schema grows.
+pub(crate) struct RunHistoryOutcome {
+    pub(crate) status: TriggerRunHistoryStatus,
+    pub(crate) completed_at: Timestamp,
+    pub(crate) failure_reason: Option<SanitizedFailureReason>,
+}
+
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn trigger_run_history_status_text(value: TriggerRunHistoryStatus) -> &'static str {
     match value {
         TriggerRunHistoryStatus::Running => "running",
         TriggerRunHistoryStatus::Ok => "ok",
         TriggerRunHistoryStatus::Error => "error",
+    }
+}
+
+/// Maximum stored length of a sanitized failure reason. Long enough for a
+/// human-readable cause, short enough to bound a stray internal string.
+const MAX_FAILURE_REASON_LEN: usize = 240;
+
+/// A short, sanitized, human-readable reason a trigger fire failed before
+/// acceptance. Persisted on `trigger_run_history` and surfaced to the
+/// Automations UI so an operator sees *why* a fire failed instead of only the
+/// generic "No thread attached".
+///
+/// Sanitized by construction: control characters and newlines fold to spaces,
+/// runs of whitespace collapse, and the value is capped at
+/// [`MAX_FAILURE_REASON_LEN`] characters. Callers must still choose a
+/// boundary-safe message (no internal ids/paths) per
+/// `.claude/rules/error-handling.md`; this type is the length/charset backstop,
+/// not a substitute for mapping at the source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct SanitizedFailureReason(String);
+
+impl SanitizedFailureReason {
+    /// Sanitize arbitrary text into a bounded display reason. Returns `None`
+    /// when the input is empty after sanitization.
+    pub fn sanitize(raw: &str) -> Option<Self> {
+        let mut collapsed = String::new();
+        let mut last_was_space = false;
+        for ch in raw.chars() {
+            let mapped = if ch.is_control() || ch.is_whitespace() {
+                ' '
+            } else {
+                ch
+            };
+            if mapped == ' ' {
+                if last_was_space || collapsed.is_empty() {
+                    continue;
+                }
+                last_was_space = true;
+            } else {
+                last_was_space = false;
+            }
+            if collapsed.chars().count() >= MAX_FAILURE_REASON_LEN {
+                break;
+            }
+            collapsed.push(mapped);
+        }
+        let trimmed = collapsed.trim_end();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(Self(trimmed.to_string()))
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl TryFrom<String> for SanitizedFailureReason {
+    type Error = &'static str;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::sanitize(&value).ok_or("sanitized failure reason is empty")
+    }
+}
+
+impl From<SanitizedFailureReason> for String {
+    fn from(value: SanitizedFailureReason) -> Self {
+        value.0
     }
 }
 
@@ -463,6 +548,11 @@ pub struct TriggerRunRecord {
     pub status: TriggerRunHistoryStatus,
     pub submitted_at: Timestamp,
     pub completed_at: Option<Timestamp>,
+    /// Sanitized reason this fire failed before acceptance, or `None` for
+    /// running/successful rows. Set on the error-completion path so the UI can
+    /// explain *why* a fire produced no run/thread instead of only showing
+    /// "No thread attached".
+    pub failure_reason: Option<SanitizedFailureReason>,
 }
 
 impl TriggerRunRecord {
@@ -488,6 +578,7 @@ impl TriggerRunRecord {
             status: TriggerRunHistoryStatus::Running,
             submitted_at,
             completed_at: None,
+            failure_reason: None,
         }
     }
 }
@@ -626,6 +717,8 @@ pub struct FireRetryableFailedRequest {
     pub tenant_id: TenantId,
     pub trigger_id: TriggerId,
     pub fire_slot: Timestamp,
+    /// Sanitized reason this fire failed, persisted on the error run-history row.
+    pub failure_reason: Option<SanitizedFailureReason>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -634,6 +727,8 @@ pub struct FirePermanentFailedRequest {
     pub trigger_id: TriggerId,
     pub fire_slot: Timestamp,
     pub next_run_at: Timestamp,
+    /// Sanitized reason this fire failed, persisted on the error run-history row.
+    pub failure_reason: Option<SanitizedFailureReason>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -641,6 +736,8 @@ pub struct FireTerminalFailedRequest {
     pub tenant_id: TenantId,
     pub trigger_id: TriggerId,
     pub fire_slot: Timestamp,
+    /// Sanitized reason this fire failed, persisted on the error run-history row.
+    pub failure_reason: Option<SanitizedFailureReason>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1308,8 +1405,11 @@ impl TriggerRepository for InMemoryTriggerRepository {
             request.trigger_id,
             request.fire_slot,
             None,
-            TriggerRunHistoryStatus::Error,
-            Utc::now(),
+            RunHistoryOutcome {
+                status: TriggerRunHistoryStatus::Error,
+                completed_at: Utc::now(),
+                failure_reason: request.failure_reason,
+            },
         )?;
         Ok(Some(record))
     }
@@ -1340,8 +1440,11 @@ impl TriggerRepository for InMemoryTriggerRepository {
             request.trigger_id,
             request.fire_slot,
             None,
-            TriggerRunHistoryStatus::Error,
-            Utc::now(),
+            RunHistoryOutcome {
+                status: TriggerRunHistoryStatus::Error,
+                completed_at: Utc::now(),
+                failure_reason: request.failure_reason,
+            },
         )?;
         Ok(Some(record))
     }
@@ -1371,8 +1474,11 @@ impl TriggerRepository for InMemoryTriggerRepository {
             request.trigger_id,
             request.fire_slot,
             None,
-            TriggerRunHistoryStatus::Error,
-            Utc::now(),
+            RunHistoryOutcome {
+                status: TriggerRunHistoryStatus::Error,
+                completed_at: Utc::now(),
+                failure_reason: request.failure_reason,
+            },
         )?;
         Ok(Some(record))
     }
@@ -1565,9 +1671,13 @@ impl InMemoryTriggerRepository {
         trigger_id: TriggerId,
         fire_slot: Timestamp,
         run_id: Option<TurnRunId>,
-        status: TriggerRunHistoryStatus,
-        completed_at: Timestamp,
+        outcome: RunHistoryOutcome,
     ) -> Result<(), TriggerError> {
+        let RunHistoryOutcome {
+            status,
+            completed_at,
+            failure_reason,
+        } = outcome;
         let mut state = self.lock_state()?;
         state
             .runs
@@ -1580,6 +1690,7 @@ impl InMemoryTriggerRepository {
                 }
                 run.status = status;
                 run.completed_at = Some(completed_at);
+                run.failure_reason = failure_reason.clone();
             })
             .or_insert_with(|| {
                 let mut run = TriggerRunRecord::running(
@@ -1591,6 +1702,7 @@ impl InMemoryTriggerRepository {
                 );
                 run.status = status;
                 run.completed_at = Some(completed_at);
+                run.failure_reason = failure_reason;
                 run
             });
         prune_run_history_locked(&mut state, tenant_id, trigger_id);
@@ -1793,6 +1905,44 @@ mod tests {
 
     fn tenant(value: &str) -> TenantId {
         TenantId::new(value).expect("valid tenant")
+    }
+
+    #[test]
+    fn sanitized_failure_reason_rejects_empty_and_whitespace_only() {
+        assert!(SanitizedFailureReason::sanitize("").is_none());
+        assert!(SanitizedFailureReason::sanitize("   \t\n ").is_none());
+    }
+
+    #[test]
+    fn sanitized_failure_reason_folds_control_chars_and_collapses_whitespace() {
+        let reason = SanitizedFailureReason::sanitize("  trigger\tfire\n\nnot   authorized  ")
+            .expect("non-empty");
+        assert_eq!(reason.as_str(), "trigger fire not authorized");
+    }
+
+    #[test]
+    fn sanitized_failure_reason_caps_length() {
+        let raw = "x".repeat(MAX_FAILURE_REASON_LEN * 2);
+        let reason = SanitizedFailureReason::sanitize(&raw).expect("non-empty");
+        assert_eq!(reason.as_str().chars().count(), MAX_FAILURE_REASON_LEN);
+    }
+
+    #[test]
+    fn sanitized_failure_reason_round_trips_through_serde() {
+        let reason = SanitizedFailureReason::sanitize("creator access revoked").expect("non-empty");
+        let value = to_value(&reason).expect("serialize");
+        assert_eq!(value, json!("creator access revoked"));
+        let restored: SanitizedFailureReason = from_value(value).expect("deserialize");
+        assert_eq!(restored, reason);
+    }
+
+    #[test]
+    fn sanitized_failure_reason_serde_rejects_empty_string() {
+        let result: Result<SanitizedFailureReason, _> = from_value(json!("   "));
+        assert!(
+            result.is_err(),
+            "empty sanitized reason must not deserialize"
+        );
     }
 
     fn poison_in_memory_repo(repo: &InMemoryTriggerRepository) {
@@ -2402,8 +2552,11 @@ mod tests {
             trigger_id,
             fire_slot,
             Some(run_id),
-            TriggerRunHistoryStatus::Ok,
-            completed_at,
+            RunHistoryOutcome {
+                status: TriggerRunHistoryStatus::Ok,
+                completed_at,
+                failure_reason: None,
+            },
         )
         .expect("seed terminal history");
 
@@ -2518,6 +2671,7 @@ mod tests {
                 tenant_id: tenant("tenant-a"),
                 trigger_id: TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid"),
                 fire_slot,
+                failure_reason: None,
             })
             .await
             .expect_err("poisoned mutex maps to backend through retryable-failure API");
@@ -2537,6 +2691,7 @@ mod tests {
                 trigger_id: TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid"),
                 fire_slot,
                 next_run_at: ts(1_704_067_260),
+                failure_reason: None,
             })
             .await
             .expect_err("poisoned mutex maps to backend through permanent-failure API");

@@ -1492,7 +1492,7 @@ mod fire_claim_contract {
     use ironclaw_triggers::{
         ClaimDueFireOutcome, ClaimDueFireRequest, FireAcceptedRequest, FirePermanentFailedRequest,
         FireReplayedRequest, FireRetryableFailedRequest, FireTerminalFailedRequest,
-        TriggerRunHistoryStatus,
+        SanitizedFailureReason, TriggerRunHistoryStatus,
     };
 
     async fn assert_fire_claim_and_update_contract(repo: &impl TriggerRepository) {
@@ -1596,6 +1596,7 @@ mod fire_claim_contract {
                 tenant_id: tenant_id.clone(),
                 trigger_id,
                 fire_slot,
+                failure_reason: None,
             })
             .await
             .expect_err("stale retryable failure must not clear accepted run ref");
@@ -1678,6 +1679,7 @@ mod fire_claim_contract {
                 trigger_id: replayed_trigger_id,
                 fire_slot,
                 next_run_at: expected_next_run_at,
+                failure_reason: None,
             })
             .await
             .expect_err("stale permanent failure must not clear replayed run ref");
@@ -1710,6 +1712,7 @@ mod fire_claim_contract {
                 tenant_id: retryable_tenant_id,
                 trigger_id: retryable_trigger_id,
                 fire_slot,
+                failure_reason: None,
             })
             .await
             .expect("mark retryable failed")
@@ -1750,6 +1753,7 @@ mod fire_claim_contract {
                 trigger_id: permanent_trigger_id,
                 fire_slot,
                 next_run_at: expected_next_run_at,
+                failure_reason: None,
             })
             .await
             .expect("mark permanently failed")
@@ -1789,6 +1793,7 @@ mod fire_claim_contract {
                 tenant_id: terminal_tenant_id,
                 trigger_id: terminal_trigger_id,
                 fire_slot,
+                failure_reason: None,
             })
             .await
             .expect("mark terminally failed")
@@ -1914,6 +1919,7 @@ mod fire_claim_contract {
                 tenant_id: stale_retryable_tenant_id.clone(),
                 trigger_id: stale_retryable_trigger_id,
                 fire_slot: stale_fire_slot,
+                failure_reason: None,
             })
             .await
             .expect("stale retryable update")
@@ -1944,6 +1950,7 @@ mod fire_claim_contract {
                 trigger_id: stale_permanent_trigger_id,
                 fire_slot: stale_fire_slot,
                 next_run_at: ts(1_704_067_260),
+                failure_reason: None,
             })
             .await
             .expect("stale permanent update")
@@ -1973,6 +1980,7 @@ mod fire_claim_contract {
                 tenant_id: stale_terminal_tenant_id.clone(),
                 trigger_id: stale_terminal_trigger_id,
                 fire_slot: stale_fire_slot,
+                failure_reason: None,
             })
             .await
             .expect("stale terminal update")
@@ -2046,6 +2054,7 @@ mod fire_claim_contract {
                 tenant_id: retryable_tenant_id,
                 trigger_id: retryable_trigger_id,
                 fire_slot,
+                failure_reason: None,
             })
             .await
             .expect_err("retryable failure rejects advanced next_run_at");
@@ -2065,6 +2074,7 @@ mod fire_claim_contract {
                 trigger_id: permanent_trigger_id,
                 fire_slot,
                 next_run_at: fire_slot,
+                failure_reason: None,
             })
             .await
             .expect_err("permanent failure rejects non-future next_run_at");
@@ -2682,6 +2692,65 @@ mod fire_claim_contract {
         assert_fire_clear_contract(repo).await;
         assert_run_history_lifecycle_contract(repo).await;
         assert_run_history_retention_contract(repo).await;
+        assert_failed_fire_persists_failure_reason(repo).await;
+    }
+
+    /// A pre-acceptance failure persists a sanitized `failure_reason` that
+    /// round-trips through `list_trigger_run_history`, while `run_id`/`thread_id`
+    /// stay null — the regression guard for #4992's "No thread attached" gap.
+    async fn assert_failed_fire_persists_failure_reason(repo: &impl TriggerRepository) {
+        let trigger_id = TriggerId::parse("01J00000000000000000000031").expect("ulid");
+        let tenant_id = tenant("tenant-failure-reason");
+        let fire_slot = ts(1_704_070_800);
+        let record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
+        let next_run_at = record
+            .schedule
+            .next_slot_after(fire_slot)
+            .expect("next slot calculation")
+            .expect("future slot");
+        repo.upsert_trigger(record).await.expect("insert record");
+
+        let claimed = repo
+            .claim_due_fire(ClaimDueFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                now: fire_slot + chrono::Duration::seconds(3),
+            })
+            .await
+            .expect("claim fire");
+        assert!(matches!(claimed, ClaimDueFireOutcome::Claimed(_)));
+
+        let reason =
+            SanitizedFailureReason::sanitize("trigger fire not authorized: creator access revoked")
+                .expect("non-empty reason");
+        repo.mark_fire_permanently_failed(FirePermanentFailedRequest {
+            tenant_id: tenant_id.clone(),
+            trigger_id,
+            fire_slot,
+            next_run_at,
+            failure_reason: Some(reason.clone()),
+        })
+        .await
+        .expect("mark permanently failed")
+        .expect("failed fire should persist");
+
+        let runs = repo
+            .list_trigger_run_history(tenant_id.clone(), trigger_id, 10)
+            .await
+            .expect("list failed run history");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, TriggerRunHistoryStatus::Error);
+        assert_eq!(runs[0].run_id, None, "pre-acceptance failure has no run id");
+        assert_eq!(
+            runs[0].thread_id, None,
+            "pre-acceptance failure has no canonical thread"
+        );
+        assert_eq!(
+            runs[0].failure_reason,
+            Some(reason),
+            "sanitized failure reason must round-trip through run history"
+        );
     }
 
     async fn assert_run_history_lifecycle_contract(repo: &impl TriggerRepository) {
@@ -2883,6 +2952,7 @@ mod fire_claim_contract {
             tenant_id: failed_tenant_id.clone(),
             trigger_id: failed_trigger_id,
             fire_slot,
+            failure_reason: None,
         })
         .await
         .expect("mark terminal failure")
@@ -3162,6 +3232,7 @@ mod fire_claim_contract {
         assert_fire_clear_contract(&repo).await;
         assert_run_history_lifecycle_contract(&repo).await;
         assert_run_history_retention_contract(&repo).await;
+        assert_failed_fire_persists_failure_reason(&repo).await;
     }
 
     #[cfg(feature = "libsql")]

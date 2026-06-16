@@ -16,11 +16,11 @@ use libsql::params;
 use crate::{
     ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire,
     ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
-    FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerCompletionPolicy, TriggerError,
-    TriggerId, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord,
-    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
-    reject_failed_result_after_active_run, reject_non_future_next_run_at, reject_run_ref_rewrite,
-    trigger_run_history_status_text,
+    FireRetryableFailedRequest, FireTerminalFailedRequest, RunHistoryOutcome,
+    SanitizedFailureReason, TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord,
+    TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus,
+    TriggerSchedule, TriggerSourceKind, TriggerState, reject_failed_result_after_active_run,
+    reject_non_future_next_run_at, reject_run_ref_rewrite, trigger_run_history_status_text,
 };
 
 #[cfg(feature = "libsql")]
@@ -76,7 +76,8 @@ const CREATED_AT_COL: usize = 18;
 
 #[cfg(feature = "libsql")]
 const TRIGGER_RUN_COLUMNS: &str = "\
-    tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at";
+    tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at, \
+    failure_reason";
 #[cfg(feature = "libsql")]
 const RUN_TENANT_ID_COL: usize = 0;
 #[cfg(feature = "libsql")]
@@ -93,6 +94,8 @@ const RUN_STATUS_COL: usize = 5;
 const RUN_SUBMITTED_AT_COL: usize = 6;
 #[cfg(feature = "libsql")]
 const RUN_COMPLETED_AT_COL: usize = 7;
+#[cfg(feature = "libsql")]
+const RUN_FAILURE_REASON_COL: usize = 8;
 
 /// Durable libSQL trigger repository.
 #[cfg(feature = "libsql")]
@@ -191,6 +194,7 @@ impl LibSqlTriggerRepository {
                         status TEXT NOT NULL,
                         submitted_at TEXT NOT NULL,
                         completed_at TEXT,
+                        failure_reason TEXT,
                         PRIMARY KEY (tenant_id, trigger_id, fire_slot)
                     )"
                 ),
@@ -296,6 +300,21 @@ impl LibSqlTriggerRepository {
                 ))
                 .await
                 .map_err(|error| backend_error("make trigger_run_history thread_id nullable", error))?;
+            }
+            // Add the nullable failure_reason column if it doesn't already exist
+            // (idempotent migration). Runs after the thread_id rebuild above so
+            // the rebuild operates on the pre-failure_reason column set.
+            if let Err(error) = conn
+                .execute(
+                    &format!("ALTER TABLE {TRIGGER_RUN_TABLE} ADD COLUMN failure_reason TEXT"),
+                    (),
+                )
+                .await
+            {
+                let msg = error.to_string();
+                if !msg.contains("duplicate column") && !msg.contains("already exists") {
+                    return Err(backend_error("add failure_reason column", error));
+                }
             }
             Ok::<(), TriggerError>(())
         }
@@ -752,6 +771,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
             tenant_id,
             trigger_id,
             fire_slot,
+            failure_reason,
         } = request;
         let conn = self.connect().await?;
         let Some(record) = fetch_record(&conn, &tenant_id, trigger_id).await? else {
@@ -806,8 +826,11 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 trigger_id,
                 fire_slot,
                 None,
-                TriggerRunHistoryStatus::Error,
-                Utc::now(),
+                RunHistoryOutcome {
+                    status: TriggerRunHistoryStatus::Error,
+                    completed_at: Utc::now(),
+                    failure_reason,
+                },
             )
             .await?;
             Ok(Some(record))
@@ -837,6 +860,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
             trigger_id,
             fire_slot,
             next_run_at,
+            failure_reason,
         } = request;
         let conn = self.connect().await?;
         let Some(record) = fetch_record(&conn, &tenant_id, trigger_id).await? else {
@@ -888,8 +912,11 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 trigger_id,
                 fire_slot,
                 None,
-                TriggerRunHistoryStatus::Error,
-                Utc::now(),
+                RunHistoryOutcome {
+                    status: TriggerRunHistoryStatus::Error,
+                    completed_at: Utc::now(),
+                    failure_reason,
+                },
             )
             .await?;
             Ok(Some(record))
@@ -918,6 +945,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
             tenant_id,
             trigger_id,
             fire_slot,
+            failure_reason,
         } = request;
         let fire_slot_text = fmt_ts(&fire_slot);
         let last_status = status_text(TriggerRunStatus::Error);
@@ -960,8 +988,11 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 trigger_id,
                 fire_slot,
                 None,
-                TriggerRunHistoryStatus::Error,
-                Utc::now(),
+                RunHistoryOutcome {
+                    status: TriggerRunHistoryStatus::Error,
+                    completed_at: Utc::now(),
+                    failure_reason,
+                },
             )
             .await?;
             Ok(Some(record))
@@ -1021,8 +1052,11 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 request.trigger_id,
                 request.fire_slot,
                 Some(request.run_id),
-                request.status,
-                Utc::now(),
+                RunHistoryOutcome {
+                    status: request.status,
+                    completed_at: Utc::now(),
+                    failure_reason: None,
+                },
             )
             .await?;
             Ok(Some(record))
@@ -1510,6 +1544,8 @@ fn row_to_run_record(row: &libsql::Row) -> Result<TriggerRunRecord, TriggerError
     let completed_at = optional_text(row, RUN_COMPLETED_AT_COL, "completed_at")?
         .map(|value| parse_timestamp(&value, "completed_at"))
         .transpose()?;
+    let failure_reason = optional_text(row, RUN_FAILURE_REASON_COL, "failure_reason")?
+        .and_then(|value| SanitizedFailureReason::sanitize(&value));
     Ok(TriggerRunRecord {
         tenant_id,
         trigger_id,
@@ -1519,6 +1555,7 @@ fn row_to_run_record(row: &libsql::Row) -> Result<TriggerRunRecord, TriggerError
         status,
         submitted_at,
         completed_at,
+        failure_reason,
     })
 }
 
@@ -1530,14 +1567,15 @@ async fn upsert_run_history(
     conn.execute(
         &format!(
             "INSERT INTO {TRIGGER_RUN_TABLE} (
-                tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at, failure_reason
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             ON CONFLICT (tenant_id, trigger_id, fire_slot) DO UPDATE SET
                 run_id = excluded.run_id,
                 thread_id = COALESCE(excluded.thread_id, {TRIGGER_RUN_TABLE}.thread_id),
                 status = excluded.status,
                 submitted_at = excluded.submitted_at,
-                completed_at = excluded.completed_at"
+                completed_at = excluded.completed_at,
+                failure_reason = COALESCE(excluded.failure_reason, {TRIGGER_RUN_TABLE}.failure_reason)"
         ),
         params![
             run.tenant_id.as_str(),
@@ -1548,6 +1586,7 @@ async fn upsert_run_history(
             trigger_run_history_status_text(run.status),
             fmt_ts(&run.submitted_at),
             opt_ts(run.completed_at.as_ref()),
+            run.failure_reason.as_ref().map(|reason| reason.as_str()),
         ],
     )
     .await
@@ -1578,19 +1617,24 @@ async fn complete_run_history(
     trigger_id: TriggerId,
     fire_slot: Timestamp,
     run_id: Option<TurnRunId>,
-    status: TriggerRunHistoryStatus,
-    completed_at: Timestamp,
+    outcome: RunHistoryOutcome,
 ) -> Result<(), TriggerError> {
+    let RunHistoryOutcome {
+        status,
+        completed_at,
+        failure_reason,
+    } = outcome;
     let run_id_value = opt_turn_run_id(run_id.as_ref());
     conn.execute(
         &format!(
             "INSERT INTO {TRIGGER_RUN_TABLE} (
-                tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at
-            ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7)
+                tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at, failure_reason
+            ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8)
             ON CONFLICT (tenant_id, trigger_id, fire_slot) DO UPDATE SET
                 run_id = COALESCE(trigger_run_history.run_id, excluded.run_id),
                 status = excluded.status,
-                completed_at = excluded.completed_at"
+                completed_at = excluded.completed_at,
+                failure_reason = COALESCE(excluded.failure_reason, trigger_run_history.failure_reason)"
         ),
         params![
             tenant_id.as_str(),
@@ -1600,6 +1644,7 @@ async fn complete_run_history(
             trigger_run_history_status_text(status),
             fmt_ts(&completed_at),
             fmt_ts(&completed_at),
+            failure_reason.as_ref().map(|reason| reason.as_str()),
         ],
     )
     .await

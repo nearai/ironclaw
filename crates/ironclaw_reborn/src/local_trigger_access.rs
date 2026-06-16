@@ -40,6 +40,12 @@ pub enum LocalTriggerAccessSource {
     LocalDevSsoBootstrap,
     /// CLI `run` default-owner bootstrap path.
     LocalDevRunBootstrap,
+    /// Trigger-creation bootstrap path. Seeded by the trigger create hook for
+    /// the exact `(tenant, creator, agent, project)` scope of a new trigger so
+    /// the access row's lifetime tracks the trigger's lifetime instead of the
+    /// volatile login/boot reconcile. A distinct source keeps these rows immune
+    /// to env/sso/run reconcile, which only deactivates rows of its own source.
+    LocalDevTriggerCreateBootstrap,
 }
 
 impl LocalTriggerAccessSource {
@@ -48,6 +54,7 @@ impl LocalTriggerAccessSource {
             Self::LocalDevEnvBootstrap => "local_dev_env_bootstrap",
             Self::LocalDevSsoBootstrap => "local_dev_sso_bootstrap",
             Self::LocalDevRunBootstrap => "local_dev_run_bootstrap",
+            Self::LocalDevTriggerCreateBootstrap => "local_dev_trigger_create_bootstrap",
         }
     }
 }
@@ -66,6 +73,28 @@ impl LocalTriggerAccessStatus {
             Self::Inactive => "inactive",
         }
     }
+}
+
+/// Effective local-dev access state for one exact tenant/user/agent/project
+/// scope, as seen by fire-time trigger authorization.
+///
+/// The three-way distinction is what lets the fire-time checker tell an
+/// intentional operator revocation apart from a never-seeded / lost-on-DB-drop
+/// strand: `Revoked` must stay denied, while `Absent` is safe to self-heal
+/// because a trigger fire is only ever materialized from a persisted trigger
+/// record whose `creator_user_id` was set under an authenticated caller — the
+/// record's existence is itself the ownership proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalAccessState {
+    /// An active row exists for the exact scope.
+    Active,
+    /// Only an inactive row exists for the exact scope — an operator revoked it
+    /// (or a prior reconcile deactivated it). Fire-time auth must stay denied.
+    Revoked,
+    /// No row exists for the exact scope. The scope was never seeded (e.g. the
+    /// trigger carries a non-default agent/project) or the local-dev DB was
+    /// dropped, stranding a persisted trigger.
+    Absent,
 }
 
 /// Failure modes of the libSQL local trigger access store.
@@ -326,6 +355,83 @@ impl RebornLibSqlLocalTriggerAccessStore {
             .await
             .map_err(backend)?;
         Ok(rows.next().await.map_err(backend)?.is_some())
+    }
+
+    /// Return the effective [`LocalAccessState`] for the exact
+    /// tenant/agent/project/user scope, distinguishing an active grant from an
+    /// operator revocation (inactive row) and from a never-seeded scope (no
+    /// row). Fire-time authorization uses this to self-heal stranded triggers
+    /// without overriding a deliberate revocation.
+    pub async fn local_access_state(
+        &self,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+        agent_id: Option<&AgentId>,
+        project_id: Option<&ProjectId>,
+    ) -> Result<LocalAccessState, RebornLocalTriggerAccessStoreError> {
+        let conn = self.conn().await?;
+        let mut rows = conn
+            .query(
+                "SELECT status \
+                 FROM local_reborn_access \
+                 WHERE tenant_id = ?1 \
+                   AND user_id = ?2 \
+                   AND agent_id = ?3 \
+                   AND project_id = ?4 \
+                 LIMIT 1",
+                libsql::params![
+                    tenant_id.as_str(),
+                    user_id.as_str(),
+                    optional_scope_key(agent_id.map(AgentId::as_str)),
+                    optional_scope_key(project_id.map(ProjectId::as_str)),
+                ],
+            )
+            .await
+            .map_err(backend)?;
+        let Some(row) = rows.next().await.map_err(backend)? else {
+            return Ok(LocalAccessState::Absent);
+        };
+        let status = row.get::<String>(0).map_err(backend)?;
+        if status == LocalTriggerAccessStatus::Active.as_str() {
+            Ok(LocalAccessState::Active)
+        } else {
+            Ok(LocalAccessState::Revoked)
+        }
+    }
+
+    /// Distinct user ids with at least one active row from `source` in this
+    /// tenant. Used by the repair tooling to resolve the current SSO-admitted
+    /// owner when reassigning stranded triggers.
+    pub async fn list_active_user_ids_for_source(
+        &self,
+        tenant_id: &TenantId,
+        source: LocalTriggerAccessSource,
+    ) -> Result<Vec<UserId>, RebornLocalTriggerAccessStoreError> {
+        let conn = self.conn().await?;
+        let mut rows = conn
+            .query(
+                "SELECT DISTINCT user_id \
+                 FROM local_reborn_access \
+                 WHERE tenant_id = ?1 \
+                   AND source = ?2 \
+                   AND status = ?3 \
+                 ORDER BY user_id",
+                libsql::params![
+                    tenant_id.as_str(),
+                    source.as_str(),
+                    LocalTriggerAccessStatus::Active.as_str(),
+                ],
+            )
+            .await
+            .map_err(backend)?;
+        let mut user_ids = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            let raw = row.get::<String>(0).map_err(backend)?;
+            let user_id = UserId::new(raw)
+                .map_err(|error| RebornLocalTriggerAccessStoreError::Backend(error.to_string()))?;
+            user_ids.push(user_id);
+        }
+        Ok(user_ids)
     }
 }
 

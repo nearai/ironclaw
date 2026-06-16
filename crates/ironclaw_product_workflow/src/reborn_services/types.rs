@@ -895,6 +895,12 @@ pub struct RebornAutomationRecentRunInfo {
     pub submitted_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<DateTime<Utc>>,
+    /// Sanitized human-readable reason this run failed before acceptance, when
+    /// the fire produced no run/thread. Present only on error rows; lets the
+    /// Automations panel explain *why* a fire failed instead of only showing
+    /// "No thread attached".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
 }
 
 /// Allowlisted client-visible state for automation list projections.

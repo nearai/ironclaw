@@ -93,6 +93,7 @@ fn make_run_record(trigger_id: TriggerId, status: TriggerRunHistoryStatus) -> Tr
         status,
         submitted_at: now(),
         completed_at: None,
+        failure_reason: None,
     }
 }
 

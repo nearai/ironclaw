@@ -331,8 +331,12 @@ fn trigger_authorization_error(error: TriggerFireAuthError) -> TriggerError {
     match error {
         TriggerFireAuthError::Denied { reason } => {
             tracing::debug!(%reason, "trusted trigger fire authorization denied");
+            // Carry the (boundary-mapped) denial reason instead of a constant so
+            // the run-history error row and the Automations UI can explain *why*
+            // the fire was denied, not just that no thread attached. The
+            // `SanitizedFailureReason` newtype caps/strips this downstream.
             TriggerError::InvalidMaterialization {
-                reason: "trusted trigger fire authorization denied".to_string(),
+                reason: format!("trigger fire not authorized: {reason}"),
             }
         }
         TriggerFireAuthError::Retryable { reason } => {

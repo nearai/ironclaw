@@ -801,6 +801,7 @@ registerPack("en", {
   "automations.detail.thread": "thread",
   "automations.detail.run": "run",
   "automations.detail.noThread": "No thread attached",
+  "automations.detail.failureReason": "Failed:",
 
   // Routines page
   "routines.explorer": "Tasks",
