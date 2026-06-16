@@ -388,7 +388,10 @@ impl DefaultApprovalInteractionService {
                 ApprovalInteractionRejectionKind::StaleGate,
             ));
         }
-        if state.resume_disposition.is_some() {
+        if matches!(
+            state.resume_disposition.as_ref(),
+            Some(GateResumeDisposition::Denied)
+        ) {
             // Run is non-terminal and carries our denial marker — the first
             // Deny successfully resumed it with a denial disposition.
             // Replay that outcome idempotently.

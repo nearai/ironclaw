@@ -159,6 +159,6 @@ extension-install loop is only fully resolved when both land.
 - Executor: denied approval-resume fails only the matching capability,
   unrelated parallel calls proceed; batch policy recomputed; disposition
   consumed once; checkpoint round-trip of
-  `Some(ApprovalResumeDisposition::Denied)`.
+  `Some(GateResumeDisposition::Denied)`.
 - Serde: `ResumeTurnRequest` / `TurnRunRecord` missing-field defaults to
   None.

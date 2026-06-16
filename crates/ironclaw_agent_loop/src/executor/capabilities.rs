@@ -1031,6 +1031,7 @@ impl CapabilityStage {
     ///
     /// Both summaries are compile-time `&'static str` and are validated by
     /// `SanitizedStrategySummary::from_trusted_static` at the call site.
+    // arch-exempt: too_many_args, denied-resume short-circuit threads the capability-batch dispatch context (ctx/state/signatures/batch); needs a dispatch-context bundle, plan #4954
     #[allow(clippy::too_many_arguments)]
     async fn short_circuit_denied_resume(
         &self,

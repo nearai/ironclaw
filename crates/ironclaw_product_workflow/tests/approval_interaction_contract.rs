@@ -416,6 +416,7 @@ struct FakeTurnCoordinator {
     cancellations: Mutex<Vec<CancelRunRequest>>,
     resume_disposition: Mutex<Option<GateResumeDisposition>>,
     get_run_state_error: Mutex<Option<TurnError>>,
+    resume_error: Mutex<Option<TurnError>>,
 }
 
 impl FakeTurnCoordinator {
@@ -428,6 +429,7 @@ impl FakeTurnCoordinator {
             cancellations: Mutex::new(Vec::new()),
             resume_disposition: Mutex::new(None),
             get_run_state_error: Mutex::new(None),
+            resume_error: Mutex::new(None),
         }
     }
 
@@ -441,6 +443,10 @@ impl FakeTurnCoordinator {
 
     fn set_get_run_state_error(&self, error: TurnError) {
         *self.get_run_state_error.lock().expect("lock") = Some(error);
+    }
+
+    fn set_resume_error(&self, error: TurnError) {
+        *self.resume_error.lock().expect("lock") = Some(error);
     }
 
     fn resumption_count(&self) -> usize {
@@ -495,6 +501,9 @@ impl TurnCoordinator for FakeTurnCoordinator {
     ) -> Result<ResumeTurnResponse, TurnError> {
         let run_id = request.run_id;
         self.resumptions.lock().expect("lock").push(request);
+        if let Some(error) = self.resume_error.lock().expect("lock").clone() {
+            return Err(error);
+        }
         Ok(ResumeTurnResponse {
             run_id,
             status: TurnStatus::Queued,
@@ -1787,7 +1796,7 @@ async fn deny_marks_pending_gate_denied_then_resumes_run_with_disposition() {
 
 #[tokio::test]
 async fn replay_denied_gate_returns_stale_when_get_run_state_errors() {
-    // NotParkedOnGate + Denied gate + get_run_state fails → error propagates as StaleGate.
+    // NotParkedOnGate + Denied gate + get_run_state fails → error propagates as Transient.
     let (service, _resolver, coordinator, run_id, gate_ref) = service_fixture_for_request_status(
         approval_request("delete a file"),
         ApprovalStatus::Denied,
@@ -1816,6 +1825,52 @@ async fn replay_denied_gate_returns_stale_when_get_run_state_errors() {
     ));
     assert_eq!(coordinator.resumption_count(), 0);
     assert_eq!(coordinator.cancellation_count(), 0);
+}
+
+#[tokio::test]
+async fn deny_marks_pending_gate_denied_then_propagates_resume_error_without_cancelling() {
+    // ParkedOnGate (BlockedApproval) + Pending gate → fresh deny path.
+    // The durable denial write must complete before resume is attempted.
+    // When resume_turn fails (Unavailable → Transient), the error propagates
+    // and cancel_run must NOT be called.
+    let (service, resolver, coordinator, run_id, gate_ref) = service_fixture("delete a file");
+    coordinator.set_resume_error(TurnError::Unavailable {
+        reason: "coordinator unavailable".to_string(),
+    });
+
+    let error = service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: scope(),
+            actor: actor("user-alpha"),
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: ApprovalInteractionDecision::Deny,
+            idempotency_key: IdempotencyKey::new("deny-resume-error").expect("idempotency"),
+        })
+        .await
+        .expect_err("resume failure must propagate");
+
+    // map_approval_resume_error maps Unavailable → Transient.
+    assert!(
+        matches!(
+            error,
+            ironclaw_product_workflow::ProductWorkflowError::Transient { .. }
+        ),
+        "expected Transient, got {error:?}"
+    );
+    // Durable denial write happened before the resume attempt.
+    assert_eq!(
+        resolver.denial_count(),
+        1,
+        "denial must be written before resume"
+    );
+    // resume_turn was called (and failed), but cancel_run must never be called.
+    assert_eq!(coordinator.resumption_count(), 1);
+    assert_eq!(
+        coordinator.cancellation_count(),
+        0,
+        "cancel must not be called on deny path"
+    );
 }
 
 #[tokio::test]

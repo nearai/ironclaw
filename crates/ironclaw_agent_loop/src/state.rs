@@ -114,7 +114,7 @@ pub struct PendingApprovalResume {
     pub estimate: ResourceEstimate,
     /// Set when the user denied this approval gate. The loop surfaces a
     /// model-visible failure for the parked call instead of re-dispatching.
-    /// Mirrors `PendingAuthResume::disposition`.
+    /// See the field-name note on `PendingAuthResume::disposition`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disposition: Option<ironclaw_turns::GateResumeDisposition>,
 }
@@ -152,10 +152,11 @@ impl PendingApprovalResume {
 /// authorization failure for the parked call and SKIPS re-dispatch; in that
 /// case `resume_token` and `replay` are unused.
 ///
-/// Field-name note: `PendingAuthResume::disposition` is intentionally kept
-/// short because the enclosing type already scopes it to gate-resume context.
-/// Turn-layer structs that carry a similar field from a wider scope use the
-/// qualified name `resume_disposition` to avoid ambiguity.
+/// Field-name note: each pending-resume type scopes `disposition` to ONE
+/// parked gate (auth or approval), so the short name is unambiguous within
+/// the struct.  Turn-layer records that are gate-agnostic use the fuller
+/// `resume_disposition` to distinguish the field from other disposition-like
+/// values in a wider context.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingAuthResume {
     pub gate_ref: LoopGateRef,

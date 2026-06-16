@@ -879,6 +879,147 @@ fn turn_persistence_snapshot_legacy_run_defaults_resume_disposition_to_none() {
     );
 }
 
+#[test]
+fn turn_persistence_snapshot_legacy_run_preserves_denied_resume_disposition() {
+    // Mirror of turn_persistence_snapshot_legacy_run_defaults_resume_disposition_to_none,
+    // but instead of an absent key we inject the LEGACY wire key
+    // "auth_resume_disposition": "denied" into the serialized run JSON.
+    // This proves the serde rename provides back-compat for persisted records
+    // that carried a non-None value under the old field name.
+    let run_id = TurnRunId::new();
+    let turn_id = TurnId::new();
+    let scope = turn_scope("thread-legacy-denied-resume");
+
+    let descriptor = AgentLoopDriverDescriptor {
+        id: LoopDriverId::new("legacy-denied-resume-driver").expect("valid driver id"),
+        version: RunProfileVersion::new(1),
+        checkpoint_schema_id: Some(
+            CheckpointSchemaId::new("legacy_denied_resume_checkpoint").expect("valid"),
+        ),
+        checkpoint_schema_version: Some(RunProfileVersion::new(1)),
+    };
+    let resolved = ResolvedRunProfile {
+        run_class_id: RunClassId::new("legacy-denied-resume-class").expect("valid"),
+        profile_id: RunProfileId::default_profile(),
+        profile_version: RunProfileVersion::new(1),
+        loop_driver: descriptor.clone(),
+        checkpoint_schema_id: descriptor
+            .checkpoint_schema_id
+            .clone()
+            .expect("descriptor checkpoint id"),
+        checkpoint_schema_version: descriptor
+            .checkpoint_schema_version
+            .expect("descriptor checkpoint version"),
+        model_profile_id: ModelProfileId::new("legacy-denied-resume-model").expect("valid"),
+        capability_surface_profile_id: CapabilitySurfaceProfileId::new(
+            "legacy-denied-resume-capabilities",
+        )
+        .expect("valid"),
+        context_profile_id: ContextProfileId::new("legacy-denied-resume-context").expect("valid"),
+        steering_policy: SteeringPolicy {
+            allow_steering: false,
+            allow_interrupt: false,
+            allow_driver_specific_nudges: false,
+        },
+        cancellation_policy: CancellationPolicy {
+            allow_cancel: false,
+            require_checkpoint_before_cancel: false,
+        },
+        checkpoint_policy: CheckpointPolicy {
+            require_before_model: false,
+            require_before_side_effect: false,
+            require_before_block: false,
+            max_checkpoint_bytes: 64 * 1024,
+            require_final_checkpoint: false,
+            allow_no_reply_completion: false,
+        },
+        resource_budget_policy: ResourceBudgetPolicy {
+            tier: ResourceBudgetTier::new("legacy-denied-resume-tier").expect("valid"),
+            max_model_calls: 16,
+            max_capability_invocations: 32,
+        },
+        personal_context_policy: ironclaw_turns::run_profile::PersonalContextPolicy::Excluded,
+        runtime_constraints: RuntimeProfileConstraints {
+            allow_raw_runtime_backend_selection: false,
+            allow_broad_capability_surface: false,
+        },
+        runner_pool_id: None,
+        scheduling_class: SchedulingClass::new("interactive").expect("valid"),
+        concurrency_class: ConcurrencyClass::new("thread_serial").expect("valid"),
+        resolution_fingerprint: RunProfileFingerprint::new("legacy-denied-resume-fingerprint")
+            .expect("valid"),
+        provenance: RedactedRunProfileProvenance {
+            sources: vec![],
+            effective_privileges: vec![],
+        },
+    };
+
+    // Build a record with resume_disposition = None so the key is absent in
+    // serialized form (skip_serializing_if = "Option::is_none"), then inject
+    // the legacy wire key before deserializing.
+    let record = TurnRunRecord {
+        run_id,
+        turn_id,
+        scope: scope.clone(),
+        accepted_message_ref: AcceptedMessageRef::new("accepted-legacy-denied").unwrap(),
+        source_binding_ref: SourceBindingRef::new("source-legacy-denied").unwrap(),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-legacy-denied").unwrap(),
+        status: TurnStatus::Completed,
+        profile: TurnRunProfile::from_resolved(resolved),
+        resolved_model_route: None,
+        checkpoint_id: None,
+        gate_ref: None,
+        credential_requirements: vec![],
+        failure: None,
+        event_cursor: EventCursor(0),
+        runner_id: None,
+        lease_token: None,
+        lease_expires_at: None,
+        last_heartbeat_at: None,
+        claim_count: 0,
+        received_at: fixed_time(),
+        parent_run_id: None,
+        subagent_depth: 0,
+        spawn_tree_root_run_id: None,
+        product_context: None,
+        resume_disposition: None,
+    };
+
+    let snapshot = TurnPersistenceSnapshot {
+        runs: vec![record],
+        ..TurnPersistenceSnapshot::default()
+    };
+    let mut json_val = serde_json::to_value(&snapshot).expect("serialize snapshot");
+
+    // Inject the legacy key into the run object to simulate a persisted record
+    // that carried auth_resume_disposition = "denied" under the old field name.
+    let run_obj = json_val["runs"][0]
+        .as_object_mut()
+        .expect("runs[0] must be an object");
+    assert!(
+        !run_obj.contains_key("auth_resume_disposition"),
+        "auth_resume_disposition must be absent before injection"
+    );
+    run_obj.insert(
+        "auth_resume_disposition".to_string(),
+        serde_json::json!("denied"),
+    );
+
+    let deserialized: TurnPersistenceSnapshot =
+        serde_json::from_value(json_val).expect("deserialize legacy snapshot with denied key");
+
+    assert_eq!(
+        deserialized.runs.len(),
+        1,
+        "snapshot must contain exactly one run"
+    );
+    assert_eq!(
+        deserialized.runs[0].resume_disposition,
+        Some(ironclaw_turns::GateResumeDisposition::Denied),
+        "resume_disposition must be Some(Denied) when legacy auth_resume_disposition key is present"
+    );
+}
+
 fn turn_scope(thread_id: &str) -> TurnScope {
     TurnScope::new(
         TenantId::new("tenant-checkpoint").unwrap(),
