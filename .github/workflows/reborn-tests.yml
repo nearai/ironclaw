@@ -160,9 +160,9 @@ jobs:
                     | .targets[]
                     | select((.kind | index("lib")) or (.kind | index("test")))
                     | if (.kind | index("lib")) then
-                        { "name": "lib", "args": "--lib" }
+                        { "name": "lib", "kind": "lib" }
                       else
-                        { "name": .name, "args": ("--test " + .name) }
+                        { "name": .name, "kind": "test" }
                       end
                   ]
                   | unique_by(.name)
@@ -275,13 +275,27 @@ jobs:
 
       - name: Run ironclaw_webui_v2 shard
         env:
-          TARGET_ARGS: ${{ matrix.args }}
+          TARGET_KIND: ${{ matrix.kind }}
+          TARGET_NAME: ${{ matrix.name }}
         run: |
           feature_flags="$(scripts/ci/package-feature-flags.sh ironclaw_webui_v2)"
+          target_args=()
+          case "$TARGET_KIND" in
+            lib)
+              target_args=(--lib)
+              ;;
+            test)
+              target_args=(--test "$TARGET_NAME")
+              ;;
+            *)
+              echo "Unknown ironclaw_webui_v2 target kind: $TARGET_KIND" >&2
+              exit 1
+              ;;
+          esac
 
-          # shellcheck disable=SC2086 # feature_flags and TARGET_ARGS intentionally expand to Cargo args.
+          # shellcheck disable=SC2086 # feature_flags intentionally expands to zero or more Cargo args.
           timeout --signal=INT --kill-after=30s 16m \
-            cargo test -p ironclaw_webui_v2 ${feature_flags} ${TARGET_ARGS} -- --nocapture
+            cargo test -p ironclaw_webui_v2 ${feature_flags} "${target_args[@]}" -- --nocapture
 
   root-reborn-parity-tests:
     name: Reborn root tests (${{ matrix.partition }})
