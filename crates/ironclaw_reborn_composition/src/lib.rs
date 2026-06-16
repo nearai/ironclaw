@@ -339,11 +339,10 @@ pub use webui_serve::{
 };
 
 /// Re-exported identity vocabulary host binaries need to construct
-/// [`WebuiServeConfig`] (and any other public type on this crate whose
-/// signature mentions a host-api identity). Kept narrow on purpose —
-/// the composition CLAUDE.md says "Expose facade-shaped handles only";
-/// these four newtypes are the WebUI gateway's host-identity facade.
-#[cfg(feature = "webui-v2-beta")]
+/// public runtime/WebUI types whose signatures mention a host-api identity.
+/// Kept narrow on purpose — the composition CLAUDE.md says "Expose
+/// facade-shaped handles only"; these four newtypes are the host-identity
+/// facade.
 pub mod host_api {
     pub use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 }
