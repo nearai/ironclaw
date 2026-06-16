@@ -937,6 +937,8 @@ registerPack("uk", {
   "common.gatewaySession": "Сеанс шлюзу",
   "common.pinned": "Закріплено",
   "common.deleteChat": "Видалити чат",
+  "chat.deleteFailed": "Не вдалося видалити цю розмову.",
+  "chat.deleteBusy": "Неможливо видалити розмову, поки вона виконується. Спочатку зупиніть її, а потім спробуйте ще раз.",
   "command.placeholder": "Введіть команду або пошук...",
   "routine.searchPlaceholder": "Назва процедури пошуку, тригер або дія",
   "routine.unavailable": "Процедура недоступна",

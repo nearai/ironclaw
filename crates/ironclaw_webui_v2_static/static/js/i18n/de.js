@@ -937,6 +937,8 @@ registerPack("de", {
   "common.gatewaySession": "Gateway-Sitzung",
   "common.pinned": "Angeheftet",
   "common.deleteChat": "Chat löschen",
+  "chat.deleteFailed": "Diese Unterhaltung konnte nicht gelöscht werden.",
+  "chat.deleteBusy": "Eine laufende Unterhaltung kann nicht gelöscht werden. Stoppe sie zuerst und versuche es dann erneut.",
   "command.placeholder": "Geben Sie einen Befehl oder eine Suche ein ...",
   "routine.searchPlaceholder": "Routinename, Trigger oder Aktion suchen",
   "routine.unavailable": "Routine nicht verfügbar",

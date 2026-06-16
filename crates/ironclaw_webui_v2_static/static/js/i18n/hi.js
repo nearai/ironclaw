@@ -937,6 +937,8 @@ registerPack("hi", {
   "common.gatewaySession": "गेटवे सत्र",
   "common.pinned": "पिन किया गया",
   "common.deleteChat": "चैट हटाएं",
+  "chat.deleteFailed": "यह बातचीत हटाई नहीं जा सकी.",
+  "chat.deleteBusy": "चल रही बातचीत को हटाया नहीं जा सकता. पहले उसे रोकें, फिर दोबारा कोशिश करें.",
   "command.placeholder": "एक कमांड टाइप करें या खोजें...",
   "routine.searchPlaceholder": "रूटीन नाम, ट्रिगर, या क्रिया खोजें",
   "routine.unavailable": "रूटीन अनुपलब्ध",

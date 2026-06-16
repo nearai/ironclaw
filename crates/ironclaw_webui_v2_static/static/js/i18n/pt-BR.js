@@ -937,6 +937,8 @@ registerPack("pt-BR", {
   "common.gatewaySession": "Sessão de gateway",
   "common.pinned": "Fixado",
   "common.deleteChat": "Excluir bate-papo",
+  "chat.deleteFailed": "Não foi possível excluir esta conversa.",
+  "chat.deleteBusy": "Não é possível excluir uma conversa enquanto ela está em execução. Pare-a primeiro e tente novamente.",
   "command.placeholder": "Digite um comando ou pesquise...",
   "routine.searchPlaceholder": "Pesquise o nome da rotina, gatilho ou ação",
   "routine.unavailable": "Rotina indisponível",

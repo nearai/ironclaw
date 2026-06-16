@@ -937,6 +937,8 @@ registerPack("ar", {
   "common.gatewaySession": "جلسة البوابة",
   "common.pinned": "مثبت",
   "common.deleteChat": "حذف الدردشة",
+  "chat.deleteFailed": "تعذّر حذف هذه المحادثة.",
+  "chat.deleteBusy": "لا يمكن حذف محادثة أثناء تشغيلها. أوقفها أولاً ثم حاول مرة أخرى.",
   "command.placeholder": "اكتب أمرًا أو بحث...",
   "routine.searchPlaceholder": "اسم روتين البحث أو المشغل أو الإجراء",
   "routine.unavailable": "الروتين غير متاح",

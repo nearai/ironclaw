@@ -937,6 +937,8 @@ registerPack("ja", {
   "common.gatewaySession": "ゲートウェイセッション",
   "common.pinned": "固定",
   "common.deleteChat": "チャットを削除",
+  "chat.deleteFailed": "この会話を削除できませんでした。",
+  "chat.deleteBusy": "実行中の会話は削除できません。先に停止してから、もう一度お試しください。",
   "command.placeholder": "コマンドを入力するか検索...",
   "routine.searchPlaceholder": "ルーチン名、トリガー、またはアクションを検索",
   "routine.unavailable": "ルーチンは使用できません",

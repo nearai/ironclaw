@@ -937,6 +937,8 @@ registerPack("zh-CN", {
   "common.gatewaySession": "网关会话",
   "common.pinned": "已置顶",
   "common.deleteChat": "删除对话",
+  "chat.deleteFailed": "无法删除此对话。",
+  "chat.deleteBusy": "对话正在运行时无法删除。请先停止它，然后重试。",
   "command.placeholder": "在此输入指令或进行查找...",
   "routine.searchPlaceholder": "搜寻常驻例程的名称、触发条件、或者任务行为",
   "routine.unavailable": "暂不支持例程操作",

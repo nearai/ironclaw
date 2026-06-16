@@ -937,6 +937,8 @@ registerPack("ko", {
   "common.gatewaySession": "게이트웨이 세션",
   "common.pinned": "고정됨",
   "common.deleteChat": "채팅 삭제",
+  "chat.deleteFailed": "이 대화를 삭제하지 못했습니다.",
+  "chat.deleteBusy": "실행 중인 대화는 삭제할 수 없습니다. 먼저 중지한 후 다시 시도하세요.",
   "command.placeholder": "명령 입력 또는 검색...",
   "routine.searchPlaceholder": "루틴 이름, 트리거 또는 작업 검색",
   "routine.unavailable": "루틴 사용 불가",

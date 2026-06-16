@@ -990,6 +990,8 @@ registerPack("en", {
   "common.gatewaySession": "Gateway session",
   "common.pinned": "Pinned",
   "common.deleteChat": "Delete chat",
+  "chat.deleteFailed": "Couldn't delete this conversation.",
+  "chat.deleteBusy": "Can't delete a conversation while it's still running. Stop it first, then try again.",
   "command.placeholder": "Type a command or search...",
   "routine.searchPlaceholder": "Search routine name, trigger, or action",
   "routine.unavailable": "Routine unavailable",

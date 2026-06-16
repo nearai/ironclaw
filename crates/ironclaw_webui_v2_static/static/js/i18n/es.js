@@ -938,6 +938,8 @@ registerPack("es", {
   "common.gatewaySession": "Sesión de puerta de enlace",
   "common.pinned": "Fijado",
   "common.deleteChat": "Eliminar chat",
+  "chat.deleteFailed": "No se pudo eliminar esta conversación.",
+  "chat.deleteBusy": "No se puede eliminar una conversación mientras se está ejecutando. Detenla primero y vuelve a intentarlo.",
   "command.placeholder": "Escriba un comando o busque...",
   "routine.searchPlaceholder": "Buscar nombre de rutina, activador o acción",
   "routine.unavailable": "Rutina no disponible",
