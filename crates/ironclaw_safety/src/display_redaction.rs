@@ -71,13 +71,24 @@ pub fn sanitize_display_text(text: &str) -> String {
             };
             continue;
         }
+        if matches!(credential_value_state, CredentialValueState::AfterKey)
+            && let Some(separator) = credential_separator_with_value(trimmed)
+        {
+            out.push(separator);
+            out.push_str("[redacted]");
+            push_safe_text(&mut out, suffix);
+            credential_value_state = CredentialValueState::None;
+            continue;
+        }
         let redacts_credential_value =
             matches!(credential_value_state, CredentialValueState::AfterSeparator);
-        if is_url_like(trimmed) {
+        if let Some((leading, url, trailing)) = wrapped_url_parts(trimmed) {
             if redacts_credential_value {
                 out.push_str("[redacted]");
             } else {
-                out.push_str(&sanitize_url_for_display(trimmed));
+                push_safe_text(&mut out, leading);
+                out.push_str(&sanitize_url_for_display(url));
+                push_safe_text(&mut out, trailing);
             }
             push_safe_text(&mut out, suffix);
             credential_value_state = CredentialValueState::None;
@@ -124,11 +135,59 @@ fn is_url_like(token: &str) -> bool {
         })
 }
 
+fn wrapped_url_parts(token: &str) -> Option<(&str, &str, &str)> {
+    if is_url_like(token) {
+        return Some(("", token, ""));
+    }
+
+    let start = token
+        .char_indices()
+        .find(|(_, character)| !url_leading_wrapper_punctuation(*character))
+        .map(|(index, _)| index)?;
+    if start == 0 {
+        return None;
+    }
+
+    let mut end = token.len();
+    while end > start {
+        let Some(character) = token[..end].chars().next_back() else {
+            break;
+        };
+        if !url_trailing_wrapper_punctuation(character) {
+            break;
+        }
+        end -= character.len_utf8();
+    }
+    if end <= start {
+        return None;
+    }
+
+    let candidate = &token[start..end];
+    is_url_like(candidate).then_some((&token[..start], candidate, &token[end..]))
+}
+
+fn url_leading_wrapper_punctuation(character: char) -> bool {
+    matches!(
+        character,
+        '"' | '\'' | '`' | '(' | '[' | '{' | '<' | ',' | ';'
+    )
+}
+
+fn url_trailing_wrapper_punctuation(character: char) -> bool {
+    matches!(
+        character,
+        '"' | '\'' | '`' | ')' | ']' | '}' | '>' | ',' | ';'
+    )
+}
+
 pub fn sanitize_url_for_display(url: &str) -> String {
     let Some(scheme_end) = url.find("://") else {
         return sanitize_display_text(url);
     };
     let (scheme, rest) = url.split_at(scheme_end + 3);
+    if scheme[..scheme.len() - 3].eq_ignore_ascii_case("file") {
+        return "[redacted]".to_string();
+    }
     let (rest, suffix) = match rest.find(['?', '#']) {
         Some(index) => {
             let marker = &rest[index..=index];
@@ -340,6 +399,16 @@ fn credential_key_may_have_spaced_value(token: &str) -> bool {
 fn is_credential_separator(token: &str) -> bool {
     let trimmed = token.trim_matches(non_credential_boundary_punctuation);
     matches!(trimmed, ":" | "=")
+}
+
+fn credential_separator_with_value(token: &str) -> Option<char> {
+    let trimmed = token.trim_matches(non_credential_boundary_punctuation);
+    let mut characters = trimmed.chars();
+    let separator = characters.next()?;
+    if !matches!(separator, ':' | '=') || characters.as_str().trim().is_empty() {
+        return None;
+    }
+    Some(separator)
 }
 
 fn non_credential_boundary_punctuation(character: char) -> bool {
@@ -640,5 +709,35 @@ mod tests {
         assert!(!display.text.contains("opaque-value"));
         assert!(!display.text.contains("other-value"));
         assert!(!display.text.contains("third-value"));
+    }
+
+    #[test]
+    fn sanitize_display_text_redacts_half_spaced_credential_key_values() {
+        let sanitized = sanitize_display_text("token =opaque-token password :opaque-password");
+
+        assert!(sanitized.contains("token =[redacted]"));
+        assert!(sanitized.contains("password :[redacted]"));
+        assert!(!sanitized.contains("opaque-token"));
+        assert!(!sanitized.contains("opaque-password"));
+    }
+
+    #[test]
+    fn sanitize_display_text_redacts_wrapped_secret_url_paths() {
+        let sanitized = sanitize_display_text(
+            "see (https://example.test/reset/sk-secret) and <https://example.test/reset/token/opaque-value>",
+        );
+
+        assert!(sanitized.contains("(https://example.test/reset/[redacted])"));
+        assert!(sanitized.contains("<https://example.test/reset/[redacted]/[redacted]>"));
+        assert!(!sanitized.contains("sk-secret"));
+        assert!(!sanitized.contains("opaque-value"));
+    }
+
+    #[test]
+    fn sanitize_url_for_display_redacts_file_urls() {
+        let sanitized = super::sanitize_url_for_display("file:///Users/alice/.ssh/id_rsa");
+
+        assert_eq!(sanitized, "[redacted]");
+        assert!(!sanitized.contains("/Users/alice"));
     }
 }

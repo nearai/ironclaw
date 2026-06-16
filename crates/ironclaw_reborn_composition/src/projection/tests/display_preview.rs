@@ -341,6 +341,25 @@ async fn capability_display_preview_store_summarizes_http_inputs_safely() {
 }
 
 #[tokio::test]
+async fn capability_display_preview_store_redacts_file_url_inputs() {
+    let preview = completed_preview_for_input(
+        "builtin.http.save",
+        "builtin.http.save",
+        serde_json::json!({
+            "method": "get",
+            "url": "file:///Users/alice/.ssh/id_rsa",
+            "timeout_ms": 5000
+        }),
+    )
+    .await;
+
+    let input_summary = preview.input_summary.as_deref().unwrap();
+    assert!(input_summary.contains("url: [redacted]"));
+    assert!(!input_summary.contains("file:///Users/alice"));
+    assert!(!input_summary.contains("id_rsa"));
+}
+
+#[tokio::test]
 async fn capability_display_preview_store_summarizes_file_inputs_without_contents() {
     let write_preview = completed_preview_for_input(
         "builtin.write_file",
@@ -564,7 +583,7 @@ async fn capability_display_preview_store_redacts_common_secret_text_shapes() {
         capability_id: &capability,
         result_ref: "result:common-secret-text",
         output: &serde_json::Value::String(
-            "password: secret123 file:///etc/passwd ghp_abcdefghijklmnopqrstuvwxyz xoxb-1234567890 AKIAIOSFODNN7EXAMPLE eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature"
+            "password: secret123 file:///etc/passwd ghp_abcdefghijklmnopqrstuvwxyz xoxb-1234567890 AKIAIOSFODNN7EXAMPLE eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature (https://example.test/reset/sk-secret) <https://example.test/reset/token/opaque-value> token =opaque-token password :opaque-password"
                 .to_string(),
         ),
         output_bytes: 256,
@@ -596,6 +615,10 @@ async fn capability_display_preview_store_redacts_common_secret_text_shapes() {
     assert!(!rendered.contains("xoxb-1234567890"));
     assert!(!rendered.contains("AKIAIOSFODNN7EXAMPLE"));
     assert!(!rendered.contains("eyJhbGciOiJIUzI1NiJ9"));
+    assert!(!rendered.contains("sk-secret"));
+    assert!(!rendered.contains("opaque-value"));
+    assert!(!rendered.contains("opaque-token"));
+    assert!(!rendered.contains("opaque-password"));
     assert!(rendered.contains("[redacted]"));
 }
 
