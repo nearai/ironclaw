@@ -3,7 +3,6 @@
 //! The v1 `Tool`/`JobContext`/local-filesystem boundary is replaced here with
 //! `CodingCapabilityRequest`, scoped mounts, and `RootFilesystem`.
 
-use ironclaw_common::{AttachmentKind, ExtractorId};
 use ironclaw_filesystem::{FileType, FilesystemOperation};
 use ironclaw_host_api::RuntimeDispatchErrorKind;
 use serde_json::{Value, json};
@@ -67,13 +66,13 @@ pub(super) async fn read_file(
             filesystem_error_with_summary("read_file", resolved.scoped_path.as_str(), error)
         })?;
 
-    let content = match extract_document_text_for_read_file(&bytes, resolved.scoped_path.as_str())?
-    {
-        Some(content) => content,
-        None => {
-            reject_binary_probe(&bytes)?;
-            let (content, _encoding, _line_ending) = decode_text(&bytes)?;
-            content
+    let content = match decode_read_file_text(&bytes) {
+        Ok(content) => content,
+        Err(text_error) => {
+            match extract_document_text_for_read_file(&bytes, resolved.scoped_path.as_str())? {
+                Some(content) => content,
+                None => return Err(text_error),
+            }
         }
     };
 
@@ -84,6 +83,12 @@ pub(super) async fn read_file(
         limit,
         has_explicit_range,
     ))
+}
+
+fn decode_read_file_text(bytes: &[u8]) -> Result<String, CodingCapabilityError> {
+    reject_binary_probe(bytes)?;
+    let (content, _encoding, _line_ending) = decode_text(bytes)?;
+    Ok(content)
 }
 
 fn read_file_text_output(
@@ -122,40 +127,27 @@ fn extract_document_text_for_read_file(
     bytes: &[u8],
     scoped_path: &str,
 ) -> Result<Option<String>, CodingCapabilityError> {
-    let Some(mime) = document_extraction_mime_for_path(scoped_path) else {
+    let Some(text) =
+        ironclaw_extractors::extract_document_text_by_filename(bytes, Some(scoped_path)).map_err(
+            |error| {
+                operation_error_with_summary(format!(
+                    "read_file failed for {}: document text extraction failed: {error}",
+                    safe_summary_path(scoped_path)
+                ))
+            },
+        )?
+    else {
         return Ok(None);
     };
-    let text =
-        ironclaw_extractors::extract_text(bytes, mime, Some(scoped_path)).map_err(|error| {
-            operation_error_with_summary(format!(
-                "read_file failed for {}: document text extraction failed: {error}",
-                safe_summary_path(scoped_path)
-            ))
-        })?;
-    if text.trim().is_empty() {
+
+    let text = text.trim();
+    if text.is_empty() {
         return Err(operation_error_with_summary(format!(
             "read_file failed for {}: document text extraction yielded no text",
             safe_summary_path(scoped_path)
         )));
     }
-    Ok(Some(text))
-}
-
-fn document_extraction_mime_for_path(scoped_path: &str) -> Option<&'static str> {
-    let extension = scoped_path
-        .rsplit_once('.')
-        .map(|(_, extension)| extension.to_ascii_lowercase())?;
-    ironclaw_common::all_formats()
-        .iter()
-        .find(|format| {
-            format.kind == AttachmentKind::Document
-                && format.extractor != ExtractorId::None
-                && format.extractor != ExtractorId::Utf8Text
-                && format.extractor != ExtractorId::AudioTranscription
-                && (format.canonical_ext == extension
-                    || format.ext_aliases.contains(&extension.as_str()))
-        })
-        .map(|format| format.mime)
+    Ok(Some(text.to_string()))
 }
 
 pub(super) async fn write_file(
