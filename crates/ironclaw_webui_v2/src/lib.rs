@@ -61,9 +61,10 @@ pub use descriptors::{
     WEBUI_V2_ROUTE_ACTIVATE_EXTENSION, WEBUI_V2_ROUTE_CANCEL_RUN,
     WEBUI_V2_ROUTE_COMPLETE_NEARAI_WALLET_LOGIN, WEBUI_V2_ROUTE_CREATE_THREAD,
     WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER, WEBUI_V2_ROUTE_DELETE_THREAD,
-    WEBUI_V2_ROUTE_GET_EXTENSION_SETUP, WEBUI_V2_ROUTE_GET_LLM_CONFIG,
-    WEBUI_V2_ROUTE_GET_OUTBOUND_PREFERENCES, WEBUI_V2_ROUTE_GET_SESSION, WEBUI_V2_ROUTE_GET_SKILL,
-    WEBUI_V2_ROUTE_GET_TIMELINE, WEBUI_V2_ROUTE_INSTALL_EXTENSION, WEBUI_V2_ROUTE_INSTALL_SKILL,
+    WEBUI_V2_ROUTE_GET_ATTACHMENT, WEBUI_V2_ROUTE_GET_EXTENSION_SETUP,
+    WEBUI_V2_ROUTE_GET_LLM_CONFIG, WEBUI_V2_ROUTE_GET_OUTBOUND_PREFERENCES,
+    WEBUI_V2_ROUTE_GET_SESSION, WEBUI_V2_ROUTE_GET_SKILL, WEBUI_V2_ROUTE_GET_TIMELINE,
+    WEBUI_V2_ROUTE_INSTALL_EXTENSION, WEBUI_V2_ROUTE_INSTALL_SKILL,
     WEBUI_V2_ROUTE_LIST_AUTOMATIONS, WEBUI_V2_ROUTE_LIST_CONNECTABLE_CHANNELS,
     WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY, WEBUI_V2_ROUTE_LIST_EXTENSIONS,
     WEBUI_V2_ROUTE_LIST_LLM_MODELS, WEBUI_V2_ROUTE_LIST_OUTBOUND_DELIVERY_TARGETS,
@@ -89,7 +90,7 @@ pub use error::{WebUiV2HttpError, WebUiV2HttpErrorBody};
 #[cfg(feature = "webui-v2-beta")]
 pub use handlers::{
     activate_extension, cancel_run, complete_nearai_wallet_login, create_thread,
-    delete_llm_provider, delete_thread, get_extension_setup, get_llm_config,
+    delete_llm_provider, delete_thread, get_attachment, get_extension_setup, get_llm_config,
     get_operator_config_key, get_operator_diagnostics, get_operator_setup, get_operator_status,
     get_outbound_preferences, get_session, get_skill_content, get_timeline, install_extension,
     install_skill, list_automations, list_connectable_channels, list_extension_registry,

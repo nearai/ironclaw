@@ -218,6 +218,8 @@ fn render_index_with_nonce() -> Response {
          style-src-elem 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; \
          font-src 'self' https://fonts.gstatic.com data:; \
          img-src 'self' data:; \
+         media-src 'self' data:; \
+         frame-src 'self' blob:; \
          connect-src 'self'; \
          object-src 'none'; \
          frame-ancestors 'none'; \
@@ -402,6 +404,32 @@ mod tests {
         assert!(
             csp.contains("object-src 'none'"),
             "document CSP must keep `object-src 'none'`; got `{csp}`",
+        );
+        // Attachment preview needs inline audio (`media-src data:`) and inline
+        // PDF via blob iframes (`frame-src blob:`). Assert the EXACT source
+        // list per directive (not a substring) so a regression that widens them
+        // — e.g. `media-src 'self' data: https://evil` — fails here.
+        let directives: std::collections::HashMap<_, _> = csp
+            .split(';')
+            .map(str::trim)
+            .filter(|directive| !directive.is_empty())
+            .filter_map(|directive| directive.split_once(' '))
+            .map(|(name, sources)| (name, sources.trim()))
+            .collect();
+        assert_eq!(
+            directives.get("media-src").copied(),
+            Some("'self' data:"),
+            "document CSP must keep the exact media-src allowlist; got `{csp}`",
+        );
+        assert_eq!(
+            directives.get("frame-src").copied(),
+            Some("'self' blob:"),
+            "document CSP must keep the exact frame-src allowlist; got `{csp}`",
+        );
+        assert_eq!(
+            directives.get("img-src").copied(),
+            Some("'self' data:"),
+            "document CSP must keep the exact img-src allowlist; got `{csp}`",
         );
         // Scripts must NOT be executable via eval or arbitrary inline —
         // the document relies on the nonce, not `'unsafe-inline'`.

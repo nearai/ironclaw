@@ -32,11 +32,13 @@ pub const TRIGGER_CREATE_CAPABILITY_ID: &str = "builtin.trigger_create";
 pub const TRIGGER_LIST_CAPABILITY_ID: &str = "builtin.trigger_list";
 pub const TRIGGER_REMOVE_CAPABILITY_ID: &str = "builtin.trigger_remove";
 
+const TRIGGER_CREATE_DESCRIPTION: &str = "Create a caller-scoped scheduled trigger. If the user asks for routine or trigger results to be sent through an outbound product or channel, use the visible outbound delivery target capabilities to select that delivery target before creating the trigger; delivery routing is not encoded in this input.";
+
 pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
         first_party_capability_manifest(
             TRIGGER_CREATE_CAPABILITY_ID,
-            "Create a caller-scoped scheduled trigger",
+            TRIGGER_CREATE_DESCRIPTION,
             vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
             PermissionMode::Ask,
             resource_profile(),

@@ -18,25 +18,26 @@ use std::time::Duration;
 use axum::Json;
 use axum::body::Body;
 use axum::extract::{Extension, Path, Query, State};
-use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::Response;
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
 use futures::SinkExt;
 use futures::stream::Stream;
 use ironclaw_product_workflow::{
     CodexLoginStart, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult,
     LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
     NearAiWalletLoginRequest, NearAiWalletLoginResult, ProductWorkflowError, ProjectionCursor,
-    RebornCancelRunResponse, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornOperatorCommandPlaneResponse, RebornOperatorConfigGetResponse,
-    RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
-    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
-    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
-    RebornOperatorSetupResponse, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundPreferencesResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
-    RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
+    RebornAttachmentRequest, RebornCancelRunResponse, RebornConnectableChannelListResponse,
+    RebornCreateThreadResponse, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
+    RebornListAutomationsResponse, RebornListThreadsResponse, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
+    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
+    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornOperatorSetupResponse,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
+    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
+    RebornProjectFsStatRequest, RebornProjectFsStatResponse,
     RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
     RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
     RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
@@ -265,6 +266,49 @@ fn sanitized_download_filename(filename: Option<&str>) -> String {
     } else {
         trimmed
     }
+}
+
+/// `GET /api/webchat/v2/threads/{thread_id}/messages/{message_id}/attachments/{attachment_id}`
+///
+/// Serves one landed attachment's raw bytes so the browser can render an image
+/// thumbnail (or download a file) for a persisted message. The `(thread_id,
+/// message_id, attachment_id)` triple addresses the attachment; the caller's
+/// authority comes from the authenticated session, and the facade derives the
+/// scope and resolves the storage path server-side. The response sets the
+/// authoritative `Content-Type` from the stored ref plus `nosniff` and a short
+/// private cache so the browser can reuse the bytes without re-fetching.
+pub async fn get_attachment(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path((thread_id, message_id, attachment_id)): Path<(String, String, String)>,
+) -> Result<Response, WebUiV2HttpError> {
+    let attachment = state
+        .services()
+        .read_attachment(
+            caller,
+            RebornAttachmentRequest {
+                thread_id,
+                message_id,
+                attachment_id,
+            },
+        )
+        .await?;
+
+    let mut headers = HeaderMap::new();
+    // The mime came from the stored ref; fall back to octet-stream if it is not
+    // a valid header value rather than failing the read.
+    let content_type = HeaderValue::from_str(&attachment.mime_type)
+        .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
+    headers.insert(header::CONTENT_TYPE, content_type);
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=300"),
+    );
+    Ok((StatusCode::OK, headers, attachment.bytes).into_response())
 }
 
 /// SSE polling cadence for `stream_events`. The facade only exposes a

@@ -259,6 +259,7 @@ impl ProductLiveAgentLoopHarness {
             Arc::new(ProductLiveCapabilityIo::default());
         let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
         let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
+            attachment_read_port: None,
             turn_state: turn_state_for_runtime,
             thread_service: Arc::new(thread_service.clone()),
             thread_scope: thread_scope.clone(),

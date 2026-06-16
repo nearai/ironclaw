@@ -96,7 +96,7 @@ export function useHistory(threadId, options = {}) {
         if (authScope() !== issuingScope) return;
 
         const pendingMessages = cursor ? [] : getPendingMessages?.() || [];
-        const renderable = messagesFromTimeline(data.messages || [], pendingMessages);
+        const renderable = messagesFromTimeline(data.messages || [], pendingMessages, threadId);
         const nextCursor = data.next_cursor || null;
 
         // RebornTimelineResponse.next_cursor === null means we reached

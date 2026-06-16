@@ -278,6 +278,27 @@ pub struct RebornTimelineResponse {
     pub next_cursor: Option<String>,
 }
 
+/// Request the raw bytes of one landed attachment, addressed by the thread and
+/// message that carry it plus the attachment's per-message id. The triple is
+/// required because an attachment id is only unique within its message, not
+/// across a thread. The caller's authority comes from the authenticated session
+/// (the scope is derived server-side), never from these path values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAttachmentRequest {
+    pub thread_id: String,
+    pub message_id: String,
+    pub attachment_id: String,
+}
+
+/// Raw bytes of one landed attachment plus the metadata a browser needs to
+/// render or download it. Returned by [`super::RebornServicesApi::read_attachment`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebornAttachmentBytes {
+    pub mime_type: String,
+    pub filename: Option<String>,
+    pub bytes: Vec<u8>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornStreamEventsRequest {
     pub thread_id: String,

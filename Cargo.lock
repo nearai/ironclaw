@@ -4920,6 +4920,7 @@ name = "ironclaw_reborn"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "futures-util",
  "ironclaw_agent_loop",
