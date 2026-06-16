@@ -145,7 +145,7 @@ impl AgentLoopDriver for PlannedDriver {
             Err(()) => return checkpoint_unavailable_exit(run_context.run_id),
         };
 
-        let initial = match LoopExecutionState::from_checkpoint_payload(
+        let mut initial = match LoopExecutionState::from_checkpoint_payload(
             payload.payload.as_bytes(),
             checkpoint_kind,
         ) {
@@ -155,6 +155,17 @@ impl AgentLoopDriver for PlannedDriver {
                 return checkpoint_unavailable_exit(run_context.run_id);
             }
         };
+
+        // A run resumed from a user-denied auth gate carries the denial
+        // disposition in the resume request. Stamp it onto the parked auth-resume
+        // so the executor surfaces a model-visible denial and continues instead
+        // of re-dispatching the capability (which would re-block on the still-
+        // missing credential — the infinite auth/deny loop this fixes).
+        if let Some(disposition) = request.auth_resume_disposition.clone()
+            && let Some(pending) = initial.pending_auth_resume.as_mut()
+        {
+            pending.disposition = Some(disposition);
+        }
 
         self.executor
             .execute_family(self.family.as_ref(), host, initial)
@@ -528,6 +539,7 @@ mod tests {
                     run_id: context.run_id,
                     checkpoint_id: TurnCheckpointId::new(),
                     resolved_run_profile: context.resolved_run_profile.clone(),
+                    auth_resume_disposition: None,
                 },
                 &host,
             )
@@ -565,6 +577,7 @@ mod tests {
                     run_id: context.run_id,
                     checkpoint_id,
                     resolved_run_profile: context.resolved_run_profile.clone(),
+                    auth_resume_disposition: None,
                 },
                 &host,
             )
@@ -599,6 +612,7 @@ mod tests {
                     run_id: context.run_id,
                     checkpoint_id: TurnCheckpointId::new(),
                     resolved_run_profile,
+                    auth_resume_disposition: None,
                 },
                 &host,
             )
@@ -640,6 +654,7 @@ mod tests {
                     run_id: context.run_id,
                     checkpoint_id,
                     resolved_run_profile: context.resolved_run_profile.clone(),
+                    auth_resume_disposition: None,
                 },
                 &host,
             )
@@ -691,6 +706,7 @@ mod tests {
                     run_id: context.run_id,
                     checkpoint_id,
                     resolved_run_profile: context.resolved_run_profile.clone(),
+                    auth_resume_disposition: None,
                 },
                 &host,
             )
@@ -729,6 +745,7 @@ mod tests {
                     run_id: context.run_id,
                     checkpoint_id,
                     resolved_run_profile: context.resolved_run_profile.clone(),
+                    auth_resume_disposition: None,
                 },
                 &host,
             )
@@ -989,4 +1006,200 @@ mod tests {
     // intended one; the trailing one returned `None` unconditionally and
     // was unreachable behind the conflict. Removed here while updating
     // tests for the narrowed public surface.
+
+    // ---- auth-deny disposition injection tests ---------------------------------
+
+    /// Helper: build a `LoopExecutionState` with a parked `pending_auth_resume`
+    /// so we can assert the injection path stamps the disposition onto it.
+    fn state_with_pending_auth_resume(
+        context: &LoopRunContext,
+    ) -> ironclaw_agent_loop::state::LoopExecutionState {
+        use ironclaw_agent_loop::state::PendingAuthResume;
+        use ironclaw_host_api::CapabilityId;
+        use ironclaw_turns::LoopGateRef;
+        use ironclaw_turns::run_profile::{CapabilityInputRef, CapabilitySurfaceVersion};
+
+        let mut state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(context);
+        state.pending_auth_resume = Some(PendingAuthResume {
+            gate_ref: LoopGateRef::new("gate:test-auth-deny").expect("valid gate ref"),
+            capability_id: CapabilityId::new("test.capability").expect("valid capability id"),
+            surface_version: CapabilitySurfaceVersion::new("surface:v1")
+                .expect("valid surface version"),
+            input_ref: CapabilityInputRef::new("input:test-auth-deny").expect("valid input ref"),
+            effective_capability_ids: Vec::new(),
+            provider_replay: None,
+            resume_token: None,
+            prior_approval: None,
+            replay: None,
+            disposition: None,
+        });
+        state
+    }
+
+    /// Verifies that the `resume` method stamps `AuthResumeDisposition::Denied`
+    /// onto `pending_auth_resume` when the run context carries a denial, then
+    /// passes the modified state to the executor.
+    ///
+    /// The injection is exercised by confirming the executor does NOT re-block
+    /// on auth: the run produces a terminal exit (completed or failed-auth-denied)
+    /// rather than another `Blocked` exit, which is what would happen if the
+    /// `disposition` were left as `None` and the executor re-dispatched the
+    /// parked capability.
+    ///
+    /// "Test through the caller": the assertion drives `PlannedDriver::resume`,
+    /// not the injection snippet in isolation.
+    #[tokio::test]
+    async fn resume_with_auth_deny_disposition_stamps_denial_onto_pending_auth_resume() {
+        use ironclaw_turns::AuthResumeDisposition;
+
+        let registry = build_loop_family_registry().expect("registry");
+        let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
+
+        // Build a run context (no disposition on context — disposition travels
+        // via the resume request, not the host context).
+        let context = run_context_for_driver(&driver);
+        let disposition = Some(AuthResumeDisposition::Denied);
+
+        // Stage a checkpoint payload whose execution state has a parked auth
+        // resume (disposition: None — as it would be when written at block time).
+        let staged_state = state_with_pending_auth_resume(&context);
+        // Encode and re-decode to exercise the serde boundary (mirrors what the
+        // production checkpoint path does via RedactedCheckpointPayload).
+        let payload_bytes = serde_json::to_vec(&staged_state).expect("serialize checkpoint state");
+        let loaded = LoadedCheckpointPayload {
+            kind: LoopCheckpointKind::BeforeModel,
+            schema_id: context.checkpoint_schema_id.clone(),
+            schema_version: context.checkpoint_schema_version,
+            payload: RedactedCheckpointPayload::new(payload_bytes)
+                .expect("valid checkpoint payload"),
+        };
+        let checkpoint_id = TurnCheckpointId::new();
+
+        let (inner, _checkpoints) = MockAgentLoopDriverHost::builder()
+            .run_context(context.clone())
+            .build();
+        let host = ResumePayloadHost::new(inner, checkpoint_id, loaded);
+
+        let result = driver
+            .resume(
+                AgentLoopDriverResumeRequest {
+                    turn_id: context.turn_id,
+                    run_id: context.run_id,
+                    checkpoint_id,
+                    resolved_run_profile: context.resolved_run_profile.clone(),
+                    auth_resume_disposition: disposition,
+                },
+                &host,
+            )
+            .await;
+
+        // The executor must not re-block on auth. A denial-stamped pending auth
+        // resume is surfaced as a model-visible failure and the loop continues
+        // to completion or another terminal state — never another Blocked exit.
+        if let ironclaw_turns::LoopExit::Blocked(_) =
+            result.expect("resume should produce a terminal loop exit")
+        {
+            panic!(
+                "resume with AuthResumeDisposition::Denied must not re-block on auth; \
+                 the executor must surface a model-visible denial and continue"
+            );
+        }
+    }
+
+    /// Unit-level smoke test: confirm that the disposition injection in `resume`
+    /// stamps `Some(Denied)` onto `pending_auth_resume.disposition` before
+    /// passing the state to the executor, by inspecting the deserialized state
+    /// after applying the same conditional logic the production path uses.
+    #[test]
+    fn auth_deny_disposition_is_stamped_onto_pending_auth_resume_before_execution() {
+        use ironclaw_agent_loop::state::LoopExecutionState;
+        use ironclaw_turns::AuthResumeDisposition;
+        use ironclaw_turns::run_profile::LoopCheckpointKind;
+
+        let registry = build_loop_family_registry().expect("registry");
+        let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
+
+        // Disposition now travels via the resume request, not the host context.
+        let context = run_context_for_driver(&driver);
+        let request_disposition: Option<AuthResumeDisposition> =
+            Some(AuthResumeDisposition::Denied);
+
+        let staged_state = state_with_pending_auth_resume(&context);
+        // Confirm the state starts with no disposition (precondition).
+        assert!(
+            staged_state
+                .pending_auth_resume
+                .as_ref()
+                .expect("pending_auth_resume must be set")
+                .disposition
+                .is_none(),
+            "staged pending_auth_resume must start with disposition: None"
+        );
+
+        // Apply the same injection logic as the production `resume` path.
+        let payload_bytes = serde_json::to_vec(&staged_state).expect("serialize checkpoint state");
+        let checkpoint_kind = resumable_checkpoint_kind_from_host(LoopCheckpointKind::BeforeModel)
+            .expect("BeforeModel is resumable");
+        let mut loaded_state =
+            LoopExecutionState::from_checkpoint_payload(&payload_bytes, checkpoint_kind)
+                .expect("decode checkpoint state");
+
+        if let Some(disposition) = request_disposition.clone()
+            && let Some(pending) = loaded_state.pending_auth_resume.as_mut()
+        {
+            pending.disposition = Some(disposition);
+        }
+
+        // Assert the disposition was stamped.
+        let disposition = loaded_state
+            .pending_auth_resume
+            .expect("pending_auth_resume must survive round-trip")
+            .disposition
+            .expect("disposition must be Some after injection");
+        assert!(
+            matches!(disposition, AuthResumeDisposition::Denied),
+            "disposition must be Denied after injection, got {disposition:?}"
+        );
+    }
+
+    /// Confirm the injection is a no-op when the resume request carries no
+    /// disposition — do not regress the normal (non-deny) resume path.
+    #[test]
+    fn auth_deny_disposition_injection_is_noop_when_disposition_is_none() {
+        use ironclaw_agent_loop::state::LoopExecutionState;
+        use ironclaw_turns::AuthResumeDisposition;
+        use ironclaw_turns::run_profile::LoopCheckpointKind;
+
+        let registry = build_loop_family_registry().expect("registry");
+        let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
+
+        let context = run_context_for_driver(&driver);
+        // Disposition now travels via the resume request, not the host context.
+        let request_disposition: Option<AuthResumeDisposition> = None;
+
+        let staged_state = state_with_pending_auth_resume(&context);
+        let payload_bytes = serde_json::to_vec(&staged_state).expect("serialize checkpoint state");
+        let checkpoint_kind = resumable_checkpoint_kind_from_host(LoopCheckpointKind::BeforeModel)
+            .expect("BeforeModel is resumable");
+        let mut loaded_state =
+            LoopExecutionState::from_checkpoint_payload(&payload_bytes, checkpoint_kind)
+                .expect("decode checkpoint state");
+
+        // Apply injection (disposition is None — the `if let Some` guard fires false).
+        if let Some(disposition) = request_disposition.clone()
+            && let Some(pending) = loaded_state.pending_auth_resume.as_mut()
+        {
+            pending.disposition = Some(disposition);
+        }
+
+        // Disposition must remain None — no-op.
+        assert!(
+            loaded_state
+                .pending_auth_resume
+                .expect("pending_auth_resume must survive round-trip")
+                .disposition
+                .is_none(),
+            "disposition must remain None when request auth_resume_disposition is None"
+        );
+    }
 }

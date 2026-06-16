@@ -78,6 +78,7 @@ pub(super) struct MockHost {
     fail_visible_capabilities: bool,
     fail_prompt_bundle: bool,
     fail_batch_with: Arc<Mutex<Option<AgentLoopHostErrorKind>>>,
+    extra_capability_descriptors: Vec<CapabilityDescriptorView>,
 }
 
 impl MockHost {
@@ -117,6 +118,7 @@ impl MockHost {
             fail_visible_capabilities: false,
             fail_prompt_bundle: false,
             fail_batch_with: Arc::new(Mutex::new(None)),
+            extra_capability_descriptors: Vec::new(),
         }
     }
 
@@ -170,6 +172,17 @@ impl MockHost {
 
     pub(super) fn with_failing_visible_capabilities(mut self) -> Self {
         self.fail_visible_capabilities = true;
+        self
+    }
+
+    /// Append additional capability descriptors to the surface returned by
+    /// `visible_capabilities`. Use in tests that exercise parallel batches
+    /// containing multiple distinct capability IDs.
+    pub(super) fn with_extra_capability_descriptors(
+        mut self,
+        descriptors: Vec<CapabilityDescriptorView>,
+    ) -> Self {
+        self.extra_capability_descriptors = descriptors;
         self
     }
 
@@ -656,17 +669,19 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
                 "visible capabilities unavailable",
             ));
         }
+        let mut descriptors = vec![CapabilityDescriptorView {
+            capability_id: capability_id(),
+            provider: None,
+            runtime: RuntimeKind::FirstParty,
+            safe_name: "demo".to_string(),
+            safe_description: "demo capability".to_string(),
+            concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::SafeForParallel,
+            parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
+        }];
+        descriptors.extend(self.extra_capability_descriptors.clone());
         Ok(VisibleCapabilitySurface {
             version: self.visible_surface_version.clone(),
-            descriptors: vec![CapabilityDescriptorView {
-                capability_id: capability_id(),
-                provider: None,
-                runtime: RuntimeKind::FirstParty,
-                safe_name: "demo".to_string(),
-                safe_description: "demo capability".to_string(),
-                concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::SafeForParallel,
-                parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
-            }],
+            descriptors,
         })
     }
 
@@ -996,6 +1011,11 @@ pub(super) fn mixed_surface_calls_response() -> LoopModelResponse {
 
 pub(super) fn capability_id() -> CapabilityId {
     CapabilityId::new("demo.echo").expect("valid")
+}
+
+/// A second, distinct capability ID used in multi-capability batch tests.
+pub(super) fn other_capability_id() -> CapabilityId {
+    CapabilityId::new("demo.list").expect("valid")
 }
 
 pub(super) fn surface_version() -> CapabilitySurfaceVersion {
