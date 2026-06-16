@@ -524,7 +524,7 @@ mod tests {
             panic!("expected thread live update");
         };
         let ProductProjectionItem::CapabilityActivity(activity) =
-            product_items_for_live_update(&update)
+            product_items_for_live_update(update)
                 .into_iter()
                 .next()
                 .expect("capability activity")
@@ -568,7 +568,7 @@ mod tests {
             panic!("expected thread live update");
         };
         let ProductProjectionItem::CapabilityActivity(activity) =
-            product_items_for_live_update(&update)
+            product_items_for_live_update(update)
                 .into_iter()
                 .next()
                 .expect("capability activity")
