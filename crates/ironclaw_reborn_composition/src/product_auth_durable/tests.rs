@@ -1326,6 +1326,101 @@ async fn filesystem_manual_token_rotation_removes_previous_secret() {
     );
 }
 
+#[tokio::test]
+async fn filesystem_manual_token_reconnect_updates_bound_account_across_a_different_thread() {
+    // Regression (#4935 defect A, manual-token durable path): a manual-token
+    // reconnect from a different thread/invocation than the account was created
+    // in must UPDATE the bound account at owner granularity. The apply step used
+    // `validate_account_update_target` (full `scope_matches`), so setup accepted
+    // the binding but submit rejected it with CrossScopeDenied and would re-fork.
+    use ironclaw_auth::{
+        CredentialAccountUpdateBinding, ManualTokenSetupRequest, SecretSubmitRequest,
+    };
+
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
+
+    // Account created in thread-a.
+    let mut create_scope = test_scope();
+    create_scope.resource.thread_id = Some(ThreadId::new("thread-a").unwrap());
+    let challenge1 = service
+        .request_secret_input(ManualTokenSetupRequest {
+            scope: create_scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+    let AuthChallenge::ManualTokenRequired {
+        interaction_id: iid1,
+        ..
+    } = challenge1
+    else {
+        panic!("expected ManualTokenRequired");
+    };
+    let account_id = service
+        .submit_manual_token(
+            &create_scope,
+            SecretSubmitRequest {
+                interaction_id: iid1,
+                secret: SecretString::from("token-v1"),
+            },
+        )
+        .await
+        .unwrap()
+        .account_id;
+
+    // Reconnect from thread-b (fresh invocation), binding to the same account.
+    let mut reauth_scope = test_scope();
+    reauth_scope.resource.thread_id = Some(ThreadId::new("thread-b").unwrap());
+    let challenge2 = service
+        .request_secret_input(ManualTokenSetupRequest {
+            scope: reauth_scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: Some(CredentialAccountUpdateBinding {
+                account_id,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: vec![],
+            }),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .expect("reconnect challenge across a different thread");
+    let AuthChallenge::ManualTokenRequired {
+        interaction_id: iid2,
+        ..
+    } = challenge2
+    else {
+        panic!("expected ManualTokenRequired for reconnect");
+    };
+    let result = service
+        .submit_manual_token(
+            &reauth_scope,
+            SecretSubmitRequest {
+                interaction_id: iid2,
+                secret: SecretString::from("token-v2"),
+            },
+        )
+        .await
+        .expect("cross-thread manual-token reconnect must update the bound account, not fork");
+    assert_eq!(result.account_id, account_id);
+
+    // No fork: still exactly one account for the owner.
+    let accounts = service
+        .accounts_for_owner(&create_scope.to_credential_owner())
+        .await
+        .unwrap();
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].id, account_id);
+}
+
 // ─── fix: durable SecretCleanupService purges secrets on Uninstall ───────────
 
 #[tokio::test]

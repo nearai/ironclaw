@@ -265,6 +265,118 @@ async fn binding_matches_account_within_same_session() {
 }
 
 #[tokio::test]
+async fn binding_does_not_cross_surface_boundary() {
+    // surface is path-segmenting for the bind/update WRITE path exactly like
+    // session: durable account records live under a per-surface path, and the
+    // callback updates the account at the flow scope's surface path.
+    // `accounts_for_owner` enumerates EVERY surface, so the bind selection must
+    // re-impose exact surface equality — otherwise it could select an account
+    // stored on another surface that the callback can never read (a spurious
+    // CredentialMissing that aborts the reconnect).
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let web_scope = AuthProductScope::new(
+        ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap(),
+        AuthSurface::Web,
+    );
+    ConfiguredAccount::new(web_scope, "google")
+        .create(&accounts)
+        .await;
+    let selector = selector_for(accounts);
+
+    // A reconnect on the `Api` surface must not bind the `Web`-surface account.
+    let api_scope = owner_auth_scope("alice");
+    let error = selector
+        .select_configured_account_for_binding(
+            CredentialAccountSelectionRequest::new(
+                api_scope.clone(),
+                AuthProviderId::new("google").unwrap(),
+            )
+            .for_extension(ExtensionId::new("google-calendar").unwrap()),
+            api_scope,
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error, AuthProductError::CredentialMissing);
+}
+
+#[tokio::test]
+async fn binding_denies_account_not_visible_to_third_party_requester() {
+    // The binding path skips the provider-scope gate but still relies on
+    // `finalize_selection` to enforce requester authorization: an
+    // extension-owned account must not be bound by an unrelated third-party
+    // requester. Lock that on `select_configured_account_for_binding` directly
+    // (existing third-party denial coverage exercises runtime selection).
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let auth_scope = owner_auth_scope("alice");
+    ConfiguredAccount::new(auth_scope.clone(), "google")
+        .ownership(CredentialOwnership::ExtensionOwned)
+        .owner_extension("google-drive")
+        .create(&accounts)
+        .await;
+    let selector = selector_for(accounts);
+
+    let error = selector
+        .select_configured_account_for_binding(
+            CredentialAccountSelectionRequest::new(
+                auth_scope.clone(),
+                AuthProviderId::new("google").unwrap(),
+            )
+            .for_extension(ExtensionId::new("github").unwrap()),
+            auth_scope,
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error, AuthProductError::CrossScopeDenied);
+}
+
+#[tokio::test]
+async fn runtime_resolution_finds_shared_admin_account_across_thread() {
+    // The cross-thread ownership guarantee is not limited to UserReusable and
+    // ExtensionOwned: a SharedAdminManaged account authorized in one thread must
+    // resolve for a granted requester from any other thread of the same owner.
+    // `account_visible_from_runtime_scope` treats thread/mission/session as
+    // non-ownership axes for every ownership type, so a regression to
+    // thread-bound resolution here would otherwise slip through.
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let requester = ExtensionId::new("gmail").unwrap();
+    let gmail_scope = "https://www.googleapis.com/auth/gmail.readonly";
+    let mut thread_a = owner_auth_scope("alice");
+    thread_a.resource.thread_id = Some(ThreadId::new("thread-a").unwrap());
+    let created = ConfiguredAccount::new(thread_a, "google")
+        .ownership(CredentialOwnership::SharedAdminManaged)
+        .granted_extensions(vec![requester.clone()])
+        .scopes(&[gmail_scope])
+        .create(&accounts)
+        .await;
+    let selector = selector_for(accounts);
+
+    // Runtime resolution looks the owner up at owner granularity (thread
+    // stripped) and carries the live thread only as the runtime/visibility
+    // scope — exactly as the production resolvers do. Resolving from thread-b
+    // must still find the account authorized in thread-a.
+    let owner_lookup = owner_auth_scope("alice");
+    let mut runtime_thread_b = owner_auth_scope("alice");
+    runtime_thread_b.resource.thread_id = Some(ThreadId::new("thread-b").unwrap());
+    let resolved = selector
+        .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
+            CredentialAccountSelectionRequest::new(
+                owner_lookup,
+                AuthProviderId::new("google").unwrap(),
+            )
+            .for_extension(requester),
+            runtime_thread_b,
+            RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+            vec![ProviderScope::new(gmail_scope).unwrap()],
+        ))
+        .await
+        .expect("shared-admin account must resolve from a different thread");
+
+    assert_eq!(resolved.id, created.id);
+}
+
+#[tokio::test]
 async fn resolver_returns_configured_product_auth_access_secret() {
     let accounts = Arc::new(InMemoryAuthProductServices::new());
     let scope =

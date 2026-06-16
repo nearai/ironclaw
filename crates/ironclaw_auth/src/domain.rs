@@ -234,6 +234,34 @@ pub fn validate_account_update_target(
     )
 }
 
+/// Validate that a stored `account` may be updated by a reconnect carrying
+/// `binding`, at durable OWNER granularity (#4935 defect A).
+///
+/// Unlike [`validate_account_update_target`] — which compares the request scope
+/// to the account scope with full `scope_matches` equality and is correct for a
+/// fresh, same-scope write — this is the *bound reconnect apply* check. The flow
+/// / manual-token `scope` carries a fresh per-flow `invocation_id` (and possibly
+/// a thread/mission) the account does not share, so the apply step must compare
+/// at owner granularity exactly as the setup-time binding validation
+/// ([`validate_manual_token_update_binding`] / [`validate_flow_update_binding`])
+/// does. Applying `validate_account_update_target` on a bound apply path accepts
+/// the binding at setup but then rejects it at apply for every cross-thread
+/// reconnect — re-introducing the #4935 fork on the manual-token path.
+pub fn validate_bound_account_update_target(
+    account: &CredentialAccount,
+    scope: &crate::AuthProductScope,
+    provider: &crate::AuthProviderId,
+    binding: &CredentialAccountUpdateBinding,
+) -> Result<(), AuthProductError> {
+    validate_scoped_update_binding(
+        account,
+        scope,
+        provider,
+        binding,
+        "credential account update target provider mismatch",
+    )
+}
+
 pub fn validate_flow_update_binding(
     account: &CredentialAccount,
     request: &NewAuthFlow,

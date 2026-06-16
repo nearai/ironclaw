@@ -280,15 +280,17 @@ impl ProductAuthRuntimeCredentialAccountSelector {
                             setup,
                             provider_scopes,
                         } => account_has_provider_scopes(account, setup, provider_scopes),
-                        // Bind/update is session-segmented on disk and the
-                        // callback updates the account at the flow scope's
-                        // session path. `accounts_for_owner` wildcards session
-                        // when the owner session is `None` (enumerates every
-                        // session), so require exact session equality here or a
-                        // reconnect could select — and then fail to update — a
-                        // different session's account.
+                        // Bind/update is segmented on disk by surface AND
+                        // session, and the callback updates the account at the
+                        // flow scope's surface/session path. `accounts_for_owner`
+                        // enumerates every surface (and wildcards session when
+                        // the owner session is `None`), so require exact surface
+                        // and session equality here or a reconnect could select —
+                        // and then fail to read/update — an account stored on a
+                        // different surface or session.
                         AccountSelectionPurpose::Binding => {
                             account.scope.session_id.as_ref() == lookup.scope.session_id.as_ref()
+                                && account.scope.surface == lookup.scope.surface
                         }
                     }
                     && account_visible_from_runtime_scope(account, runtime_scope)
@@ -482,7 +484,7 @@ fn runtime_credential_account_selection_request(
     provider_scopes: &[String],
     requester_extension: &ExtensionId,
 ) -> Result<RuntimeCredentialAccountSelectionRequest, CredentialStageError> {
-    let owner_scope = AuthProductScope::new(runtime_account_owner_scope(scope), AuthSurface::Api);
+    let owner_scope = AuthProductScope::credential_owner(scope, AuthSurface::Api);
     let provider = AuthProviderId::new(provider.as_str()).map_err(|e| {
         tracing::debug!(
             provider = %provider.as_str(),
@@ -552,12 +554,6 @@ fn account_visible_from_runtime_scope(
         && account_resource.user_id == runtime_resource.user_id
         && account_resource.agent_id == runtime_resource.agent_id
         && account_resource.project_id == runtime_resource.project_id
-}
-
-pub(crate) fn runtime_account_owner_scope(
-    scope: &ironclaw_host_api::ResourceScope,
-) -> ironclaw_host_api::ResourceScope {
-    scope.without_thread_and_mission()
 }
 
 fn map_account_error(error: AuthProductError) -> CredentialStageError {

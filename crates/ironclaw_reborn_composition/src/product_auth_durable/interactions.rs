@@ -8,7 +8,8 @@ use super::{
     FilesystemAuthProductServices, credential_status_for_completed_flow,
     domain::{
         update_account_from_request, validate_account_update_target,
-        validate_manual_token_update_binding, validate_new_credential_account,
+        validate_bound_account_update_target, validate_manual_token_update_binding,
+        validate_new_credential_account,
     },
     paths::{fs_error, interaction_path, manual_token_secret_handle},
     scope_matches,
@@ -171,7 +172,25 @@ where
                     .read_account(&pending.scope, binding.account_id)
                     .await?
                     .ok_or(AuthProductError::CredentialMissing)?;
-                validate_account_update_target(&account, &request)?;
+                // Bound reconnect: authorize at owner granularity (#4935 defect A),
+                // exactly as the OAuth callback's `update_bound_oauth_account`
+                // does. `validate_account_update_target` (full `scope_matches`)
+                // would accept this binding at manual-token setup but then reject
+                // it here for any cross-thread reconnect, re-forking the account.
+                validate_bound_account_update_target(
+                    &account,
+                    &pending.scope,
+                    &pending.provider,
+                    binding,
+                )?;
+                // Mutate in place at the account's own durable scope (the
+                // reconnect arrives from a different thread/invocation; the
+                // account does not move), so the subsequent same-scope update
+                // check is trivially satisfied — mirroring the reusable path.
+                let request = NewCredentialAccount {
+                    scope: account.scope.clone(),
+                    ..request
+                };
                 // Capture the old handle so we can delete it from SecretStore after a
                 // successful rotation write.  The new handle is stored first so that
                 // a write failure still leaves the old material reachable.
