@@ -14620,7 +14620,6 @@ mod tests {
     /// exercised by unit tests on `find_local_tool_source_in`.
     #[tokio::test]
     async fn install_from_local_source_installs_wasm_tool_with_provenance_message() {
-        let _target_dir = ScopedEnvVar::clear("CARGO_TARGET_DIR");
         let dir = tempfile::tempdir().expect("temp dir");
         let tools_dir = dir.path().join("tools");
         let channels_dir = dir.path().join("channels");
@@ -14655,7 +14654,6 @@ mod tests {
 
     #[tokio::test]
     async fn install_from_local_source_routes_wasm_channel_to_channels_dir() {
-        let _target_dir = ScopedEnvVar::clear("CARGO_TARGET_DIR");
         let dir = tempfile::tempdir().expect("temp dir");
         let tools_dir = dir.path().join("tools");
         let channels_dir = dir.path().join("channels");
@@ -14690,7 +14688,6 @@ mod tests {
     /// lookup, otherwise every suffix-matched install fails.
     #[tokio::test]
     async fn install_from_local_source_resolves_artifact_via_crate_name() {
-        let _target_dir = ScopedEnvVar::clear("CARGO_TARGET_DIR");
         let dir = tempfile::tempdir().expect("temp dir");
         let tools_dir = dir.path().join("tools");
         let channels_dir = dir.path().join("channels");
