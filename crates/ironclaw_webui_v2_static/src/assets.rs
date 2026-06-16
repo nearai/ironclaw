@@ -56,34 +56,51 @@ mod tests {
     #[test]
     fn project_file_download_chips_are_wired() {
         // The download UI: message bubble renders chips fed by extracted
-        // workspace paths, which fetch bytes through the bearer-authenticated
-        // api helper against the v2 `/files/content` endpoint.
+        // workspace paths. Each chip is the shared `AttachmentChip` fed a
+        // descriptor whose `fetch_url` targets the bearer-authenticated v2
+        // `/files/content` endpoint, so clicking opens the same
+        // `AttachmentPreviewModal` (image/pdf/text preview + Download) as a
+        // message attachment.
         let chips = asset_text("js/pages/chat/components/project-file-chips.js");
         assert!(chips.contains("extractWorkspaceFilePaths"));
-        assert!(chips.contains("fetchProjectFileBlob"));
-        assert!(chips.contains("saveBlob"));
         assert!(chips.contains("statProjectFile"));
-        // Stable hooks the e2e download test selects on.
-        assert!(chips.contains("data-testid=\"project-file-chip\""));
-        assert!(chips.contains("data-file-path"));
+        assert!(chips.contains("projectFileContentUrl"));
+        assert!(chips.contains("AttachmentChip"));
+        assert!(chips.contains("AttachmentPreviewModal"));
+        // The chip passes the e2e selector hooks through to the shared chip.
+        assert!(chips.contains("project-file-chip"));
+        assert!(chips.contains("dataPath"));
 
         let bubble = asset_text("js/pages/chat/components/message-bubble.js");
         assert!(bubble.contains("ProjectFileChips"));
         assert!(bubble.contains("threadId"));
 
-        // The data client fetches the blob (bearer-authenticated) but does no
-        // DOM — the object-URL save lives in the shared `download.js` helper.
+        // Both surfaces share the chip + preview implementation, so message
+        // attachments and project files cannot drift. The shared chip renders
+        // the stable e2e selector attributes.
+        let chip = asset_text("js/pages/chat/components/attachment-chip.js");
+        assert!(chip.contains("export function AttachmentChip"));
+        assert!(chip.contains("export function AttachmentThumbnail"));
+        assert!(chip.contains("data-testid=${testId}"));
+        assert!(chip.contains("data-file-path=${dataPath}"));
+        assert!(bubble.contains("AttachmentChip"));
+
+        // The preview modal fetches the blob (bearer-authenticated, via the
+        // shared `fetchAttachmentBlob`) and offers a Download action with a
+        // stable test hook.
+        let preview = asset_text("js/pages/chat/components/attachment-preview.js");
+        assert!(preview.contains("fetchAttachmentBlob"));
+        assert!(preview.contains("data-testid=\"attachment-download\""));
+
+        // The api client exposes a same-origin content URL helper and keeps the
+        // bearer-authenticated blob fetch; it does no DOM (object URLs live in
+        // the preview modal / `download.js`).
         let api = asset_text("js/lib/api.js");
         assert!(api.contains("projectFilesBase"));
         assert!(api.contains("/content"));
-        assert!(api.contains("fetchProjectFileBlob"));
+        assert!(api.contains("projectFileContentUrl"));
         assert!(api.contains("Authorization"));
         assert!(!api.contains("createObjectURL"));
-
-        let download = asset_text("js/lib/download.js");
-        assert!(download.contains("saveBlob"));
-        assert!(download.contains("URL.createObjectURL"));
-        assert!(download.contains("URL.revokeObjectURL"));
 
         // The pure extraction module is served; its test sibling is not.
         assert!(lookup("js/pages/chat/lib/project-file-paths.js").is_some());

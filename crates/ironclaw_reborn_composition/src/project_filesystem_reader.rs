@@ -172,6 +172,9 @@ impl<F: RootFilesystem> ProjectFilesystemReader for ProjectScopedFilesystemReade
             path: target.as_str().to_string(),
             kind: map_kind(stat.file_type),
             size_bytes: stat.len,
+            // Same extension-derived MIME the download serves as `Content-Type`,
+            // so the WebUI can pick a preview representation before fetching.
+            mime_type: mime_for_path(target.as_str()),
         })
     }
 }
@@ -346,6 +349,30 @@ mod tests {
             modified: Some(SystemTime::UNIX_EPOCH),
             sensitive,
         }
+    }
+
+    #[tokio::test]
+    async fn stat_reports_extension_mime_for_preview() {
+        // The stat MIME drives the WebUI preview mode, so it must match the
+        // download `Content-Type` (extension-derived; octet-stream when unknown).
+        let fs = workspace_fs(MountPermissions::read_write());
+        let scope = thread_scope().to_resource_scope();
+        seed(&fs, &scope, "/workspace/report.csv", b"a,b,c").await;
+        seed(&fs, &scope, "/workspace/blob.unknownext", b"...").await;
+        let reader = ProjectScopedFilesystemReader::new(Arc::clone(&fs));
+
+        let csv = reader
+            .stat(&thread_scope(), "/workspace/report.csv")
+            .await
+            .expect("stat succeeds");
+        assert_eq!(csv.mime_type, "text/csv");
+        assert_eq!(csv.size_bytes, 5);
+
+        let unknown = reader
+            .stat(&thread_scope(), "/workspace/blob.unknownext")
+            .await
+            .expect("stat succeeds");
+        assert_eq!(unknown.mime_type, DEFAULT_OCTET_STREAM);
     }
 
     #[tokio::test]

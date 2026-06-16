@@ -203,36 +203,17 @@ export function statProjectFile({ threadId, path } = {}) {
   return apiFetch(url.pathname + url.search);
 }
 
-// Fetch a project file's bytes as a Blob. The content route is bearer-only, so
-// a plain `<a download>` cannot carry the token — callers fetch here and hand
-// the Blob to `lib/download.js::saveBlob` to trigger the browser download.
-export async function fetchProjectFileBlob({ threadId, path } = {}) {
+// Same-origin relative URL for a project file's bytes. Feeds the shared
+// `fetchAttachmentBlob` (which attaches the bearer) so project-file chips can
+// reuse the message-attachment preview modal: it carries the same byte-fetch
+// shape as `attachmentUrl(...)`.
+export function projectFileContentUrl({ threadId, path } = {}) {
   if (!threadId || !path) {
-    throw new Error("threadId and path are required");
+    throw new Error("projectFileContentUrl requires threadId and path");
   }
-  const token = readStoredToken();
-  const headers = new Headers();
-  if (token) headers.set("Authorization", `Bearer ${token}`);
   const url = new URL(`${projectFilesBase(threadId)}/content`, window.location.origin);
   url.searchParams.set("path", path);
-  const response = await fetch(url.pathname + url.search, {
-    credentials: "same-origin",
-    headers,
-  });
-  if (!response.ok) {
-    const { text, payload } = await parseErrorBody(response);
-    throw new ApiError(
-      describeApiError({ payload, body: text, statusText: response.statusText }),
-      {
-        status: response.status,
-        statusText: response.statusText,
-        body: text,
-        headers: response.headers,
-        payload,
-      },
-    );
-  }
-  return response.blob();
+  return url.pathname + url.search;
 }
 
 // --- Automations ---

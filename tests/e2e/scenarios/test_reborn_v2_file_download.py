@@ -139,23 +139,32 @@ async def test_reborn_v2_agent_files_render_download_chips(reborn_v2_yolo_page):
     await composer.press("Enter")
 
     # The assistant reply references both /workspace paths, which the SPA turns
-    # into download chips.
+    # into chips that open the shared attachment preview modal.
     csv_chip = page.locator(SEL_V2["project_file_chip_for"].format(path=CSV_PATH))
     pdf_chip = page.locator(SEL_V2["project_file_chip_for"].format(path=PDF_PATH))
     await expect(csv_chip).to_be_visible(timeout=45000)
     await expect(pdf_chip).to_be_visible(timeout=45000)
 
-    # Clicking the CSV chip performs the bearer-authenticated blob fetch and
-    # saves the exact bytes the agent wrote.
+    # Clicking a chip opens the preview modal; its Download action performs the
+    # bearer-authenticated blob fetch and saves the exact bytes the agent wrote.
+    download_btn = page.locator(SEL_V2["attachment_download"])
+
+    await csv_chip.click()
+    await expect(download_btn).to_be_visible(timeout=15000)
     async with page.expect_download() as csv_dl:
-        await csv_chip.click()
+        await download_btn.click()
     csv_download = await csv_dl.value
     assert csv_download.suggested_filename == "report.csv"
     assert await _read_download_bytes(csv_download) == CSV_BYTES
+    # Close the modal before opening the next one.
+    await page.keyboard.press("Escape")
+    await expect(download_btn).to_be_hidden(timeout=15000)
 
-    # The PDF chip downloads a PDF.
+    # The PDF chip previews + downloads a PDF.
+    await pdf_chip.click()
+    await expect(download_btn).to_be_visible(timeout=15000)
     async with page.expect_download() as pdf_dl:
-        await pdf_chip.click()
+        await download_btn.click()
     pdf_download = await pdf_dl.value
     assert pdf_download.suggested_filename == "report.pdf"
     assert (await _read_download_bytes(pdf_download)).startswith(b"%PDF-")

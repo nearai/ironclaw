@@ -1447,6 +1447,9 @@ async fn agent_produced_workspace_files_are_listable_and_downloadable() {
         stat["stat"]["size_bytes"].as_u64(),
         Some(CSV_BODY.len() as u64)
     );
+    // The extension-derived MIME drives the WebUI preview mode and mirrors the
+    // download Content-Type.
+    assert_eq!(stat["stat"]["mime_type"].as_str(), Some("text/csv"));
 
     // A path outside the workspace mount is refused.
     let denied = download_file(router, &thread_id, "/secrets/master.key").await;

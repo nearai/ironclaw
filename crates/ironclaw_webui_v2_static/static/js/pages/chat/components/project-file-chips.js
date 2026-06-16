@@ -1,27 +1,31 @@
 import { React, html } from "../../../lib/html.js";
-import { Icon } from "../../../design-system/icons.js";
-import { useT } from "../../../lib/i18n.js";
-import { toast } from "../../../lib/toast.js";
-import { fetchProjectFileBlob, statProjectFile } from "../../../lib/api.js";
-import { saveBlob } from "../../../lib/download.js";
-import {
-  basename,
-  extractWorkspaceFilePaths,
-  formatSize,
-} from "../lib/project-file-paths.js";
+import { statProjectFile, projectFileContentUrl } from "../../../lib/api.js";
+import { AttachmentChip } from "./attachment-chip.js";
+import { AttachmentPreviewModal } from "./attachment-preview.js";
+import { basename, extractWorkspaceFilePaths, formatSize } from "../lib/project-file-paths.js";
 
-function ProjectFileChip({ threadId, path }) {
-  const t = useT();
-  const [sizeLabel, setSizeLabel] = React.useState("");
-  const [downloading, setDownloading] = React.useState(false);
+// One chip for an agent-referenced workspace file. Builds an attachment-shaped
+// descriptor so it reuses the exact same `AttachmentChip` + preview modal as
+// message attachments: clicking previews (image/pdf/text/…) with a Download
+// action in the modal footer, instead of a bespoke download-only button.
+//
+// The descriptor's `fetch_url` points at the bearer-only `/files/content`
+// endpoint (same byte-fetch shape `fetchAttachmentBlob` expects). `mime_type`
+// and the size label come from a best-effort `stat`; until it resolves the chip
+// is still clickable (the modal falls back to a download-only view for an
+// unknown type).
+function ProjectFileChip({ threadId, path, onPreview }) {
+  const [meta, setMeta] = React.useState({ mime_type: "", size_label: "" });
 
-  // Best-effort size for the chip; a stat failure (missing file, race) just
-  // leaves the size blank rather than surfacing an error.
   React.useEffect(() => {
     let active = true;
     statProjectFile({ threadId, path })
       .then((response) => {
-        if (active && response?.stat) setSizeLabel(formatSize(response.stat.size_bytes));
+        if (!active || !response?.stat) return;
+        setMeta({
+          mime_type: response.stat.mime_type || "",
+          size_label: formatSize(response.stat.size_bytes),
+        });
       })
       .catch(() => {});
     return () => {
@@ -29,48 +33,42 @@ function ProjectFileChip({ threadId, path }) {
     };
   }, [threadId, path]);
 
-  const onDownload = React.useCallback(async () => {
-    setDownloading(true);
-    try {
-      const blob = await fetchProjectFileBlob({ threadId, path });
-      saveBlob(blob, basename(path));
-    } catch (_) {
-      toast(t("chat.fileDownloadFailed"), { tone: "error" });
-    } finally {
-      setDownloading(false);
-    }
-  }, [threadId, path, t]);
+  const att = {
+    filename: basename(path),
+    mime_type: meta.mime_type,
+    size_label: meta.size_label,
+    fetch_url: projectFileContentUrl({ threadId, path }),
+  };
 
-  return html`
-    <button
-      type="button"
-      data-testid="project-file-chip"
-      data-file-path=${path}
-      onClick=${onDownload}
-      disabled=${downloading}
-      title=${path}
-      className="flex items-center gap-2 rounded-md border border-iron-700 bg-iron-900/50 px-3 py-2 text-xs text-left hover:border-signal/35 disabled:opacity-60"
-    >
-      <${Icon} name="file" className="h-3.5 w-3.5 shrink-0 text-signal" />
-      <span className="truncate">${basename(path)}</span>
-      <span className="ml-auto inline-flex shrink-0 items-center gap-1 text-iron-200">
-        ${sizeLabel}
-        <${Icon} name="download" className="h-3.5 w-3.5" />
-      </span>
-    </button>
-  `;
+  return html`<${AttachmentChip}
+    att=${att}
+    onPreview=${onPreview}
+    testId="project-file-chip"
+    dataPath=${path}
+  />`;
 }
 
-// Render a chip row for every workspace file path referenced in `content`.
-// Renders nothing when there are no references or no thread context.
+// Render a chip row for every workspace file path referenced in `content`, plus
+// a single shared preview modal. Renders nothing when there are no references
+// or no thread context.
 export function ProjectFileChips({ threadId, content }) {
   const paths = React.useMemo(() => extractWorkspaceFilePaths(content), [content]);
+  const [previewAttachment, setPreviewAttachment] = React.useState(null);
   if (!threadId || paths.length === 0) return null;
   return html`
     <div className="mt-2 flex flex-col gap-1.5">
       ${paths.map(
-        (path) => html`<${ProjectFileChip} key=${path} threadId=${threadId} path=${path} />`
+        (path) => html`<${ProjectFileChip}
+          key=${path}
+          threadId=${threadId}
+          path=${path}
+          onPreview=${setPreviewAttachment}
+        />`
       )}
+      <${AttachmentPreviewModal}
+        attachment=${previewAttachment}
+        onClose=${() => setPreviewAttachment(null)}
+      />
     </div>
   `;
 }

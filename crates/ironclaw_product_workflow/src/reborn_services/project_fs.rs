@@ -52,6 +52,11 @@ pub struct ProjectFsStat {
     pub path: String,
     pub kind: ProjectFsEntryKind,
     pub size_bytes: u64,
+    /// Best-effort MIME type derived from the path extension — mirrors the
+    /// download `Content-Type`. Lets the WebUI choose a preview representation
+    /// (image/pdf/text/…) before fetching the bytes. `application/octet-stream`
+    /// when the extension is unknown.
+    pub mime_type: String,
 }
 
 /// Materialized file bytes plus the metadata a download response needs.
