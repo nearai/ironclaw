@@ -14,8 +14,8 @@ use url::Url;
 use crate::config::GeminiOauthConfig;
 use crate::error::LlmError;
 use crate::provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,
-    Role, ToolCall, ToolDefinition,
+    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmProvider,
+    ModelMetadata, Role, ToolCall, ToolDefinition,
 };
 
 // Official Gemini CLI OAuth credentials (public, from google/gemini-cli).
@@ -1631,9 +1631,21 @@ impl GeminiOauthProvider {
                     // System messages are handled via systemInstruction top-level field
                 }
                 Role::User => {
+                    // Text part first, then any inline base64 images as
+                    // `inlineData` parts so a vision model receives the pixels.
+                    let mut parts = vec![serde_json::json!({ "text": msg.content })];
+                    for part in &msg.content_parts {
+                        if let ContentPart::ImageUrl { image_url } = part
+                            && let Some((mime_type, data)) = image_url.decode_data_url()
+                        {
+                            parts.push(serde_json::json!({
+                                "inlineData": { "mimeType": mime_type, "data": data }
+                            }));
+                        }
+                    }
                     contents.push(serde_json::json!({
                         "role": "user",
-                        "parts": [{ "text": msg.content }]
+                        "parts": parts
                     }));
                 }
                 Role::Assistant => {
@@ -1941,6 +1953,7 @@ impl GeminiOauthProvider {
                         arguments: args,
                         reasoning: None,
                         signature: None,
+                        arguments_parse_error: None,
                     });
                 }
             }
@@ -2271,6 +2284,36 @@ mod tests {
         let url = "http://127.0.0.1:8080/auth/callback?state=xyz";
         let result = CredentialManager::parse_redirect_url(url);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_to_gemini_request_forwards_user_image_as_inline_data() {
+        let messages = vec![ChatMessage::user_with_parts(
+            "what is this?",
+            vec![ContentPart::ImageUrl {
+                image_url: crate::provider::ImageUrl {
+                    url: "data:image/png;base64,AQIDBA==".to_string(),
+                    detail: None,
+                },
+            }],
+        )];
+
+        let req = GeminiOauthProvider::to_gemini_request(
+            &messages,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "gemini-2.0-flash",
+            &HashMap::new(),
+        );
+
+        let parts = req["contents"][0]["parts"].as_array().expect("parts");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["text"], "what is this?");
+        assert_eq!(parts[1]["inlineData"]["mimeType"], "image/png");
+        assert_eq!(parts[1]["inlineData"]["data"], "AQIDBA==");
     }
 
     #[test]
@@ -2768,6 +2811,7 @@ mod tests {
                     arguments: serde_json::json!({"path": "/tmp/x"}),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }],
             ),
             ChatMessage::tool_result("call_1", "read_file", r#"{"output":"hello"}"#),
@@ -2808,6 +2852,7 @@ mod tests {
                     arguments: serde_json::json!({}),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }],
             ),
             ChatMessage::tool_result("call_1", "echo", r#"{"output":"ok"}"#),

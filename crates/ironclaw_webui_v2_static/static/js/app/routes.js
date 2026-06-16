@@ -39,16 +39,18 @@ export const SETTINGS_SUB_ROUTES = [
   // { id: "channels", labelKey: "settings.channels", icon: "send" },
   // { id: "networking", labelKey: "settings.networking", icon: "pulse" },
   // { id: "tools", labelKey: "settings.tools", icon: "tool" },
-  // { id: "skills", labelKey: "settings.skills", icon: "file" },
+  { id: "skills", labelKey: "settings.skills", icon: "file" },
+  // Trace Commons is un-hidden: its api lib calls the real v2
+  // `/api/webchat/v2/traces/credit` endpoint.
+  { id: "traces", labelKey: "settings.traceCommons", icon: "layers" },
   // { id: "users", labelKey: "settings.users", icon: "lock" },
   { id: "language", labelKey: "settings.language", icon: "globe" },
 ];
 
 export const EXTENSIONS_SUB_ROUTES = [
-  { id: "installed", labelKey: "extensions.installed", icon: "bolt" },
+  { id: "registry", labelKey: "extensions.registry", icon: "plus" },
   { id: "channels", labelKey: "extensions.channels", icon: "send" },
   { id: "mcp", labelKey: "extensions.mcp", icon: "pulse" },
-  { id: "registry", labelKey: "extensions.registry", icon: "plus" },
 ];
 
 export const ADMIN_SUB_ROUTES = [

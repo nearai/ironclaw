@@ -8,23 +8,18 @@ import { useT } from "../../../lib/i18n.js";
 export function SkillInstallPanel({ onInstall, isInstalling }) {
   const t = useT();
   const [name, setName] = React.useState("");
-  const [url, setUrl] = React.useState("");
   const [content, setContent] = React.useState("");
   const [error, setError] = React.useState("");
   const [result, setResult] = React.useState("");
 
   const submit = React.useCallback(async () => {
-    const payload = buildPayload({ name, url, content });
+    const payload = buildPayload({ name, content });
     if (!payload.name) {
       setError(t("skills.nameRequired"));
       return;
     }
-    if (!payload.url && !payload.content) {
-      setError(t("skills.importSourceRequired"));
-      return;
-    }
-    if (payload.url && !payload.url.startsWith("https://")) {
-      setError(t("skills.httpsRequired"));
+    if (!payload.content) {
+      setError(t("skills.contentRequired"));
       return;
     }
 
@@ -38,13 +33,12 @@ export function SkillInstallPanel({ onInstall, isInstalling }) {
       }
 
       setName("");
-      setUrl("");
       setContent("");
       setResult(response.message || t("skills.installedSuccess", { name: payload.name }));
     } catch (err) {
       setError(err.message || t("skills.installFailed"));
     }
-  }, [content, name, onInstall, t, url]);
+  }, [content, name, onInstall, t]);
 
   return html`
     <${Card} padding="md">
@@ -59,24 +53,14 @@ export function SkillInstallPanel({ onInstall, isInstalling }) {
         </div>
       </div>
 
-      <div className="grid gap-3 lg:grid-cols-[minmax(0,0.72fr)_minmax(0,1fr)]">
-        <${FormField} label=${t("skills.name")} error=${error && !name.trim() ? error : ""}>
-          <${Input}
-            size="sm"
-            value=${name}
-            placeholder=${t("skills.namePlaceholder")}
-            onInput=${(event) => setName(event.currentTarget.value)}
-          />
-        <//>
-        <${FormField} label=${t("skills.url")} hint=${t("skills.urlHint")}>
-          <${Input}
-            size="sm"
-            value=${url}
-            placeholder=${t("skills.urlPlaceholder")}
-            onInput=${(event) => setUrl(event.currentTarget.value)}
-          />
-        <//>
-      </div>
+      <${FormField} label=${t("skills.name")} error=${error && !name.trim() ? error : ""}>
+        <${Input}
+          size="sm"
+          value=${name}
+          placeholder=${t("skills.namePlaceholder")}
+          onInput=${(event) => setName(event.currentTarget.value)}
+        />
+      <//>
 
       <${FormField} className="mt-3" label=${t("skills.content")} hint=${t("skills.contentHint")}>
         <${Textarea}
@@ -102,9 +86,8 @@ export function SkillInstallPanel({ onInstall, isInstalling }) {
   `;
 }
 
-function buildPayload({ name, url, content }) {
+function buildPayload({ name, content }) {
   const payload = { name: name.trim() };
-  if (url.trim()) payload.url = url.trim();
   if (content.trim()) payload.content = content.trim();
   return payload;
 }

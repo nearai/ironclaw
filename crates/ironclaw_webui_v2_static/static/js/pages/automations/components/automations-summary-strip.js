@@ -20,11 +20,18 @@ export function AutomationsSummaryStrip({ summary }) {
       detail: t("automations.summary.activeDetail"),
     },
     {
-      key: "paused",
-      label: t("automations.summary.paused"),
-      value: summary?.paused ?? 0,
-      tone: "warning",
-      detail: t("automations.summary.pausedDetail"),
+      key: "running",
+      label: t("automations.summary.running"),
+      value: summary?.running ?? 0,
+      tone: "info",
+      detail: t("automations.summary.runningDetail"),
+    },
+    {
+      key: "failures",
+      label: t("automations.summary.failures"),
+      value: summary?.failures ?? 0,
+      tone: (summary?.failures ?? 0) > 0 ? "danger" : "success",
+      detail: t("automations.summary.failuresDetail"),
     },
     {
       key: "nextRun",
@@ -32,12 +39,15 @@ export function AutomationsSummaryStrip({ summary }) {
       value: summary?.nextRun || t("automations.summary.none"),
       tone: "info",
       detail: t("automations.summary.nextRunDetail"),
+      // NEXT RUN is a date string, not a count — use a smaller size so it isn't
+      // truncated to "Jun…" inside a narrow card.
+      valueClassName: "text-lg md:text-xl",
     },
   ];
 
   return html`
     <${Panel} className="p-4 sm:p-5">
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         ${cards.map((card) => html`
           <div
             key=${card.key}
@@ -47,7 +57,9 @@ export function AutomationsSummaryStrip({ summary }) {
               label=${card.label}
               value=${card.value}
               tone=${card.tone}
+              badgeLabel=${t(`automations.badge.${card.tone}`)}
               detail=${card.detail}
+              valueClassName=${card.valueClassName}
               showDivider=${false}
               className="px-0 py-0"
             />

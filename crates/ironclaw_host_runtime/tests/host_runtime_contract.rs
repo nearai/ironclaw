@@ -1535,7 +1535,31 @@ impl TrustAwareCapabilityDispatchAuthorizer for ApprovalAuthorizer {
 }
 
 fn registry_with_echo_capability() -> ExtensionRegistry {
-    let manifest = parse_manifest(ECHO_MANIFEST);
+    registry_with_echo_capability_permission("allow")
+}
+
+fn registry_with_echo_capability_permission(permission: &str) -> ExtensionRegistry {
+    let manifest = format!(
+        r#"
+id = "echo"
+name = "Echo"
+version = "0.1.0"
+description = "Echo test extension"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "echo.wasm"
+
+[[capabilities]]
+id = "echo.say"
+description = "Echoes input"
+effects = ["dispatch_capability"]
+default_permission = "{permission}"
+parameters_schema = {{}}
+"#
+    );
+    let manifest = parse_manifest(&manifest);
     let package = ExtensionPackage::from_manifest(
         manifest,
         VirtualPath::new("/system/extensions/echo").unwrap(),
@@ -1626,22 +1650,3 @@ fn capability_id() -> CapabilityId {
 fn extension_id() -> ExtensionId {
     ExtensionId::new("echo").unwrap()
 }
-
-const ECHO_MANIFEST: &str = r#"
-id = "echo"
-name = "Echo"
-version = "0.1.0"
-description = "Echo test extension"
-trust = "third_party"
-
-[runtime]
-kind = "wasm"
-module = "echo.wasm"
-
-[[capabilities]]
-id = "echo.say"
-description = "Echoes input"
-effects = ["dispatch_capability"]
-default_permission = "allow"
-parameters_schema = {}
-"#;

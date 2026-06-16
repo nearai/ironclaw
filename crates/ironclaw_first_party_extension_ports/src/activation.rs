@@ -835,7 +835,7 @@ impl ActivationCandidateCacheKey {
 
 impl ActivationCandidate {
     fn into_context_candidate(self) -> HostSkillContextCandidate {
-        HostSkillContextCandidate::new(
+        HostSkillContextCandidate::loaded(
             self.skill_md,
             self.descriptor.trust().cloned(),
             self.descriptor.visibility().copied(),
@@ -1337,6 +1337,7 @@ mod tests {
                     id.clone(),
                     Some(SkillTrust::Trusted),
                     Some(SkillVisibility::Visible),
+                    format!("{name} description"),
                 ));
                 files.insert((source, name.to_string()), skill_md.as_bytes().to_vec());
             }
@@ -1357,6 +1358,7 @@ mod tests {
                 id,
                 Some(SkillTrust::Trusted),
                 Some(SkillVisibility::Visible),
+                format!("{name} description"),
             )
             .with_provenance(
                 ironclaw_loop_support::SkillBundleProvenance::new(SkillSourceKind::User)
@@ -1626,8 +1628,7 @@ mod tests {
         assert_eq!(selected.len(), 1);
         assert!(
             selected[0]
-                .skill_md
-                .as_ref()
+                .loaded_skill_md()
                 .expect("skill context")
                 .contains("CODE_REVIEW_SENTINEL")
         );
@@ -1679,7 +1680,7 @@ mod tests {
 
         let combined = selected
             .iter()
-            .map(|candidate| candidate.skill_md.as_deref().unwrap_or(""))
+            .map(|candidate| candidate.loaded_skill_md().unwrap_or(""))
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -1719,8 +1720,7 @@ mod tests {
         assert_eq!(selected.len(), 1);
         assert!(
             selected[0]
-                .skill_md
-                .as_ref()
+                .loaded_skill_md()
                 .expect("skill context")
                 .contains("CODE_REVIEW_SENTINEL")
         );
@@ -1777,8 +1777,7 @@ mod tests {
         assert_eq!(selected.len(), 1);
         assert!(
             selected[0]
-                .skill_md
-                .as_ref()
+                .loaded_skill_md()
                 .expect("skill context")
                 .contains("CODE_REVIEW_SENTINEL")
         );
@@ -1822,8 +1821,7 @@ mod tests {
         assert_eq!(selected_again.len(), 1);
         assert!(
             selected_again[0]
-                .skill_md
-                .as_ref()
+                .loaded_skill_md()
                 .expect("skill context")
                 .contains("CODE_REVIEW_SENTINEL")
         );
@@ -1870,8 +1868,7 @@ mod tests {
         );
         assert!(
             selected[0]
-                .skill_md
-                .as_ref()
+                .loaded_skill_md()
                 .expect("skill context")
                 .contains("CODE_REVIEW_SENTINEL")
         );
@@ -1982,7 +1979,7 @@ mod tests {
 
         let combined = selected
             .iter()
-            .map(|candidate| candidate.skill_md.as_deref().unwrap_or(""))
+            .map(|candidate| candidate.loaded_skill_md().unwrap_or(""))
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(selected.len(), 2);
@@ -1998,6 +1995,7 @@ mod tests {
                 SkillBundleId::new(SkillSourceKind::User, name).unwrap(),
                 Some(SkillTrust::Installed),
                 Some(SkillVisibility::Visible),
+                "Installed helper",
             )],
             files: HashMap::from([(
                 (SkillSourceKind::User, name.to_string()),
@@ -2469,7 +2467,7 @@ mod tests {
             .expect("selection succeeds");
         let combined = selected
             .iter()
-            .map(|candidate| candidate.skill_md.as_deref().unwrap_or(""))
+            .map(|candidate| candidate.loaded_skill_md().unwrap_or(""))
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -2670,6 +2668,7 @@ mod tests {
                 SkillBundleId::new(SkillSourceKind::User, &name).unwrap(),
                 Some(SkillTrust::Trusted),
                 Some(SkillVisibility::Visible),
+                "Review code",
             );
             selectable
                 .activation_candidate_from_skill_md(
@@ -2726,6 +2725,7 @@ mod tests {
                 SkillBundleId::new(SkillSourceKind::User, "bad-helper").unwrap(),
                 Some(SkillTrust::Trusted),
                 Some(SkillVisibility::Visible),
+                "bad helper description",
             )],
             files: HashMap::from([(
                 (SkillSourceKind::User, "bad-helper".to_string()),
@@ -2750,6 +2750,7 @@ mod tests {
                 SkillBundleId::new(SkillSourceKind::User, "code-review").unwrap(),
                 None,
                 Some(SkillVisibility::Visible),
+                "code review description",
             )],
             files: HashMap::new(),
         });
@@ -2771,6 +2772,7 @@ mod tests {
                 SkillBundleId::new(SkillSourceKind::User, "code-review").unwrap(),
                 Some(SkillTrust::Trusted),
                 None,
+                "code review description",
             )],
             files: HashMap::new(),
         });

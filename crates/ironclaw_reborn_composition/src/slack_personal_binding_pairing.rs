@@ -19,6 +19,7 @@ use ironclaw_slack_v2_adapter::{SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID};
 use thiserror::Error;
 
 use crate::slack_actor_identity::RebornUserIdentityLookup;
+use crate::slack_outbound_targets::SlackPersonalDmTargetProvisioner;
 use crate::slack_personal_binding::{
     RebornUserIdentityBinding, SlackPersonalBindingPrincipal, SlackPersonalUserBindingError,
     SlackPersonalUserBindingService,
@@ -125,6 +126,7 @@ pub struct SlackPersonalBindingPairingService {
     binding_service: SlackPersonalUserBindingService,
     challenge_store: Arc<dyn SlackPersonalBindingPairingChallengeStore>,
     notifier: Arc<dyn SlackPersonalBindingPairingNotifier>,
+    dm_provisioner: Option<Arc<SlackPersonalDmTargetProvisioner>>,
 }
 
 impl SlackPersonalBindingPairingService {
@@ -137,7 +139,19 @@ impl SlackPersonalBindingPairingService {
             binding_service,
             challenge_store,
             notifier,
+            dm_provisioner: None,
         }
+    }
+
+    /// Attach a DM provisioner that is called after successful pairing-code
+    /// redemption.  Provisioning runs in a background task: failure is logged
+    /// and never blocks or fails the redemption itself.
+    pub(crate) fn with_dm_provisioner(
+        mut self,
+        provisioner: Arc<SlackPersonalDmTargetProvisioner>,
+    ) -> Self {
+        self.dm_provisioner = Some(provisioner);
+        self
     }
 
     pub async fn issue_challenge(
@@ -176,14 +190,34 @@ impl SlackPersonalBindingPairingService {
             )
             .map_err(SlackPersonalBindingPairingError::Binding)?;
         let challenge = self.challenge_store.consume_challenge(&code).await?;
-        self.binding_service
+        let slack_user_id = challenge.slack_user_id.clone();
+        let binding = self
+            .binding_service
             .bind_installation_actor(
                 principal,
                 challenge.installation_id,
                 challenge.slack_user_id,
             )
             .await
-            .map_err(SlackPersonalBindingPairingError::Binding)
+            .map_err(SlackPersonalBindingPairingError::Binding)?;
+        if let Some(provisioner) = self.dm_provisioner.clone() {
+            let user_id = binding.user_id.clone();
+            tokio::spawn(async move {
+                match provisioner.provision_for_user(user_id, slack_user_id).await {
+                    Ok(_) => {
+                        tracing::debug!("Slack personal DM target provisioned after pairing");
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            "Slack personal DM target provisioning failed after pairing; \
+                             will retry on next pairing event"
+                        );
+                    }
+                }
+            });
+        }
+        Ok(binding)
     }
 }
 
@@ -197,6 +231,14 @@ impl std::fmt::Debug for SlackPersonalBindingPairingService {
                 &"Arc<dyn SlackPersonalBindingPairingChallengeStore>",
             )
             .field("notifier", &"Arc<dyn SlackPersonalBindingPairingNotifier>")
+            .field(
+                "dm_provisioner",
+                if self.dm_provisioner.is_some() {
+                    &"Some(SlackPersonalDmTargetProvisioner)"
+                } else {
+                    &"None"
+                },
+            )
             .finish()
     }
 }

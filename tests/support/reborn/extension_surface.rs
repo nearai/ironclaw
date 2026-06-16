@@ -125,7 +125,7 @@ pub const BUNDLED_EXTENSION_CAPABILITY_IDS: &[&str] = &[
     "google-slides.format_paragraph",
     "google-slides.replace_shapes_with_image",
     "google-slides.batch_update",
-    "nearai.search",
+    "nearai.web_search",
     "notion.notion-search",
     "notion.notion-fetch",
     "notion.notion-create-pages",

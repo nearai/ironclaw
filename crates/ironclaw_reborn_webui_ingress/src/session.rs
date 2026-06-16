@@ -16,7 +16,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use ironclaw_host_api::{TenantId, UserId};
-use ironclaw_reborn_composition::WebuiAuthenticator;
+use ironclaw_reborn_composition::{WebuiAuthentication, WebuiAuthenticator};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -247,8 +247,8 @@ impl std::fmt::Debug for SessionAuthenticator {
 
 #[async_trait]
 impl WebuiAuthenticator for SessionAuthenticator {
-    async fn authenticate(&self, token: &str) -> Option<UserId> {
-        // The `WebuiAuthenticator` contract is `Option<UserId>` —
+    async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
+        // The `WebuiAuthenticator` contract is `Option<WebuiAuthentication>` —
         // every failure must collapse to `None` so the gateway
         // emits a generic 401 and never leaks the reason to the
         // client. But "session not found" (auth miss) and
@@ -280,7 +280,7 @@ impl WebuiAuthenticator for SessionAuthenticator {
             );
             return None;
         }
-        Some(record.user_id)
+        Some(WebuiAuthentication::user(record.user_id))
     }
 }
 
@@ -341,7 +341,8 @@ mod tests {
             .authenticate(token.expose_secret())
             .await
             .expect("authenticated");
-        assert_eq!(resolved.as_str(), "alice");
+        assert_eq!(resolved.user_id.as_str(), "alice");
+        assert!(!resolved.capabilities.operator_webui_config);
     }
 
     // Regression for the session-token-leak review (Medium): the

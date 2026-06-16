@@ -2,7 +2,11 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_approvals::{DenyApproval, LeaseApproval};
+use ironclaw_approvals::{
+    DenyApproval, InMemoryPersistentApprovalPolicyStore, LeaseApproval, PersistentApprovalAction,
+    PersistentApprovalPolicy, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
+    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+};
 use ironclaw_authorization::{
     CapabilityLeaseStatus, CapabilityLeaseStore, InMemoryCapabilityLeaseStore,
 };
@@ -141,6 +145,37 @@ impl ApprovalLeaseTermsProvider for FixedLeaseTermsProvider {
         _gate: &ApprovalGateRecord,
     ) -> Result<LeaseApproval, ironclaw_product_workflow::ProductWorkflowError> {
         Ok(dispatch_lease_approval(Principal::HostRuntime))
+    }
+
+    async fn persistent_approval_allowed(
+        &self,
+        _gate: &ApprovalGateRecord,
+    ) -> Result<(), ironclaw_product_workflow::ProductWorkflowError> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct RejectingPersistentLeaseTermsProvider;
+
+#[async_trait]
+impl ApprovalLeaseTermsProvider for RejectingPersistentLeaseTermsProvider {
+    async fn lease_terms_for(
+        &self,
+        _gate: &ApprovalGateRecord,
+    ) -> Result<LeaseApproval, ironclaw_product_workflow::ProductWorkflowError> {
+        Ok(dispatch_lease_approval(Principal::HostRuntime))
+    }
+
+    async fn persistent_approval_allowed(
+        &self,
+        _gate: &ApprovalGateRecord,
+    ) -> Result<(), ironclaw_product_workflow::ProductWorkflowError> {
+        Err(
+            ironclaw_product_workflow::ProductWorkflowError::ApprovalInteractionRejected {
+                kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
+            },
+        )
     }
 }
 
@@ -281,6 +316,98 @@ impl ApprovalResolutionPort for RecordingApprovalResolver {
     }
 }
 
+struct FailingApprovalResolver;
+
+#[async_trait]
+impl ApprovalResolutionPort for FailingApprovalResolver {
+    async fn approve_dispatch(
+        &self,
+        _scope: &ResourceScope,
+        _request_id: ApprovalRequestId,
+        _approval: LeaseApproval,
+    ) -> Result<(), ironclaw_product_workflow::ProductWorkflowError> {
+        Err(resolver_failure())
+    }
+
+    async fn approve_spawn(
+        &self,
+        _scope: &ResourceScope,
+        _request_id: ApprovalRequestId,
+        _approval: LeaseApproval,
+    ) -> Result<(), ironclaw_product_workflow::ProductWorkflowError> {
+        Err(resolver_failure())
+    }
+
+    async fn ensure_dispatch_lease(
+        &self,
+        _scope: &ResourceScope,
+        _request_id: ApprovalRequestId,
+        _approval: LeaseApproval,
+    ) -> Result<(), ironclaw_product_workflow::ProductWorkflowError> {
+        Err(resolver_failure())
+    }
+
+    async fn ensure_spawn_lease(
+        &self,
+        _scope: &ResourceScope,
+        _request_id: ApprovalRequestId,
+        _approval: LeaseApproval,
+    ) -> Result<(), ironclaw_product_workflow::ProductWorkflowError> {
+        Err(resolver_failure())
+    }
+
+    async fn deny(
+        &self,
+        _scope: &ResourceScope,
+        _request_id: ApprovalRequestId,
+        _denial: DenyApproval,
+    ) -> Result<(), ironclaw_product_workflow::ProductWorkflowError> {
+        Err(resolver_failure())
+    }
+}
+
+struct FailingPersistentApprovalPolicyStore;
+
+#[async_trait]
+impl PersistentApprovalPolicyStore for FailingPersistentApprovalPolicyStore {
+    async fn allow(
+        &self,
+        _input: PersistentApprovalPolicyInput,
+    ) -> Result<PersistentApprovalPolicy, PersistentApprovalPolicyError> {
+        Err(PersistentApprovalPolicyError::Filesystem(
+            "policy store unavailable".to_string(),
+        ))
+    }
+
+    async fn lookup(
+        &self,
+        _key: &PersistentApprovalPolicyKey,
+    ) -> Result<Option<PersistentApprovalPolicy>, PersistentApprovalPolicyError> {
+        Ok(None)
+    }
+
+    async fn revoke(
+        &self,
+        _key: &PersistentApprovalPolicyKey,
+    ) -> Result<PersistentApprovalPolicy, PersistentApprovalPolicyError> {
+        Err(PersistentApprovalPolicyError::UnknownPolicy)
+    }
+
+    async fn revoke_if_source_approval_request(
+        &self,
+        _key: &PersistentApprovalPolicyKey,
+        _source_approval_request_id: ApprovalRequestId,
+    ) -> Result<Option<PersistentApprovalPolicy>, PersistentApprovalPolicyError> {
+        Ok(None)
+    }
+}
+
+fn resolver_failure() -> ironclaw_product_workflow::ProductWorkflowError {
+    ironclaw_product_workflow::ProductWorkflowError::Transient {
+        reason: "approval resolver unavailable".to_string(),
+    }
+}
+
 struct FakeTurnCoordinator {
     actor: TurnActor,
     status: Mutex<TurnStatus>,
@@ -386,6 +513,8 @@ impl TurnCoordinator for FakeTurnCoordinator {
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(17),
+            product_context: None,
+            auth_resume_disposition: None,
         })
     }
 }
@@ -415,6 +544,75 @@ fn resource_scope(actor: &TurnActor) -> ResourceScope {
     }
 }
 
+/// A no-project resource scope (WebChat shape) with explicit user/agent/thread.
+/// Threads carry `project_id = None`, which is the case the persistent approval
+/// scope fix targets: the scope key must be thread-agnostic.
+fn no_project_scope(user: &str, agent: Option<&str>, thread: &str) -> ResourceScope {
+    ResourceScope {
+        tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
+        user_id: UserId::new(user).expect("user"),
+        agent_id: agent.map(|id| ironclaw_host_api::AgentId::new(id).expect("agent")),
+        project_id: None,
+        mission_id: None,
+        thread_id: Some(ThreadId::new(thread).expect("thread")),
+        invocation_id: InvocationId::new(),
+    }
+}
+
+/// In-memory-backed scoped filesystem matching the approvals store mount layout.
+fn scoped_fs(
+    tenant: &str,
+    user: &str,
+) -> Arc<ironclaw_filesystem::ScopedFilesystem<ironclaw_filesystem::InMemoryBackend>> {
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    let backend = Arc::new(ironclaw_filesystem::InMemoryBackend::new());
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/approvals").expect("alias"),
+        VirtualPath::new(format!("/engine/tenants/{tenant}/users/{user}/approvals"))
+            .expect("virtual path"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    Arc::new(ironclaw_filesystem::ScopedFilesystem::with_fixed_view(
+        backend, mounts,
+    ))
+}
+
+/// Builds a service fixture whose pending gate carries the supplied resource
+/// scope and approval request, so tests can drive the real `resolve` path with
+/// a chosen persisted scope and grantee.
+fn service_fixture_with_scope(
+    request: ApprovalRequest,
+    gate_scope: ResourceScope,
+) -> (
+    DefaultApprovalInteractionService,
+    Arc<RecordingApprovalResolver>,
+    Arc<FakeTurnCoordinator>,
+    TurnRunId,
+    GateRef,
+) {
+    let actor = actor(gate_scope.user_id.as_str());
+    let gate_ref = approval_gate_ref(request.id).expect("gate ref");
+    let run_id = TurnRunId::new();
+    let gate = ApprovalGateRecord::with_status(
+        gate_scope,
+        run_id,
+        gate_ref.clone(),
+        request,
+        ApprovalStatus::Pending,
+    )
+    .expect("approval gate");
+    let resolver = Arc::new(RecordingApprovalResolver::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::blocked(actor, gate_ref.clone()));
+    let service = DefaultApprovalInteractionService::new(
+        Arc::new(FakeReadModel::with_gate(gate)),
+        Arc::new(FixedLeaseTermsProvider),
+        resolver.clone(),
+        coordinator.clone(),
+    );
+    (service, resolver, coordinator, run_id, gate_ref)
+}
+
 fn approval_request(reason: &str) -> ApprovalRequest {
     ApprovalRequest {
         id: ApprovalRequestId::new(),
@@ -427,6 +625,42 @@ fn approval_request(reason: &str) -> ApprovalRequest {
         invocation_fingerprint: None,
         reason: reason.to_string(),
         reusable_scope: None,
+    }
+}
+
+/// Dispatch approval request for `demo.echo` with an explicit grantee
+/// (`requested_by`). Used by isolation tests that vary the policy grantee.
+fn approval_request_by(reason: &str, requested_by: Principal) -> ApprovalRequest {
+    let mut request = approval_request(reason);
+    request.requested_by = requested_by;
+    request
+}
+
+/// The two persistent-approval store backends every caller-level test exercises.
+/// Filesystem scope paths are part of the fix, so both must pass. `prefix`
+/// distinguishes the per-backend idempotency keys.
+fn caller_level_store_pair(prefix: &str) -> [(Arc<dyn PersistentApprovalPolicyStore>, String); 2] {
+    [
+        (
+            Arc::new(InMemoryPersistentApprovalPolicyStore::new()),
+            format!("{prefix}-in-memory"),
+        ),
+        (
+            Arc::new(
+                ironclaw_approvals::FilesystemPersistentApprovalPolicyStore::new(scoped_fs(
+                    "tenant-alpha",
+                    "user-alpha",
+                )),
+            ),
+            format!("{prefix}-filesystem"),
+        ),
+    ]
+}
+
+fn dispatch_capability(request: &ApprovalRequest) -> CapabilityId {
+    match request.action.as_ref() {
+        Action::Dispatch { capability, .. } => capability.clone(),
+        _ => panic!("test request should be dispatch"),
     }
 }
 
@@ -543,6 +777,589 @@ async fn approve_resolves_pending_gate_then_resumes_blocked_approval() {
         coordinator.last_resumption_precondition(),
         Some(ResumeTurnPrecondition::BlockedApprovalGate)
     );
+}
+
+#[tokio::test]
+async fn always_allow_resolves_gate_and_persists_reusable_policy() {
+    let request = approval_request("send the email");
+    let request_id = request.id;
+    let capability = match request.action.as_ref() {
+        Action::Dispatch { capability, .. } => capability.clone(),
+        _ => panic!("test request should be dispatch"),
+    };
+    let policy_scope = resource_scope(&actor("user-alpha"));
+    let key = PersistentApprovalPolicyKey::new(
+        &policy_scope,
+        PersistentApprovalAction::Dispatch,
+        capability,
+        Principal::User(UserId::new("user-alpha").expect("user")),
+    );
+    let (service, resolver, coordinator, run_id, gate_ref) = service_fixture_for_request(request);
+    let policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies.clone();
+    let service = service.with_persistent_policy_store(policy_store);
+
+    let response = service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: scope(),
+            actor: actor("user-alpha"),
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: ApprovalInteractionDecision::AlwaysAllow,
+            idempotency_key: IdempotencyKey::new("approve-always").expect("idempotency"),
+        })
+        .await
+        .expect("always allow");
+
+    assert!(matches!(
+        response,
+        ResolveApprovalInteractionResponse::Approved(_)
+    ));
+    assert_eq!(resolver.approval_count(), 1);
+    assert_eq!(coordinator.resumption_count(), 1);
+    let policy = policies
+        .lookup(&key)
+        .await
+        .expect("persistent policy lookup")
+        .expect("persistent policy");
+    assert_eq!(policy.source_approval_request_id, Some(request_id));
+    assert_eq!(policy.constraints.max_invocations, None);
+    assert_eq!(
+        policy.constraints.allowed_effects,
+        vec![EffectKind::DispatchCapability]
+    );
+    assert!(policy.active_grant().is_some());
+}
+
+/// Drives the real `resolve(AlwaysAllow)` path: builds a service whose pending
+/// gate carries `gate_scope` and `request`, wires `store`, and resolves with a
+/// turn scope/actor derived from `gate_scope` (so the read-model gate lookup
+/// matches). Asserts the resolution approved and resumed. The persisted policy
+/// scope is `gate_scope` and the grantee is `request.requested_by`.
+async fn drive_always_allow(
+    store: Arc<dyn PersistentApprovalPolicyStore>,
+    request: ApprovalRequest,
+    gate_scope: ResourceScope,
+    idempotency: &str,
+) {
+    let request_actor = TurnActor::new(gate_scope.user_id.clone());
+    let request_scope = TurnScope::new(
+        gate_scope.tenant_id.clone(),
+        gate_scope.agent_id.clone(),
+        gate_scope.project_id.clone(),
+        gate_scope
+            .thread_id
+            .clone()
+            .expect("gate scope must carry a thread id"),
+    );
+    let (service, resolver, coordinator, run_id, gate_ref) =
+        service_fixture_with_scope(request, gate_scope);
+    let service = service.with_persistent_policy_store(store);
+
+    let response = service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: request_scope,
+            actor: request_actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: ApprovalInteractionDecision::AlwaysAllow,
+            idempotency_key: IdempotencyKey::new(idempotency).expect("idempotency"),
+        })
+        .await
+        .expect("always allow");
+
+    assert!(matches!(
+        response,
+        ResolveApprovalInteractionResponse::Approved(_)
+    ));
+    assert_eq!(resolver.approval_count(), 1);
+    assert_eq!(coordinator.resumption_count(), 1);
+}
+
+async fn drive_spawn_always_allow(
+    store: Arc<dyn PersistentApprovalPolicyStore>,
+    request: ApprovalRequest,
+    gate_scope: ResourceScope,
+    idempotency: &str,
+) {
+    let request_actor = TurnActor::new(gate_scope.user_id.clone());
+    let request_scope = TurnScope::new(
+        gate_scope.tenant_id.clone(),
+        gate_scope.agent_id.clone(),
+        gate_scope.project_id.clone(),
+        gate_scope
+            .thread_id
+            .clone()
+            .expect("gate scope must carry a thread id"),
+    );
+    let (service, resolver, coordinator, run_id, gate_ref) =
+        service_fixture_with_scope(request, gate_scope);
+    let service = service.with_persistent_policy_store(store);
+
+    let response = service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: request_scope,
+            actor: request_actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: ApprovalInteractionDecision::AlwaysAllow,
+            idempotency_key: IdempotencyKey::new(idempotency).expect("idempotency"),
+        })
+        .await
+        .expect("always allow");
+
+    assert!(matches!(
+        response,
+        ResolveApprovalInteractionResponse::Approved(_)
+    ));
+    assert_eq!(resolver.approval_count(), 0);
+    assert_eq!(resolver.spawn_approval_count(), 1);
+    assert_eq!(coordinator.resumption_count(), 1);
+}
+
+/// Acceptance criterion 1: an "always allow" granted while resolving a gate in
+/// thread 1 (no project) is reused for the same capability in thread 2 without a
+/// gate. Covered against both InMemory and Filesystem stores because the
+/// filesystem scope path is part of the fix.
+#[tokio::test]
+async fn always_allow_grants_reuse_in_new_thread_without_project() {
+    for (store, idempotency) in caller_level_store_pair("reuse") {
+        let request = approval_request("send the email");
+        let capability = dispatch_capability(&request);
+        let thread_one = no_project_scope("user-alpha", Some("agent-a"), "thread-1");
+        drive_always_allow(Arc::clone(&store), request, thread_one, &idempotency).await;
+
+        // Look up from thread 2 (same user/agent, no project): different thread,
+        // same persistent scope key, so the grant is active.
+        let thread_two = no_project_scope("user-alpha", Some("agent-a"), "thread-2");
+        let key = PersistentApprovalPolicyKey::new(
+            &thread_two,
+            PersistentApprovalAction::Dispatch,
+            capability,
+            Principal::User(UserId::new("user-alpha").expect("user")),
+        );
+        let policy = store
+            .lookup(&key)
+            .await
+            .expect("persistent policy lookup")
+            .expect("persistent policy active in new thread");
+        assert!(policy.active_grant().is_some());
+    }
+}
+
+/// Acceptance criterion 2: a spawn-capability "always allow" is persisted as a
+/// reusable policy and can be matched again from a later thread with the same
+/// user/agent/project scope.
+#[tokio::test]
+async fn always_allow_spawn_grants_reuse_in_new_thread_without_project() {
+    for (store, idempotency) in caller_level_store_pair("spawn-reuse") {
+        let request = spawn_approval_request("start the worker");
+        let capability = match request.action.as_ref() {
+            Action::SpawnCapability { capability, .. } => capability.clone(),
+            _ => panic!("test request should be spawn"),
+        };
+        let thread_one = no_project_scope("user-alpha", Some("agent-a"), "thread-1");
+        drive_spawn_always_allow(Arc::clone(&store), request, thread_one, &idempotency).await;
+
+        let thread_two = no_project_scope("user-alpha", Some("agent-a"), "thread-2");
+        let key = PersistentApprovalPolicyKey::new(
+            &thread_two,
+            PersistentApprovalAction::SpawnCapability,
+            capability,
+            Principal::User(UserId::new("user-alpha").expect("user")),
+        );
+        let policy = store
+            .lookup(&key)
+            .await
+            .expect("persistent policy lookup")
+            .expect("persistent policy active in new thread");
+        assert!(policy.active_grant().is_some());
+    }
+}
+
+/// Acceptance criterion 4 (isolation): an "always allow" granted by user A in
+/// thread 1 must NOT authorize user B in thread 2 under the same tenant/agent.
+#[tokio::test]
+async fn always_allow_does_not_grant_other_user_in_new_thread() {
+    for (store, idempotency) in caller_level_store_pair("user-iso") {
+        let request = approval_request_by(
+            "send the email",
+            Principal::User(UserId::new("user-alpha").expect("user")),
+        );
+        let capability = dispatch_capability(&request);
+        let user_a = no_project_scope("user-alpha", Some("agent-a"), "thread-1");
+        drive_always_allow(Arc::clone(&store), request, user_a, &idempotency).await;
+
+        let user_b = no_project_scope("user-beta", Some("agent-a"), "thread-2");
+        let key = PersistentApprovalPolicyKey::new(
+            &user_b,
+            PersistentApprovalAction::Dispatch,
+            capability,
+            Principal::User(UserId::new("user-beta").expect("user")),
+        );
+        assert!(
+            store
+                .lookup(&key)
+                .await
+                .expect("persistent policy lookup")
+                .is_none(),
+            "another user must not inherit the grant"
+        );
+    }
+}
+
+/// Acceptance criterion 4 (isolation): an "always allow" granted under agent X
+/// must NOT authorize agent Y under the same tenant/user.
+#[tokio::test]
+async fn always_allow_does_not_grant_other_agent_in_new_thread() {
+    for (store, idempotency) in caller_level_store_pair("agent-iso") {
+        let request = approval_request("send the email");
+        let capability = dispatch_capability(&request);
+        let agent_x = no_project_scope("user-alpha", Some("agent-x"), "thread-1");
+        drive_always_allow(Arc::clone(&store), request, agent_x, &idempotency).await;
+
+        let agent_y = no_project_scope("user-alpha", Some("agent-y"), "thread-2");
+        let key = PersistentApprovalPolicyKey::new(
+            &agent_y,
+            PersistentApprovalAction::Dispatch,
+            capability,
+            Principal::User(UserId::new("user-alpha").expect("user")),
+        );
+        assert!(
+            store
+                .lookup(&key)
+                .await
+                .expect("persistent policy lookup")
+                .is_none(),
+            "another agent must not inherit the grant"
+        );
+    }
+}
+
+/// Acceptance criterion 4 (isolation): the policy key includes the grantee, so an
+/// approval for extension X must not match a lookup for extension Y requesting
+/// the same capability under the same scope.
+#[tokio::test]
+async fn always_allow_does_not_grant_other_extension_grantee() {
+    for (store, idempotency) in caller_level_store_pair("ext-iso") {
+        let extension_x = ironclaw_host_api::ExtensionId::new("extension-x").expect("extension");
+        let request =
+            approval_request_by("send the email", Principal::Extension(extension_x.clone()));
+        let capability = dispatch_capability(&request);
+        let gate_scope = no_project_scope("user-alpha", Some("agent-a"), "thread-1");
+        drive_always_allow(Arc::clone(&store), request, gate_scope, &idempotency).await;
+
+        // Same scope, same capability, but a different extension grantee.
+        let lookup_scope = no_project_scope("user-alpha", Some("agent-a"), "thread-2");
+        let extension_y = ironclaw_host_api::ExtensionId::new("extension-y").expect("extension");
+        let key = PersistentApprovalPolicyKey::new(
+            &lookup_scope,
+            PersistentApprovalAction::Dispatch,
+            capability.clone(),
+            Principal::Extension(extension_y),
+        );
+        assert!(
+            store
+                .lookup(&key)
+                .await
+                .expect("persistent policy lookup")
+                .is_none(),
+            "another extension grantee must not match"
+        );
+
+        // Sanity: the granting extension X DOES match (thread-agnostic reuse).
+        let key_x = PersistentApprovalPolicyKey::new(
+            &lookup_scope,
+            PersistentApprovalAction::Dispatch,
+            capability,
+            Principal::Extension(extension_x),
+        );
+        let policy = store
+            .lookup(&key_x)
+            .await
+            .expect("persistent policy lookup")
+            .expect("granting extension active in new thread");
+        assert!(policy.active_grant().is_some());
+    }
+}
+
+#[tokio::test]
+async fn always_allow_without_policy_store_rejects_before_approval_side_effects() {
+    let (service, resolver, coordinator, run_id, gate_ref) = service_fixture("send the email");
+
+    let err = service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: scope(),
+            actor: actor("user-alpha"),
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: ApprovalInteractionDecision::AlwaysAllow,
+            idempotency_key: IdempotencyKey::new("approve-always-no-store").expect("idempotency"),
+        })
+        .await
+        .expect_err("always allow without store");
+
+    assert!(matches!(
+        err,
+        ironclaw_product_workflow::ProductWorkflowError::ApprovalInteractionRejected {
+            kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported
+        }
+    ));
+    assert_eq!(resolver.approval_count(), 0);
+    assert_eq!(resolver.spawn_approval_count(), 0);
+    assert_eq!(coordinator.resumption_count(), 0);
+}
+
+#[tokio::test]
+async fn always_allow_policy_write_failure_still_returns_approved_after_resume() {
+    let (service, resolver, coordinator, run_id, gate_ref) = service_fixture("send the email");
+    let policy_store: Arc<dyn PersistentApprovalPolicyStore> =
+        Arc::new(FailingPersistentApprovalPolicyStore);
+    let service = service.with_persistent_policy_store(policy_store);
+
+    let response = service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: scope(),
+            actor: actor("user-alpha"),
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: ApprovalInteractionDecision::AlwaysAllow,
+            idempotency_key: IdempotencyKey::new("approve-always-store-fails")
+                .expect("idempotency"),
+        })
+        .await
+        .expect("always allow best-effort persistence");
+
+    assert!(matches!(
+        response,
+        ResolveApprovalInteractionResponse::Approved(_)
+    ));
+    assert_eq!(resolver.approval_count(), 1);
+    assert_eq!(coordinator.resumption_count(), 1);
+}
+
+#[tokio::test]
+async fn always_allow_disallowed_by_policy_rejects_without_persisting_or_approving() {
+    let request = approval_request("send the email");
+    let capability = match request.action.as_ref() {
+        Action::Dispatch { capability, .. } => capability.clone(),
+        _ => panic!("test request should be dispatch"),
+    };
+    let policy_scope = resource_scope(&actor("user-alpha"));
+    let key = PersistentApprovalPolicyKey::new(
+        &policy_scope,
+        PersistentApprovalAction::Dispatch,
+        capability,
+        Principal::User(UserId::new("user-alpha").expect("user")),
+    );
+    let actor = actor("user-alpha");
+    let gate_ref = approval_gate_ref(request.id).expect("gate ref");
+    let run_id = TurnRunId::new();
+    let gate = ApprovalGateRecord::with_status(
+        resource_scope(&actor),
+        run_id,
+        gate_ref.clone(),
+        request,
+        ApprovalStatus::Pending,
+    )
+    .expect("approval gate");
+    let resolver = Arc::new(RecordingApprovalResolver::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::blocked(
+        actor.clone(),
+        gate_ref.clone(),
+    ));
+    let policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies.clone();
+    let service = DefaultApprovalInteractionService::new(
+        Arc::new(FakeReadModel::with_gate(gate)),
+        Arc::new(RejectingPersistentLeaseTermsProvider),
+        resolver.clone(),
+        coordinator.clone(),
+    )
+    .with_persistent_policy_store(policy_store);
+
+    let err = service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: scope(),
+            actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: ApprovalInteractionDecision::AlwaysAllow,
+            idempotency_key: IdempotencyKey::new("approve-always-disallowed").expect("idempotency"),
+        })
+        .await
+        .expect_err("always allow disallowed by policy");
+
+    assert!(matches!(
+        err,
+        ironclaw_product_workflow::ProductWorkflowError::ApprovalInteractionRejected {
+            kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported
+        }
+    ));
+    assert_eq!(resolver.approval_count(), 0);
+    assert_eq!(resolver.spawn_approval_count(), 0);
+    assert_eq!(coordinator.resumption_count(), 0);
+    assert!(
+        policies
+            .lookup(&key)
+            .await
+            .expect("persistent policy lookup")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn always_allow_does_not_persist_policy_when_resolution_fails() {
+    let request = approval_request("send the email");
+    let capability = match request.action.as_ref() {
+        Action::Dispatch { capability, .. } => capability.clone(),
+        _ => panic!("test request should be dispatch"),
+    };
+    let actor = actor("user-alpha");
+    let policy_scope = resource_scope(&actor);
+    let key = PersistentApprovalPolicyKey::new(
+        &policy_scope,
+        PersistentApprovalAction::Dispatch,
+        capability,
+        Principal::User(UserId::new("user-alpha").expect("user")),
+    );
+    let gate_ref = approval_gate_ref(request.id).expect("gate ref");
+    let run_id = TurnRunId::new();
+    let gate = ApprovalGateRecord::with_status(
+        policy_scope,
+        run_id,
+        gate_ref.clone(),
+        request,
+        ApprovalStatus::Pending,
+    )
+    .expect("approval gate");
+    let coordinator = Arc::new(FakeTurnCoordinator::blocked(
+        actor.clone(),
+        gate_ref.clone(),
+    ));
+    let policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies.clone();
+    let service = DefaultApprovalInteractionService::new(
+        Arc::new(FakeReadModel::with_gate(gate)),
+        Arc::new(FixedLeaseTermsProvider),
+        Arc::new(FailingApprovalResolver),
+        coordinator.clone(),
+    )
+    .with_persistent_policy_store(policy_store);
+
+    let err = service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: scope(),
+            actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: ApprovalInteractionDecision::AlwaysAllow,
+            idempotency_key: IdempotencyKey::new("approve-always-resolution-fails")
+                .expect("idempotency"),
+        })
+        .await
+        .expect_err("resolver failure");
+
+    assert!(matches!(
+        err,
+        ironclaw_product_workflow::ProductWorkflowError::Transient { .. }
+    ));
+    assert_eq!(coordinator.resumption_count(), 0);
+    assert!(
+        policies
+            .lookup(&key)
+            .await
+            .expect("persistent policy lookup")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn always_allow_resolution_failure_preserves_existing_policy() {
+    let request = approval_request("send the email");
+    let capability = match request.action.as_ref() {
+        Action::Dispatch { capability, .. } => capability.clone(),
+        _ => panic!("test request should be dispatch"),
+    };
+    let actor = actor("user-alpha");
+    let policy_scope = resource_scope(&actor);
+    let key = PersistentApprovalPolicyKey::new(
+        &policy_scope,
+        PersistentApprovalAction::Dispatch,
+        capability,
+        Principal::User(UserId::new("user-alpha").expect("user")),
+    );
+    let gate_ref = approval_gate_ref(request.id).expect("gate ref");
+    let run_id = TurnRunId::new();
+    let gate = ApprovalGateRecord::with_status(
+        policy_scope,
+        run_id,
+        gate_ref.clone(),
+        request,
+        ApprovalStatus::Pending,
+    )
+    .expect("approval gate");
+    let coordinator = Arc::new(FakeTurnCoordinator::blocked(
+        actor.clone(),
+        gate_ref.clone(),
+    ));
+    let policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+    let existing_source = ApprovalRequestId::new();
+    policies
+        .allow(PersistentApprovalPolicyInput {
+            scope: resource_scope(&actor),
+            action: PersistentApprovalAction::Dispatch,
+            capability_id: CapabilityId::new("demo.echo").expect("capability"),
+            grantee: Principal::User(UserId::new("user-alpha").expect("user")),
+            approved_by: Principal::User(UserId::new("user-alpha").expect("user")),
+            constraints: ironclaw_host_api::GrantConstraints {
+                allowed_effects: vec![EffectKind::DispatchCapability],
+                mounts: MountView::default(),
+                network: NetworkPolicy::default(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
+                expires_at: None,
+                max_invocations: None,
+            },
+            source_approval_request_id: Some(existing_source),
+        })
+        .await
+        .expect("seed existing policy");
+    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies.clone();
+    let service = DefaultApprovalInteractionService::new(
+        Arc::new(FakeReadModel::with_gate(gate)),
+        Arc::new(FixedLeaseTermsProvider),
+        Arc::new(FailingApprovalResolver),
+        coordinator.clone(),
+    )
+    .with_persistent_policy_store(policy_store);
+
+    let err = service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: scope(),
+            actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: ApprovalInteractionDecision::AlwaysAllow,
+            idempotency_key: IdempotencyKey::new("approve-always-newer-policy")
+                .expect("idempotency"),
+        })
+        .await
+        .expect_err("resolver failure");
+
+    assert!(matches!(
+        err,
+        ironclaw_product_workflow::ProductWorkflowError::Transient { .. }
+    ));
+    assert_eq!(coordinator.resumption_count(), 0);
+    let policy = policies
+        .lookup(&key)
+        .await
+        .expect("persistent policy lookup")
+        .expect("existing persistent policy");
+    assert_eq!(policy.source_approval_request_id, Some(existing_source));
+    assert!(policy.revoked_at.is_none());
+    assert!(policy.active_grant().is_some());
 }
 
 #[tokio::test]
@@ -670,6 +1487,57 @@ async fn already_approved_replay_reaches_turn_coordinator_when_run_is_not_parked
     ));
     assert_eq!(resolver.dispatch_lease_retry_count(), 0);
     assert_eq!(coordinator.resumption_count(), 1);
+}
+
+#[tokio::test]
+async fn already_approved_always_allow_replay_rejects_without_persisting_policy() {
+    let request = approval_request("send the email");
+    let capability = match request.action.as_ref() {
+        Action::Dispatch { capability, .. } => capability.clone(),
+        _ => panic!("test request should be dispatch"),
+    };
+    let policy_scope = resource_scope(&actor("user-alpha"));
+    let key = PersistentApprovalPolicyKey::new(
+        &policy_scope,
+        PersistentApprovalAction::Dispatch,
+        capability,
+        Principal::User(UserId::new("user-alpha").expect("user")),
+    );
+    let (service, resolver, coordinator, run_id, gate_ref) =
+        service_fixture_for_request_status(request, ApprovalStatus::Approved);
+    coordinator.set_status(TurnStatus::Queued);
+    let policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies.clone();
+    let service = service.with_persistent_policy_store(policy_store);
+
+    let err = service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: scope(),
+            actor: actor("user-alpha"),
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: ApprovalInteractionDecision::AlwaysAllow,
+            idempotency_key: IdempotencyKey::new("replay-approved-always").expect("idempotency"),
+        })
+        .await
+        .expect_err("replay approved always allow");
+
+    assert!(matches!(
+        err,
+        ironclaw_product_workflow::ProductWorkflowError::ApprovalInteractionRejected {
+            kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported
+        }
+    ));
+    assert_eq!(resolver.approval_count(), 0);
+    assert_eq!(resolver.dispatch_lease_retry_count(), 0);
+    assert_eq!(coordinator.resumption_count(), 0);
+    assert!(
+        policies
+            .lookup(&key)
+            .await
+            .expect("persistent policy lookup")
+            .is_none()
+    );
 }
 
 #[tokio::test]

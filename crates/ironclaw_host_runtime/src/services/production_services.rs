@@ -63,6 +63,11 @@ where
         );
         self.push_missing(
             &mut issues,
+            ProductionWiringComponent::PersistentApprovalPolicies,
+            self.persistent_approval_policies.is_some(),
+        );
+        self.push_missing(
+            &mut issues,
             ProductionWiringComponent::TurnState,
             self.turn_state.is_some(),
         );
@@ -265,6 +270,11 @@ where
             &mut issues,
             ProductionWiringComponent::CapabilityLeases,
             self.component_types.capability_leases,
+        );
+        self.push_local_only(
+            &mut issues,
+            ProductionWiringComponent::PersistentApprovalPolicies,
+            self.component_types.persistent_approval_policies,
         );
         self.push_local_only(
             &mut issues,

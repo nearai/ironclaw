@@ -43,26 +43,33 @@ impl<T: Clone + Eq, const N: usize> BoundedRing<T, N> {
     }
 
     pub fn most_common_count_in(&self, window: usize) -> usize {
+        self.most_common_in(window)
+            .map(|(_, count)| count)
+            .unwrap_or_default()
+    }
+
+    pub fn most_common_in(&self, window: usize) -> Option<(T, usize)> {
         if window == 0 || self.items.is_empty() {
-            return 0;
+            return None;
         }
         let window = window.min(self.items.len());
         let mut most_common = 0;
-        for (index, item) in self
-            .items
-            .iter()
-            .skip(self.items.len() - window)
-            .enumerate()
-        {
+        let mut most_common_item = None;
+        let window_start = self.items.len() - window;
+        for (index, item) in self.items.iter().skip(window_start).enumerate() {
             let count = self
                 .items
                 .iter()
-                .skip(self.items.len() - window + index)
+                .skip(window_start + index)
+                .take(window - index)
                 .filter(|candidate| *candidate == item)
                 .count();
-            most_common = most_common.max(count);
+            if count > most_common {
+                most_common = count;
+                most_common_item = Some(item.clone());
+            }
         }
-        most_common
+        most_common_item.map(|item| (item, most_common))
     }
 
     pub fn same_run_length(&self) -> usize {
@@ -243,5 +250,27 @@ mod tests {
         let ring = serde_json::from_str::<BoundedRing<u32, 2>>(r#"{"items":[1]}"#).unwrap();
 
         assert_eq!(ring.iter().copied().collect::<Vec<_>>(), vec![1]);
+    }
+
+    #[test]
+    fn most_common_in_counts_only_the_requested_window() {
+        let mut ring = BoundedRing::<u32, 8>::new();
+        for value in [1, 1, 1, 2, 2] {
+            ring.push(value);
+        }
+
+        assert_eq!(ring.most_common_in(2), Some((2, 2)));
+        assert_eq!(ring.most_common_in(3), Some((2, 2)));
+        assert_eq!(ring.most_common_in(5), Some((1, 3)));
+    }
+
+    #[test]
+    fn most_common_in_handles_empty_and_zero_windows() {
+        let mut ring = BoundedRing::<u32, 4>::new();
+        assert_eq!(ring.most_common_in(1), None);
+
+        ring.push(7);
+
+        assert_eq!(ring.most_common_in(0), None);
     }
 }

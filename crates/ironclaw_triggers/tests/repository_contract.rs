@@ -1,7 +1,7 @@
 #![cfg(any(feature = "libsql", feature = "postgres"))]
 
 use chrono::{TimeZone, Utc};
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
 use ironclaw_triggers::{
     ActiveTriggerScanCursor, ClearActiveFireRequest, InMemoryTriggerRepository,
     TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
@@ -881,6 +881,7 @@ async fn assert_rejects_validation_failures_before_persistence(repo: &impl Trigg
     let mut schedule_error = sample_record(trigger_id, tenant_id, next_run_at);
     schedule_error.schedule = TriggerSchedule::Cron {
         expression: "*/30 * * * * *".to_string(),
+        timezone: "UTC".to_string(),
     };
     assert!(matches!(
         repo.upsert_trigger(schedule_error).await,
@@ -1320,12 +1321,178 @@ async fn clear_postgres_triggers(pool: &deadpool_postgres::Pool) {
         .expect("clear trigger records");
 }
 
+// ---------------------------------------------------------------------------
+// Timezone round-trip parity (Comment 3a)
+// ---------------------------------------------------------------------------
+
+async fn assert_round_trip_preserves_named_timezone(repo: &impl TriggerRepository) {
+    let trigger_id = TriggerId::parse("01J00000000000000000000099").expect("ulid");
+    let tenant_id = tenant("tenant-tz");
+    let next_run_at = ts(1_704_067_200);
+
+    let mut record = sample_record(trigger_id, tenant_id.clone(), next_run_at);
+    record.schedule =
+        TriggerSchedule::cron_with_timezone("0 9 * * *", "America/New_York").expect("valid tz");
+
+    repo.upsert_trigger(record.clone())
+        .await
+        .expect("insert record with named timezone");
+
+    let fetched = repo
+        .get_trigger(tenant_id, trigger_id)
+        .await
+        .expect("get trigger")
+        .expect("record present");
+
+    assert_eq!(
+        fetched.schedule, record.schedule,
+        "named timezone must survive a full round-trip"
+    );
+    match &fetched.schedule {
+        TriggerSchedule::Cron { timezone, .. } => {
+            assert_eq!(
+                timezone, "America/New_York",
+                "timezone must be preserved verbatim"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_timezone_round_trip() {
+    let (_dir, repo) = build_libsql_repo().await;
+    assert_round_trip_preserves_named_timezone(&repo).await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_timezone_round_trip() {
+    let Some((_container, pool)) = postgres_pool_or_skip().await else {
+        return;
+    };
+    let repo = PostgresTriggerRepository::new(pool.clone());
+    repo.run_migrations().await.expect("run migrations");
+    assert_round_trip_preserves_named_timezone(&repo).await;
+}
+
+// ---------------------------------------------------------------------------
+// Migration regression: legacy row without schedule_timezone gets "UTC" (Comment 3b)
+//
+// Simulates a pre-migration table that lacks the schedule_timezone column.
+// The libsql migration adds the column via ALTER TABLE ... ADD COLUMN with a
+// NOT NULL DEFAULT 'UTC' — so any row inserted before the migration exists
+// must read back with timezone == "UTC" after migration runs.
+//
+// Postgres already uses ADD COLUMN IF NOT EXISTS (idempotent SQL) and the
+// NOT NULL DEFAULT 'UTC' fills existing rows identically; we cover it via the
+// postgres_timezone_round_trip test above (which seeds through upsert_trigger,
+// not a pre-migration raw insert, so it tests the migration-complete state).
+// A true pre-migration raw-insert scenario would require running without
+// run_migrations first, which the postgres harness does not support without
+// a separate DDL setup step; that coverage is deferred. See comment below.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_utc_backfill_on_legacy_row_without_schedule_timezone() {
+    // Build the database without the schedule_timezone column — simulate the
+    // schema state before the migration that adds it.
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("triggers-legacy.db");
+    let db = Arc::new(
+        libsql::Builder::new_local(db_path.display().to_string())
+            .build()
+            .await
+            .expect("build libsql db"),
+    );
+
+    // Create the table WITHOUT schedule_timezone (pre-migration schema).
+    let conn = db.connect().expect("raw libsql connect for schema setup");
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS trigger_records (
+            trigger_id TEXT NOT NULL,
+            tenant_id TEXT NOT NULL,
+            creator_user_id TEXT NOT NULL,
+            agent_id TEXT,
+            project_id TEXT,
+            name TEXT NOT NULL,
+            source TEXT NOT NULL,
+            schedule_expression TEXT NOT NULL,
+            completion_policy TEXT NOT NULL,
+            prompt TEXT NOT NULL,
+            state TEXT NOT NULL,
+            next_run_at TEXT NOT NULL,
+            last_run_at TEXT,
+            last_fired_slot TEXT,
+            last_status TEXT,
+            active_fire_slot TEXT,
+            active_run_ref TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, trigger_id)
+        )",
+        (),
+    )
+    .await
+    .expect("create pre-migration table");
+
+    // Insert a legacy row that has no schedule_timezone column value.
+    conn.execute(
+        "INSERT INTO trigger_records (
+            trigger_id, tenant_id, creator_user_id, name, source,
+            schedule_expression, completion_policy, prompt, state,
+            next_run_at, created_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            "01J00000000000000000000098",
+            "tenant-migration",
+            "user-a",
+            "legacy trigger",
+            "schedule",
+            "0 8 * * *",
+            "recurring",
+            "daily task",
+            "scheduled",
+            "2024-01-01T00:00:00Z",
+            "2024-01-01T00:00:00Z",
+        ],
+    )
+    .await
+    .expect("insert legacy row without schedule_timezone");
+
+    // Run migrations — this adds schedule_timezone NOT NULL DEFAULT 'UTC',
+    // which backfills the existing row with "UTC".
+    let repo = LibSqlTriggerRepository::new(db);
+    repo.run_migrations()
+        .await
+        .expect("migration must succeed on pre-existing table");
+
+    // Read back the legacy row and assert timezone was backfilled to "UTC".
+    let trigger_id = TriggerId::parse("01J00000000000000000000098").expect("ulid");
+    let tenant_id = TenantId::new("tenant-migration").expect("valid tenant");
+    let fetched = repo
+        .get_trigger(tenant_id, trigger_id)
+        .await
+        .expect("get trigger after migration")
+        .expect("legacy row must be readable after migration");
+
+    match &fetched.schedule {
+        TriggerSchedule::Cron { timezone, .. } => {
+            assert_eq!(
+                timezone, "UTC",
+                "legacy row without schedule_timezone must read back as UTC after migration"
+            );
+        }
+    }
+}
+
 mod fire_claim_contract {
     use super::*;
 
     use ironclaw_triggers::{
         ClaimDueFireOutcome, ClaimDueFireRequest, FireAcceptedRequest, FirePermanentFailedRequest,
         FireReplayedRequest, FireRetryableFailedRequest, FireTerminalFailedRequest,
+        TriggerRunHistoryStatus,
     };
 
     async fn assert_fire_claim_and_update_contract(repo: &impl TriggerRepository) {
@@ -1376,6 +1543,8 @@ mod fire_claim_contract {
                 trigger_id,
                 fire_slot,
                 run_id: accepted_run_id,
+                thread_id: ThreadId::new("01890f0f-aa01-7000-8000-000000000001")
+                    .expect("valid thread id"),
                 submitted_at: accepted_at,
                 next_run_at: expected_next_run_at,
             })
@@ -1395,6 +1564,8 @@ mod fire_claim_contract {
                 trigger_id,
                 fire_slot,
                 run_id: accepted_run_id,
+                thread_id: ThreadId::new("01890f0f-aa01-7000-8000-000000000001")
+                    .expect("valid thread id"),
                 submitted_at: ts(1_704_067_206),
                 next_run_at: expected_next_run_at,
             })
@@ -1411,6 +1582,8 @@ mod fire_claim_contract {
                 trigger_id,
                 fire_slot,
                 run_id: different_accepted_run_id,
+                thread_id: ThreadId::new("01890f0f-aa01-7000-8000-000000000002")
+                    .expect("valid thread id"),
                 submitted_at: accepted_at,
                 next_run_at: expected_next_run_at,
             })
@@ -1454,6 +1627,7 @@ mod fire_claim_contract {
                 trigger_id: replayed_trigger_id,
                 fire_slot,
                 original_run_id: replayed_run_id,
+                thread_id: None,
                 replayed_at: accepted_at,
                 next_run_at: expected_next_run_at,
             })
@@ -1473,6 +1647,7 @@ mod fire_claim_contract {
                 trigger_id: replayed_trigger_id,
                 fire_slot,
                 original_run_id: replayed_run_id,
+                thread_id: None,
                 replayed_at: ts(1_704_067_207),
                 next_run_at: expected_next_run_at,
             })
@@ -1489,6 +1664,7 @@ mod fire_claim_contract {
                 trigger_id: replayed_trigger_id,
                 fire_slot,
                 original_run_id: different_replayed_run_id,
+                thread_id: None,
                 replayed_at: accepted_at,
                 next_run_at: expected_next_run_at,
             })
@@ -1671,6 +1847,8 @@ mod fire_claim_contract {
                 fire_slot: stale_fire_slot,
                 run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f62")
                     .expect("valid run"),
+                thread_id: ThreadId::new("01890f0f-bb01-7000-8000-000000000001")
+                    .expect("valid thread id"),
                 submitted_at: fire_slot,
                 next_run_at: ts(1_704_067_260),
             })
@@ -1704,6 +1882,7 @@ mod fire_claim_contract {
                 fire_slot: stale_fire_slot,
                 original_run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f63")
                     .expect("valid run"),
+                thread_id: None,
                 replayed_at: fire_slot,
                 next_run_at: ts(1_704_067_260),
             })
@@ -1821,6 +2000,8 @@ mod fire_claim_contract {
                 fire_slot,
                 run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f60")
                     .expect("valid run"),
+                thread_id: ThreadId::new("01890f0f-cc01-7000-8000-000000000001")
+                    .expect("valid thread id"),
                 submitted_at: fire_slot,
                 next_run_at: fire_slot,
             })
@@ -1843,6 +2024,7 @@ mod fire_claim_contract {
                 fire_slot,
                 original_run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f61")
                     .expect("valid run"),
+                thread_id: None,
                 replayed_at: fire_slot,
                 next_run_at: fire_slot,
             })
@@ -1908,6 +2090,7 @@ mod fire_claim_contract {
                 fire_slot,
                 run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f67")
                     .expect("valid run"),
+                status: TriggerRunHistoryStatus::Ok,
             })
             .await
             .expect("clear with wrong run ref");
@@ -1928,6 +2111,7 @@ mod fire_claim_contract {
                 trigger_id,
                 fire_slot: fire_slot + chrono::Duration::minutes(1),
                 run_id,
+                status: TriggerRunHistoryStatus::Ok,
             })
             .await
             .expect("clear with wrong fire slot");
@@ -1948,6 +2132,7 @@ mod fire_claim_contract {
                 trigger_id,
                 fire_slot,
                 run_id,
+                status: TriggerRunHistoryStatus::Ok,
             })
             .await
             .expect("clear with wrong tenant");
@@ -1968,6 +2153,7 @@ mod fire_claim_contract {
                 trigger_id,
                 fire_slot,
                 run_id,
+                status: TriggerRunHistoryStatus::Ok,
             })
             .await
             .expect("clear active fire")
@@ -2341,6 +2527,8 @@ mod fire_claim_contract {
             trigger_id,
             fire_slot,
             run_id,
+            thread_id: ThreadId::new("01890f0f-dd01-7000-8000-000000000001")
+                .expect("valid thread id"),
             submitted_at: accepted_at,
             next_run_at,
         };
@@ -2414,6 +2602,7 @@ mod fire_claim_contract {
             trigger_id,
             fire_slot,
             original_run_id,
+            thread_id: None,
             replayed_at,
             next_run_at,
         };
@@ -2491,6 +2680,470 @@ mod fire_claim_contract {
         assert_fire_claim_exclusions_and_active_gate_contract(repo).await;
         assert_fire_result_rejects_invalid_next_run_at(repo).await;
         assert_fire_clear_contract(repo).await;
+        assert_run_history_lifecycle_contract(repo).await;
+        assert_run_history_retention_contract(repo).await;
+    }
+
+    async fn assert_run_history_lifecycle_contract(repo: &impl TriggerRepository) {
+        let trigger_id = TriggerId::parse("01J00000000000000000000030").expect("ulid");
+        let tenant_id = tenant("tenant-run-history");
+        let fire_slot = ts(1_704_067_200);
+        let claim_now = ts(1_704_067_203);
+        let submitted_at = ts(1_704_067_205);
+        let record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
+        let expected_next_run_at = record
+            .schedule
+            .next_slot_after(fire_slot)
+            .expect("next slot calculation")
+            .expect("future slot");
+        repo.upsert_trigger(record).await.expect("insert record");
+
+        let claimed = repo
+            .claim_due_fire(ClaimDueFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                now: claim_now,
+            })
+            .await
+            .expect("claim fire");
+        assert!(matches!(claimed, ClaimDueFireOutcome::Claimed(_)));
+
+        let runs = repo
+            .list_trigger_run_history(tenant_id.clone(), trigger_id, 10)
+            .await
+            .expect("list claimed run history");
+        assert_eq!(runs.len(), 1);
+        // Pre-acceptance: thread_id is None — no canonical thread exists yet.
+        assert_eq!(runs[0].tenant_id, tenant_id);
+        assert_eq!(runs[0].trigger_id, trigger_id);
+        assert_eq!(runs[0].fire_slot, fire_slot);
+        assert_eq!(runs[0].run_id, None);
+        assert_eq!(
+            runs[0].thread_id, None,
+            "claim-time run must have no canonical thread"
+        );
+        assert_eq!(runs[0].status, TriggerRunHistoryStatus::Running);
+        assert_eq!(runs[0].submitted_at, claim_now);
+        assert_eq!(runs[0].completed_at, None);
+
+        let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f80").expect("valid run");
+        let canonical_thread_id =
+            ThreadId::new("01890f0f-c000-7000-8000-000000000001").expect("valid thread id");
+        repo.mark_fire_accepted(FireAcceptedRequest {
+            tenant_id: tenant_id.clone(),
+            trigger_id,
+            fire_slot,
+            run_id,
+            thread_id: canonical_thread_id.clone(),
+            submitted_at,
+            next_run_at: expected_next_run_at,
+        })
+        .await
+        .expect("mark accepted")
+        .expect("accepted fire should persist");
+
+        let runs = repo
+            .list_trigger_run_history(tenant_id.clone(), trigger_id, 10)
+            .await
+            .expect("list accepted run history");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run_id, Some(run_id));
+        assert_eq!(runs[0].status, TriggerRunHistoryStatus::Running);
+        assert_eq!(runs[0].submitted_at, submitted_at);
+        assert_eq!(runs[0].completed_at, None);
+        // After acceptance, thread_id must be Some(canonical UUID).
+        assert_eq!(
+            runs[0].thread_id,
+            Some(canonical_thread_id.clone()),
+            "thread_id must be set to the canonical UUID at fire acceptance"
+        );
+
+        repo.clear_active_fire(ClearActiveFireRequest {
+            tenant_id: tenant_id.clone(),
+            trigger_id,
+            fire_slot,
+            run_id,
+            status: TriggerRunHistoryStatus::Ok,
+        })
+        .await
+        .expect("clear active fire")
+        .expect("active fire should clear");
+
+        let runs = repo
+            .list_trigger_run_history(tenant_id.clone(), trigger_id, 10)
+            .await
+            .expect("list cleared run history");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run_id, Some(run_id));
+        assert_eq!(runs[0].status, TriggerRunHistoryStatus::Ok);
+        assert_eq!(runs[0].submitted_at, submitted_at);
+        assert!(runs[0].completed_at.is_some());
+
+        let empty_runs = repo
+            .list_trigger_run_history(tenant_id.clone(), trigger_id, 0)
+            .await
+            .expect("zero limit returns empty run history");
+        assert!(empty_runs.is_empty());
+
+        let second_fire_slot = expected_next_run_at;
+        let second_claim_now = second_fire_slot + chrono::Duration::seconds(3);
+        let second_submitted_at = second_fire_slot + chrono::Duration::seconds(5);
+        let second_run_id =
+            TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f81").expect("valid run");
+        let second_next_run_at = second_fire_slot + chrono::Duration::days(1);
+        let second_claimed = repo
+            .claim_due_fire(ClaimDueFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot: second_fire_slot,
+                now: second_claim_now,
+            })
+            .await
+            .expect("claim second fire");
+        assert!(matches!(second_claimed, ClaimDueFireOutcome::Claimed(_)));
+        repo.mark_fire_accepted(FireAcceptedRequest {
+            tenant_id: tenant_id.clone(),
+            trigger_id,
+            fire_slot: second_fire_slot,
+            run_id: second_run_id,
+            thread_id: ThreadId::new("01890f0f-c000-7000-8000-000000000002")
+                .expect("valid thread id"),
+            submitted_at: second_submitted_at,
+            next_run_at: second_next_run_at,
+        })
+        .await
+        .expect("mark second fire accepted")
+        .expect("second accepted fire should persist");
+
+        let newest_limited_runs = repo
+            .list_trigger_run_history(tenant_id.clone(), trigger_id, 1)
+            .await
+            .expect("list bounded run history");
+        assert_eq!(newest_limited_runs.len(), 1);
+        assert_eq!(newest_limited_runs[0].fire_slot, second_fire_slot);
+        assert_eq!(newest_limited_runs[0].run_id, Some(second_run_id));
+        assert_eq!(
+            newest_limited_runs[0].status,
+            TriggerRunHistoryStatus::Running
+        );
+
+        let other_trigger_id = TriggerId::parse("01J00000000000000000000032").expect("ulid");
+        let batch_runs = repo
+            .list_trigger_run_history_batch(tenant_id.clone(), &[trigger_id, other_trigger_id], 1)
+            .await
+            .expect("list batched run history");
+        assert_eq!(
+            batch_runs
+                .get(&trigger_id)
+                .expect("trigger history present")[0]
+                .fire_slot,
+            second_fire_slot
+        );
+        assert!(
+            batch_runs
+                .get(&other_trigger_id)
+                .map(Vec::is_empty)
+                .unwrap_or(true)
+        );
+
+        let other_trigger_runs = repo
+            .list_trigger_run_history(tenant_id.clone(), other_trigger_id, 10)
+            .await
+            .expect("list other trigger history");
+        assert!(other_trigger_runs.is_empty());
+
+        let other_tenant_runs = repo
+            .list_trigger_run_history(tenant("tenant-run-history-other"), trigger_id, 10)
+            .await
+            .expect("list other tenant history");
+        assert!(other_tenant_runs.is_empty());
+
+        let failed_trigger_id = TriggerId::parse("01J00000000000000000000031").expect("ulid");
+        let failed_tenant_id = tenant("tenant-run-history-failed");
+        repo.upsert_trigger(sample_record(
+            failed_trigger_id,
+            failed_tenant_id.clone(),
+            fire_slot,
+        ))
+        .await
+        .expect("insert failed record");
+        let failed_claim = repo
+            .claim_due_fire(ClaimDueFireRequest {
+                tenant_id: failed_tenant_id.clone(),
+                trigger_id: failed_trigger_id,
+                fire_slot,
+                now: claim_now,
+            })
+            .await
+            .expect("claim failed fire");
+        assert!(matches!(failed_claim, ClaimDueFireOutcome::Claimed(_)));
+
+        repo.mark_fire_terminally_failed(FireTerminalFailedRequest {
+            tenant_id: failed_tenant_id.clone(),
+            trigger_id: failed_trigger_id,
+            fire_slot,
+        })
+        .await
+        .expect("mark terminal failure")
+        .expect("terminal failure should persist");
+
+        let runs = repo
+            .list_trigger_run_history(failed_tenant_id, failed_trigger_id, 10)
+            .await
+            .expect("list failed run history");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run_id, None);
+        assert_eq!(runs[0].status, TriggerRunHistoryStatus::Error);
+        assert!(runs[0].completed_at.is_some());
+
+        let missing_history_trigger_id =
+            TriggerId::parse("01J00000000000000000000034").expect("ulid");
+        let missing_history_tenant_id = tenant("tenant-run-history-missing-running-row");
+        let missing_history_fire_slot = ts(1_704_067_300);
+        let missing_history_run_id =
+            TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f82").expect("valid run");
+        let mut missing_history_record = sample_record(
+            missing_history_trigger_id,
+            missing_history_tenant_id.clone(),
+            missing_history_fire_slot,
+        );
+        missing_history_record.active_fire_slot = Some(missing_history_fire_slot);
+        missing_history_record.active_run_ref = Some(missing_history_run_id);
+        repo.upsert_trigger(missing_history_record)
+            .await
+            .expect("insert active record without run history row");
+
+        repo.clear_active_fire(ClearActiveFireRequest {
+            tenant_id: missing_history_tenant_id.clone(),
+            trigger_id: missing_history_trigger_id,
+            fire_slot: missing_history_fire_slot,
+            run_id: missing_history_run_id,
+            status: TriggerRunHistoryStatus::Ok,
+        })
+        .await
+        .expect("clear active fire without running history row")
+        .expect("active fire should clear");
+
+        let runs = repo
+            .list_trigger_run_history(missing_history_tenant_id, missing_history_trigger_id, 10)
+            .await
+            .expect("list inserted completion run history");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run_id, Some(missing_history_run_id));
+        assert_eq!(runs[0].status, TriggerRunHistoryStatus::Ok);
+        assert_eq!(
+            runs[0].submitted_at,
+            runs[0].completed_at.expect("completion timestamp"),
+            "completion-only run-history rows must use completed_at as fallback submitted_at"
+        );
+
+        // Replay thread-id semantics: a replay carrying the canonical thread id
+        // persists it, and a later replay WITHOUT a resolved scope must not
+        // clobber the stored canonical id back to None (which would regress the
+        // Automations panel chat link to a 404).
+        let replay_thread_trigger_id =
+            TriggerId::parse("01J00000000000000000000035").expect("ulid");
+        let replay_thread_tenant_id = tenant("tenant-run-history-replay-thread");
+        let replay_thread_record = sample_record(
+            replay_thread_trigger_id,
+            replay_thread_tenant_id.clone(),
+            fire_slot,
+        );
+        let replay_next_run_at = replay_thread_record
+            .schedule
+            .next_slot_after(fire_slot)
+            .expect("next slot calculation")
+            .expect("future slot");
+        repo.upsert_trigger(replay_thread_record)
+            .await
+            .expect("insert replay-thread record");
+        let replay_thread_claim = repo
+            .claim_due_fire(ClaimDueFireRequest {
+                tenant_id: replay_thread_tenant_id.clone(),
+                trigger_id: replay_thread_trigger_id,
+                fire_slot,
+                now: claim_now,
+            })
+            .await
+            .expect("claim replay-thread fire");
+        assert!(matches!(
+            replay_thread_claim,
+            ClaimDueFireOutcome::Claimed(_)
+        ));
+
+        let replay_thread_run_id =
+            TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f83").expect("valid run");
+        let replay_canonical_thread_id =
+            ThreadId::new("01890f0f-c000-7000-8000-000000000003").expect("valid thread id");
+        repo.mark_fire_replayed(FireReplayedRequest {
+            tenant_id: replay_thread_tenant_id.clone(),
+            trigger_id: replay_thread_trigger_id,
+            fire_slot,
+            original_run_id: replay_thread_run_id,
+            thread_id: Some(replay_canonical_thread_id.clone()),
+            replayed_at: submitted_at,
+            next_run_at: replay_next_run_at,
+        })
+        .await
+        .expect("mark replayed with canonical thread id")
+        .expect("replayed fire should persist");
+
+        let runs = repo
+            .list_trigger_run_history(
+                replay_thread_tenant_id.clone(),
+                replay_thread_trigger_id,
+                10,
+            )
+            .await
+            .expect("list replayed run history");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(
+            runs[0].thread_id,
+            Some(replay_canonical_thread_id.clone()),
+            "replay must persist the canonical thread id when the submit outcome carries it"
+        );
+
+        repo.mark_fire_replayed(FireReplayedRequest {
+            tenant_id: replay_thread_tenant_id.clone(),
+            trigger_id: replay_thread_trigger_id,
+            fire_slot,
+            original_run_id: replay_thread_run_id,
+            thread_id: None,
+            replayed_at: ts(1_704_067_209),
+            next_run_at: replay_next_run_at,
+        })
+        .await
+        .expect("idempotent replay without resolved scope")
+        .expect("replayed result returns existing record");
+
+        let runs = repo
+            .list_trigger_run_history(replay_thread_tenant_id, replay_thread_trigger_id, 10)
+            .await
+            .expect("list run history after scopeless replay");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(
+            runs[0].thread_id,
+            Some(replay_canonical_thread_id),
+            "a replay without a resolved scope must not clobber the stored canonical thread id"
+        );
+    }
+
+    async fn assert_run_history_retention_contract(repo: &impl TriggerRepository) {
+        let trigger_id = TriggerId::parse("01J00000000000000000000033").expect("ulid");
+        let tenant_id = tenant("tenant-run-history-retention");
+        let base_fire_slot = ts(1_704_067_200);
+        repo.upsert_trigger(sample_record(trigger_id, tenant_id.clone(), base_fire_slot))
+            .await
+            .expect("insert retention record");
+
+        for offset in 0..=500 {
+            let fire_slot = base_fire_slot + chrono::Duration::minutes(offset);
+            let run_id = TurnRunId::new();
+            let mut active_record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
+            active_record.active_fire_slot = Some(fire_slot);
+            active_record.active_run_ref = Some(run_id);
+            repo.upsert_trigger(active_record)
+                .await
+                .expect("upsert active retention record");
+            repo.clear_active_fire(ClearActiveFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                run_id,
+                status: TriggerRunHistoryStatus::Ok,
+            })
+            .await
+            .expect("clear retention fire")
+            .expect("active fire should clear");
+        }
+
+        let retained = repo
+            .list_trigger_run_history(tenant_id, trigger_id, 501)
+            .await
+            .expect("list retained run history");
+        assert_eq!(retained.len(), 500);
+        assert_eq!(
+            retained.first().expect("newest retained").fire_slot,
+            base_fire_slot + chrono::Duration::minutes(500)
+        );
+        assert_eq!(
+            retained.last().expect("oldest retained").fire_slot,
+            base_fire_slot + chrono::Duration::minutes(1)
+        );
+    }
+
+    async fn seed_persisted_run_history(repo: &impl TriggerRepository) -> (TenantId, TriggerId) {
+        let trigger_id = TriggerId::parse("01J00000000000000000000040").expect("ulid");
+        let tenant_id = tenant("tenant-malformed-run-history");
+        let fire_slot = ts(1_704_067_200);
+        let record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
+        let expected_next_run_at = record
+            .schedule
+            .next_slot_after(fire_slot)
+            .expect("next slot calculation")
+            .expect("future slot");
+        repo.upsert_trigger(record).await.expect("insert record");
+
+        let claim_now = fire_slot + chrono::Duration::seconds(3);
+        let claimed = repo
+            .claim_due_fire(ClaimDueFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                now: claim_now,
+            })
+            .await
+            .expect("claim fire");
+        assert!(matches!(claimed, ClaimDueFireOutcome::Claimed(_)));
+
+        let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f90").expect("valid run");
+        repo.mark_fire_accepted(FireAcceptedRequest {
+            tenant_id: tenant_id.clone(),
+            trigger_id,
+            fire_slot,
+            run_id,
+            thread_id: ThreadId::new("01890f0f-ee01-7000-8000-000000000001")
+                .expect("valid thread id"),
+            submitted_at: fire_slot + chrono::Duration::seconds(5),
+            next_run_at: expected_next_run_at,
+        })
+        .await
+        .expect("mark fire accepted")
+        .expect("accepted fire should persist");
+
+        (tenant_id, trigger_id)
+    }
+
+    fn malformed_run_history_cases() -> Vec<(&'static str, &'static str, &'static str)> {
+        vec![
+            ("fire_slot", "not-a-timestamp", "fire_slot"),
+            ("run_id", "not-a-uuid", "run_id"),
+            ("thread_id", "not/a/valid/thread-id", "thread"),
+            ("status", "timed_out", "status"),
+            ("submitted_at", "not-a-timestamp", "submitted_at"),
+            ("completed_at", "not-a-timestamp", "completed_at"),
+        ]
+    }
+
+    async fn assert_malformed_run_history_hydration_errors(
+        repo: &impl TriggerRepository,
+        tenant_id: TenantId,
+        trigger_id: TriggerId,
+        expected: &str,
+    ) {
+        let error = repo
+            .list_trigger_run_history(tenant_id.clone(), trigger_id, 10)
+            .await
+            .expect_err("malformed run history row must fail single-trigger hydration");
+        assert_error_contains(error, expected);
+
+        let other_trigger_id = TriggerId::parse("01J00000000000000000000041").expect("ulid");
+        let error = repo
+            .list_trigger_run_history_batch(tenant_id, &[trigger_id, other_trigger_id], 10)
+            .await
+            .expect_err("malformed run history row must fail batched hydration");
+        assert_error_contains(error, expected);
     }
 
     fn assert_error_contains(error: TriggerError, expected: &str) {
@@ -2507,6 +3160,8 @@ mod fire_claim_contract {
         assert_fire_claim_exclusions_and_active_gate_contract(&repo).await;
         assert_fire_result_rejects_invalid_next_run_at(&repo).await;
         assert_fire_clear_contract(&repo).await;
+        assert_run_history_lifecycle_contract(&repo).await;
+        assert_run_history_retention_contract(&repo).await;
     }
 
     #[cfg(feature = "libsql")]
@@ -2514,6 +3169,27 @@ mod fire_claim_contract {
     async fn libsql_repository_fire_claim_contract() {
         let (_dir, repo) = build_libsql_repo().await;
         assert_durable_fire_claim_contract(&repo).await;
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn libsql_repository_rejects_malformed_persisted_run_history_rows() {
+        for (column, value, expected) in malformed_run_history_cases() {
+            let (_dir, db, repo) = build_libsql_repo_with_db().await;
+            let (tenant_id, trigger_id) = seed_persisted_run_history(&repo).await;
+            let conn = db.connect().expect("connect raw libsql");
+            conn.execute(
+                &format!(
+                    "UPDATE trigger_run_history SET {column} = ?1 WHERE tenant_id = ?2 AND trigger_id = ?3"
+                ),
+                libsql::params![value, tenant_id.as_str(), trigger_id.to_string()],
+            )
+            .await
+            .expect("corrupt persisted run history row");
+
+            assert_malformed_run_history_hydration_errors(&repo, tenant_id, trigger_id, expected)
+                .await;
+        }
     }
 
     #[cfg(feature = "libsql")]
@@ -2561,6 +3237,48 @@ mod fire_claim_contract {
 
     #[cfg(feature = "postgres")]
     #[tokio::test]
+    async fn postgres_repository_rejects_malformed_persisted_run_history_rows() {
+        let Some((_container, pool)) = postgres_pool_or_skip().await else {
+            return;
+        };
+        let repo = PostgresTriggerRepository::new(pool.clone());
+        repo.run_migrations().await.expect("run migrations");
+        let client = pool.get().await.expect("postgres connection");
+
+        for (column, value, expected) in malformed_run_history_cases() {
+            client
+                .execute("DELETE FROM trigger_run_history", &[])
+                .await
+                .expect("clear trigger run history");
+            client
+                .execute("DELETE FROM trigger_records", &[])
+                .await
+                .expect("clear trigger records");
+
+            let (tenant_id, trigger_id) = seed_persisted_run_history(&repo).await;
+            client
+                .execute(
+                    &format!(
+                        "UPDATE trigger_run_history SET {column} = $1 WHERE tenant_id = $2 AND trigger_id = $3"
+                    ),
+                    &[&value, &tenant_id.as_str(), &trigger_id.to_string()],
+                )
+                .await
+                .expect("corrupt persisted run history row");
+
+            assert_malformed_run_history_hydration_errors(&repo, tenant_id, trigger_id, expected)
+                .await;
+        }
+
+        client
+            .execute("DELETE FROM trigger_run_history", &[])
+            .await
+            .expect("clear trigger run history");
+        clear_postgres_triggers(&pool).await;
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
     async fn postgres_repository_fire_claim_is_atomic() {
         let Some((_container, pool)) = postgres_pool_or_skip().await else {
             return;
@@ -2603,5 +3321,149 @@ mod fire_claim_contract {
         )
         .await;
         clear_postgres_triggers(&pool).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// find_trigger_run_by_thread_id contract
+// ---------------------------------------------------------------------------
+
+mod find_trigger_run_by_thread_id_contract {
+    use super::*;
+
+    use ironclaw_triggers::{ClaimDueFireOutcome, ClaimDueFireRequest, FireAcceptedRequest};
+
+    fn thread_id(value: &str) -> ThreadId {
+        ThreadId::new(value).expect("valid thread id")
+    }
+
+    /// Seeds a trigger record and marks one fire as accepted with the given
+    /// `thread_id`, returning `(trigger_id, fire_slot)`.
+    async fn seed_accepted_run(
+        repo: &impl TriggerRepository,
+        trigger_id: TriggerId,
+        tenant_id: TenantId,
+        run_thread_id: ThreadId,
+    ) -> Timestamp {
+        let fire_slot = ts(1_704_067_200);
+        let record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
+        repo.upsert_trigger(record).await.expect("upsert");
+        let claimed = repo
+            .claim_due_fire(ClaimDueFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                now: fire_slot,
+            })
+            .await
+            .expect("claim due fire");
+        assert!(
+            matches!(claimed, ClaimDueFireOutcome::Claimed(_)),
+            "seed_accepted_run: claim must succeed"
+        );
+        let next_run_at = ts(fire_slot.timestamp() + 3600);
+        repo.mark_fire_accepted(FireAcceptedRequest {
+            tenant_id,
+            trigger_id,
+            fire_slot,
+            run_id: TurnRunId::new(),
+            thread_id: run_thread_id,
+            submitted_at: fire_slot,
+            next_run_at,
+        })
+        .await
+        .expect("mark fire accepted");
+        fire_slot
+    }
+
+    async fn assert_find_trigger_run_by_thread_id_contract(repo: &impl TriggerRepository) {
+        let tenant_a = tenant("tenant-a");
+        let tenant_b = tenant("tenant-b");
+        let trigger_id_a = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let trigger_id_b = TriggerId::parse("01J00000000000000000000000").expect("ulid");
+        let t1 = thread_id("01890f0f-test-7000-8000-000000000001");
+        let t2 = thread_id("01890f0f-test-7000-8000-000000000002");
+        let unknown = thread_id("01890f0f-test-7000-8000-999999999999");
+
+        // Seed trigger-a (tenant-a) with thread t1.
+        let _ = seed_accepted_run(repo, trigger_id_a, tenant_a.clone(), t1.clone()).await;
+        // Seed trigger-b (tenant-b) with thread t2.
+        let _ = seed_accepted_run(repo, trigger_id_b, tenant_b.clone(), t2.clone()).await;
+
+        // Found: correct tenant + thread_id.
+        let result = repo
+            .find_trigger_run_by_thread_id(tenant_a.clone(), &t1)
+            .await
+            .expect("find by known thread_id")
+            .expect("run record must be present");
+        assert_eq!(result.0.trigger_id, trigger_id_a);
+        assert_eq!(
+            result.1.thread_id.as_ref().map(|t| t.as_str()),
+            Some(t1.as_str())
+        );
+
+        // Not found: correct tenant, wrong thread_id (unknown).
+        let not_found = repo
+            .find_trigger_run_by_thread_id(tenant_a.clone(), &unknown)
+            .await
+            .expect("find by unknown thread_id must not error");
+        assert!(not_found.is_none(), "unknown thread_id must return None");
+
+        // Tenant isolation: searching tenant_b for thread t1 (which lives in tenant_a)
+        // must return None.
+        let cross_tenant = repo
+            .find_trigger_run_by_thread_id(tenant_b.clone(), &t1)
+            .await
+            .expect("cross-tenant find must not error");
+        assert!(
+            cross_tenant.is_none(),
+            "thread_id from another tenant must not be visible"
+        );
+
+        // Run rows without a thread_id (pre-acceptance rows) must not be
+        // findable.  We test this via a fresh trigger that has been claimed but
+        // NOT accepted (no thread_id row yet).
+        let trigger_id_c = TriggerId::parse("01J00000000000000000000003").expect("ulid");
+        let fire_slot_c = ts(1_704_067_300);
+        let record_c = sample_record(trigger_id_c, tenant_a.clone(), fire_slot_c);
+        repo.upsert_trigger(record_c)
+            .await
+            .expect("upsert trigger-c");
+        // Do not call mark_fire_accepted — no thread_id row exists.
+        let t_none = thread_id("01890f0f-test-7000-8000-000000000003");
+        let pre_accept = repo
+            .find_trigger_run_by_thread_id(tenant_a.clone(), &t_none)
+            .await
+            .expect("pre-acceptance find must not error");
+        assert!(
+            pre_accept.is_none(),
+            "pre-acceptance trigger (no thread_id row) must return None"
+        );
+    }
+
+    // In-memory backend.
+    #[tokio::test]
+    async fn in_memory_find_trigger_run_by_thread_id() {
+        let repo = InMemoryTriggerRepository::default();
+        assert_find_trigger_run_by_thread_id_contract(&repo).await;
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn libsql_find_trigger_run_by_thread_id() {
+        let (_dir, repo) = super::build_libsql_repo().await;
+        assert_find_trigger_run_by_thread_id_contract(&repo).await;
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn postgres_find_trigger_run_by_thread_id() {
+        let Some((_container, pool)) = super::postgres_pool_or_skip().await else {
+            return;
+        };
+        let repo = PostgresTriggerRepository::new(pool.clone());
+        repo.run_migrations().await.expect("run migrations");
+        assert_find_trigger_run_by_thread_id_contract(&repo).await;
+        super::clear_postgres_triggers(&pool).await;
     }
 }

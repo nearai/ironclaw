@@ -164,8 +164,18 @@ where
     turn_state_store: Arc<dyn TurnStateStore>,
     loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
     checkpoint_state_store: Option<Arc<dyn CheckpointStateStore>>,
+    approval_gate_evidence: Option<Arc<dyn ApprovalGateEvidenceStore>>,
     thread_scope: Option<ThreadScope>,
     cancellation_factory: Option<Arc<dyn RunCancellationFactory>>,
+}
+
+#[async_trait]
+pub trait ApprovalGateEvidenceStore: Send + Sync {
+    async fn pending_approval_gate(
+        &self,
+        scope: &TurnScope,
+        gate_ref: &ironclaw_turns::LoopGateRef,
+    ) -> Result<bool, TurnError>;
 }
 
 impl<S> ThreadCheckpointLoopExitEvidencePort<S>
@@ -182,6 +192,7 @@ where
             turn_state_store,
             loop_checkpoint_store,
             checkpoint_state_store: None,
+            approval_gate_evidence: None,
             thread_scope: None,
             cancellation_factory: None,
         }
@@ -198,6 +209,7 @@ where
             turn_state_store,
             loop_checkpoint_store,
             checkpoint_state_store: None,
+            approval_gate_evidence: None,
             thread_scope: Some(thread_scope),
             cancellation_factory: None,
         }
@@ -208,6 +220,14 @@ where
         checkpoint_state_store: Arc<dyn CheckpointStateStore>,
     ) -> Self {
         self.checkpoint_state_store = Some(checkpoint_state_store);
+        self
+    }
+
+    pub fn with_approval_gate_evidence(
+        mut self,
+        approval_gate_evidence: Arc<dyn ApprovalGateEvidenceStore>,
+    ) -> Self {
+        self.approval_gate_evidence = Some(approval_gate_evidence);
         self
     }
 
@@ -311,9 +331,12 @@ where
     ) -> Result<bool, TurnError> {
         match request.blocked.kind {
             LoopBlockedKind::Auth => {}
-            LoopBlockedKind::Approval
-            | LoopBlockedKind::Resource
-            | LoopBlockedKind::AwaitDependentRun => {
+            LoopBlockedKind::Approval => {
+                if !self.verify_pending_approval_gate(&request).await? {
+                    return Ok(false);
+                }
+            }
+            LoopBlockedKind::Resource | LoopBlockedKind::AwaitDependentRun => {
                 // A BeforeBlock checkpoint alone is not sufficient for approval,
                 // resource, or dependent-run gates: #3424 requires a durable
                 // pending gate/process ref for those block types. Auth gates use
@@ -445,6 +468,23 @@ where
     }
 }
 
+impl<S> ThreadCheckpointLoopExitEvidencePort<S>
+where
+    S: SessionThreadService + ?Sized + Send + Sync,
+{
+    async fn verify_pending_approval_gate(
+        &self,
+        request: &BlockedEvidenceRequest<'_>,
+    ) -> Result<bool, TurnError> {
+        let Some(evidence) = &self.approval_gate_evidence else {
+            return Ok(false);
+        };
+        evidence
+            .pending_approval_gate(request.scope, &request.blocked.gate_ref)
+            .await
+    }
+}
+
 fn thread_scope_from_turn_scope(scope: &TurnScope) -> Result<ThreadScope, TurnError> {
     // `ironclaw_threads::ThreadScope` is currently agent-scoped. Reject
     // agentless Reborn turns explicitly until the thread store grows an
@@ -531,10 +571,10 @@ fn message_content_matches_result_ref(
     };
     // Cheap metadata checks run before this helper. Keep the envelope parse so
     // forged or malformed transcript content cannot satisfy completion evidence.
-    let Ok(envelope) = serde_json::from_str::<ToolResultReferenceEnvelope>(content) else {
+    let Ok(envelope) = ToolResultReferenceEnvelope::from_json_str(content) else {
         return false;
     };
-    envelope.version == 1 && envelope.result_ref == result_ref.as_str()
+    envelope.result_ref == result_ref.as_str()
 }
 
 #[cfg(test)]

@@ -1,9 +1,17 @@
 //! Contract tests for WebUI-facing RebornServices facade.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{CredentialAccountId, CredentialAccountProjection};
 use ironclaw_host_api::{AgentId, ApprovalRequestId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_adapters::{
@@ -11,34 +19,53 @@ use ironclaw_product_adapters::{
     ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_product_workflow::{
-    AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE, ApprovalInteractionDecision,
-    ApprovalInteractionService, AuthInteractionDecision, AuthInteractionService,
-    AutomationProductFacade, ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
-    ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialRequirement,
+    AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE,
+    AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE,
+    AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, ApprovalInteractionDecision, ApprovalInteractionService,
+    AuthInteractionDecision, AuthInteractionService, AutomationListRequest,
+    AutomationProductFacade, CodexLoginStart, ExtensionCredentialSetupService,
+    ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, InboundAttachmentLander,
+    InboundAttachmentReader, LifecycleExtensionCredentialRequirement,
     LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
     LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductAction,
     LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleReadinessBlocker, ListPendingApprovalsRequest,
     ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
-    ListPendingAuthInteractionsResponse, ProductAgentBoundCaller, ProductWorkflowError,
-    RebornAutomationInfo, RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
-    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornConnectableChannelInfo,
-    RebornExtensionOnboardingState, RebornGetRunStateRequest, RebornResolveGateResponse,
-    RebornServices, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    ListPendingAuthInteractionsResponse, LlmActiveSelection, LlmConfigService,
+    LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
+    LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
+    NearAiWalletLoginResult, OperatorLogsService, OperatorServiceLifecycleService,
+    OutboundPreferencesProductFacade, ProductAgentBoundCaller, ProductWorkflowError,
+    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornChannelConnectAction, RebornChannelConnectStrategy,
+    RebornConnectableChannelInfo, RebornDeleteThreadRequest, RebornExtensionOnboardingState,
+    RebornGetRunStateRequest, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorLogsQuery, RebornOperatorSetupRequest,
+    RebornOperatorSetupStatus, RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
+    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
+    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
+    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
+    RebornResolveGateResponse, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
+    RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServices, RebornServicesApi,
+    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest, RebornSubmitTurnResponse,
     RebornTimelineRequest, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
-    StaticConnectableChannelsProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, approval_gate_ref,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SetActiveLlmRequest,
+    StaticConnectableChannelsProductFacade, TriggerRunThreadScope, UpsertLlmProviderRequest,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    approval_gate_ref, automation_trigger_thread_metadata_json,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
-    AppendToolResultReferenceRequest, ContextMessages, ContextWindow, CreateSummaryArtifactRequest,
-    EnsureThreadRequest, InMemorySessionThreadService, LoadContextMessagesRequest,
+    AppendToolResultReferenceRequest, AttachmentKind, AttachmentRef, ContextMessages,
+    ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest, InMemorySessionThreadService,
+    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
     LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
     SessionThreadService, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
@@ -51,9 +78,11 @@ use ironclaw_turns::{
     InMemoryTurnStateStore, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
     ResumeTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
     SubmitTurnResponse, TurnActor, TurnCapacityResource, TurnCoordinator, TurnError, TurnId,
-    TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    TurnOriginKind, TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
+use secrecy::SecretString;
 use serde_json::json;
+use tokio::sync::{Notify, oneshot};
 
 fn caller() -> WebUiAuthenticatedCaller {
     caller_for_user("user-alpha")
@@ -96,6 +125,10 @@ fn run_id_string() -> String {
     "3d54a1f0-0a7f-4b9c-a350-4258f2fa3e18".to_string()
 }
 
+fn automation_run_id() -> TurnRunId {
+    TurnRunId::parse("11111111-1111-1111-1111-111111111111").expect("valid automation run id")
+}
+
 fn fake_thread_history(owner: &WebUiAuthenticatedCaller, thread_id: &str) -> ThreadHistory {
     let thread_id = ThreadId::new(thread_id).expect("valid thread id");
     let scope = ThreadScope {
@@ -128,6 +161,7 @@ fn fake_thread_history(owner: &WebUiAuthenticatedCaller, thread_id: &str) -> Thr
             tool_result_ref: None,
             tool_result_provider_call: None,
             content: Some("timeline from fake M2 port".to_string()),
+            attachments: Vec::new(),
             redaction_ref: None,
         }],
         summary_artifacts: vec![],
@@ -291,6 +325,45 @@ impl FakeTurnCoordinator {
             .last()
             .map(|request| request.scope.clone())
     }
+
+    fn last_submission_origin_kind(&self) -> Option<TurnOriginKind> {
+        self.submissions
+            .lock()
+            .expect("lock")
+            .last()
+            .and_then(|request| request.product_context.as_ref().map(|c| c.origin))
+    }
+
+    fn last_cancellation_scope(&self) -> Option<TurnScope> {
+        self.cancellations
+            .lock()
+            .expect("lock")
+            .last()
+            .map(|request| request.scope.clone())
+    }
+
+    fn last_cancellation_actor(&self) -> Option<TurnActor> {
+        self.cancellations
+            .lock()
+            .expect("lock")
+            .last()
+            .map(|request| request.actor.clone())
+    }
+
+    /// Returns the `TurnScope` from the most recent `get_run_state` call.
+    ///
+    /// Used by trigger-thread tests to assert that `resolve_gate`,
+    /// `cancel_run`, and `get_run_state` receive the trigger-owned scope
+    /// (with `owner_user_id = Some(creator_user_id)`) rather than the
+    /// WebUI caller's session scope.  This distinction is what #4754 ("Part A")
+    /// and the `check_automation_trigger_access` reconstruction guarantee.
+    fn last_run_state_scope(&self) -> Option<TurnScope> {
+        self.run_state_requests
+            .lock()
+            .expect("lock")
+            .last()
+            .map(|request| request.scope.clone())
+    }
 }
 
 #[async_trait]
@@ -384,6 +457,104 @@ impl TurnCoordinator for FakeTurnCoordinator {
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(17),
+            product_context: None,
+            auth_resume_disposition: None,
+        })
+    }
+}
+
+struct BlockingSubmitCoordinator {
+    submit_entered: AtomicBool,
+    submit_released: AtomicBool,
+    entered_submit: Notify,
+    release_submit: Notify,
+    run_id: TurnRunId,
+}
+
+impl BlockingSubmitCoordinator {
+    fn new() -> Self {
+        Self {
+            submit_entered: AtomicBool::new(false),
+            submit_released: AtomicBool::new(false),
+            entered_submit: Notify::new(),
+            release_submit: Notify::new(),
+            run_id: TurnRunId::new(),
+        }
+    }
+
+    async fn wait_for_submit(&self) {
+        while !self.submit_entered.load(Ordering::Acquire) {
+            self.entered_submit.notified().await;
+        }
+    }
+
+    fn release_submit(&self) {
+        self.submit_released.store(true, Ordering::Release);
+        self.release_submit.notify_waiters();
+    }
+}
+
+#[async_trait]
+impl TurnCoordinator for BlockingSubmitCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
+    }
+
+    async fn submit_turn(
+        &self,
+        request: SubmitTurnRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        self.submit_entered.store(true, Ordering::Release);
+        self.entered_submit.notify_waiters();
+        while !self.submit_released.load(Ordering::Acquire) {
+            self.release_submit.notified().await;
+        }
+        Ok(SubmitTurnResponse::Accepted {
+            turn_id: TurnId::new(),
+            run_id: self.run_id,
+            status: TurnStatus::Queued,
+            resolved_run_profile_id: RunProfileId::default_profile(),
+            resolved_run_profile_version: RunProfileVersion::new(1),
+            event_cursor: EventCursor(23),
+            accepted_message_ref: request.accepted_message_ref,
+            reply_target_binding_ref: request.reply_target_binding_ref,
+        })
+    }
+
+    async fn resume_turn(
+        &self,
+        _request: ResumeTurnRequest,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        panic!("resume_turn is not used by delete submit serialization tests")
+    }
+
+    async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
+        panic!("cancel_run is not used by delete submit serialization tests")
+    }
+
+    async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        Ok(TurnRunState {
+            scope: request.scope,
+            actor: Some(turn_actor_for_user("user-alpha")),
+            turn_id: TurnId::new(),
+            run_id: request.run_id,
+            status: TurnStatus::Queued,
+            accepted_message_ref: AcceptedMessageRef::new("msg:blocked-submit").expect("valid ref"),
+            source_binding_ref: SourceBindingRef::new("webui-src:blocked-submit")
+                .expect("valid ref"),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("webui-reply:blocked-submit")
+                .expect("valid ref"),
+            resolved_run_profile_id: RunProfileId::default_profile(),
+            resolved_run_profile_version: RunProfileVersion::new(1),
+            resolved_model_route: None,
+            received_at: Utc::now(),
+            checkpoint_id: None,
+            gate_ref: None,
+            credential_requirements: Vec::new(),
+            failure: None,
+            event_cursor: EventCursor(29),
+            product_context: None,
+            auth_resume_disposition: None,
         })
     }
 }
@@ -421,7 +592,7 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
         let decision = request.decision;
         self.resolutions.lock().expect("lock").push(request);
         Ok(match decision {
-            ApprovalInteractionDecision::ApproveOnce => {
+            ApprovalInteractionDecision::ApproveOnce | ApprovalInteractionDecision::AlwaysAllow => {
                 ResolveApprovalInteractionResponse::Approved(ResumeTurnResponse {
                     run_id,
                     status: TurnStatus::Queued,
@@ -552,6 +723,7 @@ impl RecordingLifecycleFacade {
             description: "test extension".to_string(),
             source: LifecycleExtensionSource::HostBundled,
             runtime_kind: LifecycleExtensionRuntimeKind::FirstParty,
+            surface_kinds: Vec::new(),
             visible_capability_ids: Vec::new(),
             visible_read_only_capability_ids: Vec::new(),
             credential_requirements: self.credential_requirements.clone(),
@@ -640,6 +812,7 @@ impl LifecycleProductFacade for ListingLifecycleFacade {
 struct ListAutomationCall {
     caller: ProductAgentBoundCaller,
     limit: usize,
+    run_limit: usize,
 }
 
 #[derive(Default)]
@@ -658,12 +831,16 @@ impl AutomationProductFacade for RecordingAutomationFacade {
     async fn list_automations(
         &self,
         caller: ProductAgentBoundCaller,
-        limit: usize,
+        request: AutomationListRequest,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
         self.list_calls
             .lock()
             .expect("lock")
-            .push(ListAutomationCall { caller, limit });
+            .push(ListAutomationCall {
+                caller,
+                limit: request.limit,
+                run_limit: request.run_limit,
+            });
         Ok(vec![automation_info(
             "trigger-listed",
             "Daily status",
@@ -671,22 +848,267 @@ impl AutomationProductFacade for RecordingAutomationFacade {
             Some(RebornAutomationRunStatus::Ok),
         )])
     }
+
+    async fn resolve_run_thread_scope(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<TriggerRunThreadScope>, RebornServicesError> {
+        // Trigger-thread access is not wired in the recording facade.
+        Ok(None)
+    }
 }
 
 #[derive(Clone)]
 struct StaticAutomationFacade {
     output: Vec<RebornAutomationInfo>,
+    scheduler_enabled: bool,
+    /// Scopes returned by `resolve_run_thread_scope`, keyed by the queried
+    /// thread id so tests prove the lookup contract rather than accepting a
+    /// cached scope for any request.
+    resolve_scopes: HashMap<ThreadId, TriggerRunThreadScope>,
+    resolve_calls: Arc<Mutex<Vec<ThreadId>>>,
+}
+
+impl StaticAutomationFacade {
+    fn new(output: Vec<RebornAutomationInfo>) -> Self {
+        Self {
+            output,
+            scheduler_enabled: true,
+            resolve_scopes: HashMap::new(),
+            resolve_calls: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn with_scheduler_enabled(mut self, scheduler_enabled: bool) -> Self {
+        self.scheduler_enabled = scheduler_enabled;
+        self
+    }
+
+    fn with_resolve_scope_for_thread(
+        mut self,
+        thread_id: ThreadId,
+        scope: TriggerRunThreadScope,
+    ) -> Self {
+        self.resolve_scopes.insert(thread_id, scope);
+        self
+    }
+
+    fn resolve_calls(&self) -> Vec<ThreadId> {
+        self.resolve_calls.lock().expect("lock").clone()
+    }
 }
 
 #[async_trait]
 impl AutomationProductFacade for StaticAutomationFacade {
+    fn scheduler_enabled(&self) -> bool {
+        self.scheduler_enabled
+    }
+
     async fn list_automations(
         &self,
         _caller: ProductAgentBoundCaller,
-        _limit: usize,
+        _request: AutomationListRequest,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
         Ok(self.output.clone())
     }
+
+    async fn resolve_run_thread_scope(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        thread_id: &ThreadId,
+    ) -> Result<Option<TriggerRunThreadScope>, RebornServicesError> {
+        self.resolve_calls
+            .lock()
+            .expect("lock")
+            .push(thread_id.clone());
+        Ok(self.resolve_scopes.get(thread_id).cloned())
+    }
+}
+
+/// An automation facade that initially exposes one trigger thread scope but can
+/// have that scope revoked via `revoke()`. Used to verify that the service
+/// revalidates authorization on every call rather than caching the result.
+struct RevocableAutomationFacade {
+    thread_id: ThreadId,
+    scope: TriggerRunThreadScope,
+    revoked: Mutex<bool>,
+}
+
+impl RevocableAutomationFacade {
+    fn new(thread_id: ThreadId, caller: &WebUiAuthenticatedCaller) -> Self {
+        let scope = TriggerRunThreadScope {
+            agent_id: caller.agent_id.clone(),
+            project_id: caller.project_id.clone(),
+            creator_user_id: caller.user_id.clone(),
+        };
+        Self {
+            thread_id,
+            scope,
+            revoked: Mutex::new(false),
+        }
+    }
+
+    fn revoke(&self) {
+        *self.revoked.lock().expect("lock") = true;
+    }
+}
+
+#[async_trait]
+impl AutomationProductFacade for RevocableAutomationFacade {
+    async fn list_automations(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _request: AutomationListRequest,
+    ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
+        Ok(Vec::new())
+    }
+
+    async fn resolve_run_thread_scope(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        thread_id: &ThreadId,
+    ) -> Result<Option<TriggerRunThreadScope>, RebornServicesError> {
+        if *self.revoked.lock().expect("lock") {
+            return Ok(None);
+        }
+        if thread_id == &self.thread_id {
+            Ok(Some(self.scope.clone()))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+/// An automation facade whose `resolve_run_thread_scope` always returns a
+/// backend error (503 Unavailable, retryable). Used to verify that the timeline
+/// call surfaces the backend error rather than masking it as a 404.
+struct ErroringAutomationFacade {
+    error: RebornServicesError,
+}
+
+impl ErroringAutomationFacade {
+    fn unavailable() -> Self {
+        Self {
+            error: RebornServicesError {
+                code: RebornServicesErrorCode::Unavailable,
+                kind: RebornServicesErrorKind::ServiceUnavailable,
+                status_code: 503,
+                retryable: true,
+                field: None,
+                validation_code: None,
+            },
+        }
+    }
+}
+
+#[async_trait]
+impl AutomationProductFacade for ErroringAutomationFacade {
+    async fn list_automations(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _request: AutomationListRequest,
+    ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
+        Ok(Vec::new())
+    }
+
+    async fn resolve_run_thread_scope(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<TriggerRunThreadScope>, RebornServicesError> {
+        Err(self.error.clone())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct OutboundPreferencesSetCall {
+    caller: WebUiAuthenticatedCaller,
+    request: RebornSetOutboundPreferencesRequest,
+}
+
+#[derive(Default)]
+struct RecordingOutboundPreferencesFacade {
+    get_calls: Mutex<Vec<WebUiAuthenticatedCaller>>,
+    set_calls: Mutex<Vec<OutboundPreferencesSetCall>>,
+    list_calls: Mutex<Vec<WebUiAuthenticatedCaller>>,
+}
+
+impl RecordingOutboundPreferencesFacade {
+    fn get_calls(&self) -> Vec<WebUiAuthenticatedCaller> {
+        self.get_calls.lock().expect("lock").clone()
+    }
+
+    fn set_calls(&self) -> Vec<OutboundPreferencesSetCall> {
+        self.set_calls.lock().expect("lock").clone()
+    }
+
+    fn list_calls(&self) -> Vec<WebUiAuthenticatedCaller> {
+        self.list_calls.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl OutboundPreferencesProductFacade for RecordingOutboundPreferencesFacade {
+    async fn get_outbound_preferences(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        self.get_calls.lock().expect("lock").push(caller);
+        Ok(RebornOutboundPreferencesResponse {
+            final_reply_target: Some(outbound_target_summary("slack-dm-alpha")),
+            final_reply_target_status: RebornOutboundDeliveryTargetStatus::Available,
+            default_modality: RebornOutboundDeliveryModality::Text,
+        })
+    }
+
+    async fn set_outbound_preferences(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornSetOutboundPreferencesRequest,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        self.set_calls
+            .lock()
+            .expect("lock")
+            .push(OutboundPreferencesSetCall { caller, request });
+        Ok(RebornOutboundPreferencesResponse {
+            final_reply_target: Some(outbound_target_summary("slack-dm-beta")),
+            final_reply_target_status: RebornOutboundDeliveryTargetStatus::Available,
+            default_modality: RebornOutboundDeliveryModality::Text,
+        })
+    }
+
+    async fn list_outbound_delivery_targets(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
+        self.list_calls.lock().expect("lock").push(caller);
+        Ok(RebornOutboundDeliveryTargetListResponse {
+            targets: vec![RebornOutboundDeliveryTargetOption {
+                target: outbound_target_summary("slack-dm-alpha"),
+                capabilities: RebornOutboundDeliveryTargetCapabilities {
+                    final_replies: true,
+                    gate_prompts: true,
+                    auth_prompts: true,
+                },
+            }],
+            next_cursor: None,
+        })
+    }
+}
+
+fn outbound_target_summary(target_id: &str) -> RebornOutboundDeliveryTargetSummary {
+    RebornOutboundDeliveryTargetSummary::new(
+        outbound_target_id(target_id),
+        "slack",
+        "Slack DM",
+        Some("Slack direct message".to_string()),
+    )
+    .expect("valid target summary")
+}
+
+fn outbound_target_id(target_id: &str) -> RebornOutboundDeliveryTargetId {
+    RebornOutboundDeliveryTargetId::new(target_id).expect("valid target id")
 }
 
 fn automation_info(
@@ -698,11 +1120,22 @@ fn automation_info(
     RebornAutomationInfo {
         automation_id: trigger_id.to_string(),
         name: name.into(),
-        source: RebornAutomationSource::Schedule { cron: cron.into() },
+        source: RebornAutomationSource::Schedule {
+            cron: cron.into(),
+            timezone: "UTC".to_string(),
+        },
         state: RebornAutomationState::Active,
         next_run_at: Some("2026-06-03T09:00:00Z".parse().expect("next run")),
         last_run_at: None,
         last_status,
+        recent_runs: vec![RebornAutomationRecentRunInfo {
+            run_id: Some(automation_run_id()),
+            thread_id: Some(ThreadId::new("thread-listed").expect("valid thread id")),
+            fire_slot: Some("2026-06-03T09:00:00Z".parse().expect("fire slot")),
+            status: RebornAutomationRecentRunStatus::Ok,
+            submitted_at: "2026-06-03T09:00:01Z".parse().expect("submitted at"),
+            completed_at: Some("2026-06-03T09:00:42Z".parse().expect("completed at")),
+        }],
         is_active: true,
         created_at: Some("2026-06-02T18:00:00Z".parse().expect("created at")),
     }
@@ -877,13 +1310,13 @@ impl SessionThreadService for ScopeMismatchThreadStub {
         panic!("ScopeMismatchThreadStub::mark_message_submitted should not be reached")
     }
 
-    async fn mark_message_deferred_busy(
+    async fn mark_message_rejected_busy(
         &self,
         _scope: &ThreadScope,
         _thread_id: &ThreadId,
         _message_id: ThreadMessageId,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        panic!("ScopeMismatchThreadStub::mark_message_deferred_busy should not be reached")
+        panic!("ScopeMismatchThreadStub::mark_message_rejected_busy should not be reached")
     }
 
     async fn append_assistant_draft(
@@ -963,12 +1396,41 @@ impl SessionThreadService for ScopeMismatchThreadStub {
 enum ScriptedThreadBehavior {
     BackendHistory,
     History(Box<ThreadHistory>),
-    SubmittedReplay { turn_run_id: Option<String> },
+    ListPages,
+    SubmittedReplay {
+        turn_run_id: Option<String>,
+    },
+    RejectedBusyReplay,
+    /// `mark_message_rejected_busy` fails; reconcile path replays the accepted
+    /// message as RejectedBusy so no error surfaces to the caller.
+    RejectedBusyMarkFails {
+        /// Message id assigned by `accept_inbound_message`, shared so that
+        /// `reconcile_terminal_duplicate` can match it against the handoff.
+        message_id: ThreadMessageId,
+    },
+    /// `mark_message_rejected_busy` fails; reconcile path replays the accepted
+    /// message as legacy DeferredBusy.  Unlike `RejectedBusyMarkFails`,
+    /// `DeferredBusy` is non-terminal: `reconcile_terminal_duplicate` accepts
+    /// only `RejectedBusy` as settled, so this replay does NOT satisfy
+    /// reconciliation.  The original mark failure surfaces as a retryable error
+    /// (Unavailable / 503) rather than a false-terminal RejectedBusy.
+    DeferredBusyMarkFails {
+        /// Message id assigned by `accept_inbound_message`, shared so that
+        /// `reconcile_terminal_duplicate` can match it against the handoff.
+        message_id: ThreadMessageId,
+    },
 }
 
 struct ScriptedThreadService {
     behavior: ScriptedThreadBehavior,
     history_requests: Mutex<Vec<ThreadHistoryRequest>>,
+    list_requests: Mutex<Vec<ListThreadsForScopeRequest>>,
+    list_responses: Mutex<Vec<ListThreadsForScopeResponse>>,
+    /// Tracks `replay_accepted_inbound_message` call count; used by
+    /// `RejectedBusyMarkFails` (and `DeferredBusyMarkFails`) to return `None`
+    /// on the first two calls (idempotency probes) and `Some(…)` on the third
+    /// call (reconcile probe) onward.
+    replay_call_count: Mutex<usize>,
 }
 
 impl ScriptedThreadService {
@@ -976,6 +1438,9 @@ impl ScriptedThreadService {
         Self {
             behavior: ScriptedThreadBehavior::BackendHistory,
             history_requests: Mutex::new(Vec::new()),
+            list_requests: Mutex::new(Vec::new()),
+            list_responses: Mutex::new(Vec::new()),
+            replay_call_count: Mutex::new(0),
         }
     }
 
@@ -983,6 +1448,19 @@ impl ScriptedThreadService {
         Self {
             behavior: ScriptedThreadBehavior::History(Box::new(history)),
             history_requests: Mutex::new(Vec::new()),
+            list_requests: Mutex::new(Vec::new()),
+            list_responses: Mutex::new(Vec::new()),
+            replay_call_count: Mutex::new(0),
+        }
+    }
+
+    fn list_pages(responses: Vec<ListThreadsForScopeResponse>) -> Self {
+        Self {
+            behavior: ScriptedThreadBehavior::ListPages,
+            history_requests: Mutex::new(Vec::new()),
+            list_requests: Mutex::new(Vec::new()),
+            list_responses: Mutex::new(responses),
+            replay_call_count: Mutex::new(0),
         }
     }
 
@@ -990,11 +1468,68 @@ impl ScriptedThreadService {
         Self {
             behavior: ScriptedThreadBehavior::SubmittedReplay { turn_run_id },
             history_requests: Mutex::new(Vec::new()),
+            list_requests: Mutex::new(Vec::new()),
+            list_responses: Mutex::new(Vec::new()),
+            replay_call_count: Mutex::new(0),
+        }
+    }
+
+    fn rejected_busy_replay() -> Self {
+        Self {
+            behavior: ScriptedThreadBehavior::RejectedBusyReplay,
+            history_requests: Mutex::new(Vec::new()),
+            list_requests: Mutex::new(Vec::new()),
+            list_responses: Mutex::new(Vec::new()),
+            replay_call_count: Mutex::new(0),
+        }
+    }
+
+    /// Scripted service for the mark-failure reconcile path:
+    /// - `accept_inbound_message` accepts the message
+    /// - `mark_message_rejected_busy` returns a backend error
+    /// - `replay_accepted_inbound_message` returns `None` on the first two
+    ///   calls (idempotency probes) and `Some(RejectedBusy)` on the third
+    ///   call (reconcile probe), so `reconcile_terminal_duplicate` settles
+    ///   without error
+    fn rejected_busy_mark_fails() -> Self {
+        Self {
+            behavior: ScriptedThreadBehavior::RejectedBusyMarkFails {
+                message_id: ThreadMessageId::new(),
+            },
+            history_requests: Mutex::new(Vec::new()),
+            list_requests: Mutex::new(Vec::new()),
+            list_responses: Mutex::new(Vec::new()),
+            replay_call_count: Mutex::new(0),
+        }
+    }
+
+    /// Scripted service for the legacy DeferredBusy mark-failure path:
+    /// - `accept_inbound_message` accepts the message
+    /// - `mark_message_rejected_busy` returns a backend error
+    /// - `replay_accepted_inbound_message` returns `None` on the first two
+    ///   calls (idempotency probes) and `Some(DeferredBusy)` on the reconcile
+    ///   probe.  `DeferredBusy` is non-terminal: `reconcile_terminal_duplicate`
+    ///   no longer accepts it as settled (only `RejectedBusy` qualifies), so the
+    ///   mark failure propagates as a retryable Unavailable error rather than
+    ///   silently producing a false-terminal RejectedBusy.
+    fn deferred_busy_mark_fails() -> Self {
+        Self {
+            behavior: ScriptedThreadBehavior::DeferredBusyMarkFails {
+                message_id: ThreadMessageId::new(),
+            },
+            history_requests: Mutex::new(Vec::new()),
+            list_requests: Mutex::new(Vec::new()),
+            list_responses: Mutex::new(Vec::new()),
+            replay_call_count: Mutex::new(0),
         }
     }
 
     fn history_requests(&self) -> Vec<ThreadHistoryRequest> {
         self.history_requests.lock().expect("lock").clone()
+    }
+
+    fn list_requests(&self) -> Vec<ListThreadsForScopeRequest> {
+        self.list_requests.lock().expect("lock").clone()
     }
 }
 
@@ -1013,7 +1548,11 @@ impl SessionThreadService for ScriptedThreadService {
                 "backend detail /host/path secret-token".to_string(),
             )),
             ScriptedThreadBehavior::History(history) => Ok(history.as_ref().clone()),
-            ScriptedThreadBehavior::SubmittedReplay { .. } => Ok(ThreadHistory {
+            ScriptedThreadBehavior::ListPages => scripted_stub_unreachable("list_thread_history"),
+            ScriptedThreadBehavior::SubmittedReplay { .. }
+            | ScriptedThreadBehavior::RejectedBusyReplay
+            | ScriptedThreadBehavior::RejectedBusyMarkFails { .. }
+            | ScriptedThreadBehavior::DeferredBusyMarkFails { .. } => Ok(ThreadHistory {
                 thread: SessionThreadRecord {
                     scope: request.scope,
                     thread_id: request.thread_id,
@@ -1037,9 +1576,20 @@ impl SessionThreadService for ScriptedThreadService {
 
     async fn accept_inbound_message(
         &self,
-        _request: AcceptInboundMessageRequest,
+        request: AcceptInboundMessageRequest,
     ) -> Result<AcceptedInboundMessage, SessionThreadError> {
-        scripted_stub_unreachable("accept_inbound_message")
+        match &self.behavior {
+            ScriptedThreadBehavior::RejectedBusyMarkFails { message_id }
+            | ScriptedThreadBehavior::DeferredBusyMarkFails { message_id } => {
+                Ok(AcceptedInboundMessage {
+                    thread_id: request.thread_id,
+                    message_id: *message_id,
+                    sequence: 1,
+                    idempotent_replay: false,
+                })
+            }
+            _ => scripted_stub_unreachable("accept_inbound_message"),
+        }
     }
 
     async fn replay_accepted_inbound_message(
@@ -1060,7 +1610,71 @@ impl SessionThreadService for ScriptedThreadService {
                     turn_run_id: turn_run_id.clone(),
                 }))
             }
-            ScriptedThreadBehavior::BackendHistory | ScriptedThreadBehavior::History(_) => {
+            ScriptedThreadBehavior::RejectedBusyReplay => Ok(Some(AcceptedInboundMessageReplay {
+                scope: request.scope,
+                thread_id: ThreadId::new("thread-alpha").expect("valid thread"),
+                message_id: ThreadMessageId::new(),
+                sequence: 1,
+                status: MessageStatus::RejectedBusy,
+                actor_id: Some(request.actor_id),
+                source_binding_id: Some(request.source_binding_id),
+                reply_target_binding_id: Some("webui-reply:replayed".to_string()),
+                turn_run_id: None,
+            })),
+            ScriptedThreadBehavior::RejectedBusyMarkFails { message_id } => {
+                // replay_webui_send_message probes with two source-binding variants
+                // (main + legacy) before accepting the message, so calls 1 and 2
+                // are the initial idempotency probes — both must return None so
+                // accept_inbound_message is reached.  Call 3+ comes from
+                // reconcile_terminal_duplicate after mark_message_rejected_busy
+                // fails; return the already-settled RejectedBusy so reconciliation
+                // succeeds without propagating the mark error.
+                let mut count = self.replay_call_count.lock().expect("lock");
+                *count += 1;
+                if *count <= 2 {
+                    Ok(None)
+                } else {
+                    Ok(Some(AcceptedInboundMessageReplay {
+                        scope: request.scope,
+                        thread_id: ThreadId::new("thread-alpha").expect("valid thread"),
+                        message_id: *message_id,
+                        sequence: 1,
+                        status: MessageStatus::RejectedBusy,
+                        actor_id: Some(request.actor_id),
+                        source_binding_id: Some(request.source_binding_id),
+                        reply_target_binding_id: Some("webui-reply:replayed".to_string()),
+                        turn_run_id: None,
+                    }))
+                }
+            }
+            ScriptedThreadBehavior::DeferredBusyMarkFails { message_id } => {
+                // Same two-phase probe as RejectedBusyMarkFails: calls 1 and 2 are
+                // the initial idempotency probes and must return None.  Call 3+
+                // comes from reconcile_terminal_duplicate; return legacy DeferredBusy.
+                // DeferredBusy is non-terminal — reconcile_terminal_duplicate accepts
+                // only RejectedBusy as settled, so this replay does NOT satisfy
+                // reconciliation.  The original mark failure surfaces as an error.
+                let mut count = self.replay_call_count.lock().expect("lock");
+                *count += 1;
+                if *count <= 2 {
+                    Ok(None)
+                } else {
+                    Ok(Some(AcceptedInboundMessageReplay {
+                        scope: request.scope,
+                        thread_id: ThreadId::new("thread-alpha").expect("valid thread"),
+                        message_id: *message_id,
+                        sequence: 1,
+                        status: MessageStatus::DeferredBusy,
+                        actor_id: Some(request.actor_id),
+                        source_binding_id: Some(request.source_binding_id),
+                        reply_target_binding_id: Some("webui-reply:replayed".to_string()),
+                        turn_run_id: None,
+                    }))
+                }
+            }
+            ScriptedThreadBehavior::BackendHistory
+            | ScriptedThreadBehavior::History(_)
+            | ScriptedThreadBehavior::ListPages => {
                 scripted_stub_unreachable("replay_accepted_inbound_message")
             }
         }
@@ -1077,13 +1691,21 @@ impl SessionThreadService for ScriptedThreadService {
         scripted_stub_unreachable("mark_message_submitted")
     }
 
-    async fn mark_message_deferred_busy(
+    async fn mark_message_rejected_busy(
         &self,
         _scope: &ThreadScope,
         _thread_id: &ThreadId,
         _message_id: ThreadMessageId,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        scripted_stub_unreachable("mark_message_deferred_busy")
+        match &self.behavior {
+            ScriptedThreadBehavior::RejectedBusyMarkFails { .. }
+            | ScriptedThreadBehavior::DeferredBusyMarkFails { .. } => {
+                Err(SessionThreadError::Backend(
+                    "simulated backend failure in mark_message_rejected_busy".to_string(),
+                ))
+            }
+            _ => scripted_stub_unreachable("mark_message_rejected_busy"),
+        }
     }
 
     async fn append_assistant_draft(
@@ -1157,6 +1779,23 @@ impl SessionThreadService for ScriptedThreadService {
         _request: CreateSummaryArtifactRequest,
     ) -> Result<SummaryArtifact, SessionThreadError> {
         scripted_stub_unreachable("create_summary_artifact")
+    }
+
+    async fn list_threads_for_scope(
+        &self,
+        request: ListThreadsForScopeRequest,
+    ) -> Result<ListThreadsForScopeResponse, SessionThreadError> {
+        match &self.behavior {
+            ScriptedThreadBehavior::ListPages => {
+                self.list_requests.lock().expect("lock").push(request);
+                let mut responses = self.list_responses.lock().expect("lock");
+                if responses.is_empty() {
+                    scripted_stub_unreachable("list_threads_for_scope");
+                }
+                Ok(responses.remove(0))
+            }
+            _ => scripted_stub_unreachable("list_threads_for_scope"),
+        }
     }
 }
 
@@ -1355,6 +1994,11 @@ async fn submit_turn_uses_facade_and_thread_history_without_route_store_access()
         submission_scope.project_id.expect("project").as_str(),
         "project-alpha"
     );
+    assert_eq!(
+        coordinator.last_submission_origin_kind(),
+        Some(TurnOriginKind::WebUi),
+        "WebUI submit must produce WebUi origin"
+    );
 }
 
 #[tokio::test]
@@ -1439,7 +2083,7 @@ async fn busy_submit_clears_skill_activation_message() {
     );
     create_thread_for(&services, caller(), "thread-alpha").await;
 
-    let deferred = services
+    let rejected = services
         .submit_turn(
             caller(),
             serde_json::from_value::<WebUiSendMessageRequest>(json!({
@@ -1450,12 +2094,12 @@ async fn busy_submit_clears_skill_activation_message() {
             .expect("request"),
         )
         .await
-        .expect("busy submit is deferred");
+        .expect("busy submit is rejected");
 
     assert!(matches!(
-        deferred,
-        RebornSubmitTurnResponse::DeferredBusy {
-            active_run_id: id,
+        rejected,
+        RebornSubmitTurnResponse::RejectedBusy {
+            active_run_id: Some(id),
             ..
         } if id == active_run_id
     ));
@@ -1466,7 +2110,7 @@ async fn busy_submit_clears_skill_activation_message() {
     assert_eq!(
         cleared.as_slice(),
         &[(recorded[0].0.clone(), recorded[0].1.clone())],
-        "deferred submissions must clear their activation input before returning"
+        "rejected submissions must clear their activation input before returning"
     );
 }
 
@@ -1975,14 +2619,14 @@ async fn concurrent_duplicate_submit_creates_one_message_and_replays_outcome() {
     let first_run_id = match &first {
         RebornSubmitTurnResponse::Submitted { run_id, .. }
         | RebornSubmitTurnResponse::AlreadySubmitted { run_id, .. } => *run_id,
-        RebornSubmitTurnResponse::DeferredBusy { .. } => {
+        RebornSubmitTurnResponse::RejectedBusy { .. } => {
             panic!("duplicate submit must not defer while deduping")
         }
     };
     let second_run_id = match &second {
         RebornSubmitTurnResponse::Submitted { run_id, .. }
         | RebornSubmitTurnResponse::AlreadySubmitted { run_id, .. } => *run_id,
-        RebornSubmitTurnResponse::DeferredBusy { .. } => {
+        RebornSubmitTurnResponse::RejectedBusy { .. } => {
             panic!("duplicate submit must not defer while deduping")
         }
     };
@@ -2067,6 +2711,187 @@ async fn get_timeline_rejects_cross_user_access() {
 
     assert_eq!(err.code, RebornServicesErrorCode::NotFound);
     assert_eq!(err.status_code, 404);
+}
+
+#[tokio::test]
+async fn delete_thread_removes_owned_thread() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let response = services
+        .delete_thread(
+            caller(),
+            RebornDeleteThreadRequest {
+                thread_id: "thread-alpha".to_string(),
+            },
+        )
+        .await
+        .expect("delete owned thread");
+
+    assert_eq!(response.thread_id.as_str(), "thread-alpha");
+    assert!(response.deleted);
+
+    let err = services
+        .get_timeline(
+            caller(),
+            RebornTimelineRequest {
+                thread_id: "thread-alpha".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("deleted thread must no longer be readable");
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+}
+
+#[tokio::test]
+async fn delete_thread_rejects_cross_user_access_without_deleting_owner_thread() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+    let alice = caller();
+    create_thread_for(&services, alice.clone(), "thread-alpha").await;
+
+    let err = services
+        .delete_thread(
+            caller_for_user("user-beta"),
+            RebornDeleteThreadRequest {
+                thread_id: "thread-alpha".to_string(),
+            },
+        )
+        .await
+        .expect_err("cross-user delete must be rejected");
+
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+
+    services
+        .get_timeline(
+            alice,
+            RebornTimelineRequest {
+                thread_id: "thread-alpha".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("owner thread must remain after rejected cross-user delete");
+}
+
+#[tokio::test]
+async fn delete_thread_rejects_thread_with_active_run() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(threads, coordinator.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-before-delete",
+                "thread_id": "thread-alpha",
+                "content": "keep this run alive"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("submit succeeds");
+
+    let err = services
+        .delete_thread(
+            caller(),
+            RebornDeleteThreadRequest {
+                thread_id: "thread-alpha".to_string(),
+            },
+        )
+        .await
+        .expect_err("active thread delete must be rejected");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Conflict);
+    assert_eq!(err.kind, RebornServicesErrorKind::Busy);
+    assert_eq!(err.status_code, 409);
+    assert_eq!(coordinator.run_state_request_count(), 1);
+    services
+        .get_timeline(
+            caller(),
+            RebornTimelineRequest {
+                thread_id: "thread-alpha".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("rejected delete must leave thread readable");
+}
+
+#[tokio::test]
+async fn delete_thread_waits_for_in_flight_submit_before_active_run_check() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(BlockingSubmitCoordinator::new());
+    let services = RebornServices::new(threads, coordinator.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let submit_services = services.clone();
+    let submit_handle = tokio::spawn(async move {
+        submit_services
+            .submit_turn(
+                caller(),
+                serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                    "client_action_id": "send-racing-delete",
+                    "thread_id": "thread-alpha",
+                    "content": "submit while delete races"
+                }))
+                .expect("request"),
+            )
+            .await
+    });
+    coordinator.wait_for_submit().await;
+
+    let delete_services = services.clone();
+    let (delete_done_tx, mut delete_done_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        let result = delete_services
+            .delete_thread(
+                caller(),
+                RebornDeleteThreadRequest {
+                    thread_id: "thread-alpha".to_string(),
+                },
+            )
+            .await;
+        let _ = delete_done_tx.send(result);
+    });
+
+    let early_delete = tokio::time::timeout(Duration::from_millis(25), &mut delete_done_rx).await;
+    assert!(
+        early_delete.is_err(),
+        "delete must wait behind the in-flight submit operation"
+    );
+
+    coordinator.release_submit();
+    submit_handle
+        .await
+        .expect("submit task joins")
+        .expect("submit succeeds");
+
+    let err = delete_done_rx
+        .await
+        .expect("delete result")
+        .expect_err("delete sees submitted active run after waiting");
+    assert_eq!(err.code, RebornServicesErrorCode::Conflict);
+    assert_eq!(err.kind, RebornServicesErrorKind::Busy);
+    services
+        .get_timeline(
+            caller(),
+            RebornTimelineRequest {
+                thread_id: "thread-alpha".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("rejected delete must leave thread readable");
 }
 
 #[tokio::test]
@@ -3103,6 +3928,75 @@ async fn hook_auth_gate_denial_uses_auth_interaction_service() {
     assert_eq!(coordinator.cancellation_count(), 0);
 }
 
+/// A minimal auth-interaction stub that returns `Resumed` for every
+/// Deny decision, mirroring the production path where the model is resumed
+/// so it can surface the denial to the user.
+struct DeniedResumedAuthInteractionService;
+
+#[async_trait]
+impl AuthInteractionService for DeniedResumedAuthInteractionService {
+    async fn list_pending(
+        &self,
+        _request: ListPendingAuthInteractionsRequest,
+    ) -> Result<ListPendingAuthInteractionsResponse, ProductWorkflowError> {
+        Ok(ListPendingAuthInteractionsResponse {
+            auth_interactions: vec![],
+        })
+    }
+
+    async fn resolve(
+        &self,
+        request: ResolveAuthInteractionRequest,
+    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
+        let run_id = request.run_id_hint.expect("webui passes run_id");
+        Ok(ResolveAuthInteractionResponse::Resumed(
+            ResumeTurnResponse {
+                run_id,
+                status: TurnStatus::Queued,
+                event_cursor: EventCursor(37),
+            },
+        ))
+    }
+}
+
+#[tokio::test]
+async fn hook_auth_gate_denial_maps_to_reborn_resumed() {
+    // Verifies that a Deny decision (which produces `Resumed` from
+    // `resume_denied_auth`) maps to `RebornResolveGateResponse::Resumed`
+    // through the facade.
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let auth_interactions = Arc::new(DeniedResumedAuthInteractionService);
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_auth_interactions(auth_interactions);
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let response = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "gate-auth-denial-resumed",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": "gate:hook-auth-denial-resumed",
+                "resolution": "denied"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect(
+            "Resumed from auth-interaction service must map to RebornResolveGateResponse::Resumed",
+        );
+
+    assert!(
+        matches!(response, RebornResolveGateResponse::Resumed(_)),
+        "expected Resumed, got: {response:?}"
+    );
+    assert_eq!(coordinator.cancellation_count(), 0);
+}
+
 #[tokio::test]
 async fn missing_run_state_for_auth_gate_still_routes_to_auth_interaction_service() {
     let coordinator = Arc::new(FakeTurnCoordinator::with_run_state_error(
@@ -3423,11 +4317,8 @@ async fn denied_gate_resolution_with_stale_gate_ref_returns_conflict() {
     );
 }
 
-// Regression: `Approved { always: true }` requests a persistent approval which
-// this facade cannot honor (no approval-policy port). Reject as Unavailable
-// instead of silently downgrading to one-shot.
 #[tokio::test]
-async fn approved_gate_resolution_with_persistent_flag_is_rejected() {
+async fn generic_gate_resolution_with_persistent_flag_is_rejected() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
@@ -3449,7 +4340,7 @@ async fn approved_gate_resolution_with_persistent_flag_is_rejected() {
             .expect("request"),
         )
         .await
-        .expect_err("persistent approval must be rejected");
+        .expect_err("generic persistent gate resolution must be rejected");
 
     assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
     assert_eq!(err.kind, RebornServicesErrorKind::BlockedApproval);
@@ -3457,12 +4348,12 @@ async fn approved_gate_resolution_with_persistent_flag_is_rejected() {
     assert_eq!(
         coordinator.resumption_count(),
         0,
-        "resume_turn must NOT be called for unsupported persistent approval"
+        "resume_turn must NOT be called for unsupported generic persistent gate"
     );
 }
 
 #[tokio::test]
-async fn approval_gate_resolution_with_persistent_flag_is_rejected_without_approval_interaction() {
+async fn approval_gate_resolution_with_persistent_flag_uses_approval_interaction_service() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
     let services = RebornServices::new(
@@ -3473,7 +4364,7 @@ async fn approval_gate_resolution_with_persistent_flag_is_rejected_without_appro
     create_thread_for(&services, caller(), "thread-alpha").await;
     let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
 
-    let err = services
+    let response = services
         .resolve_gate(
             caller(),
             serde_json::from_value::<WebUiResolveGateRequest>(json!({
@@ -3487,12 +4378,20 @@ async fn approval_gate_resolution_with_persistent_flag_is_rejected_without_appro
             .expect("request"),
         )
         .await
-        .expect_err("persistent approval must be rejected");
+        .expect("persistent approval resolution succeeds");
 
-    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
-    assert_eq!(err.kind, RebornServicesErrorKind::BlockedApproval);
-    assert_eq!(err.status_code, 503);
-    assert_eq!(approval_interactions.resolution_count(), 0);
+    assert!(matches!(
+        response,
+        RebornResolveGateResponse::Resumed(response) if response.status == TurnStatus::Queued
+    ));
+    assert_eq!(approval_interactions.resolution_count(), 1);
+    assert_eq!(
+        approval_interactions
+            .last_resolution()
+            .expect("resolution")
+            .decision,
+        ApprovalInteractionDecision::AlwaysAllow
+    );
     assert_eq!(coordinator.resumption_count(), 0);
 }
 
@@ -3584,7 +4483,13 @@ async fn list_automation_dispatches_through_product_facade() {
     .with_automation_product_facade(automation_facade.clone());
 
     let listed = services
-        .list_automations(caller(), WebUiListAutomationsRequest { limit: Some(10) })
+        .list_automations(
+            caller(),
+            WebUiListAutomationsRequest {
+                limit: Some(10),
+                run_limit: None,
+            },
+        )
         .await
         .expect("list automations");
     assert_eq!(listed.automations.len(), 1);
@@ -3592,13 +4497,26 @@ async fn list_automation_dispatches_through_product_facade() {
     assert_eq!(
         listed.automations[0].source,
         RebornAutomationSource::Schedule {
-            cron: "0 9 * * *".to_string()
+            cron: "0 9 * * *".to_string(),
+            timezone: "UTC".to_string(),
         }
     );
     assert_eq!(listed.automations[0].state, RebornAutomationState::Active);
     assert_eq!(
         listed.automations[0].last_status,
         Some(RebornAutomationRunStatus::Ok)
+    );
+    assert_eq!(listed.automations[0].recent_runs.len(), 1);
+    assert_eq!(
+        listed.automations[0].recent_runs[0].status,
+        RebornAutomationRecentRunStatus::Ok
+    );
+    assert_eq!(
+        listed.automations[0].recent_runs[0]
+            .thread_id
+            .as_ref()
+            .map(|t| t.as_str()),
+        Some("thread-listed")
     );
 
     let list_calls = automation_facade.list_calls();
@@ -3614,6 +4532,11 @@ async fn list_automation_dispatches_through_product_facade() {
         Some("project-alpha")
     );
     assert_eq!(list_calls[0].limit, 10);
+    assert_eq!(
+        list_calls[0].run_limit, AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE as usize,
+        "omitted automation run history limit must use AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE ({})",
+        AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE
+    );
 }
 
 #[tokio::test]
@@ -3645,7 +4568,7 @@ async fn list_connectable_channels_returns_configured_action_metadata() {
             action: RebornChannelConnectAction {
                 title: "Slack account connection".to_string(),
                 instructions: "Message the Slack app, then enter the code here.".to_string(),
-                code_placeholder: "Enter Slack pairing code...".to_string(),
+                input_placeholder: "Enter Slack pairing code...".to_string(),
                 submit_label: "Connect".to_string(),
                 success_message: "Slack account connected.".to_string(),
                 error_message: "Invalid or expired Slack pairing code.".to_string(),
@@ -3676,6 +4599,628 @@ async fn list_connectable_channels_returns_configured_action_metadata() {
     );
 }
 
+#[test]
+fn channel_connect_action_serializes_neutral_input_placeholder_and_accepts_legacy_code_placeholder()
+{
+    let action = RebornChannelConnectAction {
+        title: "Slack channel access".to_string(),
+        instructions: "Choose allowed channels.".to_string(),
+        input_placeholder: "C0123456789".to_string(),
+        submit_label: "Save channels".to_string(),
+        success_message: "Slack channels saved.".to_string(),
+        error_message: "Slack channel update failed.".to_string(),
+    };
+
+    let serialized = serde_json::to_value(&action).expect("action serializes");
+    assert_eq!(serialized["input_placeholder"], "C0123456789");
+    assert!(serialized.get("code_placeholder").is_none());
+
+    let legacy: RebornChannelConnectAction = serde_json::from_value(serde_json::json!({
+        "title": "Slack account connection",
+        "instructions": "Message the Slack app, then enter the code here.",
+        "code_placeholder": "Enter Slack pairing code...",
+        "submit_label": "Connect",
+        "success_message": "Slack account connected.",
+        "error_message": "Invalid or expired Slack pairing code."
+    }))
+    .expect("legacy action deserializes");
+    assert_eq!(legacy.input_placeholder, "Enter Slack pairing code...");
+}
+
+#[tokio::test]
+async fn get_outbound_preferences_unwired_returns_empty_projection() {
+    // arch-exempt: large_file, outbound pref tests belong at API seam, plan docs/plans/2026-06-05-trigger-delivery-default-outbound-e2e-plan.md.
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let response = services
+        .get_outbound_preferences(caller())
+        .await
+        .expect("default outbound preferences");
+
+    assert!(response.final_reply_target.is_none());
+    assert_eq!(
+        response.default_modality,
+        RebornOutboundDeliveryModality::Text
+    );
+}
+
+#[test]
+fn outbound_delivery_modality_text_round_trips_as_text() {
+    let serialized = serde_json::to_value(RebornOutboundDeliveryModality::Text)
+        .expect("serialize text modality");
+    assert_eq!(serialized, json!("text"));
+
+    let deserialized: RebornOutboundDeliveryModality =
+        serde_json::from_value(serialized).expect("deserialize text modality");
+    assert_eq!(deserialized, RebornOutboundDeliveryModality::Text);
+}
+
+#[test]
+fn set_outbound_preferences_empty_json_defaults_final_target_to_none() {
+    let request: RebornSetOutboundPreferencesRequest =
+        serde_json::from_value(json!({})).expect("deserialize empty preferences request");
+
+    assert!(request.final_reply_target_id.is_none());
+}
+
+#[test]
+fn outbound_preferences_response_preserves_client_json_shape() {
+    let response = RebornOutboundPreferencesResponse {
+        final_reply_target: Some(outbound_target_summary("slack-dm-alpha")),
+        final_reply_target_status: RebornOutboundDeliveryTargetStatus::Available,
+        default_modality: RebornOutboundDeliveryModality::Text,
+    };
+
+    let serialized = serde_json::to_value(&response).expect("serialize preferences response");
+    assert_eq!(
+        serialized,
+        json!({
+            "final_reply_target": {
+                "target_id": "slack-dm-alpha",
+                "channel": "slack",
+                "display_name": "Slack DM",
+                "description": "Slack direct message",
+            },
+            "final_reply_target_status": "available",
+            "default_modality": "text",
+        })
+    );
+
+    let deserialized: RebornOutboundPreferencesResponse =
+        serde_json::from_value(serialized).expect("deserialize preferences response");
+    assert_eq!(deserialized, response);
+}
+
+#[test]
+fn outbound_preferences_response_empty_json_defaults_to_text_without_target() {
+    let response: RebornOutboundPreferencesResponse =
+        serde_json::from_value(json!({})).expect("deserialize empty preferences response");
+
+    assert!(response.final_reply_target.is_none());
+    assert_eq!(
+        response.final_reply_target_status,
+        RebornOutboundDeliveryTargetStatus::NoneConfigured
+    );
+    assert_eq!(
+        response.default_modality,
+        RebornOutboundDeliveryModality::Text
+    );
+}
+
+#[test]
+fn outbound_preferences_response_missing_status_defaults_to_available_when_target_present() {
+    let response: RebornOutboundPreferencesResponse = serde_json::from_value(json!({
+        "final_reply_target": {
+            "target_id": "slack-dm-alpha",
+            "channel": "slack",
+            "display_name": "Slack DM",
+            "description": "Slack direct message",
+        },
+        "default_modality": "text",
+    }))
+    .expect("deserialize legacy preferences response");
+
+    assert_eq!(
+        response.final_reply_target_status,
+        RebornOutboundDeliveryTargetStatus::Available
+    );
+    assert!(response.final_reply_target.is_some());
+    assert_eq!(
+        response.default_modality,
+        RebornOutboundDeliveryModality::Text
+    );
+}
+
+#[test]
+fn outbound_preferences_response_serializes_unavailable_status_without_target() {
+    let response = RebornOutboundPreferencesResponse {
+        final_reply_target: None,
+        final_reply_target_status: RebornOutboundDeliveryTargetStatus::Unavailable,
+        default_modality: RebornOutboundDeliveryModality::Text,
+    };
+
+    let serialized =
+        serde_json::to_value(&response).expect("serialize unavailable preferences response");
+    assert_eq!(
+        serialized,
+        json!({
+            "final_reply_target_status": "unavailable",
+            "default_modality": "text",
+        })
+    );
+
+    let deserialized: RebornOutboundPreferencesResponse =
+        serde_json::from_value(serialized).expect("deserialize unavailable preferences response");
+    assert_eq!(deserialized, response);
+}
+
+#[test]
+fn outbound_preferences_response_serializes_none_configured_status_explicitly() {
+    let response = RebornOutboundPreferencesResponse {
+        final_reply_target: None,
+        final_reply_target_status: RebornOutboundDeliveryTargetStatus::NoneConfigured,
+        default_modality: RebornOutboundDeliveryModality::Text,
+    };
+
+    let serialized =
+        serde_json::to_value(&response).expect("serialize none configured preferences response");
+    assert_eq!(
+        serialized,
+        json!({
+            "final_reply_target_status": "none_configured",
+            "default_modality": "text",
+        })
+    );
+}
+
+#[test]
+fn outbound_target_summary_preserves_client_json_shape() {
+    let summary = outbound_target_summary("slack-dm-alpha");
+
+    let serialized = serde_json::to_value(&summary).expect("serialize target summary");
+    assert_eq!(
+        serialized,
+        json!({
+            "target_id": "slack-dm-alpha",
+            "channel": "slack",
+            "display_name": "Slack DM",
+            "description": "Slack direct message",
+        })
+    );
+
+    let deserialized: RebornOutboundDeliveryTargetSummary =
+        serde_json::from_value(serialized).expect("deserialize target summary");
+    assert_eq!(deserialized.target_id.as_str(), "slack-dm-alpha");
+    assert_eq!(deserialized.channel.as_str(), "slack");
+    assert_eq!(deserialized.display_name.as_str(), "Slack DM");
+    assert_eq!(
+        deserialized
+            .description
+            .as_ref()
+            .map(|description| description.as_str()),
+        Some("Slack direct message")
+    );
+}
+
+#[test]
+fn outbound_target_list_response_preserves_empty_json_shape_without_cursor() {
+    let response = RebornOutboundDeliveryTargetListResponse {
+        targets: Vec::new(),
+        next_cursor: None,
+    };
+
+    let serialized = serde_json::to_value(&response).expect("serialize empty target list");
+    assert_eq!(serialized, json!({ "targets": [] }));
+    assert!(
+        serialized.get("next_cursor").is_none(),
+        "None cursor must be omitted from the client payload"
+    );
+
+    let deserialized: RebornOutboundDeliveryTargetListResponse =
+        serde_json::from_value(json!({ "targets": [] })).expect("deserialize empty target list");
+    assert!(deserialized.targets.is_empty());
+    assert!(deserialized.next_cursor.is_none());
+}
+
+#[test]
+fn outbound_target_list_response_preserves_json_shape_with_cursor() {
+    let response = RebornOutboundDeliveryTargetListResponse {
+        targets: vec![RebornOutboundDeliveryTargetOption {
+            target: outbound_target_summary("slack-dm-alpha"),
+            capabilities: RebornOutboundDeliveryTargetCapabilities {
+                final_replies: true,
+                gate_prompts: true,
+                auth_prompts: true,
+            },
+        }],
+        next_cursor: Some("opaque-page-token".to_string()),
+    };
+
+    let serialized = serde_json::to_value(&response).expect("serialize target list with cursor");
+    assert_eq!(
+        serialized,
+        json!({
+            "targets": [{
+                "target": {
+                    "target_id": "slack-dm-alpha",
+                    "channel": "slack",
+                    "display_name": "Slack DM",
+                    "description": "Slack direct message",
+                },
+                "capabilities": {
+                    "final_replies": true,
+                    "gate_prompts": true,
+                    "auth_prompts": true,
+                },
+            }],
+            "next_cursor": "opaque-page-token",
+        })
+    );
+
+    let deserialized: RebornOutboundDeliveryTargetListResponse =
+        serde_json::from_value(serialized).expect("deserialize target list with cursor");
+    assert_eq!(deserialized, response);
+}
+
+#[test]
+fn outbound_target_summary_rejects_malformed_display_fields() {
+    for (field, invalid_value) in [
+        ("channel", json!("")),
+        ("channel", json!("slack\ninjected")),
+        ("display_name", json!("")),
+        ("display_name", json!("Slack DM\u{0000}")),
+        ("description", json!("Slack direct\rmessage")),
+    ] {
+        let mut payload = json!({
+            "target_id": "slack-dm-alpha",
+            "channel": "slack",
+            "display_name": "Slack DM",
+            "description": "Slack direct message",
+        });
+        payload[field] = invalid_value;
+
+        serde_json::from_value::<RebornOutboundDeliveryTargetSummary>(payload)
+            .expect_err("malformed target summary display field");
+    }
+
+    for (field, invalid_value) in [
+        ("channel", json!("a".repeat(129))),
+        ("display_name", json!("a".repeat(257))),
+        ("description", json!("a".repeat(1025))),
+    ] {
+        let mut payload = json!({
+            "target_id": "slack-dm-alpha",
+            "channel": "slack",
+            "display_name": "Slack DM",
+            "description": "Slack direct message",
+        });
+        payload[field] = invalid_value;
+
+        serde_json::from_value::<RebornOutboundDeliveryTargetSummary>(payload)
+            .expect_err("oversized target summary display field");
+    }
+
+    RebornOutboundDeliveryTargetSummary::new(
+        outbound_target_id("slack-dm-alpha"),
+        "slack",
+        "Slack DM\ninjected",
+        None,
+    )
+    .expect_err("constructor rejects malformed display field");
+}
+
+#[test]
+fn outbound_target_display_fields_reject_whitespace_only_required_values_and_outer_whitespace() {
+    for (field, invalid_value) in [
+        ("channel", json!(" ")),
+        ("channel", json!("\t")),
+        ("display_name", json!(" ")),
+        ("display_name", json!("\t")),
+        ("channel", json!(" slack")),
+        ("channel", json!("slack ")),
+        ("display_name", json!(" Slack DM")),
+        ("display_name", json!("Slack DM ")),
+        ("description", json!(" Slack direct message")),
+        ("description", json!("Slack direct message ")),
+    ] {
+        let mut payload = json!({
+            "target_id": "slack-dm-alpha",
+            "channel": "slack",
+            "display_name": "Slack DM",
+            "description": "Slack direct message",
+        });
+        payload[field] = invalid_value;
+
+        serde_json::from_value::<RebornOutboundDeliveryTargetSummary>(payload)
+            .expect_err("target summary display fields reject whitespace-only or padded values");
+    }
+}
+
+#[test]
+fn outbound_target_id_and_display_fields_reject_unicode_line_separators() {
+    for target_id in [
+        "slack-dm-alpha\u{2028}injected",
+        "slack-dm-alpha\u{2029}injected",
+    ] {
+        RebornOutboundDeliveryTargetId::new(target_id)
+            .expect_err("target id rejects unicode line separators");
+        serde_json::from_value::<RebornSetOutboundPreferencesRequest>(json!({
+            "final_reply_target_id": target_id,
+        }))
+        .expect_err("preference request rejects target id unicode line separators");
+    }
+
+    for (field, invalid_value) in [
+        ("channel", json!("slack\u{2028}injected")),
+        ("channel", json!("slack\u{2029}injected")),
+        ("display_name", json!("Slack DM\u{2028}injected")),
+        ("display_name", json!("Slack DM\u{2029}injected")),
+        ("description", json!("Slack direct\u{2028}message")),
+        ("description", json!("Slack direct\u{2029}message")),
+    ] {
+        let mut payload = json!({
+            "target_id": "slack-dm-alpha",
+            "channel": "slack",
+            "display_name": "Slack DM",
+            "description": "Slack direct message",
+        });
+        payload[field] = invalid_value;
+
+        serde_json::from_value::<RebornOutboundDeliveryTargetSummary>(payload)
+            .expect_err("target summary display fields reject unicode line separators");
+    }
+}
+
+#[test]
+fn outbound_target_id_and_display_fields_reject_unsafe_unicode_formatting() {
+    for target_id in [
+        "slack-dm-alpha\u{202e}injected",
+        "slack-dm-alpha\u{2066}injected",
+        "slack-dm-alpha\u{200b}injected",
+        "slack-dm-alpha\u{feff}injected",
+    ] {
+        RebornOutboundDeliveryTargetId::new(target_id)
+            .expect_err("target id rejects unsafe unicode formatting characters");
+        serde_json::from_value::<RebornSetOutboundPreferencesRequest>(json!({
+            "final_reply_target_id": target_id,
+        }))
+        .expect_err("preference request rejects unsafe unicode formatting characters");
+    }
+
+    for (field, invalid_value) in [
+        ("channel", json!("slack\u{202e}injected")),
+        ("channel", json!("slack\u{2066}injected")),
+        ("channel", json!("slack\u{200b}injected")),
+        ("channel", json!("slack\u{feff}injected")),
+        ("display_name", json!("Slack DM\u{202e}injected")),
+        ("display_name", json!("Slack DM\u{2066}injected")),
+        ("display_name", json!("Slack DM\u{200b}injected")),
+        ("display_name", json!("Slack DM\u{feff}injected")),
+        ("description", json!("Slack direct\u{202e}message")),
+        ("description", json!("Slack direct\u{2066}message")),
+        ("description", json!("Slack direct\u{200b}message")),
+        ("description", json!("Slack direct\u{feff}message")),
+    ] {
+        let mut payload = json!({
+            "target_id": "slack-dm-alpha",
+            "channel": "slack",
+            "display_name": "Slack DM",
+            "description": "Slack direct message",
+        });
+        payload[field] = invalid_value;
+
+        serde_json::from_value::<RebornOutboundDeliveryTargetSummary>(payload)
+            .expect_err("target summary display fields reject unsafe unicode formatting");
+    }
+}
+
+#[test]
+fn outbound_target_empty_description_is_accepted() {
+    let description =
+        RebornOutboundDeliveryTargetDescription::new("").expect("empty description is allowed");
+    assert_eq!(description.as_str(), "");
+
+    let summary = RebornOutboundDeliveryTargetSummary::new(
+        outbound_target_id("slack-dm-alpha"),
+        "slack",
+        "Slack DM",
+        Some("".to_string()),
+    )
+    .expect("summary accepts empty description");
+
+    assert_eq!(
+        summary
+            .description
+            .as_ref()
+            .map(RebornOutboundDeliveryTargetDescription::as_str),
+        Some("")
+    );
+}
+
+#[tokio::test]
+async fn outbound_preferences_unwired_mutations_and_target_listing_fail_closed() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let set_error = services
+        .set_outbound_preferences(
+            caller(),
+            RebornSetOutboundPreferencesRequest {
+                final_reply_target_id: Some(outbound_target_id("slack-dm-alpha")),
+            },
+        )
+        .await
+        .expect_err("unwired preference mutation");
+    assert_eq!(set_error.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(set_error.status_code, 503);
+    assert!(!set_error.retryable);
+
+    let list_error = services
+        .list_outbound_delivery_targets(caller())
+        .await
+        .expect_err("unwired target listing");
+    assert_eq!(list_error.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(list_error.status_code, 503);
+    assert!(!list_error.retryable);
+}
+
+#[tokio::test]
+async fn outbound_preferences_facade_forwards_caller_and_request() {
+    let outbound_facade = Arc::new(RecordingOutboundPreferencesFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_outbound_preferences_facade(outbound_facade.clone());
+
+    let get_response = services
+        .get_outbound_preferences(caller())
+        .await
+        .expect("get outbound preferences");
+    assert_eq!(
+        get_response
+            .final_reply_target
+            .as_ref()
+            .map(|target| target.target_id.as_str()),
+        Some("slack-dm-alpha")
+    );
+
+    let set_response = services
+        .set_outbound_preferences(
+            caller_for_user_with_project("user-bravo", None),
+            RebornSetOutboundPreferencesRequest {
+                final_reply_target_id: Some(outbound_target_id("slack-dm-beta")),
+            },
+        )
+        .await
+        .expect("set outbound preferences");
+    assert_eq!(
+        set_response
+            .final_reply_target
+            .as_ref()
+            .map(|target| target.target_id.as_str()),
+        Some("slack-dm-beta")
+    );
+
+    let targets = services
+        .list_outbound_delivery_targets(caller_for_user("user-charlie"))
+        .await
+        .expect("list outbound targets");
+    assert_eq!(targets.targets.len(), 1);
+    assert_eq!(
+        targets.targets[0].target.target_id.as_str(),
+        "slack-dm-alpha"
+    );
+    assert!(targets.targets[0].capabilities.final_replies);
+
+    let get_calls = outbound_facade.get_calls();
+    assert_eq!(get_calls.len(), 1);
+    assert_eq!(get_calls[0].tenant_id.as_str(), "tenant-alpha");
+    assert_eq!(get_calls[0].user_id.as_str(), "user-alpha");
+
+    let set_calls = outbound_facade.set_calls();
+    assert_eq!(set_calls.len(), 1);
+    assert_eq!(set_calls[0].caller.user_id.as_str(), "user-bravo");
+    assert!(set_calls[0].caller.agent_id.is_some());
+    assert!(set_calls[0].caller.project_id.is_none());
+    assert_eq!(
+        set_calls[0]
+            .request
+            .final_reply_target_id
+            .as_ref()
+            .map(|target_id| target_id.as_str()),
+        Some("slack-dm-beta")
+    );
+
+    let list_calls = outbound_facade.list_calls();
+    assert_eq!(list_calls.len(), 1);
+    assert_eq!(list_calls[0].user_id.as_str(), "user-charlie");
+}
+
+#[tokio::test]
+async fn set_outbound_preferences_can_clear_final_target() {
+    let outbound_facade = Arc::new(RecordingOutboundPreferencesFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_outbound_preferences_facade(outbound_facade.clone());
+
+    services
+        .set_outbound_preferences(
+            caller(),
+            RebornSetOutboundPreferencesRequest {
+                final_reply_target_id: None,
+            },
+        )
+        .await
+        .expect("clear outbound preferences");
+
+    let set_calls = outbound_facade.set_calls();
+    assert_eq!(set_calls.len(), 1);
+    assert!(set_calls[0].request.final_reply_target_id.is_none());
+}
+
+#[tokio::test]
+async fn set_outbound_preferences_rejects_malformed_target_id_before_facade() {
+    for target_id in [
+        "",
+        " ",
+        " slack-dm-alpha",
+        "slack-dm-alpha ",
+        "slack-dm-alpha\ninjected",
+        "slack-dm-alpha\0injected",
+    ] {
+        serde_json::from_value::<RebornSetOutboundPreferencesRequest>(json!({
+            "final_reply_target_id": target_id,
+        }))
+        .expect_err("malformed target id");
+    }
+
+    let oversized_target_id = "a".repeat(513);
+    serde_json::from_value::<RebornSetOutboundPreferencesRequest>(json!({
+        "final_reply_target_id": oversized_target_id,
+    }))
+    .expect_err("oversized target id");
+}
+
+#[tokio::test]
+async fn set_outbound_preferences_accepts_max_length_target_id_before_facade() {
+    let outbound_facade = Arc::new(RecordingOutboundPreferencesFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_outbound_preferences_facade(outbound_facade.clone());
+
+    let max_length_target_id = "a".repeat(512);
+    services
+        .set_outbound_preferences(
+            caller(),
+            RebornSetOutboundPreferencesRequest {
+                final_reply_target_id: Some(outbound_target_id(&max_length_target_id)),
+            },
+        )
+        .await
+        .expect("max-length target id");
+
+    let set_calls = outbound_facade.set_calls();
+    assert_eq!(set_calls.len(), 1);
+    assert_eq!(
+        set_calls[0]
+            .request
+            .final_reply_target_id
+            .as_ref()
+            .map(|target_id| target_id.as_str()),
+        Some(max_length_target_id.as_str())
+    );
+}
+
 #[tokio::test]
 async fn list_automations_rejects_missing_agent_id() {
     let automation_facade = Arc::new(RecordingAutomationFacade::default());
@@ -3688,7 +5233,10 @@ async fn list_automations_rejects_missing_agent_id() {
     let err = services
         .list_automations(
             caller_without_agent(),
-            WebUiListAutomationsRequest { limit: Some(10) },
+            WebUiListAutomationsRequest {
+                limit: Some(10),
+                run_limit: None,
+            },
         )
         .await
         .expect_err("missing agent id should fail closed");
@@ -3712,6 +5260,7 @@ async fn list_automations_clamps_oversize_limit_before_product_facade() {
             caller(),
             WebUiListAutomationsRequest {
                 limit: Some(u32::MAX),
+                run_limit: None,
             },
         )
         .await
@@ -3736,7 +5285,13 @@ async fn list_automations_clamps_zero_limit_before_product_facade() {
     .with_automation_product_facade(automation_facade.clone());
 
     services
-        .list_automations(caller(), WebUiListAutomationsRequest { limit: Some(0) })
+        .list_automations(
+            caller(),
+            WebUiListAutomationsRequest {
+                limit: Some(0),
+                run_limit: None,
+            },
+        )
         .await
         .expect("list automations");
 
@@ -3758,7 +5313,13 @@ async fn list_automations_uses_default_limit_when_omitted() {
     .with_automation_product_facade(automation_facade.clone());
 
     services
-        .list_automations(caller(), WebUiListAutomationsRequest { limit: None })
+        .list_automations(
+            caller(),
+            WebUiListAutomationsRequest {
+                limit: None,
+                run_limit: None,
+            },
+        )
         .await
         .expect("list automations");
 
@@ -3768,6 +5329,63 @@ async fn list_automations_uses_default_limit_when_omitted() {
         list_calls[0].limit, AUTOMATION_LIST_DEFAULT_PAGE_SIZE as usize,
         "omitted automation list limit must use AUTOMATION_LIST_DEFAULT_PAGE_SIZE ({})",
         AUTOMATION_LIST_DEFAULT_PAGE_SIZE
+    );
+}
+
+#[tokio::test]
+async fn list_automations_clamps_oversize_run_limit_before_product_facade() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    services
+        .list_automations(
+            caller(),
+            WebUiListAutomationsRequest {
+                limit: None,
+                run_limit: Some(u32::MAX),
+            },
+        )
+        .await
+        .expect("list automations");
+
+    let list_calls = automation_facade.list_calls();
+    assert_eq!(list_calls.len(), 1);
+    assert_eq!(
+        list_calls[0].run_limit, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE as usize,
+        "automation run history limit must be clamped to AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE ({}) before the product facade",
+        AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE
+    );
+}
+
+#[tokio::test]
+async fn list_automations_allows_zero_run_limit_before_product_facade() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    services
+        .list_automations(
+            caller(),
+            WebUiListAutomationsRequest {
+                limit: None,
+                run_limit: Some(0),
+            },
+        )
+        .await
+        .expect("list automations");
+
+    let list_calls = automation_facade.list_calls();
+    assert_eq!(list_calls.len(), 1);
+    assert_eq!(
+        list_calls[0].run_limit, 0,
+        "explicit zero automation run history limit must disable embedded run history"
     );
 }
 
@@ -3792,13 +5410,1366 @@ fn reborn_automation_state_round_trips_serde_for_every_variant() {
     }
 }
 
+#[test]
+fn reborn_automation_recent_run_info_round_trips_typed_ids_and_preserves_unknown_status() {
+    let recent_run = RebornAutomationRecentRunInfo {
+        run_id: Some(automation_run_id()),
+        thread_id: Some(ThreadId::new("thread-listed").expect("valid thread id")),
+        fire_slot: Some("2026-06-03T09:00:00Z".parse().expect("fire slot")),
+        status: RebornAutomationRecentRunStatus::Running,
+        submitted_at: "2026-06-03T09:00:01Z".parse().expect("submitted at"),
+        completed_at: None,
+    };
+
+    let serialized = serde_json::to_value(&recent_run).expect("serialize recent run");
+    assert_eq!(
+        serialized,
+        json!({
+            "run_id": "11111111-1111-1111-1111-111111111111",
+            "thread_id": "thread-listed",
+            "fire_slot": "2026-06-03T09:00:00Z",
+            "status": "running",
+            "submitted_at": "2026-06-03T09:00:01Z",
+        })
+    );
+
+    let deserialized: RebornAutomationRecentRunInfo =
+        serde_json::from_value(serialized).expect("deserialize recent run");
+    assert_eq!(deserialized, recent_run);
+
+    let future_status: RebornAutomationRecentRunInfo = serde_json::from_value(json!({
+        "run_id": "11111111-1111-1111-1111-111111111111",
+        "thread_id": "thread-listed",
+        "status": "cancelled",
+        "submitted_at": "2026-06-03T09:00:01Z",
+    }))
+    .expect("deserialize future recent run status");
+    assert_eq!(
+        future_status.status,
+        RebornAutomationRecentRunStatus::Unknown
+    );
+
+    let defaulted_status: RebornAutomationRecentRunInfo = serde_json::from_value(json!({
+        "run_id": "11111111-1111-1111-1111-111111111111",
+        "thread_id": "thread-listed",
+        "submitted_at": "2026-06-03T09:00:01Z",
+    }))
+    .expect("deserialize defaulted recent run status");
+    assert_eq!(
+        defaulted_status.status,
+        RebornAutomationRecentRunStatus::Unknown
+    );
+
+    serde_json::from_value::<RebornAutomationRecentRunInfo>(json!({
+        "run_id": "11111111-1111-1111-1111-111111111111",
+        "thread_id": "thread-listed",
+        "status": { "backend": "future" },
+        "submitted_at": "2026-06-03T09:00:01Z",
+    }))
+    .expect_err("recent run rejects malformed status");
+
+    serde_json::from_value::<RebornAutomationRecentRunInfo>(json!({
+        "run_id": "not-a-uuid",
+        "thread_id": "thread-listed",
+        "status": "running",
+        "submitted_at": "2026-06-03T09:00:01Z",
+    }))
+    .expect_err("recent run rejects malformed run_id");
+
+    serde_json::from_value::<RebornAutomationRecentRunInfo>(json!({
+        "run_id": "11111111-1111-1111-1111-111111111111",
+        "thread_id": "thread/listed",
+        "status": "running",
+        "submitted_at": "2026-06-03T09:00:01Z",
+    }))
+    .expect_err("recent run rejects malformed thread_id");
+}
+
+#[derive(Default)]
+struct RecordingOperatorLogsService {
+    requests: Mutex<Vec<RebornLogQueryRequest>>,
+}
+
+impl RecordingOperatorLogsService {
+    fn requests(&self) -> Vec<RebornLogQueryRequest> {
+        self.requests.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl OperatorLogsService for RecordingOperatorLogsService {
+    async fn query_logs(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornLogQueryRequest,
+    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
+        self.requests.lock().expect("lock").push(request);
+        Ok(RebornLogQueryResponse {
+            source: "test".to_string(),
+            entries: Vec::new(),
+            next_cursor: None,
+            tail_supported: false,
+            follow_supported: false,
+        })
+    }
+}
+
+struct CrateRootLifecycleBackend;
+
+#[async_trait]
+impl OperatorServiceLifecycleService for CrateRootLifecycleBackend {
+    async fn control_service(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornServiceLifecycleRequest,
+    ) -> Result<RebornServiceLifecycleResponse, RebornServicesError> {
+        Ok(RebornServiceLifecycleResponse {
+            action: request.action,
+            state: RebornServiceLifecycleState::Unsupported,
+            message: "not wired".to_string(),
+            remediation: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn query_operator_logs_bounds_query_before_logs_service() {
+    let operator_logs = Arc::new(RecordingOperatorLogsService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_operator_logs_service(operator_logs.clone());
+
+    let oversized_cursor = format!("  {}  ", "c".repeat(2048));
+    let oversized_target = format!("{}é", "t".repeat(512));
+    let oversized_thread_id = format!("{}é", "thread-".repeat(80));
+    let oversized_run_id = format!("{}é", "run-".repeat(100));
+    let boundary_source = format!("{}é", "s".repeat(254));
+    let response = services
+        .query_operator_logs(
+            caller(),
+            RebornOperatorLogsQuery {
+                limit: Some(u32::MAX),
+                cursor: Some(oversized_cursor),
+                level: Some(RebornLogLevel::Warn),
+                target: Some(oversized_target),
+                thread_id: Some(oversized_thread_id),
+                run_id: Some(oversized_run_id),
+                turn_id: Some("turn-1".to_string()),
+                tool_call_id: Some("tool-call-1".to_string()),
+                tool_name: Some("shell".to_string()),
+                source: Some(boundary_source),
+                tail: true,
+            },
+        )
+        .await
+        .expect("operator logs query");
+
+    assert_eq!(response.status, RebornOperatorSurfaceStatus::Available);
+    let requests = operator_logs.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].limit, Some(500));
+    assert_eq!(requests[0].cursor.as_ref().map(String::len), Some(512));
+    assert_eq!(requests[0].target.as_ref().map(String::len), Some(256));
+    assert_eq!(requests[0].thread_id.as_ref().map(String::len), Some(256));
+    assert_eq!(requests[0].run_id.as_ref().map(String::len), Some(256));
+    assert_eq!(requests[0].turn_id.as_deref(), Some("turn-1"));
+    assert_eq!(requests[0].tool_call_id.as_deref(), Some("tool-call-1"));
+    assert_eq!(requests[0].tool_name.as_deref(), Some("shell"));
+    let source = requests[0].source.as_deref().expect("bounded source");
+    assert_eq!(source.len(), 256);
+    assert!(source.ends_with('é'));
+    assert!(source.is_char_boundary(source.len()));
+    let run_id = requests[0].run_id.as_deref().expect("bounded run id");
+    assert_eq!(run_id.len(), 256);
+    assert!(run_id.ends_with(" ... [truncated]"));
+    assert!(run_id.is_char_boundary(run_id.len()));
+    assert_eq!(requests[0].level, Some(RebornLogLevel::Warn));
+    assert!(
+        !requests[0].tail,
+        "unsupported streaming must not reach the logs backend"
+    );
+}
+
+#[tokio::test]
+async fn operator_service_lifecycle_contract_is_implementable_from_crate_root() {
+    let backend = CrateRootLifecycleBackend;
+    let response = backend
+        .control_service(
+            caller(),
+            RebornServiceLifecycleRequest {
+                action: RebornServiceLifecycleAction::Status,
+            },
+        )
+        .await
+        .expect("crate-root lifecycle service implementation");
+
+    assert_eq!(response.action, RebornServiceLifecycleAction::Status);
+    assert_eq!(response.state, RebornServiceLifecycleState::Unsupported);
+}
+
+/// External creator user id used in trigger-thread scope tests.
+///
+/// Trigger threads are stored with the `creator_user_id` of the actor that
+/// fired the trigger (e.g. a Slack user), which is intentionally different
+/// from the WebUI caller (`"user-alpha"`/`"user-alice"`/`"user-bob"`).
+/// Using a distinct value here proves the scope reconstruction uses the
+/// stored creator — not the caller — to build the `ThreadScope`.
+const TRIGGER_CREATOR_USER_ID: &str = "user-trigger-creator";
+
+/// Build a `ThreadScope` matching how `record_trigger_prompt` actually stores
+/// trigger-fired threads: same tenant/agent/project as the trigger record, but
+/// `owner_user_id` = the **external creator** (not the WebUI caller).
+fn trigger_thread_scope_for(caller: &WebUiAuthenticatedCaller) -> ThreadScope {
+    ThreadScope {
+        tenant_id: caller.tenant_id.clone(),
+        agent_id: caller.agent_id.clone().expect("agent id"),
+        project_id: caller.project_id.clone(),
+        owner_user_id: Some(
+            UserId::new(TRIGGER_CREATOR_USER_ID).expect("valid trigger creator user id"),
+        ),
+        mission_id: None,
+    }
+}
+
+/// Build the `TriggerRunThreadScope` that `resolve_run_thread_scope` returns
+/// for a trigger whose thread was stored via `trigger_thread_scope_for`.
+fn trigger_run_thread_scope_for(caller: &WebUiAuthenticatedCaller) -> TriggerRunThreadScope {
+    TriggerRunThreadScope {
+        agent_id: caller.agent_id.clone(),
+        project_id: caller.project_id.clone(),
+        creator_user_id: UserId::new(TRIGGER_CREATOR_USER_ID)
+            .expect("valid trigger creator user id"),
+    }
+}
+
+// Regression tests for the automation-trigger timeline fallback.
+// Bug: `get_timeline` scoped the thread lookup to the WebUI user's
+// `owner_user_id`, but trigger-fired threads are stored with the external
+// creator's `owner_user_id`.  The user-scoped probe returned `UnknownThread`,
+// and the handler propagated `404` without checking whether the thread
+// belongs to one of the caller's automations.
+
+#[tokio::test]
+async fn get_timeline_succeeds_for_own_automation_trigger_thread() {
+    // Trigger thread stored with the EXTERNAL creator's owner_user_id — not the
+    // WebUI caller's.  The old guessing code would produce a caller-scoped
+    // ThreadScope and miss this thread; the new `resolve_run_thread_scope` path
+    // must reconstruct the true scope and return the history.
+    let trigger_thread_id = ThreadId::new("thread-trigger-alpha").expect("valid trigger thread id");
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+
+    // Store the trigger thread under the external creator's scope (not caller).
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: trigger_thread_scope_for(&caller),
+            thread_id: Some(trigger_thread_id.clone()),
+            created_by_actor_id: "system".to_string(),
+            title: Some("Scheduled run".to_string()),
+            metadata_json: Some(automation_trigger_thread_metadata_json(
+                "trigger-scheduled-alpha",
+            )),
+        })
+        .await
+        .expect("trigger thread stored");
+
+    // The automation facade recognises the thread and returns the trigger scope.
+    let automation_facade = Arc::new(
+        StaticAutomationFacade::new(vec![RebornAutomationInfo {
+            automation_id: "trigger-scheduled-alpha".to_string(),
+            name: "Morning briefing".to_string(),
+            source: RebornAutomationSource::Schedule {
+                cron: "0 9 * * *".to_string(),
+                timezone: "UTC".to_string(),
+            },
+            state: RebornAutomationState::Active,
+            next_run_at: None,
+            last_run_at: None,
+            last_status: Some(RebornAutomationRunStatus::Ok),
+            recent_runs: vec![RebornAutomationRecentRunInfo {
+                run_id: Some(automation_run_id()),
+                thread_id: Some(trigger_thread_id.clone()),
+                fire_slot: None,
+                status: RebornAutomationRecentRunStatus::Ok,
+                submitted_at: "2026-06-09T09:00:01Z".parse().expect("submitted_at"),
+                completed_at: Some("2026-06-09T09:00:42Z".parse().expect("completed_at")),
+            }],
+            is_active: true,
+            created_at: None,
+        }])
+        .with_resolve_scope_for_thread(
+            trigger_thread_id.clone(),
+            trigger_run_thread_scope_for(&caller),
+        ),
+    );
+
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(automation_facade);
+
+    let response = services
+        .get_timeline(
+            caller,
+            RebornTimelineRequest {
+                thread_id: trigger_thread_id.as_str().to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("owner should be able to read their automation trigger thread timeline");
+
+    assert_eq!(response.thread.thread_id, trigger_thread_id);
+}
+
+/// Records the scope and storage key each byte read is issued under so a test
+/// can assert the reader addressed the right project mount AND resolved the
+/// right attachment key.
+struct RecordingAttachmentReader {
+    bytes: Vec<u8>,
+    reads: Mutex<Vec<(ThreadScope, String)>>,
+}
+
+#[async_trait]
+impl InboundAttachmentReader for RecordingAttachmentReader {
+    async fn read(
+        &self,
+        thread_scope: &ThreadScope,
+        storage_key: &str,
+    ) -> Result<Vec<u8>, RebornServicesError> {
+        self.reads
+            .lock()
+            .expect("lock")
+            .push((thread_scope.clone(), storage_key.to_string()));
+        Ok(self.bytes.clone())
+    }
+}
+
+// Regression for the trigger-thread byte-read scope. `read_attachment` shares
+// the timeline's automation-trigger fallback, which resolves the thread under
+// the trigger creator's scope (not the WebUI caller's session scope). The bytes
+// must be read back under that same resolved scope — reading under the caller's
+// session scope would address the wrong project mount and 404.
+#[tokio::test]
+async fn read_attachment_reads_trigger_thread_bytes_under_creator_scope() {
+    let trigger_thread_id = ThreadId::new("thread-trigger-bytes").expect("valid trigger thread id");
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: trigger_thread_scope_for(&caller),
+            thread_id: Some(trigger_thread_id.clone()),
+            created_by_actor_id: "system".to_string(),
+            title: Some("Scheduled run".to_string()),
+            metadata_json: Some(automation_trigger_thread_metadata_json("trigger-bytes")),
+        })
+        .await
+        .expect("trigger thread stored");
+
+    // A landed image attachment on the trigger thread, stored under the
+    // creator's scope.
+    let accepted = thread_service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: trigger_thread_scope_for(&caller),
+            thread_id: trigger_thread_id.clone(),
+            actor_id: "system".to_string(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: Some("trigger-image".to_string()),
+            content: MessageContent::with_attachments(
+                "see image",
+                vec![AttachmentRef {
+                    id: "att-0".to_string(),
+                    kind: AttachmentKind::Image,
+                    mime_type: "image/png".to_string(),
+                    filename: Some("p.png".to_string()),
+                    size_bytes: Some(4),
+                    storage_key: Some("/workspace/attachments/2026-06-14/m-0-p.png".to_string()),
+                    extracted_text: None,
+                }],
+            ),
+        })
+        .await
+        .expect("message with attachment accepted");
+
+    let automation_facade = Arc::new(
+        StaticAutomationFacade::new(vec![RebornAutomationInfo {
+            automation_id: "trigger-bytes".to_string(),
+            name: "Morning briefing".to_string(),
+            source: RebornAutomationSource::Schedule {
+                cron: "0 9 * * *".to_string(),
+                timezone: "UTC".to_string(),
+            },
+            state: RebornAutomationState::Active,
+            next_run_at: None,
+            last_run_at: None,
+            last_status: Some(RebornAutomationRunStatus::Ok),
+            recent_runs: vec![RebornAutomationRecentRunInfo {
+                run_id: Some(automation_run_id()),
+                thread_id: Some(trigger_thread_id.clone()),
+                fire_slot: None,
+                status: RebornAutomationRecentRunStatus::Ok,
+                submitted_at: "2026-06-09T09:00:01Z".parse().expect("submitted_at"),
+                completed_at: Some("2026-06-09T09:00:42Z".parse().expect("completed_at")),
+            }],
+            is_active: true,
+            created_at: None,
+        }])
+        .with_resolve_scope_for_thread(
+            trigger_thread_id.clone(),
+            trigger_run_thread_scope_for(&caller),
+        ),
+    );
+
+    let reader = Arc::new(RecordingAttachmentReader {
+        bytes: vec![1, 2, 3, 4],
+        reads: Mutex::new(Vec::new()),
+    });
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(automation_facade)
+        .with_inbound_attachment_reader(reader.clone());
+
+    let result = services
+        .read_attachment(
+            caller,
+            RebornAttachmentRequest {
+                thread_id: trigger_thread_id.as_str().to_string(),
+                message_id: accepted.message_id.to_string(),
+                attachment_id: "att-0".to_string(),
+            },
+        )
+        .await
+        .expect("owner should be able to read their trigger thread's attachment");
+
+    assert_eq!(result.bytes, vec![1, 2, 3, 4]);
+    assert_eq!(result.mime_type, "image/png");
+
+    // The fix: the read was issued under the trigger creator's scope (not the
+    // caller's session scope) and for the landed attachment's own storage key.
+    let reads = reader.reads.lock().expect("lock");
+    assert_eq!(reads.len(), 1);
+    let (scope, storage_key) = &reads[0];
+    assert_eq!(
+        scope.owner_user_id,
+        Some(UserId::new(TRIGGER_CREATOR_USER_ID).expect("trigger creator user id")),
+    );
+    assert_eq!(storage_key, "/workspace/attachments/2026-06-14/m-0-p.png");
+}
+
+#[tokio::test]
+async fn get_timeline_rejects_other_users_automation_trigger_thread() {
+    // A trigger thread owned by alice's automation. Bob tries to read it.
+    let alice = caller_for_user("user-alice");
+    let bob = caller_for_user("user-bob");
+    let trigger_thread_id = ThreadId::new("thread-trigger-beta").expect("valid trigger thread id");
+
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    // Store the thread in alice's trigger scope.
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: trigger_thread_scope_for(&alice),
+            thread_id: Some(trigger_thread_id.clone()),
+            created_by_actor_id: "system".to_string(),
+            title: Some("Alice's scheduled run".to_string()),
+            metadata_json: Some(automation_trigger_thread_metadata_json(
+                "trigger-alices-job",
+            )),
+        })
+        .await
+        .expect("alice trigger thread stored");
+
+    // Bob's facade returns no automations and no resolve_scope — the fallback
+    // must deny him because resolve_run_thread_scope returns None.
+    let automation_facade = Arc::new(StaticAutomationFacade::new(Vec::new()));
+
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(automation_facade);
+
+    let err = services
+        .get_timeline(
+            bob,
+            RebornTimelineRequest {
+                thread_id: trigger_thread_id.as_str().to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("non-owner must not read another user's trigger thread");
+
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+}
+
+// Contract: backend errors from `resolve_run_thread_scope` must surface as 503
+// Unavailable, not be masked as 404 NotFound.  A backend outage should never
+// look like an authorization miss to the caller.
+#[tokio::test]
+async fn get_timeline_surfaces_trigger_scope_lookup_backend_error() {
+    // The primary user-scoped lookup will miss (thread stored under trigger
+    // creator scope), then the automation fallback fires.  The facade returns
+    // a 503 Unavailable error — the service must propagate that error rather
+    // than converting it to 404.
+    let caller = caller();
+    let trigger_thread_id =
+        ThreadId::new("thread-trigger-backend-err").expect("valid trigger thread id");
+
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    // Store the thread under the external creator's scope so the user-scoped
+    // lookup misses and the automation fallback is invoked.
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: trigger_thread_scope_for(&caller),
+            thread_id: Some(trigger_thread_id.clone()),
+            created_by_actor_id: "system".to_string(),
+            title: Some("Trigger backend error test thread".to_string()),
+            metadata_json: Some(automation_trigger_thread_metadata_json(
+                "trigger-backend-err-automation",
+            )),
+        })
+        .await
+        .expect("trigger thread stored");
+
+    // The automation facade returns a 503 backend error from resolve_run_thread_scope.
+    let automation_facade = Arc::new(ErroringAutomationFacade::unavailable());
+
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(automation_facade);
+
+    let err = services
+        .get_timeline(
+            caller,
+            RebornTimelineRequest {
+                thread_id: trigger_thread_id.as_str().to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("backend error from facade must propagate, not become 404");
+
+    assert_eq!(
+        err.code,
+        RebornServicesErrorCode::Unavailable,
+        "backend lookup error must surface as Unavailable, not NotFound"
+    );
+    assert_eq!(err.status_code, 503);
+    assert!(err.retryable, "backend outage error must be retryable");
+}
+
+/// A `SessionThreadService` that returns `UnknownThread` on its first
+/// `list_thread_history` call and `Backend(...)` on every subsequent call.
+/// Used to test the error-taxonomy contract when the caller-scoped probe misses
+/// (→ automation fallback fires) but the trigger-owned scope reload then errors.
+struct FirstMissBackendErrorThreadService {
+    call_count: Mutex<usize>,
+}
+
+impl FirstMissBackendErrorThreadService {
+    fn new() -> Self {
+        Self {
+            call_count: Mutex::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl SessionThreadService for FirstMissBackendErrorThreadService {
+    async fn list_thread_history(
+        &self,
+        request: ThreadHistoryRequest,
+    ) -> Result<ThreadHistory, SessionThreadError> {
+        let mut count = self.call_count.lock().expect("lock");
+        *count += 1;
+        if *count == 1 {
+            Err(SessionThreadError::UnknownThread {
+                thread_id: request.thread_id,
+            })
+        } else {
+            Err(SessionThreadError::Backend(
+                "backend error on trigger-owned reload".to_string(),
+            ))
+        }
+    }
+
+    async fn ensure_thread(
+        &self,
+        _request: EnsureThreadRequest,
+    ) -> Result<SessionThreadRecord, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::ensure_thread should not be reached")
+    }
+
+    async fn accept_inbound_message(
+        &self,
+        _request: AcceptInboundMessageRequest,
+    ) -> Result<AcceptedInboundMessage, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::accept_inbound_message should not be reached")
+    }
+
+    async fn replay_accepted_inbound_message(
+        &self,
+        _request: ReplayAcceptedInboundMessageRequest,
+    ) -> Result<Option<AcceptedInboundMessageReplay>, SessionThreadError> {
+        panic!(
+            "FirstMissBackendErrorThreadService::replay_accepted_inbound_message should not be reached"
+        )
+    }
+
+    async fn mark_message_submitted(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+        _turn_id: String,
+        _turn_run_id: String,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::mark_message_submitted should not be reached")
+    }
+
+    async fn mark_message_rejected_busy(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!(
+            "FirstMissBackendErrorThreadService::mark_message_rejected_busy should not be reached"
+        )
+    }
+
+    async fn append_assistant_draft(
+        &self,
+        _request: AppendAssistantDraftRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::append_assistant_draft should not be reached")
+    }
+
+    async fn append_tool_result_reference(
+        &self,
+        _request: AppendToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!(
+            "FirstMissBackendErrorThreadService::append_tool_result_reference should not be reached"
+        )
+    }
+
+    async fn append_capability_display_preview(
+        &self,
+        _request: AppendCapabilityDisplayPreviewRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!(
+            "FirstMissBackendErrorThreadService::append_capability_display_preview should not be reached"
+        )
+    }
+
+    async fn update_tool_result_reference(
+        &self,
+        _request: UpdateToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!(
+            "FirstMissBackendErrorThreadService::update_tool_result_reference should not be reached"
+        )
+    }
+
+    async fn update_assistant_draft(
+        &self,
+        _request: UpdateAssistantDraftRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::update_assistant_draft should not be reached")
+    }
+
+    async fn finalize_assistant_message(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+        _content: MessageContent,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!(
+            "FirstMissBackendErrorThreadService::finalize_assistant_message should not be reached"
+        )
+    }
+
+    async fn redact_message(
+        &self,
+        _request: RedactMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::redact_message should not be reached")
+    }
+
+    async fn load_context_window(
+        &self,
+        _request: LoadContextWindowRequest,
+    ) -> Result<ContextWindow, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::load_context_window should not be reached")
+    }
+
+    async fn load_context_messages(
+        &self,
+        _request: LoadContextMessagesRequest,
+    ) -> Result<ContextMessages, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::load_context_messages should not be reached")
+    }
+
+    async fn list_threads_for_scope(
+        &self,
+        _request: ListThreadsForScopeRequest,
+    ) -> Result<ListThreadsForScopeResponse, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::list_threads_for_scope should not be reached")
+    }
+
+    async fn create_summary_artifact(
+        &self,
+        _request: CreateSummaryArtifactRequest,
+    ) -> Result<SummaryArtifact, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::create_summary_artifact should not be reached")
+    }
+}
+
+// Contract: when the caller-scoped probe misses (UnknownThread → automation
+// fallback fires) and `resolve_run_thread_scope` authorizes access, but the
+// second `list_thread_history` call for the trigger-owned scope returns a
+// backend error, the result must be Unavailable (503) — NOT the 404 NotFound
+// that would have been returned had the automation facade also denied access.
+// A backend outage must never be surfaced as an authorization miss.
+#[tokio::test]
+async fn get_timeline_surfaces_backend_error_from_unscoped_trigger_history_reload() {
+    let caller = caller();
+    let trigger_thread_id =
+        ThreadId::new("thread-trigger-reload-error").expect("valid trigger thread id");
+
+    // Thread service: first call (caller-scoped probe) → UnknownThread,
+    // second call (trigger-owned scope reload) → Backend error.
+    let thread_service = Arc::new(FirstMissBackendErrorThreadService::new());
+
+    // Automation facade authorizes: the facade resolves a scope for the
+    // thread, so the service proceeds to the trigger-owned reload.
+    let automation_facade = Arc::new(
+        StaticAutomationFacade::new(Vec::new()).with_resolve_scope_for_thread(
+            trigger_thread_id.clone(),
+            trigger_run_thread_scope_for(&caller),
+        ),
+    );
+
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(automation_facade);
+
+    let err = services
+        .get_timeline(
+            caller,
+            RebornTimelineRequest {
+                thread_id: trigger_thread_id.as_str().to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("backend error on trigger-owned reload must surface as 503, not 404");
+
+    // Must be Unavailable, not NotFound: the backend error on the reload
+    // must not be mistaken for an authorization miss.
+    assert_eq!(
+        err.code,
+        RebornServicesErrorCode::Unavailable,
+        "trigger-owned reload backend error must map to Unavailable, not NotFound"
+    );
+    assert_eq!(err.status_code, 503);
+    assert!(err.retryable, "backend outage must be retryable");
+}
+
+// Contract: when `TriggerRunThreadScope.agent_id` is `None` the fallback must
+// substitute the bound caller's `agent_id` so the reconstructed `TurnScope`
+// can locate the thread in storage.
+#[tokio::test]
+async fn get_timeline_uses_caller_agent_when_trigger_scope_omits_agent_id() {
+    // `TriggerRunThreadScope.agent_id` is `Option<AgentId>`.  When it is
+    // `None` (e.g. the trigger record was stored without an explicit agent),
+    // `check_automation_trigger_access` falls back to `bound_caller.agent_id`.
+    // This test seeds the thread under the scope that fallback should produce
+    // (caller's agent, trigger's project, creator's owner) and verifies that
+    // the timeline resolves — proving the fallback actually runs.
+    let caller = caller();
+    let trigger_thread_id =
+        ThreadId::new("thread-trigger-no-agent").expect("valid trigger thread id");
+
+    // The thread is stored under the scope the fallback reconstructs:
+    //   agent_id    = bound_caller.agent_id  (falls back from None)
+    //   project_id  = trigger_scope.project_id
+    //   owner_user_id = Some(creator_user_id)
+    let fallback_scope = ThreadScope {
+        tenant_id: caller.tenant_id.clone(),
+        agent_id: caller.agent_id.clone().expect("test caller has agent"),
+        project_id: caller.project_id.clone(),
+        owner_user_id: Some(
+            UserId::new(TRIGGER_CREATOR_USER_ID).expect("valid trigger creator user id"),
+        ),
+        mission_id: None,
+    };
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: fallback_scope,
+            thread_id: Some(trigger_thread_id.clone()),
+            created_by_actor_id: "system".to_string(),
+            title: Some("Agent-omitted trigger run".to_string()),
+            metadata_json: Some(automation_trigger_thread_metadata_json(
+                "trigger-no-agent-automation",
+            )),
+        })
+        .await
+        .expect("trigger thread stored");
+
+    // The trigger scope has agent_id = None, exercising the fallback branch.
+    let scope_with_no_agent = TriggerRunThreadScope {
+        agent_id: None,
+        project_id: caller.project_id.clone(),
+        creator_user_id: UserId::new(TRIGGER_CREATOR_USER_ID)
+            .expect("valid trigger creator user id"),
+    };
+    let automation_facade = Arc::new(
+        StaticAutomationFacade::new(vec![])
+            .with_resolve_scope_for_thread(trigger_thread_id.clone(), scope_with_no_agent),
+    );
+
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(automation_facade);
+
+    let response = services
+        .get_timeline(
+            caller,
+            RebornTimelineRequest {
+                thread_id: trigger_thread_id.as_str().to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("timeline must resolve when agent_id is None via caller fallback");
+
+    assert_eq!(
+        response.thread.thread_id, trigger_thread_id,
+        "fallback to caller agent_id must locate the trigger-owned thread"
+    );
+}
+
+// Regression tests for the automation-trigger gate/approval interaction
+// fallback.  Bug: `resolve_gate`, `cancel_run`, `get_run_state`, and
+// `stream_events` all called `resolve_webui_thread_metadata` (user-scoped
+// probe only) rather than `resolve_thread_access_for_caller` (user-scoped
+// probe + automation fallback). Any gate-approval or auth-submit action on a
+// trigger-fired thread therefore returned 404, even when the caller owned the
+// automation that produced the thread.
+
+fn automation_facade_with_trigger_thread(
+    trigger_thread_id: ThreadId,
+    caller: &WebUiAuthenticatedCaller,
+) -> Arc<StaticAutomationFacade> {
+    Arc::new(
+        StaticAutomationFacade::new(vec![RebornAutomationInfo {
+            automation_id: "trigger-gate-automation".to_string(),
+            name: "Gate test automation".to_string(),
+            source: RebornAutomationSource::Schedule {
+                cron: "0 9 * * *".to_string(),
+                timezone: "UTC".to_string(),
+            },
+            state: RebornAutomationState::Active,
+            next_run_at: None,
+            last_run_at: None,
+            last_status: Some(RebornAutomationRunStatus::Ok),
+            recent_runs: vec![RebornAutomationRecentRunInfo {
+                run_id: Some(automation_run_id()),
+                thread_id: Some(trigger_thread_id.clone()),
+                fire_slot: None,
+                status: RebornAutomationRecentRunStatus::Ok,
+                submitted_at: "2026-06-10T09:00:01Z".parse().expect("submitted_at"),
+                completed_at: None,
+            }],
+            is_active: true,
+            created_at: None,
+        }])
+        .with_resolve_scope_for_thread(
+            trigger_thread_id.clone(),
+            trigger_run_thread_scope_for(caller),
+        ),
+    )
+}
+
+/// Set up a trigger thread stored under the external creator's scope and
+/// return the thread_id.  Mirrors `record_trigger_prompt` which sets
+/// `owner_user_id = Some(creator_user_id)`.
+async fn setup_trigger_thread(
+    thread_service: &Arc<InMemorySessionThreadService>,
+    caller: &WebUiAuthenticatedCaller,
+    thread_id: &str,
+) -> ThreadId {
+    let tid = ThreadId::new(thread_id).expect("valid trigger thread id");
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: trigger_thread_scope_for(caller),
+            thread_id: Some(tid.clone()),
+            created_by_actor_id: "system".to_string(),
+            title: Some("Gate test trigger thread".to_string()),
+            metadata_json: Some(automation_trigger_thread_metadata_json(
+                "trigger-gate-automation",
+            )),
+        })
+        .await
+        .expect("trigger thread stored");
+    tid
+}
+
+#[tokio::test]
+async fn resolve_gate_approval_succeeds_for_own_automation_trigger_thread() {
+    // The caller owns the automation that produced the trigger thread. Approval
+    // of a gate on that thread must succeed via the automation fallback.
+    //
+    // Post-#4754 ("Part A") verification: `check_automation_trigger_access`
+    // must forward the trigger-owned `TurnScope` (with
+    // `owner_user_id = Some(TRIGGER_CREATOR_USER_ID)`) — not the WebUI
+    // caller's user_id — to the turn coordinator's `get_run_state` call.
+    // The fake coordinator is configured to return `BlockedApproval` only
+    // for any scope it receives; this assertion proves the coordinator
+    // actually gets the trigger-owned scope, not the caller's session scope.
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let trigger_thread_id =
+        setup_trigger_thread(&thread_service, &caller, "thread-trigger-gate-alpha").await;
+
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
+    // Program coordinator to report BlockedApproval with an approval gate.
+    let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
+    coordinator.set_parked_approval_gate(gate_ref.clone());
+    coordinator.set_run_state_actor(Some(turn_actor_for_user(TRIGGER_CREATOR_USER_ID)));
+
+    let services = RebornServices::new(thread_service, coordinator.clone())
+        .with_automation_product_facade(automation_facade_with_trigger_thread(
+            trigger_thread_id.clone(),
+            &caller,
+        ))
+        .with_approval_interactions(approval_interactions.clone());
+
+    let response = services
+        .resolve_gate(
+            caller.clone(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "approval-trigger-1",
+                "thread_id": trigger_thread_id.as_str(),
+                "run_id": run_id_string(),
+                "gate_ref": gate_ref.as_str(),
+                "resolution": "approved"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("automation owner should be able to approve gate on trigger thread");
+
+    assert!(
+        matches!(response, RebornResolveGateResponse::Resumed(_)),
+        "expected Resumed, got {response:?}"
+    );
+    assert_eq!(
+        approval_interactions.resolution_count(),
+        1,
+        "approval interaction should have been called"
+    );
+
+    // Part A scope assertion: the coordinator must receive the trigger-owned
+    // scope (owner = TRIGGER_CREATOR_USER_ID), not the WebUI caller's scope
+    // (owner = "user-alpha"). This confirms `check_automation_trigger_access`
+    // reconstructs the scope from `TriggerRunThreadScope.creator_user_id` and
+    // that the reconstructed scope flows through to the turn coordinator.
+    let expected_trigger_scope = TurnScope::new_with_owner(
+        caller.tenant_id.clone(),
+        caller.agent_id.clone(),
+        caller.project_id.clone(),
+        trigger_thread_id.clone(),
+        Some(UserId::new(TRIGGER_CREATOR_USER_ID).expect("valid creator user id")),
+    );
+    assert_eq!(
+        coordinator.last_run_state_scope(),
+        Some(expected_trigger_scope),
+        "get_run_state must receive the trigger-owned scope (owner = TRIGGER_CREATOR_USER_ID), \
+         not the WebUI caller's session scope (owner = user-alpha)"
+    );
+    assert_eq!(
+        approval_interactions
+            .last_resolution()
+            .expect("approval resolution")
+            .actor
+            .user_id,
+        UserId::new(TRIGGER_CREATOR_USER_ID).expect("valid creator user id"),
+        "approval resolution must resume the run as the trigger creator, not the WebUI caller"
+    );
+}
+
+#[tokio::test]
+async fn cancel_run_succeeds_for_own_automation_trigger_thread() {
+    // The caller owns the automation, but the run itself belongs to the trigger
+    // creator. cancel_run must forward both the trigger-owned scope and the run
+    // actor to the turn coordinator.
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let trigger_thread_id =
+        setup_trigger_thread(&thread_service, &caller, "thread-trigger-cancel-alpha").await;
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+
+    let services =
+        RebornServices::new(thread_service, coordinator.clone()).with_automation_product_facade(
+            automation_facade_with_trigger_thread(trigger_thread_id.clone(), &caller),
+        );
+
+    let response = services
+        .cancel_run(
+            caller.clone(),
+            serde_json::from_value::<WebUiCancelRunRequest>(json!({
+                "client_action_id": "cancel-trigger-1",
+                "thread_id": trigger_thread_id.as_str(),
+                "run_id": run_id_string(),
+                "reason": "user_requested"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("automation owner should be able to cancel trigger thread run");
+
+    assert_eq!(response.status, TurnStatus::Cancelled);
+    let expected_trigger_scope = TurnScope::new_with_owner(
+        caller.tenant_id.clone(),
+        caller.agent_id.clone(),
+        caller.project_id.clone(),
+        trigger_thread_id,
+        Some(UserId::new(TRIGGER_CREATOR_USER_ID).expect("valid creator user id")),
+    );
+    assert_eq!(
+        coordinator.last_cancellation_scope(),
+        Some(expected_trigger_scope),
+        "cancel_run must receive the trigger-owned scope"
+    );
+    assert_eq!(
+        coordinator
+            .last_cancellation_actor()
+            .expect("cancel actor")
+            .user_id,
+        UserId::new(TRIGGER_CREATOR_USER_ID).expect("valid creator user id"),
+        "cancel_run must use the trigger creator actor, not the WebUI caller"
+    );
+}
+
+#[tokio::test]
+async fn get_run_state_succeeds_for_own_automation_trigger_thread() {
+    // get_run_state is read-only, but it still must resolve the browser thread
+    // id to the trigger-owned scope before querying the coordinator.
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let trigger_thread_id =
+        setup_trigger_thread(&thread_service, &caller, "thread-trigger-state-alpha").await;
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+
+    let services =
+        RebornServices::new(thread_service, coordinator.clone()).with_automation_product_facade(
+            automation_facade_with_trigger_thread(trigger_thread_id.clone(), &caller),
+        );
+
+    let response = services
+        .get_run_state(
+            caller.clone(),
+            RebornGetRunStateRequest {
+                thread_id: trigger_thread_id.as_str().to_string(),
+                run_id: run_id_string(),
+            },
+        )
+        .await
+        .expect("automation owner should be able to read trigger run state");
+
+    assert_eq!(response.status, TurnStatus::Queued);
+    let expected_trigger_scope = TurnScope::new_with_owner(
+        caller.tenant_id.clone(),
+        caller.agent_id.clone(),
+        caller.project_id.clone(),
+        trigger_thread_id,
+        Some(UserId::new(TRIGGER_CREATOR_USER_ID).expect("valid creator user id")),
+    );
+    assert_eq!(
+        coordinator.last_run_state_scope(),
+        Some(expected_trigger_scope),
+        "get_run_state must query the trigger-owned scope"
+    );
+}
+
+#[tokio::test]
+async fn resolve_gate_rejects_other_users_automation_trigger_thread() {
+    // Alice owns the trigger thread. Bob should get 404, not a gate resolution.
+    let alice = caller_for_user("user-alice");
+    let bob = caller_for_user("user-bob");
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let trigger_thread_id =
+        setup_trigger_thread(&thread_service, &alice, "thread-trigger-gate-beta").await;
+
+    // Bob has no automations — resolve_run_thread_scope returns None, fallback denies him.
+    let bob_automation_facade = Arc::new(StaticAutomationFacade::new(Vec::new()));
+    let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
+    let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
+
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(bob_automation_facade)
+        .with_approval_interactions(approval_interactions.clone());
+
+    let err = services
+        .resolve_gate(
+            bob,
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "approval-trigger-rejected",
+                "thread_id": trigger_thread_id.as_str(),
+                "run_id": run_id_string(),
+                "gate_ref": gate_ref.as_str(),
+                "resolution": "approved"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("non-owner must not resolve gate on another user's trigger thread");
+
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+    assert_eq!(
+        approval_interactions.resolution_count(),
+        0,
+        "approval interaction must not be called for unauthorized caller"
+    );
+}
+
+// Regression: stream_events used the WebUI caller's user_id as the projection
+// identity even after resolve_thread_access_for_caller succeeded via the
+// automation fallback. For a trigger-fired thread the run events are keyed
+// under the trigger creator's user_id, not the WebUI caller's; passing the
+// caller's id caused the turn-event replay filter (owner_user_id) and the
+// runtime event stream key (EventStreamKey) to select the wrong bucket —
+// approval-gate events were invisible to the chat page.
+//
+// The fix: after authorization succeeds, derive the projection identity from
+// scope.explicit_owner_user_id() (the creator for trigger threads; falls back
+// to caller for normal session threads where thread_owner = ActorFallback).
+#[tokio::test]
+async fn stream_events_uses_trigger_creator_as_projection_identity() {
+    // The caller ("user-alpha") owns the automation. The trigger thread was
+    // stored under the external creator's scope ("user-trigger-creator").
+    // stream_events must pass the CREATOR's identity to the projection drain,
+    // not the caller's, so the correct event stream bucket is selected.
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let trigger_thread_id =
+        setup_trigger_thread(&thread_service, &caller, "thread-trigger-stream-alpha").await;
+
+    let event_stream = Arc::new(RecordingProjectionStream::default());
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(automation_facade_with_trigger_thread(
+            trigger_thread_id.clone(),
+            &caller,
+        ))
+        .with_event_stream(event_stream.clone());
+
+    services
+        .stream_events(
+            caller.clone(),
+            RebornStreamEventsRequest {
+                thread_id: trigger_thread_id.as_str().to_string(),
+                after_cursor: None,
+            },
+        )
+        .await
+        .expect("automation owner should be able to stream trigger thread events");
+
+    // The projection drain must have been called with the trigger CREATOR's
+    // user_id, not the WebUI caller's user_id. Events are owned by the
+    // run's submitting identity (the creator); using the caller's id
+    // filters to the wrong stream/event bucket.
+    let requests = event_stream.requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "projection drain must be called exactly once"
+    );
+    assert_eq!(
+        requests[0].actor.user_id,
+        UserId::new(TRIGGER_CREATOR_USER_ID).expect("valid creator user id"),
+        "projection actor must be the trigger creator (owner of the run events), \
+         not the WebUI caller (who proved visibility via automation ownership)"
+    );
+    // The scope must still carry the thread_id correctly.
+    assert_eq!(
+        requests[0].scope.thread_id, trigger_thread_id,
+        "projection scope thread_id must match the trigger thread"
+    );
+}
+
+#[tokio::test]
+async fn stream_events_revalidates_facade_on_every_poll() {
+    // Every stream_events poll must call resolve_run_thread_scope — there is no
+    // authorization cache. This ensures a caller that loses automation
+    // visibility between polls cannot keep draining the trigger-owned stream.
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let trigger_thread_id = setup_trigger_thread(
+        &thread_service,
+        &caller,
+        "thread-trigger-stream-revalidate-alpha",
+    )
+    .await;
+
+    let automation_facade =
+        automation_facade_with_trigger_thread(trigger_thread_id.clone(), &caller);
+    let event_stream = Arc::new(RecordingProjectionStream::default());
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(automation_facade.clone())
+        .with_event_stream(event_stream.clone());
+
+    for _ in 0..3 {
+        services
+            .stream_events(
+                caller.clone(),
+                RebornStreamEventsRequest {
+                    thread_id: trigger_thread_id.as_str().to_string(),
+                    after_cursor: None,
+                },
+            )
+            .await
+            .expect("automation owner should be able to repeatedly stream trigger events");
+    }
+
+    assert_eq!(
+        automation_facade.resolve_calls(),
+        vec![
+            trigger_thread_id.clone(),
+            trigger_thread_id.clone(),
+            trigger_thread_id.clone()
+        ],
+        "every stream_events poll must call resolve_run_thread_scope (no authz caching)"
+    );
+    assert_eq!(
+        event_stream.requests().len(),
+        3,
+        "event polling must not be suppressed"
+    );
+}
+
+#[tokio::test]
+async fn stream_events_fails_when_visibility_revoked_between_polls() {
+    // If the caller's automation visibility is revoked between polls,
+    // the next poll must fail with not_found — the authz result is not cached.
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let trigger_thread_id = setup_trigger_thread(
+        &thread_service,
+        &caller,
+        "thread-trigger-stream-revoke-alpha",
+    )
+    .await;
+
+    // A facade that starts with the scope available but can revoke it.
+    let revocable_facade = Arc::new(RevocableAutomationFacade::new(
+        trigger_thread_id.clone(),
+        &caller,
+    ));
+    let event_stream = Arc::new(RecordingProjectionStream::default());
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(revocable_facade.clone())
+        .with_event_stream(event_stream.clone());
+
+    // First poll succeeds — caller still has automation visibility.
+    services
+        .stream_events(
+            caller.clone(),
+            RebornStreamEventsRequest {
+                thread_id: trigger_thread_id.as_str().to_string(),
+                after_cursor: None,
+            },
+        )
+        .await
+        .expect("first poll must succeed while scope is visible");
+
+    // Revoke visibility.
+    revocable_facade.revoke();
+
+    // Second poll must fail — visibility was revoked and there is no cached authz.
+    let err = services
+        .stream_events(
+            caller.clone(),
+            RebornStreamEventsRequest {
+                thread_id: trigger_thread_id.as_str().to_string(),
+                after_cursor: None,
+            },
+        )
+        .await
+        .expect_err("second poll must fail after visibility is revoked");
+
+    assert_eq!(
+        err.code,
+        RebornServicesErrorCode::NotFound,
+        "revoked visibility must surface as not_found, not a stale cached grant"
+    );
+    assert_eq!(err.status_code, 404);
+}
+
+#[tokio::test]
+async fn get_timeline_rejects_thread_id_absent_from_callers_automations() {
+    // The thread_id does not appear in the caller's automation run history at
+    // all — `resolve_run_thread_scope` returns `None`.  The service must return
+    // 404 and must NOT fall back to guessing the thread scope.
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    // No threads stored anywhere.
+
+    // Automation facade knows about a DIFFERENT thread, not the requested one.
+    let unrelated_thread_id =
+        ThreadId::new("thread-unrelated-xyz").expect("valid unrelated thread id");
+    let automation_facade = Arc::new(
+        StaticAutomationFacade::new(vec![RebornAutomationInfo {
+            automation_id: "trigger-other".to_string(),
+            name: "Other automation".to_string(),
+            source: RebornAutomationSource::Schedule {
+                cron: "0 12 * * *".to_string(),
+                timezone: "UTC".to_string(),
+            },
+            state: RebornAutomationState::Active,
+            next_run_at: None,
+            last_run_at: None,
+            last_status: None,
+            recent_runs: vec![RebornAutomationRecentRunInfo {
+                run_id: Some(automation_run_id()),
+                thread_id: Some(unrelated_thread_id),
+                fire_slot: None,
+                status: RebornAutomationRecentRunStatus::Ok,
+                submitted_at: "2026-06-10T12:00:00Z".parse().expect("submitted_at"),
+                completed_at: Some("2026-06-10T12:01:00Z".parse().expect("completed_at")),
+            }],
+            is_active: true,
+            created_at: None,
+        }]), // resolve_scope is None — the facade does not recognise the requested thread.
+    );
+
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(automation_facade);
+
+    let err = services
+        .get_timeline(
+            caller,
+            RebornTimelineRequest {
+                thread_id: "thread-absent-from-automations".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("unknown thread_id must return 404");
+
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+}
+
 #[tokio::test]
 async fn list_automations_returns_empty_list() {
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(Arc::new(StaticAutomationFacade { output: Vec::new() }));
+    .with_automation_product_facade(Arc::new(StaticAutomationFacade::new(Vec::new())));
 
     let listed = services
         .list_automations(caller(), WebUiListAutomationsRequest::default())
@@ -3806,6 +6777,29 @@ async fn list_automations_returns_empty_list() {
         .expect("list automations");
 
     assert!(listed.automations.is_empty());
+    // Default facade reports the scheduler as running.
+    assert!(listed.scheduler_enabled);
+}
+
+#[tokio::test]
+async fn list_automations_surfaces_disabled_scheduler() {
+    // Regression: when the trigger poller is off, the response must report
+    // scheduler_enabled=false so the browser can warn that listed automations
+    // will not fire. Previously the wire response had no such signal.
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(Arc::new(
+        StaticAutomationFacade::new(Vec::new()).with_scheduler_enabled(false),
+    ));
+
+    let listed = services
+        .list_automations(caller(), WebUiListAutomationsRequest::default())
+        .await
+        .expect("list automations");
+
+    assert!(!listed.scheduler_enabled);
 }
 
 #[tokio::test]
@@ -3955,6 +6949,668 @@ fn setup_services_with_requirements(
     ))
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct SetupUpsertCall {
+    id: String,
+    adapter: String,
+    base_url: Option<String>,
+    default_model: Option<String>,
+    api_key_set: bool,
+    set_active: bool,
+    model: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SetupSetActiveCall {
+    provider_id: String,
+    model: Option<String>,
+}
+
+struct SetupRecordingLlmConfigService {
+    snapshot_calls: Mutex<usize>,
+    upsert_provider_calls: Mutex<Vec<SetupUpsertCall>>,
+    set_active_calls: Mutex<Vec<SetupSetActiveCall>>,
+    test_connection_calls: Mutex<usize>,
+    list_models_calls: Mutex<usize>,
+    snapshot: Mutex<LlmConfigSnapshot>,
+    next_snapshot_error: Mutex<Option<LlmConfigServiceError>>,
+    next_upsert_error: Mutex<Option<LlmConfigServiceError>>,
+    next_set_active_error: Mutex<Option<LlmConfigServiceError>>,
+}
+
+impl Default for SetupRecordingLlmConfigService {
+    fn default() -> Self {
+        Self {
+            snapshot_calls: Mutex::new(0),
+            upsert_provider_calls: Mutex::new(Vec::new()),
+            set_active_calls: Mutex::new(Vec::new()),
+            test_connection_calls: Mutex::new(0),
+            list_models_calls: Mutex::new(0),
+            snapshot: Mutex::new(Self::empty_snapshot()),
+            next_snapshot_error: Mutex::new(None),
+            next_upsert_error: Mutex::new(None),
+            next_set_active_error: Mutex::new(None),
+        }
+    }
+}
+
+impl SetupRecordingLlmConfigService {
+    fn snapshot_count(&self) -> usize {
+        *self.snapshot_calls.lock().expect("lock")
+    }
+
+    fn upsert_provider_count(&self) -> usize {
+        self.upsert_provider_calls.lock().expect("lock").len()
+    }
+
+    fn set_active_count(&self) -> usize {
+        self.set_active_calls.lock().expect("lock").len()
+    }
+
+    fn test_connection_count(&self) -> usize {
+        *self.test_connection_calls.lock().expect("lock")
+    }
+
+    fn list_models_count(&self) -> usize {
+        *self.list_models_calls.lock().expect("lock")
+    }
+
+    fn use_active_snapshot(&self, provider_id: &str, model: &str) {
+        *self.snapshot.lock().expect("lock") = Self::active_snapshot(provider_id, model);
+    }
+
+    fn fail_next_snapshot(&self, error: LlmConfigServiceError) {
+        *self.next_snapshot_error.lock().expect("lock") = Some(error);
+    }
+
+    fn fail_next_upsert(&self, error: LlmConfigServiceError) {
+        *self.next_upsert_error.lock().expect("lock") = Some(error);
+    }
+
+    fn fail_next_set_active(&self, error: LlmConfigServiceError) {
+        *self.next_set_active_error.lock().expect("lock") = Some(error);
+    }
+
+    fn empty_snapshot() -> LlmConfigSnapshot {
+        LlmConfigSnapshot {
+            providers: Vec::new(),
+            active: None,
+        }
+    }
+
+    fn active_snapshot(provider_id: &str, model: &str) -> LlmConfigSnapshot {
+        LlmConfigSnapshot {
+            providers: vec![LlmProviderView {
+                id: provider_id.to_string(),
+                description: "configured provider".to_string(),
+                adapter: "open_ai_completions".to_string(),
+                default_model: model.to_string(),
+                base_url: Some("https://api.example.test/v1".to_string()),
+                builtin: false,
+                active: true,
+                active_model: Some(model.to_string()),
+                api_key_required: true,
+                accepts_api_key: true,
+                api_key_set: true,
+                can_list_models: true,
+            }],
+            active: Some(LlmActiveSelection {
+                provider_id: provider_id.to_string(),
+                model: Some(model.to_string()),
+            }),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmConfigService for SetupRecordingLlmConfigService {
+    async fn snapshot(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        *self.snapshot_calls.lock().expect("lock") += 1;
+        if let Some(error) = self.next_snapshot_error.lock().expect("lock").take() {
+            return Err(error);
+        }
+        Ok(self.snapshot.lock().expect("lock").clone())
+    }
+
+    async fn upsert_provider(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: UpsertLlmProviderRequest,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        if let Some(error) = self.next_upsert_error.lock().expect("lock").take() {
+            return Err(error);
+        }
+        self.upsert_provider_calls
+            .lock()
+            .expect("lock")
+            .push(SetupUpsertCall {
+                id: request.id,
+                adapter: request.adapter,
+                base_url: request.base_url,
+                default_model: request.default_model,
+                api_key_set: request.api_key.is_some(),
+                set_active: request.set_active,
+                model: request.model,
+            });
+        Ok(self.snapshot.lock().expect("lock").clone())
+    }
+
+    async fn delete_provider(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _provider_id: String,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        panic!("delete_provider is not used by operator setup tests")
+    }
+
+    async fn set_active(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: SetActiveLlmRequest,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        if let Some(error) = self.next_set_active_error.lock().expect("lock").take() {
+            return Err(error);
+        }
+        self.set_active_calls
+            .lock()
+            .expect("lock")
+            .push(SetupSetActiveCall {
+                provider_id: request.provider_id,
+                model: request.model,
+            });
+        Ok(self.snapshot.lock().expect("lock").clone())
+    }
+
+    async fn test_connection(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: LlmProbeRequest,
+    ) -> Result<LlmProbeResult, LlmConfigServiceError> {
+        *self.test_connection_calls.lock().expect("lock") += 1;
+        Ok(LlmProbeResult {
+            ok: true,
+            message: "ok".to_string(),
+        })
+    }
+
+    async fn list_models(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: LlmProbeRequest,
+    ) -> Result<LlmModelsResult, LlmConfigServiceError> {
+        *self.list_models_calls.lock().expect("lock") += 1;
+        Ok(LlmModelsResult {
+            ok: true,
+            models: vec!["model-a".to_string()],
+            message: String::new(),
+        })
+    }
+
+    async fn start_nearai_login(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: NearAiLoginRequest,
+    ) -> Result<NearAiLoginStart, LlmConfigServiceError> {
+        panic!("start_nearai_login is not used by operator setup tests")
+    }
+
+    async fn complete_nearai_wallet_login(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: NearAiWalletLoginRequest,
+    ) -> Result<NearAiWalletLoginResult, LlmConfigServiceError> {
+        panic!("complete_nearai_wallet_login is not used by operator setup tests")
+    }
+
+    async fn start_codex_login(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<CodexLoginStart, LlmConfigServiceError> {
+        panic!("start_codex_login is not used by operator setup tests")
+    }
+}
+
+fn services_with_setup_llm_config(
+    llm_config: Arc<SetupRecordingLlmConfigService>,
+) -> RebornServices {
+    RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_llm_config_service(llm_config)
+}
+
+#[tokio::test]
+async fn get_operator_setup_returns_snapshot_from_llm_config() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    llm_config.use_active_snapshot("openai", "gpt-5-mini");
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let response = services
+        .get_operator_setup(caller())
+        .await
+        .expect("setup response");
+
+    assert_eq!(llm_config.snapshot_count(), 1);
+    assert_eq!(response.active_provider_id.as_deref(), Some("openai"));
+    assert_eq!(response.active_model.as_deref(), Some("gpt-5-mini"));
+    assert_eq!(response.status, RebornOperatorSetupStatus::Complete);
+    assert!(response.diagnostics.iter().any(|diagnostic| {
+        diagnostic.reason_code == "operator_setup_profile_not_wired"
+            && diagnostic.severity == RebornOperatorConfigDiagnosticSeverity::Info
+    }));
+    assert!(response.diagnostics.iter().any(|diagnostic| {
+        diagnostic.reason_code == "operator_setup_webui_access_not_wired"
+            && diagnostic.severity == RebornOperatorConfigDiagnosticSeverity::Info
+    }));
+}
+
+#[tokio::test]
+async fn get_operator_setup_without_llm_config_returns_service_unavailable() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let err = services
+        .get_operator_setup(caller())
+        .await
+        .expect_err("setup service is unavailable");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::ServiceUnavailable);
+    assert_eq!(err.status_code, 503);
+}
+
+#[tokio::test]
+async fn setup_response_reflects_active_provider_and_model() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    llm_config.use_active_snapshot("openai", "gpt-5-mini");
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let response = services
+        .run_operator_setup(caller(), RebornOperatorSetupRequest::default())
+        .await
+        .expect("setup response");
+
+    assert_eq!(response.active_provider_id.as_deref(), Some("openai"));
+    assert_eq!(response.active_model.as_deref(), Some("gpt-5-mini"));
+    assert_eq!(response.status, RebornOperatorSetupStatus::Complete);
+    assert!(response.steps.iter().any(|step| {
+        step.name == "provider"
+            && step.status == ironclaw_product_workflow::RebornOperatorSetupStepStatus::Complete
+    }));
+    assert!(response.steps.iter().any(|step| {
+        step.name == "model"
+            && step.status == ironclaw_product_workflow::RebornOperatorSetupStepStatus::Complete
+    }));
+}
+
+#[tokio::test]
+async fn run_operator_setup_without_llm_config_returns_service_unavailable() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let err = services
+        .run_operator_setup(caller(), RebornOperatorSetupRequest::default())
+        .await
+        .expect_err("setup service is unavailable");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::ServiceUnavailable);
+    assert_eq!(err.status_code, 503);
+}
+
+#[tokio::test]
+async fn run_operator_setup_requires_provider_id_for_provider_changes() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    llm_config.use_active_snapshot("openai", "gpt-5-mini");
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                adapter: Some("open_ai_completions".to_string()),
+                api_key: Some(SecretString::from("sk-secret".to_string())),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("provider changes require provider_id");
+
+    assert_setup_validation(err, "provider_id", WebUiInboundValidationCode::InvalidValue);
+    assert_eq!(llm_config.snapshot_count(), 0);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_model_without_provider_id() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    llm_config.use_active_snapshot("openai", "gpt-5-mini");
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                model: Some("gpt-5-mini".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("model requires provider_id");
+
+    assert_setup_validation(err, "model", WebUiInboundValidationCode::InvalidValue);
+    assert_eq!(llm_config.snapshot_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_base_url_without_adapter() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                base_url: Some("https://api.example.test/v1".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("base_url requires adapter");
+
+    assert_setup_validation(err, "base_url", WebUiInboundValidationCode::InvalidValue);
+    assert_eq!(llm_config.snapshot_count(), 0);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_api_key_without_adapter() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                api_key: Some(SecretString::from("sk-secret".to_string())),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("api_key requires adapter");
+
+    assert_setup_validation(err, "api_key", WebUiInboundValidationCode::InvalidValue);
+    assert_eq!(llm_config.snapshot_count(), 0);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_internal_base_url_before_upsert() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                adapter: Some("open_ai_completions".to_string()),
+                base_url: Some("http://169.254.169.254/latest/meta-data/".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("metadata endpoint is rejected");
+
+    assert_setup_validation(err, "base_url", WebUiInboundValidationCode::InvalidValue);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+}
+
+#[tokio::test]
+async fn upsert_llm_provider_allows_loopback_base_url_for_self_hosted() {
+    // Loopback/private endpoints are the primary self-hosted use case (Ollama,
+    // vLLM): the guard must let them through to the service, not reject them as
+    // "internal". Only the always-blocked classes (metadata/link-local,
+    // multicast, unspecified) are rejected — see the metadata cases above.
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    services
+        .upsert_llm_provider(
+            caller(),
+            UpsertLlmProviderRequest {
+                id: "ollama".to_string(),
+                name: None,
+                adapter: "ollama".to_string(),
+                base_url: Some("http://127.0.0.1:11434/v1".to_string()),
+                default_model: None,
+                api_key: None,
+                set_active: false,
+                model: None,
+            },
+        )
+        .await
+        .expect("loopback endpoint reaches the service");
+
+    assert_eq!(llm_config.upsert_provider_count(), 1);
+}
+
+#[tokio::test]
+async fn test_llm_connection_allows_loopback_base_url_for_self_hosted() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    services
+        .test_llm_connection(
+            caller(),
+            LlmProbeRequest {
+                adapter: "ollama".to_string(),
+                base_url: Some("http://127.0.0.1:11434/v1".to_string()),
+                provider_id: "ollama".to_string(),
+                model: Some("qwen3:latest".to_string()),
+                api_key: None,
+            },
+        )
+        .await
+        .expect("loopback probe reaches the service");
+
+    assert_eq!(llm_config.test_connection_count(), 1);
+}
+
+#[tokio::test]
+async fn list_llm_models_allows_localhost_base_url_for_self_hosted() {
+    // Regression: `validate_llm_base_url` used to reject `localhost`, breaking
+    // the "Fetch models" button for self-hosted Ollama (the dialog showed
+    // "Invalid value (base_url)").
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    services
+        .list_llm_models(
+            caller(),
+            LlmProbeRequest {
+                adapter: "ollama".to_string(),
+                base_url: Some("http://localhost:11434".to_string()),
+                provider_id: "ollama".to_string(),
+                model: None,
+                api_key: None,
+            },
+        )
+        .await
+        .expect("localhost probe reaches the service");
+
+    assert_eq!(llm_config.list_models_count(), 1);
+}
+
+#[tokio::test]
+async fn list_llm_models_rejects_internal_base_url_before_service() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .list_llm_models(
+            caller(),
+            LlmProbeRequest {
+                adapter: "open_ai_completions".to_string(),
+                base_url: Some("http://169.254.169.254/latest/meta-data/".to_string()),
+                provider_id: "openai".to_string(),
+                model: Some("gpt-5-mini".to_string()),
+                api_key: Some(SecretString::from("sk-secret".to_string())),
+            },
+        )
+        .await
+        .expect_err("metadata probe endpoint is rejected");
+
+    assert_setup_validation(err, "base_url", WebUiInboundValidationCode::InvalidValue);
+    assert_eq!(llm_config.list_models_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_upserts_and_activates_provider_config() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    llm_config.use_active_snapshot("openai", "gpt-5-mini");
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let response = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                adapter: Some("open_ai_completions".to_string()),
+                base_url: Some("https://api.example.test/v1".to_string()),
+                model: Some("gpt-5-mini".to_string()),
+                api_key: Some(SecretString::from("sk-secret".to_string())),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("setup response");
+
+    assert_eq!(response.status, RebornOperatorSetupStatus::Complete);
+    assert_eq!(llm_config.snapshot_count(), 0);
+    assert_eq!(
+        llm_config
+            .upsert_provider_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        [SetupUpsertCall {
+            id: "openai".to_string(),
+            adapter: "open_ai_completions".to_string(),
+            base_url: Some("https://api.example.test/v1".to_string()),
+            default_model: Some("gpt-5-mini".to_string()),
+            api_key_set: true,
+            set_active: true,
+            model: Some("gpt-5-mini".to_string()),
+        }]
+    );
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_selects_existing_provider_without_adapter() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                model: Some("gpt-5-mini".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("setup response");
+
+    assert_eq!(llm_config.snapshot_count(), 0);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(
+        llm_config.set_active_calls.lock().expect("lock").as_slice(),
+        [SetupSetActiveCall {
+            provider_id: "openai".to_string(),
+            model: Some("gpt-5-mini".to_string()),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn run_operator_setup_without_provider_change_returns_snapshot() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    llm_config.use_active_snapshot("openai", "gpt-5-mini");
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let response = services
+        .run_operator_setup(caller(), RebornOperatorSetupRequest::default())
+        .await
+        .expect("setup response");
+
+    assert_eq!(response.status, RebornOperatorSetupStatus::Complete);
+    assert_eq!(llm_config.snapshot_count(), 1);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_propagates_llm_config_service_error() {
+    let upsert_config = Arc::new(SetupRecordingLlmConfigService::default());
+    upsert_config.fail_next_upsert(LlmConfigServiceError::Unavailable);
+    let upsert_services = services_with_setup_llm_config(upsert_config);
+    let upsert_err = upsert_services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                adapter: Some("open_ai_completions".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("upsert error propagates");
+    assert_eq!(upsert_err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(upsert_err.status_code, 503);
+
+    let set_active_config = Arc::new(SetupRecordingLlmConfigService::default());
+    set_active_config.fail_next_set_active(LlmConfigServiceError::Unavailable);
+    let set_active_services = services_with_setup_llm_config(set_active_config);
+    let set_active_err = set_active_services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("set_active error propagates");
+    assert_eq!(set_active_err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(set_active_err.status_code, 503);
+
+    let snapshot_config = Arc::new(SetupRecordingLlmConfigService::default());
+    snapshot_config.fail_next_snapshot(LlmConfigServiceError::Unavailable);
+    let snapshot_services = services_with_setup_llm_config(snapshot_config);
+    let snapshot_err = snapshot_services
+        .run_operator_setup(caller(), RebornOperatorSetupRequest::default())
+        .await
+        .expect_err("snapshot error propagates");
+    assert_eq!(snapshot_err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(snapshot_err.status_code, 503);
+}
+
 fn lifecycle_package_ref(package_id: &str) -> LifecyclePackageRef {
     LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id)
         .expect("valid package ref")
@@ -3972,6 +7628,7 @@ fn extension_summary(
         description: "test extension".to_string(),
         source: LifecycleExtensionSource::HostBundled,
         runtime_kind: LifecycleExtensionRuntimeKind::FirstParty,
+        surface_kinds: Vec::new(),
         visible_capability_ids: vec![format!("{package_id}.read"), format!("{package_id}.write")],
         visible_read_only_capability_ids: Vec::new(),
         credential_requirements,
@@ -4462,4 +8119,910 @@ async fn list_threads_unimplemented_backend_returns_service_unavailable() {
         "wire code must be snake_case `unavailable`; got: {json}"
     );
     assert_eq!(json["retryable"], true);
+}
+
+#[tokio::test]
+async fn list_threads_hides_automation_trigger_threads() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+    let caller = caller();
+    let visible_thread_id = ThreadId::new("thread-visible").expect("visible thread id");
+    let automation_thread_id = ThreadId::new("thread-automation").expect("automation thread id");
+    let malformed_metadata_thread_id =
+        ThreadId::new("thread-malformed-metadata").expect("malformed metadata thread id");
+
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&caller),
+            thread_id: Some(visible_thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: Some("Visible chat".to_string()),
+            metadata_json: Some(json!({ "source": "webui" }).to_string()),
+        })
+        .await
+        .expect("visible thread");
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&caller),
+            thread_id: Some(automation_thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: Some("Automation run".to_string()),
+            metadata_json: Some(automation_trigger_thread_metadata_json(
+                "trigger-scheduled-summary",
+            )),
+        })
+        .await
+        .expect("automation thread");
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&caller),
+            thread_id: Some(malformed_metadata_thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: Some("Malformed metadata chat".to_string()),
+            metadata_json: Some(format!(
+                r#"{{"source":"{AUTOMATION_TRIGGER_THREAD_SOURCE_TAG}""#
+            )),
+        })
+        .await
+        .expect("malformed metadata thread");
+
+    let response = services
+        .list_threads(caller, WebUiListThreadsRequest::default())
+        .await
+        .expect("list threads");
+    let thread_ids = response
+        .threads
+        .iter()
+        .map(|thread| thread.thread_id.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(thread_ids.len(), 2);
+    assert!(thread_ids.contains(&visible_thread_id));
+    assert!(thread_ids.contains(&malformed_metadata_thread_id));
+    assert!(
+        !thread_ids.contains(&automation_thread_id),
+        "automation trigger threads should be accessible by direct id but hidden from the chat list",
+    );
+}
+
+#[tokio::test]
+async fn list_threads_breaks_out_when_cursor_does_not_advance_for_automation_threads() {
+    let caller = caller();
+    let scope = thread_scope_for(&caller);
+    let automation_thread = |thread_id: &str| SessionThreadRecord {
+        scope: scope.clone(),
+        thread_id: ThreadId::new(thread_id).expect("automation thread id"),
+        created_by_actor_id: caller.user_id.as_str().to_string(),
+        title: Some(format!("Automation run {thread_id}")),
+        metadata_json: Some(automation_trigger_thread_metadata_json(
+            "trigger-scheduled-summary",
+        )),
+        goal: None,
+    };
+    let stalled_cursor = "cursor-stalled".to_string();
+    let thread_service = Arc::new(ScriptedThreadService::list_pages(vec![
+        ListThreadsForScopeResponse {
+            threads: vec![automation_thread("thread-automation-stall-1")],
+            next_cursor: Some(stalled_cursor.clone()),
+        },
+        ListThreadsForScopeResponse {
+            threads: vec![automation_thread("thread-automation-stall-2")],
+            next_cursor: Some(stalled_cursor.clone()),
+        },
+    ]));
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        services.list_threads(
+            caller,
+            WebUiListThreadsRequest {
+                limit: Some(2),
+                cursor: None,
+            },
+        ),
+    )
+    .await
+    .expect("list_threads should terminate when backend cursor stalls")
+    .expect("list threads");
+
+    assert!(
+        response.threads.is_empty(),
+        "automation trigger threads must stay hidden even when every fetched page is filtered",
+    );
+    assert_eq!(
+        response.next_cursor, None,
+        "stalled cursor must be cleared so callers do not keep replaying the same filtered page",
+    );
+    let list_requests = thread_service.list_requests();
+    assert_eq!(
+        list_requests.len(),
+        2,
+        "facade should fetch the stalled page once and then break on the repeated cursor",
+    );
+    assert_eq!(list_requests[0].cursor, None);
+    assert_eq!(list_requests[1].cursor.as_deref(), Some("cursor-stalled"));
+}
+
+#[tokio::test]
+async fn list_threads_caps_filtered_pages_when_automation_threads_dominate() {
+    let caller = caller();
+    let scope = thread_scope_for(&caller);
+    let automation_thread = |index: usize| SessionThreadRecord {
+        scope: scope.clone(),
+        thread_id: ThreadId::new(format!("thread-automation-budget-{index:02}"))
+            .expect("automation thread id"),
+        created_by_actor_id: caller.user_id.as_str().to_string(),
+        title: Some(format!("Automation run {index}")),
+        metadata_json: Some(automation_trigger_thread_metadata_json(
+            "trigger-scheduled-summary",
+        )),
+        goal: None,
+    };
+    let responses = (0..20)
+        .map(|index| ListThreadsForScopeResponse {
+            threads: vec![automation_thread(index)],
+            next_cursor: Some(format!("cursor-{index:02}")),
+        })
+        .collect::<Vec<_>>();
+    let thread_service = Arc::new(ScriptedThreadService::list_pages(responses));
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let response = services
+        .list_threads(
+            caller,
+            WebUiListThreadsRequest {
+                limit: Some(1),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("list threads");
+
+    assert!(
+        response.threads.is_empty(),
+        "automation trigger threads must stay hidden when filter pages are exhausted",
+    );
+    assert_eq!(
+        response.next_cursor, None,
+        "filter page budget exhaustion must clear the cursor so callers do not keep scanning",
+    );
+    let list_requests = thread_service.list_requests();
+    assert_eq!(
+        list_requests.len(),
+        20,
+        "facade must enforce a hard cap on filtered backend pages",
+    );
+    assert!(
+        list_requests
+            .iter()
+            .all(|request| request.limit == Some(50)),
+        "facade should use a fixed candidate page size instead of shrinking toward one"
+    );
+}
+
+#[tokio::test]
+async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+    let caller = caller();
+    let automation_thread_id = ThreadId::new("thread-a-automation").expect("automation thread id");
+    let first_visible_thread_id =
+        ThreadId::new("thread-b-visible").expect("first visible thread id");
+    let second_visible_thread_id =
+        ThreadId::new("thread-c-visible").expect("second visible thread id");
+
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&caller),
+            thread_id: Some(automation_thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: Some("Automation run".to_string()),
+            metadata_json: Some(automation_trigger_thread_metadata_json(
+                "trigger-scheduled-summary",
+            )),
+        })
+        .await
+        .expect("automation thread");
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&caller),
+            thread_id: Some(first_visible_thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: Some("First visible chat".to_string()),
+            metadata_json: Some(json!({ "source": "webui" }).to_string()),
+        })
+        .await
+        .expect("first visible thread");
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&caller),
+            thread_id: Some(second_visible_thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: Some("Second visible chat".to_string()),
+            metadata_json: Some(json!({ "source": "webui" }).to_string()),
+        })
+        .await
+        .expect("second visible thread");
+
+    let first_page = services
+        .list_threads(
+            caller.clone(),
+            WebUiListThreadsRequest {
+                limit: Some(1),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("list first visible page");
+    assert_eq!(
+        first_page
+            .threads
+            .iter()
+            .map(|thread| thread.thread_id.clone())
+            .collect::<Vec<_>>(),
+        vec![first_visible_thread_id],
+    );
+    assert_eq!(first_page.next_cursor.as_deref(), Some("thread-b-visible"));
+
+    let second_page = services
+        .list_threads(
+            caller,
+            WebUiListThreadsRequest {
+                limit: Some(1),
+                cursor: first_page.next_cursor,
+            },
+        )
+        .await
+        .expect("list second visible page");
+    assert_eq!(
+        second_page
+            .threads
+            .iter()
+            .map(|thread| thread.thread_id.clone())
+            .collect::<Vec<_>>(),
+        vec![second_visible_thread_id],
+    );
+    assert_eq!(second_page.next_cursor, None);
+}
+
+// ---------------------------------------------------------------------------
+// Notice-text mapping: rejected_busy_notice maps TurnStatus to the right copy
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn rejected_busy_notice_blocked_approval_contains_approval_copy() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id: TurnRunId::new(),
+            status: TurnStatus::BlockedApproval,
+            event_cursor: EventCursor(5),
+        }),
+    ));
+    let services = RebornServices::new(threads, coordinator);
+    create_thread_for(&services, caller(), "thread-notice").await;
+
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-notice-approval",
+                "thread_id": "thread-notice",
+                "content": "hello"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("busy submit succeeds with RejectedBusy");
+
+    match response {
+        RebornSubmitTurnResponse::RejectedBusy {
+            status: Some(status),
+            notice,
+            ..
+        } => {
+            assert_eq!(status, TurnStatus::BlockedApproval);
+            assert_eq!(
+                notice,
+                "An approval gate is open on this thread — resolve it (approve or deny) before continuing, then resend your message."
+            );
+        }
+        other => panic!("expected RejectedBusy, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn rejected_busy_notice_blocked_auth_contains_auth_copy() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id: TurnRunId::new(),
+            status: TurnStatus::BlockedAuth,
+            event_cursor: EventCursor(5),
+        }),
+    ));
+    let services = RebornServices::new(threads, coordinator);
+    create_thread_for(&services, caller(), "thread-notice").await;
+
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-notice-auth",
+                "thread_id": "thread-notice",
+                "content": "hello"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("busy submit succeeds with RejectedBusy");
+
+    match response {
+        RebornSubmitTurnResponse::RejectedBusy {
+            status: Some(status),
+            notice,
+            ..
+        } => {
+            assert_eq!(status, TurnStatus::BlockedAuth);
+            assert_eq!(
+                notice,
+                "An authentication gate is open on this thread — complete authentication before continuing, then resend your message."
+            );
+        }
+        other => panic!("expected RejectedBusy, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn rejected_busy_notice_generic_status_contains_generic_copy() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id: TurnRunId::new(),
+            status: TurnStatus::Running,
+            event_cursor: EventCursor(5),
+        }),
+    ));
+    let services = RebornServices::new(threads, coordinator);
+    create_thread_for(&services, caller(), "thread-notice").await;
+
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-notice-generic",
+                "thread_id": "thread-notice",
+                "content": "hello"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("busy submit succeeds with RejectedBusy");
+
+    match response {
+        RebornSubmitTurnResponse::RejectedBusy {
+            status: Some(status),
+            notice,
+            ..
+        } => {
+            assert_eq!(status, TurnStatus::Running);
+            assert_eq!(
+                notice,
+                "Ironclaw is still working on a previous message — resend yours once the current task finishes."
+            );
+        }
+        other => panic!("expected RejectedBusy, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Replay regression: a replayed RejectedBusy must return RejectedBusy again,
+// never submit a new run (contract from PR #4838)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn replayed_rejected_busy_returns_rejected_busy_without_new_submission() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    // ScriptedThreadService pre-seeds the message as RejectedBusy — simulates
+    // the client retrying after the original rejection response was lost.
+    let services = RebornServices::new(
+        Arc::new(ScriptedThreadService::rejected_busy_replay()),
+        coordinator.clone(),
+    );
+
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-replay-rejected-busy",
+                "thread_id": "thread-alpha",
+                "content": "hello from webui"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("replayed RejectedBusy must succeed (not error)");
+
+    assert!(
+        matches!(response, RebornSubmitTurnResponse::RejectedBusy { .. }),
+        "replay of RejectedBusy must return RejectedBusy, got {response:?}"
+    );
+    assert_eq!(
+        coordinator.submission_count(),
+        0,
+        "a replayed RejectedBusy must not produce a new turn submission"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Option<> run-metadata contract: replay path yields None; fresh path yields Some
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn replayed_rejected_busy_returns_none_run_metadata() {
+    // Replay: the original blocking run is gone — run metadata must be None,
+    // not a fabricated run-id or status that the client cannot query.
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(ScriptedThreadService::rejected_busy_replay()),
+        coordinator.clone(),
+    );
+
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-replay-none-metadata",
+                "thread_id": "thread-alpha",
+                "content": "replay with none metadata"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("replayed RejectedBusy must succeed");
+
+    match response {
+        RebornSubmitTurnResponse::RejectedBusy {
+            active_run_id,
+            status,
+            event_cursor,
+            notice,
+            ..
+        } => {
+            assert!(
+                active_run_id.is_none(),
+                "replayed RejectedBusy must not fabricate active_run_id, got {active_run_id:?}"
+            );
+            assert!(
+                status.is_none(),
+                "replayed RejectedBusy must not fabricate status, got {status:?}"
+            );
+            assert!(
+                event_cursor.is_none(),
+                "replayed RejectedBusy must not fabricate event_cursor, got {event_cursor:?}"
+            );
+            assert!(
+                !notice.is_empty(),
+                "replayed RejectedBusy must carry a notice"
+            );
+        }
+        other => panic!("expected RejectedBusy, got {other:?}"),
+    }
+    assert_eq!(
+        coordinator.submission_count(),
+        0,
+        "replay must not produce a new turn submission"
+    );
+}
+
+#[tokio::test]
+async fn fresh_rejected_busy_returns_some_run_metadata() {
+    // Fresh ThreadBusy: the blocking run is live — run metadata must be Some
+    // with the real values so the client can poll the existing run.
+    let active_run_id = TurnRunId::new();
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id,
+            status: TurnStatus::Running,
+            event_cursor: EventCursor(7),
+        }),
+    ));
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let services = RebornServices::new(threads, coordinator.clone());
+    create_thread_for(&services, caller(), "thread-busy-fresh").await;
+
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-fresh-busy-metadata",
+                "thread_id": "thread-busy-fresh",
+                "content": "hello busy"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("fresh RejectedBusy must succeed");
+
+    match response {
+        RebornSubmitTurnResponse::RejectedBusy {
+            active_run_id: returned_run_id,
+            status: returned_status,
+            event_cursor: returned_cursor,
+            notice,
+            ..
+        } => {
+            assert_eq!(
+                returned_run_id,
+                Some(active_run_id),
+                "fresh RejectedBusy must carry the real blocking run id"
+            );
+            assert_eq!(
+                returned_status,
+                Some(TurnStatus::Running),
+                "fresh RejectedBusy must carry the real blocking run status"
+            );
+            assert_eq!(
+                returned_cursor,
+                Some(EventCursor(7)),
+                "fresh RejectedBusy must carry the real event cursor"
+            );
+            assert!(!notice.is_empty(), "fresh RejectedBusy must carry a notice");
+        }
+        other => panic!("expected RejectedBusy, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mark-failure reconcile path: mark_message_rejected_busy errors → replay
+// confirms RejectedBusy → no error surfaces, RejectedBusy returned
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn rejected_busy_mark_failure_reconciles_via_replay_and_returns_rejected_busy() {
+    // Arrange: coordinator returns ThreadBusy so the busy path fires; the
+    // scripted thread service makes mark_message_rejected_busy fail and then
+    // supplies a RejectedBusy replay on the reconcile probe so
+    // reconcile_terminal_duplicate settles the race without propagating the error.
+    let active_run_id = TurnRunId::new();
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id,
+            status: TurnStatus::Running,
+            event_cursor: EventCursor(3),
+        }),
+    ));
+    let services = RebornServices::new(
+        Arc::new(ScriptedThreadService::rejected_busy_mark_fails()),
+        coordinator,
+    );
+
+    // Act: submit a fresh turn against thread-alpha (which the scripted service
+    // owns); coordinator fires ThreadBusy, mark fails, reconcile replays.
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-mark-fail-reconcile",
+                "thread_id": "thread-alpha",
+                "content": "hello mark-fail"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("mark-failure reconcile must succeed (not error)");
+
+    // Assert: the mark error must NOT propagate to the caller — reconcile_terminal_duplicate
+    // replays the accepted message, sees RejectedBusy, and returns Ok(()).
+    // The response is built from the original ThreadBusy metadata (active_run_id,
+    // status, event_cursor), proving the full path ran without dropping state.
+    match response {
+        RebornSubmitTurnResponse::RejectedBusy {
+            active_run_id: returned_run_id,
+            status: returned_status,
+            event_cursor: returned_cursor,
+            notice,
+            ..
+        } => {
+            assert_eq!(
+                returned_run_id,
+                Some(active_run_id),
+                "mark-failure reconcile must carry the real blocking run id from ThreadBusy"
+            );
+            assert_eq!(
+                returned_status,
+                Some(TurnStatus::Running),
+                "mark-failure reconcile must carry the real blocking run status"
+            );
+            assert_eq!(
+                returned_cursor,
+                Some(EventCursor(3)),
+                "mark-failure reconcile must carry the real event cursor"
+            );
+            assert!(!notice.is_empty(), "RejectedBusy must carry a notice");
+        }
+        other => {
+            panic!("mark-failure reconcile must return RejectedBusy (not error), got {other:?}")
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Legacy DeferredBusy mark-failure reconcile path: mark_message_rejected_busy errors
+// → replay returns legacy DeferredBusy (non-terminal) → predicate does NOT match
+// → original mark error surfaces as Unavailable, not a false-terminal RejectedBusy
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn legacy_deferred_busy_mark_failure_surfaces_error_not_false_terminal() {
+    // Arrange: coordinator returns ThreadBusy so the busy path fires; the
+    // scripted thread service makes mark_message_rejected_busy fail and then
+    // supplies a legacy DeferredBusy replay on the reconcile probe.
+    // DeferredBusy is non-terminal — reconcile_terminal_duplicate must NOT
+    // accept it as settled.  The predicate now matches only RejectedBusy, so
+    // the `_ =>` arm propagates the original mark failure as an error.
+    let active_run_id = TurnRunId::new();
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id,
+            status: TurnStatus::Running,
+            event_cursor: EventCursor(3),
+        }),
+    ));
+    let services = RebornServices::new(
+        Arc::new(ScriptedThreadService::deferred_busy_mark_fails()),
+        coordinator,
+    );
+
+    // Act: submit a fresh turn against thread-alpha; coordinator fires ThreadBusy,
+    // mark_message_rejected_busy fails, reconcile sees legacy DeferredBusy which
+    // no longer matches → the original mark error must propagate.
+    let error = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-deferred-busy-mark-fail-reconcile",
+                "thread_id": "thread-alpha",
+                "content": "hello deferred-busy mark-fail"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err(
+            "legacy DeferredBusy reconcile must surface the mark failure as an error, \
+             not silently return a false-terminal RejectedBusy",
+        );
+
+    // Assert: SessionThreadError::Backend maps to service_unavailable(true) —
+    // code=Unavailable, status_code=503, retryable=true.
+    assert_eq!(
+        error.code,
+        RebornServicesErrorCode::Unavailable,
+        "DeferredBusy reconcile miss must surface the backend mark failure (Unavailable), got {error:?}",
+    );
+    assert_eq!(
+        error.status_code, 503,
+        "DeferredBusy reconcile miss must return 503, got {error:?}",
+    );
+    assert!(
+        error.retryable,
+        "backend mark failure is retryable, got {error:?}",
+    );
+}
+
+/// Test lander that records what it was asked to land and returns a ref per
+/// attachment with a deterministic `storage_key`, so the facade test can assert
+/// both that decode→land ran and that the returned refs reach the transcript.
+#[derive(Default)]
+struct RecordingLander {
+    landed: Mutex<Vec<(String, Vec<InboundAttachment>)>>,
+}
+
+#[async_trait]
+impl InboundAttachmentLander for RecordingLander {
+    async fn land(
+        &self,
+        _thread_scope: &ThreadScope,
+        message_id: &str,
+        attachments: Vec<InboundAttachment>,
+    ) -> Result<Vec<AttachmentRef>, RebornServicesError> {
+        let refs = attachments
+            .iter()
+            .enumerate()
+            .map(|(index, attachment)| AttachmentRef {
+                id: attachment.id.clone(),
+                // The real bridge derives kind from the MIME type; mirror that.
+                kind: ironclaw_common::kind_for_mime(&attachment.mime_type),
+                mime_type: attachment.mime_type.clone(),
+                filename: attachment.filename.clone(),
+                size_bytes: Some(attachment.bytes.len() as u64),
+                storage_key: Some(format!(
+                    "/workspace/attachments/test/{message_id}-{index}-landed"
+                )),
+                extracted_text: None,
+            })
+            .collect();
+        self.landed
+            .lock()
+            .expect("lander mutex")
+            .push((message_id.to_string(), attachments));
+        Ok(refs)
+    }
+}
+
+#[tokio::test]
+async fn submit_turn_lands_attachments_and_persists_refs_on_the_user_message() {
+    use base64::Engine;
+
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let lander = Arc::new(RecordingLander::default());
+    let services = RebornServices::new(Arc::clone(&threads), coordinator.clone())
+        .with_inbound_attachments(lander.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let pdf_b64 = base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.7 body");
+    services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-att",
+                "thread_id": "thread-alpha",
+                "content": "see attached",
+                "attachments": [{
+                    "mime_type": "application/pdf",
+                    "filename": "report.pdf",
+                    "data_base64": pdf_b64,
+                }],
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("submit succeeds");
+
+    // The lander was invoked with the decoded attachment bytes + metadata.
+    {
+        let landed = lander.landed.lock().expect("lander mutex");
+        assert_eq!(landed.len(), 1);
+        assert_eq!(landed[0].1.len(), 1);
+        assert_eq!(landed[0].1[0].mime_type, "application/pdf");
+        assert_eq!(landed[0].1[0].filename.as_deref(), Some("report.pdf"));
+        assert_eq!(landed[0].1[0].bytes, b"%PDF-1.7 body");
+    }
+
+    // The returned refs are persisted on the accepted user message.
+    let history = threads
+        .list_thread_history(ThreadHistoryRequest {
+            scope: thread_scope_for(&caller()),
+            thread_id: ThreadId::new("thread-alpha").unwrap(),
+        })
+        .await
+        .expect("history");
+    let user_message = history
+        .messages
+        .iter()
+        .find(|message| message.kind == MessageKind::User)
+        .expect("user message present");
+    assert_eq!(user_message.content.as_deref(), Some("see attached"));
+    assert_eq!(user_message.attachments.len(), 1);
+    let attachment_ref = &user_message.attachments[0];
+    assert_eq!(attachment_ref.kind, AttachmentKind::Document);
+    assert_eq!(attachment_ref.mime_type, "application/pdf");
+    assert_eq!(attachment_ref.filename.as_deref(), Some("report.pdf"));
+    assert!(
+        attachment_ref
+            .storage_key
+            .as_deref()
+            .is_some_and(|key| key.ends_with("-landed")),
+        "expected landed storage_key, got {:?}",
+        attachment_ref.storage_key
+    );
+}
+
+#[tokio::test]
+async fn get_timeline_returns_attachment_refs_on_the_user_message() {
+    use base64::Engine;
+
+    // The browser renders attachment cards from the timeline, and they must
+    // survive a page refresh. The browser's surface is `get_timeline`, not
+    // `list_thread_history`, so drive that path (test through the caller) and
+    // assert the projected `ThreadMessageRecord` still carries the refs.
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let lander = Arc::new(RecordingLander::default());
+    let services = RebornServices::new(Arc::clone(&threads), coordinator.clone())
+        .with_inbound_attachments(lander.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let csv_b64 = base64::engine::general_purpose::STANDARD.encode(b"a,b\n1,2\n");
+    services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-att",
+                "thread_id": "thread-alpha",
+                "content": "spreadsheet attached",
+                "attachments": [{
+                    "mime_type": "text/csv",
+                    "filename": "data.csv",
+                    "data_base64": csv_b64,
+                }],
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("submit succeeds");
+
+    let timeline = services
+        .get_timeline(
+            caller(),
+            RebornTimelineRequest {
+                thread_id: "thread-alpha".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("timeline");
+
+    let user_message = timeline
+        .messages
+        .iter()
+        .find(|message| message.kind == MessageKind::User)
+        .expect("user message present in timeline");
+    assert_eq!(user_message.attachments.len(), 1);
+    let attachment_ref = &user_message.attachments[0];
+    assert_eq!(attachment_ref.kind, AttachmentKind::Document);
+    assert_eq!(attachment_ref.mime_type, "text/csv");
+    assert_eq!(attachment_ref.filename.as_deref(), Some("data.csv"));
+    assert!(
+        attachment_ref
+            .storage_key
+            .as_deref()
+            .is_some_and(|key| !key.is_empty()),
+        "timeline ref must carry a non-empty storage_key so the agent can re-read it later"
+    );
+}
+
+#[tokio::test]
+async fn submit_turn_rejects_attachments_when_no_lander_is_wired() {
+    use base64::Engine;
+
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    // No `.with_inbound_attachments(...)`: a deployment without attachment
+    // support must reject rather than silently drop the files.
+    let services = RebornServices::new(threads, coordinator);
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let pdf_b64 = base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.7");
+    let err = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-att",
+                "thread_id": "thread-alpha",
+                "content": "see attached",
+                "attachments": [{
+                    "mime_type": "application/pdf",
+                    "data_base64": pdf_b64,
+                }],
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("attachments without a lander must be rejected");
+    assert_eq!(err.kind, RebornServicesErrorKind::ServiceUnavailable);
 }

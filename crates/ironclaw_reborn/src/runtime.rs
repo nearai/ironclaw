@@ -1,18 +1,18 @@
 //! Default Reborn runtime-loop composition.
 
-use std::{error::Error, fmt, marker::PhantomData, sync::Arc};
+use std::{error::Error, fmt, sync::Arc};
 
 use ironclaw_events::SecurityAuditSink;
 use ironclaw_host_api::CapabilityId;
 use ironclaw_loop_support::{
     CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier,
     DecoratingLoopCapabilityPortFactory, HostIdentityContextSource, HostInputQueue,
-    HostManagedModelGateway, HostSkillContextSource, LoopCapabilityPortDecorator,
-    LoopCapabilityPortFactory, LoopCapabilityResultWriter, ProductLiveCancellationReadiness,
-    RunCancellationFactory, SpawnSubagentInputCodec, SubagentDefinitionResolver,
-    SubagentPromptComposer, SubagentPromptMaterialSource, SubagentSpawnCapabilityPort,
-    SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits,
-    verify_product_live_cancellation_probe,
+    HostManagedModelGateway, HostSkillContextSource, LoopAttachmentReadPort,
+    LoopCapabilityPortDecorator, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    ProductLiveCancellationReadiness, RunCancellationFactory, SpawnSubagentFlavorDescriptor,
+    SpawnSubagentInputCodec, SubagentDefinitionResolver, SubagentPromptComposer,
+    SubagentPromptMaterialSource, SubagentSpawnCapabilityPort, SubagentSpawnDeps,
+    SubagentSpawnGoalStore, SubagentSpawnLimits, verify_product_live_cancellation_probe,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 use ironclaw_turns::{
@@ -23,8 +23,9 @@ use ironclaw_turns::{
     TurnStateStore,
     loop_exit::LoopExitEvidencePort,
     run_profile::{
-        AgentLoopHostError, InstructionSafetyContext, LoopCapabilityPort, LoopHostMilestoneSink,
-        LoopModelBudgetAccountant, LoopModelPolicyGuard, LoopRunContext,
+        AgentLoopHostError, CommunicationContextProvider, InstructionSafetyContext,
+        LoopCapabilityPort, LoopHostMilestoneSink, LoopModelBudgetAccountant, LoopModelPolicyGuard,
+        LoopRunContext,
     },
     runner::TurnRunTransitionPort,
 };
@@ -44,7 +45,7 @@ use crate::{
     },
     subagent::{
         capability_surface::SubagentCapabilitySurfaceResolver,
-        completion_observer::SubagentCompletionObserver,
+        completion_observer::SubagentCompletionObserver, flavors,
         gate_resolution::BoundedSubagentGateResolutionStore, goal_store::SubagentGoalStore,
         prompt_material::GateBackedSubagentPromptMaterialSource,
     },
@@ -54,6 +55,8 @@ use crate::{
     },
 };
 
+type PlannedRuntimeWakeChannel = (TurnRunnerWakeSender, TurnRunnerWakeReceiver);
+
 #[derive(Debug, Clone, Default)]
 pub struct DefaultPlannedRuntimeConfig {
     pub worker: TurnRunnerWorkerConfig,
@@ -61,12 +64,29 @@ pub struct DefaultPlannedRuntimeConfig {
     pub host: TextOnlyLoopHostConfig,
 }
 
-pub struct DefaultPlannedRuntimeParts<T, G>
+pub trait RuntimeTurnStateStore:
+    TurnSpawnTreeStateStore
+    + TurnRunTransitionPort
+    + ironclaw_turns::TurnEventProjectionSource
+    + Send
+    + Sync
+{
+}
+
+impl<T> RuntimeTurnStateStore for T where
+    T: TurnSpawnTreeStateStore
+        + TurnRunTransitionPort
+        + ironclaw_turns::TurnEventProjectionSource
+        + Send
+        + Sync
+{
+}
+
+pub struct DefaultPlannedRuntimeParts<G>
 where
-    T: TurnSpawnTreeStateStore + TurnRunTransitionPort + Send + Sync + 'static,
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
-    pub turn_state: Arc<T>,
+    pub turn_state: Arc<dyn RuntimeTurnStateStore>,
     pub thread_service: Arc<dyn SessionThreadService>,
     pub thread_scope: ThreadScope,
     pub model_gateway: Arc<G>,
@@ -86,6 +106,14 @@ where
     pub model_route_resolver: Option<Arc<dyn ModelRouteResolver>>,
     pub cancellation_factory: Option<Arc<dyn RunCancellationFactory>>,
     pub skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
+    /// Reads landed attachment bytes so the model port can build multimodal
+    /// image parts for vision-capable models. Genuinely optional, not a
+    /// fail-closed gap: a reader can only exist where a local runtime composed a
+    /// workspace filesystem to read landed bytes back from. Compositions without
+    /// one have nothing to read, so `None` correctly degrades to the transcript's
+    /// textual `<attachments>` pointer (the same fallback a text-only model
+    /// gets) rather than failing the turn.
+    pub attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
     pub input_queue: Option<Arc<dyn HostInputQueue>>,
     /// Required by live planned-runtime composition. Helper-level tests may use
     /// a no-op implementation, but the type signature always requires a valid
@@ -104,6 +132,7 @@ where
     /// the hook framework dormant: no dispatcher is composed and the runtime
     /// behaves exactly as it did before hooks existed.
     pub hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
+    pub communication_context_provider: Option<Arc<dyn CommunicationContextProvider>>,
 }
 
 pub trait RuntimeSubagentGoalStore:
@@ -116,9 +145,8 @@ impl<T> RuntimeSubagentGoalStore for T where
 {
 }
 
-pub struct RebornRuntimeLoopComposition<T, S, G>
+pub struct RebornRuntimeLoopComposition<S, G>
 where
-    T: TurnStateStore + TurnRunTransitionPort + Send + Sync + 'static,
     S: SessionThreadService + ?Sized + Send + Sync + 'static,
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
@@ -128,7 +156,6 @@ where
     pub host_factory: Arc<RebornLoopDriverHostFactory<S, G>>,
     pub worker: Arc<TurnRunnerWorker>,
     pub wake_sender: TurnRunnerWakeSender,
-    _turn_state: PhantomData<fn() -> T>,
 }
 
 #[derive(Debug)]
@@ -242,14 +269,10 @@ impl Error for ProductLiveRuntimeBuildError {
     }
 }
 
-pub fn build_product_live_planned_runtime<T, G>(
-    mut parts: DefaultPlannedRuntimeParts<T, G>,
-) -> Result<
-    RebornRuntimeLoopComposition<T, dyn SessionThreadService, G>,
-    ProductLiveRuntimeBuildError,
->
+pub fn build_product_live_planned_runtime<G>(
+    mut parts: DefaultPlannedRuntimeParts<G>,
+) -> Result<RebornRuntimeLoopComposition<dyn SessionThreadService, G>, ProductLiveRuntimeBuildError>
 where
-    T: TurnSpawnTreeStateStore + TurnRunTransitionPort + Send + Sync + 'static,
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
     if parts.model_route_resolver.is_none() {
@@ -315,14 +338,39 @@ fn local_development_noop_safety_context() -> InstructionSafetyContext {
     InstructionSafetyContext::local_development_noop()
 }
 
-pub fn build_default_planned_runtime<T, G>(
-    parts: DefaultPlannedRuntimeParts<T, G>,
+pub fn build_default_planned_runtime<G>(
+    parts: DefaultPlannedRuntimeParts<G>,
 ) -> Result<
-    RebornRuntimeLoopComposition<T, dyn SessionThreadService, G>,
+    RebornRuntimeLoopComposition<dyn SessionThreadService, G>,
     DefaultPlannedRuntimeBuildError,
 >
 where
-    T: TurnSpawnTreeStateStore + TurnRunTransitionPort + Send + Sync + 'static,
+    G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
+{
+    build_default_planned_runtime_with_optional_wake_channel(parts, None)
+}
+
+pub fn build_default_planned_runtime_with_wake_channel<G>(
+    parts: DefaultPlannedRuntimeParts<G>,
+    wake_channel: PlannedRuntimeWakeChannel,
+) -> Result<
+    RebornRuntimeLoopComposition<dyn SessionThreadService, G>,
+    DefaultPlannedRuntimeBuildError,
+>
+where
+    G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
+{
+    build_default_planned_runtime_with_optional_wake_channel(parts, Some(wake_channel))
+}
+
+fn build_default_planned_runtime_with_optional_wake_channel<G>(
+    parts: DefaultPlannedRuntimeParts<G>,
+    wake_channel: Option<PlannedRuntimeWakeChannel>,
+) -> Result<
+    RebornRuntimeLoopComposition<dyn SessionThreadService, G>,
+    DefaultPlannedRuntimeBuildError,
+>
+where
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
     let mut registry = DriverRegistry::new();
@@ -346,7 +394,7 @@ where
     );
     let run_profile_resolver: Arc<dyn RunProfileResolver> = resolver;
 
-    let (wake_sender, wake_receiver) = TurnRunnerWakeReceiver::new();
+    let (wake_sender, wake_receiver) = wake_channel.unwrap_or_else(TurnRunnerWakeReceiver::new);
     let worker_wake_notifier: Arc<dyn TurnRunWakeNotifier> = Arc::new(wake_sender.clone());
     // When a cancellation factory is supplied, fan-out each coordinator wake to
     // BOTH the worker AND the factory's `notify_run_wake` observer. Without
@@ -419,6 +467,7 @@ where
             result_writer: Arc::clone(&parts.capability_result_writer),
         },
         parts.subagent_spawn_limits,
+        flavors::builtin_flavor_catalog(),
     )?);
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> = Arc::new(
         DecoratingLoopCapabilityPortFactory::new(parts.capability_factory)
@@ -452,6 +501,9 @@ where
     if let Some(factory) = parts.cancellation_factory {
         host_factory = host_factory.with_cancellation_factory(factory);
     }
+    if let Some(port) = parts.attachment_read_port {
+        host_factory = host_factory.with_attachment_read_port(port);
+    }
     if let Some(source) = parts.skill_context_source {
         host_factory = host_factory.with_skill_context_source(source);
     }
@@ -466,6 +518,9 @@ where
     }
     if let Some(factory) = parts.hook_dispatcher_builder_factory {
         host_factory = host_factory.with_hook_dispatcher_builder_factory(move || factory());
+    }
+    if let Some(provider) = parts.communication_context_provider {
+        host_factory = host_factory.with_communication_context_provider(provider);
     }
     if let Some(sink) = parts.hook_security_audit_sink {
         host_factory = host_factory.with_hook_security_audit_sink(sink);
@@ -488,14 +543,13 @@ where
     ));
 
     Ok(
-        RebornRuntimeLoopComposition::<T, dyn SessionThreadService, G> {
+        RebornRuntimeLoopComposition::<dyn SessionThreadService, G> {
             driver_registry,
             run_profile_resolver,
             coordinator,
             host_factory,
             worker,
             wake_sender,
-            _turn_state: PhantomData,
         },
     )
 }
@@ -504,20 +558,28 @@ struct SubagentSpawnCapabilityDecorator {
     spawn_deps: Arc<SubagentSpawnDeps>,
     spawn_id: CapabilityId,
     spawn_limits: SubagentSpawnLimits,
+    /// Schema precomputed once at construction time so `decorate()` does not
+    /// rebuild it on every loop run.
+    parameters_schema: Arc<serde_json::Value>,
 }
 
 impl SubagentSpawnCapabilityDecorator {
     fn new(
         spawn_deps: SubagentSpawnDeps,
         spawn_limits: SubagentSpawnLimits,
+        flavor_catalog: Vec<SpawnSubagentFlavorDescriptor>,
     ) -> Result<Self, DefaultPlannedRuntimeBuildError> {
         let spawn_id =
             CapabilityId::new(ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
                 .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?;
+        let parameters_schema = Arc::new(
+            ironclaw_loop_support::build_spawn_subagent_parameters_schema(&flavor_catalog),
+        );
         Ok(Self {
             spawn_deps: Arc::new(spawn_deps),
             spawn_id,
             spawn_limits,
+            parameters_schema,
         })
     }
 }
@@ -528,12 +590,17 @@ impl LoopCapabilityPortDecorator for SubagentSpawnCapabilityDecorator {
         run_context: &LoopRunContext,
         inner: Arc<dyn LoopCapabilityPort>,
     ) -> Arc<dyn LoopCapabilityPort> {
-        Arc::new(SubagentSpawnCapabilityPort::new(
+        // Arc::clone is a cheap ref-count bump — avoids deep-cloning the JSON
+        // schema tree on every decorate() call (the schema is rendered to a
+        // serde_json::Value only at the single render site in
+        // spawn_tool_definition / spawn_descriptor when the model requests it).
+        Arc::new(SubagentSpawnCapabilityPort::new_with_schema(
             inner,
             run_context.clone(),
             self.spawn_id.clone(),
             self.spawn_limits,
             Arc::clone(&self.spawn_deps),
+            Arc::clone(&self.parameters_schema),
         ))
     }
 }
@@ -764,5 +831,42 @@ mod tests {
             self.decorate_calls.fetch_add(1, Ordering::SeqCst);
             inner
         }
+    }
+
+    // ── Gap 3: decorator non-empty catalog → schema enum present ─────────────
+
+    #[test]
+    fn builtin_flavor_catalog_threads_enum_into_schema() {
+        // Verifies that `builtin_flavor_catalog()` — the source-of-truth
+        // function the decorator wires into `SubagentSpawnCapabilityPort` — is
+        // non-empty AND that the resulting `build_spawn_subagent_parameters_schema`
+        // output includes an `enum` key containing all four expected flavor IDs
+        // in registry order.
+        //
+        // This indirectly proves the threading: if the decorator passes a
+        // non-empty catalog, the produced schema will have a satisfiable enum
+        // constraint. The companion empty-catalog test (gap 1, loop_support)
+        // confirms the absent-enum guard on the other side.
+        use ironclaw_loop_support::build_spawn_subagent_parameters_schema;
+
+        let catalog = crate::subagent::flavors::builtin_flavor_catalog();
+
+        assert!(
+            !catalog.is_empty(),
+            "builtin_flavor_catalog must be non-empty"
+        );
+        assert_eq!(catalog.len(), 4, "expected exactly 4 builtin flavors");
+
+        let schema = build_spawn_subagent_parameters_schema(&catalog);
+
+        let enum_vals = schema["properties"]["subagent_type"]["enum"]
+            .as_array()
+            .expect("schema must have an 'enum' key when catalog is non-empty");
+
+        assert_eq!(enum_vals.len(), 4);
+        assert_eq!(enum_vals[0], serde_json::json!("general"));
+        assert_eq!(enum_vals[1], serde_json::json!("explorer"));
+        assert_eq!(enum_vals[2], serde_json::json!("coder"));
+        assert_eq!(enum_vals[3], serde_json::json!("planner"));
     }
 }

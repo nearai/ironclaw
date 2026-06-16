@@ -406,6 +406,48 @@ fn validate_auth_resolution_result(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProjectionReadPayload {
+    pub thread_id_hint: Option<String>,
+    pub after_cursor: Option<ProjectionCursor>,
+    pub limit: Option<u16>,
+}
+
+impl ProjectionReadPayload {
+    pub fn new(
+        thread_id_hint: Option<String>,
+        after_cursor: Option<ProjectionCursor>,
+        limit: Option<u16>,
+    ) -> Result<Self, ProductAdapterError> {
+        if let Some(hint) = &thread_id_hint {
+            validate_token_string("thread id hint", hint, THREAD_HINT_MAX_BYTES)?;
+        }
+        Ok(Self {
+            thread_id_hint,
+            after_cursor,
+            limit,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct ProjectionReadPayloadWire {
+    thread_id_hint: Option<String>,
+    after_cursor: Option<ProjectionCursor>,
+    limit: Option<u16>,
+}
+
+impl<'de> Deserialize<'de> for ProjectionReadPayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = ProjectionReadPayloadWire::deserialize(deserializer)?;
+        Self::new(wire.thread_id_hint, wire.after_cursor, wire.limit)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProjectionSubscriptionPayload {
     pub thread_id_hint: Option<String>,
     pub after_cursor: Option<ProjectionCursor>,
@@ -439,6 +481,22 @@ impl<'de> Deserialize<'de> for ProjectionSubscriptionPayload {
     {
         let wire = ProjectionSubscriptionPayloadWire::deserialize(deserializer)?;
         Self::new(wire.thread_id_hint, wire.after_cursor).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ProductControlActionPayload {
+    CancelRun { run_id: TurnRunId },
+}
+
+impl ProductControlActionPayload {
+    pub fn cancel_run(run_id: &str) -> Result<Self, ProductAdapterError> {
+        let run_id =
+            TurnRunId::parse(run_id).map_err(|_| ProductAdapterError::MalformedInboundPayload {
+                reason: RedactedString::new("invalid run id"),
+            })?;
+        Ok(Self::CancelRun { run_id })
     }
 }
 
@@ -501,7 +559,9 @@ pub enum ProductInboundPayload {
     ApprovalResolution(ApprovalResolutionPayload),
     ScopedApprovalResolution(ScopedApprovalResolutionPayload),
     AuthResolution(AuthResolutionPayload),
+    ProjectionRead(ProjectionReadPayload),
     SubscriptionRequest(ProjectionSubscriptionPayload),
+    ControlAction(ProductControlActionPayload),
     LinkedThreadAction(LinkedThreadActionPayload),
     NoOp,
 }
@@ -653,6 +713,10 @@ pub enum ProductRejectionKind {
     UnknownInstallation,
     InvalidRequest,
     PolicyDenied,
+    AmbiguousResolution,
+    /// The approval gate was already approved or denied — it is no longer pending.
+    /// Distinct from `PolicyDenied`, which means an active policy refused the request.
+    StaleGate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -691,6 +755,49 @@ impl ProductRejection {
     }
 }
 
+impl ProductRejectionKind {
+    /// Returns a sanitized, user-facing hint for this rejection kind.
+    ///
+    /// Never interpolates internal state, reasons, or redacted strings.
+    pub fn user_facing_hint(&self) -> &'static str {
+        match self {
+            Self::BindingRequired => {
+                "I couldn't match this reply to an active conversation. Reply in the approval thread, or use `approve gate:<ref>`."
+            }
+            Self::AccessDenied => "You don't have access to resolve this request.",
+            Self::UnknownInstallation => "This workspace isn't set up with IronClaw yet.",
+            Self::InvalidRequest => {
+                "I couldn't read that request. Use `approve` / `deny`, optionally with `gate:<ref>`."
+            }
+            Self::PolicyDenied => "That request was declined by policy.",
+            Self::AmbiguousResolution => {
+                "Multiple requests are pending in this conversation. Use `approve gate:<ref>` or `deny gate:<ref>` to pick one."
+            }
+            Self::StaleGate => {
+                "This approval request is no longer pending — it was already approved or denied."
+            }
+        }
+    }
+
+    /// Auth-resolution-flavored variant of [`Self::user_facing_hint`]: kinds whose
+    /// generic hint references approval commands get auth-specific guidance
+    /// (`auth deny <auth-request-ref>`); all other kinds reuse the generic hint.
+    pub fn user_facing_auth_hint(&self) -> &'static str {
+        match self {
+            Self::BindingRequired => {
+                "I couldn't match this reply to an active auth request. Reply in the auth prompt thread, or use `auth deny <auth-request-ref>` to decline."
+            }
+            Self::InvalidRequest => {
+                "I couldn't read that request. Use `auth deny <auth-request-ref>` to decline an auth request."
+            }
+            Self::AmbiguousResolution => {
+                "Multiple auth requests are pending in this conversation. Use `auth deny <auth-request-ref>` to target a specific one."
+            }
+            _ => self.user_facing_hint(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InboundRetryDisposition {
@@ -726,6 +833,10 @@ pub enum ProductInboundAck {
         accepted_message_ref: AcceptedMessageRef,
         active_run_id: TurnRunId,
     },
+    RejectedBusy {
+        accepted_message_ref: AcceptedMessageRef,
+        active_run_id: Option<TurnRunId>,
+    },
     Rejected(ProductRejection),
     CommandResult {
         command: String,
@@ -742,6 +853,7 @@ impl ProductInboundAck {
         match self {
             Self::Accepted { .. }
             | Self::DeferredBusy { .. }
+            | Self::RejectedBusy { .. }
             | Self::Duplicate { .. }
             | Self::CommandResult { .. }
             | Self::NoOp => true,
@@ -959,6 +1071,116 @@ mod tests {
             }
             .retry_disposition(),
             InboundRetryDisposition::ReplayPrior
+        );
+    }
+
+    #[test]
+    fn rejection_kind_user_facing_hint_is_exhaustive_and_sanitized() {
+        // Every variant must return a non-empty, static hint with no internal state.
+        let cases = [
+            (ProductRejectionKind::BindingRequired, "approve gate:"),
+            (ProductRejectionKind::AccessDenied, "access"),
+            (ProductRejectionKind::UnknownInstallation, "workspace"),
+            (ProductRejectionKind::InvalidRequest, "approve"),
+            (ProductRejectionKind::PolicyDenied, "policy"),
+            (ProductRejectionKind::AmbiguousResolution, "approve gate:"),
+        ];
+        for (kind, expected_substr) in &cases {
+            let hint = kind.user_facing_hint();
+            assert!(!hint.is_empty(), "{kind:?} hint must not be empty");
+            assert!(
+                hint.contains(expected_substr),
+                "{kind:?} hint '{hint}' must contain '{expected_substr}'"
+            );
+        }
+
+        // Hints must be pairwise distinct — two kinds sharing a hint would
+        // make the user-facing feedback ambiguous about what went wrong.
+        let mut hints: Vec<&str> = cases
+            .iter()
+            .map(|(kind, _)| kind.user_facing_hint())
+            .collect();
+        hints.sort_unstable();
+        hints.dedup();
+        assert_eq!(
+            hints.len(),
+            cases.len(),
+            "every ProductRejectionKind must have a distinct user-facing hint"
+        );
+    }
+
+    #[test]
+    fn rejection_kind_user_facing_auth_hint_overrides_approval_kinds_and_falls_through() {
+        // BindingRequired and InvalidRequest must return auth-specific guidance,
+        // not the approval-command text from user_facing_hint().
+        let binding_hint = ProductRejectionKind::BindingRequired.user_facing_auth_hint();
+        assert!(
+            binding_hint.contains("auth deny"),
+            "BindingRequired auth hint must reference 'auth deny', got: {binding_hint}"
+        );
+        assert!(
+            !binding_hint.contains("approve gate:"),
+            "BindingRequired auth hint must not contain approval command, got: {binding_hint}"
+        );
+
+        let invalid_hint = ProductRejectionKind::InvalidRequest.user_facing_auth_hint();
+        assert!(
+            invalid_hint.contains("auth deny"),
+            "InvalidRequest auth hint must reference 'auth deny', got: {invalid_hint}"
+        );
+        assert!(
+            !invalid_hint.contains("approve"),
+            "InvalidRequest auth hint must not contain approval command, got: {invalid_hint}"
+        );
+
+        // AmbiguousResolution must also return auth-specific guidance, not approval text.
+        let ambiguous_hint = ProductRejectionKind::AmbiguousResolution.user_facing_auth_hint();
+        assert!(
+            ambiguous_hint.contains("auth deny"),
+            "AmbiguousResolution auth hint must reference 'auth deny', got: {ambiguous_hint}"
+        );
+
+        // All other kinds fall through to user_facing_hint().
+        for kind in [
+            ProductRejectionKind::AccessDenied,
+            ProductRejectionKind::UnknownInstallation,
+            ProductRejectionKind::PolicyDenied,
+        ] {
+            assert_eq!(
+                kind.user_facing_auth_hint(),
+                kind.user_facing_hint(),
+                "{kind:?} auth hint must fall through to user_facing_hint()"
+            );
+        }
+    }
+
+    // BUG 3 regression: StaleGate must have a distinct hint that does NOT say
+    // "declined by policy" — it means the gate was already resolved.
+    #[test]
+    fn stale_gate_hint_is_distinct_from_policy_denied() {
+        let stale_hint = ProductRejectionKind::StaleGate.user_facing_hint();
+        let policy_hint = ProductRejectionKind::PolicyDenied.user_facing_hint();
+        assert_ne!(
+            stale_hint, policy_hint,
+            "StaleGate hint must differ from PolicyDenied hint"
+        );
+        assert!(
+            !stale_hint.contains("declined by policy"),
+            "StaleGate hint must not say 'declined by policy', got: {stale_hint}"
+        );
+        assert!(
+            stale_hint.contains("already approved or denied"),
+            "StaleGate hint must mention 'already approved or denied', got: {stale_hint}"
+        );
+    }
+
+    #[test]
+    fn policy_denied_hint_unchanged() {
+        // Regression: PolicyDenied string must remain stable — existing usages
+        // in other approval flows depend on it.
+        assert_eq!(
+            ProductRejectionKind::PolicyDenied.user_facing_hint(),
+            "That request was declined by policy."
         );
     }
 }

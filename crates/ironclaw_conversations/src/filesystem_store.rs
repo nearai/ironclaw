@@ -506,12 +506,14 @@ impl ConversationBindingService for RebornFilesystemConversationServices {
         request: ResolveConversationRequest,
         trusted_agent_id: Option<ironclaw_host_api::AgentId>,
         trusted_project_id: Option<ironclaw_host_api::ProjectId>,
+        trusted_owner_user_id: Option<ironclaw_host_api::UserId>,
     ) -> Result<ConversationBindingResolution, InboundTurnError> {
         self.inner
             .resolve_or_create_binding_with_trusted_scope(
                 request,
                 trusted_agent_id,
                 trusted_project_id,
+                trusted_owner_user_id,
             )
             .await
     }

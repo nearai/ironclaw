@@ -1,3 +1,5 @@
+#![allow(dead_code)] // Shared by the QA smoke scenario test binary only.
+
 use std::collections::BTreeSet;
 
 const QA_SCENARIOS: &[&str] = &[

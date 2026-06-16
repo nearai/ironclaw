@@ -12,7 +12,7 @@ publish = false
 
 [features]
 default = []
-root-llm-provider = ["dep:ironclaw_llm"]
+root-llm-provider = ["dep:ironclaw_llm", "dep:base64"]
 libsql-secrets = [
     "dep:ironclaw_secrets",
     "dep:libsql",
@@ -22,11 +22,11 @@ libsql-secrets = [
     "filesystem-goal-store",
 ]
 filesystem-goal-store = ["dep:ironclaw_filesystem"]
-# libSQL-backed user + OAuth-identity store for the WebChat v2 SSO login
-# surface (the host's `UserDirectory` delegate). Opt-in so it only
-# compiles into builds that mount the login surface (the reborn CLI's
-# `webui-v2-beta`), not every `ironclaw_reborn` consumer.
-webui-user-store = ["dep:libsql", "dep:uuid"]
+# Local-dev trigger-fire access store (libSQL-backed). Named for its original
+# WebChat user-store home; the canonical user store has since moved to the
+# filesystem identity resolver, so this feature now only gates the
+# `local_trigger_access` module.
+webui-user-store = ["dep:libsql"]
 # Opt-in because the restart coverage opens real libSQL-backed turn/thread stores.
 # Keep separate from `libsql-secrets` so local `cargo test -p ironclaw_reborn`
 # stays fast, while CI can exercise process-restart persistence explicitly.
@@ -39,6 +39,7 @@ libsql-restart-tests = [
 
 [dependencies]
 async-trait = "0.1"
+base64 = { version = "0.22", optional = true }
 chrono = "0.4"
 futures-util = { version = "0.3", default-features = false }
 ironclaw_agent_loop = { path = "../ironclaw_agent_loop", version = "0.1.0" }
@@ -48,6 +49,7 @@ ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime", version = "0.1.0" }
 ironclaw_llm = { path = "../ironclaw_llm", version = "0.1.0", optional = true, default-features = false }
 ironclaw_loop_support = { path = "../ironclaw_loop_support", version = "0.1.0" }
+ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
 ironclaw_secrets = { path = "../ironclaw_secrets", version = "0.1.0", optional = true }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0", optional = true }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
@@ -55,7 +57,6 @@ ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 parking_lot = "0.12"
 secrecy = { version = "0.10", optional = true }
-uuid = { version = "1", optional = true, features = ["v4"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

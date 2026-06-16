@@ -6128,10 +6128,11 @@ mod tests {
             "failed to build WeCom wasm fixture for component tests"
         );
 
-        let built_path = std::path::Path::new(
-            "channels-src/wecom/target/wasm32-wasip2/release/wecom_channel.wasm",
-        );
-        std::fs::read(built_path).unwrap_or_else(|err| {
+        let built_path = std::env::var_os("CARGO_TARGET_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("channels-src/wecom/target"))
+            .join("wasm32-wasip2/release/wecom_channel.wasm");
+        std::fs::read(&built_path).unwrap_or_else(|err| {
             panic!(
                 "WeCom component fixture is missing and built artifact could not be read at {}: {err}",
                 built_path.display()

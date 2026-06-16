@@ -72,6 +72,7 @@ cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- config path
 
 `config path` and `doctor` are safe diagnostics; they report the resolved home,
 profile, `config.toml`, `providers.json`, and `v1_state: not-used`.
+They do not create Reborn state or seed config files.
 
 ### Configure the model route
 
@@ -129,9 +130,41 @@ api_key_env = "OPENAI_API_KEY"
 `[identity]`, `[runner]`, and `[skills]`; `config init` writes commented
 guidance for the supported fields.
 
+If `config.toml` is missing, the first stateful runtime start through `run`,
+`repl`, or `serve` seeds a sparse file with `api_version` and the safe
+`local-dev` boot profile. Read-only commands and `run --dry-run` stay
+side-effect-free. One-off environment selections such as
+`IRONCLAW_REBORN_PROFILE=local-dev-yolo` are not persisted into the seeded
+file.
+
 Important: `api_key_env` is the name of an environment variable, not the secret
 itself. Reborn rejects inline secret-shaped values in `config.toml` and
 `providers.json`.
+
+Production storage uses the same env-only pattern. A production Reborn config
+may name the PostgreSQL URL variable, but must not contain the raw URL:
+
+```toml
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+# Optional; defaults to 16. Keep below the PostgreSQL server's max_connections
+# after reserving capacity for migrations and operator sessions.
+pool_max_size = 16
+
+[policy]
+deployment_mode = "hosted_multi_tenant"
+default_profile = "secure_default"
+```
+
+Set `IRONCLAW_REBORN_POSTGRES_URL` in the process environment, and set
+`IRONCLAW_REBORN_SECRET_MASTER_KEY` to independent cryptographic key material.
+Managed remote PostgreSQL providers must use TLS, for example by appending
+`sslmode=require`.
+Production `run` also requires an explicit `[policy]` section. The first
+production launch slice supports runtime policies that do not require a
+tenant-sandbox process binding.
 
 Once `[llm.default]` exists, that config selects the provider. `LLM_BACKEND` is
 only an env fallback when no default LLM slot is configured. To switch providers
@@ -141,7 +174,9 @@ after writing config, use `models set-provider <provider>` or edit
 ### Env-only model selection
 
 If `$IRONCLAW_REBORN_HOME/config.toml` is absent or has no `[llm.default]`,
-Reborn can resolve the LLM from environment variables:
+Reborn can resolve the LLM from environment variables. A sparse first-run
+seeded config does not include `[llm.default]`, so env-only model selection
+continues to work:
 
 ```bash
 export IRONCLAW_REBORN_HOME="$PWD/.reborn-env-only"
@@ -170,6 +205,8 @@ the current branch.
 | --- | --- |
 | `IRONCLAW_REBORN_HOME` | Absolute Reborn state root. Defaults to `$HOME/.ironclaw/reborn`. The resolver rejects unsafe paths and v1 state-root aliases such as `$HOME/.ironclaw`. |
 | `IRONCLAW_REBORN_PROFILE` | Boot profile selector. Supported values: `local-dev`, `local-dev-yolo`, `production`, `migration-dry-run`. |
+| `IRONCLAW_REBORN_POSTGRES_URL` | Production PostgreSQL storage URL when `[storage].backend = "postgres"` and `[storage].url_env` names this variable. Keep it out of `config.toml`; remote providers must use TLS. |
+| `IRONCLAW_REBORN_SECRET_MASTER_KEY` | Production Reborn secret master key when `[storage].secret_master_key_env` names this variable. Keep it independent from the database URL and out of `config.toml`. |
 | `IRONCLAW_REBORN_LOG` | Tracing filter for the Reborn binary, for example `debug,ironclaw_reborn=trace`. |
 
 `run` and `repl` currently support `local-dev` and `local-dev-yolo` runtime
@@ -226,17 +263,17 @@ Required WebUI env vars:
 | `IRONCLAW_REBORN_WEBUI_TOKEN` | Bearer token for WebUI requests. If SSO is enabled, this also signs sessions and must be at least 32 bytes. |
 | `IRONCLAW_REBORN_WEBUI_USER_ID` | Reborn owner/user id for env-bearer requests. If `[identity].default_owner` is configured, it must match this value. |
 
-Optional WebUI SSO env vars:
+Optional WebUI OAuth env vars:
 
 | Variable | Purpose |
 | --- | --- |
+| `IRONCLAW_REBORN_WEBUI_BASE_URL` | Public base URL used for WebUI login and product-auth OAuth callbacks. Non-loopback deployments must use `https://`. |
 | `IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID` | Enables Google SSO when set. |
 | `IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET` | Required when Google SSO is enabled. |
 | `IRONCLAW_REBORN_WEBUI_GOOGLE_ALLOWED_HD` | Optional Google hosted-domain restriction. |
 | `IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_ID` | Enables GitHub SSO when set. |
 | `IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_SECRET` | Required when GitHub SSO is enabled. |
 | `IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS` | Required when any SSO provider is enabled. Comma-separated verified email domains. |
-| `IRONCLAW_REBORN_WEBUI_BASE_URL` | Public base URL used for OAuth callbacks. Non-loopback deployments must use `https://`. |
 | `IRONCLAW_REBORN_WEBUI_OAUTH_HTTP_TIMEOUT_SECS` | Optional OAuth HTTP timeout override. |
 
 For Google SSO, create a Google OAuth web client and register the Reborn WebUI
@@ -253,11 +290,13 @@ the authorized redirect URI in Google Cloud is:
 https://ironclaw.example.com/auth/callback/google
 ```
 
-Do not include a trailing slash in `IRONCLAW_REBORN_WEBUI_BASE_URL`; Reborn
-trims it before building callback URLs. If the base URL is omitted, Reborn uses
-the actual listener address, such as `http://127.0.0.1:3000`, which is suitable
-only for loopback/local OAuth testing. Public or non-loopback SSO deployments
-must set an `https://` base URL.
+Notion MCP and other product-auth OAuth setup flows use the same public WebUI
+base URL when registering provider callback URLs. Do not include a trailing
+slash in `IRONCLAW_REBORN_WEBUI_BASE_URL`; Reborn trims it before building
+callback URLs. If the base URL is omitted, Reborn uses the actual listener
+address, such as `http://127.0.0.1:3000`, which is suitable only for
+loopback/local OAuth testing. Public or non-loopback OAuth deployments must set
+an `https://` base URL.
 
 Complete Google SSO startup env:
 

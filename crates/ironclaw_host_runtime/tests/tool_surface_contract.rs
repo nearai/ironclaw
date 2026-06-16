@@ -543,6 +543,31 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
     assert_schema_has_property(&surface, "builtin.skill_install", "url");
     assert_schema_has_property(&surface, "builtin.skill_install", "name");
 
+    let trigger_create = surface
+        .capabilities
+        .iter()
+        .find(|capability| capability.descriptor.id == capability_id("builtin.trigger_create"))
+        .expect("builtin.trigger_create should be visible");
+    assert!(
+        trigger_create
+            .descriptor
+            .description
+            .contains("outbound delivery target capabilities"),
+        "trigger_create description should point the model at delivery target selection"
+    );
+    let trigger_prompt_description = trigger_create
+        .descriptor
+        .parameters_schema
+        .get("properties")
+        .and_then(|properties| properties.get("prompt"))
+        .and_then(|property| property.get("description"))
+        .and_then(serde_json::Value::as_str)
+        .expect("trigger prompt description should be present");
+    assert!(
+        trigger_prompt_description.contains("first select the target"),
+        "trigger_create prompt schema should steer delivery requests before trigger creation"
+    );
+
     let http_schema = &surface
         .capabilities
         .iter()

@@ -1,4 +1,4 @@
-import { Navigate, useNavigate, useOutletContext, useParams } from "react-router";
+import { Navigate, useOutletContext, useParams } from "react-router";
 import { React, html } from "../../lib/html.js";
 import { useT } from "../../lib/i18n.js";
 import { AgentTab } from "./components/agent-tab.js";
@@ -8,35 +8,23 @@ import { LanguageTab } from "./components/language-tab.js";
 import { NetworkingTab } from "./components/networking-tab.js";
 import { RestartBanner } from "./components/restart-banner.js";
 import { SkillsTab } from "./components/skills-tab.js";
-import { SettingsToolbar } from "./components/settings-toolbar.js";
 import { ToolsTab } from "./components/tools-tab.js";
+import { TraceCommonsTab } from "./components/trace-commons-tab.js";
 import { UsersTab } from "./components/users-tab.js";
 import { useSettings } from "./hooks/useSettings.js";
 
 export function SettingsPage() {
   const t = useT();
-  const { tab = "inference" } = useParams();
-  const navigate = useNavigate();
-  const { gatewayStatus, gatewayStatusQuery, isAdmin = true } = useOutletContext();
-  const {
-    settings,
-    query,
-    save,
-    savedKeys,
-    needsRestart,
-    importSettings,
-    isImporting,
-    saveError,
-  } = useSettings();
+  const { tab: requestedTab } = useParams();
+  const { gatewayStatus, gatewayStatusQuery, isAdmin = false } = useOutletContext();
+  const defaultTab = isAdmin ? "inference" : "language";
+  const tab = requestedTab || defaultTab;
+  const { settings, query, save, savedKeys, needsRestart, saveError } = useSettings();
   const [searchQuery, setSearchQuery] = React.useState("");
 
   React.useEffect(() => {
     setSearchQuery("");
   }, [tab]);
-
-  const handleBack = React.useCallback(() => {
-    navigate("/settings/inference");
-  }, [navigate]);
 
   const isLoading = query.isLoading;
 
@@ -66,12 +54,19 @@ export function SettingsPage() {
     />`,
     tools: html`<${ToolsTab} searchQuery=${searchQuery} />`,
     skills: html`<${SkillsTab} searchQuery=${searchQuery} />`,
+    traces: html`<${TraceCommonsTab} searchQuery=${searchQuery} />`,
     users: html`<${UsersTab} searchQuery=${searchQuery} />`,
     language: html`<${LanguageTab} searchQuery=${searchQuery} />`,
   };
 
-  if (!tabContent[tab] || (!isAdmin && tab === "users")) {
-    return html`<${Navigate} to="/settings/inference" replace />`;
+  const isOperatorTab = (id) => id === "users" || id === "inference";
+  const tabContentHas = (id) => Object.prototype.hasOwnProperty.call(tabContent, id);
+  const visibleTabIds = Object.keys(tabContent).filter((id) => isAdmin || !isOperatorTab(id));
+  const defaultTabIsVisible = tabContentHas(defaultTab) && visibleTabIds.includes(defaultTab);
+  const redirectTab = defaultTabIsVisible ? defaultTab : visibleTabIds[0] || "language";
+
+  if (!tabContentHas(tab) || (!isAdmin && isOperatorTab(tab))) {
+    return html`<${Navigate} to=${`/settings/${redirectTab}`} replace />`;
   }
 
   return html`
@@ -87,19 +82,6 @@ export function SettingsPage() {
                 gatewayStatusQuery=${gatewayStatusQuery}
               />
             </div>`}
-
-            ${''
-              // <${SettingsToolbar}
-              //   settingsExport=${query.data}
-              //   onImport=${importSettings}
-              //   isImporting=${isImporting}
-              //   searchQuery=${searchQuery}
-              //   onSearchChange=${setSearchQuery}
-              //   onSearchClear=${() => setSearchQuery("")}
-              //   onBack=${handleBack}
-              //   canGoBack=${tab !== "inference"}
-              // />
-            }
 
             ${saveError &&
             html`

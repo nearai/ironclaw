@@ -1,8 +1,10 @@
 use async_trait::async_trait;
-use ironclaw_host_api::{TenantId, Timestamp};
-use ironclaw_turns::TurnRunId;
+use ironclaw_host_api::{TenantId, ThreadId, Timestamp};
+use ironclaw_turns::{TurnRunId, TurnScope};
 
-use crate::{TriggerError, TriggerFire, TriggerId, TriggerMaterializedPrompt};
+use crate::{
+    TriggerError, TriggerFire, TriggerId, TriggerMaterializedPrompt, TriggerRunHistoryStatus,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustedTriggerSubmitRequest {
@@ -49,6 +51,23 @@ impl TrustedTriggerSubmitRequest {
     pub fn into_parts(self) -> (TriggerFire, TriggerMaterializedPrompt, Timestamp) {
         (self.fire, self.materialized_prompt, self.received_at)
     }
+
+    /// Test-only constructor that bypasses the `pub(crate)` seal.
+    ///
+    /// Production code always creates submit requests inside the trigger worker
+    /// (`due_fire.rs`), which is the only caller allowed to pair a `TriggerFire`
+    /// with its materialized prompt. This helper lets downstream crates (e.g.
+    /// `ironclaw_conversations`) test their `TrustedTriggerFireSubmitter` impls
+    /// without pulling in the full worker. Gated on `test-support` feature so
+    /// it ships zero bytes in production binaries.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new_for_test(
+        fire: TriggerFire,
+        materialized_prompt: TriggerMaterializedPrompt,
+        received_at: Timestamp,
+    ) -> Self {
+        Self::new(fire, materialized_prompt, received_at)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,10 +75,20 @@ pub enum TrustedTriggerFireSubmitOutcome {
     Accepted {
         run_id: TurnRunId,
         submitted_at: Timestamp,
+        /// Scope of the submitted run, available for post-submit hooks (e.g.
+        /// triggered-run delivery) that need to poll the run state.
+        turn_scope: TurnScope,
     },
     Replayed {
         original_run_id: TurnRunId,
         replayed_at: Timestamp,
+        /// Canonical thread id for the replayed fire.
+        ///
+        /// The submission path resolves conversation binding before determining
+        /// whether a fire is new or replayed, so the canonical `ThreadId` is
+        /// available at this point. `None` means no canonical thread was
+        /// resolved.
+        thread_id: Option<ThreadId>,
     },
 }
 
@@ -83,7 +112,7 @@ pub struct TriggerActiveRunStateRequest {
 pub enum TriggerActiveRunState {
     Missing,
     Nonterminal,
-    Terminal,
+    Terminal { status: TriggerRunHistoryStatus },
 }
 
 #[async_trait]

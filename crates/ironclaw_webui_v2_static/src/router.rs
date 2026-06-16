@@ -218,6 +218,8 @@ fn render_index_with_nonce() -> Response {
          style-src-elem 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; \
          font-src 'self' https://fonts.gstatic.com data:; \
          img-src 'self' data:; \
+         media-src 'self' data:; \
+         frame-src 'self' blob:; \
          connect-src 'self'; \
          object-src 'none'; \
          frame-ancestors 'none'; \
@@ -354,6 +356,95 @@ mod tests {
         assert!(
             csp.contains(&format!("'nonce-{html_nonce}'")),
             "CSP must allow the exact nonce embedded in the HTML — got `{csp}`",
+        );
+    }
+
+    #[tokio::test]
+    async fn spa_document_csp_allowlist_is_locked() {
+        // The SPA loads React / Tailwind / fonts from CDNs at runtime, so
+        // the document CSP carries a deliberate allowlist. Lock its exact
+        // shape (security-parity 03 row 3b): a regression that added
+        // `unsafe-eval`, allowed `'unsafe-inline'` scripts, or widened the
+        // CDN origin set must fail here, not ship silently.
+        let app = static_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(response.status(), StatusCode::OK);
+        let csp = response
+            .headers()
+            .get(axum::http::header::CONTENT_SECURITY_POLICY)
+            .expect("CSP header on SPA shell")
+            .to_str()
+            .expect("CSP ASCII")
+            .to_string();
+
+        // The exact documented `script-src` CDN origins — no more, no less.
+        for origin in [
+            "https://esm.sh",
+            "https://cdn.jsdelivr.net",
+            "https://cdnjs.cloudflare.com",
+        ] {
+            assert!(
+                csp.contains(origin),
+                "document CSP must allow CDN script origin `{origin}`; got `{csp}`",
+            );
+        }
+        assert!(
+            csp.contains("'nonce-"),
+            "document `script-src` must carry a per-request nonce; got `{csp}`",
+        );
+        assert!(
+            csp.contains("object-src 'none'"),
+            "document CSP must keep `object-src 'none'`; got `{csp}`",
+        );
+        // Attachment preview needs inline audio (`media-src data:`) and inline
+        // PDF via blob iframes (`frame-src blob:`). Assert the EXACT source
+        // list per directive (not a substring) so a regression that widens them
+        // — e.g. `media-src 'self' data: https://evil` — fails here.
+        let directives: std::collections::HashMap<_, _> = csp
+            .split(';')
+            .map(str::trim)
+            .filter(|directive| !directive.is_empty())
+            .filter_map(|directive| directive.split_once(' '))
+            .map(|(name, sources)| (name, sources.trim()))
+            .collect();
+        assert_eq!(
+            directives.get("media-src").copied(),
+            Some("'self' data:"),
+            "document CSP must keep the exact media-src allowlist; got `{csp}`",
+        );
+        assert_eq!(
+            directives.get("frame-src").copied(),
+            Some("'self' blob:"),
+            "document CSP must keep the exact frame-src allowlist; got `{csp}`",
+        );
+        assert_eq!(
+            directives.get("img-src").copied(),
+            Some("'self' data:"),
+            "document CSP must keep the exact img-src allowlist; got `{csp}`",
+        );
+        // Scripts must NOT be executable via eval or arbitrary inline —
+        // the document relies on the nonce, not `'unsafe-inline'`.
+        assert!(
+            !csp.contains("'unsafe-eval'"),
+            "document CSP must not allow `unsafe-eval`; got `{csp}`",
+        );
+        let script_src = csp
+            .split(';')
+            .map(str::trim)
+            .find(|d| d.starts_with("script-src ") || *d == "script-src")
+            .expect("script-src directive present");
+        assert!(
+            !script_src.contains("'unsafe-inline'"),
+            "document `script-src` must not allow `'unsafe-inline'` (nonce-based); got `{script_src}`",
         );
     }
 

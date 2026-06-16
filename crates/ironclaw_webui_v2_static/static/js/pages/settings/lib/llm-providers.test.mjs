@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   API_KEY_UNCHANGED,
   groupProvidersByStatus,
+  nextModelAfterFetch,
   providerAcceptsApiKey,
   providerStatus,
 } from "./llm-providers.js";
@@ -165,4 +166,25 @@ test("groupProvidersByStatus returns empty arrays for missing buckets, not undef
 test("groupProvidersByStatus treats non-array input as empty", () => {
   const groups = groupProvidersByStatus(null, {}, null);
   assert.deepEqual(groups, { active: [], ready: [], setup: [] });
+});
+
+test("nextModelAfterFetch commits the first model when the field is empty", () => {
+  // The exact Ollama bug: empty form.model + a single fetched option. The
+  // controlled <Select> shows it but never commits, so save would send empty.
+  assert.equal(nextModelAfterFetch("", ["qwen3:latest"]), "qwen3:latest");
+  assert.equal(nextModelAfterFetch("   ", ["llama3", "qwen2"]), "llama3");
+});
+
+test("nextModelAfterFetch commits the first model when the current one is absent from the list", () => {
+  assert.equal(nextModelAfterFetch("old-model", ["llama3", "qwen2"]), "llama3");
+});
+
+test("nextModelAfterFetch keeps the current model when it is in the fetched list", () => {
+  assert.equal(nextModelAfterFetch("qwen2", ["llama3", "qwen2"]), null);
+  assert.equal(nextModelAfterFetch(" qwen2 ", ["llama3", "qwen2"]), null);
+});
+
+test("nextModelAfterFetch keeps the current model when no models were fetched", () => {
+  assert.equal(nextModelAfterFetch("", []), null);
+  assert.equal(nextModelAfterFetch("x", null), null);
 });

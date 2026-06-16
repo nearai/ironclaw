@@ -72,21 +72,8 @@ function renderChatInput({ onCancel, setCalls = [] } = {}) {
         ];
       },
     },
-    addFiles: () => {},
-    clearAttachments: () => {},
-    formatSize: (size) => String(size),
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
-    removeAttachment: () => {},
-    removeImage: () => {},
-    useComposerAttachments: () => ({
-      images: [],
-      attachments: [],
-      addFiles: () => {},
-      removeImage: () => {},
-      removeAttachment: () => {},
-      clearAttachments: () => {},
-    }),
     useT: () => (key) => key,
     window: { requestAnimationFrame: (fn) => fn() },
   };

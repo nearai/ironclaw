@@ -25,14 +25,18 @@ use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
     LifecyclePackageRef, RebornCancelRunResponse, RebornCreateThreadResponse,
-    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
-    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
-    RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, rejecting_reborn_services_error,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
+    RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
+    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    rejecting_reborn_services_error,
 };
 use ironclaw_reborn_composition::{
     RebornReadiness, RebornWebuiBundle, WebuiServeConfig, webui_v2_app,
@@ -142,6 +146,13 @@ impl RebornServicesApi for RecordingServices {
             next_cursor: None,
         })
     }
+    async fn delete_thread(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: RebornDeleteThreadRequest,
+    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
+        unreachable!("test does not drive delete_thread")
+    }
     async fn list_automations(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -149,10 +160,72 @@ impl RebornServicesApi for RecordingServices {
     ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
+    async fn get_outbound_preferences(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+    async fn set_outbound_preferences(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: RebornSetOutboundPreferencesRequest,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+    async fn list_outbound_delivery_targets(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
     async fn list_extensions(
         &self,
         _caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornExtensionListResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+    async fn list_skills(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornSkillListResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+    async fn search_skills(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _query: String,
+    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+    async fn install_skill(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+        _content: Option<String>,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+    async fn read_skill_content(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+    async fn update_skill(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+        _content: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+    async fn remove_skill(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
     async fn list_extension_registry(
@@ -420,6 +493,44 @@ async fn create_thread(app: &axum::Router, bearer: &str) -> StatusCode {
         .status()
 }
 
+async fn session_payload(app: &axum::Router, bearer: &str) -> serde_json::Value {
+    let response = app
+        .clone()
+        .oneshot(with_peer(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .body(Body::empty())
+                .expect("request"),
+        ))
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    serde_json::from_slice(&bytes).expect("session json")
+}
+
+async fn llm_providers_status(app: &axum::Router, bearer: &str, method: Method) -> StatusCode {
+    app.clone()
+        .oneshot(with_peer(
+            Request::builder()
+                .method(method)
+                .uri("/api/webchat/v2/llm/providers")
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .body(Body::empty())
+                .expect("request"),
+        ))
+        .await
+        .expect("oneshot")
+        .status()
+}
+
 // ─── test ─────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -455,6 +566,46 @@ async fn two_oauth_users_reach_protected_routes_as_distinct_callers() {
     );
     // Both callers carry the host-trusted tenant, never a browser value.
     assert!(callers.iter().all(|c| c.tenant_id.as_str() == TENANT));
+}
+
+#[tokio::test]
+async fn sso_sessions_stay_non_operator_while_env_token_can_configure_operator_routes() {
+    // This mirrors the Railway deployment shape: SSO login is enabled,
+    // but the env bearer remains the separate operator credential.
+    let (app, _services) = build_app(vec![profile("alice-sub", "alice@example.com")]);
+    let sso_bearer = login(&app).await;
+
+    let sso_session = session_payload(&app, &sso_bearer).await;
+    assert_eq!(sso_session["user_id"], "user-alice-sub");
+    assert_eq!(
+        sso_session["capabilities"]["operator_webui_config"], false,
+        "SSO session tokens must not inherit operator privileges"
+    );
+    assert_eq!(
+        llm_providers_status(&app, &sso_bearer, Method::GET).await,
+        StatusCode::FORBIDDEN,
+        "SSO session tokens must be denied on operator LLM config routes"
+    );
+    assert_eq!(
+        llm_providers_status(&app, &sso_bearer, Method::HEAD).await,
+        StatusCode::FORBIDDEN,
+        "SSO session tokens must be denied on operator LLM config routes before Axum routes HEAD through GET"
+    );
+
+    let operator_session = session_payload(&app, "env-operator-token").await;
+    assert_eq!(operator_session["user_id"], "operator");
+    assert_eq!(
+        operator_session["capabilities"]["operator_webui_config"], true,
+        "the env bearer token must keep operator capability when SSO is mounted"
+    );
+    let operator_status = llm_providers_status(&app, "env-operator-token", Method::GET).await;
+    assert_ne!(operator_status, StatusCode::UNAUTHORIZED);
+    assert_ne!(operator_status, StatusCode::FORBIDDEN);
+    assert_ne!(
+        operator_status,
+        StatusCode::NOT_FOUND,
+        "operator routes must be mounted when the composite authenticator contains an env operator token"
+    );
 }
 
 #[tokio::test]

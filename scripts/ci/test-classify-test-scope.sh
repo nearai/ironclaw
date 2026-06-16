@@ -89,6 +89,49 @@ has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
+  "reborn root test runner script" \
+  "scripts/ci/run-reborn-root-partition.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "reborn root tests and support" \
+  "tests/reborn_qa_smoke_scenarios_e2e.rs
+tests/support/reborn/harness.rs
+tests/e2e/scenarios/test_reborn_gateway_smoke.py" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "reborn e2e scenario" \
+  "tests/e2e/scenarios/test_reborn_scope_isolation.py" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "legacy e2e scenario" \
+  "tests/e2e/scenarios/test_live_flow.py" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=true
+has_reborn_tests=false"
+
+assert_scope \
+  "mixed legacy and reborn root tests" \
+  "tests/e2e_live.rs
+tests/reborn_trace_first_party_tool_coverage.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=true
+has_reborn_tests=true"
+
+assert_scope \
   "legacy root runtime" \
   "src/agent/session.rs" \
   "docs_only=false

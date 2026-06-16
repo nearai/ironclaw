@@ -77,6 +77,7 @@ impl LoopCapabilityPort for AlwaysCompletedPort {
                 .expect("ok"),
             safe_summary: format!("ran {}", request.capability_id),
             terminate_hint: false,
+            byte_len: 0,
         }))
     }
 
@@ -237,6 +238,7 @@ fn snapshot_fixture_invocation() -> CapabilityInvocation {
             "input:cap.snapshot.fixture",
         )
         .expect("input ref literal is valid"),
+        approval_resume: None,
     }
 }
 
@@ -366,11 +368,13 @@ fn invocation_arguments_digest_differs_for_different_input_refs() {
         surface_version: surface.clone(),
         capability_id: cap_id.clone(),
         input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:a").expect("ok"),
+        approval_resume: None,
     };
     let b = CapabilityInvocation {
         surface_version: surface,
         capability_id: cap_id,
         input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:b").expect("ok"),
+        approval_resume: None,
     };
     assert_ne!(
         invocation_arguments_digest(&a),
@@ -388,11 +392,13 @@ fn invocation_arguments_digest_differs_for_different_capability_ids() {
         surface_version: surface.clone(),
         capability_id: CapabilityId::new("cap.alpha").expect("ok"),
         input_ref: input_ref.clone(),
+        approval_resume: None,
     };
     let b = CapabilityInvocation {
         surface_version: surface,
         capability_id: CapabilityId::new("cap.beta").expect("ok"),
         input_ref,
+        approval_resume: None,
     };
     assert_ne!(
         invocation_arguments_digest(&a),
@@ -408,6 +414,7 @@ fn invocation(capability: &str) -> CapabilityInvocation {
         surface_version: CapabilitySurfaceVersion::new("v1").expect("ok"),
         capability_id: CapabilityId::new(capability).expect("ok"),
         input_ref: CapabilityInputRef::new(format!("input:{capability}")).expect("ok"),
+        approval_resume: None,
     }
 }
 
@@ -514,6 +521,7 @@ async fn pause_approval_decision_surfaces_as_approval_required() {
         CapabilityOutcome::ApprovalRequired {
             gate_ref,
             safe_summary,
+            ..
         } => {
             assert!(gate_ref.as_str().starts_with("gate:hook-approval-"));
             assert_eq!(safe_summary, "needs approval for this capability");
@@ -539,6 +547,7 @@ async fn pause_auth_decision_surfaces_as_auth_required() {
         CapabilityOutcome::AuthRequired {
             gate_ref,
             safe_summary,
+            ..
         } => {
             assert!(gate_ref.as_str().starts_with("gate:hook-auth-"));
             assert_eq!(safe_summary, "needs auth for this capability");

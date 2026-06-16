@@ -21,8 +21,8 @@ use ironclaw_host_api::{
     CapabilityDispatchResult, CapabilityId, CredentialStageError, DecisionSummary, EffectKind,
     ExtensionId, MountView, NetworkPolicy, Obligation, ProcessId, ResourceCeiling,
     ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage,
-    RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
-    SandboxQuota, SecretHandle,
+    RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
+    RuntimeCredentialAuthRequirement, RuntimeHttpEgress, SandboxQuota, SecretHandle,
 };
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{ProcessError, ProcessRecord, ProcessStart, ProcessStore};
@@ -31,6 +31,7 @@ use ironclaw_safety::LeakDetector;
 use ironclaw_secrets::{
     SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore, SecretStoreError,
 };
+use secrecy::ExposeSecret;
 
 use crate::{
     ToolCallHttpEgress,
@@ -44,6 +45,7 @@ pub(crate) const DEFAULT_RUNTIME_SECRET_INJECTION_TTL: Duration = Duration::from
 pub struct RuntimeCredentialAccountRequest<'a> {
     pub scope: &'a ResourceScope,
     pub provider: &'a RuntimeCredentialAccountProviderId,
+    pub setup: &'a RuntimeCredentialAccountSetup,
     pub provider_scopes: &'a [String],
     pub requester_extension: &'a ExtensionId,
 }
@@ -143,6 +145,24 @@ impl RuntimeSecretInjectionStore {
                 handle,
             ))
             .map(|entry| entry.material))
+    }
+
+    pub(crate) fn clone_material(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        handle: &SecretHandle,
+    ) -> Result<Option<SecretMaterial>, RuntimeSecretInjectionStoreError> {
+        let now = Instant::now();
+        let mut secrets = self.lock()?;
+        prune_expired_entries(&mut secrets, now);
+        Ok(secrets
+            .get(&RuntimeSecretInjectionKey::new(
+                scope,
+                capability_id,
+                handle,
+            ))
+            .map(|entry| SecretMaterial::from(entry.material.expose_secret())))
     }
 
     /// Discard all staged secrets for a scoped capability before process ownership exists.
@@ -1191,11 +1211,28 @@ impl BuiltinObligationHandler {
             return Err(secret_obligation_failed());
         }
         for handle in handles {
-            let exists = secret_store
-                .metadata(&request.context.resource_scope, handle)
-                .await
-                .map_err(|_| secret_obligation_failed())?
-                .is_some();
+            // Fail closed on a store error: the dispatch-time backstop must never
+            // let an uncredentialed call through on a transient failure. Preserve the
+            // cause as a server-side trail (`SecretStoreError` Display carries no raw
+            // secret material — handles/reasons only); the caller still receives the
+            // opaque, sanitized secret-obligation failure.
+            let exists = match secret_present(
+                secret_store.as_ref(),
+                &request.context.resource_scope,
+                handle,
+            )
+            .await
+            {
+                Ok(exists) => exists,
+                Err(error) => {
+                    tracing::debug!(
+                        secret_handle = handle.as_str(),
+                        error = %error,
+                        "dispatch-time secret presence probe failed; failing closed at the obligation backstop"
+                    );
+                    return Err(secret_obligation_failed());
+                }
+            };
             if !exists {
                 return Err(CapabilityObligationError::AuthRequired {
                     credential_requirements: Vec::new(),
@@ -1269,6 +1306,7 @@ impl BuiltinObligationHandler {
                 .resolve_access_secret(RuntimeCredentialAccountRequest {
                     scope: &request.context.resource_scope,
                     provider: obligation.provider,
+                    setup: obligation.setup,
                     provider_scopes: obligation.provider_scopes,
                     requester_extension: obligation.requester_extension,
                 })
@@ -1702,6 +1740,7 @@ fn secret_injection_handles(obligations: &[Obligation]) -> Vec<SecretHandle> {
 struct CredentialAccountInjectionObligation<'a> {
     handle: &'a SecretHandle,
     provider: &'a RuntimeCredentialAccountProviderId,
+    setup: &'a RuntimeCredentialAccountSetup,
     provider_scopes: &'a [String],
     requester_extension: &'a ExtensionId,
 }
@@ -1715,11 +1754,13 @@ fn credential_account_injection_obligations(
             Obligation::InjectCredentialAccountOnce {
                 handle,
                 provider,
+                setup,
                 provider_scopes,
                 requester_extension,
             } => Some(CredentialAccountInjectionObligation {
                 handle,
                 provider,
+                setup,
                 provider_scopes,
                 requester_extension,
             }),
@@ -1755,6 +1796,7 @@ fn credential_stage_error_to_obligation_error(
                 .map(|obligation| {
                     vec![RuntimeCredentialAuthRequirement {
                         provider: obligation.provider.clone(),
+                        setup: obligation.setup.clone(),
                         requester_extension: obligation.requester_extension.clone(),
                         provider_scopes: obligation.provider_scopes.to_vec(),
                     }]
@@ -1991,6 +2033,22 @@ fn secret_obligation_failed() -> CapabilityObligationError {
     CapabilityObligationError::Failed {
         kind: CapabilityObligationFailureKind::Secret,
     }
+}
+
+/// Single source of truth for "is this required secret present in `scope`".
+///
+/// Both the credential pre-flight (ordering — `DefaultHostRuntime::
+/// credential_preflight_check`) and the dispatch-time obligation backstop
+/// (enforcement — [`BuiltinObligationHandler::preflight_secret_injection`])
+/// consult this one rule so "what counts as a present credential" cannot drift
+/// between the two call sites. Each caller decides how to treat a store `Err`
+/// (the pre-flight fails open and skips; the obligation backstop fails closed).
+pub(crate) async fn secret_present(
+    store: &dyn SecretStore,
+    scope: &ResourceScope,
+    handle: &SecretHandle,
+) -> Result<bool, SecretStoreError> {
+    Ok(store.metadata(scope, handle).await?.is_some())
 }
 
 fn resource_obligation_failed() -> CapabilityObligationError {

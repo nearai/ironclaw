@@ -23,7 +23,7 @@ function enhanceCodeBlocks(root) {
     }
 
     const wrap = document.createElement("div");
-    wrap.style.position = "relative";
+    wrap.className = "markdown-code-frame";
     pre.parentNode.insertBefore(wrap, pre);
     wrap.appendChild(pre);
 
@@ -47,7 +47,6 @@ function enhanceCodeBlocks(root) {
     wrapBtn.addEventListener("click", () => {
       wrapped = !wrapped;
       pre.style.whiteSpace = wrapped ? "pre-wrap" : "";
-      if (codeEl) codeEl.style.whiteSpace = wrapped ? "pre-wrap" : "";
       wrapBtn.textContent = wrapped ? "No wrap" : "Wrap";
     });
 
@@ -69,7 +68,8 @@ function enhanceCodeBlocks(root) {
 
     if (pre.scrollHeight > COLLAPSE_PX) {
       pre.style.maxHeight = `${COLLAPSE_PX}px`;
-      pre.style.overflow = "hidden";
+      pre.style.overflowX = "auto";
+      pre.style.overflowY = "hidden";
       let expanded = false;
       const toggle = document.createElement("button");
       toggle.type = "button";
@@ -79,6 +79,7 @@ function enhanceCodeBlocks(root) {
       toggle.addEventListener("click", () => {
         expanded = !expanded;
         pre.style.maxHeight = expanded ? "none" : `${COLLAPSE_PX}px`;
+        pre.style.overflowY = expanded ? "visible" : "hidden";
         toggle.textContent = expanded ? "Show less" : "Show more";
       });
       wrap.appendChild(toggle);
@@ -86,18 +87,28 @@ function enhanceCodeBlocks(root) {
   });
 }
 
-export function MarkdownRenderer({ content, className = "" }) {
+function MarkdownRendererImpl({ content, className = "" }) {
   const ref = React.useRef(null);
+
+  // marked.parse + DOMPurify.sanitize are expensive; only re-run when
+  // the source content actually changes, not on every parent render
+  // (during streaming the message list re-renders on every token).
+  const rendered = React.useMemo(() => renderMarkdown(content), [content]);
 
   React.useEffect(() => {
     enhanceCodeBlocks(ref.current);
-  }, [content]);
+  }, [rendered]);
 
   return html`
     <div
       ref=${ref}
       className=${["markdown-body", className].join(" ")}
-      dangerouslySetInnerHTML=${{ __html: renderMarkdown(content) }}
+      dangerouslySetInnerHTML=${{ __html: rendered }}
     />
   `;
 }
+
+// Memoized so a bubble whose `content`/`className` are unchanged skips
+// re-rendering when sibling messages update (e.g. a new streaming chunk
+// elsewhere in the list).
+export const MarkdownRenderer = React.memo(MarkdownRendererImpl);

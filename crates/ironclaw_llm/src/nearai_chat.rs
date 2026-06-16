@@ -41,14 +41,102 @@ pub struct ModelInfo {
     pub provider: Option<String>,
 }
 
+/// Parse a NEAR AI `/models` response body into [`ModelInfo`] entries.
+///
+/// Accepts `{models: [...]}`, `{data: [...]}`, or a bare `[...]` array, and
+/// tolerates the various field names different deployments emit. Returns an
+/// empty vec when no recognizable entries are found.
+fn parse_nearai_models(response_text: &str) -> Vec<ModelInfo> {
+    #[derive(Deserialize)]
+    struct ModelMetadataInner {
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default, alias = "modelName", alias = "model_name")]
+        model_name: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct ModelEntry {
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default, alias = "modelName", alias = "model_name")]
+        model_name: Option<String>,
+        #[serde(default, alias = "modelId", alias = "model_id")]
+        model_id: Option<String>,
+        #[serde(default)]
+        metadata: Option<ModelMetadataInner>,
+    }
+
+    impl ModelEntry {
+        /// Resolve the routable model identifier. The canonical id fields
+        /// (`id`/`model`/`model_id`) win over the human-readable
+        /// `name`/`model_name`: NEAR AI's `/models` entries carry a display
+        /// name in `name` (e.g. "DeepSeek V4 Flash") alongside the id in
+        /// `id`/`model` (e.g. "deepseek-ai/DeepSeek-V4-Flash"). Selecting the
+        /// display name persists an unroutable model and breaks completions.
+        /// Fall back to `name` only when no id field is present — some
+        /// OpenAI-compatible endpoints put the id directly in `name`.
+        fn resolve_id(&self) -> Option<String> {
+            // Treat a present-but-blank field as absent so a whitespace `id`
+            // falls through to the next candidate rather than dropping the
+            // entry.
+            fn clean(field: &Option<String>) -> Option<String> {
+                field
+                    .as_ref()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            }
+            clean(&self.id)
+                .or_else(|| clean(&self.model))
+                .or_else(|| clean(&self.model_id))
+                .or_else(|| clean(&self.name))
+                .or_else(|| clean(&self.model_name))
+                .or_else(|| self.metadata.as_ref().and_then(|m| clean(&m.model_name)))
+                .or_else(|| self.metadata.as_ref().and_then(|m| clean(&m.name)))
+        }
+    }
+
+    #[derive(Deserialize)]
+    struct ModelsResponse {
+        #[serde(default)]
+        models: Option<Vec<ModelEntry>>,
+        #[serde(default)]
+        data: Option<Vec<ModelEntry>>,
+    }
+
+    // Try {models: [...]} / {data: [...]}; fall back to a bare array.
+    let entries = serde_json::from_str::<ModelsResponse>(response_text)
+        .ok()
+        .and_then(|resp| resp.models.or(resp.data))
+        .or_else(|| serde_json::from_str::<Vec<ModelEntry>>(response_text).ok());
+
+    entries
+        .map(|entries| {
+            entries
+                .into_iter()
+                .filter_map(|e| {
+                    e.resolve_id().map(|name| ModelInfo {
+                        name,
+                        provider: None,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Default NEAR AI model used when no model is configured.
-pub const DEFAULT_MODEL: &str = "Qwen/Qwen3.5-122B-A10B";
+pub const DEFAULT_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
 
 /// Fallback model list used by the setup wizard when the `/models` API is
 /// unreachable. Returns `(model_id, display_label)` pairs.
 pub fn default_models() -> Vec<(String, String)> {
     vec![
-        (DEFAULT_MODEL.into(), "Qwen 3.5 122B (default)".into()),
+        (DEFAULT_MODEL.into(), "DeepSeek V4 Flash (default)".into()),
         (
             "Qwen/Qwen3-32B".into(),
             "Qwen 3 32B (smaller, faster)".into(),
@@ -410,84 +498,11 @@ impl NearAiChatProvider {
             });
         }
 
-        // Flexible model entry parsing -- handle various field names
-        #[derive(Deserialize)]
-        struct ModelMetadataInner {
-            #[serde(default)]
-            name: Option<String>,
-            #[serde(default, alias = "modelName", alias = "model_name")]
-            model_name: Option<String>,
-        }
-
-        #[derive(Deserialize)]
-        struct ModelEntry {
-            #[serde(default)]
-            name: Option<String>,
-            #[serde(default)]
-            id: Option<String>,
-            #[serde(default)]
-            model: Option<String>,
-            #[serde(default, alias = "modelName", alias = "model_name")]
-            model_name: Option<String>,
-            #[serde(default, alias = "modelId", alias = "model_id")]
-            model_id: Option<String>,
-            #[serde(default)]
-            metadata: Option<ModelMetadataInner>,
-        }
-
-        impl ModelEntry {
-            fn get_name(&self) -> Option<String> {
-                self.name
-                    .clone()
-                    .or_else(|| self.id.clone())
-                    .or_else(|| self.model.clone())
-                    .or_else(|| self.model_name.clone())
-                    .or_else(|| self.model_id.clone())
-                    .or_else(|| self.metadata.as_ref().and_then(|m| m.name.clone()))
-                    .or_else(|| self.metadata.as_ref().and_then(|m| m.model_name.clone()))
-            }
-        }
-
-        #[derive(Deserialize)]
-        struct ModelsResponse {
-            #[serde(default)]
-            models: Option<Vec<ModelEntry>>,
-            #[serde(default)]
-            data: Option<Vec<ModelEntry>>,
-        }
-
-        // Try {models: [...]} or {data: [...]} format
-        if let Ok(resp) = serde_json::from_str::<ModelsResponse>(&response_text)
-            && let Some(entries) = resp.models.or(resp.data)
-        {
-            let models: Vec<ModelInfo> = entries
-                .into_iter()
-                .filter_map(|e| {
-                    e.get_name().map(|name| ModelInfo {
-                        name,
-                        provider: None,
-                    })
-                })
-                .collect();
-            if !models.is_empty() {
-                return Ok(models);
-            }
-        }
-
-        // Try direct array format
-        if let Ok(entries) = serde_json::from_str::<Vec<ModelEntry>>(&response_text) {
-            let models: Vec<ModelInfo> = entries
-                .into_iter()
-                .filter_map(|e| {
-                    e.get_name().map(|name| ModelInfo {
-                        name,
-                        provider: None,
-                    })
-                })
-                .collect();
-            if !models.is_empty() {
-                return Ok(models);
-            }
+        // Flexible model entry parsing -- handle various field names and
+        // shapes ({models:[...]}, {data:[...]}, bare array).
+        let models = parse_nearai_models(&response_text);
+        if !models.is_empty() {
+            return Ok(models);
         }
 
         // Couldn't find model names in response
@@ -641,6 +656,7 @@ impl LlmProvider for NearAiChatProvider {
                     arguments,
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }
             })
             .collect();
@@ -1162,6 +1178,96 @@ mod tests {
     use crate::session::SessionConfig;
     use rust_decimal_macros::dec;
 
+    #[test]
+    fn parse_models_prefers_id_over_display_name() {
+        // NEAR AI /models entries carry a human display name in `name`
+        // alongside the routable id in `id`. Discovery must surface the id so
+        // the saved provider config resolves at completion time.
+        let body = r#"{"data":[
+            {"id":"deepseek-ai/DeepSeek-V4-Flash","name":"DeepSeek V4 Flash"},
+            {"id":"qwen/Qwen3-30B","name":"Qwen3 30B"}
+        ]}"#;
+        let models: Vec<_> = parse_nearai_models(body)
+            .into_iter()
+            .map(|m| m.name)
+            .collect();
+        assert_eq!(models, ["deepseek-ai/DeepSeek-V4-Flash", "qwen/Qwen3-30B"]);
+    }
+
+    #[test]
+    fn parse_models_falls_back_to_name_when_no_id() {
+        // OpenAI-compatible endpoints that only expose `name`/`model` still
+        // work — the id-shaped field is simply absent.
+        let body = r#"[{"name":"gpt-4o"},{"model":"o3-mini"}]"#;
+        let models: Vec<_> = parse_nearai_models(body)
+            .into_iter()
+            .map(|m| m.name)
+            .collect();
+        assert_eq!(models, ["gpt-4o", "o3-mini"]);
+    }
+
+    #[test]
+    fn parse_models_handles_models_key_and_skips_blank_entries() {
+        let body = r#"{"models":[
+            {"id":"  ","name":"only-display"},
+            {"model":"meta/Llama-4"}
+        ]}"#;
+        let models: Vec<_> = parse_nearai_models(body)
+            .into_iter()
+            .map(|m| m.name)
+            .collect();
+        // Blank `id` falls through to `name`; second entry uses `model`.
+        assert_eq!(models, ["only-display", "meta/Llama-4"]);
+    }
+
+    #[test]
+    fn parse_models_resolves_model_id_alias() {
+        // `model_id` (and its `modelId` camelCase alias) as the sole identifier.
+        let body = r#"[{"model_id":"vendor/x"},{"modelId":"vendor/y"}]"#;
+        let models: Vec<_> = parse_nearai_models(body)
+            .into_iter()
+            .map(|m| m.name)
+            .collect();
+        assert_eq!(models, ["vendor/x", "vendor/y"]);
+    }
+
+    #[test]
+    fn parse_models_resolves_model_name_aliases() {
+        // `model_name` and its `modelName` camelCase alias, used only when no
+        // id-shaped field is present.
+        let body = r#"[{"model_name":"qwen-turbo"},{"modelName":"glm-5"}]"#;
+        let models: Vec<_> = parse_nearai_models(body)
+            .into_iter()
+            .map(|m| m.name)
+            .collect();
+        assert_eq!(models, ["qwen-turbo", "glm-5"]);
+    }
+
+    #[test]
+    fn parse_models_resolves_metadata_fields_as_last_resort() {
+        // Nested metadata is the final fallback; metadata.model_name wins over
+        // metadata.name, mirroring the top-level id-over-display preference.
+        let body = r#"[
+            {"metadata":{"model_name":"meta-model"}},
+            {"metadata":{"name":"meta-display"}}
+        ]"#;
+        let models: Vec<_> = parse_nearai_models(body)
+            .into_iter()
+            .map(|m| m.name)
+            .collect();
+        assert_eq!(models, ["meta-model", "meta-display"]);
+    }
+
+    #[test]
+    fn parse_models_returns_empty_for_unrecognized_or_invalid_bodies() {
+        // No recognizable identifier field, malformed JSON, and empty input
+        // all yield an empty list (the caller then surfaces InvalidResponse).
+        assert!(parse_nearai_models(r#"{"foo":"bar"}"#).is_empty());
+        assert!(parse_nearai_models(r#"[{"unknown":"x"}]"#).is_empty());
+        assert!(parse_nearai_models("not json").is_empty());
+        assert!(parse_nearai_models("").is_empty());
+    }
+
     fn test_nearai_config(base_url: &str) -> NearAiConfig {
         NearAiConfig {
             model: "test-model".to_string(),
@@ -1216,18 +1322,34 @@ mod tests {
     }
 
     #[test]
+    fn context_length_error_detects_provider_prompt_too_long_wording() {
+        let body = r#"{"error":{"message":"Provider failed for model 'anthropic/claude-sonnet-4-5': prompt is too long: 234872 tokens > 200000 maximum","type":"invalid_request_error","param":null,"code":null}}"#;
+        match crate::error::context_length_error(400, body) {
+            Some(LlmError::ContextLengthExceeded { used, limit }) => {
+                assert_eq!(used, 234872);
+                assert_eq!(limit, 200000);
+            }
+            other => panic!("expected context-length error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn context_length_error_does_not_treat_all_bad_requests_as_overflow() {
         let body = r#"{"error":{"message":"invalid tool schema"}}"#;
         assert!(crate::error::context_length_error(400, body).is_none());
     }
 
-    #[tokio::test]
-    async fn complete_maps_context_overflow_http_400_to_context_length_exceeded() {
+    async fn assert_complete_maps_context_overflow_message(
+        message: &str,
+        expected_used: usize,
+        expected_limit: usize,
+    ) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let message = message.to_string();
         tokio::spawn(async move {
             loop {
                 let Ok((mut socket, _)) = listener.accept().await else {
@@ -1243,7 +1365,7 @@ mod tests {
                         "400 Bad Request",
                         serde_json::json!({
                             "error": {
-                                "message": "Provider failed: The input (314325 tokens) is longer than the model's context length (262144 tokens)."
+                                "message": message
                             }
                         })
                         .to_string(),
@@ -1271,11 +1393,31 @@ mod tests {
 
         match err {
             LlmError::ContextLengthExceeded { used, limit } => {
-                assert_eq!(used, 314325);
-                assert_eq!(limit, 262144);
+                assert_eq!(used, expected_used);
+                assert_eq!(limit, expected_limit);
             }
             other => panic!("expected context-length error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn complete_maps_prompt_too_long_http_400_to_context_length_exceeded() {
+        assert_complete_maps_context_overflow_message(
+            "Provider failed for model 'anthropic/claude-sonnet-4-5': prompt is too long: 234872 tokens > 200000 maximum",
+            234872,
+            200000,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn complete_maps_longer_than_context_http_400_to_context_length_exceeded() {
+        assert_complete_maps_context_overflow_message(
+            "Provider failed: The input (314325 tokens) is longer than the model's context length (262144 tokens).",
+            314325,
+            262144,
+        )
+        .await;
     }
 
     #[test]
@@ -1361,6 +1503,7 @@ mod tests {
                 arguments: serde_json::json!({"owner": "foo", "repo": "bar"}),
                 reasoning: None,
                 signature: None,
+                arguments_parse_error: None,
             },
             ToolCall {
                 id: "call_2".to_string(),
@@ -1368,6 +1511,7 @@ mod tests {
                 arguments: serde_json::json!({"query": "test"}),
                 reasoning: None,
                 signature: None,
+                arguments_parse_error: None,
             },
         ];
 
@@ -1482,6 +1626,7 @@ mod tests {
             arguments: serde_json::json!({"key": "value"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let msg = ChatMessage::assistant_with_tool_calls(None, vec![tc]);
         let chat_msg: ChatCompletionMessage = msg.into();
@@ -1613,6 +1758,7 @@ mod tests {
                     arguments,
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }
             })
             .collect();
@@ -1671,6 +1817,7 @@ mod tests {
                     arguments,
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }
             })
             .collect();
@@ -1772,6 +1919,7 @@ mod tests {
                     arguments,
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }
             })
             .collect();
@@ -2578,6 +2726,7 @@ mod tests {
                 arguments: serde_json::json!({}),
                 reasoning: None,
                 signature: None,
+                arguments_parse_error: None,
             }],
         );
         let chat_msg: ChatCompletionMessage = msg.into();

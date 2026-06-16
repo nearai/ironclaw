@@ -17,31 +17,66 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::extract::{Extension, Path, Query, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
 use futures::SinkExt;
 use futures::stream::Stream;
 use ironclaw_product_workflow::{
     CodexLoginStart, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult,
     LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
     NearAiWalletLoginRequest, NearAiWalletLoginResult, ProductWorkflowError, ProjectionCursor,
-    RebornCancelRunResponse, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
+    RebornAttachmentRequest, RebornCancelRunResponse, RebornConnectableChannelListResponse,
+    RebornCreateThreadResponse, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
     RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
-    RebornListAutomationsResponse, RebornListThreadsResponse, RebornResolveGateResponse,
-    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest,
+    RebornListAutomationsResponse, RebornListThreadsResponse, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
+    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
+    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornOperatorSetupResponse,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
+    RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
+    RebornTraceHoldAuthorizeResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    WebUiAttachmentCapabilities, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, webui_attachment_capabilities,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::error::WebUiV2HttpError;
-use crate::router::WebUiV2State;
+use crate::router::{WebUiV2Capabilities, WebUiV2State};
 use crate::schema::WebChatV2EventFrame;
 use crate::sse_capacity::{SSE_MAX_LIFETIME, SseSlot};
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WebUiV2SessionResponse {
+    pub tenant_id: String,
+    pub user_id: String,
+    pub capabilities: WebUiV2Capabilities,
+    /// Inline-attachment contract (allowed `accept` tokens + size budgets)
+    /// the browser advertises on its file picker. Generated from the shared
+    /// format registry so the picker can never drift from the server's
+    /// allowed set; the send-message decode remains authoritative.
+    pub attachments: WebUiAttachmentCapabilities,
+}
+
+/// `GET /api/webchat/v2/session`
+pub async fn get_session(
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+) -> Json<WebUiV2SessionResponse> {
+    Json(WebUiV2SessionResponse {
+        tenant_id: caller.tenant_id.to_string(),
+        user_id: caller.user_id.to_string(),
+        capabilities,
+        attachments: webui_attachment_capabilities(),
+    })
+}
 
 /// `POST /api/webchat/v2/threads`
 ///
@@ -52,6 +87,19 @@ pub async fn create_thread(
     Json(body): Json<WebUiCreateThreadRequest>,
 ) -> Result<Json<RebornCreateThreadResponse>, WebUiV2HttpError> {
     let response = state.services().create_thread(caller, body).await?;
+    Ok(Json(response))
+}
+
+/// `DELETE /api/webchat/v2/threads/{thread_id}`
+pub async fn delete_thread(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(thread_id): Path<String>,
+) -> Result<Json<RebornDeleteThreadResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .delete_thread(caller, RebornDeleteThreadRequest { thread_id })
+        .await?;
     Ok(Json(response))
 }
 
@@ -101,6 +149,49 @@ pub struct TimelineQuery {
     pub limit: Option<u32>,
     #[serde(default)]
     pub cursor: Option<String>,
+}
+
+/// `GET /api/webchat/v2/threads/{thread_id}/messages/{message_id}/attachments/{attachment_id}`
+///
+/// Serves one landed attachment's raw bytes so the browser can render an image
+/// thumbnail (or download a file) for a persisted message. The `(thread_id,
+/// message_id, attachment_id)` triple addresses the attachment; the caller's
+/// authority comes from the authenticated session, and the facade derives the
+/// scope and resolves the storage path server-side. The response sets the
+/// authoritative `Content-Type` from the stored ref plus `nosniff` and a short
+/// private cache so the browser can reuse the bytes without re-fetching.
+pub async fn get_attachment(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path((thread_id, message_id, attachment_id)): Path<(String, String, String)>,
+) -> Result<Response, WebUiV2HttpError> {
+    let attachment = state
+        .services()
+        .read_attachment(
+            caller,
+            RebornAttachmentRequest {
+                thread_id,
+                message_id,
+                attachment_id,
+            },
+        )
+        .await?;
+
+    let mut headers = HeaderMap::new();
+    // The mime came from the stored ref; fall back to octet-stream if it is not
+    // a valid header value rather than failing the read.
+    let content_type = HeaderValue::from_str(&attachment.mime_type)
+        .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
+    headers.insert(header::CONTENT_TYPE, content_type);
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=300"),
+    );
+    Ok((StatusCode::OK, headers, attachment.bytes).into_response())
 }
 
 /// SSE polling cadence for `stream_events`. The facade only exposes a
@@ -399,14 +490,18 @@ pub struct ListThreadsQuery {
 /// `GET /api/webchat/v2/automations`
 ///
 /// Lists the caller-scoped schedule automations visible to the browser. The
-/// optional `?limit=N` query is capped by the product workflow facade; the
-/// response is a single bounded page and does not include a cursor.
+/// optional `?limit=N` and `?run_limit=N` queries are capped by the product
+/// workflow facade; the response is a single bounded page and does not include
+/// a cursor.
 pub async fn list_automations(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Query(query): Query<ListAutomationsQuery>,
 ) -> Result<Json<RebornListAutomationsResponse>, WebUiV2HttpError> {
-    let request = WebUiListAutomationsRequest { limit: query.limit };
+    let request = WebUiListAutomationsRequest {
+        limit: query.limit,
+        run_limit: query.run_limit,
+    };
     let response = state.services().list_automations(caller, request).await?;
     Ok(Json(response))
 }
@@ -416,6 +511,44 @@ pub struct ListAutomationsQuery {
     /// Optional maximum number of schedule automations to return.
     #[serde(default)]
     pub limit: Option<u32>,
+    /// Optional maximum number of recent runs to return per automation row.
+    #[serde(default)]
+    pub run_limit: Option<u32>,
+}
+
+/// `GET /api/webchat/v2/traces/credit`
+///
+/// Read-only Trace Commons credit summary scoped strictly to the
+/// authenticated caller — the facade derives the trace scope from the
+/// caller's user id; no scope input is accepted from the request. The
+/// response is the contributor-local view as of the last credit sync;
+/// the authoritative ledger is server-side. A caller with no local
+/// Trace Commons state receives the unenrolled zero-state, not an
+/// error.
+pub async fn trace_credits(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornTraceCreditsResponse>, WebUiV2HttpError> {
+    let response = state.services().trace_credits(caller).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/traces/holds/{submission_id}/authorize`
+///
+/// Authorize a held manual-review trace for submission (promote-as-is). The
+/// trace scope is derived from the authenticated caller; the `submission_id`
+/// path segment is never authority to cross scopes. A missing/already-resolved
+/// hold returns `{ authorized: false }`, not an error.
+pub async fn authorize_trace_hold(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(submission_id): Path<String>,
+) -> Result<Json<RebornTraceHoldAuthorizeResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .authorize_trace_hold(caller, submission_id)
+        .await?;
+    Ok(Json(response))
 }
 
 /// `GET /api/webchat/v2/channels/connectable`
@@ -427,12 +560,115 @@ pub async fn list_connectable_channels(
     Ok(Json(response))
 }
 
+/// `GET /api/webchat/v2/outbound/preferences`
+pub async fn get_outbound_preferences(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornOutboundPreferencesResponse>, WebUiV2HttpError> {
+    let response = state.services().get_outbound_preferences(caller).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/outbound/preferences`
+///
+/// Body shape: [`RebornSetOutboundPreferencesRequest`]. Sending
+/// `{"final_reply_target_id": null}` clears the configured final-reply target.
+pub async fn set_outbound_preferences(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<RebornSetOutboundPreferencesRequest>,
+) -> Result<Json<RebornOutboundPreferencesResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .set_outbound_preferences(caller, body)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/outbound/targets`
+pub async fn list_outbound_delivery_targets(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornOutboundDeliveryTargetListResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .list_outbound_delivery_targets(caller)
+        .await?;
+    Ok(Json(response))
+}
+
 /// `GET /api/webchat/v2/extensions`
 pub async fn list_extensions(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornExtensionListResponse>, WebUiV2HttpError> {
     let response = state.services().list_extensions(caller).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/skills`
+pub async fn list_skills(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornSkillListResponse>, WebUiV2HttpError> {
+    let response = state.services().list_skills(caller).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/skills/search`
+pub async fn search_skills(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<SearchSkillsBody>,
+) -> Result<Json<RebornSkillSearchResponse>, WebUiV2HttpError> {
+    let response = state.services().search_skills(caller, body.query).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/skills/install`
+pub async fn install_skill(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<InstallSkillBody>,
+) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .install_skill(caller, body.name, body.content)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/skills/{name}`
+pub async fn get_skill_content(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(SkillPath { name }): Path<SkillPath>,
+) -> Result<Json<RebornSkillContentResponse>, WebUiV2HttpError> {
+    let response = state.services().read_skill_content(caller, name).await?;
+    Ok(Json(response))
+}
+
+/// `PUT /api/webchat/v2/skills/{name}`
+pub async fn update_skill(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(SkillPath { name }): Path<SkillPath>,
+    Json(body): Json<UpdateSkillBody>,
+) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .update_skill(caller, name, body.content)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `DELETE /api/webchat/v2/skills/{name}`
+pub async fn remove_skill(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(SkillPath { name }): Path<SkillPath>,
+) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+    let response = state.services().remove_skill(caller, name).await?;
     Ok(Json(response))
 }
 
@@ -537,6 +773,201 @@ pub async fn setup_extension(
     Ok(Json(response))
 }
 
+fn require_operator_webui_config(
+    capabilities: WebUiV2Capabilities,
+) -> Result<(), WebUiV2HttpError> {
+    if capabilities.operator_webui_config {
+        return Ok(());
+    }
+    Err(RebornServicesError {
+        code: RebornServicesErrorCode::Forbidden,
+        kind: RebornServicesErrorKind::ParticipantDenied,
+        status_code: 403,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    }
+    .into())
+}
+
+/// `GET /api/webchat/v2/operator/setup`
+pub async fn get_operator_setup(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+) -> Result<Json<RebornOperatorSetupResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    let response = state.services().get_operator_setup(caller).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/operator/setup`
+pub async fn run_operator_setup(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+    Json(body): Json<RebornOperatorSetupRequest>,
+) -> Result<Json<RebornOperatorSetupResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    let response = state.services().run_operator_setup(caller, body).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/operator/config`
+pub async fn list_operator_config(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+) -> Result<Json<RebornOperatorConfigListResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    let response = state.services().list_operator_config(caller).await?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OperatorConfigKeyPath {
+    pub key: String,
+}
+
+const OPERATOR_CONFIG_KEY_MAX_BYTES: usize = 128;
+const OPERATOR_CONFIG_RESERVED_VALIDATE_KEY: &str = "validate";
+
+fn validate_operator_config_key(key: String) -> Result<String, WebUiV2HttpError> {
+    let validation_code = if key.is_empty() {
+        Some(WebUiInboundValidationCode::Blank)
+    } else if key.len() > OPERATOR_CONFIG_KEY_MAX_BYTES {
+        Some(WebUiInboundValidationCode::TooLong)
+    } else if key == OPERATOR_CONFIG_RESERVED_VALIDATE_KEY {
+        Some(WebUiInboundValidationCode::InvalidValue)
+    } else if key.bytes().all(|byte| {
+        byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'.' | b'-')
+    }) {
+        None
+    } else {
+        Some(WebUiInboundValidationCode::InvalidValue)
+    };
+
+    match validation_code {
+        None => Ok(key),
+        Some(code) => Err(operator_config_key_error(code)),
+    }
+}
+
+fn operator_config_key_error(code: WebUiInboundValidationCode) -> WebUiV2HttpError {
+    RebornServicesError::from(WebUiInboundValidationError::new("key", code)).into()
+}
+
+/// `GET /api/webchat/v2/operator/config/{key}`
+pub async fn get_operator_config_key(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+    Path(OperatorConfigKeyPath { key }): Path<OperatorConfigKeyPath>,
+) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    let key = validate_operator_config_key(key)?;
+    let response = state
+        .services()
+        .get_operator_config_key(caller, key)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/operator/config/{key}`
+pub async fn set_operator_config_key(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+    Path(OperatorConfigKeyPath { key }): Path<OperatorConfigKeyPath>,
+    Json(body): Json<RebornOperatorConfigSetRequest>,
+) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    let key = validate_operator_config_key(key)?;
+    let response = state
+        .services()
+        .set_operator_config_key(caller, key, body)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/operator/config/validate`
+///
+/// `validate` is reserved for the validation operation and is not a readable
+/// config key. This explicit static-path handler keeps axum static route
+/// priority from surfacing an ambiguous 405.
+pub async fn reject_reserved_operator_config_key(
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    Err(operator_config_key_error(
+        WebUiInboundValidationCode::InvalidValue,
+    ))
+}
+
+/// `POST /api/webchat/v2/operator/config/validate`
+pub async fn validate_operator_config(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+    Json(body): Json<RebornOperatorConfigValidateRequest>,
+) -> Result<Json<RebornOperatorConfigValidateResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    let response = state
+        .services()
+        .validate_operator_config(caller, body)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/operator/diagnostics`
+pub async fn get_operator_diagnostics(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    let response = state.services().get_operator_diagnostics(caller).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/operator/status`
+pub async fn get_operator_status(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    let response = state.services().get_operator_status(caller).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/operator/logs`
+pub async fn query_operator_logs(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+    Query(query): Query<RebornOperatorLogsQuery>,
+) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    let response = state.services().query_operator_logs(caller, query).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/operator/service`
+pub async fn run_operator_service_lifecycle(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+    Json(body): Json<RebornOperatorServiceLifecycleRequest>,
+) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    let response = state
+        .services()
+        .run_operator_service_lifecycle(caller, body)
+        .await?;
+    Ok(Json(response))
+}
+
 /// Path param carrying the LLM provider id.
 #[derive(Debug, Deserialize)]
 pub struct LlmProviderPath {
@@ -547,7 +978,9 @@ pub struct LlmProviderPath {
 pub async fn get_llm_config(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().get_llm_config(caller).await?;
     Ok(Json(response))
 }
@@ -556,8 +989,10 @@ pub async fn get_llm_config(
 pub async fn upsert_llm_provider(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<UpsertLlmProviderRequest>,
 ) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().upsert_llm_provider(caller, body).await?;
     Ok(Json(response))
 }
@@ -566,8 +1001,10 @@ pub async fn upsert_llm_provider(
 pub async fn delete_llm_provider(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Path(LlmProviderPath { provider_id }): Path<LlmProviderPath>,
 ) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state
         .services()
         .delete_llm_provider(caller, provider_id)
@@ -579,8 +1016,10 @@ pub async fn delete_llm_provider(
 pub async fn set_active_llm(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<SetActiveLlmRequest>,
 ) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().set_active_llm(caller, body).await?;
     Ok(Json(response))
 }
@@ -589,8 +1028,10 @@ pub async fn set_active_llm(
 pub async fn test_llm_connection(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<LlmProbeRequest>,
 ) -> Result<Json<LlmProbeResult>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().test_llm_connection(caller, body).await?;
     Ok(Json(response))
 }
@@ -599,8 +1040,10 @@ pub async fn test_llm_connection(
 pub async fn list_llm_models(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<LlmProbeRequest>,
 ) -> Result<Json<LlmModelsResult>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().list_llm_models(caller, body).await?;
     Ok(Json(response))
 }
@@ -609,8 +1052,23 @@ pub async fn list_llm_models(
 pub async fn start_nearai_login(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
-    Json(body): Json<NearAiLoginRequest>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+    headers: HeaderMap,
+    Json(mut body): Json<NearAiLoginRequest>,
 ) -> Result<Json<NearAiLoginStart>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    // The NEAR AI callback carries the login token in its redirect, so the
+    // callback origin must come from trusted request context, not arbitrary
+    // body input. This route's descriptor is `CorsPolicy::SameOriginOnly`, so a
+    // present `Origin` header has been gateway-validated as same-origin; prefer
+    // it over the body field (which stays as a fallback for non-browser callers).
+    if let Some(origin) = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+    {
+        body.origin = origin.to_string();
+    }
     let response = state.services().start_nearai_login(caller, body).await?;
     Ok(Json(response))
 }
@@ -623,8 +1081,10 @@ pub async fn start_nearai_login(
 pub async fn complete_nearai_wallet_login(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<NearAiWalletLoginRequest>,
 ) -> Result<Json<NearAiWalletLoginResult>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state
         .services()
         .complete_nearai_wallet_login(caller, body)
@@ -639,7 +1099,9 @@ pub async fn complete_nearai_wallet_login(
 pub async fn start_codex_login(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<CodexLoginStart>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
     let response = state.services().start_codex_login(caller).await?;
     Ok(Json(response))
 }
@@ -652,6 +1114,27 @@ pub struct ExtensionPackagePath {
 #[derive(Debug, Deserialize)]
 pub struct InstallExtensionBody {
     pub package_ref: LifecyclePackageRef,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillPath {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SearchSkillsBody {
+    pub query: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InstallSkillBody {
+    pub name: String,
+    pub content: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateSkillBody {
+    pub content: String,
 }
 
 fn extension_package_ref_for_request(

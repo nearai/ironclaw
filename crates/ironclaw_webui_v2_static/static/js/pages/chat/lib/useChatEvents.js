@@ -36,12 +36,15 @@ export function useChatEvents({
   setPendingGate,
   setActiveRun,
   activeRunRef,
-  onRunCompleted,
+  onRunSettled,
 }) {
-  // Track which runIds we've already announced completion for so that
-  // SSE replays (reconnect with `last-event-id`, repeated snapshots)
-  // don't trigger duplicate timeline refetches.
-  const completedRunsRef = React.useRef(new Set());
+  // Track which runIds we've already settled so that SSE replays
+  // (reconnect with `last-event-id`, repeated snapshots) don't trigger
+  // duplicate timeline refetches. A run settles on ANY terminal status,
+  // not only success — every terminal run reloads the timeline so tool
+  // input/output previews are recovered from the durable record even when
+  // the run failed, was cancelled, or needs recovery.
+  const settledRunsRef = React.useRef(new Set());
   // Last `run_status.run_id` we've observed, persisted across event
   // frames. Used by `applyProjectionItems` to correlate an `item.gate`
   // (which doesn't carry `run_id`) with the active run so resolveGate
@@ -145,11 +148,29 @@ export function useChatEvents({
           return;
         }
 
-        case "cancelled":
-        case "failed": {
+        case "cancelled": {
+          const runId =
+            frame.run_state?.run_id || activeRunRef?.current?.runId || null;
           setPendingGate(null);
           setIsProcessing(false);
           setActiveRun?.(null);
+          settleRun(settledRunsRef, onRunSettled, runId, false);
+          return;
+        }
+
+        case "failed": {
+          const runState = frame.run_state || {};
+          const runId = runState.run_id || activeRunRef?.current?.runId || null;
+          setPendingGate(null);
+          setIsProcessing(false);
+          setActiveRun?.(null);
+          appendRunFailureMessage(setMessages, {
+            runId,
+            status: runState.status || "failed",
+            failureCategory: failureCategoryFromRunState(runState),
+            failureSummary: null,
+          });
+          settleRun(settledRunsRef, onRunSettled, runId, false);
           return;
         }
 
@@ -163,8 +184,8 @@ export function useChatEvents({
             setIsProcessing,
             setPendingGate,
             setActiveRun,
-            onRunCompleted,
-            completedRunsRef,
+            onRunSettled,
+            settledRunsRef,
             latestRunIdRef,
             promptRunIdRef,
             activeRunRef,
@@ -184,9 +205,20 @@ export function useChatEvents({
       setPendingGate,
       setActiveRun,
       activeRunRef,
-      onRunCompleted,
+      onRunSettled,
     ],
   );
+}
+
+// Fire the settle callback exactly once per runId. A run settles on any
+// terminal status; the consumer reloads the timeline so tool input/output
+// previews are recovered from the durable record. Deduped because SSE
+// replays the same terminal projection on every reconnect.
+function settleRun(settledRunsRef, onRunSettled, runId, success) {
+  if (!onRunSettled || !runId || !settledRunsRef?.current) return;
+  if (settledRunsRef.current.has(runId)) return;
+  settledRunsRef.current.add(runId);
+  onRunSettled(runId, { success });
 }
 
 const TERMINAL_RUN_STATUSES = new Set([
@@ -232,8 +264,8 @@ function applyProjectionItems({
   setIsProcessing,
   setPendingGate,
   setActiveRun,
-  onRunCompleted,
-  completedRunsRef,
+  onRunSettled,
+  settledRunsRef,
   latestRunIdRef,
   promptRunIdRef,
   activeRunRef,
@@ -297,52 +329,26 @@ function applyProjectionItems({
         if (runId && promptRunIdRef?.current === runId) {
           promptRunIdRef.current = null;
         }
-        if (
-          SUCCESS_RUN_STATUSES.has(status) &&
-          onRunCompleted &&
-          runId &&
-          !completedRunsRef?.current.has(runId)
-        ) {
-          // Reborn's projection bridge does not currently emit `Text`
-          // items for assistant replies — the reply lives only in the
-          // thread timeline. Trigger a timeline refetch on terminal
-          // success so the assistant message becomes visible. Dedup
-          // by runId because SSE replays the same projection on every
-          // reconnect.
-          completedRunsRef.current.add(runId);
-          onRunCompleted(runId);
-        }
+        // Reborn's projection bridge does not currently emit `Text` items
+        // for assistant replies, nor `capability_display_preview` items in
+        // the projection state — both the assistant reply and the rich tool
+        // input/output cards live only in the thread timeline. Reload the
+        // timeline on EVERY terminal status (not only success) so a failed,
+        // cancelled, or recovery-required run still recovers the tool
+        // previews for the tools that completed before it terminated. The
+        // reload preserves the client-side `err-*` failure bubble.
+        settleRun(
+          settledRunsRef,
+          onRunSettled,
+          runId,
+          SUCCESS_RUN_STATUSES.has(status),
+        );
         if (status === "failed" || status === "recovery_required") {
-          // Dedup by `err-<runId>` so replays of the same projection
-          // (SSE reconnect with `last-event-id`, or repeated updates
-          // carrying the same terminal status) collapse to one
-          // bubble instead of stacking.
-          const messageId = `err-${runId || "unknown"}`;
-          setMessages((prev) => {
-            const existing = prev.findIndex((m) => m.id === messageId);
-            const content = failureMessageForRunStatus({
-              status,
-              failureCategory,
-              failureSummary,
-            });
-            if (existing >= 0) {
-              if (!failureSummary || prev[existing].content === content) return prev;
-              const next = [...prev];
-              next[existing] = {
-                ...next[existing],
-                content,
-              };
-              return next;
-            }
-            return [
-              ...prev,
-              {
-                id: messageId,
-                role: "error",
-                content,
-                timestamp: new Date().toISOString(),
-              },
-            ];
+          appendRunFailureMessage(setMessages, {
+            runId,
+            status,
+            failureCategory,
+            failureSummary,
           });
         }
       } else if (!PROMPT_RUN_STATUSES.has(status)) {
@@ -407,8 +413,7 @@ function applyProjectionItems({
     }
 
     if (item.gate) {
-      // ProductProjectionItem::Gate { gate_ref, headline } — projection
-      // carries gate_ref but not run_id, so we correlate to the
+      // ProductProjectionItem::Gate carries gate_ref but not run_id, so we correlate to the
       // active run (snapshotted above). Without a run_id the
       // pendingGate is unusable (`resolveGate` would 400 at the path
       // construction in `api.js`), so skip emitting the gate entirely
@@ -421,6 +426,7 @@ function applyProjectionItems({
           gateRef: item.gate.gate_ref,
           headline: item.gate.headline,
           body: "",
+          allowAlways: item.gate.allow_always === true,
         });
         setIsProcessing(false);
       }
@@ -456,6 +462,56 @@ function applyProjectionItems({
   if (latestRunIdRef && activeRunId) {
     latestRunIdRef.current = activeRunId;
   }
+}
+
+function failureCategoryFromRunState(runState) {
+  const failure = runState?.failure;
+  if (typeof failure === "string" && failure.trim()) return failure.trim();
+  if (
+    failure &&
+    typeof failure === "object" &&
+    typeof failure.category === "string" &&
+    failure.category.trim()
+  ) {
+    return failure.category.trim();
+  }
+  return null;
+}
+
+function appendRunFailureMessage(
+  setMessages,
+  { runId, status, failureCategory, failureSummary },
+) {
+  // Dedup by `err-<runId>` so replays of the same projection
+  // (SSE reconnect with `last-event-id`, or repeated updates carrying
+  // the same terminal status) collapse to one bubble instead of stacking.
+  const messageId = `err-${runId || "unknown"}`;
+  setMessages((prev) => {
+    const existing = prev.findIndex((m) => m.id === messageId);
+    const content = failureMessageForRunStatus({
+      status,
+      failureCategory,
+      failureSummary,
+    });
+    if (existing >= 0) {
+      if (!failureSummary || prev[existing].content === content) return prev;
+      const next = [...prev];
+      next[existing] = {
+        ...next[existing],
+        content,
+      };
+      return next;
+    }
+    return [
+      ...prev,
+      {
+        id: messageId,
+        role: "error",
+        content,
+        timestamp: new Date().toISOString(),
+      },
+    ];
+  });
 }
 
 function upsertToolFromPreview(setMessages, invocationId, card) {

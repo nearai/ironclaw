@@ -234,7 +234,7 @@ impl ConversationBindingService for InMemoryConversationServices {
         &self,
         request: ResolveConversationRequest,
     ) -> Result<ConversationBindingResolution, InboundTurnError> {
-        self.resolve_or_create_binding_inner(request, None, None)
+        self.resolve_or_create_binding_inner(request, None, None, None)
             .await
     }
 
@@ -243,9 +243,15 @@ impl ConversationBindingService for InMemoryConversationServices {
         request: ResolveConversationRequest,
         trusted_agent_id: Option<AgentId>,
         trusted_project_id: Option<ProjectId>,
+        trusted_owner_user_id: Option<UserId>,
     ) -> Result<ConversationBindingResolution, InboundTurnError> {
-        self.resolve_or_create_binding_inner(request, trusted_agent_id, trusted_project_id)
-            .await
+        self.resolve_or_create_binding_inner(
+            request,
+            trusted_agent_id,
+            trusted_project_id,
+            trusted_owner_user_id,
+        )
+        .await
     }
 
     async fn lookup_binding(
@@ -380,6 +386,7 @@ impl ConversationBindingService for InMemoryConversationServices {
                         request.target_thread_id,
                         target_thread.agent_id,
                         target_thread.project_id,
+                        None,
                     ),
                 )?;
                 let linked = LinkedConversationBinding {
@@ -460,6 +467,7 @@ impl InMemoryConversationServices {
         request: ResolveConversationRequest,
         trusted_agent_id: Option<AgentId>,
         trusted_project_id: Option<ProjectId>,
+        trusted_owner_user_id: Option<UserId>,
     ) -> Result<ConversationBindingResolution, InboundTurnError> {
         let _mutation = self.mutation_lock.lock().await;
         self.refresh_state_from_repository().await?;
@@ -512,6 +520,11 @@ impl InMemoryConversationServices {
                 )?;
                 if request.route_kind == ConversationRouteKind::Shared {
                     state.widen_binding_route_access(&binding_key)?;
+                    if binding.owner_user_id.is_none()
+                        && let Some(owner_user_id) = trusted_owner_user_id.clone()
+                    {
+                        state.set_binding_owner(&binding_key, owner_user_id)?;
+                    }
                 }
                 state.record_external_event_route(
                     &request.tenant_id,
@@ -548,7 +561,12 @@ impl InMemoryConversationServices {
                     request.adapter_installation_id.clone(),
                     request.external_conversation_ref,
                     ReplyRouteAccess::new(route_actor_key, request.route_kind),
-                    BindingTarget::new(thread_id, trusted_agent_id, trusted_project_id),
+                    BindingTarget::new(
+                        thread_id,
+                        trusted_agent_id,
+                        trusted_project_id,
+                        trusted_owner_user_id,
+                    ),
                 )?;
                 let resolution =
                     binding.resolution(actor_user_id.clone(), request.tenant_id.clone());
@@ -877,6 +895,25 @@ impl InMemoryState {
             .get_mut(binding.reply_target_binding_ref.as_str())
         {
             reply_target.route_access.allow_shared();
+        }
+        Ok(())
+    }
+
+    fn set_binding_owner(
+        &mut self,
+        binding_key: &BindingKey,
+        owner_user_id: UserId,
+    ) -> Result<(), InboundTurnError> {
+        let binding = self
+            .bindings
+            .get_mut(binding_key)
+            .ok_or(InboundTurnError::StatePoisoned)?;
+        binding.owner_user_id = Some(owner_user_id.clone());
+        if let Some(source_binding) = self
+            .source_bindings
+            .get_mut(binding.source_binding_ref.as_str())
+        {
+            source_binding.owner_user_id = Some(owner_user_id.clone());
         }
         Ok(())
     }
@@ -1222,6 +1259,7 @@ pub(crate) struct BindingTarget {
     pub(crate) thread_id: ThreadId,
     pub(crate) agent_id: Option<AgentId>,
     pub(crate) project_id: Option<ProjectId>,
+    pub(crate) owner_user_id: Option<UserId>,
 }
 
 impl BindingTarget {
@@ -1229,11 +1267,13 @@ impl BindingTarget {
         thread_id: ThreadId,
         agent_id: Option<AgentId>,
         project_id: Option<ProjectId>,
+        owner_user_id: Option<UserId>,
     ) -> Self {
         Self {
             thread_id,
             agent_id,
             project_id,
+            owner_user_id,
         }
     }
 }
@@ -1248,6 +1288,8 @@ pub(crate) struct BindingRecord {
     pub(crate) thread_id: ThreadId,
     pub(crate) agent_id: Option<AgentId>,
     pub(crate) project_id: Option<ProjectId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) owner_user_id: Option<UserId>,
     pub(crate) route_access: ReplyRouteAccess,
     pub(crate) source_binding_ref: SourceBindingRef,
     pub(crate) reply_target_binding_ref: ReplyTargetBindingRef,
@@ -1277,6 +1319,7 @@ impl BindingRecord {
             thread_id: target.thread_id,
             agent_id: target.agent_id,
             project_id: target.project_id,
+            owner_user_id: target.owner_user_id,
             route_access,
             source_binding_ref,
             reply_target_binding_ref,
@@ -1288,15 +1331,25 @@ impl BindingRecord {
         actor_user_id: UserId,
         tenant_id: TenantId,
     ) -> ConversationBindingResolution {
-        ConversationBindingResolution {
-            tenant_id: tenant_id.clone(),
-            actor: TurnActor::new(actor_user_id),
-            turn_scope: TurnScope::new(
-                tenant_id,
+        let turn_scope = match self.owner_user_id.clone() {
+            Some(owner_user_id) => TurnScope::new_with_owner(
+                tenant_id.clone(),
+                self.agent_id.clone(),
+                self.project_id.clone(),
+                self.thread_id.clone(),
+                Some(owner_user_id),
+            ),
+            None => TurnScope::new(
+                tenant_id.clone(),
                 self.agent_id.clone(),
                 self.project_id.clone(),
                 self.thread_id.clone(),
             ),
+        };
+        ConversationBindingResolution {
+            tenant_id,
+            actor: TurnActor::new(actor_user_id),
+            turn_scope,
             source_binding_ref: self.source_binding_ref.clone(),
             reply_target_binding_ref: self.reply_target_binding_ref.clone(),
             access: ThreadAccessDecision::Allowed,

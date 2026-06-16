@@ -1,8 +1,12 @@
 use async_trait::async_trait;
-use ironclaw_turns::run_profile::{LoopInlineMessage, LoopPromptBundleRequest, PromptMode};
+use ironclaw_turns::run_profile::{
+    LoopInlineMessage, LoopInlineMessageRole, LoopPromptBundleRequest, LoopSafeSummary, PromptMode,
+};
 
-use crate::state::LoopExecutionState;
+use crate::state::{LoopExecutionState, RepeatedCallWarningPhase};
 use crate::strategies::reply_admission::reply_admission_control_message;
+
+pub(crate) const REPEATED_CALL_WARNING_CONTROL_TEXT: &str = "loop control repeated capability call detected change strategy explain new evidence or answer from current evidence";
 
 /// Decides what context the host should materialize for the next model call.
 ///
@@ -24,12 +28,13 @@ fn _assert_object_safe(_: &dyn ContextStrategy) {}
 pub(crate) struct ContextPlan {
     pub(crate) request: LoopPromptBundleRequest,
     pub(crate) emitted_admission_control: bool,
+    pub(crate) emitted_repeated_call_warning: bool,
 }
 
 /// Reference baseline `ContextStrategy` implementation.
 ///
 /// Requests `PromptMode::TextOnly` with at most [`Self::DEFAULT_MAX_MESSAGES`]
-/// transcript messages and no inline nudges. Loop families that want
+/// scanned transcript messages and no inline nudges. Loop families that want
 /// CodeAct-shaped prompts or want to inject nudges swap this strategy
 /// rather than mutating state.
 #[derive(Debug, Clone, Copy)]
@@ -40,8 +45,11 @@ pub struct DefaultContextStrategy {
 }
 
 impl DefaultContextStrategy {
-    /// Default ceiling on transcript messages requested per turn.
-    pub const DEFAULT_MAX_MESSAGES: u32 = 16;
+    /// Default ceiling on transcript messages scanned per turn.
+    ///
+    /// Host adapters apply token budgeting after the scan, so this should be
+    /// large enough for compaction to observe more than the latest chat exchange.
+    pub const DEFAULT_MAX_MESSAGES: u32 = 128;
 }
 
 impl Default for DefaultContextStrategy {
@@ -55,7 +63,7 @@ impl Default for DefaultContextStrategy {
 #[async_trait]
 impl ContextStrategy for DefaultContextStrategy {
     async fn plan_context_request(&self, state: &LoopExecutionState) -> ContextPlan {
-        let (inline_messages, emitted_admission_control) = loop_control_inline_messages(state);
+        let loop_control = loop_control_inline_messages(state);
         // `max(1)` keeps the host's "zero is rejected" invariant from
         // `LoopPromptBundleRequest` even if a loop family overrides
         // `max_messages` to zero by accident.
@@ -66,22 +74,53 @@ impl ContextStrategy for DefaultContextStrategy {
                 surface_version: None,
                 checkpoint_state_ref: None,
                 max_messages: Some(self.max_messages.max(1)),
-                inline_messages,
+                inline_messages: loop_control.inline_messages,
                 capability_view: None,
             },
-            emitted_admission_control,
+            emitted_admission_control: loop_control.emitted_admission_control,
+            emitted_repeated_call_warning: loop_control.emitted_repeated_call_warning,
         }
     }
 }
 
-fn loop_control_inline_messages(state: &LoopExecutionState) -> (Vec<LoopInlineMessage>, bool) {
-    let Some(rejection) = state.reply_admission_state.pending_rejection.as_ref() else {
-        return (Vec::new(), false);
-    };
-    if state.reply_admission_state.pending_rejection_rendered {
-        return (Vec::new(), false);
+struct LoopControlInlineMessages {
+    inline_messages: Vec<LoopInlineMessage>,
+    emitted_admission_control: bool,
+    emitted_repeated_call_warning: bool,
+}
+
+fn loop_control_inline_messages(state: &LoopExecutionState) -> LoopControlInlineMessages {
+    let mut inline_messages = Vec::new();
+    let mut emitted_admission_control = false;
+    if let Some(rejection) = state.reply_admission_state.pending_rejection.as_ref()
+        && !state.reply_admission_state.pending_rejection_rendered
+    {
+        inline_messages.push(reply_admission_control_message(rejection));
+        emitted_admission_control = true;
     }
-    (vec![reply_admission_control_message(rejection)], true)
+
+    let emitted_repeated_call_warning = state
+        .stop_state
+        .repeated_call_warning
+        .as_ref()
+        .is_some_and(|warning| warning.phase == RepeatedCallWarningPhase::PendingRender);
+    if emitted_repeated_call_warning {
+        inline_messages.push(repeated_call_warning_control_message());
+    }
+
+    LoopControlInlineMessages {
+        inline_messages,
+        emitted_admission_control,
+        emitted_repeated_call_warning,
+    }
+}
+
+pub(crate) fn repeated_call_warning_control_message() -> LoopInlineMessage {
+    LoopInlineMessage {
+        role: LoopInlineMessageRole::System,
+        safe_body: LoopSafeSummary::new(REPEATED_CALL_WARNING_CONTROL_TEXT)
+            .expect("static loop-control text is non-empty and safe"), // safety: static safe ASCII words.
+    }
 }
 
 #[cfg(test)]
@@ -99,7 +138,10 @@ mod tests {
     };
 
     use super::{ContextStrategy, DefaultContextStrategy};
-    use crate::state::{LoopExecutionState, ReplyAdmissionRejection};
+    use crate::state::{
+        CapabilityCallSignature, LoopExecutionState, RepeatedCallWarningState,
+        ReplyAdmissionRejection,
+    };
 
     #[allow(dead_code)]
     fn _check(_: &dyn ContextStrategy) {}
@@ -179,8 +221,8 @@ mod tests {
     }
 
     #[test]
-    fn default_max_messages_is_sixteen() {
-        assert_eq!(DefaultContextStrategy::default().max_messages, 16);
+    fn default_max_messages_is_one_hundred_twenty_eight() {
+        assert_eq!(DefaultContextStrategy::default().max_messages, 128);
     }
 
     #[tokio::test]
@@ -191,9 +233,10 @@ mod tests {
         let request = strategy.plan_context_request(&state).await;
 
         assert_eq!(request.request.mode, PromptMode::TextOnly);
-        assert_eq!(request.request.max_messages, Some(16));
+        assert_eq!(request.request.max_messages, Some(128));
         assert!(request.request.inline_messages.is_empty());
         assert!(!request.emitted_admission_control);
+        assert!(!request.emitted_repeated_call_warning);
         assert!(request.request.context_cursor.is_none());
         assert!(request.request.surface_version.is_none());
         assert!(request.request.checkpoint_state_ref.is_none());
@@ -219,6 +262,7 @@ mod tests {
         let request = strategy.plan_context_request(&state).await;
 
         assert!(request.emitted_admission_control);
+        assert!(!request.emitted_repeated_call_warning);
         assert_eq!(request.request.inline_messages.len(), 1);
         assert_eq!(
             request.request.inline_messages[0].safe_body.as_str(),
@@ -237,6 +281,49 @@ mod tests {
         let request = strategy.plan_context_request(&state).await;
 
         assert!(!request.emitted_admission_control);
+        assert!(!request.emitted_repeated_call_warning);
+        assert!(request.request.inline_messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn plan_context_request_emits_pending_repeated_call_warning_once() {
+        let strategy = DefaultContextStrategy::default();
+        let mut state = LoopExecutionState::initial_for_run(&test_run_context());
+        state.stop_state.repeated_call_warning = Some(RepeatedCallWarningState::pending_render(
+            CapabilityCallSignature::from_call(
+                ironclaw_host_api::CapabilityId::new("demo.echo").expect("valid"),
+                &serde_json::json!({"x": 1}),
+            )
+            .expect("valid signature"),
+        ));
+
+        let request = strategy.plan_context_request(&state).await;
+
+        assert!(!request.emitted_admission_control);
+        assert!(request.emitted_repeated_call_warning);
+        assert_eq!(request.request.inline_messages.len(), 1);
+        assert_eq!(
+            request.request.inline_messages[0].safe_body.as_str(),
+            super::REPEATED_CALL_WARNING_CONTROL_TEXT
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_context_request_suppresses_rendered_repeated_call_warning() {
+        let strategy = DefaultContextStrategy::default();
+        let mut state = LoopExecutionState::initial_for_run(&test_run_context());
+        state.stop_state.repeated_call_warning = Some(RepeatedCallWarningState::rendered(
+            CapabilityCallSignature::from_call(
+                ironclaw_host_api::CapabilityId::new("demo.echo").expect("valid"),
+                &serde_json::json!({"x": 1}),
+            )
+            .expect("valid signature"),
+        ));
+
+        let request = strategy.plan_context_request(&state).await;
+
+        assert!(!request.emitted_admission_control);
+        assert!(!request.emitted_repeated_call_warning);
         assert!(request.request.inline_messages.is_empty());
     }
 }

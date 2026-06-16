@@ -21,8 +21,10 @@ pub use adapter::{ProductAdapter, ProductAdapterHealth};
 pub use auth::{AuthRequirement, ProtocolAuthEvidence, ProtocolAuthFailure, VerifiedAuthClaim};
 #[cfg(feature = "host-auth-mint")]
 pub use auth::{
-    mark_bearer_token_verified, mark_request_signature_verified, mark_session_verified,
-    mark_shared_secret_header_verified,
+    mark_bearer_token_verified, mark_bearer_token_verified_for_tenant,
+    mark_request_signature_verified, mark_request_signature_verified_for_tenant,
+    mark_session_verified, mark_session_verified_for_tenant, mark_shared_secret_header_verified,
+    mark_shared_secret_header_verified_for_tenant,
 };
 pub use capabilities::{ProductAdapterCapabilities, ProductCapabilityFlag};
 pub use egress::{
@@ -44,23 +46,29 @@ pub use identity::{AdapterInstallationId, ProductAdapterId, ProductSurfaceKind};
 pub use inbound::{
     ApprovalDecision, ApprovalResolutionPayload, AuthResolutionPayload, AuthResolutionResult,
     InboundCommandPayload, InboundRetryDisposition, LinkedThreadActionPayload,
-    ParsedProductInbound, ProductCommandResultPayload, ProductInboundAck, ProductInboundEnvelope,
-    ProductInboundPayload, ProductRejection, ProductRejectionDisposition, ProductRejectionKind,
-    ProductSlashCommandParseError, ProductTriggerReason, ProjectionSubscriptionPayload,
+    ParsedProductInbound, ProductCommandResultPayload, ProductControlActionPayload,
+    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductRejection,
+    ProductRejectionDisposition, ProductRejectionKind, ProductSlashCommandParseError,
+    ProductTriggerReason, ProjectionReadPayload, ProjectionSubscriptionPayload,
     ScopedApprovalResolutionPayload, TrustedInboundContext, UserMessagePayload,
     parse_product_slash_command,
 };
 pub use outbound::{
-    AuthPromptChallengeKind, AuthPromptView, CAPABILITY_DISPLAY_KIND_MAX_BYTES,
-    CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES, CAPABILITY_DISPLAY_RESULT_REF_MAX_BYTES,
-    CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES, CapabilityActivityStatusView, CapabilityActivityView,
-    CapabilityActivityViewInput, CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput,
-    FinalReplyView, GatePromptView, PROJECTION_SKILL_ACTIVATION_MAX_ITEMS,
-    PROJECTION_SKILL_FEEDBACK_MAX_BYTES, PROJECTION_SKILL_NAME_MAX_BYTES, ProductOutboundEnvelope,
-    ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem, ProductProjectionState,
-    ProductRenderOutcome, ProductSynchronousResponse, ProductWorkSummaryPhase, ProgressKind,
-    ProgressUpdateView, ProjectionCursor,
+    ApprovalPromptActionView, ApprovalPromptContextView, ApprovalPromptDestinationView,
+    ApprovalPromptDetailView, ApprovalPromptScopeView, AuthPromptChallengeKind, AuthPromptView,
+    CAPABILITY_DISPLAY_KIND_MAX_BYTES, CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES,
+    CAPABILITY_DISPLAY_RESULT_REF_MAX_BYTES, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+    CapabilityActivityStatusView, CapabilityActivityView, CapabilityActivityViewInput,
+    CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput, FinalReplyView,
+    GatePromptView, PROJECTION_SKILL_ACTIVATION_MAX_ITEMS, PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
+    PROJECTION_SKILL_NAME_MAX_BYTES, ProductOutboundEnvelope, ProductOutboundPayload,
+    ProductOutboundTarget, ProductProjectionItem, ProductProjectionState, ProductRenderOutcome,
+    ProductSynchronousResponse, ProductWorkSummaryPhase, ProgressKind, ProgressUpdateView,
+    ProjectionCursor,
 };
-pub use projection::{ProjectionStream, ProjectionSubscriptionRequest};
+pub use projection::{
+    ProductProjectionReadInput, ProductProjectionSubject, ProductProjectionSubscribeInput,
+    ProjectionReadRequest, ProjectionStream, ProjectionSubscriptionRequest,
+};
 pub use redaction::{REDACTED_PLACEHOLDER, RedactedDebug, RedactedString};
 pub use workflow::ProductWorkflow;

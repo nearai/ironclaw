@@ -2,17 +2,22 @@ import { React } from "../lib/html.js";
 import { queryClient } from "../lib/query-client.js";
 import {
   exchangeLoginTicket,
+  fetchSession,
   logout as logoutRequest,
   readStoredToken,
   storeToken,
 } from "../lib/api.js";
+import { ANON_SCOPE, authScope, setAuthScope } from "../lib/auth-scope.js";
+import { clearAllPins } from "../lib/pin-store.js";
+import { clearHistoryCache } from "../pages/chat/hooks/useHistory.js";
+import { clearAllDrafts } from "../pages/chat/lib/draft-store.js";
 
 // The Reborn host validates bearer tokens via OIDC; the SPA simply
 // carries whatever token the user supplies (via `?token=` URL param,
 // `#token=` URL fragment, OAuth `login_ticket` exchange, or
-// `sessionStorage`) and lets the server reject anything invalid. No
-// v2 endpoint exposes session probing or profile info, so this hook
-// holds no derived identity state.
+// `sessionStorage`) and lets the server reject anything invalid. The
+// session endpoint is the source of truth for derived identity and
+// UI capabilities.
 //
 // `?token=`  — manual-token paste pattern (the "Connect" form on
 //              the login page).
@@ -124,8 +129,12 @@ export function useAuthSession() {
   );
   const [error, setError] = React.useState(() => consumeLoginErrorFromUrl());
   const [loginTicket] = React.useState(() => consumeLoginTicketFromUrl());
+  const [session, setSession] = React.useState(null);
   const [isExchanging, setIsExchanging] = React.useState(
     () => Boolean(loginTicket && !readStoredToken()),
+  );
+  const [isSessionChecking, setIsSessionChecking] = React.useState(
+    () => Boolean(readStoredToken()),
   );
 
   React.useEffect(() => {
@@ -138,7 +147,9 @@ export function useAuthSession() {
       .then((nextToken) => {
         if (cancelled) return;
         storeToken(nextToken);
+        setIsSessionChecking(true);
         setToken(nextToken);
+        setSession(null);
         setError("");
         setIsExchanging(false);
         queryClient.clear();
@@ -153,9 +164,74 @@ export function useAuthSession() {
     };
   }, [loginTicket]);
 
+  React.useEffect(() => {
+    if (!token || isExchanging) {
+      setSession(null);
+      setIsSessionChecking(false);
+      return undefined;
+    }
+    let cancelled = false;
+    setIsSessionChecking(true);
+    fetchSession()
+      .then((nextSession) => {
+        if (cancelled) return;
+        setSession(nextSession);
+        setIsSessionChecking(false);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setSession(null);
+        setIsSessionChecking(false);
+        if (err?.status === 401 || err?.status === 403) {
+          storeToken("");
+          setToken("");
+          setError("Your session expired. Please sign in again.");
+          queryClient.clear();
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [token, isExchanging]);
+
+  // Set the cache scope synchronously during render, before authenticated
+  // children mount. Stores that read scoped storage on their first render
+  // (the composer draft store, the pinned-thread store) must see the resolved
+  // identity immediately — a passive effect runs only after those children
+  // have already mounted, so on reload the real user's saved drafts/pins
+  // would not be restored. This write is idempotent and derives purely from
+  // `session`, so running it every render is safe.
+  setAuthScope(session);
+
+  // Purge the previous identity's per-session client state whenever the
+  // authenticated identity is invalidated or replaced. This covers every
+  // teardown path, not just the explicit sign-out button: a 401/403 from
+  // `fetchSession` and a token swap both flow through `session` here.
+  // Namespacing already isolates reads by identity; this also frees the
+  // stale entries so they never linger.
+  const lastScopeRef = React.useRef(null);
+  React.useEffect(() => {
+    const nextScope = authScope();
+    // Purge only when leaving a *real* identity for a different one. The
+    // initial null→anon and the anon→user resolution on every load are not
+    // identity changes and must not wipe the just-resolved user's data.
+    const leavingRealIdentity =
+      lastScopeRef.current &&
+      lastScopeRef.current !== ANON_SCOPE &&
+      lastScopeRef.current !== nextScope;
+    if (leavingRealIdentity) {
+      clearHistoryCache();
+      clearAllDrafts();
+      clearAllPins();
+    }
+    lastScopeRef.current = nextScope;
+  }, [session]);
+
   const signIn = React.useCallback((nextToken) => {
     storeToken(nextToken);
+    setIsSessionChecking(Boolean(nextToken));
     setToken(nextToken);
+    setSession(null);
     setError("");
     queryClient.clear();
   }, []);
@@ -168,26 +244,28 @@ export function useAuthSession() {
     // visually signed out and can re-authenticate.
     logoutRequest().catch(() => {});
     storeToken("");
+    setIsSessionChecking(false);
     setToken("");
+    setSession(null);
     setError("");
     queryClient.clear();
+    // Per-session client state (history cache, drafts) is purged by the
+    // identity-change effect above when `session` drops to null.
   }, []);
 
   return {
     token,
-    profile: null,
+    profile: session
+      ? {
+          tenant_id: session.tenant_id,
+          user_id: session.user_id,
+        }
+      : null,
     error,
     setError,
-    isChecking: isExchanging,
+    isChecking: isExchanging || isSessionChecking,
     isAuthenticated: Boolean(token),
-    // No v2 profile endpoint exists yet, so the SPA cannot prove
-    // admin status — default closed. The fork's `!profile`
-    // permissive read defaulted open, which is the wrong direction
-    // for a bearer-only auth surface. Admin-gated routes are also
-    // hidden via `route.hidden`, so this is defense in depth; once a
-    // server-issued profile endpoint lands the flag flips from
-    // there.
-    isAdmin: false,
+    isAdmin: Boolean(session?.capabilities?.operator_webui_config),
     signIn,
     signOut,
   };

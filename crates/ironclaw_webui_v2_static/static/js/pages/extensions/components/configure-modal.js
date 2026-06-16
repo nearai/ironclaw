@@ -1,14 +1,16 @@
 import { Button } from "../../../design-system/button.js";
 import { Icon } from "../../../design-system/icons.js";
 import { React, html } from "../../../lib/html.js";
+import { useT } from "../../../lib/i18n.js";
 import {
   useExtensionSetup,
   useOauthSetup,
   useSetupSubmit,
 } from "../hooks/useExtensions.js";
-import { setupReadyForActivation } from "../lib/extension-actions.js";
+import { extensionIsActive, setupReadyForActivation } from "../lib/extension-actions.js";
 
 export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
+  const t = useT();
   const extensionName = extension?.displayName || extension?.packageRef?.id || "Extension";
   const { secrets = [], fields = [], onboarding, isLoading, error } =
     useExtensionSetup(extension?.packageRef);
@@ -43,11 +45,12 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     (secret) => (secret.setup?.kind || "manual_token") === "manual_token"
   );
   const canSave = manualSecrets.length > 0 || fields.length > 0;
-  const canActivate = setupReadyForActivation({ secrets, fields });
+  const isActive = extensionIsActive(extension);
+  const canActivate = setupReadyForActivation({ extension, secrets, fields });
 
   if (isLoading) {
     return html`
-      <${ModalShell} onClose=${onClose} title=${"Configure " + extensionName}>
+      <${ModalShell} onClose=${onClose} title=${t("extensions.configureName").replace("{name}", extensionName)}>
         <div className="space-y-3">
           ${[1, 2].map(
             (i) =>
@@ -63,9 +66,9 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
 
   if (error) {
     return html`
-      <${ModalShell} onClose=${onClose} title=${"Configure " + extensionName}>
+      <${ModalShell} onClose=${onClose} title=${t("extensions.configureName").replace("{name}", extensionName)}>
         <p className="text-sm text-red-200">
-          Failed to load setup: ${error.message}
+          ${t("extensions.loadFailed") || "Failed to load setup:"} ${error.message}
         </p>
       <//>
     `;
@@ -73,16 +76,16 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
 
   if (secrets.length === 0 && fields.length === 0) {
     return html`
-      <${ModalShell} onClose=${onClose} title=${"Configure " + extensionName}>
+      <${ModalShell} onClose=${onClose} title=${t("extensions.configureName").replace("{name}", extensionName)}>
         <p className="text-sm text-iron-300">
-          No configuration required for this extension.
+          ${t("extensions.noConfigRequired") || "No configuration required for this extension."}
         </p>
       <//>
     `;
   }
 
   return html`
-    <${ModalShell} onClose=${onClose} title=${"Configure " + extensionName}>
+    <${ModalShell} onClose=${onClose} title=${t("extensions.configureName").replace("{name}", extensionName)}>
       ${onboarding?.credential_instructions &&
       html`
         <p className="mb-4 text-sm leading-6 text-iron-300">
@@ -113,13 +116,13 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
                 ${secret.optional &&
                 html`
                   <span className="font-mono text-[10px] text-iron-700"
-                    >optional</span
+                    >${t("common.optional") || "optional"}</span
                   >
                 `}
                 ${secret.provided &&
                 html`
                   <span className="font-mono text-[10px] text-mint"
-                    >configured</span
+                    >${t("common.configured") || "configured"}</span
                   >
                 `}
               </label>
@@ -128,8 +131,8 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
                     <div className="flex items-center justify-between gap-3 rounded-md border border-white/12 bg-white/[0.04] px-3 py-2">
                       <span className="text-xs text-iron-300">
                         ${secret.provided
-                          ? "Authorization is configured."
-                          : "Authorize this provider in a browser popup."}
+                          ? t("extensions.authConfigured") || "Authorization is configured."
+                          : t("extensions.authPopup") || "Authorize this provider in a browser popup."}
                       </span>
                       <${Button}
                         variant=${secret.provided ? "secondary" : "primary"}
@@ -137,10 +140,10 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
                         disabled=${oauthMutation.isPending}
                       >
                         ${oauthMutation.isPending
-                          ? "Opening..."
+                          ? t("extensions.opening")
                           : secret.provided
-                            ? "Reconnect"
-                            : "Authorize"}
+                            ? t("extensions.reconnect")
+                            : t("extensions.authorize")}
                       <//>
                     </div>
                   `
@@ -163,7 +166,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
               !secret.provided &&
               html`
                 <p className="mt-1 text-xs text-iron-700">
-                  Auto-generated if left blank
+                  ${t("extensions.autoGenerated") || "Auto-generated if left blank"}
                 </p>
               `}
                   `}
@@ -180,7 +183,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
                 ${field.optional &&
                 html`
                   <span className="font-mono text-[10px] text-iron-700"
-                    >optional</span
+                    >${t("common.optional") || "optional"}</span
                   >
                 `}
               </label>
@@ -207,6 +210,14 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
           ${onboarding.credential_next_step}
         </p>
       `}
+      ${isActive &&
+      html`
+        <div
+          className="mt-4 rounded-md border border-mint/20 bg-mint/10 px-3 py-2 text-xs text-mint"
+        >
+          ${t("extensions.activeConfigured")}
+        </div>
+      `}
       ${submitMutation.error &&
       html`
         <div
@@ -225,7 +236,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
       `}
 
       <div className="mt-6 flex items-center justify-end gap-3">
-        <${Button} variant="ghost" onClick=${onClose}>Cancel<//>
+        <${Button} variant="ghost" onClick=${onClose}>${t("common.cancel") || "Cancel"}<//>
         ${canActivate &&
         html`
         <${Button}
@@ -242,7 +253,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
           onClick=${handleSubmit}
           disabled=${submitMutation.isPending}
         >
-          ${submitMutation.isPending ? "Saving…" : "Save"}
+          ${submitMutation.isPending ? "Saving…" : t("common.save") || "Save"}
         <//>
         `}
       </div>

@@ -14,10 +14,15 @@ pub async fn list_reborn_local_skills(
 ) -> Result<Vec<ironclaw_skills::SkillSummary>, RebornSkillListError> {
     let mut skills =
         match build_existing_local_dev_skill_management_port(owner_id, local_dev_storage_root)? {
-            Some(skill_management) => skill_management
-                .list()
-                .await
-                .map_err(map_local_skill_management_error)?,
+            Some(skill_management) => {
+                let scope = skill_management
+                    .owner_scope()
+                    .map_err(map_local_skill_management_error)?;
+                skill_management
+                    .list_for_scope(scope)
+                    .await
+                    .map_err(map_local_skill_management_error)?
+            }
             None => Vec::new(),
         };
     let bundled_skills = bundled_reborn_skill_summaries()?;
@@ -252,7 +257,9 @@ mod tests {
     }
 
     fn write_skill(storage_root: &std::path::Path, name: &str) {
-        let skill_dir = storage_root.join("skills").join(name);
+        let skill_dir = storage_root
+            .join("tenants/default/users/list-owner/skills")
+            .join(name);
         std::fs::create_dir_all(&skill_dir).expect("skill dir");
         std::fs::write(
             skill_dir.join("SKILL.md"),

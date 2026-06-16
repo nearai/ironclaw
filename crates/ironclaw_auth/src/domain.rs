@@ -234,6 +234,34 @@ pub fn validate_account_update_target(
     )
 }
 
+/// Validate that a stored `account` may be updated by a reconnect carrying
+/// `binding`, at durable OWNER granularity (#4935 defect A).
+///
+/// Unlike [`validate_account_update_target`] — which compares the request scope
+/// to the account scope with full `scope_matches` equality and is correct for a
+/// fresh, same-scope write — this is the *bound reconnect apply* check. The flow
+/// / manual-token `scope` carries a fresh per-flow `invocation_id` (and possibly
+/// a thread/mission) the account does not share, so the apply step must compare
+/// at owner granularity exactly as the setup-time binding validation
+/// ([`validate_manual_token_update_binding`] / [`validate_flow_update_binding`])
+/// does. Applying `validate_account_update_target` on a bound apply path accepts
+/// the binding at setup but then rejects it at apply for every cross-thread
+/// reconnect — re-introducing the #4935 fork on the manual-token path.
+pub fn validate_bound_account_update_target(
+    account: &CredentialAccount,
+    scope: &crate::AuthProductScope,
+    provider: &crate::AuthProviderId,
+    binding: &CredentialAccountUpdateBinding,
+) -> Result<(), AuthProductError> {
+    validate_scoped_update_binding(
+        account,
+        scope,
+        provider,
+        binding,
+        "credential account update target provider mismatch",
+    )
+}
+
 pub fn validate_flow_update_binding(
     account: &CredentialAccount,
     request: &NewAuthFlow,
@@ -271,7 +299,16 @@ fn validate_scoped_update_binding(
     binding: &CredentialAccountUpdateBinding,
     provider_mismatch: &'static str,
 ) -> Result<(), AuthProductError> {
-    if !scope_matches(scope, &account.scope) {
+    // Validate the bind at durable OWNER granularity (#4935 defect A). The
+    // flow / manual-token `scope` carries a fresh per-flow `invocation_id` (and
+    // possibly a thread/mission) that the account — created in an earlier flow
+    // — does not share. The old `scope_matches` full-equality compared those
+    // transient fields and so rejected every legitimate reconnect, forking a
+    // duplicate account each time. tenant/user/agent/project stay hard-required
+    // via `CredentialAccountOwnerScope`; session_id stays matched; the
+    // requester-authority check below is unchanged, so an unauthorized
+    // requester still cannot bind another owner's account.
+    if !crate::binding_scope_owns_account(scope, account) {
         return Err(AuthProductError::CrossScopeDenied);
     }
     if &account.provider != provider {
@@ -312,6 +349,33 @@ pub fn account_is_authorized_for_requester(
     requester_extension: Option<&ExtensionId>,
 ) -> bool {
     account.is_authorized_for_requester(requester_extension)
+}
+
+/// Selects the runtime default from duplicate reusable accounts for one provider.
+///
+/// Runtime credential gates cannot show an account picker, and historical OAuth
+/// setup can store the same login under capability-derived labels. When every
+/// candidate is reusable, unbound, and configured with an access secret, recency
+/// is the setup-time choice signal; mixed ownership still requires explicit
+/// account selection.
+pub fn select_latest_duplicate_user_reusable_account(
+    accounts: &[CredentialAccount],
+) -> Option<CredentialAccount> {
+    let first = accounts.first()?;
+    if !accounts.iter().all(|account| {
+        account.provider == first.provider
+            && account.status == crate::CredentialAccountStatus::Configured
+            && account.ownership == CredentialOwnership::UserReusable
+            && account.owner_extension.is_none()
+            && account.granted_extensions.is_empty()
+            && account.access_secret.is_some()
+    }) {
+        return None;
+    }
+    accounts
+        .iter()
+        .max_by_key(|account| (account.updated_at, account.created_at, account.id))
+        .cloned()
 }
 
 pub fn validate_new_credential_account(

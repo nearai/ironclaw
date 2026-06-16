@@ -12,6 +12,8 @@ use ironclaw_reborn_composition::{
 use ironclaw_turns::TurnStatus;
 use tokio_util::sync::CancellationToken;
 
+const SEND_USER_MESSAGE_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[tokio::test]
 async fn runtime_rejects_disabled_profile_before_local_substrate_lookup() {
     let input =
@@ -25,7 +27,44 @@ async fn runtime_rejects_disabled_profile_before_local_substrate_lookup() {
     let RebornRuntimeError::InvalidArgument { reason } = error else {
         panic!("expected invalid argument, got {error:?}");
     };
-    assert!(reason.contains("profile=disabled is not yet wired end-to-end"));
+    assert!(reason.contains("profile=disabled must not start live Reborn runtime traffic"));
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn runtime_rejects_migration_dry_run_before_live_traffic() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = std::sync::Arc::new(
+        libsql::Builder::new_local(dir.path().join("reborn.db"))
+            .build()
+            .await
+            .unwrap(),
+    );
+    let input = RebornRuntimeInput::from_services(RebornBuildInput::libsql(
+        ironclaw_reborn_composition::RebornCompositionProfile::MigrationDryRun,
+        "runtime-migration-dry-run-owner",
+        db,
+        dir.path().join("events.db").to_string_lossy(),
+        None,
+        ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
+    ));
+
+    let error = match build_reborn_runtime(input).await {
+        Ok(runtime) => {
+            runtime.shutdown().await.expect("shutdown");
+            panic!("migration-dry-run must validate only and never start live runtime traffic");
+        }
+        Err(error) => error,
+    };
+
+    let RebornRuntimeError::InvalidArgument { reason } = error else {
+        panic!("expected invalid argument, got {error:?}");
+    };
+    assert!(
+        reason.contains("profile=migration-dry-run")
+            && reason.contains("must not start live Reborn runtime traffic"),
+        "reason: {reason}"
+    );
 }
 
 #[tokio::test]
@@ -70,21 +109,26 @@ async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation()
 
     let conversation = runtime.new_conversation().await.unwrap();
     let reply = tokio::time::timeout(
-        Duration::from_secs(10),
+        SEND_USER_MESSAGE_TIMEOUT,
         runtime.send_user_message(&conversation, "hello"),
     )
     .await
     .unwrap()
     .unwrap();
 
-    // With no LLM gateway configured the driver returns Unavailable, which
-    // maps to a terminal Failed turn instead of the pre-PR RecoveryRequired
-    // path that cancelled via the standalone-runtime cancel guard.
+    // With no LLM gateway configured the stubbed driver path reports a
+    // protocol violation, which maps to a terminal Failed turn instead of the
+    // pre-PR RecoveryRequired path that cancelled via the standalone-runtime
+    // cancel guard.
     assert_eq!(reply.status, TurnStatus::Failed);
+    assert_eq!(
+        reply.failure_category.as_deref(),
+        Some("driver_protocol_violation")
+    );
     assert_eq!(reply.text, None);
 
     let second_reply = tokio::time::timeout(
-        Duration::from_secs(10),
+        SEND_USER_MESSAGE_TIMEOUT,
         runtime.send_user_message(&conversation, "hello again"),
     )
     .await
@@ -92,6 +136,10 @@ async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation()
     .unwrap();
 
     assert_eq!(second_reply.status, TurnStatus::Failed);
+    assert_eq!(
+        second_reply.failure_category.as_deref(),
+        Some("driver_protocol_violation")
+    );
     assert_eq!(second_reply.text, None);
 
     runtime.shutdown().await.unwrap();
@@ -141,9 +189,11 @@ async fn send_user_message_with_cancellation_cancels_submitted_run() {
 async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
     let root = tempfile::tempdir().unwrap();
     let storage_root = root.path().join("local-dev");
-    std::fs::create_dir_all(storage_root.join("skills/filesystem-review/references")).unwrap();
+    let skill_root = storage_root
+        .join("tenants/runtime-skill-execution-tenant/users/runtime-skill-execution-owner/skills/filesystem-review");
+    std::fs::create_dir_all(skill_root.join("references")).unwrap();
     std::fs::write(
-        storage_root.join("skills/filesystem-review/SKILL.md"),
+        skill_root.join("SKILL.md"),
         skill_md(
             "filesystem-review",
             "filesystem-review",
@@ -151,11 +201,7 @@ async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        storage_root.join("skills/filesystem-review/references/policy.md"),
-        "filesystem policy",
-    )
-    .unwrap();
+    std::fs::write(skill_root.join("references/policy.md"), "filesystem policy").unwrap();
     let input = RebornRuntimeInput::from_services(
         RebornBuildInput::local_dev("runtime-skill-execution-owner", storage_root)
             .with_runtime_policy(local_dev_runtime_policy()),
@@ -263,7 +309,7 @@ async fn build_reborn_runtime_wires_third_party_hooks_when_enabled() {
     // and reaches a terminal state without hanging.
     let conversation = runtime.new_conversation().await.unwrap();
     let reply = tokio::time::timeout(
-        Duration::from_secs(2),
+        SEND_USER_MESSAGE_TIMEOUT,
         runtime.send_user_message(&conversation, "hello"),
     )
     .await

@@ -9,6 +9,8 @@ mod accounts;
 mod lifecycle;
 mod manual_token;
 mod oauth;
+#[cfg(test)]
+mod oauth_start_tests;
 
 use std::{
     hash::Hash,
@@ -36,9 +38,9 @@ use ironclaw_auth::{
     GoogleOAuthCallbackState, GoogleOAuthRouteConfig, OAuthAuthorizationCode,
     OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash,
     PkceVerifierSecret, ProviderScope, SecretCleanupAction, SecretCleanupReport,
-    SecretCleanupRequest, Timestamp, TurnRunRef, build_google_authorization_url,
-    parse_google_callback_scopes, parse_google_requested_scopes, pkce_s256_challenge,
-    scope_matches,
+    SecretCleanupRequest, Timestamp, TurnRunRef, binding_scope_owns_account,
+    build_google_authorization_url, parse_google_callback_scopes, parse_google_requested_scopes,
+    pkce_s256_challenge,
 };
 use ironclaw_host_api::NetworkMethod;
 use ironclaw_host_api::ingress::{
@@ -62,7 +64,6 @@ use crate::{
     RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse,
     RebornOAuthCallbackError, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
     RebornOAuthCallbackResponse, RebornProductAuthServices,
-    product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest,
 };
 
 pub(crate) const OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/start";
@@ -869,30 +870,52 @@ pub(super) async fn scoped_update_binding_for_requester(
     state: &ProductAuthRouteState,
     scope: AuthProductScope,
     provider: AuthProviderId,
-    provider_scopes: Vec<ProviderScope>,
     requester_extension: Option<&ExtensionId>,
 ) -> Result<Option<CredentialAccountUpdateBinding>, ProductAuthRouteFailure> {
     let Some(requester_extension) = requester_extension else {
         return Ok(None);
     };
+    // Bind a reconnect at durable owner granularity. `thread_id`/`mission_id`
+    // (and the per-flow `invocation_id` the old `scope_matches` full-equality
+    // compared) are transient invocation provenance, not identity — matching on
+    // them meant the 2nd OAuth flow could never find the existing account and
+    // forked a duplicate `UserReusable` account on every flow. `session_id` IS
+    // path-segmenting (paths.rs), so it stays matched; the update path reads at
+    // the flow's stored scope and would orphan across a different session.
+    let owner_scope = scope.to_credential_owner();
+    // Scope-agnostic on purpose: a reconnect that grants a NEW provider scope
+    // must still bind to (and update) the existing account that lacks it.
     let account = state
         .product_auth
         .runtime_credential_account_selection_service()
-        .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
-            CredentialAccountSelectionRequest::new(scope.clone(), provider.clone())
+        .select_configured_account_for_binding(
+            CredentialAccountSelectionRequest::new(owner_scope.clone(), provider.clone())
                 .for_extension(requester_extension.clone()),
-            scope.clone(),
-            provider_scopes,
-        ))
+            owner_scope.clone(),
+        )
         .await;
     match account {
-        Ok(account) if scope_matches(&scope, &account.scope) => Ok(Some(
+        Ok(account) if binding_scope_owns_account(&scope, &account) => Ok(Some(
             CredentialAccountUpdateBinding::from_projection(&account.projection()),
         )),
         Ok(_) => Ok(None),
         Err(AuthProductError::CredentialMissing) => Ok(None),
         Err(AuthProductError::CrossScopeDenied) => Ok(None),
-        Err(AuthProductError::AccountSelectionRequired) => Ok(None),
+        // Ambiguous owner state (e.g. mixed reusable + extension-owned accounts):
+        // the selector cannot pick a single account to rebind. Start a fresh flow
+        // rather than hard-failing the reconnect — failing the start route would
+        // leave the owner unable to (re)connect at all, which is worse than the
+        // rare extra account. Log it so the ambiguous reconnect is observable and
+        // not silently conflated with the "no existing account" arms above.
+        Err(AuthProductError::AccountSelectionRequired) => {
+            tracing::warn!(
+                target: "ironclaw_reborn_composition::product_auth::oauth",
+                provider = %provider.as_str(),
+                requester_extension = %requester_extension.as_str(),
+                "owner has multiple eligible accounts; starting extension OAuth without an update binding"
+            );
+            Ok(None)
+        }
         Err(AuthProductError::BackendUnavailable) => {
             tracing::warn!(
                 target: "ironclaw_reborn_composition::product_auth::oauth",
@@ -1528,82 +1551,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn extension_oauth_start_handler_does_not_bind_reconnect_accounts_outside_exact_scope() {
-        let secret_store = Arc::new(InMemorySecretStore::new());
-        let dcr_provider = Arc::new(
-            OAuthDcrProvider::new(
-                OAuthDcrProviderConfig {
-                    spec: notion_provider_spec(),
-                    callback_origin: "http://127.0.0.1:3000".to_string(),
-                    client_name: "Ironclaw".to_string(),
-                    account_label: CredentialAccountLabel::new("notion").expect("label"),
-                    scopes: Vec::new(),
-                },
-                Arc::new(RouteDcrSetupEgress),
-                secret_store,
-                Arc::new(NoopObligationHandler),
-            )
-            .expect("DCR provider"),
-        );
+    async fn extension_google_oauth_start_binds_existing_configured_account_with_matching_scope() {
         let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
-        let product_auth =
-            RebornProductAuthServices::from_shared(shared.clone(), Arc::new(NoopDispatcher))
-                .with_dcr_oauth_registry(Arc::new(OAuthDcrProviderRegistry::new(vec![
-                    dcr_provider,
-                ])));
+        let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+            shared.clone(),
+            Arc::new(NoopDispatcher),
+        ));
         let state = ProductAuthRouteState::new(
-            Arc::new(product_auth),
+            product_auth,
             TenantId::new("tenant-alpha").expect("tenant"),
             None,
             None,
+        )
+        .with_google_oauth(
+            GoogleOAuthRouteConfig::new(
+                "google-client.apps.googleusercontent.com",
+                "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
+            )
+            .expect("google oauth route config"),
         );
         let app = product_auth_route_mount(state)
             .protected
             .layer(axum::Extension(test_caller()));
-        let stale_scope = AuthProductScope::new(test_resource_scope(), AuthSurface::Callback);
-        shared
-            .create_account(NewCredentialAccount {
-                scope: stale_scope,
-                provider: AuthProviderId::new("notion").expect("provider"),
-                label: CredentialAccountLabel::new("work notion").expect("label"),
-                status: CredentialAccountStatus::Configured,
-                ownership: CredentialOwnership::UserReusable,
-                owner_extension: None,
-                granted_extensions: Vec::new(),
-                access_secret: Some(SecretHandle::new("stale-notion-access").expect("secret")),
-                refresh_secret: Some(SecretHandle::new("stale-notion-refresh").expect("secret")),
-                scopes: Vec::new(),
-            })
-            .await
-            .expect("seed stale account");
-        shared
-            .create_account(NewCredentialAccount {
-                scope: AuthProductScope::new(test_resource_scope(), AuthSurface::Callback),
-                provider: AuthProviderId::new("notion").expect("provider"),
-                label: CredentialAccountLabel::new("personal notion").expect("label"),
-                status: CredentialAccountStatus::Configured,
-                ownership: CredentialOwnership::UserReusable,
-                owner_extension: None,
-                granted_extensions: Vec::new(),
-                access_secret: Some(SecretHandle::new("other-notion-access").expect("secret")),
-                refresh_secret: Some(SecretHandle::new("other-notion-refresh").expect("secret")),
-                scopes: Vec::new(),
-            })
-            .await
-            .expect("seed second stale account");
         let flow_invocation_id = InvocationId::new();
+        let mut existing_resource = test_resource_scope();
+        existing_resource.invocation_id = flow_invocation_id;
+        let existing_scope = AuthProductScope::new(existing_resource, AuthSurface::Callback);
+        let account = shared
+            .create_account(NewCredentialAccount {
+                scope: existing_scope.clone(),
+                provider: AuthProviderId::new(GOOGLE_PROVIDER_ID).expect("provider"),
+                label: CredentialAccountLabel::new("google-drive google").expect("label"),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(SecretHandle::new("google-drive-access").expect("secret")),
+                refresh_secret: Some(SecretHandle::new("google-drive-refresh").expect("secret")),
+                scopes: vec![
+                    ProviderScope::new("https://www.googleapis.com/auth/drive")
+                        .expect("provider scope"),
+                ],
+            })
+            .await
+            .expect("seed configured google account");
 
         let response = app
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri("/api/webchat/v2/extensions/notion/setup/oauth/start")
+                    .uri("/api/webchat/v2/extensions/google-drive/setup/oauth/start")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         serde_json::json!({
-                            "provider": "notion",
-                            "account_label": "work notion",
-                            "scopes": [],
+                            "provider": GOOGLE_PROVIDER_ID,
+                            "account_label": "google-drive google",
+                            "scopes": ["https://www.googleapis.com/auth/drive"],
                             "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
                             "invocation_id": flow_invocation_id.to_string(),
                         })
@@ -1622,15 +1625,16 @@ mod tests {
         let flow_id = AuthFlowId::from_uuid(
             Uuid::parse_str(json["flow_id"].as_str().expect("flow id")).expect("flow uuid"),
         );
-        let mut flow_resource = test_resource_scope();
-        flow_resource.invocation_id = flow_invocation_id;
-        let flow_scope = AuthProductScope::new(flow_resource, AuthSurface::Callback);
         let flow = shared
-            .get_flow(&flow_scope, flow_id)
+            .get_flow(&existing_scope, flow_id)
             .await
             .expect("flow lookup")
             .expect("flow");
-        assert!(flow.update_binding.is_none());
+        let update_binding = flow
+            .update_binding
+            .expect("matching account should be bound for OAuth reconnect");
+        assert_eq!(update_binding.account_id, account.id);
+        assert_eq!(update_binding.ownership, CredentialOwnership::UserReusable);
     }
 
     #[tokio::test]
@@ -1924,6 +1928,7 @@ mod tests {
         let gate_ref = "gate:notion-auth";
         let requirements = vec![RuntimeCredentialAuthRequirement {
             provider: RuntimeCredentialAccountProviderId::new("notion").expect("provider"),
+            setup: Default::default(),
             requester_extension: ExtensionId::new("notion").expect("extension"),
             provider_scopes: Vec::new(),
         }];

@@ -36,6 +36,9 @@ use ironclaw_turns::{
     },
 };
 
+/// Compaction prompt-index fixtures exposed for crate integration tests.
+pub mod compaction;
+
 use crate::state::{
     CapabilityCallSignature, CheckpointKind, LoopExecutionState, RecoveryAttemptClass,
     RecoveryStrategyState,
@@ -58,6 +61,7 @@ pub struct MockAgentLoopDriverHost {
     fail_model_with: Mutex<Option<AgentLoopHostErrorKind>>,
     compaction_result: Mutex<Result<LoopCompactionOutcome, LoopCompactionError>>,
     progress_events: Mutex<Vec<LoopProgressEvent>>,
+    prompt_requests: Mutex<Vec<LoopPromptBundleRequest>>,
     acked_tokens: Mutex<Vec<LoopInputAckToken>>,
     finalized_assistant_messages: Mutex<Vec<String>>,
     cancellation: Mutex<Option<LoopCancellationSignal>>,
@@ -91,6 +95,11 @@ impl MockAgentLoopDriverHost {
     /// Returns loop progress events emitted through the host progress port.
     pub fn progress_events(&self) -> Vec<LoopProgressEvent> {
         clone_mutex_vec(&self.progress_events)
+    }
+
+    /// Returns prompt bundle requests captured so far.
+    pub fn prompt_requests(&self) -> Vec<LoopPromptBundleRequest> {
+        clone_mutex_vec(&self.prompt_requests)
     }
 
     /// Returns finalized assistant message contents in call order.
@@ -224,6 +233,7 @@ impl MockAgentLoopDriverHostBuilder {
                 fail_model_with: Mutex::new(self.fail_model_with),
                 compaction_result: Mutex::new(self.compaction_result),
                 progress_events: Mutex::new(Vec::new()),
+                prompt_requests: Mutex::new(Vec::new()),
                 acked_tokens: Mutex::new(Vec::new()),
                 finalized_assistant_messages: Mutex::new(Vec::new()),
                 cancellation: Mutex::new(self.cancellation),
@@ -467,6 +477,8 @@ pub enum ScriptedCapabilityOutcome {
         gate_ref: String,
         /// Result ref updated when the dependent run completes.
         result_ref: String,
+        /// Byte length of the awaited result (0 for test fakes that don't have one).
+        byte_len: u64,
     },
     /// Spawned child run result.
     SpawnedChildRun {
@@ -474,6 +486,8 @@ pub enum ScriptedCapabilityOutcome {
         child_run_id: TurnRunId,
         /// Result ref.
         result_ref: String,
+        /// Byte length of the spawned-child result (0 for test fakes that don't have one).
+        byte_len: u64,
     },
     /// Failed result.
     Failed {
@@ -633,6 +647,7 @@ impl ironclaw_turns::run_profile::LoopContextPort for MockAgentLoopDriverHost {
         Ok(LoopContextBundle {
             identity_messages: Vec::new(),
             messages: Vec::new(),
+            compaction_message_index: Vec::new(),
             instruction_snippets: Vec::new(),
             memory_snippets: Vec::new(),
         })
@@ -643,9 +658,10 @@ impl ironclaw_turns::run_profile::LoopContextPort for MockAgentLoopDriverHost {
 impl ironclaw_turns::run_profile::LoopPromptPort for MockAgentLoopDriverHost {
     async fn build_prompt_bundle(
         &self,
-        _request: LoopPromptBundleRequest,
+        request: LoopPromptBundleRequest,
     ) -> Result<LoopPromptBundle, AgentLoopHostError> {
         self.record_call(MockHostCall::BuildPromptBundle);
+        lock_or_panic(&self.prompt_requests).push(request);
         if let Some(kind) = *lock_or_panic(&self.fail_prompt_with) {
             return Err(AgentLoopHostError::new(kind, "scripted prompt failure"));
         }
@@ -1035,11 +1051,13 @@ fn scripted_capability_outcome(
             safe_summary: "completed".to_string(),
             progress,
             terminate_hint,
+            byte_len: 0,
         })),
         ScriptedCapabilityOutcome::ApprovalRequired { gate_ref } => {
             Ok(CapabilityOutcome::ApprovalRequired {
                 gate_ref: loop_gate_ref(&gate_ref),
                 safe_summary: "approval required".to_string(),
+                approval_resume: None,
             })
         }
         ScriptedCapabilityOutcome::AuthRequired { gate_ref } => {
@@ -1047,6 +1065,7 @@ fn scripted_capability_outcome(
                 gate_ref: loop_gate_ref(&gate_ref),
                 credential_requirements: Vec::new(),
                 safe_summary: "auth required".to_string(),
+                auth_resume: None,
             })
         }
         ScriptedCapabilityOutcome::ResourceBlocked { gate_ref } => {
@@ -1058,24 +1077,29 @@ fn scripted_capability_outcome(
         ScriptedCapabilityOutcome::AwaitDependentRun {
             gate_ref,
             result_ref,
+            byte_len,
         } => Ok(CapabilityOutcome::AwaitDependentRun {
             gate_ref: loop_gate_ref(&gate_ref),
             result_ref: loop_result_ref(&result_ref),
             safe_summary: "await dependent run".to_string(),
+            byte_len,
         }),
         ScriptedCapabilityOutcome::SpawnedChildRun {
             child_run_id,
             result_ref,
+            byte_len,
         } => Ok(CapabilityOutcome::SpawnedChildRun {
             child_run_id,
             result_ref: LoopResultRef::new(result_ref)
                 .unwrap_or_else(|error| panic!("test result ref should be valid: {error}")),
             safe_summary: "spawned child run".to_string(),
+            byte_len,
         }),
         ScriptedCapabilityOutcome::Failed { error_kind } => {
             Ok(CapabilityOutcome::Failed(CapabilityFailure {
                 error_kind,
                 safe_summary: "failed".to_string(),
+                detail: None,
             }))
         }
     }

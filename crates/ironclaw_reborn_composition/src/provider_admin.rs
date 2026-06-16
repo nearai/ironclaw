@@ -37,7 +37,11 @@ impl RebornProviderAdmin {
                 source: Box::new(source),
             }
         })?;
-        let active = active_llm_selection(config.as_ref(), &registry);
+        let active = active_llm_selection(
+            config.as_ref(),
+            &registry,
+            Some(home.providers_file_path().as_path()),
+        );
 
         let providers = if let Some(provider) = provider {
             let def = registry.find(provider).ok_or_else(|| {
@@ -72,7 +76,11 @@ impl RebornProviderAdmin {
                 source: Box::new(source),
             }
         })?;
-        let active = active_llm_selection(config.as_ref(), &registry);
+        let active = active_llm_selection(
+            config.as_ref(),
+            &registry,
+            Some(home.providers_file_path().as_path()),
+        );
         Ok(RebornProviderStatus {
             routes: if active.is_some() {
                 RebornModelRoutesState::Configured
@@ -372,12 +380,62 @@ struct ActiveLlmSelection {
     base_url: Option<String>,
 }
 
+/// Resolve which provider is *actually* active, mirroring the runtime's
+/// precedence in [`crate::llm_catalog::resolve_reborn_runtime_llm`]:
+/// the persisted `config.toml [llm.default]` slot first, then the same
+/// environment fallback the chat-serving provider chain is built from
+/// (`LLM_BACKEND`, Codex CLI auth, or a provider whose env vars are set).
+///
+/// Without the env fallback the Settings UI reported "no active provider"
+/// (defaulting the display to `nearai`) whenever the live provider came from
+/// the environment rather than an explicit selection — the inconsistency in
+/// issue #4697.
 fn active_llm_selection(
     config: Option<&RebornConfigFile>,
     registry: &ironclaw_llm::ProviderRegistry,
+    providers_path: Option<&std::path::Path>,
 ) -> Option<ActiveLlmSelection> {
-    let selection = config.and_then(RebornConfigFile::default_llm_slot)?;
-    Some(active_selection_from_slot(selection, registry))
+    if let Some(selection) = config.and_then(RebornConfigFile::default_llm_slot) {
+        return Some(active_selection_from_slot(selection, registry));
+    }
+    active_selection_from_env(registry, providers_path)
+}
+
+/// Build the active selection from the environment-resolved provider, when the
+/// config file carries no explicit `[llm.default]` slot.
+fn active_selection_from_env(
+    registry: &ironclaw_llm::ProviderRegistry,
+    providers_path: Option<&std::path::Path>,
+) -> Option<ActiveLlmSelection> {
+    let resolved = match ironclaw_llm::resolve_provider_config_from_env(providers_path) {
+        Ok(resolved) => resolved?,
+        Err(error) => {
+            tracing::debug!(%error, "active provider env resolution failed; reporting none");
+            return None;
+        }
+    };
+    Some(active_selection_from_resolved(&resolved, registry))
+}
+
+/// Map an environment-resolved provider onto an [`ActiveLlmSelection`].
+///
+/// Pure mapping (no env / IO) so the field translation — canonical id lookup
+/// and empty-string-to-`None` normalization — is unit-testable directly.
+fn active_selection_from_resolved(
+    resolved: &ironclaw_llm::ResolvedProviderConfig,
+    registry: &ironclaw_llm::ProviderRegistry,
+) -> ActiveLlmSelection {
+    let provider_id = resolved.provider_id().to_string();
+    let canonical_provider_id = registry.find(&provider_id).map(|def| def.id.clone());
+    let model = resolved.model();
+    let base_url = resolved.base_url();
+    ActiveLlmSelection {
+        provider_id: Some(provider_id),
+        canonical_provider_id,
+        model: (!model.is_empty()).then(|| model.to_string()),
+        api_key_env: None,
+        base_url: (!base_url.is_empty()).then(|| base_url.to_string()),
+    }
 }
 
 fn active_selection_from_slot(
@@ -468,4 +526,80 @@ fn provider_protocol_wire_name(protocol: ironclaw_llm::registry::ProviderProtoco
         .ok()
         .and_then(|value| value.as_str().map(str::to_string))
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_llm::{
+        ProviderProtocol, ProviderRegistry, ResolvedDedicatedProviderConfig, ResolvedProviderConfig,
+    };
+
+    fn dedicated(provider_id: &str, model: &str, base_url: &str) -> ResolvedProviderConfig {
+        ResolvedProviderConfig::Dedicated(ResolvedDedicatedProviderConfig {
+            protocol: ProviderProtocol::OpenAiCompletions,
+            provider_id: provider_id.to_string(),
+            api_key: None,
+            base_url: base_url.to_string(),
+            model: model.to_string(),
+        })
+    }
+
+    #[test]
+    fn env_resolved_known_provider_maps_to_active_selection() {
+        let registry = ProviderRegistry::try_load_from_path(None).expect("builtin registry");
+        let resolved = dedicated("openai", "gpt-4o", "https://api.openai.com/v1");
+        let active = active_selection_from_resolved(&resolved, &registry);
+        assert_eq!(active.provider_id.as_deref(), Some("openai"));
+        assert_eq!(active.canonical_provider_id.as_deref(), Some("openai"));
+        assert_eq!(active.model.as_deref(), Some("gpt-4o"));
+        assert_eq!(
+            active.base_url.as_deref(),
+            Some("https://api.openai.com/v1")
+        );
+    }
+
+    #[test]
+    fn env_resolved_empty_model_and_base_url_become_none() {
+        let registry = ProviderRegistry::try_load_from_path(None).expect("builtin registry");
+        let resolved = dedicated("openai", "", "");
+        let active = active_selection_from_resolved(&resolved, &registry);
+        assert_eq!(active.provider_id.as_deref(), Some("openai"));
+        assert!(active.model.is_none());
+        assert!(active.base_url.is_none());
+    }
+
+    #[test]
+    fn env_resolved_unknown_provider_has_no_canonical_id() {
+        let registry = ProviderRegistry::try_load_from_path(None).expect("builtin registry");
+        let resolved = dedicated("not-a-real-provider", "m", "");
+        let active = active_selection_from_resolved(&resolved, &registry);
+        assert_eq!(active.provider_id.as_deref(), Some("not-a-real-provider"));
+        assert!(active.canonical_provider_id.is_none());
+    }
+
+    #[test]
+    fn active_selection_prefers_config_slot_over_env() {
+        use std::collections::BTreeMap;
+        let registry = ProviderRegistry::try_load_from_path(None).expect("builtin registry");
+        let config = RebornConfigFile {
+            llm: Some(BTreeMap::from([(
+                "default".to_string(),
+                LlmSlotSelection {
+                    provider_id: Some("anthropic".to_string()),
+                    model: Some("claude-pinned-by-config".to_string()),
+                    ..Default::default()
+                },
+            )])),
+            ..Default::default()
+        };
+        // An explicit [llm.default] slot is authoritative: the selection comes
+        // from the slot and never consults the environment. The distinctive
+        // pinned model could not come from env resolution, so a regression
+        // dropping the early return (falling through to env) would lose it.
+        let active =
+            active_llm_selection(Some(&config), &registry, None).expect("slot selection present");
+        assert_eq!(active.provider_id.as_deref(), Some("anthropic"));
+        assert_eq!(active.model.as_deref(), Some("claude-pinned-by-config"));
+    }
 }

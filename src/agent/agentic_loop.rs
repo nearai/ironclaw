@@ -572,6 +572,7 @@ mod tests {
             arguments: serde_json::json!({}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let delegate = MockDelegate::new(vec![
             tool_calls_output(vec![tool_call]),
@@ -621,6 +622,7 @@ mod tests {
             arguments: serde_json::json!({}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let delegate = MockDelegate::new(vec![
             tool_calls_output(vec![tool_call]),
@@ -913,6 +915,7 @@ mod tests {
             arguments: serde_json::json!({}), // empty — truncated
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let truncated_output = RespondOutput {
             result: RespondResult::ToolCalls {
@@ -967,6 +970,7 @@ mod tests {
                     arguments: serde_json::json!({}),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }],
                 content: None,
                 reasoning: None,
@@ -1013,6 +1017,7 @@ mod tests {
             arguments: serde_json::json!({"msg": "hi"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         }];
         let fp = DuplicateToolCallTracker::fingerprint(&calls);
         // Tool succeeded — count stays at 0
@@ -1029,6 +1034,7 @@ mod tests {
             arguments: serde_json::json!({"url": "https://example.com"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         }];
         let fp = DuplicateToolCallTracker::fingerprint(&calls);
         assert_eq!(tracker.record_with_fingerprint(fp, true), 1);
@@ -1045,6 +1051,7 @@ mod tests {
             arguments: serde_json::json!({"url": "https://example.com"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         }];
         let fp = DuplicateToolCallTracker::fingerprint(&calls);
         assert_eq!(tracker.record_with_fingerprint(fp, true), 1);
@@ -1064,6 +1071,7 @@ mod tests {
             arguments: serde_json::json!({"url": "https://a.com"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         }];
         let calls_b = vec![ToolCall {
             id: "c1".into(),
@@ -1071,6 +1079,7 @@ mod tests {
             arguments: serde_json::json!({"url": "https://b.com"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         }];
         let fp_a = DuplicateToolCallTracker::fingerprint(&calls_a);
         let fp_b = DuplicateToolCallTracker::fingerprint(&calls_b);
@@ -1089,6 +1098,7 @@ mod tests {
             arguments: serde_json::json!({"a": 1, "b": 2}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         }];
         let calls_b = vec![ToolCall {
             id: "c1".into(),
@@ -1096,6 +1106,7 @@ mod tests {
             arguments: serde_json::json!({"b": 2, "a": 1}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         }];
         assert_eq!(
             DuplicateToolCallTracker::fingerprint(&calls_a),
@@ -1113,6 +1124,7 @@ mod tests {
             arguments: serde_json::json!({"url": "https://broken.example.com"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         // 3 identical failing tool calls, then text response
         let mut delegate = MockDelegate::new(vec![
@@ -1162,6 +1174,7 @@ mod tests {
             arguments: serde_json::json!({"url": "https://broken.example.com"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         // 5 identical failing tool calls, then text response
         let mut delegate = MockDelegate::new(vec![
@@ -1200,6 +1213,7 @@ mod tests {
             arguments: serde_json::json!({"url": "https://broken.example.com"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         // 2 failing calls, then a text continuation, then 2 more of the same failing calls
         // The text response in the middle should reset the streak, so we never hit 3.

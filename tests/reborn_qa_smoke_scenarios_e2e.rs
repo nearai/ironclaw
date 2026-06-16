@@ -175,7 +175,8 @@ async fn qa_trigger_automation_smokes_create_view_and_cleanup() {
                 serde_json::json!({
                     "name": "qa-reborn-heartbeat-smoke",
                     "prompt": "reborn heartbeat smoke",
-                    "cron": "*/2 * * * *"
+                    "cron": "*/2 * * * *",
+                    "timezone": "UTC"
                 }),
             )],
             expected_tool_results: Vec::new(),
@@ -195,7 +196,8 @@ async fn qa_trigger_automation_smokes_create_view_and_cleanup() {
                 serde_json::json!({
                     "name": "qa-reborn-cron-smoke",
                     "prompt": "summarize repo status",
-                    "cron": "0 9 * * 1"
+                    "cron": "0 9 * * 1",
+                    "timezone": "UTC"
                 }),
             )],
             expected_tool_results: Vec::new(),

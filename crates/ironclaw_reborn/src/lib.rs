@@ -25,6 +25,7 @@ pub mod local_trigger_access;
 pub mod loop_driver_host;
 pub mod loop_exit_applier;
 pub mod milestone_events;
+mod model_failure_mapping;
 pub mod model_routes;
 pub mod planned_driver;
 pub mod planned_driver_factory;
@@ -39,5 +40,3 @@ pub mod turn_runner;
 pub mod model_gateway;
 #[cfg(feature = "libsql-secrets")]
 pub mod secrets;
-#[cfg(feature = "webui-user-store")]
-pub mod webui_users;

@@ -1,5 +1,10 @@
 use std::collections::BTreeMap;
 
+use ironclaw_host_api::CapabilityId;
+use ironclaw_turns::run_profile::CompactionInitiator;
+
+use super::CapabilityCallSignature;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ContextStrategyState {}
 
@@ -19,6 +24,14 @@ pub struct CompactionStrategyState {
     pub last_deferred: Option<DeferredCompactionWatermark>,
     #[serde(default)]
     pub force_compact_on_next_iteration: bool,
+    /// Initiator to emit on the NEXT iteration's `CompactionStarted` event
+    /// when `force_compact_on_next_iteration` causes the compactor to run.
+    /// Set by `PostCapabilityStage` when its policy trips; consumed
+    /// (.take()) by `PromptCompactionStep` so the event has the
+    /// proximate-cause initiator (e.g. `CapabilityResultOverflow`)
+    /// instead of falling back to `Auto`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_compact_initiator: Option<CompactionInitiator>,
 }
 
 /// Records the deferred cut point and prompt snapshot fingerprint for a
@@ -330,8 +343,83 @@ pub struct StopStrategyState {
     /// progress reported no new evidence/state.
     #[serde(default)]
     pub trailing_no_progress_results: u32,
+    /// Pending or rendered repeated-call warning that must be shown to the
+    /// model before repeated calls can terminalize as no-progress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeated_call_warning: Option<RepeatedCallWarningState>,
+}
+
+impl StopStrategyState {
+    pub fn mark_repeated_call_warning_rendered(&mut self) {
+        if let Some(warning) = self.repeated_call_warning.as_mut()
+            && warning.phase == RepeatedCallWarningPhase::PendingRender
+        {
+            warning.phase = RepeatedCallWarningPhase::Rendered;
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RepeatedCallWarningState {
+    pub signature: CapabilityCallSignature,
+    pub phase: RepeatedCallWarningPhase,
+}
+
+impl RepeatedCallWarningState {
+    pub fn pending_render(signature: CapabilityCallSignature) -> Self {
+        Self {
+            signature,
+            phase: RepeatedCallWarningPhase::PendingRender,
+        }
+    }
+
+    pub fn rendered(signature: CapabilityCallSignature) -> Self {
+        Self {
+            signature,
+            phase: RepeatedCallWarningPhase::Rendered,
+        }
+    }
+
+    pub fn terminal_ready(signature: CapabilityCallSignature) -> Self {
+        Self {
+            signature,
+            phase: RepeatedCallWarningPhase::TerminalReady,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepeatedCallWarningPhase {
+    PendingRender,
+    Rendered,
+    TerminalReady,
 }
 
 /// Persistent state owned by `GateHandlingStrategy`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GateStrategyState {}
+
+/// Per-turn pipeline-directive state for `PostCapabilityStage`.
+///
+/// Unlike sibling `<Domain>StrategyState` types, this slot belongs to a
+/// pipeline stage (not a strategy) and tracks two distinct lifecycles:
+///
+/// - `pending_capability_bytes` is **per-turn**: filled by
+///   `push_completed_result` during a capability batch, cleared at the
+///   end of every `PostCapabilityStage::process` call (BUG-N1 fix).
+/// - `skip_model_this_iteration` is a **one-shot directive**: set by
+///   `PostCapabilityStage` when its policy trips, then consumed by the
+///   NEXT iteration's `PromptStage` which clears the flag and emits
+///   `PromptStep::SkipModel` to short-circuit the model call.
+///
+/// The distinct naming (`StageState` vs `StrategyState`) marks the
+/// category difference: stages own transient one-shot directives;
+/// strategies own resumable accounting.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PostCapabilityStageState {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pending_capability_bytes: BTreeMap<CapabilityId, u64>,
+    #[serde(default)]
+    pub skip_model_this_iteration: bool,
+}
