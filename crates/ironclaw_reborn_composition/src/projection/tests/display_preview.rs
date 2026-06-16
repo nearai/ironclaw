@@ -491,7 +491,7 @@ async fn capability_display_preview_store_summarizes_grep_and_glob_inputs() {
     )
     .await;
     let grep_summary = grep_preview.input_summary.as_deref().unwrap();
-    assert!(grep_summary.contains("pattern: Authorization: Bearer [redacted]"));
+    assert!(grep_summary.contains("pattern: Authorization: [redacted]"));
     assert!(grep_summary.contains("path: src"));
     assert!(grep_summary.contains("glob: *.rs"));
     assert!(grep_summary.contains("output_mode: content"));
