@@ -10,7 +10,11 @@ use ironclaw_engine::{
 };
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use uuid::Uuid;
 
+use crate::agent::cost_guard::CostGuard;
+use crate::db::Database;
+use crate::history::LlmCallRecord;
 use ironclaw_llm::{
     ChatMessage, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolDefinition,
     clean_response, recover_tool_calls_from_content, sanitize_tool_messages,
@@ -73,6 +77,102 @@ pub struct LlmBridgeAdapter {
     provider: Arc<dyn LlmProvider>,
     /// Optional cheaper provider for sub-calls (depth > 0).
     cheap_provider: Option<Arc<dyn LlmProvider>>,
+    usage_recorder: Option<Arc<LlmUsageRecorder>>,
+}
+
+pub struct LlmUsageRecorder {
+    db: Option<Arc<dyn Database>>,
+    cost_guard: Arc<CostGuard>,
+    provider_name: String,
+}
+
+impl LlmUsageRecorder {
+    pub fn new(
+        db: Option<Arc<dyn Database>>,
+        cost_guard: Arc<CostGuard>,
+        provider_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            db,
+            cost_guard,
+            provider_name: provider_name.into(),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn record(
+        &self,
+        provider: &Arc<dyn LlmProvider>,
+        config: &LlmCallConfig,
+        input_tokens: u32,
+        output_tokens: u32,
+        cache_read_input_tokens: u32,
+        cache_creation_input_tokens: u32,
+    ) {
+        let model = provider.effective_model_name(config.model.as_deref());
+        let cost_per_token = if config.model.is_some() {
+            None
+        } else {
+            Some(provider.cost_per_token())
+        };
+        let user_id = config.metadata.get("user_id");
+        let cost = match user_id {
+            Some(user_id) => {
+                self.cost_guard
+                    .record_llm_call_for_user(
+                        user_id,
+                        &model,
+                        input_tokens,
+                        output_tokens,
+                        cache_read_input_tokens,
+                        cache_creation_input_tokens,
+                        provider.cache_read_discount(),
+                        provider.cache_write_multiplier(),
+                        cost_per_token,
+                    )
+                    .await
+            }
+            None => {
+                self.cost_guard
+                    .record_llm_call(
+                        &model,
+                        input_tokens,
+                        output_tokens,
+                        cache_read_input_tokens,
+                        cache_creation_input_tokens,
+                        provider.cache_read_discount(),
+                        provider.cache_write_multiplier(),
+                        cost_per_token,
+                    )
+                    .await
+            }
+        };
+
+        let Some(db) = self.db.as_ref() else {
+            return;
+        };
+
+        let conversation_id = config
+            .metadata
+            .get("v1_conversation_id")
+            .or_else(|| config.metadata.get("conversation_scope"))
+            .and_then(|value| Uuid::parse_str(value).ok());
+        let purpose = config.metadata.get("purpose").map(String::as_str);
+        let record = LlmCallRecord {
+            job_id: None,
+            conversation_id,
+            provider: &self.provider_name,
+            model: &model,
+            input_tokens,
+            output_tokens,
+            cost,
+            purpose,
+        };
+
+        if let Err(e) = db.record_llm_call(&record).await {
+            tracing::warn!("Failed to persist engine v2 LLM call to DB: {e}");
+        }
+    }
 }
 
 impl LlmBridgeAdapter {
@@ -83,7 +183,13 @@ impl LlmBridgeAdapter {
         Self {
             provider,
             cheap_provider,
+            usage_recorder: None,
         }
+    }
+
+    pub fn with_usage_recorder(mut self, usage_recorder: Arc<LlmUsageRecorder>) -> Self {
+        self.usage_recorder = Some(usage_recorder);
+        self
     }
 
     fn provider_for_depth(&self, depth: u32) -> &Arc<dyn LlmProvider> {
@@ -91,6 +197,29 @@ impl LlmBridgeAdapter {
             self.cheap_provider.as_ref().unwrap_or(&self.provider)
         } else {
             &self.provider
+        }
+    }
+
+    async fn record_usage(
+        &self,
+        provider: &Arc<dyn LlmProvider>,
+        config: &LlmCallConfig,
+        input_tokens: u32,
+        output_tokens: u32,
+        cache_read_input_tokens: u32,
+        cache_creation_input_tokens: u32,
+    ) {
+        if let Some(recorder) = self.usage_recorder.as_ref() {
+            recorder
+                .record(
+                    provider,
+                    config,
+                    input_tokens,
+                    output_tokens,
+                    cache_read_input_tokens,
+                    cache_creation_input_tokens,
+                )
+                .await;
         }
     }
 }
@@ -152,6 +281,15 @@ impl LlmBackend for LlmBridgeAdapter {
                 .map_err(|e| EngineError::Llm {
                     reason: e.to_string(),
                 })?;
+            self.record_usage(
+                provider,
+                config,
+                response.input_tokens,
+                response.output_tokens,
+                response.cache_read_input_tokens,
+                response.cache_creation_input_tokens,
+            )
+            .await;
 
             let cleaned_text = clean_response(&response.content);
 
@@ -195,6 +333,15 @@ impl LlmBackend for LlmBridgeAdapter {
                 .map_err(|e| EngineError::Llm {
                     reason: e.to_string(),
                 })?;
+        self.record_usage(
+            provider,
+            config,
+            response.input_tokens,
+            response.output_tokens,
+            response.cache_read_input_tokens,
+            response.cache_creation_input_tokens,
+        )
+        .await;
 
         // Convert response — check for code blocks (CodeAct/RLM pattern)
         let llm_response = if !response.tool_calls.is_empty() {
@@ -795,6 +942,123 @@ mod tests {
         assert_eq!(sent[2].content, "[Tool `search` returned: result payload]");
         assert!(sent[2].tool_call_id.is_none());
         assert!(sent[2].name.is_none());
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn complete_records_engine_v2_usage_for_admin_aggregates() {
+        use chrono::Utc;
+
+        use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
+        use crate::db::{Database, UserRecord};
+
+        struct PricedUsageProvider;
+
+        #[async_trait]
+        impl LlmProvider for PricedUsageProvider {
+            fn model_name(&self) -> &str {
+                "priced-usage-model"
+            }
+
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::new(1, 2), Decimal::new(2, 2))
+            }
+
+            async fn complete(
+                &self,
+                _req: ironclaw_llm::CompletionRequest,
+            ) -> Result<ironclaw_llm::CompletionResponse, LlmError> {
+                Ok(ironclaw_llm::CompletionResponse {
+                    content: "ok".to_string(),
+                    input_tokens: 3,
+                    output_tokens: 2,
+                    finish_reason: ironclaw_llm::FinishReason::Stop,
+                    reasoning: None,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            }
+
+            async fn complete_with_tools(
+                &self,
+                _req: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, LlmError> {
+                unreachable!()
+            }
+        }
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = temp_dir.path().join("usage.db");
+        let backend = crate::db::libsql::LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("LibSqlBackend");
+        backend.run_migrations().await.expect("migrations");
+        let db: Arc<dyn Database> = Arc::new(backend);
+        db.create_user(&UserRecord {
+            id: "alice".to_string(),
+            email: Some("alice@example.com".to_string()),
+            display_name: "alice".to_string(),
+            status: "active".to_string(),
+            role: "member".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_login_at: None,
+            created_by: None,
+            metadata: serde_json::json!({}),
+        })
+        .await
+        .expect("create user");
+        let conversation_id = db
+            .create_conversation("web", "alice", Some("thread-1"))
+            .await
+            .expect("create conversation");
+
+        let cost_guard = Arc::new(CostGuard::new(CostGuardConfig::default()));
+        let provider: Arc<dyn LlmProvider> = Arc::new(PricedUsageProvider);
+        let adapter = LlmBridgeAdapter::new(provider, None).with_usage_recorder(Arc::new(
+            LlmUsageRecorder::new(
+                Some(Arc::clone(&db)),
+                Arc::clone(&cost_guard),
+                "test-backend",
+            ),
+        ));
+        let mut config = LlmCallConfig::default();
+        config
+            .metadata
+            .insert("user_id".to_string(), "alice".to_string());
+        config.metadata.insert(
+            "v1_conversation_id".to_string(),
+            conversation_id.to_string(),
+        );
+        config
+            .metadata
+            .insert("purpose".to_string(), "chat".to_string());
+
+        adapter
+            .complete(&[ThreadMessage::user("hello")], &[], &config)
+            .await
+            .expect("complete");
+
+        let usage = db
+            .user_usage_stats(Some("alice"), Utc::now() - chrono::Duration::hours(1))
+            .await
+            .expect("usage stats");
+        assert_eq!(usage.len(), 1);
+        assert_eq!(usage[0].user_id, "alice");
+        assert_eq!(usage[0].model, "priced-usage-model");
+        assert_eq!(usage[0].call_count, 1);
+        assert_eq!(usage[0].input_tokens, 3);
+        assert_eq!(usage[0].output_tokens, 2);
+        assert!(usage[0].total_cost > Decimal::ZERO);
+
+        let summaries = db
+            .user_summary_stats(Some("alice"))
+            .await
+            .expect("summary stats");
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].user_id, "alice");
+        assert!(summaries[0].last_active_at.is_some());
+        assert_eq!(cost_guard.actions_this_hour().await, 1);
     }
 
     #[tokio::test]

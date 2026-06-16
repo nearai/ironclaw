@@ -600,6 +600,7 @@ async fn execute_code_with_skills_inner(
     let mut events = Vec::new();
     let mut recursive_tokens = TokenUsage::default();
     let mut final_answer: Option<String> = None;
+    let llm_metadata = llm_usage_metadata(thread, "chat");
 
     // Build context variables including persisted state from prior steps
     let (input_names, input_values) = build_context_inputs(thread, persisted_state);
@@ -786,8 +787,12 @@ async fn execute_code_with_skills_inner(
                         let args = call.args.clone();
                         let kwargs = call.kwargs.clone();
                         let llm = llm.clone();
+                        let metadata = llm_metadata.clone();
                         let handle = tokio::spawn(async move {
-                            handle_llm_query_standalone(&args, &kwargs, &llm).await
+                            handle_llm_query_standalone_with_metadata(
+                                &args, &kwargs, &llm, metadata,
+                            )
+                            .await
                         });
                         pending_futures.insert(monty_call_id, PendingFuture::Llm { handle });
                         None // handled as async below
@@ -796,8 +801,12 @@ async fn execute_code_with_skills_inner(
                         let args = call.args.clone();
                         let kwargs = call.kwargs.clone();
                         let llm = llm.clone();
+                        let metadata = llm_metadata.clone();
                         let handle = tokio::spawn(async move {
-                            handle_llm_query_batched_standalone(&args, &kwargs, &llm).await
+                            handle_llm_query_batched_standalone_with_metadata(
+                                &args, &kwargs, &llm, metadata,
+                            )
+                            .await
                         });
                         pending_futures.insert(monty_call_id, PendingFuture::Llm { handle });
                         None
@@ -1677,14 +1686,53 @@ async fn preflight_action(
     PreflightResult::Approved(lease)
 }
 
+fn llm_usage_metadata(thread: &Thread, purpose: &str) -> HashMap<String, String> {
+    let mut metadata = HashMap::from([
+        ("thread_id".to_string(), thread.id.0.to_string()),
+        ("user_id".to_string(), thread.user_id.clone()),
+        ("purpose".to_string(), purpose.to_string()),
+    ]);
+
+    if let Some(scope) = thread
+        .metadata
+        .get("conversation_scope")
+        .and_then(|v| v.as_str())
+    {
+        metadata.insert("conversation_scope".to_string(), scope.to_string());
+    }
+    if let Some(conversation_id) = thread
+        .metadata
+        .get("v1_conversation_id")
+        .and_then(|v| v.as_str())
+    {
+        metadata.insert(
+            "v1_conversation_id".to_string(),
+            conversation_id.to_string(),
+        );
+    }
+
+    metadata
+}
+
 // ── llm_query() — recursive subagent (RLM 3.5) ─────────────
 
 /// Handle `llm_query(prompt, context)` — single recursive sub-call.
+#[cfg(test)]
 async fn handle_llm_query(
     args: &[MontyObject],
     kwargs: &[(MontyObject, MontyObject)],
     llm: &Arc<dyn LlmBackend>,
     recursive_tokens: &mut TokenUsage,
+) -> ExtFunctionResult {
+    handle_llm_query_with_metadata(args, kwargs, llm, recursive_tokens, &HashMap::new()).await
+}
+
+async fn handle_llm_query_with_metadata(
+    args: &[MontyObject],
+    kwargs: &[(MontyObject, MontyObject)],
+    llm: &Arc<dyn LlmBackend>,
+    recursive_tokens: &mut TokenUsage,
+    metadata: &HashMap<String, String>,
 ) -> ExtFunctionResult {
     let prompt = extract_string_arg(args, kwargs, "prompt", 0);
     let context_arg = extract_string_arg(args, kwargs, "context", 1);
@@ -1724,6 +1772,7 @@ async fn handle_llm_query(
     let config = LlmCallConfig {
         force_text: true,
         model: model_arg,
+        metadata: metadata.clone(),
         ..LlmCallConfig::default()
     };
 
@@ -1750,11 +1799,23 @@ async fn handle_llm_query(
 ///
 /// Takes a list of prompt strings and dispatches them concurrently.
 /// Returns a list of response strings in the same order.
+#[cfg(test)]
 async fn handle_llm_query_batched(
     args: &[MontyObject],
     kwargs: &[(MontyObject, MontyObject)],
     llm: &Arc<dyn LlmBackend>,
     recursive_tokens: &mut TokenUsage,
+) -> ExtFunctionResult {
+    handle_llm_query_batched_with_metadata(args, kwargs, llm, recursive_tokens, &HashMap::new())
+        .await
+}
+
+async fn handle_llm_query_batched_with_metadata(
+    args: &[MontyObject],
+    kwargs: &[(MontyObject, MontyObject)],
+    llm: &Arc<dyn LlmBackend>,
+    recursive_tokens: &mut TokenUsage,
+    metadata: &HashMap<String, String>,
 ) -> ExtFunctionResult {
     // Extract prompts list (first arg or kwarg "prompts")
     let prompts_obj = args.first().or_else(|| {
@@ -1878,6 +1939,7 @@ async fn handle_llm_query_batched(
         let config = LlmCallConfig {
             force_text: true,
             model: model_override,
+            metadata: metadata.clone(),
             ..LlmCallConfig::default()
         };
         handles.push(tokio::spawn(async move {
@@ -2088,25 +2150,26 @@ async fn handle_rlm_query(
 
 // ── Standalone async handlers (for tokio::spawn) ────────────
 
-/// `llm_query()` — standalone version that returns `(ExtFunctionResult, TokenUsage)`.
-async fn handle_llm_query_standalone(
+async fn handle_llm_query_standalone_with_metadata(
     args: &[MontyObject],
     kwargs: &[(MontyObject, MontyObject)],
     llm: &Arc<dyn LlmBackend>,
+    metadata: HashMap<String, String>,
 ) -> (ExtFunctionResult, TokenUsage) {
     let mut tokens = TokenUsage::default();
-    let result = handle_llm_query(args, kwargs, llm, &mut tokens).await;
+    let result = handle_llm_query_with_metadata(args, kwargs, llm, &mut tokens, &metadata).await;
     (result, tokens)
 }
 
-/// `llm_query_batched()` — standalone version.
-async fn handle_llm_query_batched_standalone(
+async fn handle_llm_query_batched_standalone_with_metadata(
     args: &[MontyObject],
     kwargs: &[(MontyObject, MontyObject)],
     llm: &Arc<dyn LlmBackend>,
+    metadata: HashMap<String, String>,
 ) -> (ExtFunctionResult, TokenUsage) {
     let mut tokens = TokenUsage::default();
-    let result = handle_llm_query_batched(args, kwargs, llm, &mut tokens).await;
+    let result =
+        handle_llm_query_batched_with_metadata(args, kwargs, llm, &mut tokens, &metadata).await;
     (result, tokens)
 }
 

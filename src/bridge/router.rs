@@ -18,7 +18,7 @@ use crate::agent::Agent;
 use crate::auth::extension::AuthManager;
 use crate::bridge::effect_adapter::EffectBridgeAdapter;
 use crate::bridge::engine_actions::mission_capability_actions;
-use crate::bridge::llm_adapter::LlmBridgeAdapter;
+use crate::bridge::llm_adapter::{LlmBridgeAdapter, LlmUsageRecorder};
 use crate::bridge::store_adapter::HybridStore;
 use crate::channels::web::GATEWAY_CHANNEL_NAME;
 use crate::channels::web::sse::SseManager;
@@ -1743,10 +1743,15 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
 
     debug!("engine v2: initializing engine state");
 
-    let llm_adapter = Arc::new(LlmBridgeAdapter::new(
-        agent.llm().clone(),
-        Some(agent.cheap_llm().clone()),
+    let usage_recorder = Arc::new(LlmUsageRecorder::new(
+        agent.deps.store.clone(),
+        Arc::clone(&agent.deps.cost_guard),
+        agent.deps.llm_backend.clone(),
     ));
+    let llm_adapter = Arc::new(
+        LlmBridgeAdapter::new(agent.llm().clone(), Some(agent.cheap_llm().clone()))
+            .with_usage_recorder(usage_recorder),
+    );
 
     let effect_adapter = Arc::new(
         EffectBridgeAdapter::new(
@@ -4688,15 +4693,40 @@ async fn handle_with_engine_inner(
     // executor task that starts immediately after spawn would race the
     // bridge's post-spawn `transfer` and miss caller tools on the
     // first turn.
+    let v1_conversation_id = if let Some(ref db) = state.db {
+        match resolve_v1_conversation_for_message(db, message).await {
+            Ok(cid) => Some(cid),
+            Err(e) => {
+                tracing::warn!(
+                    message_id = %message.id,
+                    "failed to resolve v1 conversation for engine metadata: {e}"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let scope_uuid = parse_engine_thread_id(scope);
-    let extra_metadata = scope_uuid.map(|tid| {
+    let extra_metadata = if scope_uuid.is_some() || v1_conversation_id.is_some() {
         let mut map = serde_json::Map::new();
-        map.insert(
-            "conversation_scope".into(),
-            serde_json::Value::String(tid.0.to_string()),
-        );
-        map
-    });
+        if let Some(tid) = scope_uuid {
+            map.insert(
+                "conversation_scope".into(),
+                serde_json::Value::String(tid.0.to_string()),
+            );
+        }
+        if let Some(cid) = v1_conversation_id {
+            map.insert(
+                "v1_conversation_id".into(),
+                serde_json::Value::String(cid.to_string()),
+            );
+        }
+        Some(map)
+    } else {
+        None
+    };
 
     // Pre-bind per-execution context BEFORE the engine spawns the
     // thread. `handle_user_message` allocates and starts the engine
@@ -4788,16 +4818,16 @@ async fn handle_with_engine_inner(
     // are not UUIDs, so they are mapped to stable UUID conversation IDs while
     // preserving the original scope in `conversations.thread_id`.
     if let Some(ref db) = state.db {
-        match resolve_v1_conversation_for_message(db, message).await {
-            Ok(cid) => {
+        match v1_conversation_id {
+            Some(cid) => {
                 let _ = db
                     .add_conversation_message(cid, "user", effective_content)
                     .await;
             }
-            Err(e) => {
+            None => {
                 tracing::warn!(
                     message_id = %message.id,
-                    "failed to resolve v1 conversation for user message persist: {e}"
+                    "failed to persist user message because v1 conversation was not resolved"
                 );
             }
         }

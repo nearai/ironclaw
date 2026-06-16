@@ -65,6 +65,34 @@ pub struct OrchestratorResult {
     pub tokens_used: TokenUsage,
 }
 
+fn llm_usage_metadata(thread: &Thread, purpose: &str) -> HashMap<String, String> {
+    let mut metadata = HashMap::from([
+        ("thread_id".to_string(), thread.id.0.to_string()),
+        ("user_id".to_string(), thread.user_id.clone()),
+        ("purpose".to_string(), purpose.to_string()),
+    ]);
+
+    if let Some(scope) = thread
+        .metadata
+        .get("conversation_scope")
+        .and_then(|v| v.as_str())
+    {
+        metadata.insert("conversation_scope".to_string(), scope.to_string());
+    }
+    if let Some(conversation_id) = thread
+        .metadata
+        .get("v1_conversation_id")
+        .and_then(|v| v.as_str())
+    {
+        metadata.insert(
+            "v1_conversation_id".to_string(),
+            conversation_id.to_string(),
+        );
+    }
+
+    metadata
+}
+
 fn apply_snapshot_inventory(
     exec_ctx: &mut ThreadExecutionContext,
     inventory: Option<Arc<crate::types::capability::ActionInventory>>,
@@ -803,7 +831,7 @@ async fn handle_llm_complete(
             .and_then(|cfg| cfg.get("model"))
             .and_then(|v| v.as_str())
             .map(String::from),
-        metadata: HashMap::new(),
+        metadata: llm_usage_metadata(thread, "chat"),
     };
 
     match deps.llm.complete(&messages, &actions, &config).await {
