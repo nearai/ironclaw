@@ -35,6 +35,7 @@ function useChatEventsSourceForTest() {
 function createUseChatEventsHarness({
   gateFromEvent = () => null,
   failureMessageForRunStatus = () => "run failed",
+  locallyResolvedGatesRef = { current: new Map() },
 } = {}) {
   let messages = [];
   let pendingGate = null;
@@ -76,6 +77,7 @@ function createUseChatEventsHarness({
       activeRunRef.current = activeRun;
     },
     activeRunRef,
+    locallyResolvedGatesRef,
     onRunCompleted: (runId) => completedRuns.push(runId),
   });
 
@@ -402,6 +404,52 @@ test("useChatEvents: typed failed event appends visible error", () => {
       failureSummary: null,
     },
   ]);
+});
+
+test("useChatEvents: locally resolved approval gate is not restored by stale projection", () => {
+  const runId = "run-denied";
+  const gateRef = "gate:approval-denied";
+  const harness = createUseChatEventsHarness({
+    locallyResolvedGatesRef: {
+      current: new Map([[`${runId}\n${gateRef}`, "denied"]]),
+    },
+  });
+  harness.setCurrentActiveRun({
+    runId,
+    threadId: "thread-1",
+    status: "awaiting_gate",
+  });
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: runId, status: "blocked_approval" } },
+          {
+            gate: {
+              gate_ref: gateRef,
+              headline: "Approval required",
+              allow_always: true,
+            },
+          },
+          {
+            capability_activity: {
+              invocation_id: "invocation-denied",
+              turn_run_id: runId,
+              capability_id: "builtin.shell",
+              status: "running",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.pendingGate, null);
+  assert.equal(harness.isProcessing, false);
+  assert.equal(harness.activeRun, null);
+  assert.deepEqual(harness.messages, []);
 });
 
 test("useChatEvents: stale terminal run status does not clear newer run", () => {

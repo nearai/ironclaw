@@ -36,6 +36,7 @@ export function useChatEvents({
   setPendingGate,
   setActiveRun,
   activeRunRef,
+  locallyResolvedGatesRef,
   onRunCompleted,
 }) {
   // Track which runIds we've already announced completion for so that
@@ -182,6 +183,7 @@ export function useChatEvents({
             latestRunIdRef,
             promptRunIdRef,
             activeRunRef,
+            locallyResolvedGatesRef,
           });
           return;
         }
@@ -198,6 +200,7 @@ export function useChatEvents({
       setPendingGate,
       setActiveRun,
       activeRunRef,
+      locallyResolvedGatesRef,
       onRunCompleted,
     ],
   );
@@ -251,6 +254,7 @@ function applyProjectionItems({
   latestRunIdRef,
   promptRunIdRef,
   activeRunRef,
+  locallyResolvedGatesRef,
 }) {
   // Snapshot the run_id surfaced by the most recent `run_status` item
   // we've seen — either earlier in this same items batch, or carried
@@ -283,7 +287,22 @@ function applyProjectionItems({
           streamActiveRunId &&
           streamActiveRunId !== runId,
       );
+      const isLocallyResolvedPromptStatus = Boolean(
+        runId &&
+          PROMPT_RUN_STATUSES.has(status) &&
+          isLocallyResolvedRun(locallyResolvedGatesRef, runId),
+      );
       if (isStaleLocalRunStatus || isStaleTerminalStatus) {
+        continue;
+      }
+      if (isLocallyResolvedPromptStatus) {
+        clearPendingGateForRun(setPendingGate, runId, promptRunIdRef);
+        setIsProcessing(false);
+        if (activeRunRef?.current?.runId === runId) {
+          setActiveRun?.(null);
+        }
+        activeRunId = null;
+        if (latestRunIdRef?.current === runId) latestRunIdRef.current = null;
         continue;
       }
       if (runId) {
@@ -390,6 +409,12 @@ function applyProjectionItems({
     if (item.capability_activity) {
       const activity = item.capability_activity;
       if (activity.invocation_id) {
+        if (
+          isLocallyResolvedRun(locallyResolvedGatesRef, activity.turn_run_id) &&
+          !isTerminalActivityStatus(activity.status)
+        ) {
+          continue;
+        }
         const card = toolCardFromActivity(activity);
         upsertToolFromActivity(setMessages, activity.invocation_id, card);
       }
@@ -402,7 +427,11 @@ function applyProjectionItems({
       // construction in `api.js`), so skip emitting the gate entirely
       // if no run is active yet — a later projection_update will
       // re-surface it once a run_status arrives.
-      if (activeRunId && promptRunIdRef?.current === activeRunId) {
+      if (
+        activeRunId &&
+        promptRunIdRef?.current === activeRunId &&
+        !isLocallyResolvedGate(locallyResolvedGatesRef, activeRunId, item.gate.gate_ref)
+      ) {
         setPendingGate((current) => current || {
           kind: "gate",
           runId: activeRunId,
@@ -495,6 +524,24 @@ function appendRunFailureMessage(
       },
     ];
   });
+}
+
+function isLocallyResolvedRun(locallyResolvedGatesRef, runId) {
+  if (!runId) return false;
+  const resolved = locallyResolvedGatesRef?.current;
+  return Boolean(
+    resolved &&
+      Array.from(resolved.keys()).some((key) => key.startsWith(`${runId}\n`)),
+  );
+}
+
+function isLocallyResolvedGate(locallyResolvedGatesRef, runId, gateRef) {
+  if (!runId || !gateRef) return false;
+  return Boolean(locallyResolvedGatesRef?.current?.has(`${runId}\n${gateRef}`));
+}
+
+function isTerminalActivityStatus(status) {
+  return status === "completed" || status === "failed" || status === "killed";
 }
 
 function upsertToolFromPreview(setMessages, invocationId, card) {

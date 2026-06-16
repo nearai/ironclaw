@@ -29,6 +29,32 @@ const OAUTH_CALLBACK_CHANNEL = "ironclaw-product-auth";
 const OAUTH_CALLBACK_STORAGE_KEY = "ironclaw:product-auth:oauth-complete";
 const OAUTH_CALLBACK_MESSAGE_TYPE = "ironclaw:product-auth:oauth-complete";
 
+function resolvedGateKey(runId, gateRef) {
+  return runId && gateRef ? `${runId}\n${gateRef}` : null;
+}
+
+function markRunToolsErrored(messages, runId) {
+  if (!runId) return messages;
+  let changed = false;
+  const next = messages.map((message) => {
+    if (
+      message.role !== "tool_activity" ||
+      message.turnRunId !== runId ||
+      message.toolStatus !== "running"
+    ) {
+      return message;
+    }
+    changed = true;
+    return {
+      ...message,
+      toolStatus: "error",
+      toolError: message.toolError || "cancelled",
+      updatedAt: message.updatedAt || new Date().toISOString(),
+    };
+  });
+  return changed ? next : messages;
+}
+
 async function withAuthTokenTimeout(task) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), AUTH_TOKEN_FLOW_TIMEOUT_MS);
@@ -114,6 +140,7 @@ export function useChat(threadId) {
   const [now, setNow] = React.useState(Date.now());
   const [activeRun, setActiveRunState] = React.useState(null);
   const activeRunRef = React.useRef(activeRun);
+  const locallyResolvedGatesRef = React.useRef(new Map());
   const setActiveRun = React.useCallback((next) => {
     const value = typeof next === "function" ? next(activeRunRef.current) : next;
     activeRunRef.current = value;
@@ -166,6 +193,7 @@ export function useChat(threadId) {
     setIsProcessing(false);
     setPendingGate(null);
     setActiveRun(null);
+    locallyResolvedGatesRef.current.clear();
     setChannelConnectAction(null);
   }, [threadId]);
 
@@ -239,6 +267,7 @@ export function useChat(threadId) {
     setPendingGate,
     setActiveRun,
     activeRunRef,
+    locallyResolvedGatesRef,
     // Reborn's projection bridge does not yet emit `Text` items for
     // assistant replies, so the SSE stream only delivers `run_status`.
     // On terminal success, refetch the timeline so the assistant
@@ -442,6 +471,13 @@ export function useChat(threadId) {
       });
       const shouldContinueProcessing =
         resolution === "approved" || resolution === "credential_provided";
+      if (!shouldContinueProcessing) {
+        const key = resolvedGateKey(runId, gateRef);
+        if (key) {
+          locallyResolvedGatesRef.current.set(key, resolution);
+        }
+        setMessages((prev) => markRunToolsErrored(prev, runId));
+      }
       setPendingGate(null);
       setIsProcessing(shouldContinueProcessing);
       if (!shouldContinueProcessing) {

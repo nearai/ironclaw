@@ -378,6 +378,98 @@ test("useChat.cancelRun clears local state before cancel request resolves", asyn
   await cancelPromise;
 });
 
+test("useChat.approve deny marks current run tool activity errored", async () => {
+  const threadId = "thread-1";
+  const runId = "run-1";
+  const gateRef = "gate-1";
+  const stateUpdates = [];
+  let renderedMessages = [
+    {
+      id: "tool-invocation-1",
+      role: "tool_activity",
+      turnRunId: runId,
+      toolStatus: "running",
+      toolName: "builtin.shell",
+    },
+  ];
+  let resolveRequest = null;
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({
+      initialByIndex: new Map([
+        [2, { runId, threadId, status: "awaiting_gate" }],
+        [4, false],
+        [5, { runId, gateRef, kind: "gate" }],
+      ]),
+      setCalls: stateUpdates,
+    }),
+    addPending,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("createThread should not run");
+    },
+    globalThis: {},
+    listConnectableChannels: async () => ({ channels: [] }),
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async () => ({ channels: [] }),
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async (request) => {
+      resolveRequest = request;
+      return { status: "cancelled" };
+    },
+    sendMessage: async () => {
+      throw new Error("sendMessage should not run");
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  vm.runInNewContext(useChatSourceForTest(), context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  await chat.approve(null, "deny", "gate");
+
+  assert.deepEqual(JSON.parse(JSON.stringify(resolveRequest)), {
+    threadId,
+    runId,
+    gateRef,
+    resolution: "denied",
+    always: false,
+  });
+  assert.equal(renderedMessages[0].toolStatus, "error");
+  assert.equal(renderedMessages[0].toolError, "cancelled");
+  assert.deepEqual(stateUpdates.slice(-3), [
+    { index: 5, value: null },
+    { index: 4, value: false },
+    { index: 2, value: null },
+  ]);
+});
+
 test("useChat.cancelRun completion does not clear a newer run", async () => {
   const threadId = "thread-1";
   const stateUpdates = [];
@@ -629,6 +721,8 @@ test("useChat.send: rejected_busy appends system notice, marks optimistic failed
     Math,
     React: createReactStub({ setCalls: stateUpdates }),
     addPending,
+    toRenderAttachment,
+    toWireAttachment,
     cancelRunRequest: async () => {},
     clearTimeout,
     createThreadRequest: async () => {
@@ -707,6 +801,8 @@ test("useChat.send: rejected_busy without notice still clears isProcessing", asy
     Math,
     React: createReactStub({ setCalls: stateUpdates }),
     addPending,
+    toRenderAttachment,
+    toWireAttachment,
     cancelRunRequest: async () => {},
     clearTimeout,
     createThreadRequest: async () => {
