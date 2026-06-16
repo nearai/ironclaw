@@ -287,6 +287,7 @@ fn capability_display_preview_resolution_from_store(
         result_ref: record.result_ref,
         truncated: record.truncated,
         updated_at: activity.updated_at,
+        activity_order: Some(activity.last_cursor.as_u64()),
     })
     .map(Box::new)
     .map(CapabilityDisplayPreviewResolution::Ready)
@@ -326,6 +327,7 @@ fn failed_capability_display_preview(
         result_ref: None,
         truncated: false,
         updated_at: activity.updated_at,
+        activity_order: Some(activity.last_cursor.as_u64()),
     })
     .map(Box::new)
     .map(CapabilityDisplayPreviewResolution::Ready)

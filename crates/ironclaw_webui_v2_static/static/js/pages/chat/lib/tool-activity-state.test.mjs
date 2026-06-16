@@ -220,7 +220,7 @@ test("tool activity cards use unprefixed display names", () => {
   );
 });
 
-test("tool activity state assigns pending gates after existing timeline activity", () => {
+test("tool activity state leaves pending gates unnumbered after existing timeline activity", () => {
   const runId = "run-refresh-order";
   const stateRef = { current: createToolActivityState() };
   let messages = [
@@ -263,12 +263,12 @@ test("tool activity state assigns pending gates after existing timeline activity
     [
       ["extension_search", 2],
       ["extension_search", 3],
-      ["search", 4],
+      ["search", undefined],
     ],
   );
 });
 
-test("tool activity state preserves rebased order when a gate is denied", () => {
+test("tool activity state preserves existing order when a gate is denied", () => {
   const runId = "run-deny-rebased";
   const stateRef = { current: createToolActivityState() };
   let messages = [];
@@ -294,7 +294,7 @@ test("tool activity state preserves rebased order when a gate is denied", () => 
   assert.equal(messages[0].activityOrder, 4);
 });
 
-test("tool activity state lets durable projection order replace live provisional order", () => {
+test("tool activity state applies durable projection order to live activity", () => {
   const runId = "run-projection-order";
   const stateRef = { current: createToolActivityState() };
   let messages = [];
@@ -313,8 +313,9 @@ test("tool activity state lets durable projection order replace live provisional
       turnRunId: runId,
     },
     stateRef,
-    { assignOrder: true },
   );
+  assert.equal(messages[0].activityOrder, undefined);
+
   upsertToolActivityMessage(
     setMessages,
     {
@@ -324,19 +325,18 @@ test("tool activity state lets durable projection order replace live provisional
       toolName: "search",
       toolStatus: "running",
       turnRunId: runId,
-      activityOrder: 42004,
-      activityOrderSource: "projection_cursor",
+      activityOrder: 42,
+      activityOrderSource: "projection",
     },
     stateRef,
-    { assignOrder: true },
   );
 
   assert.equal(messages.length, 1);
-  assert.equal(messages[0].activityOrder, 42004);
-  assert.equal(messages[0].activityOrderSource, "projection_cursor");
+  assert.equal(messages[0].activityOrder, 42);
+  assert.equal(messages[0].activityOrderSource, "projection");
 });
 
-test("tool activity state lets projection snapshot order replace gate provisional order", () => {
+test("tool activity state applies durable projection order to gate activity", () => {
   const runId = "run-snapshot-order";
   const stateRef = { current: createToolActivityState() };
   let messages = [];
@@ -354,7 +354,7 @@ test("tool activity state lets projection snapshot order replace gate provisiona
     },
     stateRef,
   );
-  assert.equal(messages[0].activityOrder, 1);
+  assert.equal(messages[0].activityOrder, undefined);
   assert.equal(messages[0].activityOrderSource, undefined);
 
   upsertToolActivityMessage(
@@ -366,14 +366,13 @@ test("tool activity state lets projection snapshot order replace gate provisiona
       toolName: "search",
       toolStatus: "running",
       turnRunId: runId,
-      activityOrder: 42003,
-      activityOrderSource: "projection_snapshot",
+      activityOrder: 43,
+      activityOrderSource: "projection",
     },
     stateRef,
-    { assignOrder: true },
   );
 
   assert.equal(messages.length, 1);
-  assert.equal(messages[0].activityOrder, 42003);
-  assert.equal(messages[0].activityOrderSource, "projection_snapshot");
+  assert.equal(messages[0].activityOrder, 43);
+  assert.equal(messages[0].activityOrderSource, "projection");
 });

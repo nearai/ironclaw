@@ -69,8 +69,12 @@ export function messagesFromTimeline(records, pendingMessages = [], threadId = n
         ...card,
         timestamp: timestampForRecord(record) || card.updatedAt || null,
         sequence: record.sequence,
-        activityOrder: Number.isFinite(record.sequence) ? record.sequence : null,
-        activityOrderSource: "timeline",
+        activityOrder: Number.isFinite(card.activityOrder)
+          ? card.activityOrder
+          : Number.isFinite(record.sequence)
+            ? record.sequence
+            : null,
+        activityOrderSource: card.activityOrderSource || "timeline",
         turnRunId: record.turn_run_id || null,
       });
       continue;
@@ -174,6 +178,7 @@ function toolCardFromPreviewRecord(record) {
 // `ToolActivityCard` destructures.
 export function toolCardFromPreview(preview) {
   const failed = preview.status === "failed" || preview.status === "killed";
+  const activityOrder = numericActivityOrder(preview.activity_order);
   return {
     invocationId: preview.invocation_id,
     callId: preview.invocation_id,
@@ -201,6 +206,8 @@ export function toolCardFromPreview(preview) {
     outputBytes: preview.output_bytes ?? null,
     outputKind: preview.output_kind || null,
     turnRunId: preview.turn_run_id || null,
+    activityOrder,
+    activityOrderSource: Number.isFinite(activityOrder) ? "projection" : null,
   };
 }
 
@@ -209,6 +216,7 @@ export function toolCardFromPreview(preview) {
 // parameters, no output — so the resulting card is intentionally
 // sparse and is meant to be enriched by the next preview frame.
 export function toolCardFromActivity(activity) {
+  const activityOrder = numericActivityOrder(activity.activity_order);
   return {
     invocationId: activity.invocation_id,
     callId: activity.invocation_id,
@@ -226,6 +234,8 @@ export function toolCardFromActivity(activity) {
     outputBytes: activity.output_bytes ?? null,
     outputKind: null,
     turnRunId: activity.turn_run_id || null,
+    activityOrder,
+    activityOrderSource: Number.isFinite(activityOrder) ? "projection" : null,
   };
 }
 
@@ -252,4 +262,9 @@ function toolStatusFromActivityStatus(status) {
     default:
       return "running";
   }
+}
+
+function numericActivityOrder(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
 }

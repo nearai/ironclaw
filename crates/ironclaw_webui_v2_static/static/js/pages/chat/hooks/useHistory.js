@@ -192,11 +192,8 @@ function mergePage(older, current) {
 
 function mergeFullRefresh(fresh, current) {
   const ids = new Set(fresh.map((m) => m.id));
-  const preservedActivity = rebasePreservedActivity(
-    fresh,
-    current.filter(
-      (message) => isRuntimeActivityMessage(message) && !ids.has(message.id),
-    ),
+  const preservedActivity = current.filter(
+    (message) => isRuntimeActivityMessage(message) && !ids.has(message.id),
   );
   return preservedActivity.length > 0
     ? [...fresh, ...preservedActivity]
@@ -205,39 +202,4 @@ function mergeFullRefresh(fresh, current) {
 
 function isRuntimeActivityMessage(message) {
   return message?.role === "tool_activity" || message?.role === "thinking";
-}
-
-function rebasePreservedActivity(fresh, preserved) {
-  if (preserved.length === 0) return preserved;
-  let nextOrder = maxActivityOrder(fresh);
-  nextOrder = Number.isFinite(nextOrder) ? nextOrder + 1 : 1;
-  return preserved.map((message) => {
-    if (message?.role !== "tool_activity") return message;
-    const order = Number.isFinite(message.activityOrder)
-      ? message.activityOrder
-      : message.sequence;
-    if (Number.isFinite(order) && order >= nextOrder) {
-      nextOrder = order + 1;
-      return message;
-    }
-    const rebased = {
-      ...message,
-      activityOrder: nextOrder,
-    };
-    nextOrder += 1;
-    return rebased;
-  });
-}
-
-function maxActivityOrder(messages) {
-  let max = null;
-  for (const message of messages || []) {
-    if (message?.role !== "tool_activity") continue;
-    const order = Number.isFinite(message.activityOrder)
-      ? message.activityOrder
-      : message.sequence;
-    if (!Number.isFinite(order)) continue;
-    max = max === null ? order : Math.max(max, order);
-  }
-  return max;
 }

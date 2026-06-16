@@ -187,6 +187,7 @@ test("messagesFromTimeline: tool previews use timeline sequence as activity orde
         capability_id: "builtin.extension_search",
         status: "completed",
         title: "extension_search",
+        activity_order: 10,
       }),
     },
     {
@@ -201,6 +202,7 @@ test("messagesFromTimeline: tool previews use timeline sequence as activity orde
         capability_id: "builtin.extension_search",
         status: "completed",
         title: "extension_search",
+        activity_order: 11,
       }),
     },
   ]);
@@ -212,10 +214,11 @@ test("messagesFromTimeline: tool previews use timeline sequence as activity orde
       message.toolStatus,
       message.sequence,
       message.activityOrder,
+      message.activityOrderSource,
     ]),
     [
-      ["tool-invocation-extension-a", "extension_search", "success", 2, 2],
-      ["tool-invocation-extension-b", "extension_search", "success", 3, 3],
+      ["tool-invocation-extension-a", "extension_search", "success", 2, 10, "projection"],
+      ["tool-invocation-extension-b", "extension_search", "success", 3, 11, "projection"],
     ],
   );
 });

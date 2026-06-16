@@ -42,27 +42,24 @@ test("groupMessages: tool activities sort by stable activity order", () => {
   );
 });
 
-test("groupMessages: authoritative projection activity sorts before provisional live activity", () => {
+test("groupMessages: ordered projection activity sorts before unnumbered live activity", () => {
   const grouped = groupMessages([
     {
       id: "tool-web",
       role: "tool_activity",
       toolName: "search",
-      activityOrder: 1,
     },
     {
       id: "tool-extension-a",
       role: "tool_activity",
       toolName: "extension_search",
-      activityOrder: 42002,
-      activityOrderSource: "projection_cursor",
+      activityOrder: 2,
     },
     {
       id: "tool-extension-b",
       role: "tool_activity",
       toolName: "extension_search",
-      activityOrder: 42003,
-      activityOrderSource: "projection_cursor",
+      activityOrder: 3,
     },
   ]);
 

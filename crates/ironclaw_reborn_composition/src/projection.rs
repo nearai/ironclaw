@@ -895,6 +895,7 @@ async fn runtime_payload_from_candidate(
                 output_bytes: activity.output_bytes,
                 error_kind: activity.error_kind,
                 updated_at: activity.updated_at,
+                activity_order: Some(activity.last_cursor.as_u64()),
             })
             .map(ProductOutboundPayload::CapabilityActivity)
             .map(Box::new)

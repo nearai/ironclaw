@@ -960,6 +960,7 @@ async fn webui_event_stream_delivers_prior_completed_activity_before_pending_app
                 activity.invocation_id,
                 activity.capability_id.clone(),
                 activity.status,
+                activity.activity_order,
             )),
             _ => None,
         })
@@ -972,16 +973,19 @@ async fn webui_event_stream_delivers_prior_completed_activity_before_pending_app
                 first_extension_invocation,
                 extension_search.clone(),
                 CapabilityActivityStatusView::Completed,
+                Some(1),
             ),
             (
                 second_extension_invocation,
                 extension_search,
                 CapabilityActivityStatusView::Completed,
+                Some(2),
             ),
             (
                 approval_invocation,
                 web_access_search,
                 CapabilityActivityStatusView::Started,
+                Some(3),
             ),
         ],
         "a pending approval preview must not hide already completed tool activity"

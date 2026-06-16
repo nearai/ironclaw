@@ -143,7 +143,7 @@ test("useHistory full refresh preserves SSE-only activity messages", async () =>
   assert.equal(setCalls.at(-1).messages[1].toolStatus, "error");
 });
 
-test("useHistory full refresh rebases live gate activity after timeline tools", async () => {
+test("useHistory full refresh preserves unnumbered live gate activity after timeline tools", async () => {
   const threadId = "thread-activity-order";
   const runId = "run-activity-order";
   const setCalls = [];
@@ -192,7 +192,6 @@ test("useHistory full refresh rebases live gate activity after timeline tools", 
       turnRunId: runId,
       toolName: "search",
       toolStatus: "running",
-      activityOrder: 1,
     },
     ...messages,
   ]);
@@ -207,7 +206,7 @@ test("useHistory full refresh rebases live gate activity after timeline tools", 
     [
       ["tool-extension-a", 2],
       ["tool-extension-b", 3],
-      ["tool-gate-web-search", 4],
+      ["tool-gate-web-search", null],
     ],
   );
 });

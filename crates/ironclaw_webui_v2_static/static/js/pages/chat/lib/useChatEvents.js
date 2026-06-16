@@ -100,17 +100,10 @@ export function useChatEvents({
           // upgrade the same bubble in place.
           const activity = frame.activity;
           if (!activity || !activity.invocation_id) return;
-          const card = withProjectionActivityOrder(
-            toolCardFromActivity(activity),
-            frame.cursor || envelope.lastEventId,
-          );
           upsertToolActivityMessage(
             setMessages,
-            card,
+            toolCardFromActivity(activity),
             toolActivityStateRef,
-            card.activityOrderSource === "projection_cursor"
-              ? { assignOrder: true }
-              : undefined,
           );
           return;
         }
@@ -188,7 +181,6 @@ export function useChatEvents({
           const items = frame.state?.items || [];
           applyProjectionItems({
             items,
-            cursor: frame.cursor || envelope.lastEventId,
             threadId,
             setMessages,
             setIsProcessing,
@@ -262,7 +254,6 @@ function clearPendingNonAuthGateForRun(setPendingGate, runId, promptRunIdRef) {
 
 function applyProjectionItems({
   items,
-  cursor,
   threadId,
   setMessages,
   setIsProcessing,
@@ -286,7 +277,7 @@ function applyProjectionItems({
   // tracking the value locally lets the gate handler that runs later
   // in the same iteration see the run we just learned about.
   let activeRunId = latestRunIdRef?.current ?? null;
-  for (const [itemIndex, item] of items.entries()) {
+  for (const item of items) {
     if (item.run_status) {
       const {
         run_id: runId,
@@ -446,14 +437,11 @@ function applyProjectionItems({
     if (item.capability_activity) {
       const activity = item.capability_activity;
       if (activity.invocation_id) {
-        const card = withProjectionSnapshotActivityOrder(
+        upsertToolActivityMessage(
+          setMessages,
           toolCardFromActivity(activity),
-          cursor,
-          itemIndex,
+          toolActivityStateRef,
         );
-        upsertToolActivityMessage(setMessages, card, toolActivityStateRef, {
-          assignOrder: true,
-        });
       }
     }
 
@@ -511,77 +499,6 @@ function applyProjectionItems({
   if (latestRunIdRef && activeRunId) {
     latestRunIdRef.current = activeRunId;
   }
-}
-
-function withProjectionActivityOrder(card, cursorValue) {
-  const activityOrder = activityOrderFromProjectionCursor(cursorValue);
-  if (!Number.isFinite(activityOrder)) return card;
-  return {
-    ...card,
-    activityOrder,
-    activityOrderSource: "projection_cursor",
-  };
-}
-
-function withProjectionSnapshotActivityOrder(card, cursorValue, itemIndex) {
-  const baseOrder = projectionCursorBaseOrder(cursorValue);
-  const offset = Number.isFinite(itemIndex) ? itemIndex + 1 : null;
-  const activityOrder = Number.isFinite(baseOrder) && Number.isFinite(offset)
-    ? baseOrder + offset
-    : offset;
-  if (!Number.isFinite(activityOrder)) return card;
-  return {
-    ...card,
-    activityOrder,
-    activityOrderSource: "projection_snapshot",
-  };
-}
-
-function activityOrderFromProjectionCursor(cursorValue) {
-  const cursor = parseProjectionCursor(cursorValue);
-  if (!cursor || typeof cursor !== "object") return null;
-  const itemCursor =
-    numericCursor(cursor.runtime_item) ??
-    numericProjectionCursor(cursor.runtime) ??
-    numericProjectionCursor(cursor.live);
-  const delivered = Number(cursor.runtime_payloads_delivered);
-  if (!Number.isFinite(itemCursor) || !Number.isFinite(delivered) || delivered <= 0) {
-    return null;
-  }
-  return itemCursor * 1000 + delivered;
-}
-
-function projectionCursorBaseOrder(cursorValue) {
-  const cursor = parseProjectionCursor(cursorValue);
-  if (!cursor || typeof cursor !== "object") return null;
-  const itemCursor =
-    numericCursor(cursor.runtime_item) ??
-    numericProjectionCursor(cursor.runtime) ??
-    numericProjectionCursor(cursor.live);
-  return Number.isFinite(itemCursor) ? itemCursor * 1000 : null;
-}
-
-function parseProjectionCursor(value) {
-  if (!value) return null;
-  if (typeof value === "object") return value;
-  if (typeof value !== "string") return null;
-  try {
-    const parsed = JSON.parse(value);
-    if (typeof parsed === "string") return parseProjectionCursor(parsed);
-    return parsed;
-  } catch (_) {
-    return null;
-  }
-}
-
-function numericProjectionCursor(value) {
-  if (!value || typeof value !== "object") return numericCursor(value);
-  return numericCursor(value.runtime);
-}
-
-function numericCursor(value) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : null;
 }
 
 function failureCategoryFromRunState(runState) {

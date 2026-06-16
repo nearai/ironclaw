@@ -695,6 +695,7 @@ test("useChatEvents: projection order annotates replayed terminal activity", () 
               turn_run_id: runId,
               capability_id: "web-access.search",
               status: "started",
+              activity_order: 1,
             },
           },
           {
@@ -703,6 +704,7 @@ test("useChatEvents: projection order annotates replayed terminal activity", () 
               turn_run_id: runId,
               capability_id: "builtin.extension_install",
               status: "started",
+              activity_order: 2,
             },
           },
           {
@@ -711,6 +713,7 @@ test("useChatEvents: projection order annotates replayed terminal activity", () 
               turn_run_id: runId,
               capability_id: "nearai.web_search",
               status: "started",
+              activity_order: 3,
             },
           },
         ],
@@ -731,14 +734,9 @@ test("useChatEvents: projection order annotates replayed terminal activity", () 
   );
 });
 
-test("useChatEvents: durable activity cursor order replaces live provisional order", () => {
+test("useChatEvents: durable activity order updates live activity", () => {
   const runId = "run-live-then-durable-order";
   const harness = createUseChatEventsHarness();
-  const cursor = (delivered) =>
-    JSON.stringify({
-      runtime_item: 42,
-      runtime_payloads_delivered: delivered,
-    });
 
   harness.handleEvent({
     type: "projection_update",
@@ -760,10 +758,10 @@ test("useChatEvents: durable activity cursor order replaces live provisional ord
 
   assert.deepEqual(
     harness.messages.map((message) => [message.id, message.activityOrder]),
-    [["tool-invocation-web", 1]],
+    [["tool-invocation-web", null]],
   );
 
-  for (const [invocationId, capabilityId, delivered] of [
+  for (const [invocationId, capabilityId, activityOrder] of [
     ["invocation-extension-a", "builtin.extension_search", 2],
     ["invocation-extension-b", "builtin.extension_search", 3],
     ["invocation-web", "web-access.search", 4],
@@ -771,12 +769,12 @@ test("useChatEvents: durable activity cursor order replaces live provisional ord
     harness.handleEvent({
       type: "capability_activity",
       frame: {
-        cursor: cursor(delivered),
         activity: {
           invocation_id: invocationId,
           turn_run_id: runId,
           capability_id: capabilityId,
           status: invocationId === "invocation-web" ? "started" : "completed",
+          activity_order: activityOrder,
         },
       },
     });
@@ -789,14 +787,14 @@ test("useChatEvents: durable activity cursor order replaces live provisional ord
       message.activityOrder,
     ]),
     [
-      ["tool-invocation-web", "search", 42004],
-      ["tool-invocation-extension-a", "extension_search", 42002],
-      ["tool-invocation-extension-b", "extension_search", 42003],
+      ["tool-invocation-web", "search", 4],
+      ["tool-invocation-extension-a", "extension_search", 2],
+      ["tool-invocation-extension-b", "extension_search", 3],
     ],
   );
 });
 
-test("useChatEvents: projection snapshot order replaces gate provisional order", () => {
+test("useChatEvents: durable activity order updates gate activity", () => {
   const runId = "run-gate-then-snapshot-order";
   const gateRef = "gate:web-search";
   const harness = createUseChatEventsHarness({
@@ -806,9 +804,6 @@ test("useChatEvents: projection snapshot order replaces gate provisional order",
       gateRef,
       toolName: "web-access.search",
     }),
-  });
-  const cursor = JSON.stringify({
-    live: { runtime: 42 },
   });
 
   harness.handleEvent({
@@ -827,13 +822,12 @@ test("useChatEvents: projection snapshot order replaces gate provisional order",
       message.activityOrder,
       message.activityOrderSource,
     ]),
-    [[`tool-gate:${runId}:${gateRef}`, "search", 1, undefined]],
+    [[`tool-gate:${runId}:${gateRef}`, "search", undefined, undefined]],
   );
 
   harness.handleEvent({
     type: "projection_update",
     frame: {
-      cursor,
       state: {
         items: [
           {
@@ -842,6 +836,7 @@ test("useChatEvents: projection snapshot order replaces gate provisional order",
               turn_run_id: runId,
               capability_id: "builtin.extension_search",
               status: "completed",
+              activity_order: 1,
             },
           },
           {
@@ -850,6 +845,7 @@ test("useChatEvents: projection snapshot order replaces gate provisional order",
               turn_run_id: runId,
               capability_id: "builtin.extension_search",
               status: "completed",
+              activity_order: 2,
             },
           },
           {
@@ -858,6 +854,7 @@ test("useChatEvents: projection snapshot order replaces gate provisional order",
               turn_run_id: runId,
               capability_id: "web-access.search",
               status: "started",
+              activity_order: 3,
             },
           },
         ],
@@ -873,18 +870,18 @@ test("useChatEvents: projection snapshot order replaces gate provisional order",
       message.activityOrderSource,
     ]),
     [
-      [`tool-gate:${runId}:${gateRef}`, "search", 42003, "projection_snapshot"],
+      [`tool-gate:${runId}:${gateRef}`, "search", 3, "projection"],
       [
         "tool-invocation-extension-a",
         "extension_search",
-        42001,
-        "projection_snapshot",
+        1,
+        "projection",
       ],
       [
         "tool-invocation-extension-b",
         "extension_search",
-        42002,
-        "projection_snapshot",
+        2,
+        "projection",
       ],
     ],
   );
