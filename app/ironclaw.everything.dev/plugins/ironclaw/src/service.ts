@@ -1,14 +1,5 @@
-import { EventSource as NodeEventSource } from "eventsource";
 import { Effect } from "every-plugin/effect";
 import type { z } from "every-plugin/zod";
-
-function onEvent(es: NodeEventSource, type: string, handler: (e: MessageEvent) => void): void {
-  es.addEventListener(type, handler);
-}
-
-function offEvent(es: NodeEventSource, type: string, handler: (e: MessageEvent) => void): void {
-  es.removeEventListener(type, handler);
-}
 
 import type {
   AcceptedResponseSchema,
@@ -492,7 +483,8 @@ export class IronclawService {
     const generator: AsyncGenerator<ChatEvent> = (async function* () {
       let cursor = afterCursor;
 
-      const eventTypes = [
+      const terminalTypes = new Set(["final_reply", "cancelled", "failed"]);
+      const sseEventTypes = new Set([
         "accepted",
         "running",
         "capability_progress",
@@ -506,9 +498,7 @@ export class IronclawService {
         "projection_snapshot",
         "projection_update",
         "keep_alive",
-      ];
-
-      const terminalTypes = new Set(["final_reply", "cancelled", "failed"]);
+      ]);
 
       const transformEvent = (raw: any): ChatEvent => {
         const base: any = {
@@ -599,90 +589,70 @@ export class IronclawService {
       };
 
       let retryDelayMs = 1_000;
-      const MAX_RETRY_DELAY_MS = 30_000;
 
       while (true) {
         const url = `${baseUrl}/api/webchat/v2/threads/${encodeURIComponent(id)}/events?token=${encodeURIComponent(token)}${cursor ? `&after_cursor=${encodeURIComponent(cursor)}` : ""}`;
-        const es = new NodeEventSource(url);
-
         let sessionEnded = false;
-        let pendingResolve: ((value: ChatEvent | null) => void) | null = null;
-        const eventQueue: ChatEvent[] = [];
-
-        const push = (event: ChatEvent) => {
-          if (pendingResolve) {
-            const r = pendingResolve;
-            pendingResolve = null;
-            r(event);
-          } else {
-            eventQueue.push(event);
-          }
-        };
-
-        const handlers: Record<string, (e: MessageEvent) => void> = {};
-        for (const type of eventTypes) {
-          handlers[type] = (e: MessageEvent) => {
-            try {
-              const raw = JSON.parse(e.data);
-              const event = transformEvent(raw);
-              if (event.cursor) cursor = event.cursor;
-              push(event);
-              if (terminalTypes.has(event.type)) {
-                sessionEnded = true;
-                if (pendingResolve) {
-                  const r = pendingResolve;
-                  pendingResolve = null;
-                  r(null);
-                }
-              }
-            } catch {
-              /* skip parse errors */
-            }
-          };
-          onEvent(es, type, handlers[type]!);
-        }
-
-        es.onerror = () => {
-          if (es.readyState === NodeEventSource.CLOSED) {
-            sessionEnded = true;
-            if (pendingResolve) {
-              const r = pendingResolve;
-              pendingResolve = null;
-              r(null);
-            }
-          }
-        };
 
         try {
-          while (eventQueue.length > 0 || !sessionEnded) {
-            if (eventQueue.length > 0) {
-              yield eventQueue.shift()!;
-            } else {
-              const event = await new Promise<ChatEvent | null>((res) => {
-                pendingResolve = res;
-              });
-              if (event === null) break;
-              yield event;
+          const response = await fetch(url, {
+            headers: { Accept: "text/event-stream" },
+          });
+
+          if (!response.ok || !response.body) throw new Error(`SSE connection failed: ${response.status}`);
+
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+
+          try {
+            while (!sessionEnded) {
+              const { done, value } = await reader.read();
+              if (done) break;
+
+              buffer += decoder.decode(value, { stream: true });
+
+              const parts = buffer.split("\n\n");
+              buffer = parts.pop() || "";
+
+              for (const part of parts) {
+                const lines = part.split("\n");
+                let eventName = "";
+                let dataStr = "";
+
+                for (const line of lines) {
+                  if (line.startsWith("event: ")) eventName = line.slice(7).trim();
+                  else if (line.startsWith("data: ")) dataStr = line.slice(6);
+                }
+
+                if (!eventName || !dataStr || !sseEventTypes.has(eventName)) continue;
+
+                try {
+                  const raw = JSON.parse(dataStr);
+                  const event = transformEvent(raw);
+                  if (event.cursor) cursor = event.cursor;
+                  yield event;
+                  if (terminalTypes.has(event.type)) {
+                    sessionEnded = true;
+                  }
+                } catch {
+                }
+              }
             }
+          } finally {
+            try {
+              reader.releaseLock();
+            } catch {}
           }
-        } finally {
-          es.onerror = null;
-          es.close();
-          for (const type of eventTypes) {
-            offEvent(es, type, handlers[type]!);
-          }
+        } catch {
         }
 
-        if (sessionEnded) {
-          return;
-        }
+        if (sessionEnded) return;
 
-        // Exponential backoff with jitter to avoid reconnect storms.
         await new Promise((res) => setTimeout(res, retryDelayMs));
-        retryDelayMs = Math.min(retryDelayMs * 2, MAX_RETRY_DELAY_MS);
+        retryDelayMs = Math.min(retryDelayMs * 2, 30_000);
       }
     })();
-
     return generator;
   }
 

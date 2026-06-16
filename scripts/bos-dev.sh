@@ -62,9 +62,15 @@ else
   exit 1
 fi
 
-stale_pid="$(lsof -ti "tcp:$REBORN_PORT" -c ironclaw-reborn 2>/dev/null || true)"
+# Kill any existing process on our port (cross-platform: lsof on macOS/Linux, skip on Windows)
+stale_pid=""
+if command -v lsof &>/dev/null; then
+  stale_pid="$(lsof -ti "tcp:$REBORN_PORT" 2>/dev/null || true)"
+elif command -v netstat &>/dev/null && command -v grep &>/dev/null; then
+  stale_pid="$(netstat -ano 2>/dev/null | grep ":$REBORN_PORT " | grep LISTENING | awk '{print $NF}' | head -1 || true)"
+fi
 if [ -n "$stale_pid" ]; then
-  echo "==> Killing stale ironclaw-reborn (PID $stale_pid) on port $REBORN_PORT"
+  echo "==> Killing stale process on port $REBORN_PORT (PID: $stale_pid)"
   kill "$stale_pid" 2>/dev/null || true
   sleep 1
 fi
@@ -213,15 +219,9 @@ if [ "$MODE" = "local" ]; then
 ══════════════════════════════════════════════════════════════════
  IronClaw Reborn — MODE: LOCAL
 ══════════════════════════════════════════════════════════════════
- The ironclaw plugin auto-discovers Reborn via IRONCLAW_BASE_URL.
- No settings configuration needed — just open the UI.
+  Plugin auto-discovers via IRONCLAW_BASE_URL — no setup needed.
 
-  ┌─ Open ───────────────────────────────────────────────────┐
-  │                                                          │
-  │    http://localhost:3000                                  │
-  │                                                          │
-  │  The sidebar shows (●) Connected when ready.             │
-  └──────────────────────────────────────────────────────────┘
+  Open http://localhost:3000 — sidebar shows (●) Connected.
 
   API        : http://$REBORN_HOST:$REBORN_PORT
   Token      : $IRONCLAW_REBORN_WEBUI_TOKEN
@@ -238,9 +238,9 @@ BANNER
 fi
 
 # ─────────────────────────────────────────────────────────────────────
-# Tunnel mode — start Reborn locally + expose via tunnel for the
-# production everything-dev UI (ironclaw.everything.dev).
-# The local dev stack is not started; the user connects via Settings.
+# Tunnel mode — start Reborn locally + ngrok tunnel.
+# Ngrok provides HTTPS with full SSE/WebSocket/grpc support.
+# Free tier works: sign up at https://dashboard.ngrok.com
 # ─────────────────────────────────────────────────────────────────────
 if [ "$MODE" = "tunnel" ]; then
   REBORN_LOG="$(mktemp)"
@@ -250,75 +250,72 @@ if [ "$MODE" = "tunnel" ]; then
 
   sleep 2
 
-  TUNNEL_CMD=""
-  if command -v cloudflared &>/dev/null; then
-    TUNNEL_CMD="cloudflared"
-  elif command -v ngrok &>/dev/null; then
-    TUNNEL_CMD="ngrok"
-  elif command -v bore &>/dev/null; then
-    TUNNEL_CMD="bore"
-  fi
-
-  if [ -z "$TUNNEL_CMD" ]; then
+  # ── Ngrok check and install guide ──────────────────────────
+  if ! command -v ngrok &>/dev/null; then
     echo ""
-    echo "error: no tunnel tool found. Install one of:" >&2
-    echo "  cloudflared   brew install cloudflared    (recommended, no account needed)" >&2
-    echo "  ngrok         brew install ngrok           (requires free account)" >&2
-    echo "  bore          cargo install bore-cli       (simple, no account)" >&2
-    echo "" >&2
+    echo "==> ngrok is required for tunnel mode. Install it:"
+    echo ""
+    case "$(uname -s | tr '[:upper:]' '[:lower:]')" in
+      darwin)
+        echo "    brew install ngrok/ngrok/ngrok"
+        echo "    ngrok config add-authtoken <your-token>"
+        ;;
+      linux)
+        echo "    curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc | \\"
+        echo "      sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null"
+        echo "    echo 'deb https://ngrok-agent.s3.amazonaws.com buster main' | \\"
+        echo "      sudo tee /etc/apt/sources.list.d/ngrok.list >/dev/null"
+        echo "    sudo apt update && sudo apt install ngrok"
+        echo "    ngrok config add-authtoken <your-token>"
+        ;;
+      mingw*|msys*|cygwin*)
+        echo "    winget install ngrok"
+        echo "    # Or download from https://ngrok.com/download"
+        echo "    ngrok config add-authtoken <your-token>"
+        ;;
+      *)
+        echo "    Download ngrok from https://ngrok.com/download"
+        echo "    ngrok config add-authtoken <your-token>"
+        ;;
+    esac
+    echo ""
+    echo "    Get your free auth token at:"
+    echo "    https://dashboard.ngrok.com/get-started/your-authtoken"
+    echo ""
     cleanup
     exit 1
   fi
 
-  printf "==> Starting tunnel via %s..." "$TUNNEL_CMD"
+  # Check if ngrok auth token is configured
+  if ! ngrok config check 2>&1 | grep -qi "valid configuration"; then
+    echo ""
+    echo "==> ngrok auth token not configured."
+    echo "    Run:  ngrok config add-authtoken <your-token>"
+    echo ""
+    echo "    Get your free token at:"
+    echo "    https://dashboard.ngrok.com/get-started/your-authtoken"
+    echo ""
+    cleanup
+    exit 1
+  fi
 
+  printf "==> Starting ngrok tunnel..."
   TUNNEL_LOG="$(mktemp)"
   TUNNEL_URL=""
 
-  set +e
-  case "$TUNNEL_CMD" in
-    cloudflared)
-      cloudflared tunnel --url "http://$REBORN_HOST:$REBORN_PORT" > "$TUNNEL_LOG" 2>&1 &
-      TUNNEL_PID=$!
-      for i in $(seq 1 30); do
-        TUNNEL_URL="$(grep -oE 'https://[a-zA-Z0-9_.-]+\.trycloudflare\.com' "$TUNNEL_LOG" 2>/dev/null | tail -1 || true)"
-        [ -n "$TUNNEL_URL" ] && break
-        printf "."
-        sleep 1
-      done
-      printf "\n"
-      ;;
-    ngrok)
-      ngrok http "$REBORN_HOST:$REBORN_PORT" --log=stdout > "$TUNNEL_LOG" 2>&1 &
-      TUNNEL_PID=$!
-      for i in $(seq 1 15); do
-        TUNNEL_URL="$(grep -oE '"public_url":"https://[^"]+' "$TUNNEL_LOG" 2>/dev/null | head -1 | sed 's/"public_url":"//' || true)"
-        [ -n "$TUNNEL_URL" ] && break
-        printf "."
-        sleep 1
-      done
-      printf "\n"
-      ;;
-    bore)
-      bore local "$REBORN_PORT" --to bore.pub > "$TUNNEL_LOG" 2>&1 &
-      TUNNEL_PID=$!
-      for i in $(seq 1 10); do
-        TUNNEL_URL="$(grep -oE 'https?://[a-zA-Z0-9.:-]+' "$TUNNEL_LOG" 2>/dev/null | head -1 || true)"
-        [ -n "$TUNNEL_URL" ] && break
-        printf "."
-        sleep 1
-      done
-      printf "\n"
-      if [ -n "$TUNNEL_URL" ]; then
-        TUNNEL_URL="http://$TUNNEL_URL"
-      fi
-      ;;
-  esac
-  set -e
+  ngrok http "$REBORN_HOST:$REBORN_PORT" --log=stdout > "$TUNNEL_LOG" 2>&1 &
+  TUNNEL_PID=$!
+  for i in $(seq 1 15); do
+    TUNNEL_URL="$(grep -oE 'url=https://[^ ]+' "$TUNNEL_LOG" 2>/dev/null | head -1 | sed 's/^url=//' || true)"
+    [ -n "$TUNNEL_URL" ] && break
+    printf "."
+    sleep 1
+  done
+  printf "\n"
 
   if [ -z "$TUNNEL_URL" ]; then
     printf "\n"
-    printf "warning: could not detect tunnel URL (last lines of tunnel log):\n" >&2
+    printf "warning: could not detect ngrok tunnel URL (last lines of tunnel log):\n" >&2
     tail -5 "$TUNNEL_LOG" >&2
     TUNNEL_URL="(see tunnel log: $TUNNEL_LOG)"
   fi
@@ -326,26 +323,15 @@ if [ "$MODE" = "tunnel" ]; then
   cat << BANNER
 
 ══════════════════════════════════════════════════════════════════
- IronClaw Reborn — MODE: TUNNEL
+ IronClaw Reborn — MODE: TUNNEL  (ngrok)
 ══════════════════════════════════════════════════════════════════
 
   >>> Tunnel URL:  $TUNNEL_URL
   >>> Token:       $IRONCLAW_REBORN_WEBUI_TOKEN
 
-  ┌─ Step 1 ─────────────────────────────────────────────────┐
-  │  Open the Setup page:                                     │
-  │    https://ironclaw.everything.dev/setup                  │
-  └──────────────────────────────────────────────────────────┘
-
-  ┌─ Step 2 ─────────────────────────────────────────────────┐
-  │  Click "Set up locally", fill in the form:                │
-  │    Tunnel URL:  $TUNNEL_URL                              │
-  │    Token:       $IRONCLAW_REBORN_WEBUI_TOKEN             │
-  └──────────────────────────────────────────────────────────┘
-
-  ┌─ Step 3 ─────────────────────────────────────────────────┐
-  │  Click Save. The sidebar shows (●) Connected when ready. │
-  └──────────────────────────────────────────────────────────┘
+  Go to Settings → IronClaw and fill in:
+    Tunnel URL:   $TUNNEL_URL
+    API Token:    $IRONCLAW_REBORN_WEBUI_TOKEN
 
   Reborn home: $IRONCLAW_REBORN_HOME
 

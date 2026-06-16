@@ -23,15 +23,15 @@
         "ALLOW_UNTRUSTED_SSR",
         "CSP_STRICT"
       ],
-      "production": "https://elliot-braem-4949-host-ironclaw-nearbuilders-734215595-ze.zephyrcloud.app",
+      "production": "https://elliot-braem-4954-host-ironclaw-nearbuilders-13bfb5f35-ze.zephyrcloud.app",
       "integrity": "sha384-uzbBU2DfN9ozBwVXUPjGyv+w29xMfBYmNTYnKuQLsxvzNTufAO6PWH6QrpPa51bB"
     },
     "ui": {
       "development": "local:ui",
-      "ssr": "https://elliot-braem-4946-ui-ironclaw-nearbuilders-c6580b165-ze.zephyrcloud.app",
-      "ssrIntegrity": "sha384-nfWp+CPT/9LqiQMZ+ICblnKhgzrv60sX7PhevY2AkbdlYxGM64EH7RkSX0pNIFr5",
-      "production": "https://elliot-braem-4945-ui-ironclaw-nearbuilders-6408f278b-ze.zephyrcloud.app",
-      "integrity": "sha384-yBH4ItHGeOYbYXvhhICW/WP7p/RNxI0pC/DdqG1id2wnHKvc6VouNqOtvpLtB1vG"
+      "ssr": "https://elliot-braem-4951-ui-ironclaw-nearbuilders-f5711cadd-ze.zephyrcloud.app",
+      "ssrIntegrity": "sha384-hs4TIKaS7wuMgx25FzdkKrgHGcr45WcaGJTbLq35T9lLtlrXvd5qhicMbvgDk9/D",
+      "production": "https://elliot-braem-4950-ui-ironclaw-nearbuilders-98899d97a-ze.zephyrcloud.app",
+      "integrity": "sha384-gRDXTAwDQDmkHc9rHLBC0w/iPZWxEjfagbH2nBtj18QfU3gU2wwBczB3rOnzm4IX"
     },
     "api": {
       "development": "local:api",
@@ -39,8 +39,8 @@
         "API_DATABASE_URL",
         "IRONCLAW_BASE_URL"
       ],
-      "production": "https://elliot-braem-4947-api-ironclaw-nearbuilders-02572bae9-ze.zephyrcloud.app",
-      "integrity": "sha384-8NGal8rGSGjBPYAPSSIXHNYStx9dnbWXZO2DgLJJ9GTx+8M9uHgPeS2+GWO96oDU"
+      "production": "https://elliot-braem-4952-api-ironclaw-nearbuilders-23f5798e3-ze.zephyrcloud.app",
+      "integrity": "sha384-PWitij4FsV0uoEwqxwd/jaGV2hGStBJ8rsYekMCHra/7Fz6Q/ZxKba2y+5atjfZz"
     }
   },
   "plugins": {
@@ -53,7 +53,7 @@
         "IRONCLAW_BASE_URL",
         "IRONCLAW_API_TOKEN"
       ],
-      "production": "https://elliot-braem-4948-every-plugin-ironclaw-ironclaw--f398811c4-ze.zephyrcloud.app",
+      "production": "https://elliot-braem-4953-every-plugin-ironclaw-ironclaw--b12b0ee7d-ze.zephyrcloud.app",
       "integrity": "sha384-Qa3PzOv3QpwTcmsPeaaIg8fCHwDRK5c9AWFognsEUS49YnDHT7K3Ekxv4+xGaW9f"
     }
   }

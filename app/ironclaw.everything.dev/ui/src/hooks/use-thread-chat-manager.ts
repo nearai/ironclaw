@@ -115,6 +115,21 @@ function handleChunk(threadId: string, chunk: any) {
   if (chunk.type === "RUN_FINISHED" || chunk.type === "RUN_ERROR") {
     session.runId = null;
     session.pendingApprovals = [];
+    for (const msg of session.messages) {
+      if (msg.role !== "assistant") continue;
+      for (let i = msg.parts.length - 1; i >= 0; i--) {
+        const p = msg.parts[i] as any;
+        if (p.type !== "tool-call") continue;
+        const next = msg.parts[i + 1] as any;
+        if (next?.type === "tool-result" && next.toolCallId === p.id) continue;
+        msg.parts.splice(i + 1, 0, {
+          type: "tool-result",
+          toolCallId: p.id,
+          content: "",
+          state: chunk.type === "RUN_ERROR" ? "error" : "complete",
+        });
+      }
+    }
     session.version++;
     notify(threadId);
     return;
@@ -185,6 +200,21 @@ function handleChunk(threadId: string, chunk: any) {
     return;
   }
 
+  if (chunk.type === "TOOL_CALL_ARGS") {
+    for (const msg of session.messages) {
+      if (msg.role !== "assistant") continue;
+      for (const p of msg.parts as any[]) {
+        if (p.type === "tool-call" && p.id === chunk.toolCallId) {
+          p.arguments = chunk.args ?? chunk.delta ?? p.arguments;
+          session.version++;
+          notify(threadId);
+          return;
+        }
+      }
+    }
+    return;
+  }
+
   if (chunk.type === "TOOL_CALL_END") {
     for (const msg of session.messages) {
       if (msg.role !== "assistant") continue;
@@ -193,6 +223,7 @@ function handleChunk(threadId: string, chunk: any) {
         if (p.type !== "tool-call" || p.id !== chunk.toolCallId) continue;
         const next = msg.parts[i + 1] as any;
         if (next?.type === "tool-result" && next.toolCallId === chunk.toolCallId) return;
+        p.state = chunk.state === "error" ? "input-complete" : "complete";
         msg.parts.splice(i + 1, 0, {
           type: "tool-result",
           toolCallId: chunk.toolCallId,

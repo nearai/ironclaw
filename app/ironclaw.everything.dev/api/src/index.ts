@@ -273,8 +273,8 @@ export default createPlugin.withPlugins<PluginsClient>()({
               },
             });
           }
-        } catch {
-          // DB error, continue
+        } catch (e) {
+          console.error("[auth] DB credential lookup error:", e);
         }
       }
 

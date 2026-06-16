@@ -271,7 +271,7 @@ function ToolRunRow({ item, verbose }: { item: ToolItem; verbose?: boolean }) {
         type="button"
         onClick={() => hasDetails && setExpanded(!expanded)}
         aria-expanded={expanded}
-        className="v2-button flex w-full items-center gap-2 border-0 bg-transparent px-1 py-1.5 text-left text-xs"
+        className="v2-button flex w-full min-h-[28px] items-center gap-2 border-0 bg-transparent px-1 py-1.5 text-left text-xs"
       >
         <span className={cn("h-2 w-2 shrink-0 rounded-full", dotClass)} />
         <span className="shrink-0 font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
@@ -279,7 +279,7 @@ function ToolRunRow({ item, verbose }: { item: ToolItem; verbose?: boolean }) {
         </span>
         <Icon size={10} className="shrink-0 text-muted-foreground" />
         <span className="min-w-0 truncate font-medium text-foreground/80">{displayName}</span>
-        <span className="ml-auto flex shrink-0 items-center gap-1.5">
+        <span className="ml-auto flex shrink-0 items-center gap-1">
           {status === "running" && (
             <Loader2 size={10} className="animate-spin text-muted-foreground" />
           )}
@@ -287,12 +287,17 @@ function ToolRunRow({ item, verbose }: { item: ToolItem; verbose?: boolean }) {
             <CheckCircle2 size={10} className="shrink-0 text-[color:var(--near-green)]" />
           )}
           {status === "error" && <AlertCircle size={10} className="shrink-0 text-destructive" />}
-          {hasDetails &&
-            (expanded ? (
-              <ChevronDown size={10} className="shrink-0 text-muted-foreground/50" />
+          <span className="inline-flex w-3 shrink-0 justify-center">
+            {hasDetails ? (
+              expanded ? (
+                <ChevronDown size={10} className="text-muted-foreground/50" />
+              ) : (
+                <ChevronRight size={10} className="text-muted-foreground/50" />
+              )
             ) : (
-              <ChevronRight size={10} className="shrink-0 text-muted-foreground/50" />
-            ))}
+              <span className="w-[10px]" />
+            )}
+          </span>
         </span>
       </button>
       {expanded && hasDetails && (

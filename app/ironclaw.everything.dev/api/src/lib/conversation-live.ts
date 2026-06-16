@@ -59,7 +59,8 @@ function resolveToolCallId(
     (preview?.invocationId ||
       preview?.timelineMessageId ||
       activity?.invocationId ||
-      activityRecord.timelineMessageId) ??
+      activityRecord.timelineMessageId ||
+      activityRecord.invocation_id) ??
     undefined
   );
 }
@@ -155,7 +156,6 @@ export function createThreadChatBridge(services: { ironclaw: (ctx: any) => any }
     });
     const ackRunId: string | undefined = ack.runId ?? ack.activeRunId;
     const eventCursor = ack.eventCursor;
-
     const upstream = await ic.threads.streamEvents({
       id: threadId,
       afterCursor: String(eventCursor),
@@ -223,6 +223,66 @@ export function createThreadChatBridge(services: { ironclaw: (ctx: any) => any }
         result,
       });
 
+    const closeActiveToolCalls = async function* (runId?: string): AsyncGenerator<LiveChunk> {
+      if (activeToolCalls.size === 0) return;
+      try {
+        const raw = await ic.threads.getTimeline({ id: threadId, limit: 30 });
+        const entries: any[] = raw.data ?? [];
+        for (const invocationId of activeToolCalls) {
+          const preview = pendingPreviews.get(invocationId);
+          const resultEntry = entries.find((e: any) => {
+            try {
+              const c = JSON.parse(e.content ?? "");
+              return (c.invocation_id ?? c.invocationId) === invocationId;
+            } catch { return false; }
+          });
+          if (resultEntry) {
+            const c = JSON.parse(resultEntry.content);
+            const title = c.title ?? preview?.title ?? "tool";
+            const envelope = serializeToolResultEnvelope({
+              output: c.output ?? c.output_preview ?? c.output_summary ?? preview?.outputSummary ?? preview?.outputPreview ?? "",
+              outputKind: c.output_kind ?? c.outputKind ?? preview?.outputKind ?? null,
+              truncated: Boolean(c.truncated ?? preview?.truncated),
+              inputSummary: c.input_summary ?? c.inputSummary ?? preview?.inputSummary ?? null,
+              title,
+            });
+            yield emitToolEnd(invocationId, title, "complete", envelope, c.input_summary ?? preview?.inputSummary ?? "", runId);
+          } else if (preview) {
+            const title = preview.title ?? "tool";
+            const envelope = serializeToolResultEnvelope({
+              output: preview.outputSummary ?? preview.outputPreview ?? "",
+              outputKind: preview.outputKind ?? null,
+              truncated: Boolean(preview.truncated),
+              inputSummary: preview.inputSummary ?? null,
+              title,
+            });
+            yield emitToolEnd(invocationId, title, "complete", envelope, preview.inputSummary ?? "", runId);
+          } else {
+            yield emitToolEnd(invocationId, "tool", "complete", "", "", runId);
+          }
+        }
+      } catch {
+        for (const invocationId of activeToolCalls) {
+          const preview = pendingPreviews.get(invocationId);
+          const title = preview?.title ?? preview?.capabilityId ?? "tool";
+          if (preview) {
+            const envelope = serializeToolResultEnvelope({
+              output: preview.outputSummary ?? preview.outputPreview ?? "",
+              outputKind: preview.outputKind ?? null,
+              truncated: Boolean(preview.truncated),
+              inputSummary: preview.inputSummary ?? null,
+              title,
+            });
+            yield emitToolEnd(invocationId, title, "complete", envelope, preview.inputSummary ?? "", runId);
+          } else {
+            yield emitToolEnd(invocationId, title, "complete", "", "", runId);
+          }
+        }
+      }
+      activeToolCalls.clear();
+      pendingPreviews.clear();
+    };
+
     try {
       for await (const raw of upstream as AsyncIterable<ChatEvent>) {
         if (signal?.aborted) break;
@@ -274,10 +334,11 @@ export function createThreadChatBridge(services: { ironclaw: (ctx: any) => any }
 
         if (type === "capability_activity") {
           const activity = raw.activity;
+          const activityRecord = activity as unknown as Record<string, unknown>;
           const invocationId = resolveToolCallId(undefined, activity);
-          const capabilityId = activity?.capabilityId;
+          const capabilityId = (activityRecord.capabilityId ?? activityRecord.capability_id) as string | undefined;
           const status = activity?.status;
-          const errorKind = activity?.errorKind;
+          const errorKind = (activityRecord.errorKind ?? activityRecord.error_kind) as string | undefined;
 
           if (!invocationId || !capabilityId) continue;
 
@@ -416,6 +477,7 @@ export function createThreadChatBridge(services: { ironclaw: (ctx: any) => any }
               messageId: msgId,
             });
           }
+          for await (const chunk of closeActiveToolCalls(eventRunId)) { yield chunk; }
           yield createChunk({
             type: "RUN_FINISHED",
             threadId,
@@ -441,6 +503,7 @@ export function createThreadChatBridge(services: { ironclaw: (ctx: any) => any }
           const chunk = emitRunStarted(eventRunId);
           if (chunk) yield chunk;
           yield emitCustom("ironclaw.cancelled", { runId: eventRunId, ...response }, eventRunId);
+          for await (const chunk of closeActiveToolCalls(eventRunId)) { yield chunk; }
           yield createChunk({
             type: "RUN_FINISHED",
             threadId,
@@ -642,6 +705,7 @@ export function createThreadChatBridge(services: { ironclaw: (ctx: any) => any }
                 }
                 if (st === "cancelled") {
                   yield emitCustom("ironclaw.cancelled", { runId }, runId);
+                  for await (const chunk of closeActiveToolCalls(runId)) { yield chunk; }
                   yield createChunk({ type: "RUN_FINISHED", threadId, runId, finishReason: null });
                   return;
                 }
@@ -679,6 +743,7 @@ export function createThreadChatBridge(services: { ironclaw: (ctx: any) => any }
                   }
                 }
                 yield emitCustom("ironclaw.finished", { runId, status: st }, runId);
+                for await (const chunk of closeActiveToolCalls(runId)) { yield chunk; }
                 yield createChunk({ type: "RUN_FINISHED", threadId, runId, finishReason: "stop" });
                 return;
               }
@@ -725,6 +790,7 @@ export function createThreadChatBridge(services: { ironclaw: (ctx: any) => any }
             // reconcile failed, proceed
           }
         }
+        for await (const chunk of closeActiveToolCalls(ackRunId)) { yield chunk; }
         yield createChunk({
           type: "RUN_FINISHED",
           threadId,
