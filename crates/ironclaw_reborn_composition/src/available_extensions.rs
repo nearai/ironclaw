@@ -142,10 +142,10 @@ fn onboarding(package_id: &str) -> Option<LifecycleExtensionOnboarding> {
             "After authorization completes, activate Notion to publish its MCP tools.",
         )),
         "nearai" => Some(onboarding_message(
-            "NEAR AI needs an API key before its MCP tools can run.",
-            Some("Paste the NEAR AI API key IronClaw should use."),
+            "NEAR AI MCP uses the NEAR AI credentials configured for the assistant. Activate it to publish its MCP tools.",
+            Some("No separate MCP credentials are required."),
             None,
-            "After saving the API key, activate NEAR AI to publish its MCP tools.",
+            "Activate NEAR AI to publish its MCP tools.",
         )),
         "web-access" => Some(onboarding_message(
             "Web Access does not need credentials. Activate it to make web search and saved-result retrieval tools available.",
@@ -184,6 +184,10 @@ fn runtime_kind(runtime: &ExtensionRuntime) -> LifecycleExtensionRuntimeKind {
 fn credential_requirements(
     package: &AvailableExtensionPackage,
 ) -> Vec<LifecycleExtensionCredentialRequirement> {
+    if package.package_ref.id.as_str() == "nearai" {
+        return Vec::new();
+    }
+
     let mut groups: Vec<CredentialRequirementGroup> = Vec::new();
     for capability in &package.package.manifest.capabilities {
         for requirement in &capability.runtime_credentials {
@@ -1698,7 +1702,7 @@ mod tests {
                 "Google Calendar needs Google OAuth authorization",
             ),
             ("notion", "Notion needs OAuth authorization"),
-            ("nearai", "NEAR AI needs an API key"),
+            ("nearai", "NEAR AI MCP uses the NEAR AI credentials"),
             ("web-access", "Web Access does not need credentials"),
         ] {
             let package_ref =
@@ -1740,7 +1744,7 @@ mod tests {
                         }),
                     "{extension_id} configure next step should describe post-authorization activation"
                 );
-            } else if matches!(extension_id, "github" | "nearai") {
+            } else if extension_id == "github" {
                 assert!(
                     onboarding
                         .credential_instructions
@@ -1762,6 +1766,15 @@ mod tests {
                         }),
                     "{extension_id} configure next step should describe activation after saving credentials"
                 );
+            } else if extension_id == "nearai" {
+                assert_eq!(
+                    onboarding.credential_instructions.as_deref(),
+                    Some("No separate MCP credentials are required.")
+                );
+                assert_eq!(
+                    onboarding.credential_next_step.as_deref(),
+                    Some("Activate NEAR AI to publish its MCP tools.")
+                );
             } else {
                 assert!(
                     onboarding
@@ -1772,6 +1785,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn bundled_nearai_keeps_runtime_credentials_out_of_browser_setup_summary() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").unwrap();
+        let package = catalog.resolve(&package_ref).unwrap();
+        let summary = package.summary();
+
+        assert!(
+            summary.credential_requirements.is_empty(),
+            "NEAR AI MCP uses assistant-level NEAR AI credentials and must not \
+             project an extension credential setup prompt"
+        );
+
+        let search = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "nearai.web_search")
+            .expect("nearai web search capability");
+        assert_eq!(search.runtime_credentials.len(), 1);
+        assert_eq!(
+            search.runtime_credentials[0].handle,
+            ironclaw_host_api::SecretHandle::new("llm_nearai_api_key").unwrap()
+        );
     }
 
     #[test]
