@@ -8,5 +8,5 @@ publish = false
 [dependencies]
 thiserror = "2"
 tracing = "0.1"
-wasmtime = { version = "44.0.2", features = ["component-model"] }
-wasmtime-wasi = "44.0.2"
+wasmtime = { version = "44.0.3", features = ["component-model"] }
+wasmtime-wasi = "44.0.3"

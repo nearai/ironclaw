@@ -1067,6 +1067,14 @@ impl RebornRuntime {
         self.turn_coordinator.clone()
     }
 
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) fn auth_challenge_provider(&self) -> Option<Arc<dyn crate::AuthChallengeProvider>> {
+        self.services
+            .product_auth
+            .as_ref()
+            .and_then(|product_auth| product_auth.as_auth_challenge_provider())
+    }
+
     pub(crate) fn webui_event_stream(&self) -> Arc<dyn ProjectionStream> {
         self.projection_services.webui_event_stream()
     }
@@ -1127,15 +1135,6 @@ impl RebornRuntime {
                 reason: format!("outbound delivery target provider lookup failed: {error}"),
             })
     }
-
-    #[cfg(feature = "slack-v2-host-beta")]
-    pub(crate) fn auth_challenge_provider(&self) -> Option<Arc<dyn crate::AuthChallengeProvider>> {
-        self.services
-            .product_auth
-            .as_ref()
-            .and_then(|product_auth| product_auth.as_auth_challenge_provider())
-    }
-
     /// Wire the triggered-run delivery hook into the already-spawned trigger
     /// poller. Must be called after [`build_reborn_runtime`] returns and after
     /// the hook itself is constructed (e.g. inside

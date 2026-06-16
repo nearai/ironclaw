@@ -142,6 +142,15 @@ impl PendingApprovalResume {
 /// The `prior_approval` field collapses the two formerly-independent
 /// `approval_request_id`/`correlation_id` options into a typed all-or-none
 /// value: both sub-fields are present together or neither is.
+///
+/// When `disposition` is `Some(Denied)`, the executor surfaces a model-visible
+/// authorization failure for the parked call and SKIPS re-dispatch; in that
+/// case `resume_token` and `replay` are unused.
+///
+/// Field-name note: `PendingAuthResume::disposition` is intentionally kept
+/// short because the enclosing type already scopes it to auth-resume context.
+/// Turn-layer structs that carry a similar field from a wider scope use the
+/// qualified name `auth_resume_disposition` to avoid ambiguity.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingAuthResume {
     pub gate_ref: LoopGateRef,
@@ -167,6 +176,10 @@ pub struct PendingAuthResume {
     /// a consumed or cross-run input ref after the user completes auth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay: Option<ironclaw_turns::run_profile::CapabilityAuthResumeReplay>,
+    /// Set when the user denied this auth gate. The loop surfaces a
+    /// model-visible failure for the parked call instead of re-dispatching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<ironclaw_turns::AuthResumeDisposition>,
 }
 
 impl LoopExecutionState {
@@ -262,7 +275,8 @@ pub enum CheckpointPayloadError {
 mod tests {
     use ironclaw_host_api::{CapabilityId, TenantId, ThreadId};
     use ironclaw_turns::{
-        AgentLoopDriverDescriptor, RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
+        AgentLoopDriverDescriptor, AuthResumeDisposition, RunProfileId, RunProfileVersion, TurnId,
+        TurnRunId, TurnScope,
         run_profile::{
             CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy, CheckpointSchemaId,
             ConcurrencyClass, ContextProfileId, LoopDriverId, ModelProfileId,
@@ -716,6 +730,7 @@ mod tests {
             resume_token: None,
             prior_approval: None,
             replay: None,
+            disposition: None,
         });
         let payload = encode_payload(&state);
         let restored =
@@ -724,6 +739,44 @@ mod tests {
         assert_eq!(
             restored.pending_auth_resume, state.pending_auth_resume,
             "PendingAuthResume must survive checkpoint encode/decode"
+        );
+    }
+
+    #[test]
+    fn pending_auth_resume_denied_disposition_round_trips_through_checkpoint_payload() {
+        // Regression: the `Some(Denied)` disposition stamped by `planned_driver`
+        // before the capability stage must survive the checkpoint encode/decode
+        // cycle so that a resumed run still sees the denial.
+        let context = test_run_context();
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.pending_auth_resume = Some(PendingAuthResume {
+            gate_ref: LoopGateRef::new("gate:auth-denied-test").expect("valid gate ref"),
+            capability_id: CapabilityId::new("gsuite.calendar.list_events").expect("valid cap id"),
+            surface_version: CapabilitySurfaceVersion::new("surface-v1")
+                .expect("valid surface version"),
+            input_ref: CapabilityInputRef::new("input:denied-test").expect("valid input ref"),
+            effective_capability_ids: vec![],
+            provider_replay: None,
+            resume_token: None,
+            prior_approval: None,
+            replay: None,
+            disposition: Some(AuthResumeDisposition::Denied),
+        });
+        let payload = encode_payload(&state);
+        let restored =
+            LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::BeforeBlock)
+                .expect("decode checkpoint payload");
+        assert_eq!(
+            restored
+                .pending_auth_resume
+                .as_ref()
+                .and_then(|r| r.disposition.as_ref()),
+            Some(&AuthResumeDisposition::Denied),
+            "PendingAuthResume with Denied disposition must survive checkpoint encode/decode"
+        );
+        assert_eq!(
+            restored.pending_auth_resume, state.pending_auth_resume,
+            "entire PendingAuthResume must round-trip without loss when disposition is Some(Denied)"
         );
     }
 
@@ -832,6 +885,7 @@ mod tests {
                 input: serde_json::json!({"query": "is:unread"}),
                 estimate: ResourceEstimate::default(),
             }),
+            disposition: None,
         });
 
         // Round-trip: all optional fields must survive encode/decode.
@@ -877,6 +931,11 @@ mod tests {
         auth_resume.remove("resume_token");
         auth_resume.remove("prior_approval");
         auth_resume.remove("replay");
+        // Also strip `disposition` — it was added later and must also default
+        // to None when absent.  Stripping it here ensures that a future
+        // accidental removal of `#[serde(default)]` on that field would cause
+        // this test to fail with a decode error rather than silently passing.
+        auth_resume.remove("disposition");
         let stripped_payload = serde_json::to_vec(&value).expect("re-encode");
         let from_legacy = LoopExecutionState::from_checkpoint_payload(
             &stripped_payload,
@@ -897,6 +956,10 @@ mod tests {
         assert!(
             legacy_pending.replay.is_none(),
             "replay absent from checkpoint payload must decode to None"
+        );
+        assert!(
+            legacy_pending.disposition.is_none(),
+            "disposition absent from checkpoint payload must decode to None"
         );
     }
 }
