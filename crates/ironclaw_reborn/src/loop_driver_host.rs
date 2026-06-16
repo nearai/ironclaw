@@ -1562,9 +1562,9 @@ where
         // Stamped once per loop spawn; a resume creates a new host and restamps.
         .with_runtime_context(LoopRuntimeContext {
             loop_started_at_utc: chrono::Utc::now(),
-            user_timezone: None,
             communication,
             product_context: run_context.product_context.clone(),
+            user_profile: None,
         });
         let mut prompt: Arc<dyn LoopPromptPort> = Arc::new(prompt_port);
         if let Some(dispatcher) = per_build_dispatcher.as_ref() {
