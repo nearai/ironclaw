@@ -473,6 +473,19 @@ const MAX_FAILURE_REASON_LEN: usize = 240;
 #[serde(try_from = "String", into = "String")]
 pub struct SanitizedFailureReason(String);
 
+/// Folds Trojan-source display hazards to a space: zero-width characters
+/// (U+200B–U+200F, U+FEFF) and bidirectional overrides/isolates
+/// (U+202A–U+202E, U+2066–U+2069). These survive `char::is_control` /
+/// `char::is_whitespace` but can visually reorder or hide text in a UI/log, so
+/// a persisted reason must never carry them. See <https://trojansource.codes/>.
+fn is_unsafe_display_char(ch: char) -> bool {
+    matches!(ch,
+        '\u{200B}'..='\u{200F}'
+        | '\u{202A}'..='\u{202E}'
+        | '\u{2066}'..='\u{2069}'
+        | '\u{FEFF}')
+}
+
 impl SanitizedFailureReason {
     /// Sanitize arbitrary text into a bounded display reason. Returns `None`
     /// when the input is empty after sanitization.
@@ -480,7 +493,7 @@ impl SanitizedFailureReason {
         let mut collapsed = String::new();
         let mut last_was_space = false;
         for ch in raw.chars() {
-            let mapped = if ch.is_control() || ch.is_whitespace() {
+            let mapped = if ch.is_control() || ch.is_whitespace() || is_unsafe_display_char(ch) {
                 ' '
             } else {
                 ch
@@ -1512,6 +1525,10 @@ impl TriggerRepository for InMemoryTriggerRepository {
                 run.run_id = Some(request.run_id);
                 run.status = request.status;
                 run.completed_at = Some(completed_at);
+                // Clearing a fire that reached a non-error terminal/Ok state must
+                // drop any stale failure reason from an earlier retryable failure
+                // on the same slot, matching the SQL clear-on-overwrite behavior.
+                run.failure_reason = None;
             })
             .or_insert_with(|| {
                 let mut run = TriggerRunRecord::running(
@@ -1918,6 +1935,25 @@ mod tests {
         let reason = SanitizedFailureReason::sanitize("  trigger\tfire\n\nnot   authorized  ")
             .expect("non-empty");
         assert_eq!(reason.as_str(), "trigger fire not authorized");
+    }
+
+    #[test]
+    fn sanitized_failure_reason_strips_zero_width_and_bidi_override_chars() {
+        // Trojan-source hazards: bidi override (U+202E), zero-width space
+        // (U+200B), zero-width joiner (U+200D), BOM (U+FEFF), and a
+        // pop-directional-isolate (U+2069). All must fold to whitespace and
+        // collapse, leaving only the visible, ordered text.
+        let reason = SanitizedFailureReason::sanitize(
+            "trigger\u{202E}fire\u{200B}not\u{200D}\u{FEFF}authorized\u{2069}",
+        )
+        .expect("non-empty");
+        assert_eq!(reason.as_str(), "trigger fire not authorized");
+        for hazard in reason.as_str().chars() {
+            assert!(
+                !is_unsafe_display_char(hazard),
+                "sanitized reason must not retain Trojan-source char {hazard:?}"
+            );
+        }
     }
 
     #[test]

@@ -210,11 +210,101 @@ fn print_apply_summary(report: &TriggerAccessRepairReport) {
             report.reseeded
         );
     }
+    if report.skipped_revoked > 0 {
+        println!(
+            "Skipped {} revoked creator(s) (use --reassign-to* to recover).",
+            report.skipped_revoked
+        );
+    }
     if report.reassigned > 0 {
         let target = report.reassigned_to.as_deref().unwrap_or("(unknown)");
         println!(
             "\nReassigned {} trigger(s) to `{target}` and seeded access.",
             report.reassigned
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn command(
+        reseed: bool,
+        reassign_to: Option<&str>,
+        reassign_to_current_sso_owner: bool,
+    ) -> RepairAccessCommand {
+        RepairAccessCommand {
+            reseed,
+            reassign_to: reassign_to.map(str::to_string),
+            reassign_to_current_sso_owner,
+            yes: false,
+        }
+    }
+
+    #[test]
+    fn reseed_with_reassign_to_is_rejected() {
+        let command = command(true, Some("current-owner"), false);
+        assert!(
+            command.resolve_action().is_err(),
+            "--reseed cannot be combined with --reassign-to"
+        );
+    }
+
+    #[test]
+    fn two_reassign_flags_are_rejected() {
+        let command = command(false, Some("current-owner"), true);
+        assert!(
+            command.resolve_action().is_err(),
+            "--reassign-to and --reassign-to-current-sso-owner are mutually exclusive"
+        );
+    }
+
+    #[test]
+    fn invalid_reassign_to_user_id_is_rejected() {
+        // An empty string is not a valid `UserId`.
+        let command = command(false, Some(""), false);
+        assert!(
+            command.resolve_action().is_err(),
+            "an invalid --reassign-to user id must be rejected"
+        );
+    }
+
+    #[test]
+    fn valid_reassign_to_yields_reassign_action() {
+        let command = command(false, Some("current-owner"), false);
+        match command.resolve_action().expect("valid reassign") {
+            TriggerAccessRepairAction::Reassign(user_id) => {
+                assert_eq!(user_id.as_str(), "current-owner");
+            }
+            other => panic!("expected Reassign, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reassign_to_current_sso_owner_yields_that_variant() {
+        let command = command(false, None, true);
+        assert!(matches!(
+            command.resolve_action().expect("valid sso owner reassign"),
+            TriggerAccessRepairAction::ReassignToCurrentSsoOwner
+        ));
+    }
+
+    #[test]
+    fn reseed_yields_reseed_action() {
+        let command = command(true, None, false);
+        assert!(matches!(
+            command.resolve_action().expect("valid reseed"),
+            TriggerAccessRepairAction::Reseed
+        ));
+    }
+
+    #[test]
+    fn no_flags_yields_report_action() {
+        let command = command(false, None, false);
+        assert!(matches!(
+            command.resolve_action().expect("valid report"),
+            TriggerAccessRepairAction::Report
+        ));
     }
 }

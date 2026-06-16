@@ -1007,6 +1007,7 @@ registerPack("ko", {
   "automations.detail.noCurrentRun": "활성 실행 없음",
   "automations.detail.noRuns": "이 자동화는 아직 표시할 실행을 생성하지 않았습니다.",
   "automations.detail.noThread": "연결된 스레드 없음",
+  "automations.detail.failureReason": "실패:",
   "automations.detail.openRun": "실행 열기",
   "automations.detail.recentRuns": "최근 실행",
   "automations.detail.run": "실행",

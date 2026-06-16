@@ -1030,7 +1030,7 @@ async fn upsert_run_history(
                     status = EXCLUDED.status,
                     submitted_at = EXCLUDED.submitted_at,
                     completed_at = EXCLUDED.completed_at,
-                    failure_reason = COALESCE(EXCLUDED.failure_reason, {TRIGGER_RUN_TABLE}.failure_reason)"
+                    failure_reason = EXCLUDED.failure_reason"
             ),
             &[
                 &run.tenant_id.as_str(),
@@ -1080,7 +1080,7 @@ async fn complete_run_history(
                     run_id = COALESCE(trigger_run_history.run_id, EXCLUDED.run_id),
                     status = EXCLUDED.status,
                     completed_at = EXCLUDED.completed_at,
-                    failure_reason = COALESCE(EXCLUDED.failure_reason, trigger_run_history.failure_reason)"
+                    failure_reason = EXCLUDED.failure_reason"
             ),
             &[
                 &tenant_id.as_str(),

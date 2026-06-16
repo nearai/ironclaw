@@ -1007,6 +1007,7 @@ registerPack("zh-CN", {
   "automations.detail.noCurrentRun": "没有正在运行的任务",
   "automations.detail.noRuns": "此自动化尚未产生任何可见运行。",
   "automations.detail.noThread": "未附加会话",
+  "automations.detail.failureReason": "失败：",
   "automations.detail.openRun": "打开运行",
   "automations.detail.recentRuns": "最近运行",
   "automations.detail.run": "运行",

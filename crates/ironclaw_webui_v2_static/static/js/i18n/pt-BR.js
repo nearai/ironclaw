@@ -1007,6 +1007,7 @@ registerPack("pt-BR", {
   "automations.detail.noCurrentRun": "Nenhuma execução ativa",
   "automations.detail.noRuns": "Esta automação ainda não produziu execuções visíveis.",
   "automations.detail.noThread": "Nenhuma conversa anexada",
+  "automations.detail.failureReason": "Falhou:",
   "automations.detail.openRun": "Abrir execução",
   "automations.detail.recentRuns": "Execuções recentes",
   "automations.detail.run": "execução",

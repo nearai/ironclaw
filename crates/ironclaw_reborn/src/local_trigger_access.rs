@@ -40,11 +40,14 @@ pub enum LocalTriggerAccessSource {
     LocalDevSsoBootstrap,
     /// CLI `run` default-owner bootstrap path.
     LocalDevRunBootstrap,
-    /// Trigger-creation bootstrap path. Seeded by the trigger create hook for
-    /// the exact `(tenant, creator, agent, project)` scope of a new trigger so
-    /// the access row's lifetime tracks the trigger's lifetime instead of the
-    /// volatile login/boot reconcile. A distinct source keeps these rows immune
-    /// to env/sso/run reconcile, which only deactivates rows of its own source.
+    /// Trigger-fire bootstrap path. There is NO trigger-create hook seeding
+    /// this; rows are seeded LAZILY for the exact
+    /// `(tenant, creator, agent, project)` scope — by fire-time self-heal (the
+    /// `TriggerFireAccessChecker` on the first fire of an `Absent`-scope
+    /// trigger) and by the operator repair tool. Using a distinct source keeps
+    /// these rows immune to the env/sso/run reconcile, which only deactivates
+    /// rows of its own source, so a trigger's fire access is not silently
+    /// revoked by a later login/boot reconcile.
     LocalDevTriggerCreateBootstrap,
 }
 

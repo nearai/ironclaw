@@ -1007,6 +1007,7 @@ registerPack("uk", {
   "automations.detail.noCurrentRun": "Немає активного запуску",
   "automations.detail.noRuns": "Ця автоматизація ще не створила видимих запусків.",
   "automations.detail.noThread": "Немає пов’язаної гілки",
+  "automations.detail.failureReason": "Помилка:",
   "automations.detail.openRun": "Відкрити запуск",
   "automations.detail.recentRuns": "Останні запуски",
   "automations.detail.run": "запуск",

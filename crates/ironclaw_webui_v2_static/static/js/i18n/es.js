@@ -1008,6 +1008,7 @@ registerPack("es", {
   "automations.detail.noCurrentRun": "No hay ejecución activa",
   "automations.detail.noRuns": "Esta automatización aún no ha generado ejecuciones visibles.",
   "automations.detail.noThread": "No hay conversación adjunta",
+  "automations.detail.failureReason": "Error:",
   "automations.detail.openRun": "Abrir ejecución",
   "automations.detail.recentRuns": "Ejecuciones recientes",
   "automations.detail.run": "ejecución",
