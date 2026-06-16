@@ -14,6 +14,7 @@ import {
   attachmentPreviewMode,
   formatBytes,
   isAcceptedFile,
+  normalizeStagedAttachment,
   stageFiles,
   toRenderAttachment,
   toWireAttachment,
@@ -231,4 +232,59 @@ test("stageFiles rejects a file whose reader yields a non-string result", async 
   });
   assert.deepEqual(staged, []);
   assert.deepEqual(errors, ["chat.attachmentReadFailed"]);
+});
+
+test("normalizeStagedAttachment passes camelCase (web stageFiles) through unchanged", () => {
+  const att = {
+    id: "staged-1",
+    filename: "report.pdf",
+    mimeType: "application/pdf",
+    kind: "document",
+    sizeBytes: 2048,
+    sizeLabel: "2.0 KB",
+    dataBase64: "QkFTRTY0",
+    previewUrl: null,
+  };
+  const out = normalizeStagedAttachment(att);
+  assert.equal(out.mimeType, "application/pdf");
+  assert.equal(out.dataBase64, "QkFTRTY0");
+  assert.equal(out.sizeBytes, 2048);
+  assert.equal(out.filename, "report.pdf");
+  assert.equal(out.kind, "document");
+});
+
+test("normalizeStagedAttachment maps desktop snake_case (useComposerAttachments) to the canonical shape", () => {
+  // Desktop extractable doc: extracted text already swapped into base64 with a
+  // text/plain mime by useComposerAttachments.
+  const att = {
+    id: "att-3",
+    filename: "services-template.docx",
+    mime_type: "text/plain",
+    base64: "TVNBLUNMQVVTRS0xNw==",
+    size: 4096,
+  };
+  const out = normalizeStagedAttachment(att);
+  assert.equal(out.mimeType, "text/plain", "snake mime_type maps to mimeType");
+  assert.equal(out.dataBase64, "TVNBLUNMQVVTRS0xNw==", "snake base64 maps to dataBase64");
+  assert.equal(out.sizeBytes, 4096, "snake size maps to sizeBytes");
+  assert.equal(out.filename, "services-template.docx");
+  assert.equal(out.kind, attachmentKindFromMime("text/plain"), "kind derived from mime when absent");
+  assert.equal(typeof out.sizeLabel, "string");
+});
+
+test("normalizeStagedAttachment output survives toWireAttachment + toRenderAttachment for desktop input", () => {
+  const out = normalizeStagedAttachment({
+    filename: "scope-summary.html",
+    mime_type: "text/html",
+    base64: "PGgxPlNjb3BlPC9oMT4=",
+    size: 64,
+  });
+  const wire = toWireAttachment(out);
+  assert.equal(wire.mime_type, "text/html");
+  assert.equal(wire.data_base64, "PGgxPlNjb3BlPC9oMT4=");
+  assert.equal(wire.filename, "scope-summary.html");
+  const render = toRenderAttachment(out);
+  assert.equal(render.mime_type, "text/html");
+  assert.equal(render.filename, "scope-summary.html");
+  assert.ok(render.kind, "render attachment carries a kind for the chip");
 });

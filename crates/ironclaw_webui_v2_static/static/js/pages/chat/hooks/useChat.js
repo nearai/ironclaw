@@ -19,7 +19,11 @@ import {
   recordAcceptedMessageRef,
   removePending,
 } from "../lib/pending-messages.js";
-import { toRenderAttachment, toWireAttachment } from "../lib/attachments.js";
+import {
+  normalizeStagedAttachment,
+  toRenderAttachment,
+  toWireAttachment,
+} from "../lib/attachments.js";
 import { buildDurableAttachmentBlock } from "../lib/history-messages.js";
 import { useHistory } from "./useHistory.js";
 import { useSSE } from "./useSSE.js";
@@ -286,8 +290,12 @@ export function useChat(threadId) {
   // hook can route to `/chat/<id>` after the first send.
   const send = React.useCallback(
     async (content, opts = {}) => {
-      const { threadId: targetThreadId, attachments: stagedAttachments = [] } =
+      const { threadId: targetThreadId, attachments: rawStagedAttachments = [] } =
         opts;
+      // Normalize to the canonical camelCase shape so the web (stageFiles) and
+      // desktop (useComposerAttachments) composer payloads both feed the wire,
+      // render, and durable-manifest paths correctly.
+      const stagedAttachments = rawStagedAttachments.map(normalizeStagedAttachment);
       const wireAttachments = stagedAttachments.map(toWireAttachment);
       const renderAttachments = stagedAttachments.map(toRenderAttachment);
 
@@ -302,6 +310,10 @@ export function useChat(threadId) {
       let contentForSend = content;
       let sendAttachments = wireAttachments;
       if (desktopRuntime && stagedAttachments.length > 0) {
+        // stagedAttachments are already normalized to the camelCase shape above,
+        // so the durable manifest carries the real type + embedded extracted
+        // text on the desktop path (where the model reads the document only
+        // through this inlined block).
         const durableSourceAttachments = stagedAttachments.map((att) => ({
           name: att.filename,
           mime_type: att.mimeType,

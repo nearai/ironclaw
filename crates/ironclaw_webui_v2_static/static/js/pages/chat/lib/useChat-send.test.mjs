@@ -4,7 +4,11 @@ import test from "node:test";
 import vm from "node:vm";
 
 import { messagesFromTimeline } from "./history-messages.js";
-import { toRenderAttachment, toWireAttachment } from "./attachments.js";
+import {
+  normalizeStagedAttachment,
+  toRenderAttachment,
+  toWireAttachment,
+} from "./attachments.js";
 import {
   looksLikeChannelConnectCommand,
   resolveChannelConnectCommand,
@@ -73,6 +77,7 @@ test("useChat.send: accepted ref reconciles pending message on timeline reload",
     Math,
     React: createReactStub(),
     addPending,
+    normalizeStagedAttachment,
     toRenderAttachment,
     toWireAttachment,
     cancelRunRequest: async () => {},
@@ -169,6 +174,7 @@ function createSendCaptureContext() {
     Math,
     React: createReactStub(),
     addPending,
+    normalizeStagedAttachment,
     toRenderAttachment,
     toWireAttachment,
     cancelRunRequest: async () => {},
@@ -317,6 +323,7 @@ test("useChat.cancelRun clears local state before cancel request resolves", asyn
       setCalls: stateUpdates,
     }),
     addPending,
+    normalizeStagedAttachment,
     toRenderAttachment,
     toWireAttachment,
     cancelRunRequest: async (request) => {
@@ -397,6 +404,7 @@ test("useChat.cancelRun completion does not clear a newer run", async () => {
       setCalls: stateUpdates,
     }),
     addPending,
+    normalizeStagedAttachment,
     toRenderAttachment,
     toWireAttachment,
     cancelRunRequest: async () =>
@@ -475,6 +483,7 @@ test("useChat.send: channel connect requests return an action without submitting
     Math,
     React: createReactStub(),
     addPending,
+    normalizeStagedAttachment,
     toRenderAttachment,
     toWireAttachment,
     cancelRunRequest: async () => {},
@@ -549,6 +558,7 @@ test("useChat.send: unmatched channel connect requests submit the prompt", async
     Math,
     React: createReactStub(),
     addPending,
+    normalizeStagedAttachment,
     toRenderAttachment,
     toWireAttachment,
     cancelRunRequest: async () => {},
@@ -629,6 +639,7 @@ test("useChat.send: rejected_busy appends system notice, marks optimistic failed
     Math,
     React: createReactStub({ setCalls: stateUpdates }),
     addPending,
+    normalizeStagedAttachment,
     toRenderAttachment,
     toWireAttachment,
     cancelRunRequest: async () => {},
@@ -709,6 +720,7 @@ test("useChat.send: rejected_busy without notice still clears isProcessing", asy
     Math,
     React: createReactStub({ setCalls: stateUpdates }),
     addPending,
+    normalizeStagedAttachment,
     toRenderAttachment,
     toWireAttachment,
     cancelRunRequest: async () => {},
@@ -785,6 +797,7 @@ test("useChat.send: connectable channel fetch failures submit the prompt", async
     Math,
     React: createReactStub(),
     addPending,
+    normalizeStagedAttachment,
     toRenderAttachment,
     toWireAttachment,
     cancelRunRequest: async () => {},

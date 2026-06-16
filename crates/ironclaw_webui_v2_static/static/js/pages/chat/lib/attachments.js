@@ -210,6 +210,30 @@ export async function stageFiles(files, { limits, existing = [], t }) {
 
 // Map a staged attachment into the `WebUiInboundAttachment` wire shape the
 // v2 send-message endpoint accepts.
+// The two composer subsystems stage attachments with different field shapes:
+// web `stageFiles` (above) emits camelCase (mimeType/dataBase64/sizeBytes/kind/
+// sizeLabel/previewUrl); desktop `useComposerAttachments` emits snake_case
+// (mime_type/base64/size) and, for extractable docs, swaps in the extracted text
+// as `base64` with mime_type text/plain. The send path (wire/render/durable
+// manifest) assumes the camelCase shape, so normalize here — otherwise desktop
+// attachments lose their type (→octet-stream), their bytes/extracted text, and
+// their render chip.
+export function normalizeStagedAttachment(att) {
+  if (!att || typeof att !== "object") return att;
+  const mimeType = att.mimeType || att.mime_type || "";
+  const sizeBytes = att.sizeBytes ?? att.size ?? 0;
+  return {
+    id: att.id,
+    filename: att.filename || att.name || "attachment",
+    mimeType,
+    kind: att.kind || attachmentKindFromMime(mimeType),
+    sizeBytes,
+    sizeLabel: att.sizeLabel || formatBytes(sizeBytes),
+    dataBase64: att.dataBase64 || att.base64 || "",
+    previewUrl: att.previewUrl || att.dataUrl || null,
+  };
+}
+
 export function toWireAttachment(att) {
   return {
     mime_type: att.mimeType,
