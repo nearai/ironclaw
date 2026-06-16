@@ -145,26 +145,24 @@ async def test_reborn_v2_agent_files_render_download_chips(reborn_v2_yolo_page):
     await expect(csv_chip).to_be_visible(timeout=45000)
     await expect(pdf_chip).to_be_visible(timeout=45000)
 
-    # Clicking a chip opens the preview modal; its Download action performs the
-    # bearer-authenticated blob fetch and saves the exact bytes the agent wrote.
-    download_btn = page.locator(SEL_V2["attachment_download"])
-
-    await csv_chip.click()
-    await expect(download_btn).to_be_visible(timeout=15000)
+    # The chip's inline download icon performs the bearer-authenticated blob
+    # fetch and saves the exact bytes the agent wrote — no modal needed.
+    csv_download_icon = page.locator(
+        SEL_V2["project_file_download_for"].format(path=CSV_PATH)
+    )
     async with page.expect_download() as csv_dl:
-        await download_btn.click()
+        await csv_download_icon.click()
     csv_download = await csv_dl.value
     assert csv_download.suggested_filename == "report.csv"
     assert await _read_download_bytes(csv_download) == CSV_BYTES
-    # Close the modal before opening the next one.
-    await page.keyboard.press("Escape")
-    await expect(download_btn).to_be_hidden(timeout=15000)
 
-    # The PDF chip previews + downloads a PDF.
+    # Clicking the chip body instead opens the preview modal, whose footer
+    # Download action saves the bytes too (covers the preview path for the PDF).
+    modal_download = page.locator(SEL_V2["attachment_download"])
     await pdf_chip.click()
-    await expect(download_btn).to_be_visible(timeout=15000)
+    await expect(modal_download).to_be_visible(timeout=15000)
     async with page.expect_download() as pdf_dl:
-        await download_btn.click()
+        await modal_download.click()
     pdf_download = await pdf_dl.value
     assert pdf_download.suggested_filename == "report.pdf"
     assert (await _read_download_bytes(pdf_download)).startswith(b"%PDF-")

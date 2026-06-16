@@ -67,8 +67,10 @@ mod tests {
         assert!(chips.contains("projectFileContentUrl"));
         assert!(chips.contains("AttachmentChip"));
         assert!(chips.contains("AttachmentPreviewModal"));
-        // The chip passes the e2e selector hooks through to the shared chip.
+        // The chip passes the e2e selector hooks through to the shared chip,
+        // including the inline one-click download icon.
         assert!(chips.contains("project-file-chip"));
+        assert!(chips.contains("project-file-download"));
         assert!(chips.contains("dataPath"));
 
         let bubble = asset_text("js/pages/chat/components/message-bubble.js");
@@ -83,6 +85,11 @@ mod tests {
         assert!(chip.contains("export function AttachmentThumbnail"));
         assert!(chip.contains("data-testid=${testId}"));
         assert!(chip.contains("data-file-path=${dataPath}"));
+        // The inline download icon fetches the bearer-authenticated bytes and
+        // saves them directly (separate from the preview modal's own Download).
+        assert!(chip.contains("data-testid=${downloadTestId}"));
+        assert!(chip.contains("fetchAttachmentBlob"));
+        assert!(chip.contains("saveBlob"));
         assert!(bubble.contains("AttachmentChip"));
 
         // The preview modal fetches the blob (bearer-authenticated, via the

@@ -45,6 +45,7 @@ function ProjectFileChip({ threadId, path, onPreview }) {
     onPreview=${onPreview}
     testId="project-file-chip"
     dataPath=${path}
+    downloadTestId="project-file-download"
   />`;
 }
 

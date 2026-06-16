@@ -234,6 +234,13 @@ SEL_V2 = {
     # carries the Download action.
     "project_file_chip": "[data-testid='project-file-chip']",
     "project_file_chip_for": "[data-testid='project-file-chip'][data-file-path='{path}']",
+    # Inline one-click download icon on a project-file chip; `{path}` scopes it
+    # to the chip's adjacent sibling so each chip's download is addressable.
+    "project_file_download_for": (
+        "[data-testid='project-file-chip'][data-file-path='{path}'] "
+        "+ [data-testid='project-file-download']"
+    ),
+    # Download action inside the shared attachment preview modal.
     "attachment_download": "[data-testid='attachment-download']",
     "logs_scope_toolbar": "[data-testid='logs-scope-toolbar']",
     "logs_scope_chip": "[data-testid='logs-scope-chip'][data-scope-key='{key}']",
