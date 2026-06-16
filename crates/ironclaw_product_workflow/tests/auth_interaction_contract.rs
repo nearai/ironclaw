@@ -711,6 +711,52 @@ async fn credential_provided_rejects_completed_flow_without_account_id() {
 }
 
 #[tokio::test]
+async fn deny_on_completed_flow_rejects_with_stale_auth() {
+    // Race: OAuth flow completed just as the user clicked Deny.
+    // `cancel_auth_flow_if_active` returns Err(StaleAuth) for Completed flows,
+    // so `resume_denied_auth` short-circuits before touching the coordinator.
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let scope = turn_scope("alice", "thread-a");
+    let run_id = TurnRunId::new();
+    let gate_ref = make_gate_ref("gate:auth-deny-completed");
+    let flow = auth_flow(
+        AuthFlowStatus::Completed,
+        &scope,
+        &actor,
+        run_id,
+        &gate_ref,
+        None,
+        setup_challenge(),
+    );
+    let (service, _flow_manager, coordinator) =
+        service_parts(flow.clone(), vec![flow], actor.clone(), gate_ref.clone());
+
+    let error = service
+        .resolve(ResolveAuthInteractionRequest {
+            scope,
+            actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: AuthInteractionDecision::Deny,
+            idempotency_key: IdempotencyKey::new("auth-action-deny-completed").unwrap(),
+        })
+        .await
+        .expect_err("deny on completed flow must be stale");
+
+    assert!(
+        matches!(
+            error,
+            ProductWorkflowError::AuthInteractionRejected {
+                kind: AuthInteractionRejectionKind::StaleAuth
+            }
+        ),
+        "expected StaleAuth, got: {error:?}"
+    );
+    assert!(coordinator.resumes().is_empty());
+    assert!(coordinator.cancellations().is_empty());
+}
+
+#[tokio::test]
 async fn denied_auth_on_parked_gate_cancels_flow_and_resumes_with_denial_disposition() {
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let scope = turn_scope("alice", "thread-a");

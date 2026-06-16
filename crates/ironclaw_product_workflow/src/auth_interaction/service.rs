@@ -412,6 +412,8 @@ impl AuthInteractionService for DefaultAuthInteractionService {
                         status: state.status,
                         event_cursor: state.event_cursor,
                         already_terminal: true,
+                        // actor: None is intentional — this is an idempotent replay
+                        // reflecting existing state; no new cancel lifecycle event fires.
                         actor: None,
                     }))
                 } else {

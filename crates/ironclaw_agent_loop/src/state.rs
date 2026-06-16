@@ -142,6 +142,15 @@ impl PendingApprovalResume {
 /// The `prior_approval` field collapses the two formerly-independent
 /// `approval_request_id`/`correlation_id` options into a typed all-or-none
 /// value: both sub-fields are present together or neither is.
+///
+/// When `disposition` is `Some(Denied)`, the executor surfaces a model-visible
+/// authorization failure for the parked call and SKIPS re-dispatch; in that
+/// case `resume_token` and `replay` are unused.
+///
+/// Field-name note: `PendingAuthResume::disposition` is intentionally kept
+/// short because the enclosing type already scopes it to auth-resume context.
+/// Turn-layer structs that carry a similar field from a wider scope use the
+/// qualified name `auth_resume_disposition` to avoid ambiguity.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingAuthResume {
     pub gate_ref: LoopGateRef,
@@ -883,6 +892,11 @@ mod tests {
         auth_resume.remove("resume_token");
         auth_resume.remove("prior_approval");
         auth_resume.remove("replay");
+        // Also strip `disposition` — it was added later and must also default
+        // to None when absent.  Stripping it here ensures that a future
+        // accidental removal of `#[serde(default)]` on that field would cause
+        // this test to fail with a decode error rather than silently passing.
+        auth_resume.remove("disposition");
         let stripped_payload = serde_json::to_vec(&value).expect("re-encode");
         let from_legacy = LoopExecutionState::from_checkpoint_payload(
             &stripped_payload,
@@ -903,6 +917,10 @@ mod tests {
         assert!(
             legacy_pending.replay.is_none(),
             "replay absent from checkpoint payload must decode to None"
+        );
+        assert!(
+            legacy_pending.disposition.is_none(),
+            "disposition absent from checkpoint payload must decode to None"
         );
     }
 }

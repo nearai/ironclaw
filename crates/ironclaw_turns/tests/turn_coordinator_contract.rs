@@ -7246,6 +7246,151 @@ async fn submit_child_run_inherits_parent_product_context() {
     );
 }
 
+// Persistence path: resume_turn with auth_resume_disposition writes the field onto the run
+// record, and claim_next_run returns a TurnRunState that carries the same value.
+#[tokio::test]
+async fn resume_turn_auth_resume_disposition_is_persisted_and_visible_on_claim() {
+    let (coordinator, store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-auth-deny-persist",
+                "idem-auth-deny-persist-submit",
+            ))
+            .await
+            .unwrap(),
+    );
+
+    // Claim the run so we can block it on an auth gate.
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-auth-deny-persist")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Drive the run into BlockedAuth via block_run with BlockedReason::Auth.
+    let gate_ref = GateRef::new("auth-deny-gate").unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
+            reason: BlockedReason::Auth {
+                gate_ref: gate_ref.clone(),
+                credential_requirements: Vec::new(),
+            },
+        })
+        .await
+        .unwrap();
+
+    // Verify we are now in BlockedAuth.
+    let blocked_state = coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: scope("thread-auth-deny-persist"),
+            run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        blocked_state.status,
+        TurnStatus::BlockedAuth,
+        "run must be in BlockedAuth before resume"
+    );
+
+    // Resume with Denied disposition — this is the auth-deny path.
+    let denied_disposition =
+        ironclaw_turns::AuthResumeDisposition::Denied { reason: None };
+    coordinator
+        .resume_turn(ResumeTurnRequest {
+            scope: scope("thread-auth-deny-persist"),
+            actor: actor(),
+            run_id,
+            gate_resolution_ref: gate_ref,
+            precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedAuthGate,
+            source_binding_ref: SourceBindingRef::new("source-auth-deny").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-auth-deny").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-auth-deny-persist-resume").unwrap(),
+            auth_resume_disposition: Some(denied_disposition.clone()),
+        })
+        .await
+        .unwrap();
+
+    // Claim the re-queued run and assert auth_resume_disposition is propagated.
+    let claimed = store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(scope("thread-auth-deny-persist")),
+        })
+        .await
+        .unwrap()
+        .expect("run must be claimable after auth-deny resume");
+
+    assert_eq!(
+        claimed.state.auth_resume_disposition,
+        Some(denied_disposition),
+        "auth_resume_disposition must be visible on the claimed TurnRunState"
+    );
+
+    // Self-clearing contract: a subsequent normal resume (disposition: None) clears the field.
+    // First drive back to BlockedAuth again via block_run.
+    let gate_ref2 = GateRef::new("auth-deny-gate-2").unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id: claimed.runner_id,
+            lease_token: claimed.lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
+            reason: BlockedReason::Auth {
+                gate_ref: gate_ref2.clone(),
+                credential_requirements: Vec::new(),
+            },
+        })
+        .await
+        .unwrap();
+
+    // Resume again, this time with no disposition.
+    coordinator
+        .resume_turn(ResumeTurnRequest {
+            scope: scope("thread-auth-deny-persist"),
+            actor: actor(),
+            run_id,
+            gate_resolution_ref: gate_ref2,
+            precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedAuthGate,
+            source_binding_ref: SourceBindingRef::new("source-auth-deny-2").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-auth-deny-2").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-auth-deny-persist-resume-2").unwrap(),
+            auth_resume_disposition: None,
+        })
+        .await
+        .unwrap();
+
+    let claimed2 = store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(scope("thread-auth-deny-persist")),
+        })
+        .await
+        .unwrap()
+        .expect("run must be claimable after second resume");
+
+    assert_eq!(
+        claimed2.state.auth_resume_disposition,
+        None,
+        "auth_resume_disposition must be None after a resume that supplies no disposition"
+    );
+}
+
 // L4: record_runner_failure produces terminal Failed with sanitized failure category preserved
 #[tokio::test]
 async fn record_runner_failure_produces_terminal_failed_with_sanitized_category() {

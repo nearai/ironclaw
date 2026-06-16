@@ -142,22 +142,30 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         // summary while still building the model observation via
         // `model_visible_capability_failure_observation`, which uses
         // `error_kind.as_str()` directly and is not subject to that check.
-        if matches!(
-            state.pending_auth_resume.as_ref().and_then(|p| p.disposition.as_ref()),
-            Some(ironclaw_turns::AuthResumeDisposition::Denied { .. })
-        ) {
-            let denied_capability_id = state
-                .pending_auth_resume
-                .as_ref()
-                .map(|p| p.capability_id.clone());
+        if let Some(denied_cap_id) = state
+            .pending_auth_resume
+            .as_ref()
+            .filter(|p| {
+                matches!(
+                    p.disposition.as_ref(),
+                    Some(ironclaw_turns::AuthResumeDisposition::Denied { .. })
+                )
+            })
+            .map(|p| p.capability_id.clone())
+        {
             let (auth_denied_calls, remaining_calls): (Vec<_>, Vec<_>) = visible_calls
                 .into_iter()
-                .partition(|call| Some(&call.capability_id) == denied_capability_id.as_ref());
+                .partition(|call| call.capability_id == denied_cap_id);
 
             for call in auth_denied_calls {
                 push_call_signature_once(&mut state, &mut signatures, &call)?;
                 let failure = ironclaw_turns::run_profile::CapabilityFailure {
                     error_kind: CapabilityFailureKind::Authorization,
+                    // Intentionally empty: the model-visible text comes from
+                    // `model_visible_capability_failure_observation` (via
+                    // `error_kind.as_str()`) and the planner summary from
+                    // `SanitizedStrategySummary::from_trusted_static` below.
+                    // `safe_summary` is unused on this path.
                     safe_summary: String::new(),
                     detail: None,
                 };
@@ -189,7 +197,15 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                 }
             }
 
-            // Consume the pending_auth_resume — the denial has been surfaced.
+            // Unconditionally consume the pending_auth_resume.
+            //
+            // `handle_capability_error` above only clears the *matching*
+            // pending_auth_resume (the one whose capability_id equals the
+            // denied call's id).  This unconditional clear additionally
+            // consumes the disposition when `auth_denied_calls` was empty —
+            // a defensive measure that prevents a stale Denied disposition
+            // from leaking into the fall-through batch or triggering this
+            // short-circuit again on the next iteration.
             state.pending_auth_resume = None;
 
             if remaining_calls.is_empty() {
