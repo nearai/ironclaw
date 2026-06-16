@@ -275,7 +275,8 @@ pub enum CheckpointPayloadError {
 mod tests {
     use ironclaw_host_api::{CapabilityId, TenantId, ThreadId};
     use ironclaw_turns::{
-        AgentLoopDriverDescriptor, RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
+        AgentLoopDriverDescriptor, AuthResumeDisposition, RunProfileId, RunProfileVersion, TurnId,
+        TurnRunId, TurnScope,
         run_profile::{
             CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy, CheckpointSchemaId,
             ConcurrencyClass, ContextProfileId, LoopDriverId, ModelProfileId,
@@ -738,6 +739,44 @@ mod tests {
         assert_eq!(
             restored.pending_auth_resume, state.pending_auth_resume,
             "PendingAuthResume must survive checkpoint encode/decode"
+        );
+    }
+
+    #[test]
+    fn pending_auth_resume_denied_disposition_round_trips_through_checkpoint_payload() {
+        // Regression: the `Some(Denied)` disposition stamped by `planned_driver`
+        // before the capability stage must survive the checkpoint encode/decode
+        // cycle so that a resumed run still sees the denial.
+        let context = test_run_context();
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.pending_auth_resume = Some(PendingAuthResume {
+            gate_ref: LoopGateRef::new("gate:auth-denied-test").expect("valid gate ref"),
+            capability_id: CapabilityId::new("gsuite.calendar.list_events").expect("valid cap id"),
+            surface_version: CapabilitySurfaceVersion::new("surface-v1")
+                .expect("valid surface version"),
+            input_ref: CapabilityInputRef::new("input:denied-test").expect("valid input ref"),
+            effective_capability_ids: vec![],
+            provider_replay: None,
+            resume_token: None,
+            prior_approval: None,
+            replay: None,
+            disposition: Some(AuthResumeDisposition::Denied),
+        });
+        let payload = encode_payload(&state);
+        let restored =
+            LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::BeforeBlock)
+                .expect("decode checkpoint payload");
+        assert_eq!(
+            restored
+                .pending_auth_resume
+                .as_ref()
+                .and_then(|r| r.disposition.as_ref()),
+            Some(&AuthResumeDisposition::Denied),
+            "PendingAuthResume with Denied disposition must survive checkpoint encode/decode"
+        );
+        assert_eq!(
+            restored.pending_auth_resume, state.pending_auth_resume,
+            "entire PendingAuthResume must round-trip without loss when disposition is Some(Denied)"
         );
     }
 
