@@ -3300,9 +3300,7 @@ impl RebornServices {
                     ApprovalInteractionDecision::ApproveOnce
                 }
             }
-            WebUiGateResolution::Denied | WebUiGateResolution::Cancelled => {
-                ApprovalInteractionDecision::Deny
-            }
+            WebUiGateResolution::Declined => ApprovalInteractionDecision::Deny,
             WebUiGateResolution::CredentialProvided { .. } => {
                 return Err(blocked_authentication_unavailable());
             }
@@ -3380,9 +3378,7 @@ impl RebornServices {
                         .map_err(map_auth_interaction_error)?,
                 }
             }
-            WebUiGateResolution::Denied | WebUiGateResolution::Cancelled => {
-                AuthInteractionDecision::Deny
-            }
+            WebUiGateResolution::Declined => AuthInteractionDecision::Deny,
             WebUiGateResolution::Approved { .. } => {
                 return Err(blocked_authentication_unavailable());
             }
@@ -3454,7 +3450,7 @@ impl RebornServices {
             WebUiGateResolution::CredentialProvided { .. } => {
                 Err(blocked_authentication_unavailable())
             }
-            WebUiGateResolution::Denied | WebUiGateResolution::Cancelled => {
+            WebUiGateResolution::Declined => {
                 assert_generic_run_parked_on_gate(
                     self.turn_coordinator.as_ref(),
                     &scope,

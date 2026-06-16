@@ -138,12 +138,23 @@ extension-install loop is only fully resolved when both land.
   approval store (product_workflow boundary), so carry the disposition
   via the resume request rather than reading durable `ApprovalStatus`
   in the executor.
-- **Q3 — RESOLVED (maintainer). Both continue.** Keep both
-  `WebUiGateResolution::Denied` and `::Cancelled` → `Deny` → resume +
-  continue, consistent with #4944. No `Cancel` decision variant. The
-  approach reviewer's dismiss-vs-refuse distinction is acknowledged but
-  not adopted: consistency with the auth path and minimal surface win.
-  (Step 5 stands as written.)
+- **Q3 — RESOLVED (maintainer). Both continue; deny/cancel unified.**
+  Every *gate resolution* the UI sends now resumes the run: the approval
+  card sends `denied`; the auth cards send `cancelled` (their only
+  negative = "won't provide credential"). Neither gate has a separate
+  stop button — **run termination is the separate X → `cancelRun` route**,
+  not a gate resolution. Because `Denied` and `Cancelled` are therefore
+  treated identically everywhere, the two `WebUiGateResolution` variants
+  were unified into a single **`Declined`** variant (serde aliases
+  `"denied"`/`"cancelled"` keep the wire stable; no JS change). Facade
+  maps `Declined → Deny` for both auth and approval. No `Cancel` decision
+  variant — stopping is `cancelRun`, already separate.
+- **#6 (WebUI) — RESOLVED.** `useChat.resolveGate` previously kept
+  processing only for `approved`/`credential_provided`, dropping
+  processing + `activeRun` on `denied`/`cancelled` — but those now
+  resume. Fixed: `resolveGate` always keeps processing/`activeRun` (the
+  terminal `run_status` SSE event clears it; the X/`cancelRun` is the
+  only stop). Also fixes the latent auth-`cancelled` desync from #4944.
 - **Q4 — RESOLVED (maintainer). Separate PRs, rollout-gated together.**
   This plan (PR1) ships only approval deny → continue. The
   `extension_install`/`extension_search` model-visible observation fix

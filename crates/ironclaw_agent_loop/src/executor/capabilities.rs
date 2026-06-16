@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::ops::ControlFlow;
 
 use async_trait::async_trait;
 use ironclaw_turns::{
@@ -36,22 +37,6 @@ use super::{
 pub(crate) struct CapabilityStage;
 
 const MAX_SAFE_SUMMARY_BYTES: usize = 512;
-
-/// Outcome of [`CapabilityStage::short_circuit_denied_resume`].
-///
-/// The helper processes the denied call(s) from a gate denial (auth or approval)
-/// and returns either:
-/// - `TurnDone` — all visible calls belonged to the denied capability; the turn
-///   is already completed and the caller should propagate the step directly.
-/// - `Remaining` — one or more calls are for unrelated capabilities and should
-///   proceed through the normal batch dispatch path.
-enum DeniedResumeOutcome {
-    TurnDone(TurnCompletedStep),
-    Remaining {
-        state: Box<LoopExecutionState>,
-        visible_calls: Vec<CapabilityCallCandidate>,
-    },
-}
 
 pub(super) struct CapabilityInput {
     pub(super) state: LoopExecutionState,
@@ -155,21 +140,22 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     state,
                     &mut signatures,
                     &mut capability_batch,
-                    result_refs_start,
                     denied_cap_id,
                     "auth gate denied by user",
                     visible_calls,
                 )
                 .await?
             {
-                DeniedResumeOutcome::TurnDone(step) => return Ok(step),
-                DeniedResumeOutcome::Remaining {
-                    state: next,
-                    visible_calls: remaining,
-                } => {
-                    state = *next;
+                ControlFlow::Break(exit) => return Ok(exit),
+                ControlFlow::Continue((next, remaining)) => {
+                    state = next;
                     visible_calls = remaining;
                 }
+            }
+            if visible_calls.is_empty() {
+                return self
+                    .completed_turn(ctx, state, result_refs_start, capability_batch)
+                    .await;
             }
         }
 
@@ -195,21 +181,22 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     state,
                     &mut signatures,
                     &mut capability_batch,
-                    result_refs_start,
                     denied_cap_id,
                     "approval gate denied by user",
                     visible_calls,
                 )
                 .await?
             {
-                DeniedResumeOutcome::TurnDone(step) => return Ok(step),
-                DeniedResumeOutcome::Remaining {
-                    state: next,
-                    visible_calls: remaining,
-                } => {
-                    state = *next;
+                ControlFlow::Break(exit) => return Ok(exit),
+                ControlFlow::Continue((next, remaining)) => {
+                    state = next;
                     visible_calls = remaining;
                 }
+            }
+            if visible_calls.is_empty() {
+                return self
+                    .completed_turn(ctx, state, result_refs_start, capability_batch)
+                    .await;
             }
         }
 
@@ -1018,9 +1005,14 @@ impl CapabilityStage {
     /// matches the denied capability, synthesises a model-visible
     /// `Authorization` failure (retry `Forbidden`) via `handle_capability_error`
     /// and uses `planner_summary` as the planner-visible strategy summary
-    /// (must pass `validate_loop_safe_summary`).  Calls for unrelated
-    /// capabilities are returned as `DeniedResumeOutcome::Remaining` so the
-    /// caller can dispatch them through the normal batch path.
+    /// (must pass `validate_loop_safe_summary`).
+    ///
+    /// Returns `ControlFlow::Break(step)` if `handle_capability_error` produced
+    /// an `Exit` (caller should propagate it immediately), or
+    /// `ControlFlow::Continue((state, remaining_calls))` with the surviving
+    /// state and the calls that did *not* match the denied capability.  The
+    /// caller is responsible for checking whether `remaining_calls` is empty
+    /// and calling `completed_turn` when it is.
     ///
     /// # Callers
     ///
@@ -1039,11 +1031,13 @@ impl CapabilityStage {
         mut state: LoopExecutionState,
         signatures: &mut HashSet<crate::state::CapabilityCallSignature>,
         capability_batch: &mut CapabilityBatchTurnSummary,
-        result_refs_start: usize,
         denied_cap_id: ironclaw_host_api::CapabilityId,
         planner_summary: &'static str,
         visible_calls: Vec<CapabilityCallCandidate>,
-    ) -> Result<DeniedResumeOutcome, AgentLoopExecutorError> {
+    ) -> Result<
+        ControlFlow<TurnCompletedStep, (LoopExecutionState, Vec<CapabilityCallCandidate>)>,
+        AgentLoopExecutorError,
+    > {
         let (denied_calls, remaining_calls): (Vec<_>, Vec<_>) = visible_calls
             .into_iter()
             .partition(|call| call.capability_id == denied_cap_id);
@@ -1080,24 +1074,15 @@ impl CapabilityStage {
             {
                 BatchStep::Continue(next) => state = *next,
                 BatchStep::Exit(exit) => {
-                    return Ok(DeniedResumeOutcome::TurnDone(TurnCompletedStep::Exit(exit)));
+                    return Ok(ControlFlow::Break(TurnCompletedStep::Exit(exit)));
                 }
             }
         }
 
-        if remaining_calls.is_empty() {
-            let done = self
-                .completed_turn(ctx, state, result_refs_start, capability_batch.clone())
-                .await?;
-            return Ok(DeniedResumeOutcome::TurnDone(done));
-        }
-
-        // Continue with only the non-denied calls; batch policy is recomputed
-        // from this reduced set so sizing and progress events are accurate.
-        Ok(DeniedResumeOutcome::Remaining {
-            state: Box::new(state),
-            visible_calls: remaining_calls,
-        })
+        // Return surviving state + remaining calls to the caller.
+        // The caller checks remaining_calls.is_empty() and calls completed_turn
+        // when there is nothing left to dispatch.
+        Ok(ControlFlow::Continue((state, remaining_calls)))
     }
 }
 

@@ -440,13 +440,13 @@ export function useChat(threadId) {
         always: opts.always,
         credentialRef: opts.credentialRef,
       });
-      const shouldContinueProcessing =
-        resolution === "approved" || resolution === "credential_provided";
+      // Every gate resolution (approved, denied, credential_provided, cancelled)
+      // resumes the run on the backend. Keep processing and preserve activeRun so
+      // the browser stays in sync with the continuing run. The terminal run_status
+      // SSE event (completed/failed/cancelled) is what clears processing naturally.
+      // Run termination is the separate cancelRun (X button) path.
       setPendingGate(null);
-      setIsProcessing(shouldContinueProcessing);
-      if (!shouldContinueProcessing) {
-        setActiveRun(null);
-      }
+      setIsProcessing(true);
     },
     [pendingGate, threadId],
   );

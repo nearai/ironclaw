@@ -840,3 +840,124 @@ test("useChat.send: connectable channel fetch failures submit the prompt", async
   assert.equal(response.thread_id, "thread-created");
   assert.equal(loggedErrors[0][0], "Failed to resolve connectable channels:");
 });
+
+function createResolveGateContext({ stateUpdates = [] } = {}) {
+  // useChat state call order: cooldownUntil(0), now(1), activeRun(2),
+  // channelConnectAction(3), isProcessing(4), pendingGate(5).
+  const pendingGate = { runId: "run-1", gateRef: "gate-1" };
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({
+      initialByIndex: new Map([
+        [2, { runId: "run-1", threadId: "thread-1", status: "running" }],
+        [4, true],
+        [5, pendingGate],
+      ]),
+      setCalls: stateUpdates,
+    }),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("createThread should not run");
+    },
+    globalThis: {},
+    listConnectableChannels: async () => ({ channels: [] }),
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async () => ({ channels: [] }),
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      throw new Error("sendMessage should not run");
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: [],
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      setMessages: () => {},
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+  return context;
+}
+
+test("useChat.resolveGate: denied keeps isProcessing true and does not clear activeRun", async () => {
+  const stateUpdates = [];
+  const context = createResolveGateContext({ stateUpdates });
+
+  vm.runInNewContext(useChatSourceForTest(), context);
+
+  const chat = context.globalThis.__testExports.useChat("thread-1");
+  await chat.resolveGate("denied");
+
+  // pendingGate (index 5) is cleared
+  const pendingGateUpdates = stateUpdates.filter((u) => u.index === 5);
+  assert.equal(pendingGateUpdates.length, 1);
+  assert.equal(pendingGateUpdates[0].value, null);
+
+  // isProcessing (index 4) is set to true — run continues
+  const isProcessingUpdates = stateUpdates.filter((u) => u.index === 4);
+  assert.ok(isProcessingUpdates.length > 0, "isProcessing should be updated");
+  const lastIsProcessing = isProcessingUpdates[isProcessingUpdates.length - 1];
+  assert.equal(lastIsProcessing.value, true);
+
+  // activeRun (index 2) is NOT cleared by resolveGate
+  const activeRunClears = stateUpdates.filter(
+    (u) => u.index === 2 && u.value === null,
+  );
+  assert.equal(activeRunClears.length, 0, "resolveGate must not clear activeRun");
+});
+
+test("useChat.resolveGate: cancelled keeps isProcessing true and does not clear activeRun", async () => {
+  const stateUpdates = [];
+  const context = createResolveGateContext({ stateUpdates });
+
+  vm.runInNewContext(useChatSourceForTest(), context);
+
+  const chat = context.globalThis.__testExports.useChat("thread-1");
+  await chat.resolveGate("cancelled");
+
+  // isProcessing (index 4) is set to true — run continues
+  const isProcessingUpdates = stateUpdates.filter((u) => u.index === 4);
+  assert.ok(isProcessingUpdates.length > 0, "isProcessing should be updated");
+  const lastIsProcessing = isProcessingUpdates[isProcessingUpdates.length - 1];
+  assert.equal(lastIsProcessing.value, true);
+
+  // activeRun (index 2) is NOT cleared
+  const activeRunClears = stateUpdates.filter(
+    (u) => u.index === 2 && u.value === null,
+  );
+  assert.equal(activeRunClears.length, 0, "resolveGate must not clear activeRun");
+});
+
+test("useChat.resolveGate: approved also keeps isProcessing true", async () => {
+  const stateUpdates = [];
+  const context = createResolveGateContext({ stateUpdates });
+
+  vm.runInNewContext(useChatSourceForTest(), context);
+
+  const chat = context.globalThis.__testExports.useChat("thread-1");
+  await chat.resolveGate("approved");
+
+  const isProcessingUpdates = stateUpdates.filter((u) => u.index === 4);
+  assert.ok(isProcessingUpdates.length > 0);
+  const lastIsProcessing = isProcessingUpdates[isProcessingUpdates.length - 1];
+  assert.equal(lastIsProcessing.value, true);
+});
