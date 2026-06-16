@@ -12,9 +12,9 @@ use ironclaw_turns::{
     RedactedRunProfileProvenance, ReplyTargetBindingRef, ResolvedRunProfile, ResourceBudgetPolicy,
     ResourceBudgetTier, RunClassId, RunProfileFingerprint, RunProfileId, RunProfileVersion,
     RuntimeProfileConstraints, SchedulingClass, SourceBindingRef, SteeringPolicy, TurnActor,
-    TurnCheckpointId, TurnCheckpointRecord, TurnEventKind, TurnId,
-    TurnLifecycleEvent, TurnPersistenceSnapshot, TurnRunId, TurnRunProfile, TurnRunRecord,
-    TurnRunState, TurnScope, TurnStatus, TurnTimestamp, run_profile::LoopCheckpointKind,
+    TurnCheckpointId, TurnCheckpointRecord, TurnEventKind, TurnId, TurnLifecycleEvent,
+    TurnPersistenceSnapshot, TurnRunId, TurnRunProfile, TurnRunRecord, TurnRunState, TurnScope,
+    TurnStatus, TurnTimestamp, run_profile::LoopCheckpointKind,
 };
 
 #[tokio::test]
