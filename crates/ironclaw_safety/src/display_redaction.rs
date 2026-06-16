@@ -136,7 +136,9 @@ fn redact_secret_url_path_segments(path: &str) -> String {
                 .any(|part| is_secret_url_path_segment_value(part));
             let should_redact = redact_next || segment_is_secret;
             redact_next = parts
-                .last()
+                .iter()
+                .rev()
+                .find(|part| !part.is_empty())
                 .is_some_and(|part| is_secret_url_path_label(part));
             if should_redact {
                 "[redacted]".to_string()
@@ -462,6 +464,22 @@ mod tests {
                 .contains("https://example.test/[redacted]/[redacted]?...")
         );
         assert!(!display.text.contains("reset%2Ftoken"));
+        assert!(!display.text.contains("opaque-value"));
+        assert!(!display.text.contains("debug=true"));
+    }
+
+    #[test]
+    fn shell_command_display_text_redacts_value_after_trailing_encoded_secret_label() {
+        let display = shell_command_display_text(
+            "curl https://example.test/reset/token%2F/opaque-value?debug=true",
+        );
+
+        assert!(
+            display
+                .text
+                .contains("https://example.test/reset/[redacted]/[redacted]?...")
+        );
+        assert!(!display.text.contains("token%2F"));
         assert!(!display.text.contains("opaque-value"));
         assert!(!display.text.contains("debug=true"));
     }
