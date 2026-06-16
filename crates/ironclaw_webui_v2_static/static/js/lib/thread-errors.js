@@ -10,7 +10,7 @@
 // also maps generic conflicts to 409, and showing "stop it first" for a
 // non-busy conflict would be wrong guidance.
 export function isThreadBusyError(error) {
-  return error?.payload?.kind === "busy";
+  return error?.status === 409 && error?.payload?.kind === "busy";
 }
 
 export function deleteThreadErrorMessage(error, t) {

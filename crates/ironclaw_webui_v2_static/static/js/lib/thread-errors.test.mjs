@@ -7,7 +7,7 @@ const t = (key) => key;
 
 test("isThreadBusyError matches the busy kind, not any 409", () => {
   assert.equal(isThreadBusyError({ status: 409, payload: { kind: "busy" } }), true);
-  assert.equal(isThreadBusyError({ payload: { kind: "busy" } }), true);
+  assert.equal(isThreadBusyError({ payload: { kind: "busy" } }), false);
   // A non-busy 409 conflict must not be reported as busy (wrong guidance).
   assert.equal(isThreadBusyError({ status: 409, payload: { kind: "conflict" } }), false);
   assert.equal(isThreadBusyError({ status: 409 }), false);
