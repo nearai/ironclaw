@@ -665,6 +665,41 @@ mod tests {
     use std::{path::Path, time::Duration};
 
     #[tokio::test]
+    async fn build_webui_services_wires_lifecycle_owner_identity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let input = crate::RebornRuntimeInput::from_services(
+            crate::RebornBuildInput::local_dev("runtime-owner", dir.path().join("local-dev"))
+                .with_runtime_policy(
+                    crate::local_dev_runtime_policy().expect("local-dev policy resolves"),
+                ),
+        )
+        .with_identity(crate::RebornRuntimeIdentity {
+            tenant_id: "tenant-alpha".to_string(),
+            agent_id: "agent-alpha".to_string(),
+            source_binding_id: "webui-test-source".to_string(),
+            reply_target_binding_id: "webui-test-reply".to_string(),
+        });
+        let runtime = crate::build_reborn_runtime(input)
+            .await
+            .expect("runtime builds");
+        let bundle = build_webui_services(&runtime, None).expect("webui services build");
+
+        let error = bundle
+            .api
+            .run_operator_service_lifecycle(
+                caller("bob"),
+                ironclaw_product_workflow::RebornOperatorServiceLifecycleRequest {
+                    action: ironclaw_product_workflow::RebornOperatorServiceLifecycleAction::Status,
+                },
+            )
+            .await
+            .expect_err("non-owner caller is rejected before lifecycle dispatch");
+
+        assert_eq!(error.code, RebornServicesErrorCode::Forbidden);
+        assert_eq!(error.status_code, 403);
+    }
+
+    #[tokio::test]
     async fn readiness_operator_status_service_generates_timestamp_per_call() {
         let service = ReadinessOperatorStatusService::new(RebornReadiness::disabled());
 
