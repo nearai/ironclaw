@@ -4430,6 +4430,8 @@ dependencies = [
  "futures-util",
  "glob",
  "ironclaw_auth",
+ "ironclaw_common",
+ "ironclaw_extractors",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_safety",
