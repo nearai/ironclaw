@@ -5351,6 +5351,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_skill_learning"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ironclaw_skills",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "ironclaw_skills"
 version = "0.3.0"
 dependencies = [
