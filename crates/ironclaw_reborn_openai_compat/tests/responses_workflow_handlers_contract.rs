@@ -313,6 +313,53 @@ async fn responses_cancel_uses_product_workflow_control_action() {
 }
 
 #[tokio::test]
+async fn responses_cancel_rejected_busy_ack_returns_429_and_does_not_read_projection() {
+    // Create a response first (FakeProductWorkflow returns Accepted by default) so the
+    // ref_store has a valid mapping that the cancel path can look up.
+    let create_workflow = Arc::new(FakeProductWorkflow::new());
+    let ref_store = Arc::new(InMemoryOpenAiCompatRefStore::new());
+    let reader = Arc::new(RecordingResponsesReader::new(completed_response(
+        OpenAiResponseId::new("resp_placeholder").expect("id"),
+        "unused",
+    )));
+
+    let create_router =
+        router_with_store_and_caller(create_workflow, ref_store.clone(), reader.clone(), caller());
+    let created = json_body(
+        create_router
+            .oneshot(response_create_request(
+                "/api/v1/responses",
+                json!({"model": "gpt-reborn", "input": "hello"}),
+                None,
+            ))
+            .await
+            .expect("create"),
+    )
+    .await;
+    let id = created["id"].as_str().expect("id from create");
+
+    // Now issue cancel through a router whose workflow always returns RejectedBusy.
+    let cancel_workflow = Arc::new(FixedAckWorkflow::new(rejected_busy_ack()));
+    let cancel_router =
+        router_with_product_workflow(cancel_workflow, ref_store, reader.clone(), caller());
+    let cancelled = cancel_router
+        .oneshot(post_empty(&format!("/api/v1/responses/{id}/cancel")))
+        .await
+        .expect("cancel");
+
+    // RejectedBusy on cancel must surface as a non-retryable 429 (terminal/settled outcome).
+    assert_eq!(cancelled.status(), http::StatusCode::TOO_MANY_REQUESTS);
+
+    // accepted_cancel_ack_from_ack errors out before read_response is called, so the
+    // projection reader must never have been touched for the cancel leg.
+    assert_eq!(
+        reader.read_count(),
+        0,
+        "cancelled projection must not be read when ack is RejectedBusy"
+    );
+}
+
+#[tokio::test]
 async fn unsupported_responses_tools_and_unwired_stream_reject_before_product_workflow() {
     let workflow = Arc::new(FakeProductWorkflow::new());
     let router = test_router(
@@ -414,6 +461,7 @@ async fn responses_empty_tools_array_is_absent_equivalent() {
 #[tokio::test]
 async fn responses_create_ack_error_paths_are_sanitized() {
     assert_fixed_ack_status(deferred_busy_ack(), http::StatusCode::TOO_MANY_REQUESTS).await;
+    assert_fixed_ack_status(rejected_busy_ack(), http::StatusCode::TOO_MANY_REQUESTS).await;
     assert_fixed_ack_status(
         rejected_ack(ProductRejectionKind::AccessDenied),
         http::StatusCode::FORBIDDEN,
@@ -446,6 +494,111 @@ async fn responses_create_ack_error_paths_are_sanitized() {
         http::StatusCode::INTERNAL_SERVER_ERROR,
     )
     .await;
+}
+
+#[tokio::test]
+async fn responses_binding_required_rejection_carries_input_param() {
+    // BindingRequired on the Responses surface must carry param="input" so API
+    // consumers can identify which request field is the root cause.
+    let workflow = Arc::new(FixedAckWorkflow::new(rejected_ack(
+        ProductRejectionKind::BindingRequired,
+    )));
+    let service = OpenAiResponsesWorkflow::new(
+        workflow,
+        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        Arc::new(StaticResponsesReader::completed("ok")),
+    );
+    let router =
+        openai_compat_router_with_state(OpenAiCompatRouterState::with_responses(Arc::new(service)))
+            .layer(axum::Extension(caller()));
+
+    let response = router
+        .oneshot(response_create_request(
+            "/api/v1/responses",
+            json!({"model": "gpt-reborn", "input": "hello"}),
+            None,
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::NOT_FOUND);
+    let body = json_body(response).await;
+    assert_eq!(
+        body["error"]["param"], "input",
+        "BindingRequired on responses must carry param=input"
+    );
+}
+
+#[tokio::test]
+async fn responses_invalid_request_rejection_carries_input_param() {
+    // InvalidRequest on the Responses surface must carry param="input" so API
+    // consumers can identify which request field is the root cause.
+    let workflow = Arc::new(FixedAckWorkflow::new(rejected_ack(
+        ProductRejectionKind::InvalidRequest,
+    )));
+    let service = OpenAiResponsesWorkflow::new(
+        workflow,
+        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        Arc::new(StaticResponsesReader::completed("ok")),
+    );
+    let router =
+        openai_compat_router_with_state(OpenAiCompatRouterState::with_responses(Arc::new(service)))
+            .layer(axum::Extension(caller()));
+
+    let response = router
+        .oneshot(response_create_request(
+            "/api/v1/responses",
+            json!({"model": "gpt-reborn", "input": "hello"}),
+            None,
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert_eq!(
+        body["error"]["param"], "input",
+        "InvalidRequest on responses must carry param=input"
+    );
+}
+
+#[tokio::test]
+async fn responses_create_ambiguous_resolution_rejection_returns_409() {
+    // ProductInboundAck::Rejected with AmbiguousResolution must map to HTTP
+    // 409 Conflict with a "conflict" error code. This test exercises the
+    // handler-level mapping through assert_fixed_ack_status to ensure no
+    // composition layer silently remaps the status code.
+    assert_fixed_ack_status(
+        rejected_ack(ProductRejectionKind::AmbiguousResolution),
+        http::StatusCode::CONFLICT,
+    )
+    .await;
+
+    // Also verify the wire body contains the canonical error code.
+    let workflow = Arc::new(FixedAckWorkflow::new(rejected_ack(
+        ProductRejectionKind::AmbiguousResolution,
+    )));
+    let service = OpenAiResponsesWorkflow::new(
+        workflow,
+        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        Arc::new(StaticResponsesReader::completed("ok")),
+    );
+    let router =
+        openai_compat_router_with_state(OpenAiCompatRouterState::with_responses(Arc::new(service)))
+            .layer(axum::Extension(caller()));
+
+    let response = router
+        .oneshot(response_create_request(
+            "/api/v1/responses",
+            json!({"model": "gpt-reborn", "input": "hello"}),
+            None,
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::CONFLICT);
+    let body = json_body(response).await;
+    assert_eq!(body["error"]["code"], "conflict");
 }
 
 #[tokio::test]
@@ -1011,6 +1164,13 @@ fn deferred_busy_ack() -> ProductInboundAck {
     ProductInboundAck::DeferredBusy {
         accepted_message_ref: AcceptedMessageRef::new("msg:busy").expect("accepted ref"),
         active_run_id: TurnRunId::new(),
+    }
+}
+
+fn rejected_busy_ack() -> ProductInboundAck {
+    ProductInboundAck::RejectedBusy {
+        accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy").expect("accepted ref"),
+        active_run_id: None,
     }
 }
 

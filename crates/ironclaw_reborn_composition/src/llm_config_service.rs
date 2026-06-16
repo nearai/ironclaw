@@ -558,21 +558,34 @@ impl LlmConfigService for RebornLlmConfigService {
         _caller: WebUiAuthenticatedCaller,
         request: LlmProbeRequest,
     ) -> Result<LlmProbeResult, LlmConfigServiceError> {
+        let endpoint = probe_endpoint_label(&request);
         let provider = self.probe_provider(&request).await?;
         match provider.list_models().await {
             Ok(models) if !models.is_empty() => Ok(LlmProbeResult {
                 ok: true,
                 message: format!("connection ok — {} models available", models.len()),
             }),
+            // The endpoint answered but advertised no models. Connectivity is
+            // confirmed, but don't overstate it as a verified model list.
             Ok(_) => Ok(LlmProbeResult {
                 ok: true,
-                message: "provider configured; this adapter does not expose a model list to verify"
-                    .to_string(),
+                message: format!("connected to {endpoint}, but it reported no models"),
             }),
-            Err(_) => Ok(LlmProbeResult {
-                ok: false,
-                message: "could not reach the provider with these settings".to_string(),
-            }),
+            // A failed `list_models` is the connectivity signal: the discovery
+            // request never reached a live endpoint. Name the address so the
+            // operator can see which host was unreachable.
+            Err(error) => {
+                tracing::debug!(
+                    provider_id = %request.provider_id,
+                    adapter = %request.adapter,
+                    error = %error,
+                    "test_connection probe failed"
+                );
+                Ok(LlmProbeResult {
+                    ok: false,
+                    message: format!("could not reach {endpoint} with these settings"),
+                })
+            }
         }
     }
 
@@ -902,6 +915,33 @@ fn normalized_endpoint(value: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| value.trim_end_matches('/').to_string())
+}
+
+/// Human-readable endpoint for probe-result messages so a connectivity failure
+/// names the address that was actually tried (e.g. `http://localhost:11434`)
+/// rather than a generic "the provider". Prefers the caller's override URL,
+/// then the builtin provider's default endpoint, then a generic fallback. Only
+/// ever returns the endpoint URL — never a key or other secret.
+fn probe_endpoint_label(request: &LlmProbeRequest) -> String {
+    if let Some(url) = request
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    {
+        return url.to_string();
+    }
+    if let Ok(registry) = ProviderRegistry::try_load_from_path(None)
+        && let Some(definition) = registry.find(&request.provider_id)
+        && let Some(base_url) = definition
+            .default_base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+    {
+        return base_url.to_string();
+    }
+    "the provider endpoint".to_string()
 }
 
 /// Resolve the overlay `ProviderDefinition` to write for an upsert.
@@ -1444,6 +1484,42 @@ mod tests {
         assert!(
             result.is_ok(),
             "keyless local provider must pass the probe validation gate, got {result:?}"
+        );
+    }
+
+    /// Testing the connection to a local Ollama that is not running must
+    /// report failure and name the unreachable endpoint — not the prior false
+    /// "provider configured" success that left chat requests to fail later.
+    #[tokio::test]
+    async fn test_connection_reports_unreachable_ollama_endpoint() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        let boot = boot_for_home(&reborn_home);
+        let service = RebornLlmConfigService::new(boot, key_store());
+
+        let request = LlmProbeRequest {
+            provider_id: "ollama".to_string(),
+            adapter: "ollama".to_string(),
+            // Port 1 is never listening, so the `/api/tags` discovery request
+            // fails the same way a stopped Ollama would.
+            base_url: Some("http://127.0.0.1:1".to_string()),
+            model: Some("llama3".to_string()),
+            api_key: None,
+        };
+
+        let result = service
+            .test_connection(caller(), request)
+            .await
+            .expect("probe completes");
+
+        assert!(
+            !result.ok,
+            "an unreachable endpoint must not report success, got {result:?}"
+        );
+        assert!(
+            result.message.contains("127.0.0.1:1"),
+            "failure message must name the unreachable endpoint, got: {}",
+            result.message
         );
     }
 

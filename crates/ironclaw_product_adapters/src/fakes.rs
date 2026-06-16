@@ -141,7 +141,9 @@ impl ProductWorkflow for FakeProductWorkflow {
         state.seen_envelopes.push(envelope.clone());
         if matches!(
             outcome,
-            ProductInboundAck::Accepted { .. } | ProductInboundAck::DeferredBusy { .. }
+            ProductInboundAck::Accepted { .. }
+                | ProductInboundAck::DeferredBusy { .. }
+                | ProductInboundAck::RejectedBusy { .. }
         ) {
             state.accepted_envelopes.push(envelope);
         }

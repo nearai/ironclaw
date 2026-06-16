@@ -87,6 +87,13 @@ browser-reachable.
 | `webui.v2.operator.logs` | GET | `/api/webchat/v2/operator/logs` | None | `ProjectionOnly` |
 | `webui.v2.operator.service_lifecycle` | POST | `/api/webchat/v2/operator/service` | None | `ProductWorkflow` |
 
+`webui.v2.operator.logs` accepts bounded `limit`, `cursor`, `level`, and `target`
+query parameters, the existing boolean `tail` flag from `RebornOperatorLogsQuery`,
+plus optional scoped filters for `thread_id`, `run_id`, `turn_id`, `tool_call_id`,
+`tool_name`, and `source`. Responses include the same correlation fields when the
+captured tracing context provides them and expose tail/follow capability through
+`tail_supported` and `follow_supported`.
+
 All routes require `BearerToken` auth with `AuthenticatedCaller`
 scope source. The host's bearer middleware is responsible for
 constructing the `WebUiAuthenticatedCaller`, carrying the matched

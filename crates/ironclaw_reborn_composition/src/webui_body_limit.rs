@@ -2,7 +2,7 @@
 //! surface.
 //!
 //! `ironclaw_webui_v2::webui_v2_routes()` carries a [`BodyLimitPolicy`]
-//! per route (16 KiB for `create_thread`, 1 MiB for `send_message`, 4
+//! per route (16 KiB for `create_thread`, 14 MiB for `send_message`, 4
 //! KiB for `cancel_run`/`resolve_gate`, `NoBody` for the read /
 //! streaming routes). The v2 crate's CLAUDE.md designates enforcement
 //! as host-composition responsibility; this module is that enforcement.
@@ -150,7 +150,7 @@ pub(crate) async fn enforce_body_limit(
         return too_large_for(route.policy);
     }
 
-    // Cast is safe: the largest descriptor cap is 1 MiB and the
+    // Cast is safe: the largest descriptor cap is 14 MiB and the
     // workspace targets are 64-bit platforms. `usize::try_from` returns
     // an error only on 32-bit platforms with a > 4 GiB cap, which the
     // v2 descriptors do not declare.
@@ -170,7 +170,7 @@ pub(crate) async fn enforce_body_limit(
     // Buffer with the descriptor cap as the hard limit. `to_bytes`
     // reads up to `limit` bytes and returns an error if the body
     // produced more. Buffering is acceptable because every v2 route
-    // caps at ≤ 1 MiB and the v2 handlers already buffer via
+    // caps at ≤ 14 MiB and the v2 handlers already buffer via
     // `Json<T>` downstream.
     let (parts, body) = request.into_parts();
     let buffered = match axum::body::to_bytes(body, max_bytes_usize).await {
@@ -272,9 +272,10 @@ mod tests {
             descriptors.len(),
             "every descriptor produced a RouteBodyLimit entry",
         );
-        // Locks in the descriptor contract: send_message must be 1 MiB,
-        // get_timeline and stream_events must be NoBody. A regression
-        // that flips these would trip here before reaching production.
+        // Locks in the descriptor contract: send_message must be 14 MiB
+        // (text + base64 inline attachments), get_timeline and
+        // stream_events must be NoBody. A regression that flips these
+        // would trip here before reaching production.
         let send = state
             .routes
             .iter()
@@ -282,7 +283,7 @@ mod tests {
             .expect("send_message route");
         assert!(matches!(
             send.policy,
-            ResolvedBodyPolicy::Limited { max_bytes } if max_bytes == 1024 * 1024,
+            ResolvedBodyPolicy::Limited { max_bytes } if max_bytes == 14 * 1024 * 1024,
         ));
         let timeline = state
             .routes

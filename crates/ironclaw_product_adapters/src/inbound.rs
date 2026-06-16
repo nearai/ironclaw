@@ -713,6 +713,10 @@ pub enum ProductRejectionKind {
     UnknownInstallation,
     InvalidRequest,
     PolicyDenied,
+    AmbiguousResolution,
+    /// The approval gate was already approved or denied — it is no longer pending.
+    /// Distinct from `PolicyDenied`, which means an active policy refused the request.
+    StaleGate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -766,6 +770,12 @@ impl ProductRejectionKind {
                 "I couldn't read that request. Use `approve` / `deny`, optionally with `gate:<ref>`."
             }
             Self::PolicyDenied => "That request was declined by policy.",
+            Self::AmbiguousResolution => {
+                "Multiple requests are pending in this conversation. Use `approve gate:<ref>` or `deny gate:<ref>` to pick one."
+            }
+            Self::StaleGate => {
+                "This approval request is no longer pending — it was already approved or denied."
+            }
         }
     }
 
@@ -779,6 +789,9 @@ impl ProductRejectionKind {
             }
             Self::InvalidRequest => {
                 "I couldn't read that request. Use `auth deny <auth-request-ref>` to decline an auth request."
+            }
+            Self::AmbiguousResolution => {
+                "Multiple auth requests are pending in this conversation. Use `auth deny <auth-request-ref>` to target a specific one."
             }
             _ => self.user_facing_hint(),
         }
@@ -820,6 +833,10 @@ pub enum ProductInboundAck {
         accepted_message_ref: AcceptedMessageRef,
         active_run_id: TurnRunId,
     },
+    RejectedBusy {
+        accepted_message_ref: AcceptedMessageRef,
+        active_run_id: Option<TurnRunId>,
+    },
     Rejected(ProductRejection),
     CommandResult {
         command: String,
@@ -836,6 +853,7 @@ impl ProductInboundAck {
         match self {
             Self::Accepted { .. }
             | Self::DeferredBusy { .. }
+            | Self::RejectedBusy { .. }
             | Self::Duplicate { .. }
             | Self::CommandResult { .. }
             | Self::NoOp => true,
@@ -1065,6 +1083,7 @@ mod tests {
             (ProductRejectionKind::UnknownInstallation, "workspace"),
             (ProductRejectionKind::InvalidRequest, "approve"),
             (ProductRejectionKind::PolicyDenied, "policy"),
+            (ProductRejectionKind::AmbiguousResolution, "approve gate:"),
         ];
         for (kind, expected_substr) in &cases {
             let hint = kind.user_facing_hint();
@@ -1114,6 +1133,13 @@ mod tests {
             "InvalidRequest auth hint must not contain approval command, got: {invalid_hint}"
         );
 
+        // AmbiguousResolution must also return auth-specific guidance, not approval text.
+        let ambiguous_hint = ProductRejectionKind::AmbiguousResolution.user_facing_auth_hint();
+        assert!(
+            ambiguous_hint.contains("auth deny"),
+            "AmbiguousResolution auth hint must reference 'auth deny', got: {ambiguous_hint}"
+        );
+
         // All other kinds fall through to user_facing_hint().
         for kind in [
             ProductRejectionKind::AccessDenied,
@@ -1126,5 +1152,35 @@ mod tests {
                 "{kind:?} auth hint must fall through to user_facing_hint()"
             );
         }
+    }
+
+    // BUG 3 regression: StaleGate must have a distinct hint that does NOT say
+    // "declined by policy" — it means the gate was already resolved.
+    #[test]
+    fn stale_gate_hint_is_distinct_from_policy_denied() {
+        let stale_hint = ProductRejectionKind::StaleGate.user_facing_hint();
+        let policy_hint = ProductRejectionKind::PolicyDenied.user_facing_hint();
+        assert_ne!(
+            stale_hint, policy_hint,
+            "StaleGate hint must differ from PolicyDenied hint"
+        );
+        assert!(
+            !stale_hint.contains("declined by policy"),
+            "StaleGate hint must not say 'declined by policy', got: {stale_hint}"
+        );
+        assert!(
+            stale_hint.contains("already approved or denied"),
+            "StaleGate hint must mention 'already approved or denied', got: {stale_hint}"
+        );
+    }
+
+    #[test]
+    fn policy_denied_hint_unchanged() {
+        // Regression: PolicyDenied string must remain stable — existing usages
+        // in other approval flows depend on it.
+        assert_eq!(
+            ProductRejectionKind::PolicyDenied.user_facing_hint(),
+            "That request was declined by policy."
+        );
     }
 }
