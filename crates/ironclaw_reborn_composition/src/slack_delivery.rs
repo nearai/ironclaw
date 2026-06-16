@@ -16,13 +16,13 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
-    CommunicationPreferenceKey, CommunicationPreferenceRepository, DeliveredGateRouteRecord,
-    DeliveredGateRouteStore, OutboundError, OutboundPolicyService, OutboundStateStore,
-    ProjectionUpdateRef, ReplyTargetBindingClaim, ReplyTargetBindingValidator,
-    ReplyTargetValidationRequest, RunNotificationContext, RunNotificationEventKind,
-    RunNotificationOrigin, SourceRouteContext, TriggerCommunicationContext, TriggerFireSlot,
-    TriggerOriginRef, TriggerSourceKind, TriggeredRunDeliveryOutcomeKind,
-    TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore, ValidatedReplyTargetBinding,
+    CommunicationPreferenceRepository, DeliveredGateRouteRecord, DeliveredGateRouteStore,
+    OutboundError, OutboundPolicyService, OutboundStateStore, ProjectionUpdateRef,
+    ReplyTargetBindingClaim, ReplyTargetBindingValidator, ReplyTargetValidationRequest,
+    RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin, SourceRouteContext,
+    TriggerCommunicationContext, TriggerFireSlot, TriggerOriginRef, TriggerSourceKind,
+    TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore,
+    ValidatedReplyTargetBinding,
 };
 use ironclaw_product_adapters::{
     ApprovalPromptContextView, DeclaredEgressHost, EgressCredentialHandle, EgressHeader,
@@ -1991,64 +1991,6 @@ async fn deliver_triggered_run(
         oauth_target_not_dm: std::sync::atomic::AtomicBool::new(false),
     };
 
-    // Pre-check: determine whether the creator's preferred delivery target is a
-    // verified personal DM. OAuth `authorization_url` values must ONLY be posted
-    // to a personal DM — posting one to a shared channel would leak the OAuth
-    // setup URL to every member of that channel. We resolve the preference once
-    // here (it does not change during delivery) so `triggered_notification_for_state`
-    // can gate the OAuth post without performing an async lookup on every loop
-    // iteration. Fail closed: if the preference cannot be read or the binding ref
-    // does not parse as a personal DM, treat the target as non-DM.
-    let target_is_verified_dm = {
-        // Resolve the preference owner: for owner-scoped runs the preference is
-        // stored under the owner identity, not the acting principal. Using the
-        // actor here would read a different (potentially absent) record and
-        // fail-close even when the owner has a valid personal-DM target.
-        let pref_owner_user_id = scope
-            .explicit_owner_user_id()
-            .cloned()
-            .unwrap_or_else(|| actor.user_id.clone());
-        let pref_key =
-            CommunicationPreferenceKey::personal(scope.tenant_id.clone(), pref_owner_user_id);
-        match services
-            .communication_preferences
-            .load_communication_preference(pref_key)
-            .await
-        {
-            Ok(Some(versioned)) => {
-                let record = &versioned.record;
-                // Gate on the EXACT target the auth prompt will resolve to, not
-                // "any stored target". The resolution engine resolves an
-                // auth-prompt intent as `auth_prompt_target.or(final_reply_target)`
-                // (see `resolution_engine.rs` `PreferenceTargetKind::AuthPrompt`) —
-                // `approval_prompt_target` is not in the auth chain, and the
-                // fallback only applies when `auth_prompt_target` is absent. A
-                // looser `.any()` would wrongly pass when `auth_prompt_target` is a
-                // shared channel but `final_reply_target` happens to be a DM, and
-                // still leak the OAuth URL to the channel.
-                let effective_auth_target = record
-                    .auth_prompt_target
-                    .as_ref()
-                    .or(record.final_reply_target.as_ref());
-                match effective_auth_target {
-                    Some(target) => slack_reply_target_is_personal_dm(target),
-                    None => false,
-                }
-            }
-            Ok(None) => false,
-            Err(err) => {
-                tracing::debug!(
-                    target = "ironclaw::reborn::slack_delivery",
-                    %run_id,
-                    error = %err,
-                    "triggered delivery: failed to load communication preference for DM check; \
-                     treating target as non-DM (fail closed)"
-                );
-                false
-            }
-        }
-    };
-
     let mut delivered_blocked_marker: Option<BlockedActionableMarker> = None;
     let mut messages_to_delete_after_final = Vec::new();
 
@@ -2088,7 +2030,6 @@ async fn deliver_triggered_run(
             &state,
             run_id,
             &trigger_label,
-            target_is_verified_dm,
         )
         .await
         {
@@ -2395,8 +2336,6 @@ fn triggered_label_from_prompt(prompt: &str) -> String {
 /// the DM's own scope — it never reaches the triggered run. If you extend this
 /// function, preserve that boundary: do not mint conversational/streaming payloads
 /// here, and do not assume inbound free-text can address a triggered run.
-// arch-exempt: too_many_args, needs a TriggeredNotificationContext bundle (services + scope + actor + state + labels + dm flag), plan #4953
-#[allow(clippy::too_many_arguments)]
 async fn triggered_notification_for_state(
     services: &SlackFinalReplyDeliveryServices,
     scope: &TurnScope,
@@ -2405,7 +2344,6 @@ async fn triggered_notification_for_state(
     state: &TurnRunState,
     run_id: TurnRunId,
     trigger_label: &str,
-    target_is_verified_dm: bool,
 ) -> Result<Option<SlackActionableNotification>, SlackFinalReplyDeliveryError> {
     match state.status {
         TurnStatus::Completed => {
@@ -2487,32 +2425,22 @@ async fn triggered_notification_for_state(
             )
             .await?;
             view.body.push_str(&triggered_gate_footer(trigger_label));
-            // Only link-based OAuth is allowed over Slack, AND only when the
-            // resolved delivery target is a verified personal DM. Posting an
-            // OAuth `authorization_url` to a shared channel would leak the
-            // setup link to every member of that channel.
-            //
-            // Fail-closed rule: if the target cannot be verified as a personal
-            // DM (`target_is_verified_dm` is false), treat the OAuth challenge
-            // the same as a non-OAuth challenge — cancel the run and post the
-            // auth-unavailable notice. When the target IS a personal DM and the
-            // challenge is link-based OAuth (`authorization_url` is Some), post
-            // the OAuth prompt; the callback resumes the run server-side.
-            if view.authorization_url.is_some() && target_is_verified_dm {
+            // Only link-based OAuth is allowed over Slack. The send-time authority
+            // backstop in `TriggeredSlackReplyTargetAuthority::resolve_product_outbound_target_metadata`
+            // enforces that the `authorization_url` only reaches a personal DM at the
+            // exact moment of delivery — it will trip and return `OAuthTargetNotDm` if
+            // the resolved binding is not a personal DM, causing `deliver_triggered_run`
+            // to cancel the run and post the auth-unavailable notice. We do not need to
+            // pre-check the DM status here: the backstop is the single enforcement point.
+            if view.authorization_url.is_some() {
                 Ok(Some(SlackActionableNotification {
                     event_kind: RunNotificationEventKind::AuthRequired,
                     payload: ProductOutboundPayload::AuthPrompt(view),
                     gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
                 }))
             } else {
-                if view.authorization_url.is_some() {
-                    tracing::debug!(
-                        target = "ironclaw::reborn::slack_delivery",
-                        %run_id,
-                        "triggered run OAuth auth blocked: delivery target is not a verified \
-                         personal DM; cancelling run to avoid leaking authorization_url"
-                    );
-                }
+                // Non-OAuth challenge (manual token / API-key entry). Deny: cancel the
+                // parked run and post the auth-unavailable notice directly.
                 cancel_auth_blocked_run(
                     services.turn_coordinator.as_ref(),
                     scope,
@@ -2775,14 +2703,12 @@ impl ProductOutboundTargetResolver for TriggeredSlackReplyTargetAuthority {
         &self,
         target: &ValidatedReplyTargetBinding,
     ) -> Result<VerifiedProductOutboundTargetMetadata, ProductWorkflowError> {
-        // Authority backstop: if the current delivery carries an OAuth
-        // `authorization_url`, enforce that the EXACT send-time binding is a
-        // personal DM. This closes the snapshot-vs-send race: the pre-loop
-        // `target_is_verified_dm` snapshot can go stale while the run waits in
-        // BlockedAuth; this guard is checked against the binding resolved NOW
-        // (at send time), not the one read earlier. On a trip we set the typed
-        // `oauth_target_not_dm` signal so `deliver_triggered_notification` can
-        // classify the failure as `OAuthTargetNotDm` without matching a magic
+        // Authority backstop — single enforcement point for the OAuth DM rule: if
+        // the current delivery carries an OAuth `authorization_url`, enforce that
+        // the EXACT send-time binding is a personal DM. This is checked against the
+        // binding resolved NOW (at send time), making it race-free. On a trip we set
+        // the typed `oauth_target_not_dm` signal so `deliver_triggered_notification`
+        // can classify the failure as `OAuthTargetNotDm` without matching a magic
         // reason string on the cross-crate error.
         if self
             .require_personal_dm_for_oauth
@@ -7215,251 +7141,22 @@ mod tests {
         );
     }
 
-    // ── Authority backstop: snapshot-vs-send race tests ───────────────────────
+    // ── Authority backstop tests ──────────────────────────────────────────────
     //
-    // These tests cover the `require_personal_dm_for_oauth` backstop that closes
-    // the race between the pre-loop `target_is_verified_dm` snapshot and the
-    // binding resolved at send time inside
-    // `TriggeredSlackReplyTargetAuthority::resolve_product_outbound_target_metadata`.
+    // These tests cover the `require_personal_dm_for_oauth` backstop in
+    // `TriggeredSlackReplyTargetAuthority::resolve_product_outbound_target_metadata`,
+    // which is now the single enforcement point ensuring OAuth authorization_urls
+    // only reach personal DMs. The pre-loop snapshot was removed; the backstop is
+    // authoritative.
 
-    /// A `CommunicationPreferenceRepository` whose `load_communication_preference`
-    /// flips the returned binding between calls. The first call returns a
-    /// personal-DM binding (making `target_is_verified_dm = true` in the pre-loop
-    /// snapshot); all subsequent calls return a shared-channel binding (the
-    /// send-time preference flip).
+    /// Backstop regression: when the send-time binding resolves to a shared
+    /// channel, the `require_personal_dm_for_oauth` backstop must catch it and
+    /// suppress the OAuth URL. The run must be cancelled and the auth-unavailable
+    /// notice must be posted. No gate route must be recorded.
     ///
-    /// This simulates the snapshot-vs-send race: the snapshot says DM but the
-    /// actual send-time target is a shared channel.
-    struct FlippingPreferenceRepository {
-        call_count: std::sync::atomic::AtomicU32,
-        dm_record: ironclaw_outbound::CommunicationPreferenceRecord,
-        shared_record: ironclaw_outbound::CommunicationPreferenceRecord,
-    }
-
-    impl FlippingPreferenceRepository {
-        fn new(
-            dm_binding: ReplyTargetBindingRef,
-            shared_binding: ReplyTargetBindingRef,
-            scope: &TurnScope,
-        ) -> Self {
-            let tenant = scope.tenant_id.clone();
-            let user = scope
-                .explicit_owner_user_id()
-                .cloned()
-                .expect("owner user id");
-            let updated_by = user.clone();
-            let dm_record = ironclaw_outbound::CommunicationPreferenceRecord {
-                scope: ironclaw_outbound::DeliveryDefaultScope::personal(
-                    tenant.clone(),
-                    user.clone(),
-                ),
-                final_reply_target: Some(dm_binding.clone()),
-                progress_target: None,
-                approval_prompt_target: Some(dm_binding),
-                auth_prompt_target: None,
-                default_modality: None,
-                updated_at: Utc::now(),
-                updated_by: updated_by.clone(),
-            };
-            let shared_record = ironclaw_outbound::CommunicationPreferenceRecord {
-                scope: ironclaw_outbound::DeliveryDefaultScope::personal(tenant, user),
-                final_reply_target: Some(shared_binding.clone()),
-                progress_target: None,
-                approval_prompt_target: Some(shared_binding),
-                auth_prompt_target: None,
-                default_modality: None,
-                updated_at: Utc::now(),
-                updated_by,
-            };
-            Self {
-                call_count: std::sync::atomic::AtomicU32::new(0),
-                dm_record,
-                shared_record,
-            }
-        }
-    }
-
-    #[async_trait]
-    impl CommunicationPreferenceRepository for FlippingPreferenceRepository {
-        async fn load_communication_preference(
-            &self,
-            _key: CommunicationPreferenceKey,
-        ) -> Result<
-            Option<ironclaw_outbound::VersionedCommunicationPreferenceRecord>,
-            ironclaw_outbound::OutboundError,
-        > {
-            let n = self
-                .call_count
-                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-            let record = if n == 0 {
-                // First call (pre-loop snapshot): return personal DM.
-                self.dm_record.clone()
-            } else {
-                // All subsequent calls (send-time resolution): return shared channel.
-                self.shared_record.clone()
-            };
-            Ok(Some(
-                ironclaw_outbound::VersionedCommunicationPreferenceRecord {
-                    record,
-                    version: ironclaw_outbound::CommunicationPreferenceVersion::from_raw(1),
-                },
-            ))
-        }
-
-        async fn write_communication_preference(
-            &self,
-            _request: ironclaw_outbound::WriteCommunicationPreferenceRequest,
-        ) -> Result<
-            ironclaw_outbound::VersionedCommunicationPreferenceRecord,
-            ironclaw_outbound::OutboundError,
-        > {
-            Err(ironclaw_outbound::OutboundError::AccessDenied)
-        }
-    }
-
-    /// A `CommunicationPreferenceRepository` that errors on the FIRST
-    /// `load_communication_preference` call (simulating a transient backend error
-    /// during the pre-loop snapshot read) and delegates all subsequent calls to a
-    /// real `InMemoryOutboundStateStore`.
-    ///
-    /// This lets us verify that a snapshot-read error is fail-closed
-    /// (`target_is_verified_dm = false`) while still allowing the delivery itself
-    /// to proceed (since the outbound policy calls the repo again at send time).
-    struct FirstCallErrorPreferenceRepository {
-        call_count: std::sync::atomic::AtomicU32,
-        delegate: Arc<InMemoryOutboundStateStore>,
-    }
-
-    impl FirstCallErrorPreferenceRepository {
-        fn new(delegate: Arc<InMemoryOutboundStateStore>) -> Self {
-            Self {
-                call_count: std::sync::atomic::AtomicU32::new(0),
-                delegate,
-            }
-        }
-    }
-
-    #[async_trait]
-    impl CommunicationPreferenceRepository for FirstCallErrorPreferenceRepository {
-        async fn load_communication_preference(
-            &self,
-            key: CommunicationPreferenceKey,
-        ) -> Result<
-            Option<ironclaw_outbound::VersionedCommunicationPreferenceRecord>,
-            ironclaw_outbound::OutboundError,
-        > {
-            let n = self
-                .call_count
-                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-            if n == 0 {
-                // First call (pre-loop snapshot): simulate a backend error.
-                Err(ironclaw_outbound::OutboundError::Backend)
-            } else {
-                // Subsequent calls (send-time delivery resolution): delegate.
-                self.delegate.load_communication_preference(key).await
-            }
-        }
-
-        async fn write_communication_preference(
-            &self,
-            request: ironclaw_outbound::WriteCommunicationPreferenceRequest,
-        ) -> Result<
-            ironclaw_outbound::VersionedCommunicationPreferenceRecord,
-            ironclaw_outbound::OutboundError,
-        > {
-            self.delegate.write_communication_preference(request).await
-        }
-    }
-
-    /// A `CommunicationPreferenceRepository` that returns `Ok(None)` on the
-    /// FIRST `load_communication_preference` call (simulating an absent record
-    /// during the pre-loop snapshot read) and delegates all subsequent calls to
-    /// a real `InMemoryOutboundStateStore`.
-    ///
-    /// This lets us verify that a snapshot-read of `Ok(None)` is fail-closed
-    /// (`target_is_verified_dm = false`) while still allowing the delivery itself
-    /// to proceed (since the outbound policy calls the repo again at send time
-    /// and finds the seeded preference).
-    struct FirstCallNonePreferenceRepository {
-        call_count: std::sync::atomic::AtomicU32,
-        delegate: Arc<InMemoryOutboundStateStore>,
-    }
-
-    impl FirstCallNonePreferenceRepository {
-        fn new(delegate: Arc<InMemoryOutboundStateStore>) -> Self {
-            Self {
-                call_count: std::sync::atomic::AtomicU32::new(0),
-                delegate,
-            }
-        }
-    }
-
-    #[async_trait]
-    impl CommunicationPreferenceRepository for FirstCallNonePreferenceRepository {
-        async fn load_communication_preference(
-            &self,
-            key: CommunicationPreferenceKey,
-        ) -> Result<
-            Option<ironclaw_outbound::VersionedCommunicationPreferenceRecord>,
-            ironclaw_outbound::OutboundError,
-        > {
-            let n = self
-                .call_count
-                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-            if n == 0 {
-                // First call (pre-loop snapshot): simulate absent preference.
-                Ok(None)
-            } else {
-                // Subsequent calls (send-time delivery resolution): delegate.
-                self.delegate.load_communication_preference(key).await
-            }
-        }
-
-        async fn write_communication_preference(
-            &self,
-            request: ironclaw_outbound::WriteCommunicationPreferenceRequest,
-        ) -> Result<
-            ironclaw_outbound::VersionedCommunicationPreferenceRecord,
-            ironclaw_outbound::OutboundError,
-        > {
-            self.delegate.write_communication_preference(request).await
-        }
-    }
-
-    /// Build `SlackFinalReplyDeliveryServices` with a custom
-    /// `CommunicationPreferenceRepository` that is separate from the outbound store
-    /// (the outbound store is used for delivery-state only; preference reads go
-    /// through the injected repo).
-    fn make_services_with_prefs(
-        coordinator: Arc<dyn TurnCoordinator>,
-        thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
-        egress: Arc<FakeProtocolHttpEgress>,
-        outbound: Arc<InMemoryOutboundStateStore>,
-        prefs: Arc<dyn CommunicationPreferenceRepository>,
-        installation_id: &str,
-    ) -> SlackFinalReplyDeliveryServices {
-        SlackFinalReplyDeliveryServices {
-            binding_service: Arc::new(TestNoopConversationBindingService),
-            thread_service,
-            turn_coordinator: coordinator,
-            outbound_store: outbound,
-            route_store: Arc::new(InMemoryDeliveredGateRouteStore::default()),
-            communication_preferences: prefs,
-            adapter: test_adapter(installation_id),
-            egress,
-            delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
-            auth_challenges: None,
-            approval_requests: None,
-        }
-    }
-
-    /// RACE regression: the pre-loop DM snapshot says DM but the preference flips
-    /// to a shared channel before the send-time binding is resolved.
-    ///
-    /// The authority backstop (`require_personal_dm_for_oauth`) must catch this
-    /// and suppress the OAuth URL. The run must be cancelled and the
-    /// auth-unavailable notice must be posted to the shared channel. No gate
-    /// route must be recorded.
+    /// Previously named `triggered_oauth_auth_dm_snapshot_but_channel_at_send_suppresses_url`
+    /// (tested the snapshot-vs-send race); simplified now that the backstop is the
+    /// only enforcement point and no pre-loop snapshot exists.
     #[tokio::test]
     async fn triggered_oauth_auth_dm_snapshot_but_channel_at_send_suppresses_url() {
         let install = "test-install";
@@ -7468,9 +7165,7 @@ mod tests {
         let run_id = TurnRunId::new();
         let agent = scope.agent_id.as_ref().expect("agent").as_str();
 
-        // The personal-DM binding is returned on the FIRST load (snapshot).
-        let dm_binding = test_slack_binding_ref(install, agent);
-        // The shared-channel binding is returned on the SECOND+ loads (send time).
+        // Shared-channel binding: the backstop must catch this at send time.
         let shared_binding = test_slack_shared_channel_binding_ref(install, agent);
 
         // First poll → BlockedAuth with OAuth gate; second poll → Completed.
@@ -7487,19 +7182,8 @@ mod tests {
         )
         .await;
 
-        // Outbound store: seed the shared-channel binding so the policy service
-        // resolves it (the FlippingPreferenceRepository drives the snapshot vs
-        // send-time distinction).
         let outbound = Arc::new(InMemoryOutboundStateStore::default());
-        seed_personal_preference(&outbound, &scope, shared_binding.clone()).await;
-
-        // The flipping preference repo: DM on first call, shared-channel on
-        // subsequent calls.
-        let prefs = Arc::new(FlippingPreferenceRepository::new(
-            dm_binding,
-            shared_binding,
-            &scope,
-        ));
+        seed_personal_preference(&outbound, &scope, shared_binding).await;
 
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         egress.allow_credential_handle("slack_bot_token");
@@ -7511,7 +7195,7 @@ mod tests {
                 slack_post_ok_json("C0SHARED", "race-test.1"),
             )),
         );
-        // Final reply after Completed (the loop re-runs once after cancel).
+        // Second response (available if loop re-runs; not required to be consumed).
         egress.program_response(
             "slack.com",
             Ok(EgressResponse::new(
@@ -7522,12 +7206,11 @@ mod tests {
 
         let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
         let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
-        let mut services = make_services_with_prefs(
+        let mut services = make_services(
             coordinator,
             thread_service,
             egress.clone(),
             outbound,
-            prefs,
             install,
         );
         // Wire up an OAuth challenge provider so authorization_url would be set
@@ -7567,7 +7250,7 @@ mod tests {
             assert!(
                 !body.contains("https://provider.example/oauth-race"),
                 "authorization_url must NOT be posted when send-time target is a shared channel \
-                 (race backstop); got: {body}"
+                 (backstop); got: {body}"
             );
         }
 
@@ -7592,267 +7275,13 @@ mod tests {
         );
     }
 
-    /// Fail-closed: `load_communication_preference` returns `Err` on the
-    /// pre-loop snapshot read → `target_is_verified_dm = false` → OAuth URL
-    /// suppressed → auth-unavailable notice posted. No gate route recorded.
-    ///
-    /// Covers reviewer item Y: a preference-read error must not allow the OAuth
-    /// URL to leak by default-treating the target as a DM.
-    #[tokio::test]
-    async fn triggered_oauth_auth_preference_read_error_suppresses_authorization_url() {
-        let install = "test-install";
-        let gate_ref_str = "gate:oauth-pref-error";
-        let scope = personal_turn_scope();
-        let run_id = TurnRunId::new();
-        let agent = scope.agent_id.as_ref().expect("agent").as_str();
+    // Removed: triggered_oauth_auth_preference_read_error_suppresses_authorization_url
+    // — tested the pre-loop snapshot fail-closed behavior on preference-read error;
+    // redundant now that the snapshot was removed and the backstop is the sole
+    // enforcement point (shared-channel delivery is already covered by
+    // `triggered_oauth_auth_to_shared_channel_suppresses_authorization_url`).
 
-        // The shared-channel binding is seeded in the outbound store so the
-        // outbound policy can resolve it. The preference repo always errors, so
-        // the snapshot is false (fail-closed).
-        let shared_binding = test_slack_shared_channel_binding_ref(install, agent);
-
-        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![
-            scripted_state(TurnStatus::BlockedAuth, Some(gate_ref_str)),
-            scripted_state(TurnStatus::Completed, None),
-        ]));
-        let thread_service = Arc::new(InMemorySessionThreadService::default());
-        seed_finalized_assistant_message(
-            &thread_service,
-            &scope,
-            run_id,
-            "Run complete after auth.",
-        )
-        .await;
-
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
-        seed_personal_preference(&outbound, &scope, shared_binding).await;
-
-        // First-call-error preference repository: errors on the pre-loop snapshot
-        // read, then delegates to the real outbound store for delivery-time calls.
-        // This ensures `target_is_verified_dm = false` (fail-closed) while still
-        // letting the delivery succeed so we can observe the auth-unavailable notice.
-        let prefs = Arc::new(FirstCallErrorPreferenceRepository::new(Arc::clone(
-            &outbound,
-        )));
-
-        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
-        egress.allow_credential_handle("slack_bot_token");
-        // auth-unavailable notice.
-        egress.program_response(
-            "slack.com",
-            Ok(EgressResponse::new(
-                200,
-                slack_post_ok_json("C0SHARED", "pref-err.1"),
-            )),
-        );
-        // Final reply after Completed.
-        egress.program_response(
-            "slack.com",
-            Ok(EgressResponse::new(
-                200,
-                slack_post_ok_json("C0SHARED", "pref-err.2"),
-            )),
-        );
-
-        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
-        let mut services = make_services_with_prefs(
-            coordinator,
-            thread_service,
-            egress.clone(),
-            outbound,
-            prefs,
-            install,
-        );
-        services.auth_challenges = Some(Arc::new(OAuthAuthChallengeProvider {
-            url: "https://provider.example/oauth-pref-error".to_string(),
-        }));
-
-        let settings = SlackFinalReplyDeliverySettings {
-            poll_interval: std::time::Duration::ZERO,
-            max_wait: std::time::Duration::from_secs(5),
-            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
-            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
-        };
-        let driver = TriggeredRunDeliveryDriver::with_settings(
-            services,
-            settings,
-            delivery_store.clone(),
-            route_store.clone(),
-            scope.agent_id.clone().expect("test scope has agent"),
-        );
-
-        driver
-            .on_trigger_submitted(minimal_trigger_fire(None), run_id, scope.clone())
-            .await;
-        wait_for_delivery_record(&delivery_store, run_id).await;
-
-        let posted: Vec<String> = egress
-            .calls()
-            .iter()
-            .filter(|c| c.path == "/api/chat.postMessage")
-            .map(|c| String::from_utf8_lossy(&c.body).to_string())
-            .collect();
-
-        // The OAuth URL must NOT appear anywhere.
-        for body in &posted {
-            assert!(
-                !body.contains("https://provider.example/oauth-pref-error"),
-                "authorization_url must NOT be posted when preference read errors (fail closed); \
-                 got: {body}"
-            );
-        }
-
-        // The auth-unavailable notice must be posted.
-        assert!(
-            posted
-                .iter()
-                .any(|b| b.contains(SLACK_AUTH_UNAVAILABLE_MESSAGE)),
-            "auth-unavailable notice must be posted when preference read errors; got: {posted:?}"
-        );
-
-        // No gate route recorded.
-        let creator = ironclaw_host_api::UserId::new("creator-user").expect("user id");
-        let route = route_store
-            .load_delivered_gate_route(&scope.tenant_id, &creator, gate_ref_str)
-            .await
-            .expect("load route");
-        assert!(
-            route.is_none(),
-            "no gate route must be recorded when OAuth is suppressed due to preference read error"
-        );
-    }
-
-    /// Fail-closed: `load_communication_preference` returns `Ok(None)` (no
-    /// preference record stored) on the pre-loop snapshot read →
-    /// `target_is_verified_dm = false` → OAuth URL suppressed →
-    /// auth-unavailable notice posted instead. No gate route recorded.
-    ///
-    /// Regression for A5/A3: an absent preference must not be treated as a DM.
-    #[tokio::test]
-    async fn triggered_oauth_auth_no_preference_suppresses_authorization_url() {
-        let install = "test-install";
-        let gate_ref_str = "gate:oauth-no-preference";
-        let scope = personal_turn_scope();
-        let run_id = TurnRunId::new();
-        let agent = scope.agent_id.as_ref().expect("agent").as_str();
-
-        // Shared-channel binding seeded in the outbound store so delivery can
-        // resolve it. The preference repo (the default empty InMemoryOutboundStateStore)
-        // has NO communication preference record, so the snapshot read returns
-        // Ok(None) → fail-closed.
-        let shared_binding = test_slack_shared_channel_binding_ref(install, agent);
-
-        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![
-            scripted_state(TurnStatus::BlockedAuth, Some(gate_ref_str)),
-            scripted_state(TurnStatus::Completed, None),
-        ]));
-        let thread_service = Arc::new(InMemorySessionThreadService::default());
-        seed_finalized_assistant_message(
-            &thread_service,
-            &scope,
-            run_id,
-            "Run complete after auth.",
-        )
-        .await;
-
-        // The outbound store is seeded with the delivery-target binding so the
-        // FinalReply notice can be posted.  The preference repo (FirstCallNonePreferenceRepository)
-        // returns Ok(None) on the first (pre-loop snapshot) call → fail-closed, then
-        // delegates to the real store on subsequent (send-time) calls so delivery
-        // can proceed.
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
-        seed_personal_preference(&outbound, &scope, shared_binding).await;
-
-        let prefs = Arc::new(FirstCallNonePreferenceRepository::new(Arc::clone(
-            &outbound,
-        )));
-
-        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
-        egress.allow_credential_handle("slack_bot_token");
-        // auth-unavailable notice.
-        egress.program_response(
-            "slack.com",
-            Ok(EgressResponse::new(
-                200,
-                slack_post_ok_json("C0SHARED", "no-pref.1"),
-            )),
-        );
-        // Final reply after Completed.
-        egress.program_response(
-            "slack.com",
-            Ok(EgressResponse::new(
-                200,
-                slack_post_ok_json("C0SHARED", "no-pref.2"),
-            )),
-        );
-
-        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
-        let mut services = make_services_with_prefs(
-            coordinator,
-            thread_service,
-            egress.clone(),
-            outbound,
-            prefs,
-            install,
-        );
-        services.auth_challenges = Some(Arc::new(OAuthAuthChallengeProvider {
-            url: "https://provider.example/oauth-no-preference".to_string(),
-        }));
-
-        let settings = SlackFinalReplyDeliverySettings {
-            poll_interval: std::time::Duration::ZERO,
-            max_wait: std::time::Duration::from_secs(5),
-            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
-            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
-        };
-        let driver = TriggeredRunDeliveryDriver::with_settings(
-            services,
-            settings,
-            delivery_store.clone(),
-            route_store.clone(),
-            scope.agent_id.clone().expect("test scope has agent"),
-        );
-
-        driver
-            .on_trigger_submitted(minimal_trigger_fire(None), run_id, scope.clone())
-            .await;
-        wait_for_delivery_record(&delivery_store, run_id).await;
-
-        let posted: Vec<String> = egress
-            .calls()
-            .iter()
-            .filter(|c| c.path == "/api/chat.postMessage")
-            .map(|c| String::from_utf8_lossy(&c.body).to_string())
-            .collect();
-
-        // The OAuth URL must NOT appear anywhere (no preference → fail closed).
-        for body in &posted {
-            assert!(
-                !body.contains("https://provider.example/oauth-no-preference"),
-                "authorization_url must NOT be posted when no preference is stored (fail closed); \
-                 got: {body}"
-            );
-        }
-
-        // The auth-unavailable notice must be posted.
-        assert!(
-            posted
-                .iter()
-                .any(|b| b.contains(SLACK_AUTH_UNAVAILABLE_MESSAGE)),
-            "auth-unavailable notice must be posted when no preference is stored; got: {posted:?}"
-        );
-
-        // No gate route recorded.
-        let creator = ironclaw_host_api::UserId::new("creator-user").expect("user id");
-        let route = route_store
-            .load_delivered_gate_route(&scope.tenant_id, &creator, gate_ref_str)
-            .await
-            .expect("load route");
-        assert!(
-            route.is_none(),
-            "no gate route must be recorded when OAuth is suppressed due to absent preference"
-        );
-    }
+    // Removed: triggered_oauth_auth_no_preference_suppresses_authorization_url
+    // — tested the pre-loop snapshot fail-closed behavior for an absent preference
+    // record; redundant after snapshot removal for the same reason as above.
 }
