@@ -2150,22 +2150,35 @@ async fn wait_for_actionable_triggered(
     }
 }
 
-/// One-line capability hint appended to every triggered-run Slack message.
-const SLACK_TRIGGERED_SESSION_HINT: &str = "Here you can reply `approve`/`deny` \
-or `auth deny` and receive updates — to interact with this run, open the \
-Ironclaw web app.";
-
-/// Footer appended to every triggered-run Slack message so the recipient knows
-/// the surface is output + gate-resolution only (not a conversational channel)
-/// and where to go to actually interact with the run. `label` is a short routine
-/// identifier (a truncated trigger prompt); it is omitted from the text when empty.
-fn triggered_session_footer(label: &str) -> String {
+/// Footer for triggered **gate** prompts (approval / OAuth auth). The user can
+/// act on this specific request in Slack, but cannot otherwise drive the run.
+/// `label` is a short trigger identifier (truncated prompt); omitted when empty.
+fn triggered_gate_footer(label: &str) -> String {
     let label = label.trim();
-    if label.is_empty() {
-        format!("\n\n_From an automated routine. {SLACK_TRIGGERED_SESSION_HINT}_")
+    let lead = if label.is_empty() {
+        "From a triggered event.".to_string()
     } else {
-        format!("\n\n_From an automated routine: “{label}”. {SLACK_TRIGGERED_SESSION_HINT}_")
-    }
+        format!("From a triggered event: “{label}”.")
+    };
+    format!(
+        "\n\n_{lead} You can respond to this request here — to otherwise interact \
+         with this run, open the Ironclaw web app._"
+    )
+}
+
+/// Footer for triggered **updates / final replies**. These are output only —
+/// there is nothing to act on in Slack, so it points the user to the web app.
+fn triggered_update_footer(label: &str) -> String {
+    let label = label.trim();
+    let lead = if label.is_empty() {
+        "From a triggered event.".to_string()
+    } else {
+        format!("From a triggered event: “{label}”.")
+    };
+    format!(
+        "\n\n_{lead} You can't interact with triggered events here — open the \
+         Ironclaw web app to interact with this run._"
+    )
 }
 
 /// Truncate a trigger prompt to a short single-line label for the footer.
@@ -2214,7 +2227,6 @@ async fn triggered_notification_for_state(
     run_id: TurnRunId,
     trigger_label: &str,
 ) -> Result<Option<SlackActionableNotification>, SlackFinalReplyDeliveryError> {
-    let footer = triggered_session_footer(trigger_label);
     match state.status {
         TurnStatus::Completed => {
             // Read finalized assistant message.
@@ -2239,7 +2251,7 @@ async fn triggered_notification_for_state(
                 event_kind: RunNotificationEventKind::FinalReplyReady,
                 payload: ProductOutboundPayload::FinalReply(FinalReplyView {
                     turn_run_id: run_id,
-                    text: format!("{text}{footer}"),
+                    text: format!("{text}{}", triggered_update_footer(trigger_label)),
                     generated_at: Utc::now(),
                 }),
                 gate_ref_for_routing: None,
@@ -2268,7 +2280,7 @@ async fn triggered_notification_for_state(
             )
             .await;
             let mut prompt = slack_approval_gate_prompt_view(run_id, gate_ref, context.as_ref());
-            prompt.body.push_str(&footer);
+            prompt.body.push_str(&triggered_gate_footer(trigger_label));
             Ok(Some(SlackActionableNotification {
                 event_kind: RunNotificationEventKind::ApprovalNeeded,
                 payload: ProductOutboundPayload::GatePrompt(prompt),
@@ -2294,7 +2306,7 @@ async fn triggered_notification_for_state(
                 services.auth_challenges.as_deref(),
             )
             .await?;
-            view.body.push_str(&footer);
+            view.body.push_str(&triggered_gate_footer(trigger_label));
             // Same policy as the live path: only link-based OAuth is allowed over
             // Slack. A triggered run delivers to the creator's private DM, so the
             // OAuth `authorization_url` is safe to post there and the callback
@@ -2320,7 +2332,10 @@ async fn triggered_notification_for_state(
                     event_kind: RunNotificationEventKind::FinalReplyReady,
                     payload: ProductOutboundPayload::FinalReply(FinalReplyView {
                         turn_run_id: run_id,
-                        text: format!("{SLACK_AUTH_UNAVAILABLE_MESSAGE}{footer}"),
+                        text: format!(
+                            "{SLACK_AUTH_UNAVAILABLE_MESSAGE}{}",
+                            triggered_update_footer(trigger_label)
+                        ),
                         generated_at: Utc::now(),
                     }),
                     gate_ref_for_routing: None,
@@ -5386,12 +5401,12 @@ mod tests {
             approval_post_body.contains("A step in this workflow needs your approval to continue"),
             "triggered approval prompt must use the shared gate-prompt render; got: {approval_post_body}"
         );
-        // Every triggered Slack message carries the routine footer naming the
-        // surface contract (approve/auth/updates here; interact via the web app).
+        // Every triggered Slack message carries the triggered-event footer
+        // naming the surface contract (act here; interact via the web app).
         assert!(
-            approval_post_body.contains("From an automated routine")
+            approval_post_body.contains("From a triggered event")
                 && approval_post_body.contains("Ironclaw web app"),
-            "triggered message must carry the routine/web-app footer; got: {approval_post_body}"
+            "triggered message must carry the triggered-event/web-app footer; got: {approval_post_body}"
         );
 
         let creator = ironclaw_host_api::UserId::new("creator-user").expect("user id");
