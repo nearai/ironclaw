@@ -312,10 +312,10 @@ export declare const ChatEventSchema: z.ZodObject<{
         generatedAt: z.ZodString;
     }, z.core.$strip>>;
     prompt: z.ZodOptional<z.ZodObject<{
-        turnRunId: z.ZodString;
-        gateRef: z.ZodString;
-        headline: z.ZodString;
-        body: z.ZodString;
+        turnRunId: z.ZodCatch<z.ZodString>;
+        gateRef: z.ZodCatch<z.ZodString>;
+        headline: z.ZodCatch<z.ZodString>;
+        body: z.ZodCatch<z.ZodString>;
         allowAlways: z.ZodOptional<z.ZodBoolean>;
         approvalContext: z.ZodOptional<z.ZodObject<{
             toolName: z.ZodString;
@@ -866,7 +866,7 @@ export declare const contract: {
         resolveGate: import("@orpc/contract").ContractProcedure<z.ZodObject<{
             id: z.ZodString;
             runId: z.ZodString;
-            gateRef: z.ZodString;
+            gateRef: z.ZodCatch<z.ZodString>;
             resolution: z.ZodEnum<{
                 approved: "approved";
                 denied: "denied";
@@ -1993,3 +1993,10 @@ export declare const contract: {
     };
 };
 export type ContractType = typeof contract;
+export type ChatEvent = z.infer<typeof ChatEventSchema>;
+export type AcceptedResponse = z.infer<typeof AcceptedResponseSchema>;
+export type TimelineEntry = z.infer<typeof TimelineEntrySchema>;
+export type Thread = z.infer<typeof ThreadSchema>;
+export type Session = z.infer<typeof SessionSchema>;
+export type GateResolution = z.infer<typeof GateResolutionSchema>;
+export type ThreadCreate = z.infer<typeof ThreadCreateSchema>;

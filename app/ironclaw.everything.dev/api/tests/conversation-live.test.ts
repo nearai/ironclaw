@@ -1,18 +1,24 @@
 import { describe, expect, it, vi } from "vitest";
-import { createConversationLiveHandler } from "../src/lib/conversation-live";
+import { createThreadChatBridge } from "../src/lib/conversation-live";
 
 function event(type: string, overrides: Record<string, unknown> = {}) {
   return { type, ...overrides };
 }
 
-function mockIc(events: any[]) {
+function mockSendMessage() {
+  return { runId: "test-run-1", activeRunId: "test-run-1", eventCursor: 0 };
+}
+
+function mockIc(events: any[], timelineData?: any[]) {
   const ic = {
     threads: {
+      sendMessage: vi.fn().mockResolvedValue(mockSendMessage()),
       streamEvents: vi.fn().mockResolvedValue(
         (async function* () {
           for (const e of events) yield e;
         })(),
       ),
+      getTimeline: vi.fn().mockResolvedValue(timelineData ? { data: timelineData } : { data: [] }),
     },
   };
 
@@ -20,109 +26,83 @@ function mockIc(events: any[]) {
 }
 
 async function collectEvents(
-  handler: ReturnType<typeof createConversationLiveHandler>,
-  input: { threadId: string; runId?: string; afterCursor?: string },
+  handler: ReturnType<typeof createThreadChatBridge>,
+  input: { threadId: string; messages?: any[] },
 ) {
-  const gen = handler({ input, signal: new AbortController().signal, context: {} });
+  const gen = handler({
+    input: {
+      threadId: input.threadId,
+      messages: input.messages ?? [{ id: "test-1", role: "user", content: "test" }],
+    },
+    signal: new AbortController().signal,
+    context: {},
+  });
   const events: any[] = [];
   for await (const e of gen) events.push(e);
   return events;
 }
 
-describe("createConversationLiveHandler", () => {
-  it("maps capability events into AG-UI chunks and custom events", async () => {
+describe("createThreadChatBridge", () => {
+  it("sends message and streams events into AG-UI chunks", async () => {
     const { ic } = mockIc([
       event("accepted", {
-        ack: { runId: "run-1", activeRunId: "run-1", threadId: "thread-1" },
-      }),
-      event("capability_display_preview", {
-        preview: {
-          timelineMessageId: "msg-1",
-          capabilityId: "search-web",
-          title: "Search web",
-          inputSummary: "ironclaw",
-          outputSummary: "found it",
-          outputKind: "text",
-          truncated: false,
-        },
-      }),
-      event("capability_activity", {
-        activity: {
-          timelineMessageId: "msg-1",
-          capabilityId: "search-web",
-          status: "completed",
-          errorKind: undefined,
-        },
+        ack: { runId: "test-run-1", activeRunId: "test-run-1", threadId: "thread-1" },
       }),
       event("final_reply", {
-        reply: { text: "final answer", turnRunId: "run-1" },
+        reply: { text: "hello from the bridge", turnRunId: "test-run-1" },
       }),
     ]);
 
-    const handler = createConversationLiveHandler({ ironclaw: () => ic as any });
-    const events = await collectEvents(handler, { threadId: "thread-1", runId: "run-1" });
+    const handler = createThreadChatBridge({ ironclaw: () => ic as any });
+    const events = await collectEvents(handler, { threadId: "thread-1" });
 
-    expect(events.map((e) => e.type)).toEqual([
-      "RUN_STARTED",
-      "CUSTOM",
-      "TOOL_CALL_START",
-      "TOOL_CALL_ARGS",
-      "CUSTOM",
-      "TOOL_CALL_END",
-      "CUSTOM",
-      "CUSTOM",
-      "RUN_FINISHED",
-    ]);
-
-    expect(events[1]!.name).toBe("ironclaw.accepted");
-    expect(events[2]!.toolCallId).toBe("msg-1");
-    expect(events[5]!.result).toContain("found it");
-    expect(events[7]!.name).toBe("ironclaw.final-reply");
+    expect(ic.threads.sendMessage).toHaveBeenCalledTimes(1);
+    expect(events[0]!.type).toBe("RUN_STARTED");
+    expect(events.some((e) => e.type === "TEXT_MESSAGE_CONTENT")).toBe(true);
+    expect(events[events.length - 1]!.type).toBe("RUN_FINISHED");
   });
 
-  it("emits approval requests for gates", async () => {
+  it("emits approval-requested for gate events", async () => {
     const { ic } = mockIc([
       event("accepted", {
-        ack: { runId: "run-2", activeRunId: "run-2", threadId: "thread-1" },
+        ack: { runId: "test-run-1", activeRunId: "test-run-1", threadId: "thread-1" },
       }),
       event("gate", {
         prompt: {
-          turnRunId: "run-2",
+          turnRunId: "test-run-1",
           gateRef: "gate-1",
           headline: "Need approval",
-          body: "Approve the tool call?",
+          body: "Approve?",
           approvalContext: { toolName: "shell", action: "run", scope: "thread" },
         },
       }),
     ]);
 
-    const handler = createConversationLiveHandler({ ironclaw: () => ic as any });
-    const events = await collectEvents(handler, { threadId: "thread-1", runId: "run-2" });
+    const handler = createThreadChatBridge({ ironclaw: () => ic as any });
+    const events = await collectEvents(handler, { threadId: "thread-1" });
 
-    expect(events.map((e) => e.type)).toContain("TOOL_CALL_START");
-    expect(events.map((e) => e.type)).toContain("TOOL_CALL_END");
-    expect(events.find((e) => e.type === "CUSTOM" && e.name === "approval-requested")).toBeDefined();
-    expect(events.find((e) => e.type === "CUSTOM" && e.name === "ironclaw.gate")).toBeDefined();
+    expect(events.some((e) => e.type === "CUSTOM" && e.name === "approval-requested")).toBe(true);
   });
 
-  it("skips events for other runs", async () => {
+  it("processes projection items into AG-UI chunks", async () => {
     const { ic } = mockIc([
       event("accepted", {
-        ack: { runId: "run-other", activeRunId: "run-other", threadId: "thread-1" },
+        ack: { runId: "test-run-1", activeRunId: "test-run-1", threadId: "thread-1" },
       }),
-      event("accepted", {
-        ack: { runId: "run-3", activeRunId: "run-3", threadId: "thread-1" },
-      }),
-      event("final_reply", {
-        reply: { text: "ok", turnRunId: "run-3" },
+      event("projection_snapshot", {
+        state: {
+          items: [
+            { text: { id: "txt-1", body: "projection says hello" } },
+            { runStatus: { runId: "test-run-1", status: "completed" } },
+          ],
+        },
       }),
     ]);
 
-    const handler = createConversationLiveHandler({ ironclaw: () => ic as any });
-    const events = await collectEvents(handler, { threadId: "thread-1", runId: "run-3" });
+    const handler = createThreadChatBridge({ ironclaw: () => ic as any });
+    const events = await collectEvents(handler, { threadId: "thread-1" });
 
-    expect(events[0]!.type).toBe("RUN_STARTED");
-    expect(events.some((e) => e.runId === "run-other")).toBe(false);
-    expect(events[events.length - 1]!.type).toBe("RUN_FINISHED");
+    expect(events.some((e) => e.type === "TEXT_MESSAGE_CONTENT")).toBe(true);
+    expect(events.some((e) => e.type === "RUN_FINISHED")).toBe(true);
   });
 });

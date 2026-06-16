@@ -218,10 +218,10 @@ export const ChatEventSchema = z.object({
     .optional(),
   prompt: z
     .object({
-      turnRunId: z.string(),
-      gateRef: z.string(),
-      headline: z.string(),
-      body: z.string(),
+      turnRunId: z.string().catch(""),
+      gateRef: z.string().catch(""),
+      headline: z.string().catch(""),
+      body: z.string().catch(""),
       allowAlways: z.boolean().optional(),
       approvalContext: z
         .object({
@@ -589,7 +589,7 @@ export const contract = oc.router({
         z.object({
           id: z.string(),
           runId: z.string(),
-      gateRef: z.string().catch(""),
+          gateRef: z.string().catch(""),
           resolution: GateResolutionSchema,
           always: z.boolean().optional(),
         }),
@@ -814,3 +814,11 @@ export const contract = oc.router({
 });
 
 export type ContractType = typeof contract;
+
+export type ChatEvent = z.infer<typeof ChatEventSchema>;
+export type AcceptedResponse = z.infer<typeof AcceptedResponseSchema>;
+export type TimelineEntry = z.infer<typeof TimelineEntrySchema>;
+export type Thread = z.infer<typeof ThreadSchema>;
+export type Session = z.infer<typeof SessionSchema>;
+export type GateResolution = z.infer<typeof GateResolutionSchema>;
+export type ThreadCreate = z.infer<typeof ThreadCreateSchema>;

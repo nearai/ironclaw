@@ -1,13 +1,14 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
 import { Cloud, Key, Loader2, RefreshCw, Save, Terminal } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { useApiClient } from "@/app";
+import { type SessionData, sessionQueryOptions, useApiClient, useAuthClient } from "@/app";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { getConnectionMode } from "@/hooks/use-connection-mode";
+import { useConnectionMode } from "@/hooks/use-connection-mode";
 import { useIronclawStatus } from "@/hooks/use-ironclaw-status";
 
 export const Route = createFileRoute("/_layout/_authenticated/settings/ironclaw")({
@@ -16,18 +17,22 @@ export const Route = createFileRoute("/_layout/_authenticated/settings/ironclaw"
 
 function IronclawSettings() {
   const apiClient = useApiClient();
+  const auth = useAuthClient();
+  const { data: session } = useQuery<SessionData | null>(sessionQueryOptions(auth));
+  const { connectionMode } = useConnectionMode();
   const { status: connectionStatus, refetch: refetchStatus } = useIronclawStatus();
   const [tunnelUrl, setTunnelUrl] = useState("");
   const [apiToken, setApiToken] = useState("");
+  const [tokenConfigured, setTokenConfigured] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
   const [testingConnection, setTestingConnection] = useState(false);
   const [hasSettings, setHasSettings] = useState(false);
-  const [connectionMode, setConnectionMode] = useState<"local" | "hosted">(getConnectionMode());
+  const [scope, setScope] = useState<"personal" | "organization">("personal");
 
-  useEffect(() => {
-    setConnectionMode(getConnectionMode());
-  }, []);
+  const activeOrgId = session?.session?.activeOrganizationId;
+  const hasOrg = !!activeOrgId;
 
   useEffect(() => {
     if (connectionMode === "hosted") {
@@ -35,17 +40,20 @@ function IronclawSettings() {
       return;
     }
     apiClient.ironclaw.settings
-      .get()
+      .get({ scope })
       .then((res) => {
         setTunnelUrl(res.tunnelUrl);
-        setApiToken(res.apiToken);
+        setTokenConfigured(res.hasToken ?? false);
         setHasSettings(true);
+        if (res.scope === "organization" || res.scope === "personal") {
+          setScope(res.scope);
+        }
       })
       .catch(() => {
         setHasSettings(false);
       })
       .finally(() => setLoading(false));
-  }, [apiClient, connectionMode]);
+  }, [apiClient, connectionMode, scope]);
 
   const handleTestConnection = async () => {
     setTestingConnection(true);
@@ -65,9 +73,11 @@ function IronclawSettings() {
     try {
       await apiClient.ironclaw.settings.update({
         tunnelUrl,
-        apiToken,
+        scope,
+        ...(apiToken ? { apiToken } : {}),
       });
       setHasSettings(true);
+      if (apiToken) setTokenConfigured(true);
       toast.success("IronClaw settings saved");
     } catch (err: any) {
       toast.error(err.message ?? "Failed to save settings");
@@ -76,7 +86,26 @@ function IronclawSettings() {
     }
   };
 
+  const handleDisconnect = async () => {
+    setDisconnecting(true);
+    try {
+      await apiClient.ironclaw.settings.delete({ scope });
+      setTunnelUrl("");
+      setApiToken("");
+      setTokenConfigured(false);
+      setHasSettings(false);
+      refetchStatus();
+      toast.success("Disconnected from tunnel");
+    } catch (err: any) {
+      toast.error(err.message ?? "Failed to disconnect");
+    } finally {
+      setDisconnecting(false);
+    }
+  };
+
   const isConnected = connectionStatus === "connected";
+  const canTest = tunnelUrl && (apiToken || tokenConfigured);
+  const canSave = tunnelUrl && (apiToken || tokenConfigured);
 
   return (
     <div className="space-y-6">
@@ -103,6 +132,9 @@ function IronclawSettings() {
             : connectionStatus === "disconnected"
               ? "Connection lost"
               : "Not connected"}
+        </span>
+        <span className="rounded-full bg-secondary px-2 py-0.5 text-xs text-muted-foreground">
+          Mode: {connectionMode.charAt(0).toUpperCase() + connectionMode.slice(1)}
         </span>
         <button
           type="button"
@@ -143,6 +175,39 @@ function IronclawSettings() {
       ) : (
         <form onSubmit={handleSave} className="space-y-4">
           <Card className="space-y-4 p-5">
+            <div className="flex items-center gap-2 pb-4 border-b border-border">
+              <span className="text-xs text-muted-foreground">Configuring:</span>
+              <div className="flex rounded-md border border-border overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setScope("personal")}
+                  className={`px-3 py-1 text-xs font-medium transition-colors ${
+                    scope === "personal"
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-background text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  Personal
+                </button>
+                <button
+                  type="button"
+                  onClick={() => hasOrg && setScope("organization")}
+                  disabled={!hasOrg}
+                  className={`px-3 py-1 text-xs font-medium transition-colors ${
+                    scope === "organization"
+                      ? "bg-primary text-primary-foreground"
+                      : !hasOrg
+                        ? "bg-background text-muted-foreground/40 cursor-not-allowed"
+                        : "bg-background text-muted-foreground hover:text-foreground"
+                  }`}
+                  title={!hasOrg ? "You are not a member of an organization" : undefined}
+                >
+                  Organization
+                </button>
+              </div>
+              {!hasOrg && <span className="text-xs text-muted-foreground/60">(no active org)</span>}
+            </div>
+
             <div className="space-y-2">
               <Label htmlFor="tunnelUrl" className="flex items-center gap-1.5">
                 <Terminal size={14} />
@@ -171,11 +236,15 @@ function IronclawSettings() {
                 type="password"
                 value={apiToken}
                 onChange={(e) => setApiToken(e.target.value)}
-                placeholder="The bearer token your binary expects"
-                required
+                placeholder={
+                  tokenConfigured ? "Token is configured" : "The bearer token your binary expects"
+                }
+                required={!tokenConfigured}
               />
               <p className="text-xs text-muted-foreground">
-                Must match the bearer token configured on your Reborn binary.
+                {tokenConfigured
+                  ? "Token is already configured. Leave empty to keep the existing token."
+                  : "Must match the bearer token configured on your Reborn binary."}
               </p>
             </div>
           </Card>
@@ -187,10 +256,26 @@ function IronclawSettings() {
               </p>
             )}
             <div className="flex items-center gap-2 ml-auto">
+              {hasSettings && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={disconnecting}
+                  onClick={handleDisconnect}
+                  className="text-destructive hover:text-destructive"
+                >
+                  {disconnecting ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Cloud size={14} />
+                  )}
+                  {disconnecting ? "Disconnecting..." : "Disconnect"}
+                </Button>
+              )}
               <Button
                 type="button"
                 variant="outline"
-                disabled={testingConnection || !tunnelUrl || !apiToken}
+                disabled={testingConnection || !canTest}
                 onClick={handleTestConnection}
               >
                 {testingConnection ? (
@@ -200,7 +285,7 @@ function IronclawSettings() {
                 )}
                 {testingConnection ? "Testing..." : "Test connection"}
               </Button>
-              <Button type="submit" disabled={saving || !tunnelUrl || !apiToken}>
+              <Button type="submit" disabled={saving || !canSave}>
                 {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save size={14} />}
                 {saving ? "Saving..." : "Save settings"}
               </Button>

@@ -8,7 +8,20 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import type { ThreadState } from "@/hooks/use-thread-state";
+interface ThreadState {
+  thread: {
+    threadId: string;
+    title?: string | null;
+    scope?: {
+      tenantId: string;
+      agentId: string;
+      projectId?: string;
+    };
+    createdByActorId?: string;
+  };
+  messages: Array<Record<string, unknown>>;
+  summaryArtifacts?: Array<Record<string, unknown>>;
+}
 
 interface ChatThreadMetaProps {
   open: boolean;

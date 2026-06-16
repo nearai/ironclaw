@@ -12,7 +12,7 @@ interface ChatMessageListProps {
   streamLoading?: boolean;
 }
 
-const NEAR_BOTTOM_THRESHOLD = 200;
+const NEAR_BOTTOM_THRESHOLD = 120;
 
 export function ChatMessageList({
   children,
@@ -38,46 +38,42 @@ export function ChatMessageList({
   }, []);
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
-    bottomRef.current?.scrollIntoView({ behavior });
+    bottomRef.current?.scrollIntoView({ behavior, block: "end" });
   }, []);
 
   const prevLoadingRef = useRef(loading);
   const prevEmptyRef = useRef(empty);
   const prevStreamLoadingRef = useRef(streamLoading);
-  const childCount = useRef(0);
+  const userScrolledAwayRef = useRef(false);
 
   useEffect(() => {
     const wasLoading = prevLoadingRef.current;
     const wasEmpty = prevEmptyRef.current;
+    const wasStreaming = prevStreamLoadingRef.current;
     prevLoadingRef.current = loading;
     prevEmptyRef.current = empty;
+    prevStreamLoadingRef.current = streamLoading;
 
     if (wasEmpty && !empty) {
+      userScrolledAwayRef.current = false;
       requestAnimationFrame(() => scrollToBottom("instant"));
       return;
     }
 
     if (wasLoading && !loading) {
-      scrollToBottom("instant");
+      userScrolledAwayRef.current = false;
+      requestAnimationFrame(() => scrollToBottom("instant"));
       return;
     }
 
-    const wasStreamLoading = prevStreamLoadingRef.current;
-    prevStreamLoadingRef.current = streamLoading;
-    if (wasStreamLoading && !streamLoading) {
-      requestAnimationFrame(() => scrollToBottom("smooth"));
+    if (!wasStreaming && streamLoading) {
+      userScrolledAwayRef.current = false;
     }
 
-    if (!isNearBottom()) return;
+    if (userScrolledAwayRef.current) return;
 
-    const prevChildCount = childCount.current;
-    const currentChildCount = Array.isArray(children) ? children.length : children ? 1 : 0;
-    childCount.current = currentChildCount;
-
-    if (currentChildCount > prevChildCount) {
+    if (isNearBottom()) {
       requestAnimationFrame(() => scrollToBottom("smooth"));
-    } else if (!loading && !empty) {
-      scrollToBottom("smooth");
     }
   }, [children, loading, empty, streamLoading, isNearBottom, scrollToBottom]);
 
@@ -86,7 +82,14 @@ export function ChatMessageList({
     if (!vp) return;
 
     const onScroll = () => {
-      setShowScrollButton(!isNearBottom());
+      const nearBottom = isNearBottom();
+      setShowScrollButton(!nearBottom);
+      if (!nearBottom && (prevStreamLoadingRef.current || prevLoadingRef.current)) {
+        userScrolledAwayRef.current = true;
+      }
+      if (nearBottom) {
+        userScrolledAwayRef.current = false;
+      }
     };
 
     vp.addEventListener("scroll", onScroll, { passive: true });

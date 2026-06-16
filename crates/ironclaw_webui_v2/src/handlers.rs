@@ -17,7 +17,8 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::extract::{Extension, Path, Query, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, HeaderName, HeaderValue};
+use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::SinkExt;
 use futures::stream::Stream;
@@ -196,7 +197,7 @@ pub async fn stream_events(
     Path(thread_id): Path<String>,
     headers: HeaderMap,
     Query(query): Query<StreamEventsQuery>,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, WebUiV2HttpError> {
+) -> Result<axum::response::Response, WebUiV2HttpError> {
     let slot = state
         .sse_capacity()
         .try_acquire(&caller.tenant_id, &caller.user_id)
@@ -204,14 +205,25 @@ pub async fn stream_events(
     let services = state.services().clone();
     let initial_cursor = headers
         .get(LAST_EVENT_ID_HEADER)
-        // silent-ok: non-visible-ASCII Last-Event-ID is treated as absent so the
-        // handler falls back to the query param / origin, matching the standard
-        // EventSource contract (server SHOULD ignore a malformed Last-Event-ID).
         .and_then(|value| value.to_str().ok())
         .map(str::to_string)
         .or(query.after_cursor);
     let stream = build_sse_stream(services, caller, thread_id, initial_cursor, slot);
-    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE_INTERVAL)))
+    let sse = Sse::new(stream).keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE_INTERVAL));
+    let mut response = sse.into_response();
+    response.headers_mut().insert(
+        HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
+    response.headers_mut().insert(
+        HeaderName::from_static("cache-control"),
+        HeaderValue::from_static("no-cache, no-transform"),
+    );
+    response.headers_mut().insert(
+        HeaderName::from_static("connection"),
+        HeaderValue::from_static("keep-alive"),
+    );
+    Ok(response)
 }
 
 /// Build the 429 response for SSE openings that exceed the per-caller

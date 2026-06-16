@@ -33,7 +33,14 @@ export const IronclawSettingsSchema = z.object({
   apiToken: z.string(),
   hasToken: z.boolean().optional(),
   updatedAt: z.iso.datetime().optional(),
+  scope: z.enum(["personal", "organization", "platform"]).optional(),
 });
+
+const IronclawScopeSchema = z
+  .enum(["personal", "organization", "platform"])
+  .optional()
+  .default("personal");
+const IronclawModeSchema = z.enum(["auto", "hosted", "local"]);
 
 const ConversationAttachmentInputSchema = z.object({
   mimeType: z.string(),
@@ -81,7 +88,7 @@ const ConversationMessagePageSchema = z.object({
 
 export const ConversationSendAckSchema = z.object({
   threadId: z.string(),
-  runId: z.string(),
+  runId: z.string().optional(),
   acceptedMessageRef: z.string(),
   pendingMessageId: z.string(),
   submittedAt: z.string(),
@@ -89,6 +96,38 @@ export const ConversationSendAckSchema = z.object({
   outcome: z.string().optional(),
   status: z.string().optional(),
   activeRunId: z.string().optional(),
+});
+
+export const ConversationChatMessagePartSchema = z.object({
+  type: z.enum(["text", "tool-call", "tool-result", "thinking"]),
+  content: z.string().optional(),
+  toolCallId: z.string().optional(),
+  toolName: z.string().optional(),
+  args: z.string().optional(),
+  state: z.string().optional(),
+  output: z.unknown().optional(),
+});
+
+export const ConversationChatMessageSchema = z.object({
+  id: z.string(),
+  role: z.enum(["user", "assistant"]),
+  content: z.string().optional(),
+  parts: z.array(ConversationChatMessagePartSchema).optional(),
+  createdAt: z.string().optional(),
+});
+
+const ThreadChatInputSchema = z.object({
+  threadId: z.string(),
+  messages: z.array(ConversationChatMessageSchema),
+  forwardedProps: z.record(z.string(), z.unknown()).optional(),
+  clientActionId: z.string().optional(),
+});
+
+const ThreadApproveInputSchema = z.object({
+  threadId: z.string(),
+  runId: z.string(),
+  gateRef: z.string(),
+  approved: z.boolean(),
 });
 
 export const ConversationLiveChunkSchema = z.object({
@@ -99,11 +138,15 @@ export const ConversationLiveChunkSchema = z.object({
     "TOOL_CALL_START",
     "TOOL_CALL_ARGS",
     "TOOL_CALL_END",
+    "TEXT_MESSAGE_START",
+    "TEXT_MESSAGE_CONTENT",
+    "TEXT_MESSAGE_END",
     "CUSTOM",
   ]),
   threadId: z.string(),
   runId: z.string().optional(),
   messageId: z.string().optional(),
+  parentMessageId: z.string().optional(),
   role: z.enum(["assistant", "tool"]).optional(),
   toolCallId: z.string().optional(),
   toolCallName: z.string().optional(),
@@ -129,83 +172,12 @@ export const ConversationEventSchema = z.object({
     "run_finished",
     "error",
     "keep_alive",
-    "accepted",
-    "running",
-    "gate",
-    "auth_required",
-    "failed",
-    "cancelled",
-    "final_reply",
-    "capability_progress",
-    "capability_activity",
-    "capability_display_preview",
   ]),
   threadId: z.string(),
   messages: z.array(ConversationMessageSchema).optional(),
   message: ConversationMessageSchema.optional(),
   runId: z.string().optional(),
   error: z.string().optional(),
-  ack: z
-    .object({
-      outcome: z.string(),
-      runId: z.string().optional(),
-      activeRunId: z.string().optional(),
-      acceptedMessageRef: z.string(),
-      status: z.string(),
-      eventCursor: z.number().optional(),
-    })
-    .optional(),
-  progress: z.object({ kind: z.string(), turnRunId: z.string().optional() }).optional(),
-  activity: z
-    .object({
-      invocationId: z.string(),
-      capabilityId: z.string(),
-      status: z.string(),
-      updatedAt: z.string(),
-    })
-    .optional(),
-  preview: z
-    .object({
-      invocationId: z.string(),
-      capabilityId: z.string(),
-      status: z.string(),
-      title: z.string(),
-      outputSummary: z.string().optional(),
-      outputPreview: z.string().optional(),
-      truncated: z.boolean(),
-    })
-    .optional(),
-  reply: z.object({ text: z.string(), turnRunId: z.string() }).optional(),
-  prompt: z
-    .object({ turnRunId: z.string(), gateRef: z.string().optional(), headline: z.string(), body: z.string() })
-    .optional(),
-  authPrompt: z
-    .object({
-      turnRunId: z.string(),
-      authRequestRef: z.string(),
-      headline: z.string(),
-      body: z.string(),
-      authorizationUrl: z.string().optional(),
-    })
-    .optional(),
-  response: z
-    .object({
-      runId: z.string(),
-      status: z.string(),
-      eventCursor: z.number(),
-      alreadyTerminal: z.boolean(),
-    })
-    .optional(),
-  runState: z
-    .object({
-      turnId: z.string(),
-      runId: z.string(),
-      status: z.string(),
-      eventCursor: z.number(),
-      acceptedMessageRef: z.string(),
-      failure: z.unknown().optional(),
-    })
-    .optional(),
 });
 
 export const contract = oc.router({
@@ -257,6 +229,7 @@ export const contract = oc.router({
           path: "/ironclaw/settings",
           summary: "Get ironclaw connection settings",
         })
+        .input(z.object({ scope: IronclawScopeSchema }).optional())
         .output(IronclawSettingsSchema)
         .errors({ UNAUTHORIZED, NOT_FOUND }),
 
@@ -269,11 +242,41 @@ export const contract = oc.router({
         .input(
           z.object({
             tunnelUrl: z.string().url(),
-            apiToken: z.string().min(1),
+            apiToken: z.string().optional(),
+            scope: IronclawScopeSchema,
           }),
         )
         .output(z.object({ success: z.boolean() }))
         .errors({ UNAUTHORIZED, BAD_REQUEST }),
+
+      delete: oc
+        .route({
+          method: "DELETE",
+          path: "/ironclaw/settings",
+          summary: "Delete ironclaw connection settings",
+        })
+        .input(z.object({ scope: IronclawScopeSchema }).optional())
+        .output(z.object({ success: z.boolean() }))
+        .errors({ UNAUTHORIZED }),
+
+      getMode: oc
+        .route({
+          method: "GET",
+          path: "/ironclaw/settings/mode",
+          summary: "Get user's ironclaw connection mode preference",
+        })
+        .output(z.object({ mode: IronclawModeSchema }))
+        .errors({ UNAUTHORIZED }),
+
+      setMode: oc
+        .route({
+          method: "PUT",
+          path: "/ironclaw/settings/mode",
+          summary: "Set user's ironclaw connection mode preference",
+        })
+        .input(z.object({ mode: IronclawModeSchema }))
+        .output(z.object({ success: z.boolean() }))
+        .errors({ UNAUTHORIZED }),
     },
   },
 
@@ -332,21 +335,30 @@ export const contract = oc.router({
       .output(eventIterator(ConversationLiveChunkSchema))
       .errors({ UNAUTHORIZED, NOT_FOUND }),
 
-    stream: oc
+    threadChat: oc
       .route({
-        method: "GET",
-        path: "/conversation/threads/{threadId}/events",
-        summary: "Subscribe to conversation changes",
+        method: "POST",
+        path: "/conversation/threads/{threadId}/chat",
+        summary: "Send a message and stream AG-UI compliant events (TanStack AI bridge)",
       })
-      .input(
-        z.object({
-          threadId: z.string(),
-          afterCursor: z.string().optional(),
-        }),
-      )
-      .output(eventIterator(ConversationEventSchema))
+      .input(ThreadChatInputSchema)
+      .output(eventIterator(ConversationLiveChunkSchema))
+      .errors({ UNAUTHORIZED, NOT_FOUND }),
+
+    threadApprove: oc
+      .route({
+        method: "POST",
+        path: "/conversation/threads/{threadId}/approve",
+        summary: "Approve or deny a gate/prompt",
+      })
+      .input(ThreadApproveInputSchema)
+      .output(z.object({ success: z.boolean() }))
       .errors({ UNAUTHORIZED, NOT_FOUND }),
   },
 });
 
 export type ContractType = typeof contract;
+
+export type ConversationLiveChunkType = z.infer<typeof ConversationLiveChunkSchema>;
+export type ConversationMessageType = z.infer<typeof ConversationMessageSchema>;
+export type ConversationMessagePageType = z.infer<typeof ConversationMessagePageSchema>;

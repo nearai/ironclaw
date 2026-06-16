@@ -1317,6 +1317,27 @@ async fn sse_query_token_authenticates_event_stream() {
             .and_then(|v| v.to_str().ok()),
         Some("text/event-stream"),
     );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-accel-buffering")
+            .and_then(|v| v.to_str().ok()),
+        Some("no"),
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok()),
+        Some("no-cache, no-transform"),
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("connection")
+            .and_then(|v| v.to_str().ok()),
+        Some("keep-alive"),
+    );
     // The SSE handler runs on the background body task and polls the
     // facade on a 1-second cadence. Pull one frame to drive the
     // generator far enough to record at least the first poll, then

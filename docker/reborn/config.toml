@@ -18,6 +18,11 @@ regex_activation_enabled = true
 [webui]
 env_token_var = "IRONCLAW_REBORN_WEBUI_TOKEN"
 env_user_id_var = "IRONCLAW_REBORN_WEBUI_USER_ID"
+allowed_origins = [
+  "http://localhost:3000",
+  "https://ironclaw.everything.dev",
+  "https://ironclaw.nearbuilders.org",
+]
 
 [llm.default]
 provider_id = "nearai"

@@ -1,17 +1,24 @@
 import { ConversationLiveChunkSchema } from "../contract";
+import type { ChatEvent } from "../../../plugins/ironclaw/src/contract";
+
+type LiveChunkType =
+  | "RUN_STARTED"
+  | "RUN_FINISHED"
+  | "RUN_ERROR"
+  | "TOOL_CALL_START"
+  | "TOOL_CALL_ARGS"
+  | "TOOL_CALL_END"
+  | "TEXT_MESSAGE_START"
+  | "TEXT_MESSAGE_CONTENT"
+  | "TEXT_MESSAGE_END"
+  | "CUSTOM";
 
 type LiveChunk = {
-  type:
-    | "RUN_STARTED"
-    | "RUN_FINISHED"
-    | "RUN_ERROR"
-    | "TOOL_CALL_START"
-    | "TOOL_CALL_ARGS"
-    | "TOOL_CALL_END"
-    | "CUSTOM";
+  type: LiveChunkType;
   threadId: string;
   runId?: string;
   messageId?: string;
+  parentMessageId?: string;
   role?: "assistant" | "tool";
   toolCallId?: string;
   toolCallName?: string;
@@ -27,8 +34,6 @@ type LiveChunk = {
   name?: string;
   value?: unknown;
 };
-
-type LiveEvent = Record<string, unknown> & { type?: string };
 
 function normalizeMessage(value: unknown): string {
   if (value instanceof Error) return value.message;
@@ -46,42 +51,80 @@ function serializeToolResultEnvelope(envelope: {
 }
 
 function resolveToolCallId(
-  preview: Record<string, unknown> | undefined,
-  activity: Record<string, unknown> | undefined,
+  preview: ChatEvent["preview"],
+  activity: ChatEvent["activity"],
 ): string | undefined {
+  const activityRecord = activity as unknown as Record<string, string | undefined>;
   return (
-    (typeof preview?.invocationId === "string" && preview.invocationId) ||
-    (typeof preview?.timelineMessageId === "string" && preview.timelineMessageId) ||
-    (typeof preview?.toolCallId === "string" && preview.toolCallId) ||
-    (typeof activity?.invocationId === "string" && activity.invocationId) ||
-    (typeof activity?.timelineMessageId === "string" && activity.timelineMessageId) ||
-    (typeof activity?.toolCallId === "string" && activity.toolCallId)
-  ) as string | undefined;
+    (preview?.invocationId ||
+      preview?.timelineMessageId ||
+      activity?.invocationId ||
+      activityRecord.timelineMessageId ||
+      activityRecord.invocation_id) ??
+    undefined
+  );
 }
 
-function extractEventRunId(event: LiveEvent): string | undefined {
-  const ack = event.ack as Record<string, unknown> | undefined;
-  const runState = event.runState as Record<string, unknown> | undefined;
-  const response = event.response as Record<string, unknown> | undefined;
-  const reply = event.reply as Record<string, unknown> | undefined;
-  const prompt = event.prompt as Record<string, unknown> | undefined;
-  const authPrompt = event.authPrompt as Record<string, unknown> | undefined;
-  const activity = event.activity as Record<string, unknown> | undefined;
-  const preview = event.preview as Record<string, unknown> | undefined;
-  const progress = event.progress as Record<string, unknown> | undefined;
-
+function extractEventRunId(event: ChatEvent): string | undefined {
   return (
-    (typeof ack?.runId === "string" && ack.runId) ||
-    (typeof ack?.activeRunId === "string" && ack.activeRunId) ||
-    (typeof runState?.runId === "string" && runState.runId) ||
-    (typeof response?.runId === "string" && response.runId) ||
-    (typeof reply?.turnRunId === "string" && reply.turnRunId) ||
-    (typeof prompt?.turnRunId === "string" && prompt.turnRunId) ||
-    (typeof authPrompt?.turnRunId === "string" && authPrompt.turnRunId) ||
-    (typeof activity?.turnRunId === "string" && activity.turnRunId) ||
-    (typeof preview?.turnRunId === "string" && preview.turnRunId) ||
-    (typeof progress?.turnRunId === "string" && progress.turnRunId)
-  ) || undefined;
+    event.ack?.runId ||
+    event.ack?.activeRunId ||
+    event.response?.runId ||
+    event.reply?.turnRunId ||
+    event.progress?.turnRunId ||
+    event.activity?.turnRunId ||
+    event.preview?.turnRunId ||
+    undefined
+  );
+}
+
+function projVal(item: Record<string, unknown>, ...keys: string[]): unknown {
+  for (const key of keys) {
+    const v = item[key];
+    if (v !== undefined) return v;
+  }
+  return undefined;
+}
+
+function getProjectionRunStatus(
+  item: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  return projVal(item, "runStatus", "run_status") as Record<string, unknown> | undefined;
+}
+
+function getProjectionText(item: Record<string, unknown>): Record<string, unknown> | undefined {
+  return projVal(item, "text", "Text") as Record<string, unknown> | undefined;
+}
+
+function getProjectionThinking(item: Record<string, unknown>): Record<string, unknown> | undefined {
+  return projVal(item, "thinking", "Thinking") as Record<string, unknown> | undefined;
+}
+
+function getProjectionCapabilityActivity(
+  item: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  return projVal(item, "capabilityActivity", "capability_activity") as
+    | Record<string, unknown>
+    | undefined;
+}
+
+function getProjectionGate(item: Record<string, unknown>): Record<string, unknown> | undefined {
+  return projVal(item, "gate", "Gate") as Record<string, unknown> | undefined;
+}
+
+function findAssistantTextForRun(entries: any[], runId: string): string | undefined {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    const eRunId = e.turnRunId ?? e.turn_run_id ?? e.runId ?? e.run_id;
+    if (eRunId === runId) {
+      const lower = (e.kind ?? "").toLowerCase();
+      const role = e.role ?? "";
+      if (role === "assistant" || lower === "assistant" || lower === "assistant_message") {
+        if (e.content) return e.content as string;
+      }
+    }
+  }
+  return undefined;
 }
 
 function createChunk(chunk: LiveChunk): LiveChunk {
@@ -92,33 +135,58 @@ function createChunk(chunk: LiveChunk): LiveChunk {
   return chunk;
 }
 
-export function createConversationLiveHandler(services: { ironclaw: (ctx: any) => any }) {
+export function createThreadChatBridge(services: { ironclaw: (ctx: any) => any }) {
   return async function* ({ input, signal, context }: any) {
     const ic = services.ironclaw(context);
     const threadId = input.threadId as string;
-    const expectedRunId = (input.runId as string | undefined) || undefined;
-    const afterCursor = (input.afterCursor as string | undefined) ?? undefined;
-    const runIdFallback = expectedRunId ?? crypto.randomUUID();
-    const upstream = await ic.threads.streamEvents({ id: threadId, afterCursor });
-    const pendingPreviews = new Map<string, Record<string, unknown>>();
+    const messages = (input.messages ?? []) as any[];
+    const clientActionId =
+      (input.clientActionId as string | undefined) ?? `bridge-${crypto.randomUUID()}`;
+    const forwardedProps = input.forwardedProps as Record<string, unknown> | undefined;
+
+    const lastUserMsg = [...messages].reverse().find((m: any) => m.role === "user");
+    const content = (lastUserMsg?.content as string) ?? "";
+    const attachments = (forwardedProps?.attachments as any[] | undefined) ?? undefined;
+
+    const ack = await ic.threads.sendMessage({
+      id: threadId,
+      content,
+      clientActionId,
+      attachments,
+    });
+    const ackRunId: string | undefined = ack.runId ?? ack.activeRunId;
+    const eventCursor = ack.eventCursor;
+    const upstream = await ic.threads.streamEvents({
+      id: threadId,
+      afterCursor: String(eventCursor),
+    });
+    const pendingPreviews = new Map<string, ChatEvent["preview"]>();
     const activeToolCalls = new Set<string>();
     let runStarted = false;
-    let runMatched = !expectedRunId;
+    let terminalTextEmitted = false;
+    let seenTextIds = new Set<string>();
 
     const emitRunStarted = (runId: string | undefined) => {
       if (runStarted) return;
       runStarted = true;
-      return createChunk({ type: "RUN_STARTED", threadId, runId: runId ?? runIdFallback });
+      return createChunk({
+        type: "RUN_STARTED",
+        threadId,
+        runId: runId ?? ackRunId ?? crypto.randomUUID(),
+      });
     };
 
     const emitCustom = (name: string, value: unknown, runId?: string): LiveChunk =>
       createChunk({ type: "CUSTOM", threadId, runId, name, value });
+
+    const assistantMessageId = (runId: string): string => `assistant:${runId}`;
 
     const emitToolStart = (toolCallId: string, toolName: string, runId?: string): LiveChunk =>
       createChunk({
         type: "TOOL_CALL_START",
         threadId,
         runId,
+        parentMessageId: runId ? assistantMessageId(runId) : undefined,
         toolCallId,
         toolCallName: toolName,
         toolName,
@@ -155,19 +223,72 @@ export function createConversationLiveHandler(services: { ironclaw: (ctx: any) =
         result,
       });
 
+    const closeActiveToolCalls = async function* (runId?: string): AsyncGenerator<LiveChunk> {
+      if (activeToolCalls.size === 0) return;
+      try {
+        const raw = await ic.threads.getTimeline({ id: threadId, limit: 30 });
+        const entries: any[] = raw.data ?? [];
+        for (const invocationId of activeToolCalls) {
+          const preview = pendingPreviews.get(invocationId);
+          const resultEntry = entries.find((e: any) => {
+            try {
+              const c = JSON.parse(e.content ?? "");
+              return (c.invocation_id ?? c.invocationId) === invocationId;
+            } catch { return false; }
+          });
+          if (resultEntry) {
+            const c = JSON.parse(resultEntry.content);
+            const title = c.title ?? preview?.title ?? "tool";
+            const envelope = serializeToolResultEnvelope({
+              output: c.output ?? c.output_preview ?? c.output_summary ?? preview?.outputSummary ?? preview?.outputPreview ?? "",
+              outputKind: c.output_kind ?? c.outputKind ?? preview?.outputKind ?? null,
+              truncated: Boolean(c.truncated ?? preview?.truncated),
+              inputSummary: c.input_summary ?? c.inputSummary ?? preview?.inputSummary ?? null,
+              title,
+            });
+            yield emitToolEnd(invocationId, title, "complete", envelope, c.input_summary ?? preview?.inputSummary ?? "", runId);
+          } else if (preview) {
+            const title = preview.title ?? "tool";
+            const envelope = serializeToolResultEnvelope({
+              output: preview.outputSummary ?? preview.outputPreview ?? "",
+              outputKind: preview.outputKind ?? null,
+              truncated: Boolean(preview.truncated),
+              inputSummary: preview.inputSummary ?? null,
+              title,
+            });
+            yield emitToolEnd(invocationId, title, "complete", envelope, preview.inputSummary ?? "", runId);
+          } else {
+            yield emitToolEnd(invocationId, "tool", "complete", "", "", runId);
+          }
+        }
+      } catch {
+        for (const invocationId of activeToolCalls) {
+          const preview = pendingPreviews.get(invocationId);
+          const title = preview?.title ?? preview?.capabilityId ?? "tool";
+          if (preview) {
+            const envelope = serializeToolResultEnvelope({
+              output: preview.outputSummary ?? preview.outputPreview ?? "",
+              outputKind: preview.outputKind ?? null,
+              truncated: Boolean(preview.truncated),
+              inputSummary: preview.inputSummary ?? null,
+              title,
+            });
+            yield emitToolEnd(invocationId, title, "complete", envelope, preview.inputSummary ?? "", runId);
+          } else {
+            yield emitToolEnd(invocationId, title, "complete", "", "", runId);
+          }
+        }
+      }
+      activeToolCalls.clear();
+      pendingPreviews.clear();
+    };
+
     try {
-      for await (const raw of upstream as AsyncIterable<LiveEvent>) {
+      for await (const raw of upstream as AsyncIterable<ChatEvent>) {
         if (signal?.aborted) break;
 
         const type = raw.type;
-        const eventRunId = extractEventRunId(raw) ?? expectedRunId ?? runIdFallback;
-
-        if (!runMatched) {
-          if (!eventRunId || eventRunId !== expectedRunId) {
-            continue;
-          }
-          runMatched = true;
-        }
+        const eventRunId = extractEventRunId(raw) ?? ackRunId ?? crypto.randomUUID();
 
         if (type === "accepted" || type === "running") {
           const chunk = emitRunStarted(eventRunId);
@@ -184,19 +305,23 @@ export function createConversationLiveHandler(services: { ironclaw: (ctx: any) =
         }
 
         if (type === "capability_display_preview") {
-          const preview = (raw.preview as Record<string, unknown> | undefined) ?? {};
+          const preview = raw.preview;
           const invocationId = resolveToolCallId(preview, undefined);
-          const capabilityId = preview.capabilityId as string | undefined;
-          const title = (preview.title as string | undefined) ?? capabilityId ?? "unknown";
+          const capabilityId = preview?.capabilityId;
+          const title = preview?.title ?? capabilityId ?? "unknown";
 
-          if (invocationId) {
+          if (invocationId && preview) {
             pendingPreviews.set(invocationId, preview);
             const chunk = emitRunStarted(eventRunId);
             if (chunk) yield chunk;
             if (!activeToolCalls.has(invocationId)) {
               activeToolCalls.add(invocationId);
               yield emitToolStart(invocationId, title, eventRunId);
-              yield emitToolArgs(invocationId, JSON.stringify({ input: preview.inputSummary ?? "" }), eventRunId);
+              yield emitToolArgs(
+                invocationId,
+                JSON.stringify({ input: preview.inputSummary ?? "" }),
+                eventRunId,
+              );
             }
             yield emitCustom(
               "ironclaw.capability-display-preview",
@@ -208,16 +333,17 @@ export function createConversationLiveHandler(services: { ironclaw: (ctx: any) =
         }
 
         if (type === "capability_activity") {
-          const activity = (raw.activity as Record<string, unknown> | undefined) ?? {};
+          const activity = raw.activity;
+          const activityRecord = activity as unknown as Record<string, unknown>;
           const invocationId = resolveToolCallId(undefined, activity);
-          const capabilityId = activity.capabilityId as string | undefined;
-          const status = activity.status as string | undefined;
-          const errorKind = activity.errorKind as string | undefined;
+          const capabilityId = (activityRecord.capabilityId ?? activityRecord.capability_id) as string | undefined;
+          const status = activity?.status;
+          const errorKind = (activityRecord.errorKind ?? activityRecord.error_kind) as string | undefined;
 
           if (!invocationId || !capabilityId) continue;
 
-          const preview = pendingPreviews.get(invocationId) ?? {};
-          const title = (preview.title as string | undefined) ?? capabilityId;
+          const preview = pendingPreviews.get(invocationId);
+          const title = preview?.title ?? capabilityId;
           const chunk = emitRunStarted(eventRunId);
           if (chunk) yield chunk;
 
@@ -227,17 +353,13 @@ export function createConversationLiveHandler(services: { ironclaw: (ctx: any) =
               yield emitToolStart(invocationId, title, eventRunId);
               yield emitToolArgs(
                 invocationId,
-                JSON.stringify({ input: preview.inputSummary ?? "" }),
+                JSON.stringify({ input: preview?.inputSummary ?? "" }),
                 eventRunId,
               );
             }
             yield emitCustom(
               "ironclaw.capability-activity",
-              {
-                ...activity,
-                toolCallId: invocationId,
-                toolName: title,
-              },
+              { ...activity, toolCallId: invocationId, toolName: title },
               eventRunId,
             );
             continue;
@@ -249,16 +371,19 @@ export function createConversationLiveHandler(services: { ironclaw: (ctx: any) =
               yield emitToolStart(invocationId, title, eventRunId);
               yield emitToolArgs(
                 invocationId,
-                JSON.stringify({ input: preview.inputSummary ?? "" }),
+                JSON.stringify({ input: preview?.inputSummary ?? "" }),
                 eventRunId,
               );
             }
 
             const envelope = serializeToolResultEnvelope({
-              output: (preview.outputSummary as string | undefined) ?? (preview.outputPreview as string | undefined) ?? (errorKind ? `Error: ${errorKind}` : ""),
-              outputKind: (preview.outputKind as string | undefined) ?? null,
-              truncated: Boolean(preview.truncated),
-              inputSummary: (preview.inputSummary as string | undefined) ?? null,
+              output:
+                preview?.outputSummary ??
+                preview?.outputPreview ??
+                (errorKind ? `Error: ${errorKind}` : ""),
+              outputKind: preview?.outputKind ?? null,
+              truncated: Boolean(preview?.truncated),
+              inputSummary: preview?.inputSummary ?? null,
               title,
             });
             const toolState = status === "failed" || status === "killed" ? "error" : "complete";
@@ -267,16 +392,12 @@ export function createConversationLiveHandler(services: { ironclaw: (ctx: any) =
               title,
               toolState,
               envelope,
-              preview.inputSummary ?? "",
+              preview?.inputSummary ?? "",
               eventRunId,
             );
             yield emitCustom(
               "ironclaw.capability-activity",
-              {
-                ...activity,
-                toolCallId: invocationId,
-                toolName: title,
-              },
+              { ...activity, toolCallId: invocationId, toolName: title },
               eventRunId,
             );
             pendingPreviews.delete(invocationId);
@@ -286,15 +407,19 @@ export function createConversationLiveHandler(services: { ironclaw: (ctx: any) =
         }
 
         if (type === "gate") {
-          const prompt = (raw.prompt as Record<string, unknown> | undefined) ?? {};
-          const approvalContext = (prompt.approvalContext as Record<string, unknown> | undefined) ?? {};
-          const toolName = (approvalContext.toolName as string | undefined) ?? "approval";
-          const gateRef = prompt.gateRef as string | undefined;
+          const prompt = raw.prompt;
+          const approvalContext = prompt?.approvalContext;
+          const toolName = approvalContext?.toolName ?? "approval";
+          const gateRef = prompt?.gateRef;
           const gateToolCallId = gateRef ?? `gate-${toolName}-${eventRunId}`;
           const chunk = emitRunStarted(eventRunId);
           if (chunk) yield chunk;
           yield emitToolStart(gateToolCallId, toolName, eventRunId);
-          yield emitToolArgs(gateToolCallId, JSON.stringify({ input: approvalContext }), eventRunId);
+          yield emitToolArgs(
+            gateToolCallId,
+            JSON.stringify({ input: approvalContext }),
+            eventRunId,
+          );
           yield emitToolEnd(gateToolCallId, toolName, "complete", "", approvalContext, eventRunId);
           yield emitCustom(
             "approval-requested",
@@ -315,7 +440,7 @@ export function createConversationLiveHandler(services: { ironclaw: (ctx: any) =
         }
 
         if (type === "auth_required") {
-          const authPrompt = (raw.authPrompt as Record<string, unknown> | undefined) ?? {};
+          const authPrompt = raw.authPrompt;
           const chunk = emitRunStarted(eventRunId);
           if (chunk) yield chunk;
           yield emitCustom("ironclaw.auth-required", authPrompt, eventRunId);
@@ -323,17 +448,49 @@ export function createConversationLiveHandler(services: { ironclaw: (ctx: any) =
         }
 
         if (type === "final_reply") {
-          const reply = (raw.reply as Record<string, unknown> | undefined) ?? {};
+          const reply = raw.reply;
+          const text = reply?.text ?? "";
           const chunk = emitRunStarted(eventRunId);
           if (chunk) yield chunk;
           yield emitCustom("ironclaw.final-reply", reply, eventRunId);
-          yield createChunk({ type: "RUN_FINISHED", threadId, runId: eventRunId, finishReason: "stop" });
+          if (text) {
+            terminalTextEmitted = true;
+            const msgId = eventRunId ? assistantMessageId(eventRunId) : `reply-${eventRunId}`;
+            yield createChunk({
+              type: "TEXT_MESSAGE_START",
+              threadId,
+              runId: eventRunId,
+              messageId: msgId,
+              role: "assistant",
+            });
+            yield createChunk({
+              type: "TEXT_MESSAGE_CONTENT",
+              threadId,
+              runId: eventRunId,
+              messageId: msgId,
+              delta: text,
+            });
+            yield createChunk({
+              type: "TEXT_MESSAGE_END",
+              threadId,
+              runId: eventRunId,
+              messageId: msgId,
+            });
+          }
+          for await (const chunk of closeActiveToolCalls(eventRunId)) { yield chunk; }
+          yield createChunk({
+            type: "RUN_FINISHED",
+            threadId,
+            runId: eventRunId,
+            finishReason: "stop",
+          });
           return;
         }
 
         if (type === "failed") {
-          const runState = (raw.runState as Record<string, unknown> | undefined) ?? {};
-          const message = normalizeMessage(runState.failure ?? raw.response ?? "Run failed");
+          const runState = raw.runState;
+          const failure = runState?.failure;
+          const message = normalizeMessage(failure ?? raw.response ?? "Run failed");
           const chunk = emitRunStarted(eventRunId);
           if (chunk) yield chunk;
           yield emitCustom("ironclaw.failed", { runId: eventRunId, message, runState }, eventRunId);
@@ -342,34 +499,302 @@ export function createConversationLiveHandler(services: { ironclaw: (ctx: any) =
         }
 
         if (type === "cancelled") {
-          const response = (raw.response as Record<string, unknown> | undefined) ?? {};
+          const response = raw.response;
           const chunk = emitRunStarted(eventRunId);
           if (chunk) yield chunk;
           yield emitCustom("ironclaw.cancelled", { runId: eventRunId, ...response }, eventRunId);
-          yield createChunk({ type: "RUN_FINISHED", threadId, runId: eventRunId, finishReason: null });
+          for await (const chunk of closeActiveToolCalls(eventRunId)) { yield chunk; }
+          yield createChunk({
+            type: "RUN_FINISHED",
+            threadId,
+            runId: eventRunId,
+            finishReason: null,
+          });
           return;
         }
 
-        if (type === "projection_snapshot") {
-          yield emitCustom("ironclaw.projection-snapshot", raw.state ?? raw, eventRunId);
+        if (type === "projection_snapshot" || type === "projection_update") {
+          const projectionState = raw.state as Record<string, unknown> | undefined;
+          const items = projectionState?.items as Array<Record<string, unknown>> | undefined;
+          if (items && items.length > 0) {
+            const runStatuses: Array<{
+              runId: string;
+              status: string;
+              raw: Record<string, unknown>;
+            }> = [];
+            const textItems: Array<{ id: string; body: string; runId: string }> = [];
+            const thinkingItems: Array<Record<string, unknown>> = [];
+            const capActivities: Array<Record<string, unknown>> = [];
+            const gateItems: Array<Record<string, unknown>> = [];
+
+            for (const item of items) {
+              const rs = getProjectionRunStatus(item);
+              if (rs) {
+                const rId = (rs.runId ?? rs.run_id) as string | undefined;
+                const st = rs.status as string | undefined;
+                if (rId && st) runStatuses.push({ runId: rId, status: st, raw: rs });
+                continue;
+              }
+              const tx = getProjectionText(item);
+              if (tx) {
+                const txId = tx.id as string | undefined;
+                const body = tx.body as string | undefined;
+                const txRunId = (tx.runId ??
+                  tx.run_id ??
+                  extractEventRunId(raw) ??
+                  ackRunId ??
+                  crypto.randomUUID()) as string;
+                if (txId && body) textItems.push({ id: txId, body, runId: txRunId });
+                continue;
+              }
+              const th = getProjectionThinking(item);
+              if (th) {
+                const tb = th.body as string | undefined;
+                if (tb) thinkingItems.push(th);
+                continue;
+              }
+              const ca = getProjectionCapabilityActivity(item);
+              if (ca) {
+                capActivities.push(ca);
+                continue;
+              }
+              const g = getProjectionGate(item);
+              if (g) {
+                gateItems.push(g);
+                continue;
+              }
+            }
+
+            const projRunId = ackRunId ?? crypto.randomUUID();
+
+            const ikChunk = emitRunStarted(projRunId);
+            if (ikChunk) yield ikChunk;
+
+            for (const th of thinkingItems) {
+              yield emitCustom(
+                "ironclaw.thinking",
+                {
+                  body: th.body,
+                  id: th.id ?? undefined,
+                  runId: th.runId ?? th.run_id ?? projRunId,
+                },
+                projRunId,
+              );
+            }
+
+            for (const ca of capActivities) {
+              const invocationId = (ca.invocationId ?? ca.invocation_id) as string | undefined;
+              const capId = ((ca.capabilityId ?? ca.capability_id) as string) || "tool";
+              const capStatus = (ca.status as string) || "";
+              const title = capId;
+              if (invocationId) {
+                if (capStatus === "started" || capStatus === "running") {
+                  if (!activeToolCalls.has(invocationId)) {
+                    activeToolCalls.add(invocationId);
+                    yield emitToolStart(invocationId, title, projRunId);
+                    yield emitToolArgs(invocationId, JSON.stringify({ input: "" }), projRunId);
+                  }
+                  yield emitCustom(
+                    "ironclaw.capability-activity",
+                    { toolCallId: invocationId, toolName: title, ...ca },
+                    projRunId,
+                  );
+                } else {
+                  if (!activeToolCalls.has(invocationId)) {
+                    activeToolCalls.add(invocationId);
+                    yield emitToolStart(invocationId, title, projRunId);
+                    yield emitToolArgs(invocationId, JSON.stringify({ input: "" }), projRunId);
+                  }
+                  const errorKind = (ca.errorKind ?? ca.error_kind) as string | undefined;
+                  const envelope = serializeToolResultEnvelope({
+                    output: errorKind ? `Error: ${errorKind}` : "",
+                    outputKind: null,
+                    truncated: false,
+                    inputSummary: null,
+                    title,
+                  });
+                  const toolState =
+                    capStatus === "failed" || capStatus === "killed" ? "error" : "complete";
+                  yield emitToolEnd(invocationId, title, toolState, envelope, "", projRunId);
+                  yield emitCustom(
+                    "ironclaw.capability-activity",
+                    { toolCallId: invocationId, toolName: title, ...ca },
+                    projRunId,
+                  );
+                  activeToolCalls.delete(invocationId);
+                }
+              }
+            }
+
+            for (const g of gateItems) {
+              const gateRef = (g.gateRef ?? g.gate_ref) as string | undefined;
+              const headline = (g.headline as string) || "Approval required";
+              if (gateRef) {
+                const gateToolCallId = `gate-${gateRef}`;
+                yield emitToolStart(gateToolCallId, "approval", projRunId);
+                yield emitToolArgs(gateToolCallId, JSON.stringify({ input: headline }), projRunId);
+                yield emitToolEnd(gateToolCallId, "approval", "complete", "", headline, projRunId);
+                yield emitCustom(
+                  "approval-requested",
+                  {
+                    toolCallId: gateToolCallId,
+                    toolName: "approval",
+                    input: headline,
+                    approval: { id: gateRef, needsApproval: true },
+                  },
+                  projRunId,
+                );
+                yield emitCustom(
+                  "ironclaw.gate",
+                  { gateRef, headline, toolCallId: gateToolCallId, toolName: "approval" },
+                  projRunId,
+                );
+              }
+            }
+
+            for (const tx of textItems) {
+              const dedupeKey = `${tx.runId}:${tx.id}`;
+              if (seenTextIds.has(dedupeKey)) continue;
+              seenTextIds.add(dedupeKey);
+              terminalTextEmitted = true;
+              const msgId = assistantMessageId(tx.runId);
+              yield createChunk({
+                type: "TEXT_MESSAGE_START",
+                threadId,
+                runId: tx.runId,
+                messageId: msgId,
+                role: "assistant",
+              });
+              yield createChunk({
+                type: "TEXT_MESSAGE_CONTENT",
+                threadId,
+                runId: tx.runId,
+                messageId: msgId,
+                delta: tx.body,
+              });
+              yield createChunk({
+                type: "TEXT_MESSAGE_END",
+                threadId,
+                runId: tx.runId,
+                messageId: msgId,
+              });
+            }
+
+            for (const rs of runStatuses) {
+              if (rs.runId !== ackRunId) continue;
+              const { runId, status: st } = rs;
+              const isTerminal = [
+                "completed",
+                "succeeded",
+                "failed",
+                "cancelled",
+                "recovery_required",
+              ].includes(st);
+              const isFailed = ["failed", "recovery_required"].includes(st);
+              if (isTerminal) {
+                if (isFailed) {
+                  const msg =
+                    ((rs.raw.failureSummary ?? rs.raw.failure_summary) as string) ?? `Run ${st}`;
+                  yield emitCustom(
+                    "ironclaw.failed",
+                    { runId, message: msg, runState: rs.raw },
+                    runId,
+                  );
+                  yield createChunk({ type: "RUN_ERROR", threadId, runId, message: msg });
+                  return;
+                }
+                if (st === "cancelled") {
+                  yield emitCustom("ironclaw.cancelled", { runId }, runId);
+                  for await (const chunk of closeActiveToolCalls(runId)) { yield chunk; }
+                  yield createChunk({ type: "RUN_FINISHED", threadId, runId, finishReason: null });
+                  return;
+                }
+                if (!terminalTextEmitted) {
+                  try {
+                    const raw = await ic.threads.getTimeline({ id: threadId, limit: 10 });
+                    const entries: any[] = raw.data ?? [];
+                    const assistantText = findAssistantTextForRun(entries, runId);
+                    if (assistantText) {
+                      terminalTextEmitted = true;
+                      const msgId = assistantMessageId(runId);
+                      yield createChunk({
+                        type: "TEXT_MESSAGE_START",
+                        threadId,
+                        runId,
+                        messageId: msgId,
+                        role: "assistant",
+                      });
+                      yield createChunk({
+                        type: "TEXT_MESSAGE_CONTENT",
+                        threadId,
+                        runId,
+                        messageId: msgId,
+                        delta: assistantText,
+                      });
+                      yield createChunk({
+                        type: "TEXT_MESSAGE_END",
+                        threadId,
+                        runId,
+                        messageId: msgId,
+                      });
+                    }
+                  } catch {
+                    // reconcile failed, proceed
+                  }
+                }
+                yield emitCustom("ironclaw.finished", { runId, status: st }, runId);
+                for await (const chunk of closeActiveToolCalls(runId)) { yield chunk; }
+                yield createChunk({ type: "RUN_FINISHED", threadId, runId, finishReason: "stop" });
+                return;
+              }
+            }
+          }
           continue;
         }
 
-        if (type === "projection_update") {
-          yield emitCustom("ironclaw.projection-update", raw.state ?? raw, eventRunId);
-          continue;
-        }
-
-        if (type === "keep_alive") {
-          continue;
-        }
+        if (type === "keep_alive") continue;
       }
 
       if (runStarted) {
+        if (!terminalTextEmitted) {
+          try {
+            const raw = await ic.threads.getTimeline({ id: threadId, limit: 10 });
+            const entries: any[] = raw.data ?? [];
+            const targetRunId = ackRunId ?? crypto.randomUUID();
+            const assistantText = findAssistantTextForRun(entries, targetRunId);
+            if (assistantText) {
+              terminalTextEmitted = true;
+              const msgId = assistantMessageId(targetRunId);
+              yield createChunk({
+                type: "TEXT_MESSAGE_START",
+                threadId,
+                runId: targetRunId,
+                messageId: msgId,
+                role: "assistant",
+              });
+              yield createChunk({
+                type: "TEXT_MESSAGE_CONTENT",
+                threadId,
+                runId: targetRunId,
+                messageId: msgId,
+                delta: assistantText,
+              });
+              yield createChunk({
+                type: "TEXT_MESSAGE_END",
+                threadId,
+                runId: targetRunId,
+                messageId: msgId,
+              });
+            }
+          } catch {
+            // reconcile failed, proceed
+          }
+        }
+        for await (const chunk of closeActiveToolCalls(ackRunId)) { yield chunk; }
         yield createChunk({
           type: "RUN_FINISHED",
           threadId,
-          runId: expectedRunId ?? runIdFallback,
+          runId: ackRunId ?? crypto.randomUUID(),
           finishReason: "stop",
         });
       }
@@ -378,7 +803,7 @@ export function createConversationLiveHandler(services: { ironclaw: (ctx: any) =
       yield createChunk({
         type: "RUN_ERROR",
         threadId,
-        runId: expectedRunId ?? runIdFallback,
+        runId: ackRunId ?? crypto.randomUUID(),
         message: normalizeMessage(error),
       });
     } finally {

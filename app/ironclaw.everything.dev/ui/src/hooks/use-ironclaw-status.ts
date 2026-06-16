@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { z } from "every-plugin/zod";
 import { useApiClient } from "@/app";
-import { getConnectionMode } from "@/hooks/use-connection-mode";
+import { getConnectionMode, type ConnectionMode } from "@/hooks/use-connection-mode";
 import type { SessionSchema } from "../../../plugins/ironclaw/src/contract.ts";
 
 type SessionData = z.infer<typeof SessionSchema>;
@@ -41,7 +41,7 @@ export function useIronclawStatus(): {
   status: IronclawConnectionStatus;
   refetch: () => void;
   disconnect: () => Promise<void>;
-  connectionMode: "local" | "hosted";
+  connectionMode: ConnectionMode;
   session: SessionData | null;
   attachmentCapabilities: AttachmentCapabilities;
 } {

@@ -1,4 +1,4 @@
-import { pgTable, primaryKey, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 
 export const registrations = pgTable(
   "hackathon_registrations",
@@ -45,6 +45,7 @@ export const ironclawConnections = pgTable("ironclaw_connections", {
   tunnelUrl: text("tunnel_url").notNull(),
   apiToken: text("api_token").notNull(),
   createdBy: text("created_by"),
+  updatedBy: text("updated_by"),
   createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).defaultNow().notNull(),
 });
@@ -52,16 +53,25 @@ export const ironclawConnections = pgTable("ironclaw_connections", {
 export const ironclawScopeBindings = pgTable(
   "ironclaw_scope_bindings",
   {
+    id: text("id").primaryKey(),
     tenantId: text("tenant_id").notNull(),
-    agentId: text("agent_id"),
-    projectId: text("project_id"),
+    scopeType: text("scope_type").notNull().default("personal"),
     connectionId: text("connection_id")
       .notNull()
       .references(() => ironclawConnections.id, { onDelete: "cascade" }),
-    createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).defaultNow().notNull(),
     createdBy: text("created_by"),
+    createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).defaultNow().notNull(),
   },
   (table) => ({
-    pk: primaryKey({ columns: [table.tenantId, table.agentId, table.projectId] }),
+    tenantScopeUnique: uniqueIndex("scope_bindings_tenant_type_unique").on(
+      table.tenantId,
+      table.scopeType,
+    ),
   }),
 );
+
+export const userPreferences = pgTable("user_preferences", {
+  userId: text("user_id").primaryKey(),
+  ironclawMode: text("ironclaw_mode").notNull().default("auto"),
+  updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).defaultNow().notNull(),
+});

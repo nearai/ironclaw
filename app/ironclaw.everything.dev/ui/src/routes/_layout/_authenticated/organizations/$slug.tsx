@@ -1,17 +1,36 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useRouter } from "@tanstack/react-router";
-import { Edit2, Key, LogOut, Mail, Trash2, Users } from "lucide-react";
-import { useState } from "react";
+import {
+  Cloud,
+  Edit2,
+  Key,
+  Loader2,
+  LogOut,
+  Mail,
+  Save,
+  Terminal,
+  Trash2,
+  Users,
+} from "lucide-react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { type Organization, type SessionData, sessionQueryOptions, useAuthClient } from "@/app";
+import {
+  type Organization,
+  type SessionData,
+  sessionQueryOptions,
+  useApiClient,
+  useAuthClient,
+} from "@/app";
 import {
   ApiKeyForm,
   type ApiKeyFormValues,
   ApiKeyReveal,
   type ApiKeyRevealProps,
   Button,
+  Card,
   Input,
   InvitationCard,
+  Label,
   MemberCard,
   Tabs,
   TabsContent,
@@ -69,6 +88,7 @@ function OrganizationDetail() {
   const router = useRouter();
   const { slug: orgSlug } = Route.useParams();
   const auth = useAuthClient();
+  const apiClient = useApiClient();
 
   const { data: session } = useQuery<SessionData | null>({
     queryKey: ["session"],
@@ -141,6 +161,28 @@ function OrganizationDetail() {
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<"admin" | "member">("member");
   const [createdApiKey, setCreatedApiKey] = useState<CreatedApiKey | null>(null);
+
+  const [tunnelUrl, setTunnelUrl] = useState("");
+  const [apiToken, setApiToken] = useState("");
+  const [tokenConfigured, setTokenConfigured] = useState(false);
+  const [icLoading, setIcLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
+  const [hasSettings, setHasSettings] = useState(false);
+
+  useEffect(() => {
+    apiClient.ironclaw.settings
+      .get({ scope: "organization" })
+      .then((res) => {
+        setTunnelUrl(res.tunnelUrl);
+        setTokenConfigured(res.hasToken ?? false);
+        setHasSettings(true);
+      })
+      .catch(() => {
+        setHasSettings(false);
+      })
+      .finally(() => setIcLoading(false));
+  }, [apiClient]);
 
   const handleCopyApiKey = async (value: string, message = "API key copied") => {
     try {
@@ -334,6 +376,41 @@ function OrganizationDetail() {
   const [editName, setEditName] = useState("");
   const [editSlug, setEditSlug] = useState("");
 
+  const handleIronclawSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSaving(true);
+    try {
+      await apiClient.ironclaw.settings.update({
+        tunnelUrl,
+        ...(apiToken ? { apiToken } : {}),
+        scope: "organization",
+      });
+      setHasSettings(true);
+      if (apiToken) setTokenConfigured(true);
+      toast.success("IronClaw settings saved");
+    } catch (err: any) {
+      toast.error(err.message ?? "Failed to save settings");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleIronclawDisconnect = async () => {
+    setDisconnecting(true);
+    try {
+      await apiClient.ironclaw.settings.delete({ scope: "organization" });
+      setTunnelUrl("");
+      setApiToken("");
+      setTokenConfigured(false);
+      setHasSettings(false);
+      toast.success("Disconnected from tunnel");
+    } catch (err: any) {
+      toast.error(err.message ?? "Failed to disconnect");
+    } finally {
+      setDisconnecting(false);
+    }
+  };
+
   if (isLoadingOrgs) {
     return (
       <div className="flex h-full flex-col overflow-hidden">
@@ -515,6 +592,10 @@ function OrganizationDetail() {
                 <Key className="h-4 w-4 mr-1.5" />
                 API Keys ({apiKeys.length})
               </TabsTrigger>
+              <TabsTrigger value="ironclaw" className="shrink-0">
+                <Terminal className="h-4 w-4 mr-1.5" />
+                IronClaw
+              </TabsTrigger>
             </TabsList>
 
             <TabsContent value="members" className="space-y-6 pt-4">
@@ -657,6 +738,111 @@ function OrganizationDetail() {
                 </div>
               ) : (
                 <EmptyState label="No API keys" />
+              )}
+            </TabsContent>
+
+            <TabsContent value="ironclaw" className="space-y-6 pt-4">
+              {icLoading ? (
+                <div className="flex items-center justify-center py-12">
+                  <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                </div>
+              ) : canManageMembers ? (
+                <form onSubmit={handleIronclawSave} className="space-y-4">
+                  <Card className="space-y-4 p-5">
+                    <div className="space-y-2">
+                      <Label htmlFor="org-tunnelUrl" className="flex items-center gap-1.5">
+                        <Terminal size={14} />
+                        Tunnel URL
+                      </Label>
+                      <Input
+                        id="org-tunnelUrl"
+                        value={tunnelUrl}
+                        onChange={(e) => setTunnelUrl(e.target.value)}
+                        placeholder="https://your-tunnel.ngrok.io"
+                        required
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Public URL pointing to your ironclaw reborn binary. This tunnel applies to
+                        all org members.
+                      </p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="org-apiToken" className="flex items-center gap-1.5">
+                        <Key size={14} />
+                        API Token
+                      </Label>
+                      <Input
+                        id="org-apiToken"
+                        type="password"
+                        value={apiToken}
+                        onChange={(e) => setApiToken(e.target.value)}
+                        placeholder={
+                          tokenConfigured
+                            ? "Token is configured"
+                            : "The bearer token your binary expects"
+                        }
+                        required={!tokenConfigured}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        {tokenConfigured
+                          ? "Token is already configured. Leave empty to keep the existing token."
+                          : "Must match the bearer token configured on your Reborn binary."}
+                      </p>
+                    </div>
+                  </Card>
+
+                  <div className="flex items-center justify-between gap-4">
+                    {!hasSettings && (
+                      <p className="text-xs text-muted-foreground">
+                        No settings configured yet. Add your tunnel URL and API token to connect.
+                      </p>
+                    )}
+                    <div className="flex items-center gap-2 ml-auto">
+                      {hasSettings && (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          disabled={disconnecting}
+                          onClick={handleIronclawDisconnect}
+                          className="text-destructive hover:text-destructive"
+                        >
+                          {disconnecting ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Cloud size={14} />
+                          )}
+                          {disconnecting ? "Disconnecting..." : "Disconnect"}
+                        </Button>
+                      )}
+                      <Button type="submit" disabled={saving || !tunnelUrl}>
+                        {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save size={14} />}
+                        {saving ? "Saving..." : "Save settings"}
+                      </Button>
+                    </div>
+                  </div>
+                </form>
+              ) : (
+                <Card className="p-6 space-y-3">
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-secondary">
+                      <Terminal size={14} className="text-muted-foreground" />
+                    </div>
+                    <div className="space-y-2">
+                      <p className="text-sm font-semibold text-foreground">
+                        Organization IronClaw Tunnel
+                      </p>
+                      <p className="text-sm text-muted-foreground">
+                        Your organization has an IronClaw tunnel configured by an admin.
+                      </p>
+                      {tunnelUrl && (
+                        <p className="text-xs font-mono text-muted-foreground">
+                          Tunnel: {tunnelUrl.replace(/\/\/([^/]+)/, "//***")}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </Card>
               )}
             </TabsContent>
           </Tabs>
