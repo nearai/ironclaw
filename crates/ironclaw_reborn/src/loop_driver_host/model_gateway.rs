@@ -40,13 +40,6 @@ where
         &self,
         request: LoopModelGatewayRequest,
     ) -> Result<LoopModelResponse, LoopModelGatewayError> {
-        // The image read short-circuits for a text-only model. The gateway is
-        // the authority on whether its resolved model accepts images, so the
-        // read is suppressed iff the gateway would drop the parts — and this
-        // wiring file stays free of any provider/model-catalog knowledge.
-        let model_vision_capable = self
-            .host_gateway
-            .route_accepts_images(request.context.resolved_model_route.as_ref());
         let mut model_port = ThreadBackedLoopModelPort::new(
             Arc::clone(&self.thread_service),
             self.thread_scope.clone(),
@@ -54,8 +47,7 @@ where
             Arc::clone(&self.host_gateway),
             self.max_messages,
         )
-        .with_prompt_bundle_authority(self.prompt_authority.clone())
-        .with_model_vision_capability(model_vision_capable);
+        .with_prompt_bundle_authority(self.prompt_authority.clone());
         if let Some(source) = self.skill_context_source.as_ref() {
             model_port = model_port.with_skill_context_source(source.clone());
         }

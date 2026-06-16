@@ -117,6 +117,7 @@ ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_outbound = { path = "../ironclaw_outbound" }
 ironclaw_processes = { path = "../ironclaw_processes" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
+ironclaw_product_adapter_registry = { path = "../ironclaw_product_adapter_registry" }
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
 ironclaw_product_workflow_storage = { path = "../ironclaw_product_workflow_storage", optional = true }
 ironclaw_reborn = { path = "../ironclaw_reborn" }
@@ -125,6 +126,7 @@ ironclaw_reborn_identity = { path = "../ironclaw_reborn_identity", optional = tr
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
 ironclaw_reborn_openai_compat = { path = "../ironclaw_reborn_openai_compat", optional = true }
 ironclaw_reborn_openai_compat_storage = { path = "../ironclaw_reborn_openai_compat_storage", optional = true }
+ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces" }
 ironclaw_first_party_extension_ports = { path = "../ironclaw_first_party_extension_ports" }
 ironclaw_resources = { path = "../ironclaw_resources" }
 ironclaw_run_state = { path = "../ironclaw_run_state" }

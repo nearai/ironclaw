@@ -245,6 +245,30 @@ async fn chat_completion_deferred_busy_ack_returns_429() {
 }
 
 #[tokio::test]
+async fn chat_completion_rejected_busy_ack_returns_429() {
+    let workflow = Arc::new(FixedAckWorkflow::new(rejected_busy_ack()));
+    let router = test_router_with_workflow(
+        workflow.clone(),
+        Arc::new(StaticChatProjectionReader::text("unused")),
+    );
+
+    let response = router
+        .oneshot(chat_request(
+            json!({
+                "model": "gpt-reborn",
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            None,
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(workflow.seen_count(), 1);
+    assert_eq!(workflow.read_count(), 0);
+}
+
+#[tokio::test]
 async fn chat_completion_duplicate_ack_unwraps_to_accepted() {
     let workflow = Arc::new(FixedAckWorkflow::new(ProductInboundAck::Duplicate {
         prior: Box::new(accepted_ack()),
@@ -1280,6 +1304,13 @@ fn deferred_busy_ack() -> ProductInboundAck {
     ProductInboundAck::DeferredBusy {
         accepted_message_ref: AcceptedMessageRef::new("msg:busy").expect("accepted ref"),
         active_run_id: TurnRunId::new(),
+    }
+}
+
+fn rejected_busy_ack() -> ProductInboundAck {
+    ProductInboundAck::RejectedBusy {
+        accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy").expect("accepted ref"),
+        active_run_id: None,
     }
 }
 

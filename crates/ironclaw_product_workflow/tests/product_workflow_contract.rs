@@ -2755,14 +2755,14 @@ async fn before_inbound_policy_rewrite_replays_rewritten_outcome_on_duplicate() 
 }
 
 #[tokio::test]
-async fn before_inbound_policy_does_not_block_staged_deferred_retry() {
+async fn rejected_busy_is_settled_and_transport_retry_gets_duplicate() {
     let (workflow, inbound, ledger, policy) = build_workflow_with_policy();
     policy.allow();
     let accepted_message_ref = AcceptedMessageRef::new("msg:policy-busy").expect("valid msg ref");
     let busy_run = TurnRunId::new();
-    inbound.program_outcome(InboundTurnOutcome::DeferredBusy {
+    inbound.program_outcome(InboundTurnOutcome::RejectedBusy {
         accepted_message_ref: accepted_message_ref.clone(),
-        active_run_id: busy_run,
+        active_run_id: Some(busy_run),
         binding: fake_binding(),
     });
     let envelope = sample_envelope("policy-busy-retry");
@@ -2771,36 +2771,23 @@ async fn before_inbound_policy_does_not_block_staged_deferred_retry() {
         .accept_inbound(envelope.clone())
         .await
         .expect("busy ack");
-    assert!(matches!(first, ProductInboundAck::DeferredBusy { .. }));
+    assert!(matches!(first, ProductInboundAck::RejectedBusy { .. }));
     assert_eq!(policy.request_count(), 1);
     assert_eq!(inbound.attempt_count(), 1);
-    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.settled_count(), 1);
     assert_eq!(ledger.in_flight_count(), 0);
-
-    let submitted_run_id = TurnRunId::new();
-    inbound.program_replay_outcome(InboundTurnOutcome::Submitted {
-        accepted_message_ref,
-        submitted_run_id,
-        binding: fake_binding(),
-    });
-    policy.reject(ProductRejection::permanent(
-        ProductRejectionKind::PolicyDenied,
-        "policy changed after message was staged",
-    ));
 
     let second = workflow
         .accept_inbound(envelope)
         .await
-        .expect("staged message replay should bypass policy");
+        .expect("transport retry after settled RejectedBusy");
     assert!(matches!(
         second,
-        ProductInboundAck::Accepted {
-            submitted_run_id: run_id,
-            ..
-        } if run_id == submitted_run_id
+        ProductInboundAck::Duplicate {
+            prior,
+        } if matches!(*prior, ProductInboundAck::RejectedBusy { .. })
     ));
     assert_eq!(policy.request_count(), 1);
-    assert_eq!(inbound.replay_attempt_count(), 2);
     assert_eq!(inbound.attempt_count(), 1);
     assert_eq!(ledger.settled_count(), 1);
 }
@@ -2994,9 +2981,9 @@ async fn fake_inbound_turn_service_replays_programmed_outcomes_in_order() {
     let first_run = TurnRunId::new();
     let second_run = TurnRunId::new();
     inbound.program_replay_outcomes([
-        InboundTurnOutcome::DeferredBusy {
+        InboundTurnOutcome::RejectedBusy {
             accepted_message_ref: AcceptedMessageRef::new("msg:first").expect("valid"),
-            active_run_id: first_run,
+            active_run_id: Some(first_run),
             binding: fake_binding(),
         },
         InboundTurnOutcome::Submitted {
@@ -3013,7 +3000,7 @@ async fn fake_inbound_turn_service_replays_programmed_outcomes_in_order() {
         .expect("first programmed outcome");
     assert!(matches!(
         first,
-        InboundTurnOutcome::DeferredBusy { active_run_id, .. } if active_run_id == first_run
+        InboundTurnOutcome::RejectedBusy { active_run_id, .. } if active_run_id == Some(first_run)
     ));
     let second = inbound
         .replay_accepted_user_message(&envelope)
@@ -5342,7 +5329,7 @@ async fn accepted_message_replay_validates_current_actor_before_submit() {
 
     let first = sample_envelope("accepted-replay-actor-check");
     let busy = workflow.accept_inbound(first).await.expect("busy ack");
-    assert!(matches!(busy, ProductInboundAck::DeferredBusy { .. }));
+    assert!(matches!(busy, ProductInboundAck::RejectedBusy { .. }));
 
     let unpaired_retry = sample_envelope_with_context(
         ProductAdapterId::new("test_adapter").expect("adapter"),
@@ -6045,13 +6032,13 @@ async fn retryable_dispatch_failure_releases_fingerprint_for_recovery() {
 }
 
 #[tokio::test]
-async fn deferred_busy_is_not_settled_and_retry_can_submit_same_message() {
+async fn rejected_busy_is_settled_and_duplicate_on_transport_retry() {
     let (workflow, inbound, ledger) = build_workflow();
     let accepted_message_ref = AcceptedMessageRef::new("msg:busy-retry").expect("valid msg ref");
     let busy_run = TurnRunId::new();
-    inbound.program_outcome(InboundTurnOutcome::DeferredBusy {
+    inbound.program_outcome(InboundTurnOutcome::RejectedBusy {
         accepted_message_ref: accepted_message_ref.clone(),
-        active_run_id: busy_run,
+        active_run_id: Some(busy_run),
         binding: fake_binding(),
     });
 
@@ -6060,28 +6047,21 @@ async fn deferred_busy_is_not_settled_and_retry_can_submit_same_message() {
         .accept_inbound(envelope.clone())
         .await
         .expect("busy ack");
-    assert!(matches!(first, ProductInboundAck::DeferredBusy { .. }));
-    assert_eq!(ledger.settled_count(), 0);
+    assert!(matches!(first, ProductInboundAck::RejectedBusy { .. }));
+    assert_eq!(ledger.settled_count(), 1);
     assert_eq!(ledger.in_flight_count(), 0);
 
-    let submitted_run_id = TurnRunId::new();
-    inbound.program_outcome(InboundTurnOutcome::Submitted {
-        accepted_message_ref: accepted_message_ref.clone(),
-        submitted_run_id,
-        binding: fake_binding(),
-    });
     let second = workflow
         .accept_inbound(envelope)
         .await
-        .expect("retry submit");
+        .expect("transport retry of settled RejectedBusy");
     assert!(matches!(
         second,
-        ProductInboundAck::Accepted {
-            submitted_run_id: run_id,
-            ..
-        } if run_id == submitted_run_id
+        ProductInboundAck::Duplicate {
+            prior,
+        } if matches!(*prior, ProductInboundAck::RejectedBusy { .. })
     ));
-    assert_eq!(inbound.attempt_count(), 2);
+    assert_eq!(inbound.attempt_count(), 1);
     assert_eq!(ledger.settled_count(), 1);
 }
 
@@ -6248,4 +6228,56 @@ async fn ledger_transient_failure_surfaces_retryable_error() {
         .await
         .expect_err("should fail");
     assert!(err.is_retryable());
+}
+
+#[tokio::test]
+async fn rejected_busy_with_no_active_run_id_is_settled_and_duplicate_on_transport_retry() {
+    // RejectedBusy(active_run_id: None) — the no-run case — should settle durably on the first
+    // call and return a Duplicate of the prior RejectedBusy ack on a transport retry, without
+    // re-invoking the inbound turn service.
+    let (workflow, inbound, ledger) = build_workflow();
+    let accepted_message_ref = AcceptedMessageRef::new("msg:busy-no-run").expect("valid msg ref");
+    inbound.program_outcome(InboundTurnOutcome::RejectedBusy {
+        accepted_message_ref: accepted_message_ref.clone(),
+        active_run_id: None,
+        binding: fake_binding(),
+    });
+    let envelope = sample_envelope("busy-no-run");
+
+    let first = workflow
+        .accept_inbound(envelope.clone())
+        .await
+        .expect("first busy ack");
+    assert!(
+        matches!(first, ProductInboundAck::RejectedBusy { .. }),
+        "expected RejectedBusy on first call, got: {first:?}"
+    );
+    // Durable/settled: the action must appear in the ledger.
+    assert_eq!(ledger.settled_count(), 1, "first call must settle the ack");
+    assert_eq!(ledger.in_flight_count(), 0, "no in-flight after settlement");
+    // The settled action must NOT have a fabricated run id.  RejectedBusy(active_run_id: None)
+    // has no run to reference, so the dispatch kind must be NoOp — not a UserMessageTurn with
+    // a minted run id that was never submitted.
+    let actions = ledger.settled_actions();
+    assert_eq!(actions.len(), 1);
+    assert!(
+        matches!(actions[0].dispatch_kind, Some(ActionDispatchKind::NoOp)),
+        "settled dispatch_kind should be NoOp (no fabricated run id), got: {:?}",
+        actions[0].dispatch_kind
+    );
+
+    // Transport retry — same envelope — must return Duplicate without re-invoking inbound.
+    let second = workflow
+        .accept_inbound(envelope)
+        .await
+        .expect("transport retry after settled RejectedBusy(None)");
+    assert!(
+        matches!(
+            second,
+            ProductInboundAck::Duplicate { ref prior } if matches!(**prior, ProductInboundAck::RejectedBusy { .. })
+        ),
+        "transport retry must return Duplicate of the prior RejectedBusy ack, got: {second:?}"
+    );
+    assert_eq!(inbound.attempt_count(), 1, "inbound must not be re-invoked");
+    assert_eq!(ledger.settled_count(), 1, "settled count must not increase");
 }

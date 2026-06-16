@@ -107,8 +107,12 @@ where
     pub cancellation_factory: Option<Arc<dyn RunCancellationFactory>>,
     pub skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     /// Reads landed attachment bytes so the model port can build multimodal
-    /// image parts for vision-capable models. `None` leaves images as the
-    /// transcript's textual pointer only.
+    /// image parts for vision-capable models. Genuinely optional, not a
+    /// fail-closed gap: a reader can only exist where a local runtime composed a
+    /// workspace filesystem to read landed bytes back from. Compositions without
+    /// one have nothing to read, so `None` correctly degrades to the transcript's
+    /// textual `<attachments>` pointer (the same fallback a text-only model
+    /// gets) rather than failing the turn.
     pub attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
     pub input_queue: Option<Arc<dyn HostInputQueue>>,
     /// Required by live planned-runtime composition. Helper-level tests may use

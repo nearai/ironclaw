@@ -53,10 +53,10 @@ pub use capability_allow_set::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
 };
 pub use capability_port::{
-    CapabilityResultWrite, DecoratingLoopCapabilityPortFactory, HostRuntimeLoopCapabilityPort,
-    HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityPortDecorator,
-    LoopCapabilityPortFactory, LoopCapabilityResultWriter, concurrency_hint_from_effects,
-    loop_driver_execution_extension_id,
+    CapabilityResultWrite, CapabilityTrajectoryObserver, DecoratingLoopCapabilityPortFactory,
+    HostRuntimeLoopCapabilityPort, HostRuntimeLoopCapabilityPortFactory,
+    LoopCapabilityInputResolver, LoopCapabilityPortDecorator, LoopCapabilityPortFactory,
+    LoopCapabilityResultWriter, concurrency_hint_from_effects, loop_driver_execution_extension_id,
 };
 pub use capability_surface_filter::{
     CapabilitySurfaceProfileFilter, CapabilitySurfaceVisibleFilter,
@@ -888,12 +888,6 @@ where
     instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
-    /// Whether the resolved model can consume multimodal image parts. The host
-    /// computes this from the same resolved model id the gateway sends to, so
-    /// image bytes are read + encoded only for a vision model. Defaults to
-    /// `true` ("don't suppress"): absent an explicit host signal the read is not
-    /// gated here and the gateway applies the authoritative vision check.
-    model_vision_capable: bool,
 }
 
 impl<S, G> ThreadBackedLoopModelPort<S, G>
@@ -923,7 +917,6 @@ where
             instruction_materialization_store: None,
             identity_context_source: None,
             attachment_read_port: None,
-            model_vision_capable: true,
         }
     }
 
@@ -950,7 +943,6 @@ where
             instruction_materialization_store: None,
             identity_context_source: None,
             attachment_read_port: None,
-            model_vision_capable: true,
         }
     }
 
@@ -1003,35 +995,29 @@ where
         self
     }
 
-    /// Declare whether the resolved model can consume image parts. The host
-    /// passes the vision capability of the same model id the gateway sends to,
-    /// so the read short-circuits for a text-only model. `false` suppresses the
-    /// image read entirely; `true` (the default) leaves it to the gateway's
-    /// authoritative vision check.
-    pub fn with_model_vision_capability(mut self, capable: bool) -> Self {
-        self.model_vision_capable = capable;
-        self
-    }
-
-    /// Read + base64-encode the image attachments on a model-visible message so
-    /// the gateway can attach them as multimodal parts for a vision model. Empty
-    /// when no read port is wired, the message has no images, or the resolved
-    /// model is not vision-capable (a text-only model would only discard the
-    /// parts, so the bytes are never read). Read failures are logged and
-    /// skipped — the image is dropped rather than failing the turn; the textual
-    /// `<attachments>` pointer remains either way.
-    async fn encode_image_parts(
+    /// Read the raw bytes of a model-visible message's image attachments so the
+    /// gateway can attach them as multimodal parts for a vision model. Returns
+    /// the bytes only — base64/`data:` URL formatting is a provider concern that
+    /// lives in the gateway, so this neutral adapter stays format-agnostic.
+    /// Empty when no read port is wired or the message has no images.
+    ///
+    /// The read is deliberately *not* gated on model vision capability here. The
+    /// authoritative model identity is `model_override`, resolved inside the
+    /// gateway from its routing policy, which can diverge from the run-context
+    /// route snapshot this port holds. Gating the read on the snapshot would
+    /// risk silently dropping images whenever the two disagree, so the single
+    /// authoritative vision gate lives in the gateway's `convert_messages`: a
+    /// text-only model simply discards these parts and keeps the `<attachments>`
+    /// text pointer. The only cost is a bounded read for the rare text-only +
+    /// image case.
+    ///
+    /// Read failures are logged and skipped — the image is dropped rather than
+    /// failing the turn; the textual `<attachments>` pointer remains either way.
+    async fn read_image_parts(
         &self,
         attachments: &[ironclaw_threads::ContextImageAttachment],
     ) -> Vec<HostManagedModelImagePart> {
         if attachments.is_empty() {
-            return Vec::new();
-        }
-        // Only a vision-capable model can use image parts; for any other model
-        // reading + encoding the bytes is wasted work the gateway would discard.
-        // Gate here, where the resolved model is already known, so a text-only
-        // model never touches the attachment filesystem.
-        if !self.model_vision_capable {
             return Vec::new();
         }
         let Some(port) = self.attachment_read_port.as_ref() else {
@@ -1045,12 +1031,14 @@ where
                 .await
             {
                 Ok(bytes) => {
-                    use base64::Engine;
                     parts.push(HostManagedModelImagePart {
                         mime_type: attachment.mime_type.clone(),
-                        data_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                        bytes,
                     });
                 }
+                // silent-ok: an unreadable attachment is dropped, not fatal — the
+                // model still gets the text and the `<attachments>` pointer; the
+                // cause is logged here for diagnosis.
                 Err(error) => {
                     tracing::debug!(
                         storage_key = %attachment.storage_key,
@@ -1235,7 +1223,7 @@ where
                     continue;
                 };
                 let tool_result_content = tool_result_content_for_context_message(&message)?;
-                let image_parts = self.encode_image_parts(&message.image_attachments).await;
+                let image_parts = self.read_image_parts(&message.image_attachments).await;
                 messages.push(HostManagedModelMessage {
                     role: model_role_for_kind(message.kind),
                     content: message.content,
@@ -1397,7 +1385,7 @@ where
                 ));
             }
             let image_parts = self
-                .encode_image_parts(&context_message.image_attachments)
+                .read_image_parts(&context_message.image_attachments)
                 .await;
             resolved.push(HostManagedModelMessage {
                 role: durable_role,
@@ -1484,16 +1472,6 @@ pub trait HostManagedModelGateway: Send + Sync {
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         self.stream_model(request).await
     }
-
-    /// Whether this gateway's resolved model can accept image content parts, so
-    /// the model port can skip reading + encoding image bytes a text-only model
-    /// would only discard. Defaults to `false` (text-only / unknown); the
-    /// LLM-provider-backed gateways override it from their own model catalog,
-    /// keeping provider-capability knowledge inside the provider layer. A pure
-    /// query — no `async`, no provider call.
-    fn route_accepts_images(&self, _route: Option<&HostManagedModelRouteSnapshot>) -> bool {
-        false
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1513,16 +1491,15 @@ pub struct HostManagedModelRequest {
 /// snapshot DTO here.
 pub type HostManagedModelRouteSnapshot = ironclaw_turns::run_profile::LoopModelRouteSnapshot;
 
-/// An image attachment already read back and base64-encoded, ready to become a
-/// multimodal content part for a vision-capable model. Populated only when the
-/// host has declared the resolved model vision-capable (see
-/// [`ThreadBackedLoopModelPort::with_model_vision_capability`] and
-/// `encode_image_parts`); the model gateway turns each into a
-/// `ContentPart::ImageUrl` data URL.
+/// An image attachment read back as raw bytes, ready to become a multimodal
+/// content part for a vision-capable model. The bytes are carried undecorated;
+/// base64 / `data:` URL formatting is a provider concern the model gateway owns
+/// (it turns each into a `ContentPart::ImageUrl` data URL) and only for a model
+/// that actually accepts images.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostManagedModelImagePart {
     pub mime_type: String,
-    pub data_base64: String,
+    pub bytes: Vec<u8>,
 }
 
 /// Reads attachment bytes for the current turn so the model port can build
@@ -1558,6 +1535,8 @@ impl std::fmt::Display for LoopAttachmentReadError {
     }
 }
 
+impl std::error::Error for LoopAttachmentReadError {}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostManagedModelMessage {
     pub role: HostManagedModelMessageRole,
@@ -1567,8 +1546,11 @@ pub struct HostManagedModelMessage {
     pub tool_result_provider_call: Option<ProviderToolCallReferenceEnvelope>,
     #[serde(default, skip)]
     pub tool_result_content: Option<HostManagedToolResultContent>,
-    /// Encoded image attachments for the multimodal path. Empty unless the
-    /// resolved model is vision-capable. Not serialized (transient turn data).
+    /// Raw image-attachment bytes for the multimodal path, populated for any
+    /// message that carries landed images. The gateway encodes and attaches
+    /// them only for a vision-capable model (text-only models discard them and
+    /// keep the `<attachments>` text pointer). Not serialized (transient turn
+    /// data).
     #[serde(default, skip)]
     pub image_parts: Vec<HostManagedModelImagePart>,
 }

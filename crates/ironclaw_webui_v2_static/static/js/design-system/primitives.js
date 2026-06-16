@@ -42,6 +42,11 @@ export function cx(...classes) {
  *   detail     string (optional sub-text)
  *   showDivider boolean
  *   className  string
+ *   valueClassName string (optional) — overrides the value font-size classes.
+ *     Defaults to the large numeric size; pass a smaller size for text values
+ *     (e.g. a date) that would otherwise truncate. Note: `cn()` only
+ *     concatenates (no tailwind-merge), so this REPLACES the size classes
+ *     rather than appending to them.
  */
 export function StatCard({
   label,
@@ -50,6 +55,7 @@ export function StatCard({
   detail,
   showDivider = true,
   className = "",
+  valueClassName = "text-[1.75rem] md:text-[2rem]",
 }) {
   return html`
     <div
@@ -67,7 +73,10 @@ export function StatCard({
             ${label}
           </div>
           <div
-            className="mt-3 truncate text-[1.75rem] font-medium tracking-[-0.05em] text-[var(--v2-text-strong)] md:text-[2rem]"
+            className=${cn(
+              "mt-3 truncate font-medium tracking-[-0.05em] text-[var(--v2-text-strong)]",
+              valueClassName
+            )}
           >
             ${value}
           </div>

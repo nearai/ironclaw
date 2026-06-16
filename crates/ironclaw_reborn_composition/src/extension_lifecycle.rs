@@ -3899,6 +3899,7 @@ output_schema_ref = "schemas/search.output.json"
                 .expect("fixture package ref"),
             manifest_toml: manifest_toml.to_string(),
             package,
+            surface_kinds: Vec::new(),
             assets: vec![
                 AvailableExtensionAsset {
                     path: "manifest.toml".to_string(),

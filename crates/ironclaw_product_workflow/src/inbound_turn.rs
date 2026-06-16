@@ -81,10 +81,11 @@ pub enum InboundTurnOutcome {
         binding: ResolvedBinding,
     },
     /// Turn submission was busy (thread already has an active run). The message
-    /// was accepted but deferred.
-    DeferredBusy {
+    /// was recorded as RejectedBusy — it will NOT be auto-resubmitted; the user
+    /// must resend once the current task finishes.
+    RejectedBusy {
         accepted_message_ref: AcceptedMessageRef,
-        active_run_id: TurnRunId,
+        active_run_id: Option<TurnRunId>,
         binding: ResolvedBinding,
     },
 }
@@ -101,11 +102,11 @@ impl InboundTurnOutcome {
                 accepted_message_ref: accepted_message_ref.clone(),
                 submitted_run_id: *submitted_run_id,
             },
-            Self::DeferredBusy {
+            Self::RejectedBusy {
                 accepted_message_ref,
                 active_run_id,
                 ..
-            } => ProductInboundAck::DeferredBusy {
+            } => ProductInboundAck::RejectedBusy {
                 accepted_message_ref: accepted_message_ref.clone(),
                 active_run_id: *active_run_id,
             },
@@ -524,6 +525,11 @@ enum ProductInboundTurnHandoff {
         submitted_run_id: TurnRunId,
         binding: ResolvedBinding,
     },
+    AlreadyRejected {
+        accepted_message_ref: AcceptedMessageRef,
+        binding: ResolvedBinding,
+        active_run_id: Option<TurnRunId>,
+    },
     NeedsSubmission(Box<AcceptedProductInboundTurn>),
 }
 
@@ -595,6 +601,25 @@ impl ProductInboundTurnHandoff {
             });
         }
 
+        if replay.status == MessageStatus::RejectedBusy {
+            let active_run_id = replay
+                .turn_run_id
+                .as_deref()
+                .map(|s| {
+                    Uuid::parse_str(s).map(TurnRunId::from_uuid).map_err(|e| {
+                        ProductWorkflowError::TurnSubmissionRejected {
+                            reason: format!("invalid rejected busy turn_run_id: {e}"),
+                        }
+                    })
+                })
+                .transpose()?;
+            return Ok(Self::AlreadyRejected {
+                accepted_message_ref,
+                binding,
+                active_run_id,
+            });
+        }
+
         if !matches!(
             replay.status,
             MessageStatus::Accepted | MessageStatus::DeferredBusy
@@ -650,6 +675,15 @@ impl ProductInboundTurnHandoff {
             } => Ok(InboundTurnOutcome::Submitted {
                 accepted_message_ref,
                 submitted_run_id,
+                binding,
+            }),
+            Self::AlreadyRejected {
+                accepted_message_ref,
+                binding,
+                active_run_id,
+            } => Ok(InboundTurnOutcome::RejectedBusy {
+                accepted_message_ref,
+                active_run_id,
                 binding,
             }),
             Self::NeedsSubmission(submission) => {
@@ -778,14 +812,14 @@ impl AcceptedProductInboundTurn {
             }
             Err(TurnError::ThreadBusy(busy)) => {
                 thread_service
-                    .mark_message_deferred_busy(&thread_scope, &binding.thread_id, message_id)
+                    .mark_message_rejected_busy(&thread_scope, &binding.thread_id, message_id)
                     .await
                     .map_err(|e| ProductWorkflowError::Transient {
-                        reason: format!("failed to mark message deferred: {e}"),
+                        reason: format!("failed to mark message rejected: {e}"),
                     })?;
-                Ok(InboundTurnOutcome::DeferredBusy {
+                Ok(InboundTurnOutcome::RejectedBusy {
                     accepted_message_ref,
-                    active_run_id: busy.active_run_id,
+                    active_run_id: Some(busy.active_run_id),
                     binding,
                 })
             }
@@ -1018,7 +1052,7 @@ mod tests {
             Ok(stub_message_record(_message_id))
         }
 
-        async fn mark_message_deferred_busy(
+        async fn mark_message_rejected_busy(
             &self,
             _scope: &ThreadScope,
             _thread_id: &ironclaw_host_api::ThreadId,
@@ -1261,12 +1295,12 @@ mod tests {
     }
 
     #[test]
-    fn deferred_replay_becomes_needs_submission_handoff() {
+    fn rejected_busy_replay_becomes_already_rejected_handoff() {
         let message_id = ThreadMessageId::new();
         let handoff = ProductInboundTurnHandoff::from_replay(
             replay(
                 message_id,
-                MessageStatus::DeferredBusy,
+                MessageStatus::RejectedBusy,
                 Some("src:alpha"),
                 Some("reply:alpha"),
                 None,
@@ -1275,15 +1309,22 @@ mod tests {
             received_at(),
             ProductAdapterId::new("test_adapter").unwrap(),
         )
-        .expect("deferred replay handoff");
+        .expect("rejected busy replay handoff");
 
-        let ProductInboundTurnHandoff::NeedsSubmission(submission) = handoff else {
-            panic!("expected deferred replay to require a new turn submission")
+        let ProductInboundTurnHandoff::AlreadyRejected {
+            accepted_message_ref: actual_message_ref,
+            active_run_id,
+            ..
+        } = handoff
+        else {
+            panic!("expected rejected busy replay to be terminal, not resubmitted")
         };
 
-        assert_eq!(submission.message_id, message_id);
-        assert_eq!(submission.source_binding_id, "src:alpha");
-        assert_eq!(submission.reply_target_binding_id, "reply:alpha");
+        assert_eq!(
+            actual_message_ref,
+            accepted_message_ref(message_id).unwrap()
+        );
+        assert!(active_run_id.is_none());
     }
 
     #[test]
@@ -1746,5 +1787,36 @@ mod tests {
             matches!(delegated, Err(ProductWorkflowError::Transient { .. })),
             "with no attachments the default must delegate to the normal path"
         );
+    }
+
+    #[test]
+    fn rejected_busy_replay_with_invalid_turn_run_id_fails_loudly() {
+        let message_id = ThreadMessageId::new();
+        let result = ProductInboundTurnHandoff::from_replay(
+            replay(
+                message_id,
+                MessageStatus::RejectedBusy,
+                Some("src:alpha"),
+                Some("reply:alpha"),
+                Some("not-a-uuid".to_string()),
+            ),
+            "turn-key".to_string(),
+            received_at(),
+            ProductAdapterId::new("test_adapter").unwrap(),
+        );
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected Err for malformed turn_run_id, got Ok"),
+        };
+
+        match err {
+            ProductWorkflowError::TurnSubmissionRejected { reason } => {
+                assert!(
+                    reason.contains("invalid rejected busy turn_run_id"),
+                    "expected reason to contain 'invalid rejected busy turn_run_id', got: {reason}"
+                );
+            }
+            other => panic!("expected TurnSubmissionRejected, got: {other:?}"),
+        }
     }
 }
