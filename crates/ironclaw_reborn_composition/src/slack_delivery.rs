@@ -16,13 +16,13 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
-    CommunicationPreferenceRepository, DeliveredGateRouteRecord, DeliveredGateRouteStore,
-    OutboundError, OutboundPolicyService, OutboundStateStore, ProjectionUpdateRef,
-    ReplyTargetBindingClaim, ReplyTargetBindingValidator, ReplyTargetValidationRequest,
-    RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin, SourceRouteContext,
-    TriggerCommunicationContext, TriggerFireSlot, TriggerOriginRef, TriggerSourceKind,
-    TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore,
-    ValidatedReplyTargetBinding,
+    CommunicationPreferenceKey, CommunicationPreferenceRepository, DeliveredGateRouteRecord,
+    DeliveredGateRouteStore, OutboundError, OutboundPolicyService, OutboundStateStore,
+    ProjectionUpdateRef, ReplyTargetBindingClaim, ReplyTargetBindingValidator,
+    ReplyTargetValidationRequest, RunNotificationContext, RunNotificationEventKind,
+    RunNotificationOrigin, SourceRouteContext, TriggerCommunicationContext, TriggerFireSlot,
+    TriggerOriginRef, TriggerSourceKind, TriggeredRunDeliveryOutcomeKind,
+    TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore, ValidatedReplyTargetBinding,
 };
 use ironclaw_product_adapters::{
     ApprovalPromptContextView, DeclaredEgressHost, EgressCredentialHandle, EgressHeader,
@@ -52,7 +52,9 @@ use tokio::sync::Semaphore;
 
 use crate::AuthChallengeProvider;
 use crate::auth_prompt::auth_prompt_view_for_blocked_auth;
-use crate::slack_outbound_targets::slack_conversation_id_from_reply_target_binding_ref;
+use crate::slack_outbound_targets::{
+    slack_conversation_id_from_reply_target_binding_ref, slack_reply_target_is_personal_dm,
+};
 
 const MAX_SLACK_RUN_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_TRIGGERED_RUN_DELIVERY_MAX_WAIT: Duration = Duration::from_secs(30 * 60);
@@ -1987,6 +1989,56 @@ async fn deliver_triggered_run(
         resolved_space_id: std::sync::Mutex::new(None),
     };
 
+    // Pre-check: determine whether the creator's preferred delivery target is a
+    // verified personal DM. OAuth `authorization_url` values must ONLY be posted
+    // to a personal DM — posting one to a shared channel would leak the OAuth
+    // setup URL to every member of that channel. We resolve the preference once
+    // here (it does not change during delivery) so `triggered_notification_for_state`
+    // can gate the OAuth post without performing an async lookup on every loop
+    // iteration. Fail closed: if the preference cannot be read or the binding ref
+    // does not parse as a personal DM, treat the target as non-DM.
+    let target_is_verified_dm = {
+        let pref_key =
+            CommunicationPreferenceKey::personal(scope.tenant_id.clone(), actor.user_id.clone());
+        match services
+            .communication_preferences
+            .load_communication_preference(pref_key)
+            .await
+        {
+            Ok(Some(versioned)) => {
+                let record = &versioned.record;
+                // Gate on the EXACT target the auth prompt will resolve to, not
+                // "any stored target". The resolution engine resolves an
+                // auth-prompt intent as `auth_prompt_target.or(final_reply_target)`
+                // (see `resolution_engine.rs` `PreferenceTargetKind::AuthPrompt`) —
+                // `approval_prompt_target` is not in the auth chain, and the
+                // fallback only applies when `auth_prompt_target` is absent. A
+                // looser `.any()` would wrongly pass when `auth_prompt_target` is a
+                // shared channel but `final_reply_target` happens to be a DM, and
+                // still leak the OAuth URL to the channel.
+                let effective_auth_target = record
+                    .auth_prompt_target
+                    .as_ref()
+                    .or(record.final_reply_target.as_ref());
+                match effective_auth_target {
+                    Some(target) => slack_reply_target_is_personal_dm(target),
+                    None => false,
+                }
+            }
+            Ok(None) => false,
+            Err(err) => {
+                tracing::warn!(
+                    target = "ironclaw::reborn::slack_delivery",
+                    %run_id,
+                    error = %err,
+                    "triggered delivery: failed to load communication preference for DM check; \
+                     treating target as non-DM (fail closed)"
+                );
+                false
+            }
+        }
+    };
+
     let mut delivered_blocked_marker: Option<BlockedActionableMarker> = None;
     let mut messages_to_delete_after_final = Vec::new();
 
@@ -2026,6 +2078,7 @@ async fn deliver_triggered_run(
             &state,
             run_id,
             &trigger_label,
+            target_is_verified_dm,
         )
         .await
         {
@@ -2235,6 +2288,7 @@ fn triggered_label_from_prompt(prompt: &str) -> String {
 /// the DM's own scope — it never reaches the triggered run. If you extend this
 /// function, preserve that boundary: do not mint conversational/streaming payloads
 /// here, and do not assume inbound free-text can address a triggered run.
+#[allow(clippy::too_many_arguments)]
 async fn triggered_notification_for_state(
     services: &SlackFinalReplyDeliveryServices,
     scope: &TurnScope,
@@ -2243,6 +2297,7 @@ async fn triggered_notification_for_state(
     state: &TurnRunState,
     run_id: TurnRunId,
     trigger_label: &str,
+    target_is_verified_dm: bool,
 ) -> Result<Option<SlackActionableNotification>, SlackFinalReplyDeliveryError> {
     match state.status {
         TurnStatus::Completed => {
@@ -2324,20 +2379,32 @@ async fn triggered_notification_for_state(
             )
             .await?;
             view.body.push_str(&triggered_gate_footer(trigger_label));
-            // Same policy as the live path: only link-based OAuth is allowed over
-            // Slack. A triggered run delivers to the creator's private DM, so the
-            // OAuth `authorization_url` is safe to post there and the callback
-            // resumes the run server-side (a reply in the thread is not required).
-            // Any non-OAuth challenge (manual token / API-key entry) is denied:
-            // cancel the run and post a notice — nothing secret is solicited in
-            // the channel.
-            if view.authorization_url.is_some() {
+            // Only link-based OAuth is allowed over Slack, AND only when the
+            // resolved delivery target is a verified personal DM. Posting an
+            // OAuth `authorization_url` to a shared channel would leak the
+            // setup link to every member of that channel.
+            //
+            // Fail-closed rule: if the target cannot be verified as a personal
+            // DM (`target_is_verified_dm` is false), treat the OAuth challenge
+            // the same as a non-OAuth challenge — cancel the run and post the
+            // auth-unavailable notice. When the target IS a personal DM and the
+            // challenge is link-based OAuth (`authorization_url` is Some), post
+            // the OAuth prompt; the callback resumes the run server-side.
+            if view.authorization_url.is_some() && target_is_verified_dm {
                 Ok(Some(SlackActionableNotification {
                     event_kind: RunNotificationEventKind::AuthRequired,
                     payload: ProductOutboundPayload::AuthPrompt(view),
                     gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
                 }))
             } else {
+                if view.authorization_url.is_some() {
+                    tracing::warn!(
+                        target = "ironclaw::reborn::slack_delivery",
+                        %run_id,
+                        "triggered run OAuth auth blocked: delivery target is not a verified \
+                         personal DM; cancelling run to avoid leaking authorization_url"
+                    );
+                }
                 cancel_auth_blocked_run(
                     services.turn_coordinator.as_ref(),
                     scope,
@@ -2982,6 +3049,41 @@ mod tests {
             progress_target: None,
             approval_prompt_target: Some(binding_ref),
             auth_prompt_target: None,
+            default_modality: None,
+            updated_at: Utc::now(),
+            updated_by,
+        };
+        store
+            .write_communication_preference(WriteCommunicationPreferenceRequest {
+                record,
+                expected_version: None,
+            })
+            .await
+            .expect("seed preference");
+    }
+
+    /// Seed a personal preference with distinct `auth_prompt_target` and
+    /// `final_reply_target` binding refs. Used to prove the OAuth DM gate keys on
+    /// the EFFECTIVE auth target (`auth_prompt_target.or(final_reply_target)`),
+    /// not "any stored target".
+    async fn seed_personal_preference_with_auth_target(
+        store: &InMemoryOutboundStateStore,
+        scope: &TurnScope,
+        auth_prompt_target: ReplyTargetBindingRef,
+        final_reply_target: ReplyTargetBindingRef,
+    ) {
+        let tenant = scope.tenant_id.clone();
+        let user = scope
+            .explicit_owner_user_id()
+            .cloned()
+            .expect("owner user id for preference seed");
+        let updated_by = user.clone();
+        let record = CommunicationPreferenceRecord {
+            scope: DeliveryDefaultScope::personal(tenant, user),
+            final_reply_target: Some(final_reply_target),
+            progress_target: None,
+            approval_prompt_target: None,
+            auth_prompt_target: Some(auth_prompt_target),
             default_modality: None,
             updated_at: Utc::now(),
             updated_by,
@@ -5595,6 +5697,407 @@ mod tests {
                 .iter()
                 .any(|b| b.contains(SLACK_AUTH_UNAVAILABLE_MESSAGE)),
             "expected the auth-unavailable notice to be posted; got: {posted:?}"
+        );
+    }
+
+    // ── DM-gate security tests ─────────────────────────────────────────────────
+    //
+    // These tests verify the fail-closed gate that prevents OAuth
+    // `authorization_url` values from leaking onto shared Slack channels.
+
+    /// Fake `AuthChallengeProvider` that always returns an OAuth challenge
+    /// with the given `authorization_url`.
+    struct OAuthAuthChallengeProvider {
+        url: String,
+    }
+
+    #[async_trait]
+    impl AuthChallengeProvider for OAuthAuthChallengeProvider {
+        async fn challenge_for_gate(
+            &self,
+            _scope: &TurnScope,
+            _owner_user_id: &ironclaw_host_api::UserId,
+            _run_id: TurnRunId,
+            _gate_ref: &str,
+            _credential_requirements: &[ironclaw_host_api::RuntimeCredentialAuthRequirement],
+        ) -> Result<Option<crate::auth_prompt::AuthChallengeView>, ironclaw_auth::AuthProductError>
+        {
+            Ok(Some(crate::auth_prompt::AuthChallengeView {
+                kind: ironclaw_product_adapters::AuthPromptChallengeKind::OAuthUrl,
+                provider: ironclaw_auth::AuthProviderId::new("test-provider").expect("provider"),
+                account_label: None,
+                authorization_url: Some(
+                    ironclaw_auth::OAuthAuthorizationUrl::new(self.url.clone()).expect("url"),
+                ),
+                expires_at: None,
+            }))
+        }
+    }
+
+    /// Build a shared-channel binding ref for use in tests (no actor segments).
+    fn test_slack_shared_channel_binding_ref(
+        installation_id: &str,
+        agent_id: &str,
+    ) -> ReplyTargetBindingRef {
+        fn seg(name: &str, value: &str) -> String {
+            format!("{}:{}:{};", name, value.len(), value)
+        }
+        let raw = format!(
+            "{}{}{}{}{}{}{}",
+            seg("adapter", "slack_v2"),
+            seg("installation", installation_id),
+            seg("agent", agent_id),
+            seg("project", ""),
+            seg("space", "T123"),
+            seg("conversation", "C0SHARED"),
+            seg("topic", ""),
+        );
+        crate::slack_outbound_targets::slack_reply_target_binding_ref_from_raw(raw)
+            .expect("test shared-channel binding ref")
+    }
+
+    /// Security regression: triggered OAuth auth whose delivery target is a SHARED
+    /// CHANNEL must NOT post the `authorization_url`. The run must be cancelled and
+    /// the auth-unavailable notice must be posted instead.
+    ///
+    /// This is the "fail closed" path: if the binding ref does not parse as a
+    /// personal DM, the OAuth URL is suppressed regardless of `authorization_url`
+    /// being set.
+    #[tokio::test]
+    async fn triggered_oauth_auth_to_shared_channel_suppresses_authorization_url() {
+        let install = "test-install";
+        let gate_ref_str = "gate:oauth-shared-channel-leak";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+
+        // Use a shared-channel binding ref (no actor_kind / actor segments).
+        let binding_ref = test_slack_shared_channel_binding_ref(
+            install,
+            scope.agent_id.as_ref().expect("agent").as_str(),
+        );
+
+        // First poll → BlockedAuth; second poll → Completed (after cancel the run
+        // reaches Completed or the test exits — we only care about what is posted).
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![
+            scripted_state(TurnStatus::BlockedAuth, Some(gate_ref_str)),
+            scripted_state(TurnStatus::Completed, None),
+        ]));
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        seed_finalized_assistant_message(
+            &thread_service,
+            &scope,
+            run_id,
+            "Run complete after auth.",
+        )
+        .await;
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        // Seed the preference with a SHARED CHANNEL binding ref (not a DM).
+        seed_personal_preference(&outbound, &scope, binding_ref).await;
+
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // Expect one chat.postMessage call for the auth-unavailable notice.
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("C0SHARED", "7001.1"),
+            )),
+        );
+        // And a second for the final reply after Completed.
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("C0SHARED", "7001.2"),
+            )),
+        );
+
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let mut services = make_services(
+            coordinator,
+            thread_service,
+            egress.clone(),
+            outbound,
+            install,
+        );
+        // Wire up an OAuth challenge provider so the BlockedAuth state WOULD
+        // produce an authorization_url — the gate must suppress it.
+        services.auth_challenges = Some(Arc::new(OAuthAuthChallengeProvider {
+            url: "https://provider.example/oauth-auth".to_string(),
+        }));
+
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        let fire = minimal_trigger_fire(None);
+        driver
+            .on_trigger_submitted(fire, run_id, scope.clone())
+            .await;
+        wait_for_delivery_record(&delivery_store, run_id).await;
+
+        let posted: Vec<String> = egress
+            .calls()
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .map(|c| String::from_utf8_lossy(&c.body).to_string())
+            .collect();
+
+        // The OAuth URL must NOT appear in any posted message.
+        for body in &posted {
+            assert!(
+                !body.contains("https://provider.example/oauth-auth"),
+                "authorization_url must NOT be posted to a shared channel; got: {body}"
+            );
+        }
+
+        // The auth-unavailable notice must appear instead.
+        assert!(
+            posted
+                .iter()
+                .any(|b| b.contains(SLACK_AUTH_UNAVAILABLE_MESSAGE)),
+            "auth-unavailable notice must be posted when OAuth is suppressed for non-DM target; \
+             got: {posted:?}"
+        );
+
+        // No gate route must be recorded (the auth was cancelled).
+        let creator = ironclaw_host_api::UserId::new("creator-user").expect("user id");
+        let route = route_store
+            .load_delivered_gate_route(&scope.tenant_id, &creator, gate_ref_str)
+            .await
+            .expect("load route");
+        assert!(
+            route.is_none(),
+            "no gate route must be recorded when OAuth is suppressed for non-DM target"
+        );
+    }
+
+    /// Positive case: triggered OAuth auth whose delivery target IS a personal DM
+    /// must post the `authorization_url` (unchanged from pre-fix behavior).
+    #[tokio::test]
+    async fn triggered_oauth_auth_to_personal_dm_posts_authorization_url() {
+        let install = "test-install";
+        let gate_ref_str = "gate:oauth-dm-allowed";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+        // Use the personal-DM binding ref (has actor_kind / actor segments, D-prefixed channel).
+        let binding_ref =
+            test_slack_binding_ref(install, scope.agent_id.as_ref().expect("agent").as_str());
+
+        // First poll → BlockedAuth; second → Completed.
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![
+            scripted_state(TurnStatus::BlockedAuth, Some(gate_ref_str)),
+            scripted_state(TurnStatus::Completed, None),
+        ]));
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        seed_finalized_assistant_message(
+            &thread_service,
+            &scope,
+            run_id,
+            "Run complete after OAuth.",
+        )
+        .await;
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        seed_personal_preference(&outbound, &scope, binding_ref).await;
+
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // OAuth auth-prompt response.
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D456", "8001.1"),
+            )),
+        );
+        // Final-reply response.
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D456", "8001.2"),
+            )),
+        );
+        // Auth message deleted after final reply.
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                serde_json::json!({"ok": true}).to_string().into_bytes(),
+            )),
+        );
+
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let mut services = make_services(
+            coordinator,
+            thread_service,
+            egress.clone(),
+            outbound,
+            install,
+        );
+        // Wire up an OAuth challenge provider so authorization_url is set.
+        services.auth_challenges = Some(Arc::new(OAuthAuthChallengeProvider {
+            url: "https://provider.example/oauth-auth-dm".to_string(),
+        }));
+
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        let fire = minimal_trigger_fire(None);
+        driver
+            .on_trigger_submitted(fire, run_id, scope.clone())
+            .await;
+        wait_for_delivery_record(&delivery_store, run_id).await;
+
+        let posted: Vec<String> = egress
+            .calls()
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .map(|c| String::from_utf8_lossy(&c.body).to_string())
+            .collect();
+
+        // The OAuth URL MUST appear in the auth-prompt message sent to the DM.
+        assert!(
+            posted
+                .iter()
+                .any(|b| b.contains("https://provider.example/oauth-auth-dm")),
+            "authorization_url must be posted to a verified personal DM; got: {posted:?}"
+        );
+
+        // The auth-unavailable notice must NOT appear.
+        assert!(
+            !posted
+                .iter()
+                .any(|b| b.contains(SLACK_AUTH_UNAVAILABLE_MESSAGE)),
+            "auth-unavailable notice must NOT appear when OAuth is sent to a personal DM; \
+             got: {posted:?}"
+        );
+    }
+
+    /// Precedence guard: when `auth_prompt_target` is a SHARED CHANNEL but
+    /// `final_reply_target` is a personal DM, the OAuth gate must key on the
+    /// EFFECTIVE auth target (`auth_prompt_target.or(final_reply_target)` — see
+    /// `resolution_engine.rs` `PreferenceTargetKind::AuthPrompt`), i.e. the shared
+    /// channel. The URL must be SUPPRESSED. A naive "any stored target is a DM"
+    /// check would wrongly pass here and leak the OAuth URL to the channel.
+    #[tokio::test]
+    async fn triggered_oauth_auth_prefers_auth_target_over_dm_fallback() {
+        let install = "test-install";
+        let gate_ref_str = "gate:oauth-auth-target-shared";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+        let agent = scope.agent_id.as_ref().expect("agent").as_str();
+        // auth_prompt_target → shared channel (the effective auth target);
+        // final_reply_target → personal DM (must NOT rescue the OAuth post).
+        let auth_target = test_slack_shared_channel_binding_ref(install, agent);
+        let final_target = test_slack_binding_ref(install, agent);
+
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![
+            scripted_state(TurnStatus::BlockedAuth, Some(gate_ref_str)),
+            scripted_state(TurnStatus::Completed, None),
+        ]));
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        seed_finalized_assistant_message(&thread_service, &scope, run_id, "Run complete.").await;
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        seed_personal_preference_with_auth_target(&outbound, &scope, auth_target, final_target)
+            .await;
+
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // auth-unavailable notice, then final reply.
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("C0SHARED", "9001.1"),
+            )),
+        );
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("C0SHARED", "9001.2"),
+            )),
+        );
+
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let mut services = make_services(
+            coordinator,
+            thread_service,
+            egress.clone(),
+            outbound,
+            install,
+        );
+        services.auth_challenges = Some(Arc::new(OAuthAuthChallengeProvider {
+            url: "https://provider.example/oauth-auth-target".to_string(),
+        }));
+
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        driver
+            .on_trigger_submitted(minimal_trigger_fire(None), run_id, scope.clone())
+            .await;
+        wait_for_delivery_record(&delivery_store, run_id).await;
+
+        let posted: Vec<String> = egress
+            .calls()
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .map(|c| String::from_utf8_lossy(&c.body).to_string())
+            .collect();
+
+        for body in &posted {
+            assert!(
+                !body.contains("https://provider.example/oauth-auth-target"),
+                "authorization_url must NOT post when the effective auth target is a shared \
+                 channel, even if final_reply_target is a DM; got: {body}"
+            );
+        }
+        assert!(
+            posted
+                .iter()
+                .any(|b| b.contains(SLACK_AUTH_UNAVAILABLE_MESSAGE)),
+            "auth-unavailable notice must be posted when OAuth is suppressed; got: {posted:?}"
         );
     }
 
