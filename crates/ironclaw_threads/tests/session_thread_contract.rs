@@ -2510,7 +2510,10 @@ async fn list_threads_for_scope_is_scope_filtered_and_paginated() {
 
     // Seed: 3 threads in scope A with deterministic ids so the
     // pagination assertion is stable. 1 thread in scope B that the
-    // scope-A enumeration must not see.
+    // scope-A enumeration must not see. A 1ms gap between creations
+    // guarantees strictly increasing `created_at` stamps regardless of
+    // clock resolution, so the activity-desc ordering is deterministic
+    // (003 newest → first).
     for id in ["t-a-001", "t-a-002", "t-a-003"] {
         service
             .ensure_thread(EnsureThreadRequest {
@@ -2522,6 +2525,7 @@ async fn list_threads_for_scope_is_scope_filtered_and_paginated() {
             })
             .await
             .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
     service
         .ensure_thread(EnsureThreadRequest {
@@ -2534,7 +2538,7 @@ async fn list_threads_for_scope_is_scope_filtered_and_paginated() {
         .await
         .unwrap();
 
-    // Scope filter: A sees only A's threads, sorted deterministically.
+    // Scope filter: A sees only A's threads, newest activity first.
     let scope_a_all = service
         .list_threads_for_scope(ListThreadsForScopeRequest {
             scope: scope_a.clone(),
@@ -2548,13 +2552,13 @@ async fn list_threads_for_scope_is_scope_filtered_and_paginated() {
         .iter()
         .map(|record| record.thread_id.as_str())
         .collect();
-    assert_eq!(ids, ["t-a-001", "t-a-002", "t-a-003"]);
+    assert_eq!(ids, ["t-a-003", "t-a-002", "t-a-001"]);
     assert!(
         scope_a_all.next_cursor.is_none(),
         "no more pages when page size > total",
     );
 
-    // Pagination: limit=2 → first page is [001, 002] with cursor=002.
+    // Pagination: limit=2 → first page is [003, 002] with cursor=002.
     let page_1 = service
         .list_threads_for_scope(ListThreadsForScopeRequest {
             scope: scope_a.clone(),
@@ -2568,10 +2572,10 @@ async fn list_threads_for_scope_is_scope_filtered_and_paginated() {
         .iter()
         .map(|record| record.thread_id.as_str())
         .collect();
-    assert_eq!(page_1_ids, ["t-a-001", "t-a-002"]);
+    assert_eq!(page_1_ids, ["t-a-003", "t-a-002"]);
     assert_eq!(page_1.next_cursor.as_deref(), Some("t-a-002"));
 
-    // Follow-up: cursor=002 → next page is [003] with no further cursor.
+    // Follow-up: cursor=002 → next page is [001] with no further cursor.
     let page_2 = service
         .list_threads_for_scope(ListThreadsForScopeRequest {
             scope: scope_a.clone(),
@@ -2585,7 +2589,7 @@ async fn list_threads_for_scope_is_scope_filtered_and_paginated() {
         .iter()
         .map(|record| record.thread_id.as_str())
         .collect();
-    assert_eq!(page_2_ids, ["t-a-003"]);
+    assert_eq!(page_2_ids, ["t-a-001"]);
     assert!(page_2.next_cursor.is_none());
 
     // Cross-scope safety: scope B sees only its own thread, never A's.

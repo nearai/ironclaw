@@ -859,6 +859,9 @@ async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
             })
             .await
             .unwrap();
+        // 1ms gap → strictly increasing `created_at`, so the
+        // activity-desc ordering below is deterministic.
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
     service
         .ensure_thread(EnsureThreadRequest {
@@ -871,7 +874,11 @@ async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
         .await
         .unwrap();
 
-    // Scope filter: A sees only A's threads, sorted deterministically.
+    // Scope filter: A sees only A's threads, newest activity first.
+    // The threads were created sequentially (with real backend I/O
+    // between each `ensure_thread`), so their `created_at`/`updated_at`
+    // stamps strictly increase — the activity-desc ordering therefore
+    // surfaces the last-created thread (003) first.
     let scope_a_all = service
         .list_threads_for_scope(ListThreadsForScopeRequest {
             scope: scope_a.clone(),
@@ -885,13 +892,13 @@ async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
         .iter()
         .map(|record| record.thread_id.as_str())
         .collect();
-    assert_eq!(ids, ["t-a-001", "t-a-002", "t-a-003"]);
+    assert_eq!(ids, ["t-a-003", "t-a-002", "t-a-001"]);
     assert!(
         scope_a_all.next_cursor.is_none(),
         "no more pages when page size > total",
     );
 
-    // Pagination: limit=2 → first page is [001, 002] with cursor=002.
+    // Pagination: limit=2 → first page is [003, 002] with cursor=002.
     let page_1 = service
         .list_threads_for_scope(ListThreadsForScopeRequest {
             scope: scope_a.clone(),
@@ -905,10 +912,10 @@ async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
         .iter()
         .map(|record| record.thread_id.as_str())
         .collect();
-    assert_eq!(page_1_ids, ["t-a-001", "t-a-002"]);
+    assert_eq!(page_1_ids, ["t-a-003", "t-a-002"]);
     assert_eq!(page_1.next_cursor.as_deref(), Some("t-a-002"));
 
-    // Follow-up: cursor=002 → next page is [003] with no further cursor.
+    // Follow-up: cursor=002 → next page is [001] with no further cursor.
     let page_2 = service
         .list_threads_for_scope(ListThreadsForScopeRequest {
             scope: scope_a.clone(),
@@ -922,7 +929,7 @@ async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
         .iter()
         .map(|record| record.thread_id.as_str())
         .collect();
-    assert_eq!(page_2_ids, ["t-a-003"]);
+    assert_eq!(page_2_ids, ["t-a-001"]);
     assert!(page_2.next_cursor.is_none());
 
     // Cross-scope safety: scope B sees only its own thread, never A's.
@@ -943,6 +950,85 @@ async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
         .map(|record| record.thread_id.as_str())
         .collect();
     assert_eq!(ids_b, ["t-b-001"]);
+}
+
+/// Regression: the "Recent" list must order by last interaction, not by
+/// creation time or thread id. Appending a message to the *older* thread
+/// has to bump it ahead of a more recently *created* one. Before this
+/// fix, records carried no timestamp and the backend sorted by random
+/// UUID, so a freshly-used thread could land anywhere in the list.
+#[tokio::test]
+async fn filesystem_list_threads_orders_by_last_activity_not_creation() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-activity-fs", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope_a = scope("activity");
+
+    // Create "older" first, then "newer" — newer has the later
+    // `created_at`. A 1ms gap makes the stamps strictly ordered.
+    for id in ["t-older", "t-newer"] {
+        service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope_a.clone(),
+                thread_id: Some(ThreadId::new(id).unwrap()),
+                created_by_actor_id: "actor-a".into(),
+                title: Some(id.into()),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+
+    // Initially newest-created is first.
+    let before = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope_a.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let before_ids: Vec<&str> = before
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(before_ids, ["t-newer", "t-older"]);
+
+    // Interact with the older thread — appending a message must bump its
+    // last-activity stamp above the newer thread's creation time.
+    std::thread::sleep(std::time::Duration::from_millis(1));
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope_a.clone(),
+            thread_id: ThreadId::new("t-older").unwrap(),
+            actor_id: "actor-a".into(),
+            source_binding_id: Some("binding-activity".into()),
+            reply_target_binding_id: None,
+            external_event_id: Some("event-activity".into()),
+            content: MessageContent::text("ping the old thread"),
+        })
+        .await
+        .unwrap();
+
+    // The freshly-used thread now leads the Recent list.
+    let after = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope_a,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let after_ids: Vec<&str> = after
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(after_ids, ["t-older", "t-newer"]);
 }
 
 #[tokio::test]

@@ -58,9 +58,13 @@ export function useThreads() {
 
   // Normalize v2 SessionThreadRecord → fork's expected shape:
   // - v2 carries `thread_id`; fork's thread-sidebar reads `thread.id`
-  // - v2 has no `state`, `turn_count`, `updated_at` fields
-  //   (those are v1 metadata). Fill safe defaults so the UI's
-  //   "Processing" pip and turn count never spuriously render.
+  // - v2 has no `state`/`turn_count` fields (those are v1 metadata).
+  //   Fill safe defaults so the UI's "Processing" pip and turn count
+  //   never spuriously render.
+  // - `created_at`/`updated_at` are emitted by the v2 backend now
+  //   (updated_at bumped on every message append); they flow through
+  //   the spread and drive the sidebar's activity ordering. `null`
+  //   fallback covers legacy records persisted before timestamps.
   const threads = React.useMemo(() => {
     const records = query.data?.threads || [];
     return records.map((record) => ({
