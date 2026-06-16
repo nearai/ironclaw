@@ -423,7 +423,11 @@ fn delegated_env_command(tokens: &[String]) -> Option<Vec<String>> {
     while idx < tokens.len() {
         let token = tokens[idx].as_str();
         if token == "-S" || token == "--split-string" {
-            return tokens.get(idx + 1).map(|script| shell_tokens(script));
+            return Some(
+                tokens
+                    .get(idx + 1)
+                    .map_or_else(Vec::new, |script| shell_tokens(script)),
+            );
         }
         if let Some(script) = token.strip_prefix("-S").filter(|script| !script.is_empty()) {
             return Some(shell_tokens(script));
@@ -436,6 +440,9 @@ fn delegated_env_command(tokens: &[String]) -> Option<Vec<String>> {
             "-u" | "--unset"
                 | "-C"
                 | "--chdir"
+                | "-P"
+                | "-a"
+                | "--argv0"
                 | "--block-signal"
                 | "--default-signal"
                 | "--ignore-signal"
@@ -492,7 +499,10 @@ fn classify_tokens_for_wrappers(tokens: &[String], depth: usize) -> Option<RiskL
             shell_script_arg(tokens, 1).map(|script| classify_command_risk_inner(script, depth + 1))
         }
         "env" => delegated_env_command(tokens).and_then(|delegated| {
-            let delegated_command = command_basename(&delegated[0]).to_lowercase();
+            let Some(delegated_command) = delegated.first() else {
+                return Some(RiskLevel::Medium);
+            };
+            let delegated_command = command_basename(delegated_command).to_lowercase();
             if matches!(delegated_command.as_str(), "sh" | "bash" | "zsh" | "dash") {
                 classify_tokens_for_wrappers(&delegated, depth + 1)
             } else {
@@ -515,8 +525,8 @@ fn classify_segment_risk(segment: &str, depth: usize) -> RiskLevel {
     }
 
     let tokens = shell_tokens(segment);
-    if classify_tokens_for_wrappers(&tokens, depth).is_some_and(|risk| risk == RiskLevel::High) {
-        return RiskLevel::High;
+    if let Some(risk) = classify_tokens_for_wrappers(&tokens, depth) {
+        return risk;
     }
 
     if LOW_RISK_PATTERNS

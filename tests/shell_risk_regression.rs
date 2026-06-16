@@ -238,6 +238,9 @@ async fn env_wrapper_options_with_arguments_are_skipped() {
         r#"env -u PATH sh -c "git reset --hard""#,
         r#"env --unset PATH bash -lc "rm -rf /tmp/env-unset-marker""#,
         r#"env --chdir /tmp sh -c "chmod 777 /tmp/env-chdir-marker""#,
+        r#"env -P /bin sh -c "rm -rf /tmp/env-path-marker""#,
+        r#"env -a custom_name sh -c "chmod 777 /tmp/env-argv0-marker""#,
+        r#"env --argv0 custom_name bash -lc "git reset --hard""#,
     ];
     for cmd in &cmds {
         assert_eq!(risk(&tool, cmd), RiskLevel::High);
@@ -257,6 +260,23 @@ async fn env_split_string_payloads_are_classified() {
     for cmd in &cmds {
         assert_eq!(risk(&tool, cmd), RiskLevel::High);
         assert_eq!(approval(&tool, cmd), ApprovalRequirement::Always);
+    }
+}
+
+#[tokio::test]
+async fn env_empty_split_string_payloads_are_conservative() {
+    let tool = shell_tool().await;
+    let cmds = [
+        r#"env --split-string="#,
+        r#"env --split-string="""#,
+        r#"env -S """#,
+    ];
+    for cmd in &cmds {
+        assert_eq!(risk(&tool, cmd), RiskLevel::Medium);
+        assert_eq!(
+            approval(&tool, cmd),
+            ApprovalRequirement::UnlessAutoApproved
+        );
     }
 }
 
