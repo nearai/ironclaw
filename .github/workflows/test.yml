@@ -313,6 +313,22 @@ jobs:
               ;;
           esac
 
+  legacy-workflow-contract:
+    name: Legacy workflow contract
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - name: Validate legacy workflow matrix contract
+        run: python3 scripts/ci/validate-legacy-test-workflow.py
+      - name: Test legacy root partition runner
+        run: bash scripts/ci/test-run-legacy-root-test-partition.sh
+
   secret-store-contract-tests:
     name: Secret Store Contract Tests
     needs: changes
@@ -736,6 +752,7 @@ jobs:
       - tests
       - legacy-all-features-root-tests
       - legacy-all-features-extra-tests
+      - legacy-workflow-contract
       - hooks-parity-tests
       - heavy-integration-tests
       - telegram-integration-tests
@@ -778,6 +795,7 @@ jobs:
           fi
 
           if [[ "${{ needs.changes.outputs.has_core_code }}" == "true" ]]; then
+            require_success "legacy-workflow-contract" "${{ needs.legacy-workflow-contract.result }}"
             require_success "legacy-all-features-root-tests" "${{ needs.legacy-all-features-root-tests.result }}"
             require_success "legacy-all-features-extra-tests" "${{ needs.legacy-all-features-extra-tests.result }}"
             if [[ "${{ needs.matrix-config.outputs.has_test_matrix }}" == "true" ]]; then
