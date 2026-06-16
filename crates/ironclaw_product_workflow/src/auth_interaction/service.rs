@@ -6,9 +6,9 @@ use ironclaw_auth::{
     CredentialAccountId, CredentialSelectionInput,
 };
 use ironclaw_turns::{
-    AuthResumeDisposition, CancelRunRequest, GateRef, GetRunStateRequest, ResumeTurnPrecondition,
-    ResumeTurnRequest, SanitizedCancelReason, TurnCoordinator, TurnError, TurnErrorCategory,
-    TurnRunId, TurnStatus,
+    AuthResumeDisposition, CancelRunRequest, CancelRunResponse, GateRef, GetRunStateRequest,
+    ResumeTurnPrecondition, ResumeTurnRequest, ResumeTurnResponse, SanitizedCancelReason,
+    TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnStatus,
 };
 
 use super::types::is_pending_auth_status;
@@ -235,16 +235,6 @@ impl DefaultAuthInteractionService {
         Ok(())
     }
 
-    async fn cancel_auth(
-        &self,
-        request: ResolveAuthInteractionRequest,
-        gate: AuthGateRecord,
-        run_id: TurnRunId,
-    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
-        self.cancel_auth_flow_if_active(&gate).await?;
-        self.cancel_auth_run(request, run_id).await
-    }
-
     async fn resume_denied_auth(
         &self,
         request: ResolveAuthInteractionRequest,
@@ -396,9 +386,46 @@ impl AuthInteractionService for DefaultAuthInteractionService {
             (BlockedGateState::NotParkedOnGate, AuthInteractionDecision::Deny) => {
                 let gate = self.refresh_gate(&gate).await?;
                 if gate.status() != AuthFlowStatus::Canceled {
+                    // Flow is not in a terminal-denied state but the run is no
+                    // longer parked — genuinely stale, nothing to replay.
                     return Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth));
                 }
-                self.cancel_auth(request, gate, run_id).await
+                // The gate was already resolved by a prior Deny (or concurrently).
+                // Do NOT call cancel_run — the run may already be resumed and
+                // executing.  Instead fetch current run state and return an
+                // idempotent replay response that matches what the first Deny
+                // produced.
+                let state = self
+                    .turn_coordinator
+                    .get_run_state(GetRunStateRequest {
+                        scope: request.scope.clone(),
+                        run_id,
+                    })
+                    .await
+                    .map_err(map_auth_resume_error)?;
+                if state.status == TurnStatus::Cancelled {
+                    // The run was genuinely cancelled (e.g. by some other path
+                    // before our first Deny resumed it).  Reflect that terminal
+                    // state without issuing a new cancel_run call.
+                    Ok(ResolveAuthInteractionResponse::Canceled(CancelRunResponse {
+                        run_id,
+                        status: state.status,
+                        event_cursor: state.event_cursor,
+                        already_terminal: true,
+                        actor: None,
+                    }))
+                } else {
+                    // Run is non-terminal (Queued / Running / Completed /
+                    // Blocked-on-something-else).  The first Deny already
+                    // resumed it with a denial disposition; replay that outcome.
+                    Ok(ResolveAuthInteractionResponse::DenialResumed(
+                        ResumeTurnResponse {
+                            run_id,
+                            status: state.status,
+                            event_cursor: state.event_cursor,
+                        },
+                    ))
+                }
             }
         }
     }

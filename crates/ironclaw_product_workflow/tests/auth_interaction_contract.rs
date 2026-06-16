@@ -887,7 +887,12 @@ async fn duplicate_completed_auth_resolution_replays_through_turn_coordinator() 
 }
 
 #[tokio::test]
-async fn duplicate_denied_auth_resolution_replays_through_turn_coordinator() {
+async fn duplicate_denied_auth_on_already_resumed_run_is_idempotent() {
+    // Scenario: first Deny already resolved the gate (flow=Canceled) and
+    // resumed the run (now Queued/Running).  A duplicate Deny (double-click,
+    // lost response, client retry) must NOT cancel the live resumed run.
+    // Expected: DenialResumed replay reflecting current run state, zero
+    // cancel_run calls.
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let scope = turn_scope("alice", "thread-a");
     let run_id = TurnRunId::new();
@@ -901,6 +906,8 @@ async fn duplicate_denied_auth_resolution_replays_through_turn_coordinator() {
         None,
         setup_challenge(),
     );
+    // turn_gate_state will return NotParkedOnGate because the run is no
+    // longer BlockedAuth — the first Deny already resumed it.
     let (service, _flow_manager, coordinator) =
         service_parts(flow.clone(), vec![flow], actor.clone(), gate_ref.clone());
     coordinator.set_status(TurnStatus::Queued);
@@ -915,13 +922,75 @@ async fn duplicate_denied_auth_resolution_replays_through_turn_coordinator() {
             idempotency_key: IdempotencyKey::new("auth-action-replay-denied").unwrap(),
         })
         .await
-        .expect("duplicate denied auth resolution replays");
+        .expect("duplicate denied auth resolution must be idempotent");
 
-    assert!(matches!(
-        response,
-        ResolveAuthInteractionResponse::Canceled(_)
-    ));
-    assert_eq!(coordinator.cancellations().len(), 1);
+    // Must replay the denial outcome, not cancel the live run.
+    assert!(
+        matches!(
+            response,
+            ResolveAuthInteractionResponse::DenialResumed(_)
+        ),
+        "expected DenialResumed idempotent replay, got: {response:?}"
+    );
+    // The critical invariant: no new cancel_run call must have been issued.
+    assert_eq!(
+        coordinator.cancellations().len(),
+        0,
+        "duplicate Deny must not cancel the already-resumed run"
+    );
+    assert_eq!(coordinator.resumes().len(), 0);
+}
+
+#[tokio::test]
+async fn duplicate_denied_auth_on_cancelled_run_returns_canceled_without_new_cancel_run() {
+    // Scenario: flow=Canceled (first Deny already resolved the gate) but the
+    // run ended up Cancelled by some other path (e.g. a concurrent cancel
+    // arrived before the first Deny could resume it).  The duplicate Deny
+    // must reflect the terminal state idempotently — no new cancel_run call.
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let scope = turn_scope("alice", "thread-a");
+    let run_id = TurnRunId::new();
+    let gate_ref = make_gate_ref("gate:auth-replay-denied-terminal");
+    let flow = auth_flow(
+        AuthFlowStatus::Canceled,
+        &scope,
+        &actor,
+        run_id,
+        &gate_ref,
+        None,
+        setup_challenge(),
+    );
+    let (service, _flow_manager, coordinator) =
+        service_parts(flow.clone(), vec![flow], actor.clone(), gate_ref.clone());
+    // Run is already in terminal Cancelled state.
+    coordinator.set_status(TurnStatus::Cancelled);
+
+    let response = service
+        .resolve(ResolveAuthInteractionRequest {
+            scope,
+            actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: AuthInteractionDecision::Deny,
+            idempotency_key: IdempotencyKey::new("auth-action-replay-denied-terminal").unwrap(),
+        })
+        .await
+        .expect("duplicate denied auth on terminal run must be idempotent");
+
+    // The run is already Cancelled — reflect that, but do NOT issue a new
+    // cancel_run call (that would double-fire side effects).
+    assert!(
+        matches!(
+            response,
+            ResolveAuthInteractionResponse::Canceled(_)
+        ),
+        "expected Canceled reflection for terminal run, got: {response:?}"
+    );
+    assert_eq!(
+        coordinator.cancellations().len(),
+        0,
+        "duplicate Deny on Cancelled run must not call cancel_run again"
+    );
     assert_eq!(coordinator.resumes().len(), 0);
 }
 
