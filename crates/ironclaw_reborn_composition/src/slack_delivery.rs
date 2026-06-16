@@ -66,12 +66,6 @@ const SLACK_AUTH_CANCELED_MESSAGE: &str = "Authentication canceled.";
 /// Posted when a run blocks on a credential-entry (non-OAuth) auth challenge:
 /// entering a secret in chat is a security risk, so it must be done in the web app.
 const SLACK_AUTH_UNAVAILABLE_MESSAGE: &str = "Setting this up needs a credential (an API key or token). Sharing one here is a security risk — anything entered in chat is stored in the conversation — so credential-based connections can only be set up in the Ironclaw web app. Connect it there, then ask me again here.";
-/// Sentinel reason string used inside `TriggeredSlackReplyTargetAuthority` to signal
-/// that the delivery was rejected because the send-time target was not a personal DM
-/// despite the payload carrying an OAuth `authorization_url`. This is an internal
-/// marker only — it is matched in `classify_delivery_error` to map to
-/// `TriggeredNotificationFailure::OAuthTargetNotDm` and is never shown to users.
-const OAUTH_TARGET_NOT_DM_MARKER: &str = "__oauth_url_requires_personal_dm__";
 const SLACK_DELIVERY_TIMEOUT_MESSAGE: &str =
     "This is taking longer than expected — check the WebUI for the result.";
 const SLACK_DELIVERY_ERROR_MESSAGE: &str =
@@ -1994,6 +1988,7 @@ async fn deliver_triggered_run(
         trigger_context: trigger_context.clone(),
         resolved_space_id: std::sync::Mutex::new(None),
         require_personal_dm_for_oauth: std::sync::atomic::AtomicBool::new(false),
+        oauth_target_not_dm: std::sync::atomic::AtomicBool::new(false),
     };
 
     // Pre-check: determine whether the creator's preferred delivery target is a
@@ -2621,7 +2616,7 @@ async fn deliver_triggered_notification(
     };
 
     let tracked_egress = TrackingSlackPostEgress::new(Arc::clone(&services.egress));
-    prepare_and_render_product_outbound(
+    let render_result = prepare_and_render_product_outbound(
         &outbound_policy,
         services.communication_preferences.as_ref(),
         authority,
@@ -2637,8 +2632,21 @@ async fn deliver_triggered_notification(
             delivery_sink: services.delivery_sink.as_ref(),
         },
     )
-    .await
-    .map_err(classify_delivery_error)?;
+    .await;
+
+    if let Err(error) = render_result {
+        // Typed handshake with the resolver: if the OAuth-DM backstop tripped,
+        // the resolver set `oauth_target_not_dm`. Read-and-clear it here so the
+        // failure is classified as `OAuthTargetNotDm` without inspecting the
+        // cross-crate error's reason string.
+        if authority
+            .oauth_target_not_dm
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            return Err(TriggeredNotificationFailure::OAuthTargetNotDm);
+        }
+        return Err(classify_delivery_error(error));
+    }
 
     Ok(tracked_egress.take_posted_messages())
 }
@@ -2649,7 +2657,7 @@ fn classify_delivery_error(
     error: ironclaw_product_workflow::ProductOutboundDeliveryError,
 ) -> TriggeredNotificationFailure {
     use ironclaw_outbound::OutboundError;
-    use ironclaw_product_workflow::{ProductOutboundDeliveryError, ProductWorkflowError};
+    use ironclaw_product_workflow::ProductOutboundDeliveryError;
     match &error {
         ProductOutboundDeliveryError::Outbound(OutboundError::PreferenceTargetMissing {
             ..
@@ -2657,13 +2665,9 @@ fn classify_delivery_error(
         ProductOutboundDeliveryError::Outbound(OutboundError::AccessDenied) => {
             TriggeredNotificationFailure::Denied
         }
-        // Authority backstop trip: the resolver wraps BindingResolutionFailed as
-        // Workflow { source: BindingResolutionFailed { reason } }, so the sentinel
-        // reason is reachable by direct pattern match below. There is no fallback.
-        ProductOutboundDeliveryError::Workflow {
-            source: ProductWorkflowError::BindingResolutionFailed { reason },
-            ..
-        } if reason == OAUTH_TARGET_NOT_DM_MARKER => TriggeredNotificationFailure::OAuthTargetNotDm,
+        // Note: the OAuth-DM backstop trip is NOT classified here — it is detected
+        // via the authority's typed `oauth_target_not_dm` signal in
+        // `deliver_triggered_notification` before this function is reached.
         _ => TriggeredNotificationFailure::Other(error.to_string()),
     }
 }
@@ -2737,6 +2741,12 @@ struct TriggeredSlackReplyTargetAuthority {
     /// snapshot-vs-send race (the pre-loop DM snapshot can go stale while the run
     /// waits in BlockedAuth).
     require_personal_dm_for_oauth: std::sync::atomic::AtomicBool,
+    /// Output signal: set by the resolver when `require_personal_dm_for_oauth`
+    /// is true and the resolved send-time binding is NOT a personal DM. Read
+    /// (and cleared) by `deliver_triggered_notification` to classify the delivery
+    /// failure as `OAuthTargetNotDm` — a typed handshake that avoids matching a
+    /// magic reason string on the cross-crate `ProductWorkflowError`.
+    oauth_target_not_dm: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait]
@@ -2765,15 +2775,19 @@ impl ProductOutboundTargetResolver for TriggeredSlackReplyTargetAuthority {
         // personal DM. This closes the snapshot-vs-send race: the pre-loop
         // `target_is_verified_dm` snapshot can go stale while the run waits in
         // BlockedAuth; this guard is checked against the binding resolved NOW
-        // (at send time), not the one read earlier. The reason string is matched
-        // in `classify_delivery_error` to map to `OAuthTargetNotDm`.
+        // (at send time), not the one read earlier. On a trip we set the typed
+        // `oauth_target_not_dm` signal so `deliver_triggered_notification` can
+        // classify the failure as `OAuthTargetNotDm` without matching a magic
+        // reason string on the cross-crate error.
         if self
             .require_personal_dm_for_oauth
             .load(std::sync::atomic::Ordering::Acquire)
             && !slack_reply_target_is_personal_dm(target.target())
         {
+            self.oauth_target_not_dm
+                .store(true, std::sync::atomic::Ordering::Release);
             return Err(ProductWorkflowError::BindingResolutionFailed {
-                reason: OAUTH_TARGET_NOT_DM_MARKER.to_string(),
+                reason: "OAuth authorization_url requires a personal DM target".to_string(),
             });
         }
 
