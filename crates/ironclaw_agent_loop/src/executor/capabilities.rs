@@ -117,24 +117,20 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                 .completed_turn(ctx, state, result_refs_start, capability_batch)
                 .await;
         }
-        capability_batch = CapabilityBatchTurnSummary::for_invocation_count(visible_calls.len());
-
-        CheckpointStage
-            .emit_progress(
-                ctx,
-                LoopProgressEvent::CapabilityBatchStarted {
-                    iteration: state.iteration,
-                    call_count: visible_calls.len() as u32,
-                    policy: batch_policy_kind(policy),
-                },
-            )
-            .await;
 
         // A run resumed from a user-DENIED auth gate must NOT re-dispatch the
         // parked capability — the credential is still missing, so re-dispatch
         // would re-check it and re-block (infinite auth/deny loop). Surface a
         // model-visible authorization failure (retry forbidden) so the model
         // sees the denial and continues.
+        //
+        // Only the call matching the denied capability_id must be failed; any
+        // other calls in the same parallel batch are unrelated and must proceed
+        // through normal dispatch. We therefore partition visible_calls BEFORE
+        // sizing capability_batch and emitting CapabilityBatchStarted so that
+        // the invocation count and progress event reflect only the remaining
+        // (non-denied) calls that actually reach invoke_capability_batch. This
+        // keeps the outcomes.len() == invocations.len() invariant intact.
         //
         // We call `handle_capability_error` directly rather than routing through
         // `handle_capability_outcome(Failed(Authorization, ...))` because
@@ -150,7 +146,15 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             state.pending_auth_resume.as_ref().and_then(|p| p.disposition.as_ref()),
             Some(ironclaw_turns::AuthResumeDisposition::Denied { .. })
         ) {
-            for call in visible_calls {
+            let denied_capability_id = state
+                .pending_auth_resume
+                .as_ref()
+                .map(|p| p.capability_id.clone());
+            let (auth_denied_calls, remaining_calls): (Vec<_>, Vec<_>) = visible_calls
+                .into_iter()
+                .partition(|call| Some(&call.capability_id) == denied_capability_id.as_ref());
+
+            for call in auth_denied_calls {
                 push_call_signature_once(&mut state, &mut signatures, &call)?;
                 let failure = ironclaw_turns::run_profile::CapabilityFailure {
                     error_kind: CapabilityFailureKind::Authorization,
@@ -184,10 +188,34 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     BatchStep::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
                 }
             }
-            return self
-                .completed_turn(ctx, state, result_refs_start, capability_batch)
-                .await;
+
+            // Consume the pending_auth_resume — the denial has been surfaced.
+            state.pending_auth_resume = None;
+
+            if remaining_calls.is_empty() {
+                return self
+                    .completed_turn(ctx, state, result_refs_start, capability_batch)
+                    .await;
+            }
+
+            // Fall through with only the non-denied calls. Reassign so the
+            // sizing, progress emit, and batch dispatch below operate on the
+            // remaining calls only.
+            visible_calls = remaining_calls;
         }
+
+        capability_batch = CapabilityBatchTurnSummary::for_invocation_count(visible_calls.len());
+
+        CheckpointStage
+            .emit_progress(
+                ctx,
+                LoopProgressEvent::CapabilityBatchStarted {
+                    iteration: state.iteration,
+                    call_count: visible_calls.len() as u32,
+                    policy: batch_policy_kind(policy),
+                },
+            )
+            .await;
 
         let mut pending_approval_resume = state.pending_approval_resume.clone();
         let mut pending_auth_resume = state.pending_auth_resume.clone();

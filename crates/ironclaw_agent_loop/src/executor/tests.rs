@@ -5653,3 +5653,201 @@ async fn capability_stage_denied_auth_resume_surfaces_authorization_failure_and_
         "Authorization failure must map to Forbidden retry constraint (model must not retry)"
     );
 }
+
+/// Regression test for the auth-deny partition fix.
+///
+/// When a resumed run carries `pending_auth_resume` with `disposition = Some(Denied)`
+/// and the parallel batch contains BOTH the denied capability (X = `capability_id()`)
+/// AND an unrelated capability (Y = `other_capability_id()`), only X must receive
+/// an Authorization failure. Y must be dispatched normally and its outcome must
+/// appear in the result refs. The loop must continue (not exit), and
+/// `pending_auth_resume` must be cleared.
+#[tokio::test]
+async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_dispatched() {
+    let y_result_ref = LoopResultRef::new("result:y-outcome").expect("valid");
+
+    // The MockHost surface normally contains only capability_id() ("demo.echo").
+    // Add other_capability_id() ("demo.list") so that call Y is treated as
+    // visible rather than denied-by-surface.
+    let host = MockHost::new(Vec::new())
+        .with_extra_capability_descriptors(vec![
+            ironclaw_turns::run_profile::CapabilityDescriptorView {
+                capability_id: other_capability_id(),
+                provider: None,
+                runtime: ironclaw_host_api::RuntimeKind::FirstParty,
+                safe_name: "demo_list".to_string(),
+                safe_description: "demo list capability".to_string(),
+                concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::SafeForParallel,
+                parameters_schema: serde_json::json!({"type":"object","properties":{}}),
+            },
+        ])
+        .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+                result_ref: y_result_ref.clone(),
+                safe_summary: "list done".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                terminate_hint: false,
+                byte_len: 0,
+            })],
+            stopped_on_suspension: false,
+        }]);
+
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+
+    // Seed pending_auth_resume for capability X = capability_id(), Denied.
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.pending_auth_resume = Some(PendingAuthResume {
+        gate_ref: LoopGateRef::new("gate:auth-deny-multi-test").expect("valid"),
+        capability_id: capability_id(),
+        surface_version: surface_version(),
+        input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:deny-x")
+            .expect("valid"),
+        effective_capability_ids: vec![capability_id()],
+        provider_replay: None,
+        resume_token: None,
+        prior_approval: None,
+        replay: None,
+        disposition: Some(ironclaw_turns::AuthResumeDisposition::Denied { reason: None }),
+    });
+
+    // Build a batch with two calls:
+    //   call X: capability_id() ("demo.echo")  — matches denied pending_auth_resume
+    //   call Y: other_capability_id() ("demo.list") — unrelated, must proceed normally
+    //
+    // Use provider_replay on X so the Authorization failure observation is
+    // written to appended_result_refs (same pattern as the single-call test).
+    let calls = vec![
+        // call X — denied
+        ironclaw_turns::run_profile::CapabilityCallCandidate {
+            surface_version: surface_version(),
+            capability_id: capability_id(),
+            input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:x-denied")
+                .expect("valid"),
+            effective_capability_ids: vec![capability_id()],
+            provider_replay: Some(ironclaw_turns::run_profile::ProviderToolCallReplay {
+                provider_id: "test-provider".to_string(),
+                provider_model_id: "test-model".to_string(),
+                provider_turn_id: "turn_1".to_string(),
+                provider_call_id: "call_x".to_string(),
+                provider_tool_name: "demo__echo".to_string(),
+                arguments: serde_json::json!({"message": "x"}),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            }),
+        },
+        // call Y — unrelated, must dispatch normally
+        ironclaw_turns::run_profile::CapabilityCallCandidate {
+            surface_version: surface_version(),
+            capability_id: other_capability_id(),
+            input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:y-unrelated")
+                .expect("valid"),
+            effective_capability_ids: vec![other_capability_id()],
+            provider_replay: None,
+        },
+    ];
+
+    let step = CapabilityStage
+        .process(
+            ctx,
+            CapabilityInput {
+                state,
+                surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+                    &host,
+                    VisibleCapabilityRequest,
+                )
+                .await
+                .expect("visible surface"),
+                calls,
+            },
+        )
+        .await
+        .expect("capability stage");
+
+    // 1. Must return Continue — the loop must proceed, not exit.
+    let final_state = match step {
+        TurnCompletedStep::Continue { state, .. } => state,
+        TurnCompletedStep::Exit(exit) => panic!(
+            "expected Continue after partial auth-deny, got Exit: {exit:?}"
+        ),
+    };
+
+    // 2. pending_auth_resume must be cleared — the denial was consumed.
+    assert!(
+        final_state.pending_auth_resume.is_none(),
+        "pending_auth_resume must be cleared after the denied call was surfaced"
+    );
+
+    // 3. Exactly one batch invocation containing only call Y (not X).
+    let batches = host.batch_invocations();
+    assert_eq!(
+        batches.len(),
+        1,
+        "exactly one batch invocation must occur for the remaining (non-denied) call Y"
+    );
+    let batch_ids: Vec<_> = batches[0]
+        .invocations
+        .iter()
+        .map(|inv| &inv.capability_id)
+        .collect();
+    assert!(
+        batch_ids.iter().all(|id| **id == other_capability_id()),
+        "the batch must contain only call Y (other_capability_id), not call X"
+    );
+    assert_eq!(
+        batch_ids.len(),
+        1,
+        "batch must contain exactly one invocation (call Y)"
+    );
+
+    // 4. Two result refs appended total:
+    //    - one Authorization failure observation for X
+    //    - one Completed result for Y
+    let appended = host.appended_result_refs();
+    assert_eq!(
+        appended.len(),
+        2,
+        "expected two appended result refs: one Authorization failure for X, one Completed for Y"
+    );
+
+    // The Authorization failure for X must carry a model-visible observation.
+    let auth_failure_entry = appended
+        .iter()
+        .find(|r| r.model_observation.is_some())
+        .expect("one appended result ref must be the Authorization failure for X");
+    let obs = auth_failure_entry.model_observation.as_ref().unwrap();
+    assert_eq!(
+        obs.status,
+        ToolObservationStatus::Error,
+        "X failure observation status must be Error"
+    );
+    assert_eq!(
+        obs.summary,
+        "Capability failed with authorization.",
+        "X failure observation summary must describe the authorization failure"
+    );
+    let recovery = obs.recovery.as_ref().expect("recovery must be present for X");
+    assert_eq!(
+        recovery.same_call_retry,
+        SameCallRetryConstraint::Forbidden,
+        "X failure must map to Forbidden retry"
+    );
+
+    // The Completed result for Y must be present (no model observation on a Completed outcome).
+    let y_completed = appended
+        .iter()
+        .find(|r| r.result_ref == y_result_ref)
+        .expect("Y's completed result ref must be appended");
+    assert!(
+        y_completed.model_observation.is_none()
+            || y_completed
+                .model_observation
+                .as_ref()
+                .is_some_and(|o| o.status != ToolObservationStatus::Error),
+        "Y's result must not be an Authorization failure"
+    );
+}
