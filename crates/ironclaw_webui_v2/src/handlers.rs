@@ -179,10 +179,7 @@ pub async fn list_project_files(
 ) -> Result<Json<RebornProjectFsListResponse>, WebUiV2HttpError> {
     let request = RebornProjectFsListRequest {
         thread_id,
-        path: query
-            .path
-            .filter(|path| !path.is_empty())
-            .unwrap_or_else(|| PROJECT_FS_ROOT.to_string()),
+        path: project_fs_list_path(query.path),
     };
     let response = state.services().list_project_dir(caller, request).await?;
     Ok(Json(response))
@@ -251,6 +248,16 @@ pub async fn read_project_file(
 /// Reject a missing or blank `?path=` on the stat/download routes with a
 /// field-scoped 400, rather than forwarding an empty string to the facade where
 /// it surfaces as a murkier downstream invalid-path error.
+/// Resolve the directory-listing path. An absent, empty, or whitespace-only
+/// `?path=` means "list the workspace root" — mirrors `require_project_fs_path`'s
+/// `trim`-based blank handling (so `?path=%20%20` isn't forwarded as a bogus
+/// path), but defaults to the root instead of erroring, since listing the root
+/// is a valid request.
+fn project_fs_list_path(path: Option<String>) -> String {
+    path.filter(|path| !path.trim().is_empty())
+        .unwrap_or_else(|| PROJECT_FS_ROOT.to_string())
+}
+
 fn require_project_fs_path(path: Option<String>) -> Result<String, WebUiV2HttpError> {
     match path {
         Some(path) if !path.trim().is_empty() => Ok(path),
@@ -1571,6 +1578,26 @@ mod tests {
             require_project_fs_path(Some("/workspace/report.csv".to_string()))
                 .expect("non-blank path is accepted"),
             "/workspace/report.csv"
+        );
+    }
+
+    #[test]
+    fn project_fs_list_path_defaults_root_for_missing_or_blank() {
+        // Absent, empty, and whitespace-only all mean "list the workspace root"
+        // rather than forwarding a bogus path the facade would reject.
+        assert_eq!(project_fs_list_path(None), PROJECT_FS_ROOT);
+        assert_eq!(project_fs_list_path(Some(String::new())), PROJECT_FS_ROOT);
+        assert_eq!(
+            project_fs_list_path(Some("   ".to_string())),
+            PROJECT_FS_ROOT
+        );
+    }
+
+    #[test]
+    fn project_fs_list_path_preserves_explicit_path() {
+        assert_eq!(
+            project_fs_list_path(Some("/workspace/sub".to_string())),
+            "/workspace/sub"
         );
     }
 }

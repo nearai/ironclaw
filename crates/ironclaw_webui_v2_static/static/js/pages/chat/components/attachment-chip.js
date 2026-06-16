@@ -29,14 +29,31 @@ export function AttachmentThumbnail({ att }) {
   // `<img>`. Non-images keep the file icon.
   const isImage =
     att.kind === "image" || (att.mime_type || "").toLowerCase().startsWith("image/");
-  const [resolvedUrl, setResolvedUrl] = React.useState(
+  // Lazy init keeps the optimistic-image first render flicker-free; the effect
+  // below owns every subsequent (re)sync, including resets, so a chip reused for
+  // a different `att` never keeps a stale thumbnail.
+  const [resolvedUrl, setResolvedUrl] = React.useState(() =>
     isImage ? att.preview_url || null : null,
   );
 
   React.useEffect(() => {
-    if (!isImage || att.preview_url || !att.fetch_url) return undefined;
-    // The local data URL is already renderable; only a persisted image needs
-    // the authenticated byte fetch.
+    // Non-image, or no source at all: drop any prior thumbnail, show the icon.
+    if (!isImage) {
+      setResolvedUrl(null);
+      return undefined;
+    }
+    // Optimistic image: the local data URL is already renderable.
+    if (att.preview_url) {
+      setResolvedUrl(att.preview_url);
+      return undefined;
+    }
+    if (!att.fetch_url) {
+      setResolvedUrl(null);
+      return undefined;
+    }
+    // Persisted image: clear any stale thumbnail from a previous `att`, then
+    // fetch the authenticated bytes for this one.
+    setResolvedUrl(null);
     let cancelled = false;
     fetchAttachmentDataUrl(att.fetch_url)
       .then((url) => {
