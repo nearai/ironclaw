@@ -78,18 +78,19 @@ export function filterAutomations(automations, filter) {
 
 export function automationSummary(automations) {
   const active = automations.filter((automation) => isBrowserActive(automation)).length;
-  const running = automations.reduce(
-    (count, automation) =>
-      count + automation.recent_runs.filter((run) => run.status === "running").length,
-    0,
-  );
-  const failures = automations.reduce(
-    (count, automation) =>
-      count + automation.recent_runs.filter((run) => run.status === "error").length,
-    0,
-  );
+  // Count automations (not individual runs) so each card matches the
+  // same-named filter tab, which filters automations via has_running_run /
+  // has_failed_runs.
+  const running = automations.filter((automation) => automation.has_running_run).length;
+  const failures = automations.filter((automation) => automation.has_failed_runs).length;
+  // Only automations that will actually fire contribute to "soonest next run".
+  // Paused triggers keep their stored next_run_at slot, but they won't run, so
+  // surfacing their time here would imply a run that never happens.
   const next = automations
-    .filter((automation) => nextRunTimestamp(automation) !== null)
+    .filter(
+      (automation) =>
+        isBrowserActive(automation) && nextRunTimestamp(automation) != null,
+    )
     .sort(
       (a, b) =>
         (a.next_run_timestamp ?? Number.MAX_SAFE_INTEGER) -
@@ -110,13 +111,30 @@ export function scheduleLabel(cron, timezone) {
   if (!parts) return "Custom schedule";
 
   const { minute, hour, dayOfMonth, month, dayOfWeek, year } = parts;
-  const time = formatCronTime(hour, minute);
-  if (!time) return "Custom schedule";
 
   const tz = timezone && typeof timezone === "string" ? timezone : null;
   const tzSuffix = tz ? ` (${tz})` : "";
+  const everyDate =
+    year === "*" && dayOfMonth === "*" && month === "*" && dayOfWeek === "*";
 
-  if (year === "*" && dayOfMonth === "*" && month === "*" && dayOfWeek === "*") {
+  // Sub-hourly / hourly cadences, where hour (and possibly minute) is a
+  // wildcard or step and therefore has no single clock time. These are common
+  // ("every minute", "every 15 minutes", "hourly at :00") and previously fell
+  // through to the meaningless "Custom schedule". Timezone is irrelevant for a
+  // minute-of-hour cadence, so it is omitted here.
+  if (everyDate && hour === "*") {
+    if (minute === "*") return "Every minute";
+    const step = minuteStep(minute);
+    if (step) return `Every ${step} minute${step === 1 ? "" : "s"}`;
+    if (isSingleNumber(minute, 0, 59)) {
+      return `Hourly at :${String(Number(minute)).padStart(2, "0")}`;
+    }
+  }
+
+  const time = formatCronTime(hour, minute);
+  if (!time) return "Custom schedule";
+
+  if (everyDate) {
     return `Every day at ${time}${tzSuffix}`;
   }
   const normalizedDayOfWeek = normalizeDayOfWeek(dayOfWeek);
@@ -324,6 +342,15 @@ function isSingleNumber(value, min, max) {
   if (!/^\d+$/.test(value)) return false;
   const num = Number(value);
   return num >= min && num <= max;
+}
+
+// Parse a `*/N` step expression into N, returning null when it isn't a valid
+// minute step (1..=59).
+function minuteStep(value) {
+  const match = /^\*\/(\d+)$/.exec(value);
+  if (!match) return null;
+  const step = Number(match[1]);
+  return step >= 1 && step <= 59 ? step : null;
 }
 
 function normalizeDayOfWeek(value) {

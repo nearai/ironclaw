@@ -403,7 +403,9 @@ fn expected_github_http_requests() -> Vec<ExpectedGithubHttpRequest> {
                 "license_template": "mit"
             }),
         ),
-        get("https://api.github.com/repos/nearai/ironclaw/issues?state=closed&per_page=7&page=2"),
+        get(
+            "https://api.github.com/search/issues?q=repo%3Anearai%2Fironclaw%20state%3Aclosed%20is%3Aissue&per_page=7&page=2&sort=created&order=desc",
+        ),
         request(
             "POST",
             "https://api.github.com/repos/nearai/ironclaw/issues",

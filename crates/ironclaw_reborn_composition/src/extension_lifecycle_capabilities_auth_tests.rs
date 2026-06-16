@@ -15,9 +15,7 @@ use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
 use crate::extension_lifecycle_capabilities::{
     EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
 };
-use crate::product_auth_runtime_credentials::{
-    RuntimeCredentialAccountSelectionRequest, runtime_account_owner_scope,
-};
+use crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest;
 use crate::{
     RebornBuildInput, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
     RebornServices, build_reborn_services,
@@ -91,10 +89,7 @@ async fn local_dev_extension_activate_accepts_manual_token_from_webui_gate_scope
         .runtime_credential_account_selection_service()
         .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
             CredentialAccountSelectionRequest::new(
-                AuthProductScope::new(
-                    runtime_account_owner_scope(&activate_scope),
-                    AuthSurface::Api,
-                ),
+                AuthProductScope::credential_owner(&activate_scope, AuthSurface::Api),
                 AuthProviderId::new("github").expect("provider"),
             )
             .for_extension(ExtensionId::new("github").expect("extension")),

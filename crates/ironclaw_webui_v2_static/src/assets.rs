@@ -211,7 +211,7 @@ mod tests {
         assert!(picker.contains("saveSlackAllowedChannels(channels)"));
 
         let channels_tab = asset_text("js/pages/extensions/components/channels-tab.js");
-        assert!(channels_tab.contains("slackBuiltinStatus"));
+        assert!(channels_tab.contains("showLegacySlackConnectActions"));
         assert!(channels_tab.contains("admin_managed_channels"));
         assert!(channels_tab.contains("inbound_proof_code"));
         assert!(channels_tab.contains("SlackChannelPicker"));
@@ -273,6 +273,72 @@ mod tests {
         assert!(presenter.contains("source?.type === \"schedule\""));
         assert!(presenter.contains("Custom schedule"));
         assert!(!presenter.contains("Webhook"));
+    }
+
+    #[test]
+    fn sidebar_trace_credits_card_assets_are_embedded() {
+        // The compact card is mounted in the sidebar above the conversation
+        // list and reuses the existing trace-credits hook + endpoint.
+        let card = asset_text("js/components/sidebar-trace-credits.js");
+        assert!(card.contains("export function SidebarTraceCredits"));
+        // Reuses the shared hook (and thus the `/api/webchat/v2/traces/credit`
+        // endpoint), not a parallel fetch.
+        assert!(card.contains("useTraceCredits"));
+        // Renders nothing unless enrolled — keeps the sidebar clean.
+        assert!(card.contains("if (!credits || !credits.enrolled) return null;"));
+        // Click-through opens the full Settings -> Trace Commons tab.
+        assert!(card.contains("to=\"/settings/traces\""));
+        assert!(card.contains("traceCommons.cardAccepted"));
+        // Held-for-review count surfaces only when there are holds.
+        assert!(card.contains("manual_review_hold_count"));
+        assert!(card.contains("heldCount > 0"));
+        assert!(card.contains("traceCommons.cardHeld"));
+
+        let sidebar = asset_text("js/components/sidebar.js");
+        assert!(sidebar.contains("SidebarTraceCredits"));
+        // Mounted between the nav and the threads list.
+        assert!(sidebar.contains("<${SidebarTraceCredits} />"));
+
+        // The Settings tab lists held traces (reason + submission id) sourced
+        // from the credits response `holds[]`.
+        let tab = asset_text("js/pages/settings/components/trace-commons-tab.js");
+        assert!(tab.contains("const holds = credits.holds || [];"));
+        assert!(tab.contains("traceCommons.heldTitle"));
+        assert!(tab.contains("traceCommons.heldDescription"));
+        assert!(tab.contains("hold.submission_id"));
+        assert!(tab.contains("hold.reason"));
+        // Per-hold Authorize button wired to the authorize mutation.
+        assert!(tab.contains("authorize.mutate(hold.submission_id)"));
+        assert!(tab.contains("traceCommons.authorize"));
+
+        // Authorize calls the POST endpoint and invalidates the credits query.
+        let settings_api = asset_text("js/pages/settings/lib/settings-api.js");
+        assert!(settings_api.contains("export function authorizeTraceHold"));
+        assert!(settings_api.contains("/authorize"));
+        assert!(settings_api.contains("method: \"POST\""));
+        let trace_hook = asset_text("js/pages/settings/hooks/useTraceCredits.js");
+        assert!(trace_hook.contains("authorizeTraceHold"));
+        assert!(trace_hook.contains("invalidateQueries({ queryKey: [\"trace-credits\"] })"));
+
+        // The hook refetches so the card and Settings tab reflect new
+        // accepted submissions without a manual reload. Polling is infrequent
+        // (300s) and paused while the tab is hidden; a focus refetch keeps the
+        // surface live and staleTime dedupes redundant focus refetches.
+        let hook = asset_text("js/pages/settings/hooks/useTraceCredits.js");
+        assert!(hook.contains("refetchInterval: 300_000"));
+        assert!(hook.contains("refetchIntervalInBackground: false"));
+        assert!(hook.contains("refetchOnWindowFocus: true"));
+        assert!(hook.contains("staleTime: 60_000"));
+
+        // The new i18n keys are present in the eagerly-bundled English pack
+        // (other locales fall back to it if missing, but all 11 carry them).
+        let en = asset_text("js/i18n/en.js");
+        assert!(en.contains("\"traceCommons.cardAccepted\""));
+        assert!(en.contains("\"traceCommons.cardHeld\""));
+        assert!(en.contains("\"traceCommons.heldTitle\""));
+        assert!(en.contains("\"traceCommons.heldDescription\""));
+        assert!(en.contains("\"traceCommons.authorize\""));
+        assert!(en.contains("\"traceCommons.authorizing\""));
     }
 
     #[test]
@@ -392,6 +458,40 @@ mod tests {
     }
 
     #[test]
+    fn extension_config_modal_hides_activate_for_active_extensions() {
+        let extension_actions = asset_text("js/pages/extensions/lib/extension-actions.js");
+        assert!(extension_actions.contains("export function extensionIsActive"));
+        assert!(extension_actions.contains("state === \"active\" || state === \"ready\""));
+        assert!(
+            extension_actions.contains("setupReadyForActivation({ extension"),
+            "setup readiness must receive lifecycle state, not only setup fields"
+        );
+        assert!(
+            extension_actions.contains("extensionIsActive(extension)"),
+            "active extensions must not be considered ready for another activation"
+        );
+
+        let extension_card = asset_text("js/pages/extensions/components/extension-card.js");
+        assert!(extension_card.contains("activationStatus: ext.activation_status"));
+        assert!(extension_card.contains("onboardingState: ext.onboarding_state"));
+
+        let configure_modal = asset_text("js/pages/extensions/components/configure-modal.js");
+        assert!(configure_modal.contains("const isActive = extensionIsActive(extension);"));
+        assert!(
+            configure_modal.contains("const canActivate = setupReadyForActivation({ extension"),
+            "the modal Activate button must be gated by lifecycle-aware setup readiness"
+        );
+        assert!(configure_modal.contains("extensions.activeConfigured"));
+
+        let regression = source_text("js/pages/extensions/lib/extension-actions.test.mjs");
+        assert!(
+            regression.contains("extensionIsActive accepts card payload lifecycle fields"),
+            "caller-visible card payload lifecycle fields need JS regression coverage"
+        );
+        assert!(regression.contains("extension: { active: true }"));
+    }
+
+    #[test]
     fn extension_oauth_setup_refreshes_while_popup_is_open() {
         let use_extensions = asset_text("js/pages/extensions/hooks/useExtensions.js");
 
@@ -408,6 +508,52 @@ mod tests {
                 "refreshSetupState();\n        if (\n          setupIsConfigured() ||\n          (popup && popup.closed)"
             ),
             "OAuth setup must refresh setup state before waiting for popup close"
+        );
+    }
+
+    #[test]
+    fn extension_registry_keeps_installed_entries_visible_first() {
+        let use_extensions = asset_text("js/pages/extensions/hooks/useExtensions.js");
+        let registry_tab = asset_text("js/pages/extensions/components/registry-tab.js");
+        let extensions_page = asset_text("js/pages/extensions/extensions-page.js");
+        let routes = asset_text("js/app/routes.js");
+        let schema = asset_text("js/pages/extensions/lib/extensions-schema.js");
+
+        assert!(
+            use_extensions.contains("catalogEntries"),
+            "extensions hook should expose a merged installed-plus-registry catalog"
+        );
+        assert!(
+            use_extensions.contains("catalogId(\"registry\", entry, index)")
+                && use_extensions.contains("catalogId(\"installed\", extension, index)"),
+            "merged extension catalog should use stable fallback keys for id-less entries"
+        );
+        assert!(
+            use_extensions
+                .contains("if (a.installed !== b.installed) return a.installed ? -1 : 1;")
+                && use_extensions.contains("displayName(a.entry || a.extension)"),
+            "merged extension catalog should sort installed entries before available entries"
+        );
+        assert!(
+            registry_tab.contains("installedEntries") && registry_tab.contains("availableEntries"),
+            "registry tab should render installed and available sections from one catalog"
+        );
+        assert!(
+            registry_tab.contains("return entry.entry || entry.extension || {};"),
+            "registry search should prefer richer registry metadata when installed entries are available"
+        );
+        assert!(
+            registry_tab.contains("<${ExtensionCard}") && registry_tab.contains("<${RegistryCard}"),
+            "installed registry entries should keep management actions while available entries keep install actions"
+        );
+        assert!(
+            extensions_page.contains("tab = \"registry\"")
+                && extensions_page.contains("to=\"/extensions/registry\""),
+            "extensions page should default and redirect to the unified registry surface"
+        );
+        assert!(
+            !routes.contains("id: \"installed\"") && !schema.contains("id: \"installed\""),
+            "installed should no longer be a separate extensions navigation tab"
         );
     }
 }

@@ -17,28 +17,30 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::extract::{Extension, Path, Query, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
 use futures::SinkExt;
 use futures::stream::Stream;
 use ironclaw_product_workflow::{
     CodexLoginStart, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult,
     LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
     NearAiWalletLoginRequest, NearAiWalletLoginResult, ProductWorkflowError, ProjectionCursor,
-    RebornCancelRunResponse, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornOperatorCommandPlaneResponse, RebornOperatorConfigGetResponse,
-    RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
-    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
-    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
-    RebornOperatorSetupResponse, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundPreferencesResponse, RebornResolveGateResponse, RebornServicesApi,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    RebornAttachmentRequest, RebornCancelRunResponse, RebornConnectableChannelListResponse,
+    RebornCreateThreadResponse, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
+    RebornListAutomationsResponse, RebornListThreadsResponse, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
+    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
+    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornOperatorSetupResponse,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
+    RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
+    RebornTraceHoldAuthorizeResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
     WebUiAttachmentCapabilities, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
     WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
@@ -147,6 +149,49 @@ pub struct TimelineQuery {
     pub limit: Option<u32>,
     #[serde(default)]
     pub cursor: Option<String>,
+}
+
+/// `GET /api/webchat/v2/threads/{thread_id}/messages/{message_id}/attachments/{attachment_id}`
+///
+/// Serves one landed attachment's raw bytes so the browser can render an image
+/// thumbnail (or download a file) for a persisted message. The `(thread_id,
+/// message_id, attachment_id)` triple addresses the attachment; the caller's
+/// authority comes from the authenticated session, and the facade derives the
+/// scope and resolves the storage path server-side. The response sets the
+/// authoritative `Content-Type` from the stored ref plus `nosniff` and a short
+/// private cache so the browser can reuse the bytes without re-fetching.
+pub async fn get_attachment(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path((thread_id, message_id, attachment_id)): Path<(String, String, String)>,
+) -> Result<Response, WebUiV2HttpError> {
+    let attachment = state
+        .services()
+        .read_attachment(
+            caller,
+            RebornAttachmentRequest {
+                thread_id,
+                message_id,
+                attachment_id,
+            },
+        )
+        .await?;
+
+    let mut headers = HeaderMap::new();
+    // The mime came from the stored ref; fall back to octet-stream if it is not
+    // a valid header value rather than failing the read.
+    let content_type = HeaderValue::from_str(&attachment.mime_type)
+        .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
+    headers.insert(header::CONTENT_TYPE, content_type);
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=300"),
+    );
+    Ok((StatusCode::OK, headers, attachment.bytes).into_response())
 }
 
 /// SSE polling cadence for `stream_events`. The facade only exposes a
@@ -469,6 +514,41 @@ pub struct ListAutomationsQuery {
     /// Optional maximum number of recent runs to return per automation row.
     #[serde(default)]
     pub run_limit: Option<u32>,
+}
+
+/// `GET /api/webchat/v2/traces/credit`
+///
+/// Read-only Trace Commons credit summary scoped strictly to the
+/// authenticated caller — the facade derives the trace scope from the
+/// caller's user id; no scope input is accepted from the request. The
+/// response is the contributor-local view as of the last credit sync;
+/// the authoritative ledger is server-side. A caller with no local
+/// Trace Commons state receives the unenrolled zero-state, not an
+/// error.
+pub async fn trace_credits(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornTraceCreditsResponse>, WebUiV2HttpError> {
+    let response = state.services().trace_credits(caller).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/traces/holds/{submission_id}/authorize`
+///
+/// Authorize a held manual-review trace for submission (promote-as-is). The
+/// trace scope is derived from the authenticated caller; the `submission_id`
+/// path segment is never authority to cross scopes. A missing/already-resolved
+/// hold returns `{ authorized: false }`, not an error.
+pub async fn authorize_trace_hold(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(submission_id): Path<String>,
+) -> Result<Json<RebornTraceHoldAuthorizeResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .authorize_trace_hold(caller, submission_id)
+        .await?;
+    Ok(Json(response))
 }
 
 /// `GET /api/webchat/v2/channels/connectable`

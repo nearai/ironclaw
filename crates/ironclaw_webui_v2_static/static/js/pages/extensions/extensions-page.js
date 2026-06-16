@@ -3,24 +3,21 @@ import { React, html } from "../../lib/html.js";
 import { ActionToast } from "./components/action-toast.js";
 import { ChannelsTab } from "./components/channels-tab.js";
 import { ConfigureModal } from "./components/configure-modal.js";
-import { InstalledTab } from "./components/installed-tab.js";
 import { McpTab } from "./components/mcp-tab.js";
 import { RegistryTab } from "./components/registry-tab.js";
 import { useExtensions } from "./hooks/useExtensions.js";
 
 export function ExtensionsPage() {
-  const { tab = "installed" } = useParams();
+  const { tab = "registry" } = useParams();
   const [configuring, setConfiguring] = React.useState(null);
 
   const {
     status,
-    extensions,
     channels,
     mcpServers,
-    tools,
     channelRegistry,
     mcpRegistry,
-    toolRegistry,
+    catalogEntries,
     connectableChannels,
     isLoading,
     isBusy,
@@ -69,14 +66,11 @@ export function ExtensionsPage() {
     `;
   }
 
+  if (tab === "installed") {
+    return html`<${Navigate} to="/extensions/registry" replace />`;
+  }
+
   const tabContent = {
-    installed: html`<${InstalledTab}
-      extensions=${extensions}
-      onActivate=${activate}
-      onConfigure=${handleConfigure}
-      onRemove=${remove}
-      isBusy=${isBusy}
-    />`,
     channels: html`<${ChannelsTab}
       status=${status}
       channels=${channels}
@@ -98,16 +92,17 @@ export function ExtensionsPage() {
       isBusy=${isBusy}
     />`,
     registry: html`<${RegistryTab}
-      toolRegistry=${toolRegistry}
-      channelRegistry=${channelRegistry}
-      mcpRegistry=${mcpRegistry}
+      catalogEntries=${catalogEntries}
       onInstall=${install}
+      onActivate=${activate}
+      onConfigure=${handleConfigure}
+      onRemove=${remove}
       isBusy=${isBusy}
     />`,
   };
 
   if (!tabContent[tab]) {
-    return html`<${Navigate} to="/extensions/installed" replace />`;
+    return html`<${Navigate} to="/extensions/registry" replace />`;
   }
 
   return html`

@@ -241,9 +241,9 @@ impl ServeCommand {
 
         let listen_addr = SocketAddr::new(host, port);
         reject_non_loopback_privileged_local_runtime(host, &runtime_input)?;
-        if let Some(callback_origin) =
-            webui_oauth_callback_origin(listen_addr, canonical_host.as_deref())
-        {
+        let callback_origin =
+            webui_notion_dcr_callback_origin(listen_addr, canonical_host.as_deref())?;
+        if let Some(callback_origin) = callback_origin {
             let services = runtime_input.services.take().ok_or_else(|| {
                 anyhow!("WebChat v2 serve requires Reborn runtime services before OAuth wiring")
             })?;
@@ -565,10 +565,41 @@ fn with_notion_dcr_oauth_backend(
         .map_err(|error| anyhow!("Notion DCR OAuth backend rejected callback origin: {error}"))
 }
 
-fn webui_oauth_callback_origin(
+fn webui_notion_dcr_callback_origin(
     listen_addr: SocketAddr,
     canonical_host: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    let public_base_url = crate::commands::serve_sso::webui_public_base_url_from_env()
+        .context("invalid hosted WebUI OAuth base URL from IRONCLAW_REBORN_WEBUI_BASE_URL")?;
+    crate::commands::serve_sso::validate_webui_public_base_url(
+        public_base_url.as_deref(),
+        listen_addr,
+    )
+    .context("invalid hosted WebUI OAuth base URL from IRONCLAW_REBORN_WEBUI_BASE_URL")?;
+    Ok(webui_oauth_callback_origin(
+        listen_addr,
+        public_base_url.as_deref(),
+        canonical_host,
+    ))
+}
+
+fn webui_oauth_callback_origin(
+    listen_addr: SocketAddr,
+    public_base_url: Option<&str>,
+    canonical_host: Option<&str>,
 ) -> Option<String> {
+    if let Some(base_url) = public_base_url {
+        let base_url = base_url.trim().trim_end_matches('/');
+        if base_url.is_empty() {
+            return None;
+        }
+        if crate::commands::serve_sso::is_cleartext_http_scheme(base_url)
+            && !listen_addr.ip().is_loopback()
+        {
+            return None;
+        }
+        return Some(base_url.to_string());
+    }
     if let Some(host) = canonical_host {
         return Some(format!(
             "{}://{}",
@@ -726,6 +757,14 @@ fn print_serve_banner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const WEBUI_BASE_URL_ENV: &str = "IRONCLAW_REBORN_WEBUI_BASE_URL";
+
+    fn clear_webui_env() {
+        // SAFETY: tests are serialized by `WEBUI_BASE_URL_ENV_LOCK`; no other
+        // thread reads or writes this env var while the guard is held.
+        unsafe { std::env::remove_var(WEBUI_BASE_URL_ENV) };
+    }
 
     #[test]
     fn webui_default_agent_falls_back_to_runtime_identity() {
@@ -983,7 +1022,8 @@ mod tests {
     #[test]
     fn webui_oauth_callback_origin_uses_loopback_http() {
         assert_eq!(
-            webui_oauth_callback_origin(SocketAddr::from(([127, 0, 0, 1], 3000)), None).as_deref(),
+            webui_oauth_callback_origin(SocketAddr::from(([127, 0, 0, 1], 3000)), None, None)
+                .as_deref(),
             Some("http://127.0.0.1:3000")
         );
     }
@@ -991,7 +1031,8 @@ mod tests {
     #[test]
     fn webui_oauth_callback_origin_maps_unspecified_bind_to_localhost() {
         assert_eq!(
-            webui_oauth_callback_origin(SocketAddr::from(([0, 0, 0, 0], 3000)), None).as_deref(),
+            webui_oauth_callback_origin(SocketAddr::from(([0, 0, 0, 0], 3000)), None, None)
+                .as_deref(),
             Some("http://localhost:3000")
         );
     }
@@ -1001,7 +1042,7 @@ mod tests {
         let listen_addr = SocketAddr::new(IpAddr::from_str("::1").unwrap(), 3000);
 
         assert_eq!(
-            webui_oauth_callback_origin(listen_addr, None).as_deref(),
+            webui_oauth_callback_origin(listen_addr, None, None).as_deref(),
             Some("http://[::1]:3000")
         );
     }
@@ -1009,11 +1050,11 @@ mod tests {
     #[test]
     fn webui_oauth_callback_origin_skips_unstable_or_non_loopback_origin() {
         assert_eq!(
-            webui_oauth_callback_origin(SocketAddr::from(([127, 0, 0, 1], 0)), None),
+            webui_oauth_callback_origin(SocketAddr::from(([127, 0, 0, 1], 0)), None, None),
             None
         );
         assert_eq!(
-            webui_oauth_callback_origin(SocketAddr::from(([192, 168, 1, 42], 3000)), None),
+            webui_oauth_callback_origin(SocketAddr::from(([192, 168, 1, 42], 3000)), None, None),
             None
         );
     }
@@ -1023,6 +1064,7 @@ mod tests {
         assert_eq!(
             webui_oauth_callback_origin(
                 SocketAddr::from(([0, 0, 0, 0], 3000)),
+                None,
                 Some("app.example.com"),
             )
             .as_deref(),
@@ -1035,6 +1077,7 @@ mod tests {
         assert_eq!(
             webui_oauth_callback_origin(
                 SocketAddr::from(([0, 0, 0, 0], 3000)),
+                None,
                 Some("127.0.0.1:3000"),
             )
             .as_deref(),
@@ -1045,9 +1088,47 @@ mod tests {
     #[test]
     fn webui_oauth_callback_origin_brackets_ipv6_canonical_host() {
         assert_eq!(
-            webui_oauth_callback_origin(SocketAddr::from(([0, 0, 0, 0], 3000)), Some("::1"))
+            webui_oauth_callback_origin(SocketAddr::from(([0, 0, 0, 0], 3000)), None, Some("::1"))
                 .as_deref(),
             Some("http://[::1]")
+        );
+    }
+
+    #[test]
+    fn webui_oauth_callback_origin_prefers_public_base_url_for_hosted_oauth() {
+        assert_eq!(
+            webui_oauth_callback_origin(
+                SocketAddr::from(([0, 0, 0, 0], 8080)),
+                Some("https://app.example.com/"),
+                Some("internal.example.com"),
+            )
+            .as_deref(),
+            Some("https://app.example.com")
+        );
+    }
+
+    #[test]
+    fn webui_oauth_callback_origin_rejects_cleartext_public_origin_on_non_loopback() {
+        assert_eq!(
+            webui_oauth_callback_origin(
+                SocketAddr::from(([192, 168, 1, 42], 8080)),
+                Some("http://app.example.com/"),
+                None,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn webui_oauth_callback_origin_keeps_loopback_http_public_origin() {
+        assert_eq!(
+            webui_oauth_callback_origin(
+                SocketAddr::from(([127, 0, 0, 1], 8080)),
+                Some("http://127.0.0.1:8080/"),
+                None,
+            )
+            .as_deref(),
+            Some("http://127.0.0.1:8080")
         );
     }
 
@@ -1080,6 +1161,7 @@ mod tests {
             RebornBuildInput::local_dev("notion-dcr-owner", dir.path().join("local-dev")),
             webui_oauth_callback_origin(
                 SocketAddr::from(([0, 0, 0, 0], 3000)),
+                None,
                 Some("app.example.com"),
             )
             .as_deref()
@@ -1098,5 +1180,93 @@ mod tests {
                 .is_some(),
             "serve wiring must expose the DCR-backed auth challenge provider"
         );
+    }
+
+    #[tokio::test]
+    async fn webui_serve_wires_notion_dcr_with_public_base_url_env_origin() {
+        let callback_origin = {
+            let _guard = crate::commands::serve_sso::WEBUI_BASE_URL_ENV_LOCK
+                .lock()
+                .expect("env lock");
+            clear_webui_env();
+            // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleaned up before the guard drops.
+            unsafe {
+                std::env::set_var(WEBUI_BASE_URL_ENV, " https://configured.example/ ");
+            }
+
+            let callback_origin =
+                webui_notion_dcr_callback_origin(SocketAddr::from(([0, 0, 0, 0], 8080)), None)
+                    .expect("resolve callback origin from env")
+                    .expect("public base url env should enable DCR wiring");
+            assert_eq!(callback_origin, "https://configured.example");
+            clear_webui_env();
+            callback_origin
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services_input = with_notion_dcr_oauth_backend(
+            RebornBuildInput::local_dev("notion-dcr-owner", dir.path().join("local-dev")),
+            &callback_origin,
+        )
+        .expect("notion dcr wiring");
+        let services = ironclaw_reborn_composition::build_reborn_services(services_input)
+            .await
+            .expect("reborn services build");
+
+        assert!(
+            services
+                .product_auth
+                .as_ref()
+                .and_then(|product_auth| product_auth.as_auth_challenge_provider())
+                .is_some(),
+            "serve wiring must expose the DCR-backed auth challenge provider"
+        );
+    }
+
+    #[test]
+    fn webui_notion_dcr_callback_origin_rejects_slash_only_public_base_url_env() {
+        let _guard = crate::commands::serve_sso::WEBUI_BASE_URL_ENV_LOCK
+            .lock()
+            .expect("env lock");
+        clear_webui_env();
+        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleaned up before the guard drops.
+        unsafe {
+            std::env::set_var(WEBUI_BASE_URL_ENV, "/");
+        }
+
+        let error = webui_notion_dcr_callback_origin(SocketAddr::from(([0, 0, 0, 0], 8080)), None)
+            .expect_err("slash-only base URL must fail closed");
+        assert!(
+            error.to_string().contains(WEBUI_BASE_URL_ENV),
+            "error should name the invalid env var, got: {error}"
+        );
+
+        clear_webui_env();
+    }
+
+    #[test]
+    fn webui_notion_dcr_callback_origin_rejects_public_cleartext_base_url_env() {
+        let _guard = crate::commands::serve_sso::WEBUI_BASE_URL_ENV_LOCK
+            .lock()
+            .expect("env lock");
+        clear_webui_env();
+        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleaned up before the guard drops.
+        unsafe {
+            std::env::set_var(WEBUI_BASE_URL_ENV, "http://configured.example");
+        }
+
+        let error = webui_notion_dcr_callback_origin(SocketAddr::from(([0, 0, 0, 0], 8080)), None)
+            .expect_err("public cleartext base URL must fail closed");
+        let message = error.to_string();
+        assert!(
+            message.contains(WEBUI_BASE_URL_ENV),
+            "error should name the invalid env var, got: {message}"
+        );
+        assert!(
+            message.contains("hosted WebUI OAuth base URL"),
+            "error should describe the hosted WebUI OAuth URL, got: {message}"
+        );
+
+        clear_webui_env();
     }
 }

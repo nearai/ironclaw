@@ -11,6 +11,7 @@ use ironclaw_host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
 use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, SecretMode,
 };
+use ironclaw_host_api::{AgentId, TenantId};
 #[cfg(all(test, feature = "slack-v2-host-beta"))]
 use ironclaw_host_runtime::HostRuntimeHttpEgressPort;
 use ironclaw_host_runtime::TenantSandboxProcessPort;
@@ -187,8 +188,8 @@ pub struct RebornBuildInput {
 
 #[derive(Clone, Debug)]
 pub(crate) struct RebornLocalRuntimeIdentity {
-    pub(crate) tenant_id: String,
-    pub(crate) agent_id: String,
+    pub(crate) tenant_id: TenantId,
+    pub(crate) agent_id: AgentId,
 }
 
 pub(crate) enum RebornStorageInput {
@@ -240,14 +241,10 @@ impl RebornBuildInput {
 
     /// Override the local runtime tenant/agent identity used by command-style
     /// facades that need a surface context before a full runtime exists.
-    pub fn with_local_runtime_identity(
-        mut self,
-        tenant_id: impl Into<String>,
-        agent_id: impl Into<String>,
-    ) -> Self {
+    pub fn with_local_runtime_identity(mut self, tenant_id: TenantId, agent_id: AgentId) -> Self {
         self.local_runtime_identity = Some(RebornLocalRuntimeIdentity {
-            tenant_id: tenant_id.into(),
-            agent_id: agent_id.into(),
+            tenant_id,
+            agent_id,
         });
         self
     }

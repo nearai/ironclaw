@@ -611,6 +611,15 @@ fn accepted_ack_from_ack(
                     None,
                 ));
             }
+            ProductInboundAck::RejectedBusy { .. } => {
+                // terminal/settled, not retryable — client must issue a new request
+                return Err(OpenAiCompatHttpError::from_kind(
+                    429,
+                    false,
+                    crate::OpenAiCompatErrorKind::RateLimited,
+                    None,
+                ));
+            }
             ProductInboundAck::Rejected(rejection) => return Err(error_from_rejection(rejection)),
             ProductInboundAck::CommandResult { .. } | ProductInboundAck::NoOp => {
                 return Err(OpenAiCompatHttpError::internal());
@@ -703,5 +712,38 @@ fn content_value_to_text(content: Option<&serde_json::Value>) -> String {
         }
         Some(value) if !value.is_null() => non_text_part_marker(None).to_string(),
         _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_product_adapters::ProductInboundAck;
+    use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
+
+    use super::accepted_ack_from_ack;
+
+    #[test]
+    fn deferred_busy_ack_is_retryable_429() {
+        let ack = ProductInboundAck::DeferredBusy {
+            accepted_message_ref: AcceptedMessageRef::new("msg:deferred-busy").expect("ref"),
+            active_run_id: TurnRunId::new(),
+        };
+        let err = accepted_ack_from_ack(ack).unwrap_err();
+        assert_eq!(err.status_code(), 429);
+        assert!(err.retryable(), "DeferredBusy must be retryable");
+    }
+
+    #[test]
+    fn rejected_busy_ack_is_non_retryable_429() {
+        let ack = ProductInboundAck::RejectedBusy {
+            accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy").expect("ref"),
+            active_run_id: None,
+        };
+        let err = accepted_ack_from_ack(ack).unwrap_err();
+        assert_eq!(err.status_code(), 429);
+        assert!(
+            !err.retryable(),
+            "RejectedBusy is terminal — must not be retryable"
+        );
     }
 }

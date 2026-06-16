@@ -125,6 +125,23 @@ impl ResourceScope {
     pub fn is_system(&self) -> bool {
         self.tenant_id.as_str() == SYSTEM_RESERVED_ID && self.user_id.as_str() == SYSTEM_RESERVED_ID
     }
+
+    /// Copy of this scope with the transient `mission_id`/`thread_id`
+    /// sub-scope cleared. This clears mission/thread only: the owner identity
+    /// (tenant/user/agent/project) and `invocation_id` are left unchanged, so it
+    /// does not by itself reduce the scope to a pure owner identity.
+    ///
+    /// This is a neutral scope-narrowing primitive: it makes no claim about
+    /// what the narrowed scope is *used* for. Policy crates that own an
+    /// ownership contract (e.g. credential-account ownership in `ironclaw_auth`)
+    /// build on top of this; the meaning of the narrowing lives there, not here.
+    pub fn without_thread_and_mission(&self) -> Self {
+        Self {
+            mission_id: None,
+            thread_id: None,
+            ..self.clone()
+        }
+    }
 }
 
 /// Origin of a background reservation. Distinguishes heartbeats, routines,

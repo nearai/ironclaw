@@ -1,9 +1,9 @@
 use std::{sync::Arc, time::Duration};
 
 use ironclaw_product_workflow::{
-    LifecyclePhase, LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-    LifecycleProductPayload, LifecycleProductSurfaceContext, OutboundPreferencesProductFacade,
-    RebornOutboundDeliveryTargetStatus, WebUiAuthenticatedCaller,
+    LifecycleExtensionSurfaceKind, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
+    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductSurfaceContext,
+    OutboundPreferencesProductFacade, RebornOutboundDeliveryTargetStatus, WebUiAuthenticatedCaller,
 };
 use ironclaw_turns::{
     run_profile::{
@@ -102,34 +102,30 @@ async fn fetch_communication_context(
 
     let preferences_fut = outbound_preferences.get_outbound_preferences(caller.clone());
 
-    // Lifecycle fetch is only meaningful when classification is available.
-    // Skip the ExtensionList call entirely when the predicate is a stub so
-    // the 500 ms timeout budget is not consumed by a discarded result.
+    // Fetch the installed-extension list to classify channel surfaces. Skipped
+    // only when no lifecycle facade is wired (the slice then renders channels as
+    // `unknown`). Runs concurrently with the preferences fetch under the shared
+    // budget below.
     let lifecycle_fut = async {
-        if CHANNEL_CLASSIFICATION_AVAILABLE {
-            let lifecycle_context = lifecycle_facade.as_deref().map(|_| {
-                LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
+        match lifecycle_facade.as_deref() {
+            Some(facade) => {
+                let ctx = LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
                     tenant_id: caller.tenant_id.clone(),
                     user_id: caller.user_id.clone(),
                     agent_id: caller.agent_id.clone(),
                     project_id: caller.project_id.clone(),
-                })
-            });
-            match (&lifecycle_facade, lifecycle_context) {
-                (Some(facade), Some(ctx)) => Some(
+                });
+                Some(
                     facade
                         .execute(ctx, LifecycleProductAction::ExtensionList)
                         .await,
-                ),
-                _ => None,
+                )
             }
-        } else {
-            None
+            None => None,
         }
     };
 
-    // Both futures share a single 500 ms budget.  Lifecycle runs concurrently
-    // only when CHANNEL_CLASSIFICATION_AVAILABLE is true.
+    // Both futures share a single 500 ms budget and run concurrently.
     let combined_result = timeout(COMMUNICATION_CONTEXT_FETCH_TIMEOUT, async {
         join!(preferences_fut, lifecycle_fut)
     })
@@ -176,31 +172,25 @@ async fn fetch_communication_context(
     };
 
     let connected_channels = match lifecycle_result {
+        // A present response means a lifecycle facade was wired and returned the
+        // installed-extension list; classify each by its projected surface kind.
         Some(Ok(response)) => {
-            if !CHANNEL_CLASSIFICATION_AVAILABLE {
-                // Channel-surface classification is a stub until #4778's
-                // ProductAdapter surface projection lands. Returning Known([])
-                // would be false certainty ("none connected") when the predicate
-                // cannot yet distinguish channel extensions from tool extensions.
-                ConnectedChannelsState::Unknown
-            } else {
-                let extensions = match response.payload {
-                    Some(LifecycleProductPayload::ExtensionList { extensions, .. }) => extensions,
-                    _ => Vec::new(),
-                };
-                let channels: Vec<ConnectedChannelSummary> = extensions
-                    .into_iter()
-                    .filter(|ext| {
-                        extension_is_channel_surface(ext) && ext.phase == LifecyclePhase::Active
-                    })
-                    .map(|ext| ConnectedChannelSummary {
-                        name: ext.summary.name.clone(),
-                        authenticated: true,
-                        active: true,
-                    })
-                    .collect();
-                ConnectedChannelsState::Known(channels)
-            }
+            let extensions = match response.payload {
+                Some(LifecycleProductPayload::ExtensionList { extensions, .. }) => extensions,
+                _ => Vec::new(),
+            };
+            let channels: Vec<ConnectedChannelSummary> = extensions
+                .into_iter()
+                .filter(|ext| {
+                    extension_is_channel_surface(ext) && ext.phase == LifecyclePhase::Active
+                })
+                .map(|ext| ConnectedChannelSummary {
+                    name: ext.summary.name.clone(),
+                    authenticated: true,
+                    active: true,
+                })
+                .collect();
+            ConnectedChannelsState::Known(channels)
         }
         Some(Err(error)) => {
             tracing::debug!(
@@ -220,21 +210,17 @@ async fn fetch_communication_context(
     })
 }
 
-/// Whether channel-surface classification is available.
-///
-/// Flips to `true` when #4778's `ProductAdapter` surface projection merges and
-/// `extension_is_channel_surface` becomes a real predicate rather than a stub.
-const CHANNEL_CLASSIFICATION_AVAILABLE: bool = false;
-
 /// Whether a lifecycle extension exposes a channel surface (e.g. Slack).
 ///
-/// Pre-#4778 the lifecycle summary has no surface-kind field, so no extension
-/// qualifies; once #4778's `ProductAdapter` surface projection merges, this
-/// becomes a check on the projected surface kinds.
+/// Checks the projected `surface_kinds` for `ExternalChannel`, the surface kind
+/// that maps to a connected chat channel.
 fn extension_is_channel_surface(
-    _extension: &ironclaw_product_workflow::LifecycleInstalledExtensionSummary,
+    extension: &ironclaw_product_workflow::LifecycleInstalledExtensionSummary,
 ) -> bool {
-    false
+    extension
+        .summary
+        .surface_kinds
+        .contains(&LifecycleExtensionSurfaceKind::ExternalChannel)
 }
 
 #[cfg(test)]
@@ -245,10 +231,10 @@ mod tests {
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
     use ironclaw_product_workflow::{
         LifecycleExtensionRuntimeKind, LifecycleExtensionSource, LifecycleExtensionSummary,
-        LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
-        LifecyclePhase, LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-        LifecycleProductPayload, LifecycleProductResponse, OutboundPreferencesProductFacade,
-        ProductWorkflowError, RebornOutboundDeliveryTargetId,
+        LifecycleExtensionSurfaceKind, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
+        LifecyclePackageRef, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
+        LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
+        OutboundPreferencesProductFacade, ProductWorkflowError, RebornOutboundDeliveryTargetId,
         RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetStatus,
         RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
         RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
@@ -459,6 +445,7 @@ mod tests {
                 description: "channel extension".to_string(),
                 source: LifecycleExtensionSource::HostBundled,
                 runtime_kind: LifecycleExtensionRuntimeKind::FirstParty,
+                surface_kinds: vec![LifecycleExtensionSurfaceKind::ExternalChannel],
                 visible_capability_ids: Vec::new(),
                 visible_read_only_capability_ids: Vec::new(),
                 credential_requirements: Vec::new(),
@@ -478,6 +465,7 @@ mod tests {
                 description: "tool extension".to_string(),
                 source: LifecycleExtensionSource::HostBundled,
                 runtime_kind: LifecycleExtensionRuntimeKind::WasmTool,
+                surface_kinds: Vec::new(),
                 visible_capability_ids: Vec::new(),
                 visible_read_only_capability_ids: Vec::new(),
                 credential_requirements: Vec::new(),
@@ -662,10 +650,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn classification_unavailable_returns_unknown_for_empty_extension_list() {
-        // While CHANNEL_CLASSIFICATION_AVAILABLE is false the lifecycle fetch is
-        // skipped entirely; connected_channels must be Unknown regardless of what
-        // the facade would return (never false-certainty Known([])).
+    async fn empty_extension_list_returns_known_no_channels() {
+        // Classification is available, so an empty extension list is genuine
+        // certainty: no channels connected → Known([]), not Unknown.
         let provider = RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesFacade))
             .with_lifecycle_facade(Arc::new(EmptyLifecycleFacade));
         let ctx = provider
@@ -675,18 +662,15 @@ mod tests {
             .expect("context");
         assert_eq!(
             ctx.connected_channels,
-            ConnectedChannelsState::Unknown,
-            "classification unavailable → lifecycle skipped → Unknown"
+            ConnectedChannelsState::Known(Vec::new()),
+            "classification available + empty list → Known([])"
         );
     }
 
     #[tokio::test]
-    async fn classification_unavailable_returns_unknown_for_non_channel_extensions() {
-        // While CHANNEL_CLASSIFICATION_AVAILABLE is false the lifecycle fetch is
-        // skipped entirely, so connected_channels is Unknown regardless of the
-        // extension list the facade would have returned.
-        // When #4778 merges, flip CHANNEL_CLASSIFICATION_AVAILABLE to true and
-        // grow a positive case here.
+    async fn channel_extensions_are_classified_as_connected_channels() {
+        // Only active channel-surface extensions count: telegram (active channel)
+        // is included; github (non-channel) and slack (inactive channel) are not.
         let provider = RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesFacade))
             .with_lifecycle_facade(Arc::new(ChannelListLifecycleFacade {
                 extensions: vec![
@@ -700,10 +684,16 @@ mod tests {
             .resolve(false)
             .await
             .expect("context");
+        let names: Vec<String> = match ctx.connected_channels {
+            ConnectedChannelsState::Known(channels) => {
+                channels.into_iter().map(|c| c.name).collect()
+            }
+            other => panic!("expected Known channels, got {other:?}"),
+        };
         assert_eq!(
-            ctx.connected_channels,
-            ConnectedChannelsState::Unknown,
-            "classification unavailable → Unknown, not Known([])"
+            names,
+            vec!["telegram".to_string()],
+            "only active channel-surface extensions are reported as connected"
         );
     }
 
