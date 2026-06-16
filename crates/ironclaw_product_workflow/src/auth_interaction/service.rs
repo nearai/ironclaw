@@ -6,9 +6,9 @@ use ironclaw_auth::{
     CredentialAccountId, CredentialSelectionInput,
 };
 use ironclaw_turns::{
-    AuthResumeDisposition, CancelRunRequest, CancelRunResponse, GateRef, GetRunStateRequest,
-    ResumeTurnPrecondition, ResumeTurnRequest, ResumeTurnResponse, SanitizedCancelReason,
-    TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnStatus,
+    AuthResumeDisposition, CancelRunResponse, GateRef, GetRunStateRequest, ResumeTurnPrecondition,
+    ResumeTurnRequest, ResumeTurnResponse, TurnCoordinator, TurnError, TurnErrorCategory,
+    TurnRunId, TurnStatus,
 };
 
 use super::types::is_pending_auth_status;
@@ -250,13 +250,11 @@ impl DefaultAuthInteractionService {
         Ok(())
     }
 
-    async fn resume_denied_auth(
+    async fn resume_auth_denial(
         &self,
         request: ResolveAuthInteractionRequest,
-        gate: AuthGateRecord,
         run_id: TurnRunId,
     ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
-        self.cancel_auth_flow_if_active(&gate).await?;
         let state = self
             .turn_coordinator
             .get_run_state(GetRunStateRequest {
@@ -284,37 +282,27 @@ impl DefaultAuthInteractionService {
         Ok(ResolveAuthInteractionResponse::Resumed(response))
     }
 
-    async fn cancel_auth_run(
+    async fn resume_denied_auth(
         &self,
         request: ResolveAuthInteractionRequest,
+        gate: AuthGateRecord,
         run_id: TurnRunId,
     ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
-        let response = self
-            .turn_coordinator
-            .cancel_run(CancelRunRequest {
-                scope: request.scope,
-                actor: request.actor,
-                run_id,
-                reason: SanitizedCancelReason::UserRequested,
-                idempotency_key: request.idempotency_key,
-            })
-            .await
-            .map_err(map_auth_resume_error)?;
-        Ok(ResolveAuthInteractionResponse::Canceled(response))
+        self.cancel_auth_flow_if_active(&gate).await?;
+        self.resume_auth_denial(request, run_id).await
     }
 
-    async fn cancel_parked_auth_without_flow(
+    async fn resume_denied_auth_without_flow(
         &self,
         request: ResolveAuthInteractionRequest,
         run_id: TurnRunId,
     ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
         match self.turn_gate_state(&request, run_id).await? {
-            BlockedGateState::ParkedOnGate => {}
+            BlockedGateState::ParkedOnGate => self.resume_auth_denial(request, run_id).await,
             BlockedGateState::NotParkedOnGate => {
-                return Err(auth_rejected(AuthInteractionRejectionKind::MissingAuth));
+                Err(auth_rejected(AuthInteractionRejectionKind::MissingAuth))
             }
         }
-        self.cancel_auth_run(request, run_id).await
     }
 }
 
@@ -364,7 +352,7 @@ impl AuthInteractionService for DefaultAuthInteractionService {
                 let Some(run_id) = request.run_id_hint else {
                     return Err(auth_rejected(AuthInteractionRejectionKind::MissingAuth));
                 };
-                return self.cancel_parked_auth_without_flow(request, run_id).await;
+                return self.resume_denied_auth_without_flow(request, run_id).await;
             }
             Err(error) => return Err(error),
         };

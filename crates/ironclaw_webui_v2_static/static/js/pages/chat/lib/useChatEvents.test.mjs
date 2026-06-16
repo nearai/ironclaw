@@ -619,6 +619,60 @@ test("useChatEvents: locally resumed deny allows follow-up activity without rest
   assert.equal(harness.messages[0].turnRunId, runId);
 });
 
+test("useChatEvents: parent completion after resumed auth cancel clears typing and refetches", () => {
+  const parentRunId = "turn-run-after-auth-cancel";
+  const authRunId = "auth-run-cancelled";
+  const gateRef = "gate:auth-token";
+  const harness = createUseChatEventsHarness({
+    locallyResolvedGatesRef: {
+      current: new Map([
+        [
+          `${authRunId}\n${gateRef}`,
+          { resolution: "cancelled", outcome: "resumed" },
+        ],
+      ]),
+    },
+  });
+  harness.setCurrentActiveRun({
+    runId: authRunId,
+    threadId: "thread-1",
+    status: "awaiting_gate",
+  });
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: authRunId, status: "blocked_auth" } },
+        ],
+      },
+    },
+  });
+  assert.equal(harness.isProcessing, true);
+  assert.deepEqual(plain(harness.activeRun), {
+    runId: authRunId,
+    threadId: "thread-1",
+    status: "queued",
+  });
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: parentRunId, status: "completed" } },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.isProcessing, false);
+  assert.equal(harness.pendingGate, null);
+  assert.equal(harness.activeRun, null);
+  assert.deepEqual(harness.completedRuns, [parentRunId]);
+});
+
 test("useChatEvents: late started activity cannot downgrade remembered failed tool", () => {
   const runId = "run-terminal-tool";
   const invocationId = "invocation-terminal-tool";

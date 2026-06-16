@@ -320,7 +320,32 @@ function applyProjectionItems({
         runId && PROMPT_RUN_STATUSES.has(status)
           ? locallyResolvedStateForRun(locallyResolvedGatesRef, runId)
           : null;
-      if (isStaleLocalRunStatus || isStaleTerminalStatus) {
+      if (isStaleLocalRunStatus) {
+        continue;
+      }
+      if (isStaleTerminalStatus) {
+        const activeResolvedPromptState = locallyResolvedStateForRun(
+          locallyResolvedGatesRef,
+          activeRunRef?.current?.runId,
+        );
+        if (
+          SUCCESS_RUN_STATUSES.has(status) &&
+          activeResolvedPromptState?.outcome === "resumed"
+        ) {
+          settleSuccessfulRunAfterResolvedPrompt({
+            runId,
+            activePromptRunId: activeRunRef?.current?.runId,
+            setIsProcessing,
+            setPendingGate,
+            setActiveRun,
+            onRunCompleted,
+            completedRunsRef,
+            latestRunIdRef,
+            promptRunIdRef,
+            locallyResolvedGatesRef,
+          });
+          activeRunId = null;
+        }
         continue;
       }
       if (locallyResolvedPromptState) {
@@ -515,6 +540,32 @@ function applyProjectionItems({
   }
   if (latestRunIdRef && activeRunId) {
     latestRunIdRef.current = activeRunId;
+  }
+}
+
+function settleSuccessfulRunAfterResolvedPrompt({
+  runId,
+  activePromptRunId,
+  setIsProcessing,
+  setPendingGate,
+  setActiveRun,
+  onRunCompleted,
+  completedRunsRef,
+  latestRunIdRef,
+  promptRunIdRef,
+  locallyResolvedGatesRef,
+}) {
+  setIsProcessing(false);
+  setPendingGate(null);
+  setActiveRun?.(null);
+  clearLocallyResolvedRun(locallyResolvedGatesRef, activePromptRunId);
+  if (latestRunIdRef) latestRunIdRef.current = null;
+  if (promptRunIdRef?.current === activePromptRunId) {
+    promptRunIdRef.current = null;
+  }
+  if (onRunCompleted && runId && !completedRunsRef?.current.has(runId)) {
+    completedRunsRef.current.add(runId);
+    onRunCompleted(runId);
   }
 }
 

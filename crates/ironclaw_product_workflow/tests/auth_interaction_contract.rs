@@ -824,7 +824,7 @@ async fn denied_auth_on_parked_gate_cancels_flow_and_resumes_with_denial_disposi
 }
 
 #[tokio::test]
-async fn denied_auth_without_flow_record_cancels_parked_auth_run() {
+async fn denied_auth_without_flow_record_resumes_parked_auth_run_with_denial_disposition() {
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let scope = turn_scope("alice", "thread-a");
     let run_id = TurnRunId::new();
@@ -855,14 +855,23 @@ async fn denied_auth_without_flow_record_cancels_parked_auth_run() {
 
     assert!(matches!(
         response,
-        ResolveAuthInteractionResponse::Canceled(_)
+        ResolveAuthInteractionResponse::Resumed(_)
     ));
     assert!(
         flow_manager.cancellations().is_empty(),
         "no auth flow record should mean there is no flow to cancel"
     );
-    assert_eq!(coordinator.cancellations().len(), 1);
-    assert!(coordinator.resumes().is_empty());
+    assert!(coordinator.cancellations().is_empty());
+    let resumes = coordinator.resumes();
+    assert_eq!(resumes.len(), 1);
+    assert_eq!(
+        resumes[0].precondition,
+        ResumeTurnPrecondition::BlockedAuthGate
+    );
+    assert!(matches!(
+        resumes[0].auth_resume_disposition,
+        Some(AuthResumeDisposition::Denied)
+    ));
 }
 
 #[tokio::test]
