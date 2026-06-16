@@ -1919,7 +1919,7 @@ async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/api/webchat/v2/operator/logs?limit=25&cursor=after-1&thread_id=thread-a&run_id=run-a&turn_id=turn-a&tool_call_id=tool-a&tool_name=shell&source=slack")
+                .uri("/api/webchat/v2/operator/logs?limit=25&cursor=after-1&thread_id=thread-a&run_id=run-a&turn_id=turn-a&tool_call_id=tool-a&tool_name=shell&source=slack&follow=true")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -1989,6 +1989,8 @@ async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
     );
     assert_eq!(operator_log_calls[0].tool_name.as_deref(), Some("shell"));
     assert_eq!(operator_log_calls[0].source.as_deref(), Some("slack"));
+    assert!(operator_log_calls[0].follow);
+    assert!(!operator_log_calls[0].tail);
     drop(operator_log_calls);
     assert_eq!(
         services

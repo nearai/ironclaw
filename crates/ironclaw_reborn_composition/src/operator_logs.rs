@@ -381,19 +381,23 @@ impl OperatorLogBuffer {
 
         if request.follow {
             let start_after_id = after_id.unwrap_or_else(|| state.next_id.saturating_sub(1));
+            let mut high_water_id = start_after_id;
             for entry in state.entries.iter() {
                 if entry.id <= start_after_id {
                     continue;
                 }
                 if request.level.is_some_and(|level| entry.level != level) {
+                    high_water_id = entry.id;
                     continue;
                 }
                 if let Some(target) = target_filter.as_ref()
                     && !entry.target.to_lowercase().contains(target.as_str())
                 {
+                    high_water_id = entry.id;
                     continue;
                 }
                 if !entry.matches_query(&request) {
+                    high_water_id = entry.id;
                     continue;
                 }
 
@@ -406,14 +410,11 @@ impl OperatorLogBuffer {
                 {
                     break;
                 }
+                high_water_id = entry.id;
                 selected_bytes = selected_bytes.saturating_add(entry_bytes);
                 selected.push(entry.clone());
             }
-            let cursor_id = selected
-                .last()
-                .map(|entry| entry.id)
-                .unwrap_or(start_after_id);
-            next_cursor = Some(after_cursor(cursor_id));
+            next_cursor = Some(after_cursor(high_water_id));
         } else if request.tail {
             for entry in state.entries.iter().rev() {
                 if request.level.is_some_and(|level| entry.level != level) {
@@ -441,11 +442,7 @@ impl OperatorLogBuffer {
                 selected.push(entry.clone());
             }
             selected.reverse();
-            let cursor_id = selected
-                .last()
-                .map(|entry| entry.id)
-                .unwrap_or_else(|| state.next_id.saturating_sub(1));
-            next_cursor = Some(after_cursor(cursor_id));
+            next_cursor = Some(after_cursor(state.next_id.saturating_sub(1)));
         } else {
             for entry in state.entries.iter().rev() {
                 if before_id.is_some_and(|id| entry.id >= id) {
@@ -612,10 +609,11 @@ fn redact_sensitive_log_path_token(token: &str) -> Cow<'_, str> {
     let mut last_copied = 0usize;
     let mut changed = false;
 
-    while let Some(offset) = token[cursor..].find('/') {
-        let start = cursor + offset;
+    while let Some(offset) = token[cursor..].find(['/', '\\']) {
+        let separator = cursor + offset;
+        let start = sensitive_path_candidate_start(token, separator);
         let end = sensitive_path_candidate_end(token, start);
-        if start < end && is_sensitive_path_str(&token[start..end]) {
+        if start < end && is_sensitive_log_path_candidate(&token[start..end]) {
             if !changed {
                 redacted = String::with_capacity(token.len());
                 changed = true;
@@ -625,10 +623,10 @@ fn redact_sensitive_log_path_token(token: &str) -> Cow<'_, str> {
             last_copied = end;
             cursor = end;
         } else {
-            cursor = token[start..]
+            cursor = token[separator..]
                 .chars()
                 .next()
-                .map_or(token.len(), |character| start + character.len_utf8());
+                .map_or(token.len(), |character| separator + character.len_utf8());
         }
     }
 
@@ -640,20 +638,83 @@ fn redact_sensitive_log_path_token(token: &str) -> Cow<'_, str> {
     }
 }
 
+fn sensitive_path_candidate_start(token: &str, separator: usize) -> usize {
+    if separator >= 2 {
+        let prefix = &token[..separator];
+        let mut chars = prefix.chars().rev();
+        if chars.next() == Some(':')
+            && chars
+                .next()
+                .is_some_and(|character| character.is_ascii_alphabetic())
+        {
+            return separator - 2;
+        }
+    }
+
+    token[..separator]
+        .char_indices()
+        .rev()
+        .find_map(|(offset, character)| {
+            if is_log_path_boundary(character) {
+                Some(offset + character.len_utf8())
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0)
+}
+
 fn sensitive_path_candidate_end(token: &str, start: usize) -> usize {
     token[start..]
         .char_indices()
         .find_map(|(offset, character)| {
-            if matches!(
-                character,
-                '"' | '\'' | '`' | ',' | ';' | ':' | ')' | '(' | ']' | '[' | '{' | '}'
-            ) {
+            if character == ':'
+                && offset == 1
+                && token[start..]
+                    .chars()
+                    .next()
+                    .is_some_and(|prefix| prefix.is_ascii_alphabetic())
+            {
+                return None;
+            }
+            if is_log_path_boundary(character) {
                 Some(start + offset)
             } else {
                 None
             }
         })
         .unwrap_or(token.len())
+}
+
+fn is_log_path_boundary(character: char) -> bool {
+    matches!(
+        character,
+        '"' | '\'' | '`' | ',' | ';' | ':' | ')' | '(' | ']' | '[' | '{' | '}' | '='
+    )
+}
+
+fn is_sensitive_log_path_candidate(candidate: &str) -> bool {
+    if is_sensitive_path_str(candidate) {
+        return true;
+    }
+
+    let normalized = candidate.replace('\\', "/").to_ascii_lowercase();
+    let segments = normalized
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    let has_secret_segment = segments
+        .iter()
+        .any(|segment| matches!(*segment, "secret" | "secrets"));
+    let has_credential_filename = segments.iter().any(|segment| {
+        segment.contains("token")
+            || segment.contains("credential")
+            || segment.contains("secret")
+            || segment.ends_with(".key")
+    });
+
+    normalized.contains("/.ironclaw/reborn/operator-token")
+        || (has_secret_segment && has_credential_filename)
 }
 
 fn truncate_utf8_with_suffix(value: &str, max_bytes: usize) -> String {
@@ -1147,6 +1208,27 @@ mod tests {
     }
 
     #[test]
+    fn record_redacts_backslash_delimited_sensitive_host_paths() {
+        let buffer = OperatorLogBuffer::new(10);
+        buffer.record(
+            RebornLogLevel::Warn,
+            "ironclaw::test",
+            r#"win=C:\Users\alice\.ironclaw\reborn\operator-token.txt escaped=secret\token"#
+                .to_string(),
+        );
+
+        let response = buffer.query(RebornLogQueryRequest {
+            limit: Some(1),
+            ..RebornLogQueryRequest::default()
+        });
+
+        assert_eq!(
+            response.entries[0].message,
+            "win=[REDACTED_PATH] escaped=[REDACTED_PATH]"
+        );
+    }
+
+    #[test]
     fn tail_returns_latest_entries_chronologically_with_follow_cursor() {
         let buffer = OperatorLogBuffer::new(10);
         for index in 0..4 {
@@ -1219,6 +1301,52 @@ mod tests {
             vec!["message 3", "message 4"]
         );
         assert_eq!(response.next_cursor.as_deref(), Some("after:5"));
+    }
+
+    #[test]
+    fn filtered_tail_cursor_uses_highest_retained_log_id() {
+        let buffer = OperatorLogBuffer::new(10);
+        buffer.record(RebornLogLevel::Warn, "ironclaw::test", "match".to_string());
+        buffer.record(
+            RebornLogLevel::Info,
+            "ironclaw::test",
+            "newer non-match".to_string(),
+        );
+
+        let response = buffer.query(RebornLogQueryRequest {
+            limit: Some(10),
+            level: Some(RebornLogLevel::Warn),
+            tail: true,
+            ..RebornLogQueryRequest::default()
+        });
+
+        assert_eq!(response.entries.len(), 1);
+        assert_eq!(response.entries[0].message, "match");
+        assert_eq!(response.next_cursor.as_deref(), Some("after:2"));
+    }
+
+    #[test]
+    fn filtered_follow_cursor_advances_past_scanned_non_matches() {
+        let buffer = OperatorLogBuffer::new(10);
+        buffer.record(RebornLogLevel::Info, "ironclaw::test", "base".to_string());
+        buffer.record(RebornLogLevel::Warn, "ironclaw::test", "match".to_string());
+        buffer.record(
+            RebornLogLevel::Info,
+            "ironclaw::test",
+            "newer non-match".to_string(),
+        );
+
+        let response = buffer.query(RebornLogQueryRequest {
+            limit: Some(10),
+            cursor: Some("after:1".to_string()),
+            level: Some(RebornLogLevel::Warn),
+            follow: true,
+            ..RebornLogQueryRequest::default()
+        });
+
+        assert_eq!(response.entries.len(), 1);
+        assert_eq!(response.entries[0].message, "match");
+        assert_eq!(response.next_cursor.as_deref(), Some("after:3"));
     }
 
     #[test]

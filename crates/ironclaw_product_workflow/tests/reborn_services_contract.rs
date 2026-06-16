@@ -5329,6 +5329,46 @@ async fn query_operator_logs_bounds_query_before_logs_service() {
 }
 
 #[tokio::test]
+async fn query_operator_logs_forwards_follow_mode_to_logs_service() {
+    let operator_logs = Arc::new(RecordingOperatorLogsService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_operator_logs_service(operator_logs.clone());
+
+    services
+        .query_operator_logs(
+            caller(),
+            RebornOperatorLogsQuery {
+                limit: Some(25),
+                cursor: Some("after:7".to_string()),
+                level: Some(RebornLogLevel::Info),
+                target: Some("ironclaw".to_string()),
+                thread_id: None,
+                run_id: None,
+                turn_id: None,
+                tool_call_id: None,
+                tool_name: None,
+                source: None,
+                tail: false,
+                follow: true,
+            },
+        )
+        .await
+        .expect("operator logs follow query");
+
+    let requests = operator_logs.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].limit, Some(25));
+    assert_eq!(requests[0].cursor.as_deref(), Some("after:7"));
+    assert_eq!(requests[0].level, Some(RebornLogLevel::Info));
+    assert_eq!(requests[0].target.as_deref(), Some("ironclaw"));
+    assert!(!requests[0].tail);
+    assert!(requests[0].follow);
+}
+
+#[tokio::test]
 async fn query_operator_logs_rejects_ambiguous_tail_follow_modes() {
     let operator_logs = Arc::new(RecordingOperatorLogsService::default());
     let services = RebornServices::new(
