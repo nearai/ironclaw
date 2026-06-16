@@ -328,18 +328,20 @@ function applyProjectionItems({
           locallyResolvedGatesRef,
           activeRunRef?.current?.runId,
         );
-        if (
-          SUCCESS_RUN_STATUSES.has(status) &&
-          activeResolvedPromptState?.outcome === "resumed"
-        ) {
-          settleSuccessfulRunAfterResolvedPrompt({
+        if (activeResolvedPromptState?.outcome === "resumed") {
+          settleTerminalRunAfterResolvedPrompt({
             runId,
             activePromptRunId: activeRunRef?.current?.runId,
+            success: SUCCESS_RUN_STATUSES.has(status),
+            status,
+            failureCategory,
+            failureSummary,
+            setMessages,
             setIsProcessing,
             setPendingGate,
             setActiveRun,
-            onRunCompleted,
-            completedRunsRef,
+            onRunSettled,
+            settledRunsRef,
             latestRunIdRef,
             promptRunIdRef,
             locallyResolvedGatesRef,
@@ -543,14 +545,19 @@ function applyProjectionItems({
   }
 }
 
-function settleSuccessfulRunAfterResolvedPrompt({
+function settleTerminalRunAfterResolvedPrompt({
   runId,
   activePromptRunId,
+  success,
+  status,
+  failureCategory,
+  failureSummary,
+  setMessages,
   setIsProcessing,
   setPendingGate,
   setActiveRun,
-  onRunCompleted,
-  completedRunsRef,
+  onRunSettled,
+  settledRunsRef,
   latestRunIdRef,
   promptRunIdRef,
   locallyResolvedGatesRef,
@@ -563,9 +570,14 @@ function settleSuccessfulRunAfterResolvedPrompt({
   if (promptRunIdRef?.current === activePromptRunId) {
     promptRunIdRef.current = null;
   }
-  if (onRunCompleted && runId && !completedRunsRef?.current.has(runId)) {
-    completedRunsRef.current.add(runId);
-    onRunCompleted(runId);
+  settleRun(settledRunsRef, onRunSettled, runId, success);
+  if (status === "failed" || status === "recovery_required") {
+    appendRunFailureMessage(setMessages, {
+      runId,
+      status,
+      failureCategory,
+      failureSummary,
+    });
   }
 }
 
@@ -620,7 +632,7 @@ function appendRunFailureMessage(
 }
 
 function locallyResolvedStateForRun(locallyResolvedGatesRef, runId) {
-  if (!runId) return false;
+  if (!runId) return null;
   const resolved = locallyResolvedGatesRef?.current;
   if (!resolved) return null;
   for (const [key, value] of resolved.entries()) {

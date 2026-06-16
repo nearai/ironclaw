@@ -670,7 +670,75 @@ test("useChatEvents: parent completion after resumed auth cancel clears typing a
   assert.equal(harness.isProcessing, false);
   assert.equal(harness.pendingGate, null);
   assert.equal(harness.activeRun, null);
-  assert.deepEqual(harness.completedRuns, [parentRunId]);
+  assert.deepEqual(harness.settledRuns, [
+    { runId: parentRunId, success: true },
+  ]);
+});
+
+test("useChatEvents: failed parent terminal after resumed auth cancel clears typing and shows error", () => {
+  const parentRunId = "turn-run-after-auth-cancel-failed";
+  const authRunId = "auth-run-cancelled-before-failure";
+  const gateRef = "gate:auth-token";
+  const harness = createUseChatEventsHarness({
+    locallyResolvedGatesRef: {
+      current: new Map([
+        [
+          `${authRunId}\n${gateRef}`,
+          { resolution: "cancelled", outcome: "resumed" },
+        ],
+      ]),
+    },
+    failureMessageForRunStatus: ({ failureSummary }) =>
+      failureSummary || "run failed after auth cancel",
+  });
+  harness.setCurrentActiveRun({
+    runId: authRunId,
+    threadId: "thread-1",
+    status: "awaiting_gate",
+  });
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: authRunId, status: "blocked_auth" } },
+        ],
+      },
+    },
+  });
+  assert.equal(harness.isProcessing, true);
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: parentRunId,
+              status: "failed",
+              failure_summary:
+                "The run failed after the resolved auth prompt resumed.",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.isProcessing, false);
+  assert.equal(harness.pendingGate, null);
+  assert.equal(harness.activeRun, null);
+  assert.deepEqual(harness.settledRuns, [
+    { runId: parentRunId, success: false },
+  ]);
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, `err-${parentRunId}`);
+  assert.equal(
+    harness.messages[0].content,
+    "The run failed after the resolved auth prompt resumed.",
+  );
 });
 
 test("useChatEvents: late started activity cannot downgrade remembered failed tool", () => {
