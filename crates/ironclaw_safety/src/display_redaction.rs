@@ -412,12 +412,22 @@ fn credential_key_expects_value(token: &str) -> bool {
             | "apikey="
             | "access_token:"
             | "access_token="
+            | "access-token:"
+            | "access-token="
+            | "refresh_token:"
+            | "refresh_token="
+            | "refresh-token:"
+            | "refresh-token="
             | "secret:"
             | "secret="
             | "password:"
             | "password="
             | "token:"
             | "token="
+            | "credential:"
+            | "credential="
+            | "bearer:"
+            | "bearer="
     )
 }
 
@@ -436,6 +446,8 @@ fn credential_key_may_have_spaced_value(token: &str) -> bool {
             | "secret"
             | "password"
             | "token"
+            | "credential"
+            | "bearer"
     )
 }
 
@@ -786,6 +798,20 @@ mod tests {
         assert!(sanitized.contains("Authorization: [redacted]"));
         assert!(!sanitized.contains("opaque-value"));
         assert!(!sanitized.contains("opaque-token"));
+    }
+
+    #[test]
+    fn sanitize_display_text_redacts_common_sensitive_key_values() {
+        let sanitized = sanitize_display_text(
+            "access_token: access-value refresh-token = refresh-value credential: credential-value",
+        );
+
+        assert!(sanitized.contains("access_token: [redacted]"));
+        assert!(sanitized.contains("refresh-token = [redacted]"));
+        assert!(sanitized.contains("credential: [redacted]"));
+        assert!(!sanitized.contains("access-value"));
+        assert!(!sanitized.contains("refresh-value"));
+        assert!(!sanitized.contains("credential-value"));
     }
 
     #[test]
