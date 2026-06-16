@@ -1509,7 +1509,12 @@ fn sanitize_result_ref_suffix_handles_empty_special_chars_and_truncation() {
 }
 
 #[tokio::test]
-async fn exit_stage_no_progress_detected_finalizes_fallback_reply() {
+async fn exit_stage_no_progress_fails_when_nudge_disabled() {
+    // Production default: the driver-specific nudge gate is off, so a no-progress
+    // stop produces a typed `NoProgressDetected` failure with a Final checkpoint —
+    // NOT a canned "I stopped" reply finalized as a completed turn. No assistant
+    // reply is issued (no model call), and the failure carries the honest category
+    // the product layer renders deterministically.
     let host = MockHost::new(Vec::new());
     let family = crate::families::default();
     let ctx = StageContext {
@@ -1530,12 +1535,18 @@ async fn exit_stage_no_progress_detected_finalizes_fallback_reply() {
         .expect("exit stage");
 
     match exit {
-        LoopExit::Completed(completed) => {
-            assert_eq!(completed.reply_message_refs.len(), 1);
-            assert!(completed.final_checkpoint_id.is_some());
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::NoProgressDetected);
+            // Final checkpoint is mandatory for the failed exit to validate
+            // through `verify_failure_evidence` (parity with the Aborted arm).
+            assert!(failed.checkpoint_id.is_some());
         }
-        other => panic!("expected completed exit with fallback reply, got {other:?}"),
+        other => panic!("expected typed no-progress failure, got {other:?}"),
     }
+    assert!(
+        host.model_requests().is_empty(),
+        "nudge gate disabled must not issue a model call"
+    );
 }
 
 #[tokio::test]
@@ -1586,7 +1597,9 @@ async fn no_progress_nudge_synthesizes_reply_when_gate_enabled() {
 
 #[tokio::test]
 async fn no_progress_skips_nudge_when_gate_disabled() {
-    // Gate OFF: no model call, canned fallback reply (production default).
+    // Gate OFF: even with a model reply available, no tool-free nudge call is
+    // issued and the no-progress stop terminates as a typed failure (production
+    // default) — not a canned reply, not a completed turn.
     let host = MockHost::new(vec![reply_response_with_text("unused")]);
     let family = crate::families::default();
     let ctx = StageContext {
@@ -1610,7 +1623,7 @@ async fn no_progress_skips_nudge_when_gate_disabled() {
         host.model_requests().is_empty(),
         "no nudge model call when gate disabled"
     );
-    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert!(matches!(exit, LoopExit::Failed(_)));
 }
 
 #[tokio::test]
@@ -1656,8 +1669,8 @@ async fn budget_iteration_limit_nudges_to_completed_when_gate_enabled() {
 
 #[tokio::test]
 async fn nudge_respects_one_shot_cap() {
-    // With the cap already spent, the no-progress exit must not issue a model
-    // call and falls back to the canned reply.
+    // With the cap already spent, the no-progress exit must not issue another
+    // model call and terminates as a typed failure (no canned reply).
     let host = MockHost::new(vec![reply_response_with_text("unused")]).with_driver_nudges_enabled();
     let family = crate::families::default();
     let ctx = StageContext {
@@ -1682,7 +1695,7 @@ async fn nudge_respects_one_shot_cap() {
         host.model_requests().is_empty(),
         "capped nudge must not issue another model call"
     );
-    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert!(matches!(exit, LoopExit::Failed(_)));
 }
 
 #[tokio::test]
@@ -2829,7 +2842,7 @@ async fn invalid_provider_tool_failure_appends_structured_model_observation() {
 }
 
 #[tokio::test]
-async fn repeated_model_visible_capability_failures_stop_with_no_progress_fallback() {
+async fn repeated_model_visible_capability_failures_stop_with_typed_no_progress_failure() {
     let host = MockHost::new(vec![
         provider_calls_response(),
         provider_calls_response(),
@@ -2857,15 +2870,16 @@ async fn repeated_model_visible_capability_failures_stop_with_no_progress_fallba
         .await
         .expect("execute");
 
+    // Repeated capability failures trip the no-progress guard. With the nudge
+    // gate off (production default) this is a typed `NoProgressDetected` failure,
+    // not a canned reply finalized as a completed turn. The tool-error results are
+    // still appended to the transcript (asserted below) so the work isn't lost.
     match exit {
-        LoopExit::Completed(completed) => {
-            assert_eq!(
-                completed.reply_message_refs,
-                vec![message_ref("msg:assistant")]
-            );
-            assert_eq!(completed.result_refs.len(), 3);
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::NoProgressDetected);
+            assert!(failed.checkpoint_id.is_some());
         }
-        other => panic!("expected completed no-progress fallback, got {other:?}"),
+        other => panic!("expected typed no-progress failure, got {other:?}"),
     }
     assert_eq!(host.model_requests().len(), 3);
     assert_eq!(host.batch_invocations().len(), 3);
@@ -2879,7 +2893,7 @@ async fn repeated_model_visible_capability_failures_stop_with_no_progress_fallba
 }
 
 #[tokio::test]
-async fn repeated_model_visible_multi_call_failures_stop_with_no_progress_fallback() {
+async fn repeated_model_visible_multi_call_failures_stop_with_typed_no_progress_failure() {
     let host = MockHost::new(vec![
         provider_two_calls_response(),
         provider_two_calls_response(),
@@ -2912,15 +2926,15 @@ async fn repeated_model_visible_multi_call_failures_stop_with_no_progress_fallba
         .await
         .expect("execute");
 
+    // Multi-call repeated failures trip the no-progress guard → typed
+    // `NoProgressDetected` failure (gate off), with all six tool-error results
+    // still appended to the transcript.
     match exit {
-        LoopExit::Completed(completed) => {
-            assert_eq!(
-                completed.reply_message_refs,
-                vec![message_ref("msg:assistant")]
-            );
-            assert_eq!(completed.result_refs.len(), 6);
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::NoProgressDetected);
+            assert!(failed.checkpoint_id.is_some());
         }
-        other => panic!("expected completed no-progress fallback, got {other:?}"),
+        other => panic!("expected typed no-progress failure, got {other:?}"),
     }
     assert_eq!(host.model_requests().len(), 3);
     assert_eq!(host.batch_invocations().len(), 3);

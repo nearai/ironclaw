@@ -86,13 +86,13 @@ async fn repeated_signature_stops_after_rendered_warning_and_no_progress_result(
         .expect("loop execution should succeed");
 
     match exit {
-        LoopExit::Completed(completed) => {
-            assert_eq!(completed.reply_message_refs.len(), 1);
-            assert!(completed.final_checkpoint_id.is_some());
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::NoProgressDetected);
+            assert!(failed.checkpoint_id.is_some());
         }
-        other => panic!("expected no-progress fallback completion, got {other:?}"),
+        other => panic!("expected typed no-progress failure, got {other:?}"),
     }
-    assert_no_progress_fallback(&host);
+    assert_no_progress_typed_failure(&host);
     assert_eq!(host.model_call_count(), 4);
     assert_eq!(repeated_call_warning_prompt_count(&host), 1);
 }
@@ -180,13 +180,13 @@ async fn typed_no_progress_results_escape_without_repeated_call_signature() {
         .expect("loop execution should succeed");
 
     match exit {
-        LoopExit::Completed(completed) => {
-            assert_eq!(completed.reply_message_refs.len(), 1);
-            assert!(completed.final_checkpoint_id.is_some());
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::NoProgressDetected);
+            assert!(failed.checkpoint_id.is_some());
         }
-        other => panic!("expected no-progress fallback completion, got {other:?}"),
+        other => panic!("expected typed no-progress failure, got {other:?}"),
     }
-    assert_no_progress_fallback(&host);
+    assert_no_progress_typed_failure(&host);
     assert_eq!(host.model_call_count(), 3);
 }
 
@@ -221,13 +221,13 @@ async fn typed_blocked_results_escape_without_repeated_call_signature() {
         .expect("loop execution should succeed");
 
     match exit {
-        LoopExit::Completed(completed) => {
-            assert_eq!(completed.reply_message_refs.len(), 1);
-            assert!(completed.final_checkpoint_id.is_some());
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::NoProgressDetected);
+            assert!(failed.checkpoint_id.is_some());
         }
-        other => panic!("expected no-progress fallback completion, got {other:?}"),
+        other => panic!("expected typed no-progress failure, got {other:?}"),
     }
-    assert_no_progress_fallback(&host);
+    assert_no_progress_typed_failure(&host);
     assert_eq!(host.model_call_count(), 3);
 }
 
@@ -332,11 +332,15 @@ async fn recovery_budget_exhaustion_uses_single_call_retry() {
     );
 }
 
-fn assert_no_progress_fallback(host: &MockAgentLoopDriverHost) {
-    let messages = host.finalized_assistant_messages();
-    assert_eq!(messages.len(), 1);
-    assert!(messages[0].contains("repeating the same step without making progress"));
-    assert!(messages[0].contains("repeated calls, results, and any failure summaries"));
+fn assert_no_progress_typed_failure(host: &MockAgentLoopDriverHost) {
+    // A no-progress stop with the nudge gate off finalizes NO assistant reply —
+    // the run ends as a typed `NoProgressDetected` failure, not a canned
+    // "I stopped" message masquerading as a completed turn.
+    assert!(
+        host.finalized_assistant_messages().is_empty(),
+        "no-progress failure must not finalize an assistant reply, got {:?}",
+        host.finalized_assistant_messages()
+    );
 }
 
 fn call_with_input(input_ref: &str) -> ScriptedCapabilityCall {
