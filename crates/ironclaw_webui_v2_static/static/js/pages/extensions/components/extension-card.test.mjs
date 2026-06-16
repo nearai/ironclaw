@@ -255,6 +255,17 @@ function renderExtensionCardWithInternals(ext) {
 // Tests
 // ---------------------------------------------------------------------------
 
+test("card class keeps grid siblings at natural height", () => {
+  const source = readFileSync(new URL("./extension-card.js", import.meta.url), "utf8");
+  const cardDeclaration = source.match(/const CARD =[\s\S]*?;\n/)?.[0] || "";
+
+  assert.ok(
+    cardDeclaration.includes("self-start"),
+    "CARD should align itself to the top of its grid area",
+  );
+  assert.ok(!cardDeclaration.includes("h-full"), "CARD must not stretch to grid row height");
+});
+
 test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async (t) => {
   // --- Setup state: kind=channel, state=setup_required ---
   await t.test(
@@ -452,7 +463,14 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
       assert.equal(setupAction.label, "Setup");
       setupAction.run();
       // Use JSON comparison to avoid cross-realm object identity issues from vm.runInNewContext.
-      assert.equal(JSON.stringify(configurePayload), JSON.stringify({ packageRef: { id: "telegram" }, displayName: "Telegram" }));
+      assert.equal(
+        JSON.stringify(configurePayload),
+        JSON.stringify({
+          packageRef: { id: "telegram" },
+          displayName: "Telegram",
+          onboardingState: "setup_required",
+        }),
+      );
     },
   );
 
@@ -486,7 +504,14 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
       assert.equal(reconfigureAction.label, "Reconfigure");
       reconfigureAction.run();
       // Use JSON comparison to avoid cross-realm object identity issues from vm.runInNewContext.
-      assert.equal(JSON.stringify(configurePayload), JSON.stringify({ packageRef: { id: "telegram" }, displayName: "Telegram" }));
+      assert.equal(
+        JSON.stringify(configurePayload),
+        JSON.stringify({
+          packageRef: { id: "telegram" },
+          displayName: "Telegram",
+          activationStatus: "active",
+        }),
+      );
     },
   );
 });
