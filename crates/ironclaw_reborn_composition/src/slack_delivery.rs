@@ -2196,14 +2196,11 @@ async fn deliver_triggered_run(
                     "triggered run OAuth URL suppressed by send-time backstop: resolved \
                      target is not a personal DM; cancelling run"
                 );
-                // Clean up any OAuth auth-prompt messages that were posted to a DM in
-                // earlier loop iterations. Both return paths in this arm must not
-                // leave those messages lingering — drain once here, before the first
-                // possible return.
-                for message in messages_to_delete_after_final.drain(..) {
-                    delete_triggered_slack_message(services, message).await;
-                }
-                // Cancel the blocked run.
+                // Cancel the blocked run FIRST. Do NOT remove the existing auth
+                // prompt until the run is actually canceled: a transient cancel
+                // failure must leave the prompt in place (the user may still be able
+                // to finish), so on failure we record `Failed` and return without
+                // deleting anything.
                 if let Err(err) = cancel_auth_blocked_run(
                     services.turn_coordinator.as_ref(),
                     &scope,
@@ -2256,6 +2253,14 @@ async fn deliver_triggered_run(
                         TriggeredRunDeliveryOutcomeKind::Failed
                     }
                 };
+                // The run is now canceled, so any OAuth auth-prompt messages posted
+                // to a DM in earlier iterations are stale — remove them. This runs
+                // only after a successful cancel and after the replacement notice has
+                // been attempted, so we never strip the prompt while the run is still
+                // live.
+                for message in messages_to_delete_after_final.drain(..) {
+                    delete_triggered_slack_message(services, message).await;
+                }
                 record_triggered_run_outcome(delivery_store, run_id, outcome).await;
                 return outcome;
             }

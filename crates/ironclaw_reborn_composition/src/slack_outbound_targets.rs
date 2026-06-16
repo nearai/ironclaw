@@ -924,6 +924,13 @@ pub(crate) fn slack_reply_target_is_personal_dm(
     let Some(decoded) = decode_slack_reply_target_binding_ref(target) else {
         return false;
     };
+    // A well-formed Slack reply target always carries the team/space binding. An
+    // empty `space` segment (`space:0:`) decodes to `None` here; reject it so a
+    // corrupted or forged preference missing the space cannot satisfy the
+    // OAuth-DM gate.
+    if decoded.space_id.is_none() {
+        return false;
+    }
     // DM channel ids start with uppercase 'D'.
     if !decoded.conversation_id.starts_with('D') {
         return false;
@@ -1745,6 +1752,36 @@ mod tests {
         assert!(
             !slack_reply_target_is_personal_dm(&binding_ref),
             "ref missing topic segment must NOT be identified as a personal DM"
+        );
+    }
+
+    // ── slack_reply_target_is_personal_dm: empty space segment ───────────────
+
+    #[test]
+    fn slack_reply_target_is_personal_dm_returns_false_for_empty_space_segment() {
+        // A ref with an empty `space` segment (`space:0:`) decodes space_id to
+        // None. A forged/corrupted preference missing the team/space binding must
+        // NOT satisfy the OAuth-DM gate.
+        fn seg(name: &str, value: &str) -> String {
+            format!("{}:{}:{};", name, value.len(), value)
+        }
+        let raw = format!(
+            "{}{}{}{}{}{}{}{}{}",
+            seg("adapter", SLACK_V2_ADAPTER_ID),
+            seg("installation", INSTALLATION),
+            seg("agent", AGENT),
+            seg("project", PROJECT),
+            seg("space", ""),
+            seg("conversation", "D0HOST"),
+            seg("topic", ""),
+            seg("actor_kind", SLACK_USER_ACTOR_KIND),
+            seg("actor", SLACK_USER),
+        );
+        let binding_ref =
+            slack_reply_target_binding_ref_from_raw(raw).expect("builds syntactically");
+        assert!(
+            !slack_reply_target_is_personal_dm(&binding_ref),
+            "ref with empty space segment must NOT be identified as a personal DM"
         );
     }
 
