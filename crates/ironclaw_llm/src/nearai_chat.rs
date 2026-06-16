@@ -39,6 +39,24 @@ pub struct ModelInfo {
     /// Optional provider name.
     #[serde(default)]
     pub provider: Option<String>,
+    /// Input modalities the endpoint reports this model accepts (e.g.
+    /// `["text", "image"]`), sourced from `metadata.architecture.inputModalities`.
+    /// Empty when the provider does not publish modality metadata — callers must
+    /// treat empty as "unknown", not "text-only".
+    #[serde(default)]
+    pub input_modalities: Vec<String>,
+}
+
+impl ModelInfo {
+    /// Whether the provider's published modality metadata says this model
+    /// accepts image input. Returns `false` when modalities are unknown
+    /// (empty) — the authoritative signal is only present when the endpoint
+    /// reports it, so an unknown model is never assumed vision-capable here.
+    pub fn supports_image_input(&self) -> bool {
+        self.input_modalities
+            .iter()
+            .any(|m| m.eq_ignore_ascii_case("image"))
+    }
 }
 
 /// Parse a NEAR AI `/models` response body into [`ModelInfo`] entries.
@@ -48,11 +66,19 @@ pub struct ModelInfo {
 /// empty vec when no recognizable entries are found.
 fn parse_nearai_models(response_text: &str) -> Vec<ModelInfo> {
     #[derive(Deserialize)]
+    struct ArchitectureInner {
+        #[serde(default, alias = "inputModalities", alias = "input_modalities")]
+        input_modalities: Vec<String>,
+    }
+
+    #[derive(Deserialize)]
     struct ModelMetadataInner {
         #[serde(default)]
         name: Option<String>,
         #[serde(default, alias = "modelName", alias = "model_name")]
         model_name: Option<String>,
+        #[serde(default)]
+        architecture: Option<ArchitectureInner>,
     }
 
     #[derive(Deserialize)]
@@ -119,9 +145,16 @@ fn parse_nearai_models(response_text: &str) -> Vec<ModelInfo> {
             entries
                 .into_iter()
                 .filter_map(|e| {
+                    let input_modalities = e
+                        .metadata
+                        .as_ref()
+                        .and_then(|m| m.architecture.as_ref())
+                        .map(|a| a.input_modalities.clone())
+                        .unwrap_or_default();
                     e.resolve_id().map(|name| ModelInfo {
                         name,
                         provider: None,
+                        input_modalities,
                     })
                 })
                 .collect()
@@ -884,6 +917,61 @@ fn model_cost_to_decimal(mc: &ModelCost) -> Option<Decimal> {
     base.checked_mul(factor)
 }
 
+/// Fetch the ids of vision-capable models the NEAR AI endpoint serves, using
+/// the authoritative per-model modality metadata it publishes
+/// (`metadata.architecture.inputModalities`).
+///
+/// This is the correct signal for "does this endpoint accept image input for
+/// this model" — far more reliable than name heuristics, which both miss models
+/// the endpoint marks vision (e.g. `openai/gpt-4.1`, `Qwen/Qwen3-VL-*`) and
+/// wrongly flag ones it marks text-only (e.g. a `claude-opus-4-6` deployment
+/// whose modalities are `["text"]`). Returns only ids whose modalities include
+/// `image`.
+///
+/// Errors and an absent modality field are non-fatal: an endpoint that does not
+/// publish modalities yields an empty list, and callers should fall back to a
+/// name-based heuristic ([`crate::vision_models`]) in that case.
+pub async fn fetch_image_capable_models(
+    base_url: &str,
+    api_key: &str,
+) -> Result<Vec<String>, LlmError> {
+    let base = base_url.trim_end_matches('/');
+    let url = if base.ends_with("/v1") {
+        format!("{}/model/list", base)
+    } else {
+        format!("{}/v1/model/list", base)
+    };
+
+    let response = Client::new()
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| LlmError::RequestFailed {
+            provider: "nearai_chat".to_string(),
+            reason: format!("Failed to fetch model list: {}", e),
+        })?;
+
+    if !response.status().is_success() {
+        return Err(LlmError::RequestFailed {
+            provider: "nearai_chat".to_string(),
+            reason: format!("Model list endpoint returned HTTP {}", response.status()),
+        });
+    }
+
+    let body = response.text().await.map_err(|e| LlmError::RequestFailed {
+        provider: "nearai_chat".to_string(),
+        reason: format!("Failed to read model list response: {}", e),
+    })?;
+
+    Ok(parse_nearai_models(&body)
+        .into_iter()
+        .filter(ModelInfo::supports_image_input)
+        .map(|m| m.name)
+        .collect())
+}
+
 /// Fetch pricing from the NEAR AI `/v1/model/list` endpoint.
 ///
 /// Returns a map of model_id → (input_cost_per_token, output_cost_per_token).
@@ -1266,6 +1354,31 @@ mod tests {
         assert!(parse_nearai_models(r#"[{"unknown":"x"}]"#).is_empty());
         assert!(parse_nearai_models("not json").is_empty());
         assert!(parse_nearai_models("").is_empty());
+    }
+
+    #[test]
+    fn parse_models_captures_input_modalities_for_vision_detection() {
+        // Real NEAR AI `/v1/model/list` shape: modality lives under
+        // metadata.architecture.inputModalities. A model with "image" is
+        // vision-capable; a text-only model is not; a model that omits the
+        // field has unknown modality (not assumed vision).
+        let body = r#"{"models":[
+            {"modelId":"anthropic/claude-sonnet-4-6","metadata":{"architecture":{"inputModalities":["text","image"],"outputModalities":["text"]}}},
+            {"modelId":"deepseek/deepseek-v3.2","metadata":{"architecture":{"inputModalities":["text"]}}},
+            {"modelId":"legacy/no-architecture","metadata":{}}
+        ]}"#;
+        let models = parse_nearai_models(body);
+        let by_name = |name: &str| models.iter().find(|m| m.name == name).unwrap();
+
+        assert!(by_name("anthropic/claude-sonnet-4-6").supports_image_input());
+        assert!(!by_name("deepseek/deepseek-v3.2").supports_image_input());
+        // Unknown modality must not be assumed vision-capable.
+        assert!(!by_name("legacy/no-architecture").supports_image_input());
+        assert!(
+            by_name("legacy/no-architecture")
+                .input_modalities
+                .is_empty()
+        );
     }
 
     fn test_nearai_config(base_url: &str) -> NearAiConfig {
@@ -2342,6 +2455,7 @@ mod tests {
         let info = ModelInfo {
             name: "test-model".to_string(),
             provider: Some("nearai".to_string()),
+            input_modalities: Vec::new(),
         };
         let json = serde_json::to_value(&info).unwrap();
         // Serialization always uses the field name "name", not the aliases

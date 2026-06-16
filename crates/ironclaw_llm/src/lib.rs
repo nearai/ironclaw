@@ -74,7 +74,9 @@ pub use host::{
     SessionSecrets, SharedSessionDb, SharedSessionKeyPersistor, SharedSessionRenewer,
     SharedSessionSecrets,
 };
-pub use nearai_chat::{DEFAULT_MODEL, ModelInfo, NearAiChatProvider, default_models};
+pub use nearai_chat::{
+    DEFAULT_MODEL, ModelInfo, NearAiChatProvider, default_models, fetch_image_capable_models,
+};
 pub use openai_codex_provider::OpenAiCodexProvider;
 pub use openai_codex_session::{DeviceCodeStart, OpenAiCodexSessionManager};
 pub use provider::sanitize_tool_messages;

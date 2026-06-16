@@ -673,10 +673,44 @@ impl AppBuilder {
                     .to_string();
                 tools.register_image_tools(api_base.clone(), api_key.clone(), gen_model, None);
 
-                // Check for vision models
-                let vision_model = ironclaw_llm::vision_models::suggest_vision_model(&models)
-                    .unwrap_or(&model_name)
-                    .to_string();
+                // Check for vision models. Prefer the provider's authoritative
+                // per-model modality metadata (NEAR AI publishes
+                // `inputModalities` on `/v1/model/list`) so the vision tool is
+                // backed by a real image-capable model even when the configured
+                // chat model is text-only. Only the NEAR AI path (no explicit
+                // `provider` override) speaks that endpoint shape; everything
+                // else falls back to the name heuristic. The fetch is
+                // best-effort — any error degrades to the heuristic.
+                let use_modality_metadata = self.config.llm.provider.is_none();
+                let mut vision_model: Option<String> = None;
+                if use_modality_metadata {
+                    match ironclaw_llm::fetch_image_capable_models(&api_base, &api_key).await {
+                        Ok(capable) => {
+                            vision_model = ironclaw_llm::vision_models::choose_vision_model(
+                                &model_name,
+                                &capable,
+                            )
+                            .map(str::to_string);
+                            if vision_model.is_none() {
+                                tracing::debug!(
+                                    "Model list reported no image-capable models; \
+                                     falling back to name heuristic for vision tool"
+                                );
+                            }
+                        }
+                        Err(e) => tracing::debug!(
+                            error = %e,
+                            "Could not fetch model modality metadata; \
+                             falling back to name heuristic for vision tool"
+                        ),
+                    }
+                }
+                let vision_model = vision_model.unwrap_or_else(|| {
+                    ironclaw_llm::vision_models::suggest_vision_model(&models)
+                        .unwrap_or(&model_name)
+                        .to_string()
+                });
+                tracing::debug!(vision_model = %vision_model, "Registering vision tool model");
                 tools.register_vision_tools(api_base, api_key, vision_model, None);
             }
         }

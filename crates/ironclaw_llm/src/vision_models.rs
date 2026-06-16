@@ -67,6 +67,48 @@ pub fn suggest_vision_model(models: &[String]) -> Option<&str> {
     })
 }
 
+/// Choose the model to back the vision (image-analysis) tool, given the
+/// configured chat model and the set of models the provider reports as
+/// image-capable via its authoritative modality metadata (see
+/// [`crate::fetch_image_capable_models`]).
+///
+/// Unlike [`suggest_vision_model`], this never relies on name heuristics to
+/// decide *capability* — `image_capable` is already the verified vision set.
+/// Name matching is used only to rank *quality* among that set. Policy:
+///
+/// 1. Prefer the configured model if it is itself image-capable — keeps the
+///    vision tool on the same model as the chat loop with no surprise routing.
+/// 2. Otherwise pick the highest-quality available model by family preference
+///    (Claude > GPT > Gemini > Qwen > anything else), matched case-insensitively
+///    as a substring so provider-prefixed ids (`anthropic/claude-sonnet-4-6`)
+///    and bare ids both work.
+/// 3. Otherwise fall back to the first image-capable model offered.
+///
+/// Returns `None` only when `image_capable` is empty, leaving the caller to use
+/// its own name-heuristic fallback.
+pub fn choose_vision_model<'a>(
+    configured: &'a str,
+    image_capable: &'a [String],
+) -> Option<&'a str> {
+    if image_capable.is_empty() {
+        return None;
+    }
+    let cfg = configured.to_lowercase();
+    if image_capable.iter().any(|m| m.to_lowercase() == cfg) {
+        return Some(configured);
+    }
+    const FAMILY_PREFERENCE: &[&str] = &["claude", "gpt-5", "gpt-4", "gemini", "qwen"];
+    for family in FAMILY_PREFERENCE {
+        if let Some(model) = image_capable
+            .iter()
+            .find(|m| m.to_lowercase().contains(family))
+        {
+            return Some(model.as_str());
+        }
+    }
+    image_capable.first().map(String::as_str)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,5 +176,49 @@ mod tests {
     fn returns_none_when_no_vision_models() {
         let models = vec!["gpt-3.5-turbo".to_string(), "llama-3.1-70b".to_string()];
         assert_eq!(suggest_vision_model(&models), None);
+    }
+
+    fn strings(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn choose_prefers_configured_model_when_image_capable() {
+        let capable = strings(&["anthropic/claude-sonnet-4-6", "openai/gpt-4.1"]);
+        assert_eq!(
+            choose_vision_model("openai/gpt-4.1", &capable),
+            Some("openai/gpt-4.1")
+        );
+    }
+
+    #[test]
+    fn choose_falls_back_to_best_family_when_configured_is_text_only() {
+        // Configured model (deepseek) is not in the image-capable set; Claude
+        // outranks the GPT/Gemini alternatives.
+        let capable = strings(&[
+            "openai/gpt-4.1",
+            "anthropic/claude-sonnet-4-6",
+            "google/gemini-2.5-pro",
+        ]);
+        assert_eq!(
+            choose_vision_model("deepseek/deepseek-v3.2", &capable),
+            Some("anthropic/claude-sonnet-4-6")
+        );
+    }
+
+    #[test]
+    fn choose_returns_first_capable_when_no_family_matches() {
+        // A vision model the family-preference list does not name (e.g. a
+        // VL model) is still returned rather than dropped.
+        let capable = strings(&["Qwen/Qwen3-VL-30B-A3B-Instruct"]);
+        assert_eq!(
+            choose_vision_model("deepseek/deepseek-v3.2", &capable),
+            Some("Qwen/Qwen3-VL-30B-A3B-Instruct")
+        );
+    }
+
+    #[test]
+    fn choose_returns_none_for_empty_capable_set() {
+        assert_eq!(choose_vision_model("anything", &[]), None);
     }
 }
