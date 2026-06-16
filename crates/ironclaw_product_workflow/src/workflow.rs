@@ -460,11 +460,13 @@ async fn delivered_route_base_binding(
 ///   [`resolve_via_delivered_approval_route`]). In a linear DM "approve" means
 ///   the last prompt shown; `approve gate:<ref>` overrides.
 ///
-/// Staleness is decided by the authoritative `resolve()` outcome, not by a
-/// separate `list_pending` probe: the read model's blocked-run lookup is scope
-/// fragile (it is exactly why the bare DM reply fell through to this fallback),
-/// so probing it here false-negatives live gates. `resolve()` looks the gate up
-/// by request id and returns `MissingGate`/`StaleGate` when it is truly gone.
+/// Shared by both the approval and auth delivered-route paths. Staleness is
+/// decided by the authoritative `resolve()` outcome, not by a separate
+/// `list_pending` probe: the read model's blocked-run lookup is scope fragile
+/// (it is exactly why the bare DM reply fell through to this fallback), so
+/// probing it here false-negatives live gates. `resolve()` looks the gate up by
+/// request id and returns a missing/stale error when it is truly gone —
+/// `MissingGate`/`StaleGate` for approvals, `MissingAuth`/`StaleAuth` for auth.
 fn order_delivered_routes(
     mut live: Vec<ironclaw_outbound::DeliveredGateRouteRecord>,
     expected_gate_ref: Option<&str>,
@@ -628,7 +630,8 @@ async fn select_delivered_gate_routes(
     ambiguity_error: impl Fn() -> ProductWorkflowError,
 ) -> Option<Result<Vec<SelectedDeliveredRoute>, ProductWorkflowError>> {
     // When the dispatcher already resolved a binding for this envelope (the
-    // MissingGate fallback path), reuse it instead of re-deriving one — two
+    // MissingGate / MissingAuth fallback path), reuse it instead of re-deriving
+    // one — two
     // independent lookups can diverge if route configuration changes between
     // them, and the dispatcher's binding is the one the actor was admitted
     // under. Only the BindingRequired path (no binding at all) derives the
@@ -852,15 +855,19 @@ async fn resolve_via_delivered_auth_route(
             Err(error) => return Some(Err(error)),
         };
         let submitted_run_id = run_id_from_auth_resolution(response);
+        let dispatch_kind = match ActionDispatchKind::try_from_payload(envelope.payload()) {
+            Ok(kind) => kind,
+            Err(error) => return Some(Err(error)),
+        };
         return Some(
-            interaction_accepted_message_ref("auth", envelope).and_then(|accepted_message_ref| {
-                Ok(DispatchedAction {
+            interaction_accepted_message_ref("auth", envelope).map(|accepted_message_ref| {
+                DispatchedAction {
                     ack: ProductInboundAck::Accepted {
                         accepted_message_ref,
                         submitted_run_id,
                     },
-                    dispatch_kind: ActionDispatchKind::try_from_payload(envelope.payload())?,
-                })
+                    dispatch_kind,
+                }
             }),
         );
     }
@@ -1254,6 +1261,14 @@ async fn dispatch_auth_resolution(
         .await
     {
         Ok(response) => response,
+        // Only `MissingAuth` falls back to the delivered-route lookup here — the
+        // gate was not found in the bound scope, so it may live in a triggered
+        // run's scope reachable via the conversation fingerprint. `StaleAuth` is
+        // deliberately NOT caught: on this exact-ref path the gate was found but
+        // already resolved, which must surface as-is rather than silently
+        // resolving a different gate. (`is_stale_auth_error`, used by the bare
+        // delivered-route walk, intentionally covers both — that path is allowed
+        // to skip past a stale gate to an older live one.)
         Err(
             error @ ProductWorkflowError::AuthInteractionRejected {
                 kind: AuthInteractionRejectionKind::MissingAuth,

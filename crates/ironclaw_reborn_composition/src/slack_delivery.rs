@@ -42,8 +42,8 @@ use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_threads::{FinalizedAssistantMessageByRunRequest, SessionThreadService, ThreadScope};
 use ironclaw_triggers::TriggerFire;
 use ironclaw_turns::{
-    GateRef, GetRunStateRequest, ReplyTargetBindingRef, TurnActor, TurnCoordinator, TurnRunId,
-    TurnRunState, TurnScope, TurnStatus,
+    GateRef, GetRunStateRequest, ReplyTargetBindingRef, TurnActor, TurnCoordinator,
+    TurnErrorCategory, TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 use ironclaw_wasm_product_adapters::ImmediateAckWorkflowObserver;
 use serde::{Deserialize, Serialize};
@@ -238,6 +238,31 @@ impl SlackFinalReplyDeliveryObserver {
         let actor = TurnActor::new(binding.actor_user_id.clone());
         let thread_scope = thread_scope_from_binding(&binding)?;
         let scope = turn_scope_from_thread_scope(&binding, &thread_scope)?;
+        // Foreign-run guard: a resolution bridged to a triggered run (the
+        // delivered-gate-route rewrite) resumes a run that lives in the
+        // trigger's own scope, not this Slack conversation's scope. That run is
+        // delivered by its own triggered-delivery loop (`deliver_triggered_run`),
+        // so the live observer must not also poll it here under the conversation
+        // scope — the run isn't found there, which would otherwise surface as a
+        // spurious "something went wrong" delivery error. Skip cleanly and let
+        // the triggered loop own continuation, matching the regular inbound flow.
+        if let Err(error) = self
+            .services
+            .turn_coordinator
+            .get_run_state(GetRunStateRequest {
+                scope: scope.clone(),
+                run_id,
+            })
+            .await
+            && matches!(error.category(), TurnErrorCategory::ScopeNotFound)
+        {
+            tracing::debug!(
+                target = "ironclaw::reborn::slack_delivery",
+                %run_id,
+                "skipping live Slack delivery: run is not in this conversation scope (triggered/foreign run); its own delivery loop owns continuation"
+            );
+            return Ok(());
+        }
         let mut delivered_blocked_marker = None;
         let mut working_message = None;
         let mut messages_to_delete_after_final = Vec::new();
@@ -466,32 +491,15 @@ impl SlackFinalReplyDeliveryObserver {
     }
 
     /// Auto-deny a Slack run that blocked on interactive auth (disabled on this
-    /// channel). Cancels the run with a `Policy` reason — the same `cancel_run`
-    /// the auth-deny resolution uses — so the run does not stay parked on the
-    /// auth gate. Idempotent per run so repeated observer passes are safe.
+    /// channel). Thin wrapper over the shared [`cancel_auth_blocked_run`] so the
+    /// live observer and the triggered delivery path cancel identically.
     async fn cancel_slack_auth_blocked_run(
         &self,
         scope: &TurnScope,
         actor: TurnActor,
         run_id: TurnRunId,
     ) -> Result<(), SlackFinalReplyDeliveryError> {
-        let idempotency_key = ironclaw_turns::IdempotencyKey::new(format!(
-            "slack-auth-block:{run_id}"
-        ))
-        .map_err(|err| SlackFinalReplyDeliveryError::SlackWebApi {
-            reason: format!("invalid idempotency key for slack auth block: {err}"),
-        })?;
-        self.services
-            .turn_coordinator
-            .cancel_run(ironclaw_turns::CancelRunRequest {
-                scope: scope.clone(),
-                actor,
-                run_id,
-                reason: ironclaw_turns::SanitizedCancelReason::Policy,
-                idempotency_key,
-            })
-            .await?;
-        Ok(())
+        cancel_auth_blocked_run(self.services.turn_coordinator.as_ref(), scope, actor, run_id).await
     }
 
     async fn deliver_run_notification(
@@ -1096,6 +1104,34 @@ fn slack_approval_gate_prompt_view(
         allow_always: is_approval_gate_ref(gate_ref_str),
         approval_context: context.cloned(),
     }
+}
+
+/// Cancel a run parked on an interactive-auth gate with a `Policy` reason — the
+/// same `cancel_run` the auth-deny resolution uses. Idempotent per run
+/// (`slack-auth-block:{run_id}`) so repeated observer/delivery passes are safe.
+/// Shared by the live observer path ([`SlackFinalReplyDeliveryObserver::cancel_slack_auth_blocked_run`])
+/// and the triggered delivery path ([`triggered_notification_for_state`]) so the
+/// cancellation contract cannot drift between them.
+async fn cancel_auth_blocked_run(
+    coordinator: &dyn TurnCoordinator,
+    scope: &TurnScope,
+    actor: TurnActor,
+    run_id: TurnRunId,
+) -> Result<(), SlackFinalReplyDeliveryError> {
+    let idempotency_key = ironclaw_turns::IdempotencyKey::new(format!("slack-auth-block:{run_id}"))
+        .map_err(|err| SlackFinalReplyDeliveryError::SlackWebApi {
+            reason: format!("invalid idempotency key for slack auth block: {err}"),
+        })?;
+    coordinator
+        .cancel_run(ironclaw_turns::CancelRunRequest {
+            scope: scope.clone(),
+            actor,
+            run_id,
+            reason: ironclaw_turns::SanitizedCancelReason::Policy,
+            idempotency_key,
+        })
+        .await?;
+    Ok(())
 }
 
 fn jittered_poll_interval(base: Duration, run_id: &TurnRunId) -> Duration {
@@ -1962,7 +1998,9 @@ async fn deliver_triggered_run(
             }
         };
 
-        // Build the notification payload.
+        // Build the notification payload. The trigger prompt becomes the short
+        // routine label in the footer appended to every triggered Slack message.
+        let trigger_label = triggered_label_from_prompt(&fire.prompt);
         let notification = match triggered_notification_for_state(
             services,
             &scope,
@@ -1970,6 +2008,7 @@ async fn deliver_triggered_run(
             &actor,
             &state,
             run_id,
+            &trigger_label,
         )
         .await
         {
@@ -2111,7 +2150,61 @@ async fn wait_for_actionable_triggered(
     }
 }
 
+/// One-line capability hint appended to every triggered-run Slack message.
+const SLACK_TRIGGERED_SESSION_HINT: &str = "Here you can reply `approve`/`deny` \
+or `auth deny` and receive updates — to interact with this run, open the \
+Ironclaw web app.";
+
+/// Footer appended to every triggered-run Slack message so the recipient knows
+/// the surface is output + gate-resolution only (not a conversational channel)
+/// and where to go to actually interact with the run. `label` is a short routine
+/// identifier (a truncated trigger prompt); it is omitted from the text when empty.
+fn triggered_session_footer(label: &str) -> String {
+    let label = label.trim();
+    if label.is_empty() {
+        format!("\n\n_From an automated routine. {SLACK_TRIGGERED_SESSION_HINT}_")
+    } else {
+        format!("\n\n_From an automated routine: “{label}”. {SLACK_TRIGGERED_SESSION_HINT}_")
+    }
+}
+
+/// Truncate a trigger prompt to a short single-line label for the footer.
+fn triggered_label_from_prompt(prompt: &str) -> String {
+    const MAX_LABEL_CHARS: usize = 60;
+    let first_line = prompt.lines().next().unwrap_or("").trim();
+    if first_line.chars().count() <= MAX_LABEL_CHARS {
+        first_line.to_string()
+    } else {
+        let truncated: String = first_line.chars().take(MAX_LABEL_CHARS).collect();
+        format!("{truncated}…")
+    }
+}
+
 /// Builds the notification payload for a triggered run's actionable state.
+///
+/// ## Triggered Slack surface contract
+///
+/// A triggered run is **output-only over Slack, plus gate-resolution input** —
+/// it is NOT a conversational channel. This function is the single place those
+/// outputs are minted, and it only ever produces three of the nine
+/// [`ProductOutboundPayload`] variants:
+///
+/// - `BlockedApproval` → `GatePrompt` (approve/deny)
+/// - `BlockedAuth`     → `AuthPrompt` (OAuth link) or, for non-OAuth, a cancel +
+///   `FinalReply` carrying the auth-unavailable notice
+/// - `Completed`       → `FinalReply` (the result)
+///
+/// Anything else (`Running`, etc.) yields `None` — triggered Slack deliberately
+/// does NOT stream `Progress` / `CapabilityActivity` / projection payloads; those
+/// belong to the live WebUI channel.
+///
+/// On the inbound side the triggered run only consumes gate **resolutions**
+/// (`ApprovalResolution` / `ScopedApprovalResolution` / `AuthResolution`), bridged
+/// back into the trigger's scope via the delivered-gate-route fingerprint. A
+/// free-text Slack reply parses as a `UserMessage` and starts a *separate* run in
+/// the DM's own scope — it never reaches the triggered run. If you extend this
+/// function, preserve that boundary: do not mint conversational/streaming payloads
+/// here, and do not assume inbound free-text can address a triggered run.
 async fn triggered_notification_for_state(
     services: &SlackFinalReplyDeliveryServices,
     scope: &TurnScope,
@@ -2119,7 +2212,9 @@ async fn triggered_notification_for_state(
     actor: &TurnActor,
     state: &TurnRunState,
     run_id: TurnRunId,
+    trigger_label: &str,
 ) -> Result<Option<SlackActionableNotification>, SlackFinalReplyDeliveryError> {
+    let footer = triggered_session_footer(trigger_label);
     match state.status {
         TurnStatus::Completed => {
             // Read finalized assistant message.
@@ -2134,6 +2229,7 @@ async fn triggered_notification_for_state(
                 .and_then(|m| m.content)
             else {
                 tracing::warn!(
+                    target = "ironclaw::reborn::slack_delivery",
                     %run_id,
                     "completed triggered run has no finalized assistant message; skipping delivery"
                 );
@@ -2143,7 +2239,7 @@ async fn triggered_notification_for_state(
                 event_kind: RunNotificationEventKind::FinalReplyReady,
                 payload: ProductOutboundPayload::FinalReply(FinalReplyView {
                     turn_run_id: run_id,
-                    text,
+                    text: format!("{text}{footer}"),
                     generated_at: Utc::now(),
                 }),
                 gate_ref_for_routing: None,
@@ -2152,35 +2248,43 @@ async fn triggered_notification_for_state(
         TurnStatus::BlockedApproval => {
             let Some(gate_ref) = state.gate_ref.as_ref() else {
                 tracing::warn!(
+                    target = "ironclaw::reborn::slack_delivery",
                     %run_id,
                     "triggered run blocked on approval without gate ref; skipping"
                 );
                 return Ok(None);
             };
-            // Approval-prompt copy for triggered runs: "Reply approve <gate_ref>"
-            let gate_ref_str = gate_ref.as_str().to_string();
+            // Render the triggered approval prompt exactly like the regular
+            // inbound flow: What/Why context (the tool + reason) via the shared
+            // `slack_approval_gate_prompt_view`, with the channel-specific reply
+            // instruction appended once by the adapter. The approval request is
+            // stored under this triggered run's scope, so the context resolves
+            // here.
+            let context = crate::projection::approval_prompt_context_view(
+                services.approval_requests.as_deref(),
+                gate_ref,
+                &actor.user_id,
+                scope,
+            )
+            .await;
+            let mut prompt = slack_approval_gate_prompt_view(run_id, gate_ref, context.as_ref());
+            prompt.body.push_str(&footer);
             Ok(Some(SlackActionableNotification {
                 event_kind: RunNotificationEventKind::ApprovalNeeded,
-                payload: ProductOutboundPayload::GatePrompt(GatePromptView {
-                    turn_run_id: run_id,
-                    gate_ref: gate_ref_str.clone(),
-                    headline: "Approval needed".to_string(),
-                    body: format!("Reply `approve {gate_ref_str}` to continue."),
-                    allow_always: is_approval_gate_ref(gate_ref.as_str()),
-                    approval_context: None,
-                }),
-                gate_ref_for_routing: Some(gate_ref_str),
+                payload: ProductOutboundPayload::GatePrompt(prompt),
+                gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
             }))
         }
         TurnStatus::BlockedAuth => {
             let Some(gate_ref) = state.gate_ref.as_ref() else {
                 tracing::warn!(
+                    target = "ironclaw::reborn::slack_delivery",
                     %run_id,
                     "triggered run blocked on auth without gate ref; skipping"
                 );
                 return Ok(None);
             };
-            let view = auth_prompt_view_for_blocked_auth(
+            let mut view = auth_prompt_view_for_blocked_auth(
                 &actor.user_id,
                 scope,
                 run_id,
@@ -2190,6 +2294,7 @@ async fn triggered_notification_for_state(
                 services.auth_challenges.as_deref(),
             )
             .await?;
+            view.body.push_str(&footer);
             // Same policy as the live path: only link-based OAuth is allowed over
             // Slack. A triggered run delivers to the creator's private DM, so the
             // OAuth `authorization_url` is safe to post there and the callback
@@ -2204,26 +2309,18 @@ async fn triggered_notification_for_state(
                     gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
                 }))
             } else {
-                let idempotency_key =
-                    ironclaw_turns::IdempotencyKey::new(format!("slack-auth-block:{run_id}"))
-                        .map_err(|err| SlackFinalReplyDeliveryError::SlackWebApi {
-                            reason: format!("invalid idempotency key for slack auth block: {err}"),
-                        })?;
-                services
-                    .turn_coordinator
-                    .cancel_run(ironclaw_turns::CancelRunRequest {
-                        scope: scope.clone(),
-                        actor: actor.clone(),
-                        run_id,
-                        reason: ironclaw_turns::SanitizedCancelReason::Policy,
-                        idempotency_key,
-                    })
-                    .await?;
+                cancel_auth_blocked_run(
+                    services.turn_coordinator.as_ref(),
+                    scope,
+                    actor.clone(),
+                    run_id,
+                )
+                .await?;
                 Ok(Some(SlackActionableNotification {
                     event_kind: RunNotificationEventKind::FinalReplyReady,
                     payload: ProductOutboundPayload::FinalReply(FinalReplyView {
                         turn_run_id: run_id,
-                        text: SLACK_AUTH_UNAVAILABLE_MESSAGE.to_string(),
+                        text: format!("{SLACK_AUTH_UNAVAILABLE_MESSAGE}{footer}"),
                         generated_at: Utc::now(),
                     }),
                     gate_ref_for_routing: None,
@@ -2629,6 +2726,9 @@ mod tests {
     struct ScriptedTurnCoordinator {
         /// Run states returned in order by `get_run_state`. Wraps around.
         states: Vec<ScriptedRunState>,
+        /// When set, `get_run_state` returns `ScopeNotFound` — simulating a run
+        /// that does not live in the queried scope (a triggered/foreign run).
+        scope_not_found: bool,
         calls: Mutex<usize>,
         cancel_calls: Mutex<Vec<TurnRunId>>,
     }
@@ -2638,6 +2738,7 @@ mod tests {
             assert!(!states.is_empty(), "must provide at least one state");
             Self {
                 states,
+                scope_not_found: false,
                 calls: Mutex::new(0),
                 cancel_calls: Mutex::new(Vec::new()),
             }
@@ -2648,6 +2749,14 @@ mod tests {
                 status,
                 gate_ref: None,
             }])
+        }
+
+        /// A coordinator whose `get_run_state` always reports `ScopeNotFound` —
+        /// the run is not in the queried (conversation) scope.
+        fn scope_not_found() -> Self {
+            let mut coordinator = Self::with_single_status(TurnStatus::Running);
+            coordinator.scope_not_found = true;
+            coordinator
         }
 
         fn cancel_call_count(&self) -> usize {
@@ -2706,6 +2815,9 @@ mod tests {
             &self,
             request: GetRunStateRequest,
         ) -> Result<TurnRunState, TurnError> {
+            if self.scope_not_found {
+                return Err(TurnError::ScopeNotFound);
+            }
             let mut calls = self.calls.lock().expect("calls lock");
             let idx = *calls % self.states.len();
             *calls += 1;
@@ -3568,6 +3680,39 @@ mod tests {
             )
             .expect("user message"),
         )
+    }
+
+    /// Foreign-run guard: an Accepted resolution ack whose run lives in another
+    /// scope (a triggered run bridged via the delivered-gate-route rewrite) must
+    /// NOT produce a spurious delivery-error post. The live observer skips
+    /// delivery (the triggered loop owns continuation) when `get_run_state`
+    /// reports the run is not in this conversation scope.
+    #[tokio::test]
+    async fn accepted_resolution_for_foreign_scope_run_skips_delivery_without_error() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        // The resolved run is not in this conversation scope — it lives in the
+        // trigger's scope, delivered by its own triggered-delivery loop.
+        let coordinator = Arc::new(ScriptedTurnCoordinator::scope_not_found());
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+        let env = envelope(scoped_approval_resolution_payload());
+        let ack = accepted_ack();
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        let post_count = egress
+            .calls()
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .count();
+        assert_eq!(
+            post_count, 0,
+            "foreign-scope run must skip live delivery silently — no spurious \
+             error post expected, got {post_count} post(s)"
+        );
     }
 
     /// Rejected scoped-approval ack → hint posted to the envelope conversation.
@@ -5225,6 +5370,29 @@ mod tests {
             .on_trigger_submitted(fire, run_id, scope.clone())
             .await;
         wait_for_delivery_record(&delivery_store, run_id).await;
+
+        // Regression: the triggered approval prompt now renders through the same
+        // shared `slack_approval_gate_prompt_view` as the regular inbound flow.
+        // With no approval context wired (approval_requests: None) the body is
+        // the shared generic fallback — NOT the old inline
+        // "Reply `approve <gate>` to continue." body that had drifted from live.
+        let approval_post_body = egress
+            .calls()
+            .iter()
+            .find(|c| c.path == "/api/chat.postMessage")
+            .map(|c| String::from_utf8_lossy(&c.body).to_string())
+            .expect("approval prompt must be posted");
+        assert!(
+            approval_post_body.contains("A step in this workflow needs your approval to continue"),
+            "triggered approval prompt must use the shared gate-prompt render; got: {approval_post_body}"
+        );
+        // Every triggered Slack message carries the routine footer naming the
+        // surface contract (approve/auth/updates here; interact via the web app).
+        assert!(
+            approval_post_body.contains("From an automated routine")
+                && approval_post_body.contains("Ironclaw web app"),
+            "triggered message must carry the routine/web-app footer; got: {approval_post_body}"
+        );
 
         let creator = ironclaw_host_api::UserId::new("creator-user").expect("user id");
         let route = route_store
