@@ -215,7 +215,8 @@ export function useChatEvents({
 // previews are recovered from the durable record. Deduped because SSE
 // replays the same terminal projection on every reconnect.
 function settleRun(settledRunsRef, onRunSettled, runId, success) {
-  if (!onRunSettled || !runId || settledRunsRef?.current.has(runId)) return;
+  if (!onRunSettled || !runId || !settledRunsRef?.current) return;
+  if (settledRunsRef.current.has(runId)) return;
   settledRunsRef.current.add(runId);
   onRunSettled(runId, { success });
 }

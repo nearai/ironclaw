@@ -71,13 +71,13 @@ export function useHistory(threadId, options = {}) {
   threadIdRef.current = threadId;
 
   const loadHistory = React.useCallback(
-    async (cursor, options = {}) => {
+    async (cursor, loadOptions = {}) => {
       // `preserveClientOnly` keeps client-synthesized messages that never
       // appear in the timeline (run-failure `err-*` bubbles) when a full
       // reload replaces the list. A settle-triggered reload (any terminal
       // run status) uses this so recovering tool input/output previews from
       // the durable timeline doesn't erase a visible failure notice.
-      const { preserveClientOnly = false } = options;
+      const { preserveClientOnly = false } = loadOptions;
       if (!threadId) {
         setState({ messages: [], nextCursor: null, isLoading: false, loadError: null });
         return;
@@ -111,11 +111,18 @@ export function useHistory(threadId, options = {}) {
 
         // A full (non-paginated) load can be cached without the previous
         // state, so refresh the cache even if the user has since switched
-        // threads. Always under the issuing identity's key. A
-        // preserve-client-only reload needs the previous messages to merge,
-        // so its cache write happens inside setState below instead.
-        if (!cursor && !preserveClientOnly) {
-          putCache(key, { messages: renderable, nextCursor });
+        // threads — the cache write must not be deferred into `setState`,
+        // which bails on a stale thread and would leave the cache stale
+        // (forcing a re-fetch + flicker on return). A preserve-client-only
+        // reload merges over the *cached* messages so the client-only
+        // `err-*` bubbles survive in the cache too. Always under the
+        // issuing identity's key.
+        if (!cursor) {
+          const cachedMessages = historyCache.get(key)?.messages || [];
+          const cacheMerged = preserveClientOnly
+            ? mergePreservingClientOnly(renderable, cachedMessages)
+            : renderable;
+          putCache(key, { messages: cacheMerged, nextCursor });
         }
 
         setState((prev) => {
@@ -130,7 +137,7 @@ export function useHistory(threadId, options = {}) {
           } else {
             merged = renderable;
           }
-          if (cursor || preserveClientOnly) putCache(key, { messages: merged, nextCursor });
+          if (cursor) putCache(key, { messages: merged, nextCursor });
           return {
             messages: merged,
             nextCursor,
@@ -207,10 +214,13 @@ function mergePage(older, current) {
 // status and never persist as timeline records; a settle-triggered reload
 // must keep them, appended after the authoritative timeline messages.
 function mergePreservingClientOnly(timeline, current) {
-  const ids = new Set(timeline.map((m) => m.id));
+  const ids = new Set(timeline.map((m) => m?.id).filter(Boolean));
   const preserved = current.filter(
     (m) =>
-      !ids.has(m.id) && typeof m.id === "string" && m.id.startsWith("err-"),
+      m &&
+      typeof m.id === "string" &&
+      !ids.has(m.id) &&
+      m.id.startsWith("err-"),
   );
   return [...timeline, ...preserved];
 }
