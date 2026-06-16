@@ -485,6 +485,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_dev_extension_search_hides_onboarding_after_credentialed_activation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "extension-tools-active-search-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+
+        invoke_json(
+            &services,
+            EXTENSION_INSTALL_CAPABILITY_ID,
+            serde_json::json!({"extension_id": "github"}),
+        )
+        .await
+        .expect("install succeeds");
+        let activate_context = execution_context([EXTENSION_ACTIVATE_CAPABILITY_ID]);
+        seed_configured_account(&services, &activate_context.resource_scope, "github").await;
+
+        let activate = invoke_json(
+            &services,
+            EXTENSION_ACTIVATE_CAPABILITY_ID,
+            serde_json::json!({"extension_id": "github"}),
+        )
+        .await
+        .expect("activate succeeds");
+        assert_eq!(activate["payload"]["activated"], true);
+
+        let active_search = invoke_json(
+            &services,
+            EXTENSION_SEARCH_CAPABILITY_ID,
+            serde_json::json!({"query": "github"}),
+        )
+        .await
+        .expect("active search succeeds");
+        let extensions = active_search["payload"]["extensions"]
+            .as_array()
+            .expect("extensions array");
+        let github = extensions
+            .iter()
+            .find(|extension| extension["package_ref"]["id"] == "github")
+            .expect("github search result");
+        assert_eq!(github["installation_phase"], "active");
+        assert!(
+            github.get("onboarding").is_none(),
+            "active GitHub model-visible search results must not expose stale PAT setup onboarding"
+        );
+    }
+
+    #[tokio::test]
     async fn local_dev_extension_activate_returns_auth_gate_when_account_lacks_required_scope() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = build_reborn_services(RebornBuildInput::local_dev(
