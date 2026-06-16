@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{cmp::Ordering, collections::HashSet};
 
 use ironclaw_event_projections::{
     CapabilityActivityProjection, CapabilityActivityStatus, ProjectionReplay, ProjectionSnapshot,
@@ -122,10 +122,7 @@ fn runtime_payload_candidates(
 ) -> Vec<RuntimePayloadCandidate> {
     let state_payloads = usize::from(!runs.is_empty());
     let activity_payloads = max_payloads.saturating_sub(state_payloads);
-    let activities = capability_activities
-        .into_iter()
-        .take(activity_payloads)
-        .collect::<Vec<_>>();
+    let activities = newest_activity_window(capability_activities, activity_payloads);
     let mut candidates =
         Vec::with_capacity(state_payloads.saturating_add(activities.len().saturating_mul(2)));
     if !runs.is_empty() {
@@ -163,21 +160,15 @@ fn append_activity_replay_candidates(
         .iter()
         .map(activity_event_key)
         .collect::<HashSet<_>>();
-    let mut activities = Vec::with_capacity(max_activities);
-
-    for activity in transitions.iter().take(max_activities) {
-        activities.push(activity.clone());
-    }
+    let mut activities = transitions.clone();
 
     for activity in replay.capability_activities.iter() {
-        if activities.len() >= max_activities {
-            break;
-        }
         if transition_keys.contains(&activity_event_key(activity)) {
             continue;
         }
         activities.push(activity.clone());
     }
+    let activities = newest_activity_window(activities, max_activities);
 
     for activity in activities.iter() {
         candidates.push(RuntimePayloadCandidate::CapabilityActivity(
@@ -187,6 +178,35 @@ fn append_activity_replay_candidates(
     for activity in activities {
         candidates.push(RuntimePayloadCandidate::CapabilityDisplayPreview(activity));
     }
+}
+
+fn newest_activity_window(
+    mut activities: Vec<CapabilityActivityProjection>,
+    max_activities: usize,
+) -> Vec<CapabilityActivityProjection> {
+    if max_activities == 0 || activities.is_empty() {
+        return Vec::new();
+    }
+    activities.sort_by(compare_capability_activity_projection_order);
+    if activities.len() > max_activities {
+        let drop_count = activities.len() - max_activities;
+        activities.drain(0..drop_count);
+    }
+    activities
+}
+
+fn compare_capability_activity_projection_order(
+    left: &CapabilityActivityProjection,
+    right: &CapabilityActivityProjection,
+) -> Ordering {
+    left.updated_at
+        .cmp(&right.updated_at)
+        .then_with(|| left.last_cursor.cmp(&right.last_cursor))
+        .then_with(|| {
+            left.invocation_id
+                .as_uuid()
+                .cmp(&right.invocation_id.as_uuid())
+        })
 }
 
 fn activity_event_key(

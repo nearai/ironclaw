@@ -161,14 +161,16 @@ impl AgentLoopDriver for PlannedDriver {
         // so the executor surfaces a model-visible denial and continues instead
         // of re-dispatching the capability (which would re-block on the still-
         // missing credential — the infinite auth/deny loop this fixes).
-        if let Some(disposition) = request.auth_resume_disposition.clone()
-            && let Some(pending) = initial.pending_auth_resume.as_mut()
-        {
+        if let Some(disposition) = request.auth_resume_disposition.clone() {
+            let Some(pending) = initial.pending_auth_resume.as_mut() else {
+                return checkpoint_unavailable_exit(run_context.run_id);
+            };
             pending.disposition = Some(disposition);
         }
-        if let Some(disposition) = request.approval_resume_disposition.clone()
-            && let Some(pending) = initial.pending_approval_resume.as_mut()
-        {
+        if let Some(disposition) = request.approval_resume_disposition.clone() {
+            let Some(pending) = initial.pending_approval_resume.as_mut() else {
+                return checkpoint_unavailable_exit(run_context.run_id);
+            };
             pending.disposition = Some(disposition);
         }
 
@@ -1251,6 +1253,46 @@ mod tests {
                  the executor must surface a model-visible denial and continue"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn resume_with_approval_deny_disposition_without_pending_resume_fails_closed() {
+        use ironclaw_turns::ApprovalResumeDisposition;
+
+        let registry = build_loop_family_registry().expect("registry");
+        let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
+        let context = run_context_for_driver(&driver);
+        let staged_state =
+            ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(&context);
+        let payload_bytes = serde_json::to_vec(&staged_state).expect("serialize checkpoint state");
+        let loaded = LoadedCheckpointPayload {
+            kind: LoopCheckpointKind::BeforeModel,
+            schema_id: context.checkpoint_schema_id.clone(),
+            schema_version: context.checkpoint_schema_version,
+            payload: RedactedCheckpointPayload::new(payload_bytes)
+                .expect("valid checkpoint payload"),
+        };
+        let checkpoint_id = TurnCheckpointId::new();
+        let (inner, _checkpoints) = MockAgentLoopDriverHost::builder()
+            .run_context(context.clone())
+            .build();
+        let host = ResumePayloadHost::new(inner, checkpoint_id, loaded);
+
+        let result = driver
+            .resume(
+                AgentLoopDriverResumeRequest {
+                    turn_id: context.turn_id,
+                    run_id: context.run_id,
+                    checkpoint_id,
+                    resolved_run_profile: context.resolved_run_profile.clone(),
+                    auth_resume_disposition: None,
+                    approval_resume_disposition: Some(ApprovalResumeDisposition::Denied),
+                },
+                &host,
+            )
+            .await;
+
+        assert_checkpoint_unavailable_exit(result);
     }
 
     /// Confirm the injection is a no-op when the resume request carries no

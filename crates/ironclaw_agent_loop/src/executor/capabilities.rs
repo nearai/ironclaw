@@ -12,7 +12,7 @@ use ironclaw_turns::{
 };
 
 use crate::{
-    state::{CheckpointKind, LoopExecutionState},
+    state::{CheckpointKind, LoopExecutionState, PendingApprovalResume},
     strategies::{
         BatchPolicy, CapabilityBatchTurnSummary, CapabilityErrorClass, CapabilityErrorSummary,
         GateKind, RecoveryOutcome, SanitizedStrategySummary, TurnSummary,
@@ -122,13 +122,25 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                 Some(ironclaw_turns::ApprovalResumeDisposition::Denied)
             )
         }) {
-            let denied_cap_id = pending.capability_id.clone();
+            let pending = pending.clone();
             let mut denied_activity_id =
                 CapabilityActivityId::parse(pending.resume_token.as_str()).ok();
-            state.pending_approval_resume = None;
-            let (approval_denied_calls, remaining_calls): (Vec<_>, Vec<_>) = visible_calls
-                .into_iter()
-                .partition(|call| call.capability_id == denied_cap_id);
+            let mut approval_denied_calls = Vec::new();
+            let mut remaining_calls = Vec::new();
+            let mut matched_denied_resume = false;
+            for call in visible_calls {
+                if !matched_denied_resume && pending_approval_resume_matches_call(&pending, &call) {
+                    matched_denied_resume = true;
+                    approval_denied_calls.push(call);
+                } else {
+                    remaining_calls.push(call);
+                }
+            }
+            if !matched_denied_resume {
+                return Err(AgentLoopExecutorError::PlannerContract {
+                    detail: "denied approval resume did not match a visible capability call",
+                });
+            }
 
             for call in approval_denied_calls {
                 emit_synthetic_capability_failure_progress(
@@ -171,6 +183,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     BatchStep::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
                 }
             }
+            state.pending_approval_resume = None;
 
             if remaining_calls.is_empty() {
                 return self
@@ -1073,10 +1086,19 @@ fn clear_matching_pending_approval_resume(
     if state
         .pending_approval_resume
         .as_ref()
-        .is_some_and(|resume| resume.capability_id == call.capability_id)
+        .is_some_and(|resume| pending_approval_resume_matches_call(resume, call))
     {
         state.pending_approval_resume = None;
     }
+}
+
+fn pending_approval_resume_matches_call(
+    resume: &PendingApprovalResume,
+    call: &CapabilityCallCandidate,
+) -> bool {
+    resume.capability_id == call.capability_id
+        && resume.surface_version == call.surface_version
+        && resume.input_ref == call.input_ref
 }
 
 fn auth_resume_for_gate(

@@ -5566,6 +5566,8 @@ async fn capability_stage_denied_approval_resume_surfaces_authorization_failure_
         ParentLoopOutput::AssistantReply(_) => panic!("expected provider calls fixture"),
     };
     let provider_replay = calls[0].provider_replay.clone();
+    let denied_input_ref = calls[0].input_ref.clone();
+    let denied_surface_version = calls[0].surface_version.clone();
     let denied_activity_id = CapabilityActivityId::new();
 
     let mut state = LoopExecutionState::initial_for_run(host.run_context());
@@ -5576,8 +5578,8 @@ async fn capability_stage_denied_approval_resume_surfaces_authorization_failure_
         resume_token: CapabilityResumeToken::new(denied_activity_id.to_string())
             .expect("valid token"),
         correlation_id: CorrelationId::new(),
-        surface_version: surface_version(),
-        input_ref: CapabilityInputRef::new("input:approval-deny-test").expect("valid"),
+        surface_version: denied_surface_version,
+        input_ref: denied_input_ref,
         effective_capability_ids: vec![capability_id()],
         provider_replay,
         input: serde_json::json!({ "message": "needs approval" }),
