@@ -142,6 +142,10 @@ fn decode_inline_image(
     let cleaned: Vec<u8> = data.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(&cleaned)
+        // silent-ok: malformed base64 from an untrusted client is expected input,
+        // not a server fault — the whole function returns None so the part falls
+        // back to the bounded `[image omitted]` marker (see
+        // `malformed_base64_image_falls_back_to_marker`).
         .ok()?;
     if bytes.is_empty() || bytes.len() > MAX_INLINE_IMAGE_BYTES {
         return None;

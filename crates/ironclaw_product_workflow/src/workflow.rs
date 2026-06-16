@@ -214,6 +214,22 @@ impl DefaultProductWorkflow {
             });
         }
 
+        // Inline attachment bytes are only landed for user-message payloads (see
+        // `dispatch_payload`). Fail closed if a caller staged bytes on any other
+        // payload kind rather than silently dropping the user's files.
+        if !attachments.is_empty()
+            && !matches!(envelope.payload(), ProductInboundPayload::UserMessage(_))
+        {
+            return Err(ProductAdapterError::WorkflowRejected {
+                kind: ProductWorkflowRejectionKind::InvalidRequest,
+                status_code: 400,
+                retryable: false,
+                reason: RedactedString::new(
+                    "inline attachments are only supported on user-message payloads",
+                ),
+            });
+        }
+
         let source_binding_key =
             SourceBindingKey::new(envelope.source_binding_key()).map_err(|reason| {
                 ProductAdapterError::from(ProductWorkflowError::BindingResolutionFailed { reason })

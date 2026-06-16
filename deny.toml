@@ -27,6 +27,12 @@ ignore = [
     # so the TRUNCATE bypass is not reachable from our guest surface. Remove once
     # wasmtime is upgraded to a patched release.
     "RUSTSEC-2026-0149",
+    # wasmtime: resource leak in the WASIp1 `fd_renumber` implementation. Same
+    # surface argument as 0149 — the IronClaw WASM sandbox does not grant guest
+    # modules WASIp1 filesystem/fd capabilities (guests communicate via explicit
+    # host functions), so guest-driven `fd_renumber` is not reachable. Remove
+    # once wasmtime is upgraded to a patched release.
+    "RUSTSEC-2026-0182",
 ]
 
 [licenses]
