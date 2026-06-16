@@ -81,6 +81,7 @@ impl AgentLoopDriver for TextOnlyModelReplyDriver {
 
         let model_response = host
             .stream_model(LoopModelRequest {
+                inline_messages: Vec::new(),
                 messages: prompt_bundle.messages,
                 surface_version: prompt_bundle.surface_version,
                 model_preference: None,
@@ -307,6 +308,25 @@ mod tests {
             mapped,
             AgentLoopDriverError::Failed {
                 reason_kind: MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY.to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn model_invalid_output_maps_to_invalid_model_output_failure() {
+        let mapped = map_host_error(
+            STAGE_MODEL,
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidOutput,
+                "model output was structurally invalid",
+            ),
+        );
+
+        assert_eq!(
+            mapped,
+            AgentLoopDriverError::Failed {
+                reason_kind: loop_failure_kind_name(LoopFailureKind::InvalidModelOutput)
+                    .to_string()
             }
         );
     }

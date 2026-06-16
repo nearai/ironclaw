@@ -3693,6 +3693,7 @@ async fn after_model_fires_exactly_once_at_durable_boundary() {
         .await
         .expect("build_prompt_bundle succeeds before stream_model");
     host.stream_model(LoopModelRequest {
+        inline_messages: Vec::new(),
         messages: bundle.messages.clone(),
         surface_version: None,
         model_preference: None,

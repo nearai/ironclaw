@@ -418,7 +418,7 @@ fn capability_error_to_failure_kind(class: CapabilityErrorClass) -> LoopFailureK
 }
 
 /// Maps a sanitized model error class to the loop-level failure kind.
-fn model_error_to_failure_kind(class: ModelErrorClass) -> LoopFailureKind {
+pub(crate) fn model_error_to_failure_kind(class: ModelErrorClass) -> LoopFailureKind {
     match class {
         ModelErrorClass::Transient
         | ModelErrorClass::ContextOverflow

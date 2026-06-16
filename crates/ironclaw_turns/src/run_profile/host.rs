@@ -935,6 +935,8 @@ pub struct LoopModelCapabilityView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopModelRequest {
     pub messages: Vec<LoopModelMessage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inline_messages: Vec<LoopInlineMessage>,
     pub surface_version: Option<CapabilitySurfaceVersion>,
     pub model_preference: Option<ModelProfileId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

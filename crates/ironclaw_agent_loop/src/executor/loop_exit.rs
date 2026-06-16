@@ -69,6 +69,7 @@ pub(super) async fn try_final_answer_nudge(
         role: LoopInlineMessageRole::User,
         safe_body,
     });
+    let inline_messages = request.inline_messages.clone();
     let bundle = ctx.host.build_prompt_bundle(request).await.map_err(|_| {
         AgentLoopExecutorError::HostUnavailable {
             stage: HostStage::Prompt,
@@ -86,6 +87,7 @@ pub(super) async fn try_final_answer_nudge(
     // *text*, not from the provider tool array, so it is not sufficient on its own.
     let model_request = LoopModelRequest {
         messages: bundle.messages,
+        inline_messages,
         surface_version: None,
         model_preference,
         capability_view: Some(LoopModelCapabilityView {

@@ -5,9 +5,9 @@ use ironclaw_turns::{
     run_profile::{
         CapabilitySurfaceVersion, CompactionInitiator, LoopCompactionError, LoopCompactionMode,
         LoopCompactionOutcome, LoopCompactionRequest, LoopContextCompactionKind,
-        LoopContextCompactionMetadata, LoopModelCapabilityView, LoopModelMessage,
-        LoopProgressEvent, LoopSafeSummary, SystemInferenceTaskId, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        LoopContextCompactionMetadata, LoopInlineMessage, LoopModelCapabilityView,
+        LoopModelMessage, LoopProgressEvent, LoopSafeSummary, SystemInferenceTaskId,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use std::time::Duration;
@@ -46,6 +46,7 @@ pub(super) struct PromptOutput {
     pub(super) pending_input_ack: PendingInputAck,
     pub(super) surface: VisibleCapabilitySurface,
     pub(super) messages: Vec<ironclaw_turns::run_profile::LoopModelMessage>,
+    pub(super) inline_messages: Vec<LoopInlineMessage>,
     pub(super) capability_view: LoopModelCapabilityView,
     pub(super) rendered_repeated_call_warning: bool,
 }
@@ -87,6 +88,7 @@ pub(super) enum PromptStep {
 
 pub(super) struct BuiltPromptBundle {
     messages: Vec<LoopModelMessage>,
+    inline_messages: Vec<LoopInlineMessage>,
     compaction_message_index: Vec<LoopContextCompactionMetadata>,
     rendered_reply_admission_control: bool,
     rendered_repeated_call_warning: bool,
@@ -112,6 +114,10 @@ impl BuiltPromptBundle {
     ) -> Vec<LoopModelMessage> {
         refresh_compaction_prompt_from_index(state, &self.compaction_message_index);
         self.messages
+    }
+
+    pub(super) fn inline_messages(&self) -> Vec<LoopInlineMessage> {
+        self.inline_messages.clone()
     }
 }
 
@@ -164,8 +170,8 @@ impl FinalPromptBundle {
         Ok(Self { bundle })
     }
 
-    fn into_messages(self) -> Vec<LoopModelMessage> {
-        self.bundle.messages
+    fn into_model_parts(self) -> (Vec<LoopModelMessage>, Vec<LoopInlineMessage>) {
+        (self.bundle.messages, self.bundle.inline_messages)
     }
 
     fn rendered_reply_admission_control(&self) -> bool {
@@ -314,11 +320,14 @@ impl<'a> PromptPlanningPipeline<'a> {
         }
         let rendered_repeated_call_warning = final_bundle.rendered_repeated_call_warning();
 
+        let (messages, inline_messages) = final_bundle.into_model_parts();
+
         Ok(PromptStep::Prepared(Box::new(PromptOutput {
             state: self.state,
             pending_input_ack: self.pending_input_ack,
             surface,
-            messages: final_bundle.into_messages(),
+            messages,
+            inline_messages,
             capability_view,
             rendered_repeated_call_warning,
         })))
@@ -633,6 +642,7 @@ pub(super) async fn build_prompt_bundle_for_surface(
             .inline_messages
             .push(invalid_model_output_repair_control_message());
     }
+    let inline_messages = context_request.inline_messages.clone();
     let prompt_mode = context_request.mode;
     let rendered_reply_admission_control = context_plan.emitted_admission_control;
     let rendered_repeated_call_warning = context_plan.emitted_repeated_call_warning;
@@ -663,6 +673,7 @@ pub(super) async fn build_prompt_bundle_for_surface(
 
     Ok(BuiltPromptBundle {
         messages: prompt_bundle.messages,
+        inline_messages,
         compaction_message_index: prompt_bundle.compaction_message_index,
         rendered_reply_admission_control,
         rendered_repeated_call_warning,

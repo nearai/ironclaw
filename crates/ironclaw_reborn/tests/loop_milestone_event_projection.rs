@@ -337,6 +337,7 @@ async fn drive_model_reply_milestones_and_assert_projection(
         .unwrap();
     let model_response = success_host
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: success_prompt.messages,
             surface_version: None,
             model_preference: None,
@@ -412,6 +413,7 @@ async fn drive_model_reply_milestones_and_assert_projection(
         .unwrap();
     let error = failure_host
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: failure_prompt.messages,
             surface_version: None,
             model_preference: None,

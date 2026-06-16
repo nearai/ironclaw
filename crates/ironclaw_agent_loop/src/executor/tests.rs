@@ -937,6 +937,33 @@ async fn model_shrink_context_call_scope_returns_planner_contract() {
 }
 
 #[tokio::test]
+async fn model_repair_invalid_output_iteration_scope_returns_planner_contract() {
+    let host =
+        MockHost::new(vec![reply_response()]).with_model_errors(vec![AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidOutput,
+            "model output was structurally invalid",
+        )]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let err = executor
+        .execute_family(
+            &family_with_repair_invalid_output_iteration_scope_recovery(),
+            &host,
+            state,
+        )
+        .await
+        .expect_err("iteration-scoped invalid-output repair must violate the planner contract");
+
+    assert!(matches!(
+        err,
+        AgentLoopExecutorError::PlannerContract {
+            detail: "invalid model output repair retry requires call scope"
+        }
+    ));
+}
+
+#[tokio::test]
 async fn input_stage_steering_drain_carries_pending_ack() {
     let host = MockHost::new(Vec::new());
     let run_context = host.run_context().clone();
@@ -1153,7 +1180,8 @@ async fn reply_admission_rejects_candidate_before_finalizing_and_continues() {
         .expect("execute");
 
     assert!(matches!(exit, LoopExit::Completed(_)));
-    assert_eq!(host.model_requests().len(), 3);
+    let model_requests = host.model_requests();
+    assert_eq!(model_requests.len(), 3);
     let prompt_requests = host.prompt_requests();
     assert_eq!(prompt_requests.len(), 3);
     assert!(prompt_requests[0].inline_messages.is_empty());
@@ -1163,6 +1191,10 @@ async fn reply_admission_rejects_candidate_before_finalizing_and_continues() {
         "loop control reply rejected stop condition not met continue"
     );
     assert!(prompt_requests[2].inline_messages.is_empty());
+    assert_eq!(
+        model_requests[1].inline_messages,
+        prompt_requests[1].inline_messages
+    );
 
     let before_model_states = host
         .staged_payloads()
@@ -2359,7 +2391,8 @@ async fn model_invalid_output_retry_adds_repair_hint_and_recovers() {
         .expect("execute");
 
     assert!(matches!(exit, LoopExit::Completed(_)));
-    assert_eq!(host.model_requests().len(), 2);
+    let model_requests = host.model_requests();
+    assert_eq!(model_requests.len(), 2);
     let prompt_requests = host.prompt_requests();
     assert_eq!(prompt_requests.len(), 2);
     assert!(prompt_requests[0].inline_messages.is_empty());
@@ -2367,6 +2400,10 @@ async fn model_invalid_output_retry_adds_repair_hint_and_recovers() {
     assert_eq!(
         prompt_requests[1].inline_messages[0].safe_body.as_str(),
         INVALID_MODEL_OUTPUT_REPAIR_CONTROL_TEXT
+    );
+    assert_eq!(
+        model_requests[1].inline_messages,
+        prompt_requests[1].inline_messages
     );
     assert_eq!(final_staged_state(&host).recovery_state, Default::default());
 }
@@ -2401,7 +2438,8 @@ async fn repeated_model_invalid_output_fails_as_invalid_model_output() {
         }
         other => panic!("expected failed invalid-model-output exit, got {other:?}"),
     }
-    assert_eq!(host.model_requests().len(), 3);
+    let model_requests = host.model_requests();
+    assert_eq!(model_requests.len(), 3);
     let prompt_requests = host.prompt_requests();
     assert_eq!(prompt_requests.len(), 3);
     assert!(prompt_requests[0].inline_messages.is_empty());
@@ -2411,6 +2449,16 @@ async fn repeated_model_invalid_output_fails_as_invalid_model_output() {
             .iter()
             .any(|message| message.safe_body.as_str() == INVALID_MODEL_OUTPUT_REPAIR_CONTROL_TEXT)
     }));
+    assert_eq!(
+        model_requests[1].inline_messages,
+        prompt_requests[1].inline_messages
+    );
+    assert!(
+        final_staged_state(&host)
+            .recent_failure_kinds
+            .iter()
+            .any(|kind| *kind == LoopFailureKind::InvalidModelOutput)
+    );
 }
 
 #[tokio::test]
@@ -2625,6 +2673,40 @@ async fn policy_denied_capability_error_honors_retry_recovery() {
     assert!(matches!(exit, LoopExit::Completed(_))); // safety: test-only assertion
     assert_eq!(host.single_invocations().len(), 1); // safety: test-only assertion
     assert_eq!(final_staged_state(&host).recovery_state, Default::default()); // safety: test-only assertion
+}
+
+#[tokio::test]
+async fn capability_repair_invalid_model_output_alteration_is_rejected() {
+    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Denied(
+                ironclaw_turns::run_profile::CapabilityDenied {
+                    reason_kind:
+                        ironclaw_turns::run_profile::CapabilityDeniedReasonKind::EmptySurface,
+                    safe_summary: "provider call denied".to_string(),
+                },
+            )],
+            stopped_on_suspension: false,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let error = executor
+        .execute_family(
+            &family_with_capability_repair_invalid_output_recovery(),
+            &host,
+            state,
+        )
+        .await
+        .expect_err("capability-scoped invalid-output repair must violate the planner contract");
+
+    assert!(matches!(
+        error,
+        AgentLoopExecutorError::PlannerContract {
+            detail: "invalid model output repair retry requires model scope"
+        }
+    ));
 }
 
 #[tokio::test]

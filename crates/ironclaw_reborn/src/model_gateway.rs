@@ -231,7 +231,7 @@ where
                 surface_version: request.surface_version.clone(),
                 checkpoint_state_ref: None,
                 max_messages: Some(self.max_messages.min(u32::MAX as usize) as u32),
-                inline_messages: Vec::new(),
+                inline_messages: request.inline_messages.clone(),
                 capability_view: None,
             })
             .await

@@ -491,6 +491,62 @@ impl RecoveryStrategy for ShrinkContextCallScopeRecoveryStrategy {
     }
 }
 
+pub(super) struct RepairInvalidOutputIterationScopeRecoveryStrategy;
+
+#[async_trait]
+impl RecoveryStrategy for RepairInvalidOutputIterationScopeRecoveryStrategy {
+    async fn on_capability_error(
+        &self,
+        state: &LoopExecutionState,
+        _err: &CapabilityErrorSummary,
+    ) -> RecoveryOutcome {
+        RecoveryOutcome::Abort {
+            recovery: state.recovery_state.clone(),
+            failure_kind: LoopFailureKind::CapabilityProtocolError,
+        }
+    }
+
+    async fn on_model_error(
+        &self,
+        state: &LoopExecutionState,
+        _err: &ModelErrorSummary,
+    ) -> RecoveryOutcome {
+        RecoveryOutcome::Retry {
+            recovery: state.recovery_state.clone(),
+            scope: RetryScope::Iteration,
+            alter: Some(RetryAlteration::RepairInvalidModelOutput),
+        }
+    }
+}
+
+pub(super) struct CapabilityRepairInvalidOutputRecoveryStrategy;
+
+#[async_trait]
+impl RecoveryStrategy for CapabilityRepairInvalidOutputRecoveryStrategy {
+    async fn on_capability_error(
+        &self,
+        state: &LoopExecutionState,
+        _err: &CapabilityErrorSummary,
+    ) -> RecoveryOutcome {
+        RecoveryOutcome::Retry {
+            recovery: state.recovery_state.clone(),
+            scope: RetryScope::Call,
+            alter: Some(RetryAlteration::RepairInvalidModelOutput),
+        }
+    }
+
+    async fn on_model_error(
+        &self,
+        state: &LoopExecutionState,
+        _err: &ModelErrorSummary,
+    ) -> RecoveryOutcome {
+        RecoveryOutcome::Abort {
+            recovery: state.recovery_state.clone(),
+            failure_kind: LoopFailureKind::DriverBug,
+        }
+    }
+}
+
 impl ironclaw_turns::run_profile::LoopRunInfoPort for MockHost {
     fn run_context(&self) -> &LoopRunContext {
         &self.context
@@ -1147,6 +1203,30 @@ pub(super) fn family_with_shrink_context_call_scope_recovery() -> LoopFamily {
     let version = ComponentIdentity::from_static(
         "executor-shrink-context-call-scope-test",
         ComponentDigest([9; 32]),
+    );
+    LoopFamily::new(id, version, Arc::new(planner))
+}
+
+pub(super) fn family_with_repair_invalid_output_iteration_scope_recovery() -> LoopFamily {
+    let planner = DefaultPlanner::compose_default()
+        .with_recovery(Arc::new(RepairInvalidOutputIterationScopeRecoveryStrategy));
+    let id = LoopFamilyId::new("executor-repair-invalid-output-iteration-scope-test")
+        .expect("valid test family id");
+    let version = ComponentIdentity::from_static(
+        "executor-repair-invalid-output-iteration-scope-test",
+        ComponentDigest([10; 32]),
+    );
+    LoopFamily::new(id, version, Arc::new(planner))
+}
+
+pub(super) fn family_with_capability_repair_invalid_output_recovery() -> LoopFamily {
+    let planner = DefaultPlanner::compose_default()
+        .with_recovery(Arc::new(CapabilityRepairInvalidOutputRecoveryStrategy));
+    let id = LoopFamilyId::new("executor-capability-repair-invalid-output-test")
+        .expect("valid test family id");
+    let version = ComponentIdentity::from_static(
+        "executor-capability-repair-invalid-output-test",
+        ComponentDigest([11; 32]),
     );
     LoopFamily::new(id, version, Arc::new(planner))
 }

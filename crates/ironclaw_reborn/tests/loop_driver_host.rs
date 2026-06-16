@@ -220,6 +220,7 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
 
     let model_response = host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: Some(surface.version.clone()),
             model_preference: None,
@@ -334,6 +335,7 @@ async fn text_only_host_factory_sanitizes_gateway_error_summaries() {
 
     let error = host
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
@@ -390,6 +392,7 @@ async fn text_only_host_factory_invokes_model_budget_accountant() {
         .unwrap();
 
     host.stream_model(LoopModelRequest {
+        inline_messages: Vec::new(),
         messages: prompt_bundle.messages,
         surface_version: None,
         model_preference: None,
@@ -1431,6 +1434,7 @@ async fn text_only_host_factory_includes_safety_context_in_prompt_bundle() {
         .unwrap();
     host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
@@ -1482,6 +1486,7 @@ async fn text_only_host_factory_uses_explicit_local_noop_safety_context() {
         .unwrap();
     host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
@@ -2405,6 +2410,7 @@ async fn text_only_host_e2e_keeps_persisted_model_route_through_full_flow() {
         .unwrap();
     let model_response = host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
@@ -3496,6 +3502,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         .unwrap();
     host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
@@ -3647,6 +3654,7 @@ async fn text_only_host_factory_threads_model_route_snapshot_to_gateway() {
 
     host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: host_dyn
                 .build_prompt_bundle(LoopPromptBundleRequest {
                     mode: PromptMode::TextOnly,
@@ -3924,6 +3932,7 @@ async fn text_only_host_e2e_flow_persists_checkpoint_mapping_in_turn_state_store
         .unwrap();
     let model_response = host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: Some(surface_version.clone()),
             model_preference: None,
@@ -4252,6 +4261,7 @@ async fn text_only_host_factory_threads_identity_source_to_prompt_and_model() {
 
     host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: Some(surface.version),
             model_preference: None,
@@ -4933,6 +4943,7 @@ async fn text_only_host_prompt_bundle_includes_surface_metadata_and_still_stream
     assert_eq!(prompt_bundle.messages.len(), 4);
 
     host.stream_model(LoopModelRequest {
+        inline_messages: Vec::new(),
         messages: prompt_bundle.messages,
         surface_version: Some(surface.version),
         model_preference: None,
@@ -7365,6 +7376,7 @@ impl AgentLoopDriver for ScriptCapabilityFinalReplyDriver {
             .map_err(driver_host_error)?;
         let model_response = host
             .stream_model(LoopModelRequest {
+                inline_messages: Vec::new(),
                 messages: prompt_bundle.messages,
                 surface_version: Some(surface.version),
                 model_preference: None,
@@ -7488,6 +7500,7 @@ impl AgentLoopDriver for TextOnlyFinalReplyDriver {
             .map_err(driver_host_error)?;
         let model_response = host
             .stream_model(LoopModelRequest {
+                inline_messages: Vec::new(),
                 messages: prompt_bundle.messages,
                 surface_version: Some(surface.version),
                 model_preference: None,

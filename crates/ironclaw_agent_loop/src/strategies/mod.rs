@@ -53,7 +53,7 @@ pub(crate) use model::{DefaultModelStrategy, ModelPreference, ModelStrategy};
 pub(crate) use recovery::{
     BackoffDelayMs, CapabilityErrorClass, CapabilityErrorSummary, DefaultRecoveryStrategy,
     ModelErrorClass, ModelErrorSummary, RecoveryOutcome, RecoveryStrategy, RetryAlteration,
-    RetryScope, SanitizedStrategySummary,
+    RetryScope, SanitizedStrategySummary, model_error_to_failure_kind,
 };
 pub(crate) use reply_admission::{
     DefaultReplyAdmissionStrategy, ReplyAdmissionOutcome, ReplyAdmissionStrategy,

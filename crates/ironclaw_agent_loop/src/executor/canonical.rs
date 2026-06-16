@@ -137,6 +137,7 @@ impl DefaultExecutorPipeline {
                             ModelInput {
                                 state,
                                 messages: prompt.messages,
+                                inline_messages: prompt.inline_messages,
                                 surface_version: prompt.surface.version.clone(),
                                 capability_view: prompt.capability_view,
                             },

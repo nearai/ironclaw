@@ -33,9 +33,10 @@ use ironclaw_turns::{
         HostManagedLoopModelPort, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
         InMemoryRunProfileResolver, InstructionMaterializationStore, InstructionSafetyContext,
-        LoopCapabilityPort, LoopHostMilestoneKind, LoopModelGateway, LoopModelGatewayRequest,
-        LoopModelMessage, LoopModelPort, LoopModelRequest, LoopPromptBundleRequest, LoopPromptPort,
-        LoopRunContext, LoopRuntimeContext, ModelProfileId, ParentLoopOutput, PromptMode,
+        LoopCapabilityPort, LoopHostMilestoneKind, LoopInlineMessage, LoopInlineMessageRole,
+        LoopModelGateway, LoopModelGatewayRequest, LoopModelMessage, LoopModelPort,
+        LoopModelRequest, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+        LoopRuntimeContext, LoopSafeSummary, ModelProfileId, ParentLoopOutput, PromptMode,
         ProviderToolCall, ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
         VisibleCapabilitySurface,
     },
@@ -510,6 +511,36 @@ async fn gateway_rejects_unknown_provider_tool_call_before_registration() {
             .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
     );
     let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+
+    let error = gateway
+        .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, HostManagedModelErrorKind::InvalidOutput);
+    assert!(capabilities.registered.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn gateway_preserves_invalid_output_from_provider_tool_validation() {
+    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
+        id: "call_1".to_string(),
+        name: "demo__echo".to_string(),
+        arguments: serde_json::json!({"message":"hello"}),
+        reasoning: None,
+        signature: None,
+        arguments_parse_error: None,
+    }]));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(
+        GatewayCapabilityPort::with_tool_surface()
+            .with_provider_tool_validation_error(AgentLoopHostErrorKind::InvalidOutput),
+    );
 
     let error = gateway
         .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
@@ -1653,6 +1684,59 @@ async fn production_loop_model_gateway_resolves_thread_refs_and_emits_milestones
     ));
 }
 
+#[tokio::test]
+async fn production_loop_model_gateway_accepts_inline_prompt_messages() {
+    let fixture = ThreadFixture::new().await;
+    let provider = Arc::new(RecordingLlmProvider::reply("inline response"));
+    let provider_gateway = Arc::new(LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    ));
+    let model_gateway = Arc::new(ThreadBackedLoopModelGateway::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        provider_gateway,
+        16,
+        local_development_safety_context(),
+    ));
+    let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let port = HostManagedLoopModelPort::new(
+        fixture.run_context.clone(),
+        model_gateway,
+        milestones.clone(),
+    );
+    let inline_text = "loop control previous model response was empty or structurally invalid";
+
+    let response = port
+        .stream_model(
+            production_loop_request_with_inline_messages(
+                &fixture,
+                None,
+                vec![LoopInlineMessage {
+                    role: LoopInlineMessageRole::System,
+                    safe_body: LoopSafeSummary::new(inline_text).unwrap(),
+                }],
+            )
+            .await,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.chunks[0].safe_text_delta, "inline response");
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|message| message.role == Role::System && message.content.contains(inline_text)),
+        "provider messages did not include inline control text: {:?}",
+        requests[0].messages
+    );
+}
+
 /// Proves that `HostManagedLoopPromptPort::with_runtime_context` stamps the
 /// loop-start time into the prompt bundle messages and that the materialized
 /// content is resolvable from the shared instruction store. This is
@@ -1997,6 +2081,7 @@ async fn production_loop_model_gateway_rejects_forged_context_summary_before_pro
 
     let error = port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: vec![LoopModelMessage {
                 role: "user".to_string(),
                 content_ref: forged_ref.clone(),
@@ -2044,6 +2129,7 @@ async fn production_loop_model_gateway_rejects_unvalidated_surface_before_provid
 
     let error = port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: vec![LoopModelMessage {
                 role: "user".to_string(),
                 content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id))
@@ -2460,6 +2546,35 @@ async fn production_loop_request_with_safety(
     model_preference: Option<ModelProfileId>,
     safety_context: InstructionSafetyContext,
 ) -> LoopModelRequest {
+    production_loop_request_with_safety_and_inline_messages(
+        fixture,
+        model_preference,
+        safety_context,
+        Vec::new(),
+    )
+    .await
+}
+
+async fn production_loop_request_with_inline_messages(
+    fixture: &ThreadFixture,
+    model_preference: Option<ModelProfileId>,
+    inline_messages: Vec<LoopInlineMessage>,
+) -> LoopModelRequest {
+    production_loop_request_with_safety_and_inline_messages(
+        fixture,
+        model_preference,
+        InstructionSafetyContext::local_development_noop(),
+        inline_messages,
+    )
+    .await
+}
+
+async fn production_loop_request_with_safety_and_inline_messages(
+    fixture: &ThreadFixture,
+    model_preference: Option<ModelProfileId>,
+    safety_context: InstructionSafetyContext,
+    inline_messages: Vec<LoopInlineMessage>,
+) -> LoopModelRequest {
     let context_port = Arc::new(ThreadBackedLoopContextPort::new(
         Arc::clone(&fixture.thread_service),
         fixture.thread_scope.clone(),
@@ -2482,13 +2597,14 @@ async fn production_loop_request_with_safety(
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: Some(16),
-            inline_messages: Vec::new(),
+            inline_messages: inline_messages.clone(),
             capability_view: None,
         })
         .await
         .expect("test prompt bundle should build");
     LoopModelRequest {
         messages: prompt_bundle.messages,
+        inline_messages,
         surface_version: None,
         model_preference,
         capability_view: None,
@@ -2956,6 +3072,7 @@ impl LlmProvider for ToolAwareProvider {
 struct GatewayCapabilityPort {
     definitions: Vec<ProviderToolDefinition>,
     registered: Mutex<Vec<ProviderToolCall>>,
+    validation_error: Option<AgentLoopHostErrorKind>,
 }
 
 impl GatewayCapabilityPort {
@@ -2973,7 +3090,13 @@ impl GatewayCapabilityPort {
                 }),
             }],
             registered: Mutex::new(Vec::new()),
+            validation_error: None,
         }
+    }
+
+    fn with_provider_tool_validation_error(mut self, kind: AgentLoopHostErrorKind) -> Self {
+        self.validation_error = Some(kind);
+        self
     }
 }
 
@@ -2989,6 +3112,12 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
         &self,
         tool_call: &ProviderToolCall,
     ) -> Result<(), ironclaw_turns::run_profile::AgentLoopHostError> {
+        if let Some(kind) = self.validation_error {
+            return Err(ironclaw_turns::run_profile::AgentLoopHostError::new(
+                kind,
+                "provider tool output was structurally invalid",
+            ));
+        }
         if !self
             .definitions
             .iter()

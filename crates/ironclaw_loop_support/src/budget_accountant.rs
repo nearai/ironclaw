@@ -744,6 +744,7 @@ mod tests {
 
     fn sample_request() -> LoopModelRequest {
         LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: vec![],
             surface_version: None,
             model_preference: None,

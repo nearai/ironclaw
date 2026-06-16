@@ -198,6 +198,7 @@ async fn model_port_empty_request_applies_prompt_token_budget_to_context_fallbac
     issue_prompt_grant(&fixture.run_context, &[]);
 
     port.stream_model(LoopModelRequest {
+        inline_messages: Vec::new(),
         messages: Vec::new(),
         surface_version: None,
         model_preference: None,
@@ -254,6 +255,7 @@ async fn prompt_and_model_ports_share_cached_context_window_for_one_request() {
 
     model_port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: prompt_bundle.surface_version,
             model_preference: None,
@@ -346,6 +348,7 @@ async fn context_window_cache_does_not_cross_thread_scope_boundaries() {
 
     model_port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: prompt_bundle.surface_version,
             model_preference: None,
@@ -1226,6 +1229,7 @@ async fn prompt_and_model_ports_materialize_trusted_identity_content() {
 
     model_port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
@@ -1265,6 +1269,7 @@ async fn model_port_limits_provider_tool_definitions_to_model_visible_capability
 
     model_port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages,
             surface_version: None,
             model_preference: None,
@@ -1306,6 +1311,7 @@ async fn model_port_maps_invalid_model_output_to_recoverable_model_error() {
 
     let error = model_port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages,
             surface_version: None,
             model_preference: None,
@@ -1349,6 +1355,7 @@ async fn model_port_preserves_capability_info_for_filtered_capability_view() {
 
     model_port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages,
             surface_version: None,
             model_preference: None,
@@ -1619,6 +1626,7 @@ async fn prompt_and_model_ports_send_selected_skill_context_to_gateway() {
 
     model_port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
@@ -1720,6 +1728,7 @@ async fn prompt_and_model_ports_resolve_skill_refs_after_prompt_sorting() {
 
     model_port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
@@ -1807,6 +1816,7 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
 
     model_port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
@@ -1853,6 +1863,7 @@ async fn model_port_rejects_policy_denied_identity_ref_before_gateway_call() {
 
     let error = model_port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages,
             surface_version: None,
             model_preference: None,
@@ -2052,6 +2063,7 @@ async fn prompt_and_model_ports_keep_duplicate_skill_names_distinct() {
 
     model_port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
@@ -2119,6 +2131,7 @@ async fn model_port_rejects_skill_context_refs_when_source_changes_after_prompt_
 
     let error = model_port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
@@ -2830,6 +2843,7 @@ async fn model_port_resolves_thread_message_refs_and_delegates_to_gateway() {
 
     let response = port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages,
             surface_version: None,
             model_preference: None,
@@ -2930,6 +2944,7 @@ async fn model_port_reads_image_attachment_bytes_into_model_image_parts() {
     issue_prompt_grant(&fixture.run_context, &messages);
 
     port.stream_model(LoopModelRequest {
+        inline_messages: Vec::new(),
         messages,
         surface_version: None,
         model_preference: None,
@@ -2975,6 +2990,7 @@ async fn model_port_threads_resolved_model_route_snapshot_to_gateway() {
     issue_prompt_grant(&fixture.run_context, &messages);
 
     port.stream_model(LoopModelRequest {
+        inline_messages: Vec::new(),
         messages,
         surface_version: None,
         model_preference: None,
@@ -3018,6 +3034,7 @@ async fn model_port_resolves_explicit_refs_that_fall_outside_context_window() {
     issue_prompt_grant(&fixture.run_context, &messages);
 
     port.stream_model(LoopModelRequest {
+        inline_messages: Vec::new(),
         messages,
         surface_version: None,
         model_preference: None,
@@ -3087,6 +3104,7 @@ async fn model_port_preserves_provider_metadata_for_explicit_refs_outside_contex
     issue_prompt_grant(&fixture.run_context, &messages);
 
     port.stream_model(LoopModelRequest {
+        inline_messages: Vec::new(),
         messages,
         surface_version: None,
         model_preference: None,
@@ -3208,6 +3226,7 @@ async fn model_port_round_trips_tool_result_reference_context_as_typed_model_inp
 
     model_port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages,
             surface_version: None,
             model_preference: None,
@@ -3257,6 +3276,7 @@ async fn model_port_rejects_malformed_tool_result_reference_content() {
 
     let error = model_port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages,
             surface_version: None,
             model_preference: None,
@@ -3292,6 +3312,7 @@ async fn model_port_emits_model_milestones_without_prompt_or_output_payloads() {
 
     let response = port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages,
             surface_version: None,
             model_preference: Some(
@@ -3355,6 +3376,7 @@ async fn model_port_emits_started_and_failed_milestones_when_gateway_fails() {
 
     let error = port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages,
             surface_version: None,
             model_preference: None,
@@ -3412,6 +3434,7 @@ async fn model_port_logs_model_started_milestone_failure_without_losing_response
 
     let response = port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages,
             surface_version: None,
             model_preference: None,
@@ -3452,6 +3475,7 @@ async fn model_port_logs_model_completed_milestone_failure_without_losing_respon
 
     let response = port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages,
             surface_version: None,
             model_preference: None,
@@ -3490,6 +3514,7 @@ async fn model_port_rejects_message_role_that_disagrees_with_thread_record() {
 
     let error = port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages,
             surface_version: None,
             model_preference: None,
@@ -3518,6 +3543,7 @@ async fn model_port_surfaces_fail_closed_gateway_policy_errors_without_raw_detai
 
     let error = port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages,
             surface_version: None,
             model_preference: None,
@@ -3549,6 +3575,7 @@ async fn model_port_replaces_invalid_gateway_safe_summary_with_stable_summary() 
 
     let error = port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages,
             surface_version: None,
             model_preference: None,
@@ -3591,6 +3618,7 @@ async fn model_port_preserves_gateway_safe_reason_kind() {
 
     let error = port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages,
             surface_version: None,
             model_preference: None,

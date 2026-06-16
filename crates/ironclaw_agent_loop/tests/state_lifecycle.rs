@@ -3,8 +3,8 @@ use ironclaw_agent_loop::{
     families,
     state::{
         CapabilityCallSignature, CheckpointKind, CheckpointPayloadError,
-        DeferredCompactionWatermark, LoopExecutionState, RepeatedCallWarningPhase,
-        RepeatedCallWarningState,
+        DeferredCompactionWatermark, LoopExecutionState, RecoveryAttemptClass,
+        RecoveryStrategyState, RepeatedCallWarningPhase, RepeatedCallWarningState,
     },
     test_support::{
         LoopExecutionStateBuilder, MockAgentLoopDriverHost, ScenarioScript, capability_id,
@@ -53,6 +53,27 @@ fn state_serializes_round_trips_with_last_deferred_compaction_watermark() {
             through_seq: 42,
             prompt_fingerprint: 7_777,
         })
+    );
+}
+
+#[test]
+fn model_invalid_output_recovery_attempts_survive_checkpoint_reload() {
+    let context = test_run_context("model-invalid-output-recovery-round-trip");
+    let mut state = LoopExecutionState::initial_for_run(&context);
+    state.recovery_state =
+        RecoveryStrategyState::with_attempts_for(RecoveryAttemptClass::ModelInvalidOutput, 2);
+
+    let payload = serde_json::to_vec(&state).expect("state should serialize");
+    let restored =
+        LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::BeforeModel)
+            .expect("checkpoint payload should reload");
+
+    assert_eq!(restored.recovery_state, state.recovery_state);
+    assert_eq!(
+        restored
+            .recovery_state
+            .attempts_for(RecoveryAttemptClass::ModelInvalidOutput),
+        2
     );
 }
 
