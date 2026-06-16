@@ -44,13 +44,14 @@ fn redact_shell_command_for_display(cmd: &str) -> String {
     out = patterns[2].replace_all(&out, "$1: [redacted]").into_owned();
     out = patterns[3]
         .replace_all(&out, |captures: &regex::Captures<'_>| {
-            sanitize_url_for_display(&captures[0])
+            sanitize_url_substring_for_display(&captures[0])
         })
         .into_owned();
     sanitize_display_text(&out)
 }
 
 pub fn sanitize_display_text(text: &str) -> String {
+    let text = redact_shared_display_substrings(text);
     let mut out = String::with_capacity(text.len());
     let mut credential_value_state = CredentialValueState::None;
     for token in text.split_inclusive(char::is_whitespace) {
@@ -111,6 +112,26 @@ pub fn sanitize_display_text(text: &str) -> String {
         };
     }
     out
+}
+
+fn redact_shared_display_substrings(text: &str) -> String {
+    static PATTERNS: OnceLock<[Regex; 2]> = OnceLock::new();
+    let patterns = PATTERNS.get_or_init(|| {
+        [
+            Regex::new(
+                r#"(?i)(Authorization|X-Api-Key|X-Auth-Token|Bearer)\s*:\s*(?:[a-zA-Z]+\s+[^\s"']+|[^\s"']+)"#,
+            )
+            .expect("hardcoded display redaction regex is valid"), // safety: static regex literal is covered by redaction tests.
+            Regex::new(r#"[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s"']+"#)
+                .expect("hardcoded display redaction regex is valid"), // safety: static regex literal is covered by redaction tests.
+        ]
+    });
+    let out = patterns[0].replace_all(text, "$1: [redacted]").into_owned();
+    patterns[1]
+        .replace_all(&out, |captures: &regex::Captures<'_>| {
+            sanitize_url_substring_for_display(&captures[0])
+        })
+        .into_owned()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,6 +199,25 @@ fn url_trailing_wrapper_punctuation(character: char) -> bool {
         character,
         '"' | '\'' | '`' | ')' | ']' | '}' | '>' | ',' | ';'
     )
+}
+
+fn sanitize_url_substring_for_display(url: &str) -> String {
+    let mut end = url.len();
+    while end > 0 {
+        let Some(character) = url[..end].chars().next_back() else {
+            break;
+        };
+        if !url_trailing_wrapper_punctuation(character) {
+            break;
+        }
+        let candidate_end = end - character.len_utf8();
+        if candidate_end == 0 || !is_url_like(&url[..candidate_end]) {
+            break;
+        }
+        end = candidate_end;
+    }
+    let sanitized = sanitize_url_for_display(&url[..end]);
+    format!("{sanitized}{}", &url[end..])
 }
 
 pub fn sanitize_url_for_display(url: &str) -> String {
@@ -731,6 +771,18 @@ mod tests {
         assert!(sanitized.contains("<https://example.test/reset/[redacted]/[redacted]>"));
         assert!(!sanitized.contains("sk-secret"));
         assert!(!sanitized.contains("opaque-value"));
+    }
+
+    #[test]
+    fn sanitize_display_text_redacts_url_and_auth_header_substrings() {
+        let sanitized = sanitize_display_text(
+            "url=https://example.test/reset/token/opaque-value Authorization: Bearer opaque-token",
+        );
+
+        assert!(sanitized.contains("[redacted] Authorization: [redacted]"));
+        assert!(sanitized.contains("Authorization: [redacted]"));
+        assert!(!sanitized.contains("opaque-value"));
+        assert!(!sanitized.contains("opaque-token"));
     }
 
     #[test]

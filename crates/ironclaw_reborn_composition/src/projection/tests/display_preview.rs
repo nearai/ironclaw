@@ -583,7 +583,7 @@ async fn capability_display_preview_store_redacts_common_secret_text_shapes() {
         capability_id: &capability,
         result_ref: "result:common-secret-text",
         output: &serde_json::Value::String(
-            "password: secret123 file:///etc/passwd ghp_abcdefghijklmnopqrstuvwxyz xoxb-1234567890 AKIAIOSFODNN7EXAMPLE eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature (https://example.test/reset/sk-secret) <https://example.test/reset/token/opaque-value> token =opaque-token password :opaque-password"
+            "password: secret123 file:///etc/passwd ghp_abcdefghijklmnopqrstuvwxyz xoxb-1234567890 AKIAIOSFODNN7EXAMPLE eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature (https://example.test/reset/sk-secret) <https://example.test/reset/token/opaque-value> url=https://example.test/reset/token/query-value Authorization: Bearer header-value token =opaque-token password :opaque-password"
                 .to_string(),
         ),
         output_bytes: 256,
@@ -617,6 +617,8 @@ async fn capability_display_preview_store_redacts_common_secret_text_shapes() {
     assert!(!rendered.contains("eyJhbGciOiJIUzI1NiJ9"));
     assert!(!rendered.contains("sk-secret"));
     assert!(!rendered.contains("opaque-value"));
+    assert!(!rendered.contains("query-value"));
+    assert!(!rendered.contains("header-value"));
     assert!(!rendered.contains("opaque-token"));
     assert!(!rendered.contains("opaque-password"));
     assert!(rendered.contains("[redacted]"));
