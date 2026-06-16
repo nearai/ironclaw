@@ -313,6 +313,10 @@ async fn append_capability_display_preview_is_history_visible_and_model_hidden()
             .collect::<Vec<_>>(),
         vec![MessageKind::User, MessageKind::CapabilityDisplayPreview]
     );
+    // A summary whose range contains only a CapabilityDisplayPreview (permanent
+    // non-visible, never resurfaces) IS now applied: the preview kind is safe
+    // to span.  The summary replaces seq 1 (User) through seq 2 (Preview) in
+    // the model context; the preview itself remains absent from context.
     service
         .create_summary_artifact(CreateSummaryArtifactRequest {
             scope: scope.clone(),
@@ -320,7 +324,7 @@ async fn append_capability_display_preview_is_history_visible_and_model_hidden()
             start_sequence: 1,
             end_sequence: 2,
             summary_kind: SummaryKind::Compaction,
-            content: MessageContent::text("summary must not replace preview range"),
+            content: MessageContent::text("run a tool summarized"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await
@@ -334,8 +338,11 @@ async fn append_capability_display_preview_is_history_visible_and_model_hidden()
         })
         .await
         .unwrap();
+    // Summary is now applied (CapabilityDisplayPreview is safe to span — permanent
+    // non-visible, never resurfaces).  Context shows the summary, not the raw User
+    // or the Preview.
     assert_eq!(context.messages.len(), 1);
-    assert_eq!(context.messages[0].kind, MessageKind::User);
+    assert_eq!(context.messages[0].kind, MessageKind::Summary);
 
     let direct_context = service
         .load_context_messages(LoadContextMessagesRequest {
@@ -846,8 +853,10 @@ async fn busy_message_is_visible_deferred_and_not_tied_to_a_run() {
         .await
         .unwrap();
 
+    // Inject a legacy DeferredBusy row directly — the mark_message_deferred_busy
+    // writer has been retired; this back-door preserves read/replay coverage.
     service
-        .mark_message_deferred_busy(&scope("a"), &thread.thread_id, accepted.message_id)
+        .inject_legacy_deferred_busy_for_test(&scope("a"), &thread.thread_id, accepted.message_id)
         .await
         .unwrap();
 
@@ -863,7 +872,49 @@ async fn busy_message_is_visible_deferred_and_not_tied_to_a_run() {
 }
 
 #[tokio::test]
-async fn deferred_busy_rejects_non_user_and_non_accepted_messages() {
+async fn rejected_busy_marks_message_with_rejected_status() {
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("a"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("arrived while busy"),
+        })
+        .await
+        .unwrap();
+
+    service
+        .mark_message_rejected_busy(&scope("a"), &thread.thread_id, accepted.message_id)
+        .await
+        .unwrap();
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.messages[0].status, MessageStatus::RejectedBusy);
+    assert!(history.messages[0].turn_run_id.is_none());
+}
+
+#[tokio::test]
+async fn rejected_busy_rejects_non_user_message() {
     let service = InMemorySessionThreadService::default();
     let thread = service
         .ensure_thread(EnsureThreadRequest {
@@ -886,10 +937,136 @@ async fn deferred_busy_rejects_non_user_and_non_accepted_messages() {
         .unwrap();
 
     let result = service
-        .mark_message_deferred_busy(&scope("a"), &thread.thread_id, draft.message_id)
+        .mark_message_rejected_busy(&scope("a"), &thread.thread_id, draft.message_id)
         .await;
 
-    assert!(result.is_err());
+    assert!(
+        matches!(
+            result,
+            Err(SessionThreadError::InvalidMessageTransition { .. })
+        ),
+        "mark_message_rejected_busy must fail with InvalidMessageTransition on a non-user (assistant draft) message, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn rejected_busy_rejects_already_finalized_user_message() {
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("a"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    // Accept and then submit the message so it is in Submitted state (finalized).
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("already submitted"),
+        })
+        .await
+        .unwrap();
+    service
+        .mark_message_submitted(
+            &scope("a"),
+            &thread.thread_id,
+            accepted.message_id,
+            "turn-id-x".into(),
+            "run-id-x".into(),
+        )
+        .await
+        .unwrap();
+
+    let result = service
+        .mark_message_rejected_busy(&scope("a"), &thread.thread_id, accepted.message_id)
+        .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(SessionThreadError::InvalidMessageTransition { .. })
+        ),
+        "mark_message_rejected_busy must fail with InvalidMessageTransition on an already-finalized (Submitted) user message, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn rejected_busy_cannot_be_marked_submitted_is_terminal() {
+    // RejectedBusy is a durable terminal state — the stored row must never
+    // transition to Submitted.  ensure_user_accepted no longer admits
+    // RejectedBusy, so mark_message_submitted must return
+    // InvalidMessageTransition and the status must remain RejectedBusy.
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("a"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("resend after busy"),
+        })
+        .await
+        .unwrap();
+
+    // Drive the message into RejectedBusy.
+    service
+        .mark_message_rejected_busy(&scope("a"), &thread.thread_id, accepted.message_id)
+        .await
+        .unwrap();
+
+    // Attempting to submit the rejected row must fail — RejectedBusy is terminal.
+    let result = service
+        .mark_message_submitted(
+            &scope("a"),
+            &thread.thread_id,
+            accepted.message_id,
+            "turn-id-resend".into(),
+            "run-id-resend".into(),
+        )
+        .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(SessionThreadError::InvalidMessageTransition { .. })
+        ),
+        "mark_message_submitted must fail with InvalidMessageTransition on a RejectedBusy message (terminal state), got {result:?}"
+    );
+
+    // Status must remain RejectedBusy — the row is unchanged.
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        history.messages[0].status,
+        MessageStatus::RejectedBusy,
+        "status must remain RejectedBusy after the failed Submitted transition"
+    );
 }
 
 #[tokio::test]
@@ -1670,6 +1847,190 @@ async fn summary_covering_draft_message_is_not_loaded_into_model_context() {
     assert_eq!(context.messages.len(), 1);
     assert_eq!(context.messages[0].kind, MessageKind::User);
     assert_eq!(context.messages[0].content, "visible user message");
+}
+
+/// A compaction summary whose span contains an interior RejectedBusy message
+/// (a permanently-terminal non-visible status) MUST be applied — the guard
+/// must not block it.  Previously, any non-model-context-visible message in
+/// the range caused the summary to be silently dropped.
+#[tokio::test]
+async fn summary_spanning_interior_rejected_busy_is_applied() {
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("a"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    // seq 1: visible user message
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("first"),
+        })
+        .await
+        .unwrap();
+
+    // seq 2: accepted but then rejected-busy (permanently terminal, never resurfaces)
+    let second = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("rejected busy interior"),
+        })
+        .await
+        .unwrap();
+    service
+        .mark_message_rejected_busy(&scope("a"), &thread.thread_id, second.message_id)
+        .await
+        .unwrap();
+
+    // seq 3: visible user message
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("third"),
+        })
+        .await
+        .unwrap();
+
+    // Summary spans [1..3] — covers the interior RejectedBusy at seq 2.
+    // This MUST be applied (not dropped).
+    service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 3,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("first and third summarized"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await
+        .unwrap();
+
+    let context = service
+        .load_context_window(LoadContextWindowRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id,
+            max_messages: 16,
+        })
+        .await
+        .unwrap();
+
+    // The summary must be selected and replace the visible range.
+    assert_eq!(context.messages.len(), 1, "summary must be applied");
+    assert_eq!(context.messages[0].kind, MessageKind::Summary);
+    assert_eq!(context.messages[0].content, "first and third summarized");
+}
+
+/// A compaction summary spanning a Draft (resurfaceable) interior message must
+/// NOT be applied — the guard must still block it to avoid hiding a
+/// future-visible message.
+#[tokio::test]
+async fn summary_spanning_interior_draft_is_not_applied() {
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("a"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    // seq 1: visible user message
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("first"),
+        })
+        .await
+        .unwrap();
+
+    // seq 2: assistant Draft — resurfaceable, must still block the summary.
+    service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-draft".into(),
+            content: MessageContent::text("draft interior"),
+        })
+        .await
+        .unwrap();
+
+    // seq 3: visible user message
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("third"),
+        })
+        .await
+        .unwrap();
+
+    // Summary spans [1..3] — covers the Draft at seq 2.
+    // The draft can still resurface as model-visible, so this must NOT be applied.
+    service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 3,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("should not appear"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await
+        .unwrap();
+
+    let context = service
+        .load_context_window(LoadContextWindowRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id,
+            max_messages: 16,
+        })
+        .await
+        .unwrap();
+
+    // The summary must be suppressed; only the two visible messages appear.
+    assert_eq!(
+        context.messages.len(),
+        2,
+        "summary must be suppressed for draft-spanning range"
+    );
+    assert_eq!(context.messages[0].content, "first");
+    assert_eq!(context.messages[1].content, "third");
 }
 
 #[tokio::test]

@@ -71,7 +71,7 @@ export function RecentRunRow({ run, onOpenRun, onOpenLogs }) {
           disabled=${!canOpen}
           onClick=${canOpen ? () => onOpenRun(run.chat_path) : undefined}
         >
-          <${Icon} name="chat" className="h-4 w-4" />
+          <${Icon} name="chat" className="mr-1.5 h-4 w-4" />
           ${t("automations.detail.openRun")}
         <//>
         <${Button}
@@ -80,7 +80,7 @@ export function RecentRunRow({ run, onOpenRun, onOpenLogs }) {
           disabled=${!canOpenLogs}
           onClick=${canOpenLogs ? () => onOpenLogs(logsPath) : undefined}
         >
-          <${Icon} name="file" className="h-4 w-4" />
+          <${Icon} name="file" className="mr-1.5 h-4 w-4" />
           ${t("nav.logs")}
         <//>
       </div>

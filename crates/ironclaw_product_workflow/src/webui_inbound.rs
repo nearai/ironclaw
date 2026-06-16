@@ -25,6 +25,41 @@ const MAX_INLINE_ATTACHMENT_BYTES: usize = 5 * 1024 * 1024;
 const MAX_INLINE_TOTAL_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const ATTACHMENT_FILENAME_MAX_BYTES: usize = 256;
 
+/// Browser-facing inline-attachment contract advertised to the WebUI.
+///
+/// Carries the `accept` tokens generated from the shared
+/// [`ironclaw_common`] format registry (so the file picker can never drift
+/// from the server's allowed MIME set) plus the same budgets
+/// [`WebUiSendMessageRequest::decode_attachments`] enforces. The browser
+/// uses this only for pre-submit hints; the server-side decode remains the
+/// sole authority on what is accepted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebUiAttachmentCapabilities {
+    /// HTML file-input `accept` tokens from the shared registry: exact MIME
+    /// types plus extensions, e.g. `["image/png", ".png", "application/pdf",
+    /// ".pdf"]` — never `image/*` wildcards (which would advertise unsupported
+    /// formats, and which break folder navigation in the native macOS picker).
+    pub accept: Vec<String>,
+    /// Maximum number of attachments per message.
+    pub max_count: usize,
+    /// Maximum decoded byte size of a single attachment.
+    pub max_file_bytes: usize,
+    /// Maximum combined decoded byte size of all attachments in one message.
+    pub max_total_bytes: usize,
+}
+
+/// The inline-attachment contract advertised to browsers. Generated from the
+/// shared format registry and the budgets `decode_attachments` enforces, so
+/// the picker and the server stay in lockstep by construction.
+pub fn webui_attachment_capabilities() -> WebUiAttachmentCapabilities {
+    WebUiAttachmentCapabilities {
+        accept: ironclaw_common::accept_tokens(),
+        max_count: MAX_INLINE_ATTACHMENTS,
+        max_file_bytes: MAX_INLINE_ATTACHMENT_BYTES,
+        max_total_bytes: MAX_INLINE_TOTAL_ATTACHMENT_BYTES,
+    }
+}
+
 /// Authenticated WebUI caller after route auth has already completed.
 ///
 /// This is authority-bearing input supplied by the host/router layer, not by

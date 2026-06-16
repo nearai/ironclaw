@@ -84,8 +84,8 @@ const CHANNEL: &str = "D123";
 const SLACK_SIGNATURE_HEADER: &str = "X-Slack-Signature";
 const SLACK_TIMESTAMP_HEADER: &str = "X-Slack-Request-Timestamp";
 const SECRET: &str = "topsecret";
-const GATE: &str = "gate:approve-slack";
-const GATE_B: &str = "gate:approve-slack-b";
+const GATE: &str = "gate:approval-00000000-0000-0000-0000-000000000001";
+const GATE_B: &str = "gate:approval-00000000-0000-0000-0000-000000000002";
 const AUTH_GATE: &str = "gate:auth-slack";
 
 struct Harness {
@@ -331,6 +331,7 @@ async fn build_harness_with_full_settings(
             egress: Arc::new(egress.clone()),
             delivery_sink: Arc::new(sink),
             auth_challenges,
+            approval_requests: None,
         },
         SlackFinalReplyDeliverySettings {
             poll_interval: Duration::from_millis(1),
@@ -545,6 +546,7 @@ async fn build_harness_for_delivered_route_tests_with_store_mode(
             egress: Arc::new(egress.clone()),
             delivery_sink: Arc::new(sink),
             auth_challenges: None,
+            approval_requests: None,
         },
         SlackFinalReplyDeliverySettings {
             poll_interval: Duration::from_millis(1),
@@ -750,10 +752,11 @@ async fn explicit_gate_ref_approve_resolves_via_delivered_route() {
 }
 
 /// Bare `approve` in the DM with two live route records for the same conversation
-/// is rejected as ambiguous — the workflow posts a "declined by policy" hint and
-/// does NOT forward any resolve to the approval service.
+/// resolves the most-recently-delivered gate (recency tiebreak) rather than
+/// failing closed. Exactly one resolve is forwarded — for the newest route —
+/// and `approve gate:<ref>` remains available to target a specific gate.
 #[tokio::test]
-async fn bare_approve_with_two_live_routes_fails_closed_ambiguous() {
+async fn bare_approve_with_two_live_routes_resolves_most_recent() {
     let (harness, inner_approvals) = build_harness_for_delivered_route_tests().await;
 
     // Submit a turn to establish the DM binding (no blocked run needed for
@@ -773,7 +776,8 @@ async fn bare_approve_with_two_live_routes_fails_closed_ambiguous() {
             gate_ref: GATE.to_string(),
             run_id: ironclaw_turns::TurnRunId::new(),
             scope: foreign_run_scope(),
-            recorded_at: chrono::Utc::now(),
+            // Older delivery — recency must prefer GATE_B below.
+            recorded_at: chrono::Utc::now() - chrono::Duration::hours(1),
             delivered_conversation_fingerprints: vec![fingerprint.clone()],
         })
         .await
@@ -797,30 +801,125 @@ async fn bare_approve_with_two_live_routes_fails_closed_ambiguous() {
     assert_eq!(approve_response.status(), StatusCode::OK);
     harness.drain().await;
 
-    // No resolve must have been forwarded to the approval service.
-    assert!(
-        inner_approvals.requests().is_empty(),
-        "ambiguous routes must not reach the approval service"
+    // Exactly one resolve is forwarded — for the most-recently-delivered route
+    // (GATE_B) — rather than fanning out or failing closed without consulting the
+    // service.
+    let requests = inner_approvals.requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "recency must forward exactly one resolve, got {}",
+        requests.len()
+    );
+    assert_eq!(
+        requests[0].gate_ref.as_str(),
+        GATE_B,
+        "recency must resolve the most-recently-delivered gate"
     );
 
-    // The user must receive an "ambiguous" hint (approve gate:<ref>) — not silence, not
-    // a "declined by policy" message.  The approval prompt posted by the DM_BLOCK drain
-    // occupies messages[0]; the rejection hint is messages[1].
+    // No ambiguous hint: the only message is the approval prompt posted by the
+    // DM_BLOCK drain. The bare approve resolved cleanly, so nothing else is posted.
     let messages = harness.slack_messages();
     assert_eq!(
         messages.len(),
-        2,
-        "expected approval prompt (DM_BLOCK) + ambiguous hint (DM_APPROVE), got {} message(s)",
+        1,
+        "expected only the DM_BLOCK approval prompt, got {} message(s)",
         messages.len()
     );
-    // AmbiguousResolution hint: "Multiple requests are pending … approve gate:<ref> …"
-    // The hint uses the literal placeholder `<ref>`, which the approval prompt does not.
-    assert!(
-        messages[1]["text"]
-            .as_str()
-            .is_some_and(|t| t.contains("approve gate:<ref>")),
-        "hint must prompt user to pick one gate ref; got: {:?}",
-        messages[1]["text"]
+}
+
+/// Bare `approve` in the DM with ONE approval gate AND one stale/uncompleted
+/// auth gate both delivered to the same DM resolves the approval gate —
+/// NOT AmbiguousGate.
+///
+/// Scenario: a run first triggered an auth gate (e.g. OAuth not yet completed,
+/// still live in the store) and later a second run triggered an approval gate,
+/// both delivered to the same DM.  The user sends a bare "approve".
+/// `list_pending` returns [] (ForeignScopeApprovalService).  The workflow falls
+/// back to the conversation-fingerprint index and finds TWO records.  Before
+/// this fix, both records counted toward `live.len()` → `Ambiguous` → error.
+/// After this fix, the approval-path gate-kind filter drops the auth record,
+/// leaving exactly one approval record → `Single` → resolved successfully.
+///
+/// This test would fail on the pre-fix code path: the auth-gate record would
+/// inflate `live.len()` to 2 and trigger `AmbiguousGate`.
+#[tokio::test]
+async fn bare_approve_with_one_approval_and_one_stale_auth_gate_resolves_approval() {
+    let (harness, inner_approvals) = build_harness_for_delivered_route_tests().await;
+
+    // Submit a turn so the DM conversation binding is created.
+    let block_response = harness.post_event(DM_BLOCK).await;
+    assert_eq!(block_response.status(), StatusCode::OK);
+    harness.drain().await;
+    let blocked_run_id = harness
+        .coordinator
+        .blocked_run_id()
+        .expect("run must be blocked after DM_BLOCK"); // safety: E2E test assertion.
+
+    let fingerprint = dm_conversation_fingerprint();
+
+    // Seed the approval-gate route record (the "real" pending gate the user
+    // wants to resolve).
+    harness
+        .route_store
+        .record_delivered_gate_route(ironclaw_outbound::DeliveredGateRouteRecord {
+            tenant_id: TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
+            user_id: UserId::new(USER).expect("user"), // safety: static test user id is valid.
+            gate_ref: GATE.to_string(), // gate:approval-... prefix — is_approval_gate_ref → true
+            run_id: blocked_run_id,
+            scope: foreign_run_scope(),
+            recorded_at: chrono::Utc::now(),
+            delivered_conversation_fingerprints: vec![fingerprint.clone()],
+        })
+        .await
+        .expect("approval route record write"); // safety: in-memory store should not fail.
+
+    // Seed a stale/uncompleted auth-gate route record in the SAME conversation.
+    // This simulates a lingering `gate:auth-*` record that was never completed
+    // (e.g. the user dismissed the OAuth flow without finishing it).  Because
+    // the 48h TTL has not elapsed it is still "live" and would previously
+    // contaminate the approval bare-resolve lookup.
+    harness
+        .route_store
+        .record_delivered_gate_route(ironclaw_outbound::DeliveredGateRouteRecord {
+            tenant_id: TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
+            user_id: UserId::new(USER).expect("user"), // safety: static test user id is valid.
+            gate_ref: AUTH_GATE.to_string(), // gate:auth-... prefix — is_auth_gate_ref → true
+            run_id: ironclaw_turns::TurnRunId::new(),
+            scope: foreign_run_scope(),
+            recorded_at: chrono::Utc::now(),
+            delivered_conversation_fingerprints: vec![fingerprint],
+        })
+        .await
+        .expect("auth route record write"); // safety: in-memory store should not fail.
+
+    // Post a bare "approve".  Two records exist in the conversation bucket but
+    // only the approval-gate record passes the gate-kind filter, so the workflow
+    // should resolve Single → forward exactly one approval resolve request.
+    let approve_response = harness.post_event(DM_APPROVE).await;
+    assert_eq!(approve_response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let requests = inner_approvals.requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "exactly one approval resolve must be forwarded — auth gate must be filtered out; got {} request(s)",
+        requests.len()
+    );
+    assert_eq!(
+        requests[0].run_id_hint,
+        Some(blocked_run_id),
+        "run_id_hint must come from the approval route record"
+    );
+    assert_eq!(
+        requests[0].gate_ref.as_str(),
+        GATE,
+        "resolved gate_ref must be the approval gate"
+    );
+    assert_eq!(
+        requests[0].decision,
+        ApprovalInteractionDecision::ApproveOnce
     );
 }
 
@@ -990,128 +1089,6 @@ async fn slack_dm_delivers_approval_prompt_after_immediate_ack() {
 }
 
 #[tokio::test]
-async fn slack_dm_delivers_auth_prompt_with_setup_link_after_immediate_ack() {
-    let auth_provider = Arc::new(FakeAuthChallengeProvider::default());
-    let auth_challenges: Arc<dyn AuthChallengeProvider> = auth_provider.clone();
-    let harness = build_harness_with_actor_user_resolver_and_auth_challenges(
-        TurnMode::BlockAuth,
-        static_personal_actor_user_resolver(),
-        Some(auth_challenges),
-    )
-    .await;
-
-    let response = harness
-        .post_event(dm_message("Ev-auth", "needs auth"))
-        .await;
-
-    assert_eq!(response.status(), StatusCode::OK);
-    harness.drain().await;
-
-    let messages = harness.slack_messages();
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0]["channel"], CHANNEL);
-    let text = messages[0]["text"].as_str().expect("Slack message text");
-    assert!(text.contains("Authentication required"));
-    assert!(text.contains("Setup link: https://provider.example/oauth"));
-    assert!(harness.slack_deletes().is_empty());
-    auth_provider.assert_single_call();
-}
-
-#[tokio::test]
-async fn slack_channel_auth_prompt_omits_setup_link_after_immediate_ack() {
-    let auth_challenges: Arc<dyn AuthChallengeProvider> =
-        Arc::new(FakeAuthChallengeProvider::default());
-    let harness = build_harness_with_actor_user_resolver_and_auth_challenges(
-        TurnMode::BlockAuth,
-        static_personal_actor_user_resolver(),
-        Some(auth_challenges),
-    )
-    .await;
-
-    let response = harness
-        .post_event(app_mention_message("Ev-auth-channel", "needs auth"))
-        .await;
-
-    assert_eq!(response.status(), StatusCode::OK);
-    harness.drain().await;
-
-    let messages = harness.slack_messages();
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0]["channel"], "C123");
-    assert_eq!(messages[0]["thread_ts"], "1710000000.000008");
-    let text = messages[0]["text"].as_str().expect("Slack message text");
-    assert!(text.contains("Authentication required"));
-    assert!(!text.contains("Setup link:"));
-    assert!(!text.contains("https://provider.example/oauth"));
-    assert!(harness.slack_deletes().is_empty());
-}
-
-#[tokio::test]
-async fn slack_dm_delivers_final_reply_after_auth_completes_outside_slack() {
-    let auth_provider = Arc::new(FakeAuthChallengeProvider::default());
-    let auth_challenges: Arc<dyn AuthChallengeProvider> = auth_provider.clone();
-    let harness = build_harness_with_actor_user_resolver_and_auth_challenges(
-        TurnMode::BlockAuth,
-        static_personal_actor_user_resolver(),
-        Some(auth_challenges),
-    )
-    .await;
-
-    let response = harness
-        .post_event(dm_message("Ev-auth", "needs auth"))
-        .await;
-
-    assert_eq!(response.status(), StatusCode::OK);
-    for _ in 0..80 {
-        if harness.slack_messages().len() == 1 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    let messages = harness.slack_messages();
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0]["channel"], CHANNEL);
-    assert!(
-        messages[0]["text"]
-            .as_str()
-            .is_some_and(|text| text.contains("Authentication required"))
-    );
-
-    harness
-        .coordinator
-        .resume_blocked_run_to_running()
-        .await
-        .expect("resume auth-blocked run");
-    for _ in 0..80 {
-        if harness.slack_messages().len() == 2 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    let messages = harness.slack_messages();
-    assert_eq!(messages.len(), 2);
-    assert_eq!(messages[1]["channel"], CHANNEL);
-    assert_eq!(messages[1]["text"], "Ironclaw is thinking...");
-
-    harness
-        .coordinator
-        .complete_active_run("authenticated and finished")
-        .await
-        .expect("complete resumed auth run");
-    harness.drain().await;
-
-    let messages = harness.slack_messages();
-    assert_eq!(messages.len(), 3);
-    assert_eq!(messages[2]["channel"], CHANNEL);
-    assert_eq!(messages[2]["text"], "authenticated and finished");
-    let deletes = harness.slack_deletes();
-    assert_eq!(deletes.len(), 2);
-    assert_eq!(deletes[0]["channel"], CHANNEL);
-    assert_eq!(deletes[1]["channel"], CHANNEL);
-    auth_provider.assert_single_call();
-}
-
-#[tokio::test]
 async fn slack_dm_posts_working_indicator_and_deletes_it_after_final_reply() {
     let harness = build_harness(TurnMode::Running).await;
 
@@ -1268,80 +1245,137 @@ async fn gate_prompt_is_posted_exactly_once_when_approval_ack_races_live_deliver
 }
 
 #[tokio::test]
-async fn slack_thread_auth_deny_with_bot_mention_cancels_auth_gate_without_agent_turn() {
-    let harness = build_harness(TurnMode::BlockAuth).await;
+async fn slack_dm_delivers_auth_prompt_with_setup_link_after_immediate_ack() {
+    let auth_provider = Arc::new(FakeAuthChallengeProvider::default());
+    let auth_challenges: Arc<dyn AuthChallengeProvider> = auth_provider.clone();
+    let harness = build_harness_with_actor_user_resolver_and_auth_challenges(
+        TurnMode::BlockAuth,
+        static_personal_actor_user_resolver(),
+        Some(auth_challenges),
+    )
+    .await;
 
-    let first = harness
-        .post_event(app_mention_message("Ev-auth-cancel-start", "needs auth"))
-        .await;
-    assert_eq!(first.status(), StatusCode::OK); // safety: Slack E2E route assertion.
-    harness.drain().await;
-    assert_eq!(harness.slack_messages().len(), 1); // safety: Slack E2E delivery assertion.
-
-    let second = harness
-        .post_event(thread_message_event(
-            "Ev-auth-cancel",
-            "<@UBOT> auth deny gate:auth-slack",
-            "1710000000.000009",
-        ))
+    let response = harness
+        .post_event(dm_message("Ev-auth", "needs auth"))
         .await;
 
-    assert_eq!(second.status(), StatusCode::OK); // safety: Slack E2E route assertion.
+    assert_eq!(response.status(), StatusCode::OK);
     harness.drain().await;
 
-    let auths = harness.auths.requests();
-    assert_eq!(auths.len(), 1); // safety: Slack E2E auth routing assertion.
-    assert_eq!(auths[0].decision, AuthInteractionDecision::Deny); // safety: length asserted above.
-    assert_eq!(auths[0].gate_ref.as_str(), AUTH_GATE); // safety: length asserted above.
-    let submitted_turn_count = harness.coordinator.submitted_turn_count();
-    assert_eq!(submitted_turn_count, 1); // safety: Slack E2E turn routing assertion.
     let messages = harness.slack_messages();
-    assert_eq!(messages.len(), 2); // safety: Slack E2E delivery assertion.
-    assert_eq!(messages[1]["channel"], "C123");
-    assert_eq!(messages[1]["thread_ts"], "1710000000.000009");
-    assert_eq!(messages[1]["text"], "Authentication canceled.");
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["channel"], CHANNEL);
+    let text = messages[0]["text"].as_str().expect("Slack message text");
+    assert!(text.contains("Authentication required"));
+    assert!(text.contains("Setup link: https://provider.example/oauth"));
+    assert!(harness.slack_deletes().is_empty());
+    auth_provider.assert_single_call();
 }
 
 #[tokio::test]
-async fn slack_dm_thread_auth_deny_cancels_base_dm_auth_gate_without_agent_turn() {
-    let harness = build_harness(TurnMode::BlockAuth).await;
+async fn slack_channel_auth_prompt_omits_setup_link_after_immediate_ack() {
+    let auth_challenges: Arc<dyn AuthChallengeProvider> =
+        Arc::new(FakeAuthChallengeProvider::default());
+    let harness = build_harness_with_actor_user_resolver_and_auth_challenges(
+        TurnMode::BlockAuth,
+        static_personal_actor_user_resolver(),
+        Some(auth_challenges),
+    )
+    .await;
 
-    let first = harness
+    let response = harness
+        .post_event(app_mention_message("Ev-auth-channel", "needs auth"))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["channel"], "C123");
+    assert_eq!(messages[0]["thread_ts"], "1710000000.000008");
+    let text = messages[0]["text"].as_str().expect("Slack message text");
+    assert!(text.contains("Authentication required"));
+    assert!(!text.contains("Setup link:"));
+    assert!(!text.contains("https://provider.example/oauth"));
+    assert!(harness.slack_deletes().is_empty());
+}
+
+#[tokio::test]
+async fn slack_dm_delivers_final_reply_after_auth_completes_outside_slack() {
+    let auth_provider = Arc::new(FakeAuthChallengeProvider::default());
+    let auth_challenges: Arc<dyn AuthChallengeProvider> = auth_provider.clone();
+    let harness = build_harness_with_actor_user_resolver_and_auth_challenges(
+        TurnMode::BlockAuth,
+        static_personal_actor_user_resolver(),
+        Some(auth_challenges),
+    )
+    .await;
+
+    let response = harness
         .post_event(dm_message("Ev-auth", "needs auth"))
         .await;
-    assert_eq!(first.status(), StatusCode::OK); // safety: Slack E2E route assertion.
-    harness.drain().await;
-    assert_eq!(harness.slack_messages().len(), 1); // safety: Slack E2E delivery assertion.
 
-    let second = harness
-        .post_event(thread_message_event(
-            "Ev-dm-auth-cancel",
-            "`auth deny gate:auth-slack`",
-            "1710000001.123456",
-        ))
-        .await;
-
-    assert_eq!(second.status(), StatusCode::OK); // safety: Slack E2E route assertion.
-    harness.drain().await;
-
-    let auths = harness.auths.requests();
-    assert_eq!(auths.len(), 1); // safety: Slack E2E auth routing assertion.
-    assert_eq!(auths[0].decision, AuthInteractionDecision::Deny); // safety: length asserted above.
-    assert_eq!(auths[0].gate_ref.as_str(), AUTH_GATE); // safety: length asserted above.
-    let submitted_turn_count = harness.coordinator.submitted_turn_count();
-    assert_eq!(submitted_turn_count, 1); // safety: Slack E2E turn routing assertion.
+    assert_eq!(response.status(), StatusCode::OK);
+    for _ in 0..80 {
+        if harness.slack_messages().len() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     let messages = harness.slack_messages();
-    assert_eq!(messages.len(), 2); // safety: Slack E2E delivery assertion.
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["channel"], CHANNEL);
+    assert!(
+        messages[0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("Authentication required"))
+    );
+
+    harness
+        .coordinator
+        .resume_blocked_run_to_running()
+        .await
+        .expect("resume auth-blocked run");
+    for _ in 0..80 {
+        if harness.slack_messages().len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 2);
     assert_eq!(messages[1]["channel"], CHANNEL);
-    assert_eq!(messages[1]["thread_ts"], "1710000001.123456");
-    assert_eq!(messages[1]["text"], "Authentication canceled.");
+    assert_eq!(messages[1]["text"], "Ironclaw is thinking...");
+
+    harness
+        .coordinator
+        .complete_active_run("authenticated and finished")
+        .await
+        .expect("complete resumed auth run");
+    harness.drain().await;
+
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[2]["channel"], CHANNEL);
+    assert_eq!(messages[2]["text"], "authenticated and finished");
+    let deletes = harness.slack_deletes();
+    assert_eq!(deletes.len(), 2);
+    assert_eq!(deletes[0]["channel"], CHANNEL);
+    assert_eq!(deletes[1]["channel"], CHANNEL);
+    auth_provider.assert_single_call();
 }
 
 #[derive(Debug, Clone)]
 enum TurnMode {
-    Complete { assistant_text: String },
+    Complete {
+        assistant_text: String,
+    },
     Running,
     BlockApproval,
+    /// Starts as BlockedApproval; the test manually transitions to BlockedAuth
+    /// via `RecordingTurnCoordinator::transition_blocked_approval_to_blocked_auth`.
+    BlockApprovalThenAuth,
     BlockAuth,
 }
 
@@ -1458,29 +1492,6 @@ impl RecordingTurnCoordinator {
         Ok(())
     }
 
-    async fn resume_blocked_run_to_running(&self) -> Result<(), ProductWorkflowError> {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let run_id =
-            state
-                .blocked_run_id
-                .ok_or_else(|| ProductWorkflowError::TurnResumeRejected {
-                    reason: "missing blocked run".into(),
-                })?;
-        let run = state.runs.get_mut(&run_id).ok_or_else(|| {
-            ProductWorkflowError::TurnResumeRejected {
-                reason: "missing blocked run state".into(),
-            }
-        })?;
-        run.status = TurnStatus::Running;
-        run.gate_ref = None;
-        state.active_run_id = Some(run_id);
-        state.blocked_run_id = None;
-        Ok(())
-    }
-
     async fn complete_active_run(&self, text: &str) -> Result<(), ProductWorkflowError> {
         let run_id =
             self.active_run_id()
@@ -1515,6 +1526,103 @@ impl RecordingTurnCoordinator {
         };
         self.complete_run(scope, actor, run_id, text).await
     }
+
+    async fn resume_blocked_run_to_running(&self) -> Result<(), ProductWorkflowError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let run_id =
+            state
+                .blocked_run_id
+                .ok_or_else(|| ProductWorkflowError::TurnResumeRejected {
+                    reason: "missing blocked run".into(),
+                })?;
+        let run = state.runs.get_mut(&run_id).ok_or_else(|| {
+            ProductWorkflowError::TurnResumeRejected {
+                reason: "missing blocked run state".into(),
+            }
+        })?;
+        run.status = TurnStatus::Running;
+        run.gate_ref = None;
+        state.active_run_id = Some(run_id);
+        state.blocked_run_id = None;
+        Ok(())
+    }
+
+    /// Complete the blocked run to `Completed` in a single locked mutation, skipping
+    /// any observable `Running` state.
+    ///
+    /// This prevents the delivery loop from waking in the gap between
+    /// `resume_blocked_run_to_running` and `complete_active_run`, observing
+    /// `Running` with no blocked marker, and posting the "Ironclaw is thinking..."
+    /// working indicator — which would produce a spurious 4th message and make the
+    /// `messages.len() == 3` assertion flaky.
+    async fn complete_blocked_run(&self, text: &str) -> Result<(), ProductWorkflowError> {
+        // Append the final assistant message first (does not touch `state`).
+        let (scope, actor, run_id) = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let run_id =
+                state
+                    .blocked_run_id
+                    .ok_or_else(|| ProductWorkflowError::TurnResumeRejected {
+                        reason: "missing blocked run".into(),
+                    })?;
+            let run = state.runs.get(&run_id).ok_or_else(|| {
+                ProductWorkflowError::TurnResumeRejected {
+                    reason: "missing blocked run state".into(),
+                }
+            })?;
+            let actor =
+                run.actor
+                    .clone()
+                    .ok_or_else(|| ProductWorkflowError::TurnResumeRejected {
+                        reason: "missing run actor".into(),
+                    })?;
+            (run.scope.clone(), actor, run_id)
+        };
+        // Write the final assistant message before taking the lock that marks
+        // the run Completed so the delivery loop sees a consistent terminal state.
+        append_final_assistant_message(&self.threads, &scope, run_id, text).await?;
+        // Now atomically transition: BlockedAuth → Completed, clear blocked_run_id.
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (reply_target_binding_ref, accepted_message_ref) = state
+            .runs
+            .get(&run_id)
+            .map(|run| {
+                (
+                    run.reply_target_binding_ref.clone(),
+                    run.accepted_message_ref.clone(),
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    ReplyTargetBindingRef::new("slack:reply-target").expect("reply target"), // safety: static test reply target is valid.
+                    AcceptedMessageRef::new("slack:approval-reply").expect("accepted ref"), // safety: static test accepted ref is valid.
+                )
+            });
+        state.runs.insert(
+            run_id,
+            turn_state(
+                scope,
+                actor,
+                run_id,
+                TurnStatus::Completed,
+                None,
+                reply_target_binding_ref,
+                accepted_message_ref,
+            ),
+        );
+        // Clear blocked_run_id — the run is now terminal.
+        state.blocked_run_id = None;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -1543,7 +1651,9 @@ impl TurnCoordinator for RecordingTurnCoordinator {
                 TurnStatus::Completed
             }
             TurnMode::Running => TurnStatus::Running,
-            TurnMode::BlockApproval => TurnStatus::BlockedApproval,
+            TurnMode::BlockApproval | TurnMode::BlockApprovalThenAuth => {
+                TurnStatus::BlockedApproval
+            }
             TurnMode::BlockAuth => TurnStatus::BlockedAuth,
         };
         let gate_ref = match status {
@@ -1597,8 +1707,41 @@ impl TurnCoordinator for RecordingTurnCoordinator {
         panic!("approval test uses fake ApprovalInteractionService")
     }
 
-    async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
-        panic!("cancel_run is not used")
+    async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let run = state
+            .runs
+            .get_mut(&request.run_id)
+            .ok_or_else(|| TurnError::Unavailable {
+                reason: "missing run state for cancel_run".into(),
+            })?;
+        // Preserve idempotent-cancel contract shape: a second cancel of an
+        // already-Cancelled run reports `already_terminal: true` rather than
+        // first-cancel semantics, so the fake doesn't mask caller differences
+        // on the retry path.
+        let already_terminal = matches!(run.status, TurnStatus::Cancelled);
+        if !already_terminal {
+            run.status = TurnStatus::Cancelled;
+            run.gate_ref = None;
+        }
+        // Intentionally do NOT clear `blocked_run_id` here.
+        // The delivery loop uses `cancel_run` for idempotent teardown (e.g.
+        // auth-unavailable auto-deny). The `blocked_run_id` pointer must remain
+        // set so that a subsequent inbound "auth deny" text command can still
+        // resolve through `RecordingAuthInteractionService::resolve` →
+        // `cancel_blocked_run`, which then clears `blocked_run_id` and posts
+        // the confirmation. Once `get_run_state` returns `Cancelled` the polling
+        // loop exits, so the run is not re-processed.
+        Ok(CancelRunResponse {
+            run_id: request.run_id,
+            status: TurnStatus::Cancelled,
+            event_cursor: EventCursor::default(),
+            already_terminal,
+            actor: None,
+        })
     }
 
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
@@ -1685,6 +1828,8 @@ fn turn_state(
         credential_requirements: Vec::new(),
         failure: None,
         event_cursor: EventCursor::default(),
+        product_context: None,
+        auth_resume_disposition: None,
     }
 }
 
@@ -1722,6 +1867,25 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
                 approvals: Vec::new(),
             });
         };
+        // Check the run's current status: only surface an approval gate when the run
+        // is actually blocked on approval (not when it has already transitioned to
+        // BlockedAuth after resolve() advanced the gate for BlockApprovalThenAuth).
+        let is_blocked_approval = {
+            let state = self
+                .coordinator
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state
+                .runs
+                .get(&run_id)
+                .is_some_and(|run| run.status == TurnStatus::BlockedApproval)
+        };
+        if !is_blocked_approval {
+            return Ok(ListPendingApprovalsResponse {
+                approvals: Vec::new(),
+            });
+        }
         Ok(ListPendingApprovalsResponse {
             approvals: vec![PendingApprovalInteractionView {
                 scope: ApprovalInteractionScope::from_turn(&request.scope, &request.actor),
@@ -1751,6 +1915,33 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
                 reason: "missing blocked run".into(),
             }
         })?;
+        // For BlockApprovalThenAuth mode: approval resolves by advancing the run to
+        // BlockedAuth (not completing it). This exercises the real "approval→auth
+        // hop" path the production delivery loop must handle — the run is still
+        // blocked, now on an auth gate instead of an approval gate.
+        if matches!(self.coordinator.mode, TurnMode::BlockApprovalThenAuth) {
+            let mut state = self
+                .coordinator
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let run = state.runs.get_mut(&run_id).ok_or_else(|| {
+                ProductWorkflowError::TurnResumeRejected {
+                    reason: "missing blocked run state".into(),
+                }
+            })?;
+            run.status = TurnStatus::BlockedAuth;
+            run.gate_ref = Some(GateRef::new(AUTH_GATE).expect("auth gate ref")); // safety: static test gate ref is valid.
+            // blocked_run_id stays set — the run is still blocked, now on auth.
+            return Ok(ResolveApprovalInteractionResponse::Approved(
+                ResumeTurnResponse {
+                    run_id,
+                    status: TurnStatus::BlockedAuth,
+                    event_cursor: EventCursor::default(),
+                },
+            ));
+        }
+        // Default mode: approval resolves by completing the run.
         self.coordinator
             .complete_run(
                 request.scope.clone(),
@@ -1957,14 +2148,19 @@ fn dm_message(event_id: &'static str, text: &'static str) -> &'static str {
         ("Ev-approval", "needs approval") => DM_APPROVAL,
         ("Ev-block", "needs approval") => DM_BLOCK,
         ("Ev-approve", "approve") => DM_APPROVE,
-        ("Ev-approve-explicit", "approve gate:approve-slack") => DM_APPROVE_EXPLICIT_GATE,
+        ("Ev-approve-explicit", "approve gate:approval-00000000-0000-0000-0000-000000000001") => {
+            DM_APPROVE_EXPLICIT_GATE
+        }
         ("Ev-forged", "hello") => DM_FORGED,
         ("Ev-identity", "hello") => DM_IDENTITY,
-        ("Ev-auth", "needs auth") => DM_AUTH,
         ("Ev-working", "think") => DM_WORKING,
+        ("Ev-auth", "needs auth") => DM_AUTH,
         // Gate-fanout regression fixtures
         ("Ev-fanout-block", "needs approval fanout") => DM_FANOUT_BLOCK,
         ("Ev-fanout-approve", "approve") => DM_FANOUT_APPROVE,
+        // Approval→auth sequential gate fixture
+        ("Ev-approval-then-auth-block", "needs approval then auth") => DM_APPROVAL_THEN_AUTH_BLOCK,
+        ("Ev-approval-then-auth-approve", "approve") => DM_APPROVAL_THEN_AUTH_APPROVE,
         _ => panic!("unknown fixture"),
     }
 }
@@ -2051,20 +2247,20 @@ const DM_IDENTITY: &str = r#"{
 	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"hello","ts":"1710000000.000006"}
 	}"#;
 
-const DM_AUTH: &str = r#"{
-  "type":"event_callback",
-  "team_id":"T-A",
-  "api_app_id":"A-slack",
-  "event_id":"Ev-auth",
-	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"needs auth","ts":"1710000000.000007"}
-	}"#;
-
 const DM_WORKING: &str = r#"{
   "type":"event_callback",
   "team_id":"T-A",
   "api_app_id":"A-slack",
   "event_id":"Ev-working",
 	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"think","ts":"1710000000.000009"}
+	}"#;
+
+const DM_AUTH: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-auth",
+	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"needs auth","ts":"1710000000.000007"}
 	}"#;
 
 const APP_MENTION_AUTH: &str = r#"{
@@ -2099,8 +2295,8 @@ const DM_THREAD_AUTH_CANCEL: &str = r#"{
   "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"`auth deny gate:auth-slack`","ts":"1710000001.123457","thread_ts":"1710000001.123456"}
 }"#;
 
-/// Explicit gate-ref approve in the DM: `approve gate:approve-slack`.
-/// The gate ref token after "approve " is `gate:approve-slack` (= GATE).
+/// Explicit gate-ref approve in the DM: `approve gate:approval-00000000-0000-0000-0000-000000000001`.
+/// The gate ref token after "approve " is GATE (a valid `gate:approval-` prefixed ref).
 /// Used by the delivered-gate-route test that verifies explicit gate ref resolves
 /// directly (binding found → no cross-scope rewrite).
 const DM_APPROVE_EXPLICIT_GATE: &str = r#"{
@@ -2108,7 +2304,7 @@ const DM_APPROVE_EXPLICIT_GATE: &str = r#"{
   "team_id":"T-A",
   "api_app_id":"A-slack",
   "event_id":"Ev-approve-explicit",
-  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"approve gate:approve-slack","ts":"1710000000.000005"}
+  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"approve gate:approval-00000000-0000-0000-0000-000000000001","ts":"1710000000.000005"}
 }"#;
 
 // ── Gate-fanout regression fixtures ──────────────────────────────────────────
@@ -2144,6 +2340,29 @@ const DM_AUTH_FANOUT_BLOCK: &str = r#"{
   "api_app_id":"A-slack",
   "event_id":"Ev-auth-fanout-block",
   "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"needs auth fanout","ts":"1710000003.000001"}
+}"#;
+
+// ── Approval→Auth sequential gate fixture ────────────────────────────────────
+// Used by `slack_approval_then_auth_resume_completes_without_second_approval`.
+// Distinct event_id avoids idempotency-ledger collisions with all other fixtures.
+
+/// User message that triggers a `BlockApprovalThenAuth` turn.
+const DM_APPROVAL_THEN_AUTH_BLOCK: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-approval-then-auth-block",
+  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"needs approval then auth","ts":"1710000004.000001"}
+}"#;
+
+/// Approve event for the approval→auth sequential gate regression.
+/// Distinct event_id avoids idempotency-ledger collisions with DM_FANOUT_APPROVE.
+const DM_APPROVAL_THEN_AUTH_APPROVE: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-approval-then-auth-approve",
+  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"approve","ts":"1710000004.000002"}
 }"#;
 
 /// Build a `ProductInboundEnvelope` carrying an `AuthResolution(CallbackCompleted)` payload.
@@ -2285,6 +2504,7 @@ async fn build_harness_for_auth_fanout_test(
             egress: Arc::new(egress.clone()),
             delivery_sink: Arc::new(sink),
             auth_challenges: Some(auth_challenges),
+            approval_requests: None,
         },
         SlackFinalReplyDeliverySettings {
             poll_interval: Duration::from_millis(1),
@@ -2318,24 +2538,6 @@ async fn build_harness_for_auth_fanout_test(
     (harness, observer)
 }
 
-/// Regression test: auth prompt is posted exactly once even when an
-/// `AuthResolution(Allowed)` ack races the live delivery loop (L1).
-///
-/// Pre-fix behaviour (bug): the auth-resolution ack carried the same
-/// `submitted_run_id` as the original user-message ack. The guard check
-/// happened AFTER acquiring the semaphore permit, so L2 could block on the
-/// permit while L1 held it. When L1 released the permit and removed the
-/// run_id, L2 would wake, pass the now-empty guard, and spawn a second delivery
-/// loop. L2 immediately saw the run as Completed and posted a duplicate final
-/// reply. Result: 3 messages (auth prompt + 2 final replies) instead of 2.
-///
-/// Post-fix behaviour: the guard is checked and the run_id is inserted BEFORE
-/// acquiring the permit. L2 hits the already-populated guard set and returns
-/// early without ever competing for a permit. Only L1 delivers the final reply.
-///
-/// The comment in the original PR mentioned `AuthResolution(Allowed)` as an
-/// equal trigger to `ApprovalResolution(Allow)`, but only the approval case was
-/// tested. This test closes that gap.
 #[cfg(feature = "slack-v2-host-beta")]
 #[tokio::test]
 async fn auth_prompt_is_posted_exactly_once_when_auth_resolution_ack_races_live_delivery_loop() {
@@ -2421,4 +2623,224 @@ async fn auth_prompt_is_posted_exactly_once_when_auth_resolution_ack_races_live_
         messages[1]["text"], "auth completed and finished",
         "messages[1] must be the final reply"
     );
+}
+
+#[tokio::test]
+async fn slack_thread_auth_deny_with_bot_mention_cancels_auth_gate_without_agent_turn() {
+    let harness = build_harness(TurnMode::BlockAuth).await;
+
+    let first = harness
+        .post_event(app_mention_message("Ev-auth-cancel-start", "needs auth"))
+        .await;
+    assert_eq!(first.status(), StatusCode::OK); // safety: Slack E2E route assertion.
+    harness.drain().await;
+    assert_eq!(harness.slack_messages().len(), 1); // safety: Slack E2E delivery assertion.
+
+    let second = harness
+        .post_event(thread_message_event(
+            "Ev-auth-cancel",
+            "<@UBOT> auth deny gate:auth-slack",
+            "1710000000.000009",
+        ))
+        .await;
+
+    assert_eq!(second.status(), StatusCode::OK); // safety: Slack E2E route assertion.
+    harness.drain().await;
+
+    let auths = harness.auths.requests();
+    assert_eq!(auths.len(), 1); // safety: Slack E2E auth routing assertion.
+    assert_eq!(auths[0].decision, AuthInteractionDecision::Deny); // safety: length asserted above.
+    assert_eq!(auths[0].gate_ref.as_str(), AUTH_GATE); // safety: length asserted above.
+    let submitted_turn_count = harness.coordinator.submitted_turn_count();
+    assert_eq!(submitted_turn_count, 1); // safety: Slack E2E turn routing assertion.
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 2); // safety: Slack E2E delivery assertion.
+    assert_eq!(messages[1]["channel"], "C123");
+    assert_eq!(messages[1]["thread_ts"], "1710000000.000009");
+    assert_eq!(messages[1]["text"], "Authentication canceled.");
+}
+
+#[tokio::test]
+async fn slack_dm_thread_auth_deny_cancels_base_dm_auth_gate_without_agent_turn() {
+    let harness = build_harness(TurnMode::BlockAuth).await;
+
+    let first = harness
+        .post_event(dm_message("Ev-auth", "needs auth"))
+        .await;
+    assert_eq!(first.status(), StatusCode::OK); // safety: Slack E2E route assertion.
+    harness.drain().await;
+    assert_eq!(harness.slack_messages().len(), 1); // safety: Slack E2E delivery assertion.
+
+    let second = harness
+        .post_event(thread_message_event(
+            "Ev-dm-auth-cancel",
+            "`auth deny gate:auth-slack`",
+            "1710000001.123456",
+        ))
+        .await;
+
+    assert_eq!(second.status(), StatusCode::OK); // safety: Slack E2E route assertion.
+    harness.drain().await;
+
+    let auths = harness.auths.requests();
+    assert_eq!(auths.len(), 1); // safety: Slack E2E auth routing assertion.
+    assert_eq!(auths[0].decision, AuthInteractionDecision::Deny); // safety: length asserted above.
+    assert_eq!(auths[0].gate_ref.as_str(), AUTH_GATE); // safety: length asserted above.
+    let submitted_turn_count = harness.coordinator.submitted_turn_count();
+    assert_eq!(submitted_turn_count, 1); // safety: Slack E2E turn routing assertion.
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 2); // safety: Slack E2E delivery assertion.
+    assert_eq!(messages[1]["channel"], CHANNEL);
+    assert_eq!(messages[1]["thread_ts"], "1710000001.123456");
+    assert_eq!(messages[1]["text"], "Authentication canceled.");
+}
+
+#[tokio::test]
+async fn slack_approval_then_auth_resume_completes_without_second_approval() {
+    let auth_provider = Arc::new(FakeAuthChallengeProvider::default());
+    let auth_challenges: Arc<dyn AuthChallengeProvider> = auth_provider.clone();
+    // Long max_wait keeps L1 alive while we drive coordinator state transitions.
+    let harness = build_harness_with_full_settings(
+        TurnMode::BlockApprovalThenAuth,
+        static_personal_actor_user_resolver(),
+        Some(auth_challenges),
+        Duration::from_secs(10),
+    )
+    .await;
+
+    // Post the inbound DM — L1 spawns, sees BlockedApproval, posts the approval prompt.
+    let first = harness.post_event(DM_APPROVAL_THEN_AUTH_BLOCK).await;
+    assert_eq!(first.status(), StatusCode::OK);
+
+    // Poll until the approval prompt appears (L1 has posted it and is looping).
+    for _ in 0..200 {
+        if harness.slack_messages().len() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let messages = harness.slack_messages();
+    assert_eq!(
+        messages.len(),
+        1,
+        "expected exactly one approval prompt; got {}: {:?}",
+        messages.len(),
+        messages
+    );
+    assert!(
+        messages[0]["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("Approval needed")),
+        "first message must be the approval prompt; got {:?}",
+        messages[0]["text"]
+    );
+
+    // Post the approve event through the real inbound path.
+    // RecordingApprovalInteractionService::resolve sees BlockApprovalThenAuth mode
+    // and transitions the run to BlockedAuth instead of completing it.
+    let approve = harness
+        .post_event(dm_message("Ev-approval-then-auth-approve", "approve"))
+        .await;
+    assert_eq!(approve.status(), StatusCode::OK);
+    // NB: do NOT drain here. The DM's delivery loop (L1) is tracked by
+    // `drain_immediate_ack_tasks`; draining now would block on L1 while the run is
+    // still BlockedAuth until it hits `max_wait` and exits — leaving no loop alive to
+    // deliver the final reply after completion. L1 posts the auth prompt asynchronously,
+    // so we poll for it instead.
+
+    // Poll until the auth prompt appears (L1 saw the new BlockedAuth marker and posted it).
+    for _ in 0..200 {
+        if harness.slack_messages().len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let messages = harness.slack_messages();
+    assert_eq!(
+        messages.len(),
+        2,
+        "expected approval prompt + auth prompt; got {}: {:?}",
+        messages.len(),
+        messages
+    );
+    assert!(
+        messages[1]["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("Authentication required")),
+        "second message must be the auth prompt; got {:?}",
+        messages[1]["text"]
+    );
+
+    // Advance: BlockedAuth → Completed in one locked mutation.
+    // complete_blocked_run skips the intermediate Running state, so the delivery
+    // loop's next poll sees terminal Completed and never posts the working indicator.
+    harness
+        .coordinator
+        .complete_blocked_run("approved then authed and finished")
+        .await
+        .expect("complete auth-blocked run");
+
+    // Poll until the final reply appears (L1 sees Completed and delivers it).
+    for _ in 0..200 {
+        if harness.slack_messages().len() >= 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    harness.drain().await;
+
+    let messages = harness.slack_messages();
+    assert_eq!(
+        messages.len(),
+        3,
+        "expected 3 messages: approval prompt + auth prompt + final reply, got {}: {:?}",
+        messages.len(),
+        messages
+    );
+    assert!(
+        messages[0]["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("Approval needed")),
+        "messages[0] must be the approval prompt"
+    );
+    assert!(
+        messages[1]["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("Authentication required")),
+        "messages[1] must be the auth prompt"
+    );
+    assert_eq!(
+        messages[2]["text"], "approved then authed and finished",
+        "messages[2] must be the final reply, delivered exactly once"
+    );
+
+    let deletes = harness.slack_deletes();
+    assert_eq!(
+        deletes.len(),
+        1,
+        "expected 1 delete: auth prompt deleted via messages_to_delete_after_final, got {}",
+        deletes.len()
+    );
+
+    // Exactly 1 approval-service request: the approve event was routed through
+    // RecordingApprovalInteractionService::resolve (the real caller), not via
+    // the coordinator backdoor. Satisfies the Test-Through-the-Caller rule.
+    let approvals = harness.approvals.requests();
+    assert_eq!(
+        approvals.len(),
+        1,
+        "expected 1 approval-service request (routed through the caller, not via backdoor), got {}",
+        approvals.len()
+    );
+
+    // Exactly 1 turn submitted (no re-submission).
+    let submitted = harness.coordinator.submitted_turn_count();
+    assert_eq!(
+        submitted, 1,
+        "expected exactly 1 submitted turn, got {}",
+        submitted
+    );
+
+    // FakeAuthChallengeProvider must have been called exactly once (for the auth prompt).
+    auth_provider.assert_single_call();
 }

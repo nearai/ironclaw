@@ -1275,6 +1275,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
     let turn_state_for_evidence: Arc<dyn TurnStateStore> = turn_state.clone();
     let loop_checkpoint_for_evidence: Arc<dyn LoopCheckpointStore> = loop_checkpoint_store.clone();
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
+        attachment_read_port: None,
         turn_state,
         thread_service: Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
         thread_scope: thread_scope.clone(),
@@ -1310,6 +1311,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
         hook_dispatcher_builder_factory: None,
         hook_security_audit_sink: None,
         turn_event_sink: None,
+        communication_context_provider: None,
     })
     .expect("adapter bundle should satisfy the product-live readiness gate");
 

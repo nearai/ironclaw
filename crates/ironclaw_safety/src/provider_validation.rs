@@ -3,8 +3,7 @@ use std::sync::OnceLock;
 use crate::LeakDetector;
 
 pub const PROVIDER_TOOL_NAME_MAX_BYTES: usize = 64;
-
-const PROVIDER_ARGUMENTS_MAX_BYTES: usize = 16 * 1024;
+pub const PROVIDER_ARGUMENTS_MAX_BYTES: usize = 16 * 1024;
 const PROVIDER_ARGUMENTS_MAX_DEPTH: usize = 16;
 
 const SENSITIVE_PROVIDER_TEXT_MARKERS: [&str; 18] = [
@@ -122,11 +121,25 @@ pub fn validate_provider_arguments(
         .map_err(|error| ProviderValidationError::new(error.to_string()))?
         .len();
     if arguments_len > PROVIDER_ARGUMENTS_MAX_BYTES {
-        return Err(ProviderValidationError::new(format!(
-            "provider tool arguments exceed {PROVIDER_ARGUMENTS_MAX_BYTES} bytes"
-        )));
+        return Err(ProviderValidationError::new(
+            provider_arguments_too_large_summary(),
+        ));
     }
     validate_provider_json_value(arguments, "provider arguments", 0)
+}
+
+pub fn provider_arguments_exceed_max_bytes(arguments: &serde_json::Value) -> bool {
+    serde_json::to_vec(arguments)
+        .map(|bytes| bytes.len() > PROVIDER_ARGUMENTS_MAX_BYTES)
+        .unwrap_or(false)
+}
+
+pub fn is_provider_arguments_too_large_summary(value: &str) -> bool {
+    value == provider_arguments_too_large_summary()
+}
+
+fn provider_arguments_too_large_summary() -> String {
+    format!("provider tool arguments exceed {PROVIDER_ARGUMENTS_MAX_BYTES} bytes")
 }
 
 pub fn validate_optional_provider_metadata_text(
@@ -264,6 +277,16 @@ mod tests {
         .expect_err("non-whitespace control character should fail");
 
         assert!(error.to_string().contains("NUL/control characters"));
+    }
+
+    #[test]
+    fn provider_arguments_too_large_summary_matches_validator_error() {
+        let arguments = serde_json::json!({"content": "x".repeat(PROVIDER_ARGUMENTS_MAX_BYTES)});
+        assert!(provider_arguments_exceed_max_bytes(&arguments));
+
+        let error = validate_provider_arguments(&arguments)
+            .expect_err("arguments exceeding the provider byte limit should fail");
+        assert!(is_provider_arguments_too_large_summary(&error.to_string()));
     }
 
     #[test]
