@@ -10,6 +10,7 @@ export interface ThreadSession {
   connectedAt: number;
   runId: string | null;
   pendingApprovals: Array<{ gateRef: string; headline: string }>;
+  lastRunErrorData: unknown;
   version: number;
 }
 
@@ -147,12 +148,18 @@ function handleChunk(threadId: string, chunk: any) {
       }
     }
     if (chunk.type === "RUN_ERROR" && chunk.message) {
+      const errorParts: any[] = [{ type: "text", content: chunk.message }];
+      const errorData = chunk.details || session.lastRunErrorData;
+      if (errorData) {
+        errorParts.push({ type: "error-data", content: errorData });
+      }
       session.messages.push({
         id: `error-${Date.now()}`,
         role: "system",
-        parts: [{ type: "text", content: chunk.message }],
+        parts: errorParts,
       });
     }
+    session.lastRunErrorData = null;
     session.version++;
     notify(threadId);
     return;
@@ -270,6 +277,11 @@ function handleChunk(threadId: string, chunk: any) {
     notify(threadId);
     return;
   }
+
+  if (chunk.type === "CUSTOM" && chunk.name === "ironclaw.failed") {
+    session.lastRunErrorData = (chunk.value as any)?.details ?? chunk.value;
+    return;
+  }
 }
 
 export const threadChatManager = {
@@ -286,6 +298,7 @@ export const threadChatManager = {
       connectedAt: Date.now(),
       runId: null,
       pendingApprovals: [],
+      lastRunErrorData: null,
       version: 0,
     };
     sessions.set(threadId, session);

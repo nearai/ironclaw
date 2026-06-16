@@ -159,6 +159,7 @@ export const ConversationLiveChunkSchema = z.object({
   state: z.string().optional(),
   finishReason: z.string().nullable().optional(),
   message: z.string().optional(),
+  details: z.string().optional(),
   name: z.string().optional(),
   value: z.unknown().optional(),
 });

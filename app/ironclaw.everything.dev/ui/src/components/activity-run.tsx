@@ -266,7 +266,7 @@ function ToolRunRow({ item, verbose }: { item: ToolItem; verbose?: boolean }) {
   const hasDetails = !!(resultContent || detailEnvelope?.inputSummary || verbose);
 
   return (
-    <div className="flex flex-col">
+    <div className="flex flex-col min-w-[240px]">
       <button
         type="button"
         onClick={() => hasDetails && setExpanded(!expanded)}
@@ -319,7 +319,7 @@ export function ActivityRun({ tools, verbose }: { tools: ToolItem[]; verbose?: b
 
   if (tools.length <= TOOL_RUN_COLLAPSE_AFTER) {
     return (
-      <div className="w-full max-w-[85%] space-y-0.5">
+      <div className="w-full max-w-[85%] min-w-[240px] space-y-0.5">
         {tools.map((item) => (
           <ToolRunRow key={item.call.id} item={item} verbose={verbose} />
         ))}
@@ -330,7 +330,7 @@ export function ActivityRun({ tools, verbose }: { tools: ToolItem[]; verbose?: b
   const summary = summarizeTools(tools);
 
   return (
-    <div className="w-full max-w-[85%]">
+    <div className="w-full max-w-[85%] min-w-[240px]">
       <button
         type="button"
         onClick={() => setExpanded(!expanded)}

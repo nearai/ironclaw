@@ -1,5 +1,5 @@
 import type { ToolCallPart, ToolResultPart, UIMessage } from "@tanstack/ai";
-import { AlertCircle, Copy, FileIcon, Loader2 } from "lucide-react";
+import { AlertCircle, ChevronDown, Copy, FileIcon, Loader2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useApiClient } from "@/app";
 import { ActivityRun } from "@/components/activity-run";
@@ -116,6 +116,7 @@ export function ChatMessage({ message, isOptimistic, status, verbose }: ChatMess
   const isSystem = message.role === "system";
   const isFailed = status === "failed";
   const [copied, setCopied] = useState(false);
+  const [detailsExpanded, setDetailsExpanded] = useState(false);
 
   const handleCopy = async (text: string) => {
     await navigator.clipboard.writeText(text);
@@ -134,6 +135,10 @@ export function ChatMessage({ message, isOptimistic, status, verbose }: ChatMess
     .map((p) => p.content)
     .join(" ");
 
+  const errorData = message.parts.find((p: any) => p.type === "error-data") as
+    | { type: "error-data"; content: unknown }
+    | undefined;
+
   if (isSystem) {
     return (
       <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 max-w-[85%] sm:max-w-[78%] lg:max-w-[70%]">
@@ -144,6 +149,29 @@ export function ChatMessage({ message, isOptimistic, status, verbose }: ChatMess
             content={textContent}
             className="text-sm text-destructive/80 [&_p]:mb-0"
           />
+          {errorData && (
+            <div className="mt-2">
+              <button
+                type="button"
+                onClick={() => setDetailsExpanded((v) => !v)}
+                aria-expanded={detailsExpanded}
+                className="flex items-center gap-1 text-xs text-destructive/60 hover:text-destructive transition-colors"
+              >
+                <ChevronDown
+                  size={12}
+                  className={detailsExpanded ? "rotate-0" : "-rotate-90"}
+                />
+                {detailsExpanded ? "Hide details" : "Error details"}
+              </button>
+              {detailsExpanded && (
+                <pre className="mt-2 rounded bg-destructive/10 p-2 text-xs text-destructive/80 whitespace-pre-wrap overflow-x-auto max-h-48 overflow-y-auto">
+                  {typeof errorData.content === "string"
+                    ? errorData.content
+                    : JSON.stringify(errorData.content, null, 2)}
+                </pre>
+              )}
+            </div>
+          )}
         </div>
       </div>
     );

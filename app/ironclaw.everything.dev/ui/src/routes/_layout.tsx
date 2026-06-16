@@ -55,7 +55,7 @@ function Layout() {
     ...(connectionStatus === "connected"
       ? []
       : [{ icon: Wrench, label: "setup", to: "/setup" as const, roleRequired: "member" as const }]),
-    { icon: MessageSquare, label: "chat", to: "/" as const, roleRequired: "anon" as const },
+    { icon: MessageSquare, label: "chat", to: "/chat" as const, roleRequired: "anon" as const },
     { icon: Bot, label: "automations", to: "/automations" as const, roleRequired: "anon" as const },
     {
       icon: Puzzle,
@@ -72,7 +72,7 @@ function Layout() {
   const gatewayId = runtime?.gatewayId;
 
   const isActive = (item: SidebarItem) => {
-    return pathname === item.to || (item.to !== "/" && pathname.startsWith(`${item.to}/`));
+    return pathname === item.to || pathname.startsWith(`${item.to}/`);
   };
 
   return (
@@ -183,7 +183,7 @@ function Layout() {
                     <span className="shrink-0">{runtime?.accountId ?? account}</span>
                     <span className="shrink-0">/</span>
                     <span className="truncate">
-                      {pathname === "/" ? "chat" : pathname.slice(1).split("/").join(" / ")}
+                      {pathname === "/chat" ? "chat" : pathname.slice(1).split("/").join(" / ")}
                     </span>
                   </div>
                 </div>
@@ -209,17 +209,12 @@ function Layout() {
           </header>
 
           <main
-            className={`flex-1 w-full min-h-0 flex flex-col ${pathname !== "/" ? "overflow-y-auto" : "overflow-hidden"}`}
-            style={
-              isAuthenticated && pathname !== "/"
-                ? { paddingBottom: "calc(3.5rem + env(safe-area-inset-bottom, 0px))" }
-                : undefined
-            }
+            className={`flex-1 w-full min-h-0 flex flex-col ${pathname !== "/chat" ? "overflow-y-auto" : "overflow-hidden"}`}
           >
             <Outlet />
           </main>
 
-          {pathname !== "/" && (
+          {pathname !== "/chat" && (
             <footer
               className="shrink-0 flex justify-center py-6"
               style={{

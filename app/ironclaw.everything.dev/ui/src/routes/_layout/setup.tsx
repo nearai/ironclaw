@@ -303,7 +303,7 @@ Sign up at https://nova-sdk.com for your NOVA account ID and API key.`,
         </div>
 
         <Link
-          to="/"
+          to="/chat"
           className="group flex items-center gap-4 rounded-xl border-2 border-primary/30 bg-primary/5 px-5 py-4 hover:border-primary hover:bg-primary/10 transition-all duration-200"
         >
           <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-primary/10">

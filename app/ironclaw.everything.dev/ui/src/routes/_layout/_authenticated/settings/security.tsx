@@ -68,7 +68,7 @@ function SecurityTab({ user }: { user: { email?: string; isAnonymous?: boolean |
       queryClient.removeQueries({ queryKey: ["organizations"] });
       await queryClient.invalidateQueries({ queryKey: ["session"] });
       await router.invalidate();
-      await navigate({ to: "/", replace: true });
+      await navigate({ to: "/chat", replace: true });
     },
     onError: (err: Error) => toast.error(err.message),
   });

@@ -31,6 +31,7 @@ type LiveChunk = {
   state?: string;
   finishReason?: string | null;
   message?: string;
+  details?: string;
   name?: string;
   value?: unknown;
 };
@@ -38,6 +39,22 @@ type LiveChunk = {
 function normalizeMessage(value: unknown): string {
   if (value instanceof Error) return value.message;
   return typeof value === "string" ? value : String(value);
+}
+
+function normalizeDetails(value: unknown): string | undefined {
+  if (!value) return undefined;
+  if (value instanceof Error) {
+    const stack = value.stack;
+    const msg = value.message;
+    if (stack && stack !== msg) return stack;
+    return msg;
+  }
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }
 
 function serializeToolResultEnvelope(envelope: {
@@ -165,6 +182,7 @@ export function createThreadChatBridge(services: { ironclaw: (ctx: any) => any }
         type: "RUN_ERROR",
         threadId,
         message: ack.notice ?? "Message rejected, thread is busy",
+        details: `Rejected outcome: ${ack.outcome}, activeRunId: ${ack.activeRunId ?? "unknown"}`,
       });
       return;
     }
@@ -505,10 +523,11 @@ export function createThreadChatBridge(services: { ironclaw: (ctx: any) => any }
           const runState = raw.runState;
           const failure = runState?.failure;
           const message = normalizeMessage(failure ?? raw.response ?? "Run failed");
+          const details = normalizeDetails(runState);
           const chunk = emitRunStarted(eventRunId);
           if (chunk) yield chunk;
-          yield emitCustom("ironclaw.failed", { runId: eventRunId, message, runState }, eventRunId);
-          yield createChunk({ type: "RUN_ERROR", threadId, runId: eventRunId, message });
+          yield emitCustom("ironclaw.failed", { runId: eventRunId, message, details, runState }, eventRunId);
+          yield createChunk({ type: "RUN_ERROR", threadId, runId: eventRunId, message, details });
           return;
         }
 
@@ -709,12 +728,13 @@ export function createThreadChatBridge(services: { ironclaw: (ctx: any) => any }
                 if (isFailed) {
                   const msg =
                     ((rs.raw.failureSummary ?? rs.raw.failure_summary) as string) ?? `Run ${st}`;
+                  const details = normalizeDetails(rs.raw);
                   yield emitCustom(
                     "ironclaw.failed",
-                    { runId, message: msg, runState: rs.raw },
+                    { runId, message: msg, details, runState: rs.raw },
                     runId,
                   );
-                  yield createChunk({ type: "RUN_ERROR", threadId, runId, message: msg });
+                  yield createChunk({ type: "RUN_ERROR", threadId, runId, message: msg, details });
                   return;
                 }
                 if (st === "cancelled") {
@@ -819,6 +839,7 @@ export function createThreadChatBridge(services: { ironclaw: (ctx: any) => any }
         threadId,
         runId: ackRunId ?? crypto.randomUUID(),
         message: normalizeMessage(error),
+        details: normalizeDetails(error),
       });
     } finally {
       if (typeof upstream.return === "function") {

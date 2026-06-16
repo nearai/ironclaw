@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { getAccount, getActiveRuntime, getAppName } from "@/app";
 import { Button } from "@/components/ui/button";
 import { Markdown } from "@/components/ui/markdown";
+import { UnderConstruction } from "@/components/under-construction";
 
 const INTENT_REGISTRY_URL = "https://tanstack.com/intent/registry/everything-dev";
 
@@ -105,14 +106,24 @@ function SkillPage() {
               </div>
             </div>
 
-            <div className="rounded-[8px] border border-border bg-muted px-3.5 py-3 text-sm text-muted-foreground">
-              Best entry points: `/skill.md`, the `/setup` guide, and the chat dashboard at `/`.
+            <div className="relative rounded-[8px] border border-border overflow-hidden">
+              <div className="px-3.5 py-3 text-sm text-muted-foreground blur-sm">
+                Best entry points: `/skill.md`, the `/setup` guide, and the chat dashboard at `/chat`.
+              </div>
+              <div className="absolute inset-0 flex items-center justify-center">
+                <UnderConstruction label="Quick links" skipNavigation />
+              </div>
             </div>
           </div>
 
           {skill ? (
-            <div className="rounded-[12px] border border-border bg-card p-8">
-              <Markdown content={skill} />
+            <div className="relative rounded-[12px] border border-border bg-card overflow-hidden">
+              <div className="p-8 blur-sm">
+                <Markdown content={skill} />
+              </div>
+              <div className="absolute inset-0 flex items-center justify-center">
+                <UnderConstruction label="Skill prompt" skipNavigation />
+              </div>
             </div>
           ) : (
             <div className="flex flex-col items-center justify-center gap-3 rounded-[12px] border border-border bg-card px-8 py-16 text-muted-foreground">
