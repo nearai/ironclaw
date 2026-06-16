@@ -120,15 +120,15 @@ fn auth_prompt_from_credential_requirement(
         return view;
     };
     let provider = requirement.provider.as_str().to_string();
-    view.provider = Some(provider.clone());
     match &requirement.setup {
         RuntimeCredentialAccountSetup::ManualToken => {
             view.challenge_kind = Some(AuthPromptChallengeKind::ManualToken);
-            view.account_label = Some(provider);
+            view.account_label = Some(provider.clone());
         }
         RuntimeCredentialAccountSetup::OAuth { .. } => {
             view.challenge_kind = Some(AuthPromptChallengeKind::Other);
         }
     }
+    view.provider = Some(provider);
     view
 }

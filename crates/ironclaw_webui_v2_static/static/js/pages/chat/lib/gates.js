@@ -34,19 +34,19 @@ export function gateFromEvent(eventType, prompt) {
     };
   }
   if (eventType === "auth_required") {
-    const hasModernChallengeFields =
-      prompt.challenge_kind ||
-      prompt.provider ||
-      prompt.account_label ||
-      prompt.authorization_url ||
-      prompt.expires_at;
     return {
       kind: "auth_required",
       // Legacy auth_required prompts predate challenge_kind and are manual
       // token prompts. Explicit unknown/other challenge kinds still route to
       // the neutral auth card in chat.js.
       challengeKind:
-        prompt.challenge_kind || (hasModernChallengeFields ? "other" : "manual_token"),
+        prompt.challenge_kind ||
+        (prompt.provider ||
+        prompt.account_label ||
+        prompt.authorization_url ||
+        prompt.expires_at
+          ? "other"
+          : "manual_token"),
       runId: prompt.turn_run_id,
       // AuthPromptView carries `auth_request_ref`, but v2's resolve
       // path is `/runs/{run_id}/gates/{gate_ref}/resolve` — auth
