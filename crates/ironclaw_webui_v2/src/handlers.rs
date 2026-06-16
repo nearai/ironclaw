@@ -199,7 +199,7 @@ pub async fn stat_project_file(
 ) -> Result<Json<RebornProjectFsStatResponse>, WebUiV2HttpError> {
     let request = RebornProjectFsStatRequest {
         thread_id,
-        path: query.path.unwrap_or_default(),
+        path: require_project_fs_path(query.path)?,
     };
     let response = state.services().stat_project_path(caller, request).await?;
     Ok(Json(response))
@@ -221,7 +221,7 @@ pub async fn read_project_file(
 ) -> Result<Response, WebUiV2HttpError> {
     let request = RebornProjectFsReadRequest {
         thread_id,
-        path: query.path.unwrap_or_default(),
+        path: require_project_fs_path(query.path)?,
     };
     let file = state.services().read_project_file(caller, request).await?;
     let filename = sanitized_download_filename(file.filename.as_deref());
@@ -248,6 +248,26 @@ pub async fn read_project_file(
         })
 }
 
+/// Reject a missing or blank `?path=` on the stat/download routes with a
+/// field-scoped 400, rather than forwarding an empty string to the facade where
+/// it surfaces as a murkier downstream invalid-path error.
+fn require_project_fs_path(path: Option<String>) -> Result<String, WebUiV2HttpError> {
+    match path {
+        Some(path) if !path.trim().is_empty() => Ok(path),
+        _ => Err(RebornServicesError::from(WebUiInboundValidationError::new(
+            "path",
+            WebUiInboundValidationCode::Blank,
+        ))
+        .into()),
+    }
+}
+
+/// Upper bound on the sanitized `Content-Disposition` filename. A filesystem can
+/// hold names far longer than is safe to splice into a header; cap well under
+/// typical header-size limits so an oversized name degrades to a truncated label
+/// rather than failing the whole download with a builder error (500).
+const MAX_DOWNLOAD_FILENAME_BYTES: usize = 200;
+
 /// Produce a `Content-Disposition` filename that cannot inject header bytes or
 /// path separators. Keeps a conservative set of characters and falls back to a
 /// neutral name when nothing safe survives.
@@ -260,7 +280,15 @@ fn sanitized_download_filename(filename: Option<&str>) -> String {
             _ => '_',
         })
         .collect();
-    let trimmed = candidate.trim_matches([' ', '.']).to_string();
+    // Bound the length on a char boundary (every retained char is ASCII here, so
+    // each is one byte) before trimming, so the cap can't leave a stray leading
+    // dot/space at the new end.
+    let bounded = if candidate.len() > MAX_DOWNLOAD_FILENAME_BYTES {
+        &candidate[..MAX_DOWNLOAD_FILENAME_BYTES]
+    } else {
+        candidate.as_str()
+    };
+    let trimmed = bounded.trim_matches([' ', '.']).to_string();
     if trimmed.is_empty() {
         "download".to_string()
     } else {
@@ -1479,5 +1507,70 @@ async fn ws_send_with_timeout(
             );
             Err(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitized_filename_neutralizes_header_injection() {
+        // Quote + CRLF injection attempts collapse to underscores so nothing can
+        // break out of the quoted `Content-Disposition` value or inject a header.
+        assert_eq!(
+            sanitized_download_filename(Some("a\"; rm -rf /.txt")),
+            "a__ rm -rf _.txt"
+        );
+        assert_eq!(
+            sanitized_download_filename(Some("evil\r\nSet-Cookie: x.csv")),
+            "evil__Set-Cookie_ x.csv"
+        );
+        // Path separators never survive — a download can't address another dir.
+        // (Leading dots are also trimmed, so a `../` prefix can't linger.)
+        assert_eq!(
+            sanitized_download_filename(Some("../../etc/passwd")),
+            "_.._etc_passwd"
+        );
+    }
+
+    #[test]
+    fn sanitized_filename_falls_back_to_neutral_name() {
+        assert_eq!(sanitized_download_filename(None), "download");
+        // A dots/spaces-only name trims to empty and falls back to the neutral
+        // name (illegal non-space chars instead map to `_` and survive).
+        assert_eq!(sanitized_download_filename(Some("   ...  ")), "download");
+        // A normal name is preserved verbatim.
+        assert_eq!(
+            sanitized_download_filename(Some("report.csv")),
+            "report.csv"
+        );
+    }
+
+    #[test]
+    fn sanitized_filename_is_length_capped() {
+        let long = format!("{}.csv", "a".repeat(500));
+        let out = sanitized_download_filename(Some(&long));
+        assert!(
+            out.len() <= MAX_DOWNLOAD_FILENAME_BYTES,
+            "filename must be capped, got {} bytes",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn require_project_fs_path_rejects_missing_or_blank() {
+        assert!(require_project_fs_path(None).is_err());
+        assert!(require_project_fs_path(Some(String::new())).is_err());
+        assert!(require_project_fs_path(Some("   ".to_string())).is_err());
+    }
+
+    #[test]
+    fn require_project_fs_path_accepts_non_blank() {
+        assert_eq!(
+            require_project_fs_path(Some("/workspace/report.csv".to_string()))
+                .expect("non-blank path is accepted"),
+            "/workspace/report.csv"
+        );
     }
 }

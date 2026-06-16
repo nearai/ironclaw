@@ -2026,7 +2026,19 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
         # once its tool calls have run and `match_tool_call` has dedup'd them,
         # instead of the generic multi-tool summary below. Only an explicit match
         # wins — absent one we fall through to the summary.
-        explicit = _explicit_canned_response(_last_user_content(messages))
+        #
+        # Suppress it on a failed/denied run: `CANNED_RESPONSES` triggers are
+        # broad, so a success-style "ready to download" reply must not mask a
+        # tool that was denied or errored — those turns fall through to the
+        # summary so the real outcome stays visible to assertions.
+        tool_run_failed = _tool_results_include_denial(tool_results) or any(
+            "error" in tr.get("content", "").lower() for tr in tool_results
+        )
+        explicit = (
+            None
+            if tool_run_failed
+            else _explicit_canned_response(_last_user_content(messages))
+        )
         if explicit is not None:
             if not stream:
                 return _text_response(cid, explicit)

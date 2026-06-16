@@ -2101,6 +2101,9 @@ impl RebornServicesApi for RebornServices {
         let thread_scope = self
             .authorize_project_fs_access(caller, request.thread_id)
             .await?;
+        // dispatch-exempt: read-only, already-authorized workspace listing through
+        // the facade's own port — not an in-turn mutating tool call, so it does
+        // not route through ToolDispatcher.
         let entries = reader
             .list_dir(&thread_scope, &request.path)
             .await
@@ -2117,6 +2120,8 @@ impl RebornServicesApi for RebornServices {
         let thread_scope = self
             .authorize_project_fs_access(caller, request.thread_id)
             .await?;
+        // dispatch-exempt: read-only, already-authorized workspace stat through
+        // the facade's own port — not an in-turn mutating tool call.
         let stat = reader
             .stat(&thread_scope, &request.path)
             .await
@@ -2133,6 +2138,8 @@ impl RebornServicesApi for RebornServices {
         let thread_scope = self
             .authorize_project_fs_access(caller, request.thread_id)
             .await?;
+        // dispatch-exempt: read-only, already-authorized workspace file download
+        // through the facade's own port — not an in-turn mutating tool call.
         reader
             .read_file(&thread_scope, &request.path)
             .await

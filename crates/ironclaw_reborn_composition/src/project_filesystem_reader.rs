@@ -47,6 +47,15 @@ impl<F: RootFilesystem> ProjectScopedFilesystemReader<F> {
         }
     }
 
+    #[cfg(test)]
+    fn with_max_read_bytes(filesystem: Arc<ScopedFilesystem<F>>, max_read_bytes: u64) -> Self {
+        Self {
+            filesystem,
+            workspace_alias: WORKSPACE_ALIAS.to_string(),
+            max_read_bytes,
+        }
+    }
+
     /// Parse and confine a caller-supplied path. `ScopedPath::new` rejects
     /// URLs, raw host paths, and `..` traversal; we additionally require the
     /// normalized path to stay under the `/workspace` alias so the read-only
@@ -83,10 +92,21 @@ impl<F: RootFilesystem> ProjectFilesystemReader for ProjectScopedFilesystemReade
         let base = dir.as_str().trim_end_matches('/');
         Ok(entries
             .into_iter()
-            .map(|entry: DirEntry| ProjectFsEntry {
-                path: format!("{base}/{}", entry.name),
-                name: entry.name,
-                kind: map_kind(entry.file_type),
+            // `DirEntry` carries no `sensitive` flag (only `stat`/`read_file`
+            // see it), so listing must filter sensitive names itself — otherwise
+            // a directory listing enumerates secret filenames (`.env`, `id_rsa`)
+            // even though their bytes stay denied. Cheap string check, keeping
+            // list/stat/read consistent on what is reachable.
+            .filter_map(|entry: DirEntry| {
+                let path = format!("{base}/{}", entry.name);
+                if ironclaw_safety::sensitive_paths::is_sensitive_path_str(&path) {
+                    return None;
+                }
+                Some(ProjectFsEntry {
+                    path,
+                    name: entry.name,
+                    kind: map_kind(entry.file_type),
+                })
             })
             .collect())
     }
@@ -326,6 +346,62 @@ mod tests {
             modified: Some(SystemTime::UNIX_EPOCH),
             sensitive,
         }
+    }
+
+    #[tokio::test]
+    async fn list_dir_omits_sensitive_filenames() {
+        // A listing must not enumerate secret filenames even though their bytes
+        // stay denied — otherwise it is a recon primitive.
+        let fs = workspace_fs(MountPermissions::read_write());
+        let scope = thread_scope().to_resource_scope();
+        seed(&fs, &scope, "/workspace/report.csv", b"a,b,c").await;
+        seed(&fs, &scope, "/workspace/.env", b"SECRET=1").await;
+        seed(&fs, &scope, "/workspace/id_rsa", b"-----BEGIN").await;
+        let reader = ProjectScopedFilesystemReader::new(Arc::clone(&fs));
+
+        let names: Vec<String> = reader
+            .list_dir(&thread_scope(), "/workspace")
+            .await
+            .expect("listing succeeds")
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        assert!(names.contains(&"report.csv".to_string()));
+        assert!(!names.contains(&".env".to_string()), "{names:?}");
+        assert!(!names.contains(&"id_rsa".to_string()), "{names:?}");
+    }
+
+    #[tokio::test]
+    async fn confine_denies_workspace_prefix_sibling() {
+        // `/workspace-other/...` shares the textual prefix `/workspace` but is a
+        // different directory; component-wise confinement must deny it.
+        let reader =
+            ProjectScopedFilesystemReader::new(workspace_fs(MountPermissions::read_only()));
+        let err = reader
+            .read_file(&thread_scope(), "/workspace-other/x.txt")
+            .await
+            .expect_err("a sibling of the workspace alias must be denied");
+        assert_eq!(err, ProjectFsError::Denied);
+    }
+
+    #[tokio::test]
+    async fn read_file_rejects_oversize() {
+        // The size cap denies an oversized read before its bytes reach the
+        // caller. Locks the `TooLarge` path (and its facade 413 mapping
+        // upstream) end-to-end through the reader.
+        let fs = workspace_fs(MountPermissions::read_write());
+        let scope = thread_scope().to_resource_scope();
+        seed(&fs, &scope, "/workspace/big.bin", b"0123456789").await;
+        let reader = ProjectScopedFilesystemReader::with_max_read_bytes(Arc::clone(&fs), 4);
+
+        let err = reader
+            .read_file(&thread_scope(), "/workspace/big.bin")
+            .await
+            .expect_err("a file over the cap must be denied");
+        assert!(
+            matches!(err, ProjectFsError::TooLarge { .. }),
+            "expected TooLarge, got {err:?}"
+        );
     }
 
     #[test]

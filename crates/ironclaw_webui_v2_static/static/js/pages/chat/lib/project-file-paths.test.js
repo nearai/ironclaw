@@ -46,6 +46,31 @@ test("ignores non-workspace paths and extensionless tokens", () => {
   );
 });
 
+test("ignores paths inside fenced code blocks", () => {
+  assert.deepEqual(
+    extractWorkspaceFilePaths(
+      "Run this:\n```sh\ncat /workspace/.env.local\n```\nbut not a download.",
+    ),
+    [],
+  );
+});
+
+test("ignores paths inside inline code spans", () => {
+  assert.deepEqual(
+    extractWorkspaceFilePaths("Use `rm /workspace/config.yaml` to clean up."),
+    [],
+  );
+});
+
+test("still extracts a real reference alongside a code span", () => {
+  assert.deepEqual(
+    extractWorkspaceFilePaths(
+      "Example `cat /workspace/secret.env`, but the output is /workspace/report.csv",
+    ),
+    ["/workspace/report.csv"],
+  );
+});
+
 test("handles empty / non-string content", () => {
   assert.deepEqual(extractWorkspaceFilePaths(""), []);
   assert.deepEqual(extractWorkspaceFilePaths(null), []);

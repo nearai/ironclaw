@@ -89,6 +89,7 @@ registerPack("ko", {
   "chat.attachmentUnsupportedType": "{name}은(는) 지원되지 않는 파일 형식입니다.",
   "chat.attachmentReadFailed": "{name}을(를) 읽을 수 없습니다.",
   "chat.attachmentStagingFailed": "선택한 파일을 첨부할 수 없습니다.",
+  "chat.fileDownloadFailed": "해당 파일을 다운로드할 수 없습니다.",
   "chat.modeAutoReview": "자동 리뷰",
   "chat.runtimeLocal": "로컬에서 작업",
   "chat.statusWorking": "작업 중",

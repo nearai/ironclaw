@@ -926,4 +926,24 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn mime_for_extension_resolves_canonical_alias_and_normalizes() {
+        // Canonical extension.
+        assert_eq!(mime_for_extension("csv"), Some("text/csv"));
+        assert_eq!(mime_for_extension("jpg"), Some("image/jpeg"));
+        // Alias extensions resolve to the same canonical MIME.
+        assert_eq!(mime_for_extension("jpeg"), Some("image/jpeg"));
+        assert_eq!(mime_for_extension("jfif"), Some("image/jpeg"));
+        // Input is normalized: leading dot stripped, ASCII case-insensitive.
+        assert_eq!(mime_for_extension(".JPG"), Some("image/jpeg"));
+        assert_eq!(mime_for_extension("CSV"), Some("text/csv"));
+    }
+
+    #[test]
+    fn mime_for_extension_returns_none_for_unknown() {
+        // Download callers rely on `None` to fall back to octet-stream.
+        assert_eq!(mime_for_extension("nope"), None);
+        assert_eq!(mime_for_extension(""), None);
+    }
 }

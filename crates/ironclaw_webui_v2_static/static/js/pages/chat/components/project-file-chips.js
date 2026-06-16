@@ -35,9 +35,7 @@ function ProjectFileChip({ threadId, path }) {
       const blob = await fetchProjectFileBlob({ threadId, path });
       saveBlob(blob, basename(path));
     } catch (_) {
-      toast(t("chat.fileDownloadFailed") || "Couldn't download that file", {
-        tone: "error",
-      });
+      toast(t("chat.fileDownloadFailed"), { tone: "error" });
     } finally {
       setDownloading(false);
     }

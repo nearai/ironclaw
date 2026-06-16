@@ -93,6 +93,7 @@ registerPack("en", {
   "chat.attachmentUnsupportedType": "{name} is not a supported file type.",
   "chat.attachmentReadFailed": "Could not read {name}.",
   "chat.attachmentStagingFailed": "Could not attach the selected files.",
+  "chat.fileDownloadFailed": "Couldn't download that file.",
   "chat.modeAutoReview": "Auto-review",
   "chat.runtimeLocal": "Work locally",
   "chat.statusWorking": "Working",

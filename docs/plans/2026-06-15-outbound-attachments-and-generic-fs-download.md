@@ -26,8 +26,8 @@ registry helper.
   renders downloadable once the frontend link lands.
 
 **Design decision (2026-06-15):** went **path/link-based**, not the tool+harvest
-approach (§3.1–3.3 dropped). The agent references files it creates by their `/project`
-path; the WebUI renders project-path references as downloadable file chips over the
+approach (§3.1–3.3 dropped). The agent references files it creates by their `/workspace`
+path; the WebUI renders workspace-path references as downloadable file chips over the
 generic endpoint. Rationale: the download is a presentation concern over the filesystem
 (the path *is* the file's identity), it reuses the already-built generic endpoint, and
 it avoids a deep/risky change to the core agent loop (`ironclaw_loop_support` finalize +

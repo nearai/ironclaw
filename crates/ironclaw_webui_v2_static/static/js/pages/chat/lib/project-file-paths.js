@@ -9,12 +9,21 @@
 // (`[report.csv](/workspace/report.csv)`) are caught by the same scan.
 const WORKSPACE_FILE_PATH = /\/workspace\/[A-Za-z0-9._\-/]+\.[A-Za-z0-9]+/g;
 
+// Strip fenced (```…```) and inline (`…`) code spans. A path that the assistant
+// only *displays* in a shell snippet (`cat /workspace/.env`) must not become a
+// real, one-click download chip — code spans are illustrative, not file
+// references. Fenced blocks are removed first so their inner backticks don't
+// throw off the inline pass.
+function stripCodeSpans(content) {
+  return content.replace(/```[\s\S]*?```/g, " ").replace(/`[^`]*`/g, " ");
+}
+
 // Extract de-duplicated workspace file paths, preserving first-seen order.
 export function extractWorkspaceFilePaths(content) {
   if (typeof content !== "string" || !content) return [];
   const seen = new Set();
   const paths = [];
-  for (const match of content.matchAll(WORKSPACE_FILE_PATH)) {
+  for (const match of stripCodeSpans(content).matchAll(WORKSPACE_FILE_PATH)) {
     // The regex ends at `\.[A-Za-z0-9]+`, so a match always terminates on an
     // alphanumeric character — trailing sentence/link punctuation (`. , ) ]`)
     // is never captured and needs no stripping here.

@@ -89,6 +89,7 @@ registerPack("ja", {
   "chat.attachmentUnsupportedType": "{name} はサポートされていないファイル形式です。",
   "chat.attachmentReadFailed": "{name} を読み取れませんでした。",
   "chat.attachmentStagingFailed": "選択したファイルを添付できませんでした。",
+  "chat.fileDownloadFailed": "そのファイルをダウンロードできませんでした。",
   "chat.modeAutoReview": "自動レビュー",
   "chat.runtimeLocal": "ローカルで作業",
   "chat.statusWorking": "作業中",
