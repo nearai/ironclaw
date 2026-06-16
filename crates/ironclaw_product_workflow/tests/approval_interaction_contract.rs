@@ -200,6 +200,8 @@ struct RecordingApprovalResolver {
     dispatch_lease_retries: Mutex<Vec<RecordedApproval>>,
     spawn_lease_retries: Mutex<Vec<RecordedApproval>>,
     denials: Mutex<Vec<(ResourceScope, ApprovalRequestId, Principal)>>,
+    /// Shared ordered event log for call-ordering tests; None by default.
+    event_log: Mutex<Option<Arc<Mutex<Vec<&'static str>>>>>,
 }
 
 #[derive(Clone)]
@@ -229,6 +231,10 @@ impl RecordingApprovalResolver {
 
     fn approvals(&self) -> Vec<RecordedApproval> {
         self.approvals.lock().expect("lock").clone()
+    }
+
+    fn set_event_log(&self, log: Arc<Mutex<Vec<&'static str>>>) {
+        *self.event_log.lock().expect("lock") = Some(log);
     }
 }
 
@@ -313,6 +319,9 @@ impl ApprovalResolutionPort for RecordingApprovalResolver {
             .lock()
             .expect("lock")
             .push((scope.clone(), request_id, denial.denied_by));
+        if let Some(log) = self.event_log.lock().expect("lock").as_ref() {
+            log.lock().expect("lock").push("deny");
+        }
         Ok(())
     }
 }
@@ -420,6 +429,8 @@ struct FakeTurnCoordinator {
     /// A second resume_turn call with the same key returns the cached response
     /// before any precondition or status check, mirroring real TurnCoordinator behaviour.
     resume_cache: Mutex<HashMap<(TurnRunId, IdempotencyKey), ResumeTurnResponse>>,
+    /// Shared ordered event log for call-ordering tests; None by default.
+    event_log: Mutex<Option<Arc<Mutex<Vec<&'static str>>>>>,
 }
 
 impl FakeTurnCoordinator {
@@ -432,7 +443,12 @@ impl FakeTurnCoordinator {
             cancellations: Mutex::new(Vec::new()),
             resume_error: Mutex::new(None),
             resume_cache: Mutex::new(HashMap::new()),
+            event_log: Mutex::new(None),
         }
+    }
+
+    fn set_event_log(&self, log: Arc<Mutex<Vec<&'static str>>>) {
+        *self.event_log.lock().expect("lock") = Some(log);
     }
 
     fn set_status(&self, status: TurnStatus) {
@@ -510,6 +526,9 @@ impl TurnCoordinator for FakeTurnCoordinator {
         let run_id = request.run_id;
         let cache_key = (run_id, request.idempotency_key.clone());
         self.resumptions.lock().expect("lock").push(request);
+        if let Some(log) = self.event_log.lock().expect("lock").as_ref() {
+            log.lock().expect("lock").push("resume");
+        }
         // Idempotency: return cached response for a repeated key before any
         // other check, matching real TurnCoordinator behaviour.
         if let Some(cached) = self
@@ -1987,7 +2006,14 @@ async fn deny_marks_pending_gate_denied_then_propagates_resume_error_without_can
     // The durable denial write must complete before resume is attempted.
     // When resume_turn fails (Unavailable → Transient), the error propagates
     // and cancel_run must NOT be called.
+    //
+    // An ordered event log is shared between both fakes to verify that the
+    // resolver's deny() is called strictly before the coordinator's resume_turn().
+    let call_order: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+
     let (service, resolver, coordinator, run_id, gate_ref) = service_fixture("delete a file");
+    resolver.set_event_log(Arc::clone(&call_order));
+    coordinator.set_event_log(Arc::clone(&call_order));
     coordinator.set_resume_error(TurnError::Unavailable {
         reason: "coordinator unavailable".to_string(),
     });
@@ -2024,6 +2050,13 @@ async fn deny_marks_pending_gate_denied_then_propagates_resume_error_without_can
         coordinator.cancellation_count(),
         0,
         "cancel must not be called on deny path"
+    );
+    // Ordering: deny must be recorded strictly before resume_turn.
+    let recorded = call_order.lock().expect("lock").clone();
+    assert_eq!(
+        recorded,
+        vec!["deny", "resume"],
+        "deny must be called before resume_turn; got: {recorded:?}"
     );
 }
 

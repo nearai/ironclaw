@@ -247,6 +247,10 @@ fn validate_descriptor_assignment(
 /// gate fires mid-re-dispatch). Matching on `last_gate` ensures the denial is
 /// attributed only to the slot that corresponds to the current blocking gate,
 /// leaving the other slot untouched.
+///
+/// If BOTH slots carry the same `gate_ref` as `last_gate` (should never happen
+/// in practice), the function stamps NEITHER and emits a `warn!` — failing
+/// closed rather than misattributing the denial.
 fn stamp_resume_disposition(
     state: &mut ironclaw_agent_loop::state::LoopExecutionState,
     disposition: ironclaw_turns::GateResumeDisposition,
@@ -254,18 +258,38 @@ fn stamp_resume_disposition(
     let Some(last_gate) = state.last_gate.clone() else {
         return;
     };
-    // Stamp only the pending slot whose gate_ref matches the blocking gate.
-    // Both slots can be populated at once (GateStage preserves a pending auth
-    // resume when a non-auth gate blocks mid-re-dispatch), so stamping both
-    // would misattribute the denial. Neither matched: stamp neither (defensive).
-    if let Some(pending) = state.pending_auth_resume.as_mut()
-        && pending.gate_ref == last_gate
-    {
-        pending.disposition = Some(disposition);
-    } else if let Some(pending) = state.pending_approval_resume.as_mut()
-        && pending.gate_ref == last_gate
-    {
-        pending.disposition = Some(disposition);
+    // Compute matches before taking mutable borrows.
+    let auth_matches = state
+        .pending_auth_resume
+        .as_ref()
+        .is_some_and(|p| p.gate_ref == last_gate);
+    let approval_matches = state
+        .pending_approval_resume
+        .as_ref()
+        .is_some_and(|p| p.gate_ref == last_gate);
+    // Explicit 4-way match — fail closed when both slots claim the same gate.
+    match (auth_matches, approval_matches) {
+        (true, false) => {
+            if let Some(pending) = state.pending_auth_resume.as_mut() {
+                pending.disposition = Some(disposition);
+            }
+        }
+        (false, true) => {
+            if let Some(pending) = state.pending_approval_resume.as_mut() {
+                pending.disposition = Some(disposition);
+            }
+        }
+        (false, false) => {
+            // Neither slot matches last_gate — stamp neither (defensive no-op).
+        }
+        (true, true) => {
+            // Should never happen: two pending slots share the same gate_ref.
+            // Refuse to stamp either rather than misattribute the denial.
+            tracing::warn!(
+                ?last_gate,
+                "ambiguous gate resume disposition; refusing to stamp"
+            );
+        }
     }
 }
 
@@ -1518,6 +1542,118 @@ mod tests {
         assert!(
             matches!(approval_disposition, GateResumeDisposition::Denied),
             "pending_approval_resume.disposition must be Denied, got {approval_disposition:?}"
+        );
+    }
+
+    // ---- ambiguous-gate fail-closed test -----------------------------------------
+
+    /// Helper: build a `LoopExecutionState` where BOTH `pending_auth_resume` AND
+    /// `pending_approval_resume` carry the SAME `gate_ref`, and `last_gate` is
+    /// set to that same ref.  This is the impossible-in-practice state that
+    /// `stamp_resume_disposition` must handle by stamping NEITHER slot.
+    fn state_with_both_slots_same_gate_ref(
+        context: &LoopRunContext,
+    ) -> ironclaw_agent_loop::state::LoopExecutionState {
+        use ironclaw_agent_loop::state::{PendingApprovalResume, PendingAuthResume};
+        use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId, ResourceEstimate};
+        use ironclaw_turns::LoopGateRef;
+        use ironclaw_turns::run_profile::{
+            CapabilityInputRef, CapabilityResumeToken, CapabilitySurfaceVersion,
+        };
+
+        let gate_ref = LoopGateRef::new("gate:ambiguous-shared").expect("valid gate ref");
+        let mut state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(context);
+        state.last_gate = Some(gate_ref.clone());
+        state.pending_auth_resume = Some(PendingAuthResume {
+            gate_ref: gate_ref.clone(),
+            capability_id: CapabilityId::new("test.capability.auth").expect("valid capability id"),
+            surface_version: CapabilitySurfaceVersion::new("surface:v1")
+                .expect("valid surface version"),
+            input_ref: CapabilityInputRef::new("input:ambiguous-auth").expect("valid input ref"),
+            effective_capability_ids: Vec::new(),
+            provider_replay: None,
+            resume_token: None,
+            prior_approval: None,
+            replay: None,
+            disposition: None,
+        });
+        state.pending_approval_resume = Some(PendingApprovalResume {
+            gate_ref,
+            capability_id: CapabilityId::new("test.capability.approval")
+                .expect("valid capability id"),
+            approval_request_id: ApprovalRequestId::new(),
+            resume_token: CapabilityResumeToken::new("00000000-0000-0000-0000-000000000003")
+                .expect("valid resume token"),
+            correlation_id: CorrelationId::new(),
+            surface_version: CapabilitySurfaceVersion::new("surface:v1")
+                .expect("valid surface version"),
+            input_ref: CapabilityInputRef::new("input:ambiguous-approval")
+                .expect("valid input ref"),
+            effective_capability_ids: Vec::new(),
+            provider_replay: None,
+            input: serde_json::Value::Null,
+            estimate: ResourceEstimate::default(),
+            disposition: None,
+        });
+        state
+    }
+
+    /// Fail-closed safety test: when BOTH `pending_auth_resume` and
+    /// `pending_approval_resume` carry the same `gate_ref` as `last_gate`,
+    /// `stamp_resume_disposition` must stamp NEITHER slot rather than
+    /// misattribute the denial to whichever slot the old `else if` happened
+    /// to evaluate first.
+    #[test]
+    fn stamp_resume_disposition_fails_closed_when_both_slots_match_last_gate() {
+        use ironclaw_turns::GateResumeDisposition;
+
+        let registry = build_loop_family_registry().expect("registry");
+        let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
+        let context = run_context_for_driver(&driver);
+
+        let mut state = state_with_both_slots_same_gate_ref(&context);
+
+        // Precondition: both slots start without a disposition.
+        assert!(
+            state
+                .pending_auth_resume
+                .as_ref()
+                .expect("pending_auth_resume must be set")
+                .disposition
+                .is_none(),
+            "pending_auth_resume must start with disposition: None"
+        );
+        assert!(
+            state
+                .pending_approval_resume
+                .as_ref()
+                .expect("pending_approval_resume must be set")
+                .disposition
+                .is_none(),
+            "pending_approval_resume must start with disposition: None"
+        );
+
+        // Call with the ambiguous state — should warn and stamp neither.
+        stamp_resume_disposition(&mut state, GateResumeDisposition::Denied);
+
+        // BOTH dispositions must remain None — fail closed.
+        assert!(
+            state
+                .pending_auth_resume
+                .as_ref()
+                .expect("pending_auth_resume must survive")
+                .disposition
+                .is_none(),
+            "pending_auth_resume.disposition must remain None when both slots are ambiguous"
+        );
+        assert!(
+            state
+                .pending_approval_resume
+                .as_ref()
+                .expect("pending_approval_resume must survive")
+                .disposition
+                .is_none(),
+            "pending_approval_resume.disposition must remain None when both slots are ambiguous"
         );
     }
 }
