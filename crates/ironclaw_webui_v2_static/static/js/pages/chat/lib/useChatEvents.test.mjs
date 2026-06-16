@@ -8,6 +8,11 @@ import {
   toolCardFromActivity,
   toolCardFromPreview,
 } from "./history-messages.js";
+import {
+  createToolActivityState,
+  ensureGateToolActivity,
+  upsertToolActivityMessage,
+} from "./tool-activity-state.js";
 
 function useChatEventsSourceForTest() {
   const source = readFileSync(
@@ -42,19 +47,23 @@ function createUseChatEventsHarness({
   let isProcessing = false;
   let activeRun = null;
   const activeRunRef = { current: null };
+  const toolActivityStateRef = { current: createToolActivityState() };
   const completedRuns = [];
   const context = {
     Date,
     React: {
       useCallback: (fn) => fn,
+      useEffect: (fn) => fn(),
       useRef: (value) => ({ current: value }),
     },
     failureMessageForRunStatus,
     gateFromEvent,
     globalThis: {},
+    ensureGateToolActivity,
     isTerminalToolStatus,
     toolCardFromActivity,
     toolCardFromPreview,
+    upsertToolActivityMessage,
   };
 
   vm.runInNewContext(useChatEventsSourceForTest(), context);
@@ -78,6 +87,7 @@ function createUseChatEventsHarness({
     },
     activeRunRef,
     locallyResolvedGatesRef,
+    toolActivityStateRef,
     onRunCompleted: (runId) => completedRuns.push(runId),
   });
 
@@ -99,9 +109,13 @@ function createUseChatEventsHarness({
       activeRun = run;
       activeRunRef.current = run;
     },
+    replaceMessages(next) {
+      messages = next;
+    },
     get completedRuns() {
       return completedRuns;
     },
+    toolActivityStateRef,
   };
 }
 
@@ -148,7 +162,7 @@ test("useChatEvents: projection activity preserves reasoning/tool chronology", (
     Array.from(harness.messages, (message) => message.role),
     ["thinking", "tool_activity", "thinking"],
   );
-  assert.equal(harness.messages[1].toolName, "builtin.http");
+  assert.equal(harness.messages[1].toolName, "http");
   assert.equal(harness.messages[1].toolStatus, "running");
   assert.deepEqual(
     Array.from(harness.messages, (message) => message.turnRunId),
@@ -223,6 +237,98 @@ test("useChatEvents: progress clears non-auth gates for the resumed run", () => 
   });
 
   assert.equal(harness.pendingGate, null);
+});
+
+test("useChatEvents: approval gate annotates an existing tool activity", () => {
+  const runId = "run-gated-existing";
+  const gateRef = "gate:web-access";
+  const gate = {
+    kind: "gate",
+    runId,
+    gateRef,
+    toolName: "web-access.search",
+  };
+  const harness = createUseChatEventsHarness({
+    gateFromEvent: () => gate,
+  });
+
+  harness.handleEvent({
+    type: "capability_activity",
+    frame: {
+      activity: {
+        invocation_id: "invocation-web-access",
+        turn_run_id: runId,
+        capability_id: "web-access.search",
+        status: "started",
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "gate",
+    frame: {
+      prompt: {
+        turn_run_id: runId,
+        gate_ref: gateRef,
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, "tool-invocation-web-access");
+  assert.equal(harness.messages[0].toolName, "search");
+  assert.equal(harness.messages[0].toolStatus, "running");
+  assert.equal(harness.messages[0].gateRef, gateRef);
+  assert.deepEqual(harness.pendingGate, gate);
+});
+
+test("useChatEvents: approval gate creates activity before invocation metadata arrives", () => {
+  const runId = "run-gated-synthetic";
+  const gateRef = "gate:nearai";
+  const gate = {
+    kind: "gate",
+    runId,
+    gateRef,
+    toolName: "nearai.web_search",
+  };
+  const harness = createUseChatEventsHarness({
+    gateFromEvent: () => gate,
+  });
+
+  harness.handleEvent({
+    type: "gate",
+    frame: {
+      prompt: {
+        turn_run_id: runId,
+        gate_ref: gateRef,
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, `tool-gate:${runId}:${gateRef}`);
+  assert.equal(harness.messages[0].toolName, "web_search");
+  assert.equal(harness.messages[0].toolStatus, "running");
+  assert.equal(harness.messages[0].gateRef, gateRef);
+
+  harness.handleEvent({
+    type: "capability_activity",
+    frame: {
+      activity: {
+        invocation_id: "invocation-nearai",
+        turn_run_id: runId,
+        capability_id: "nearai.web_search",
+        status: "started",
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, "tool-invocation-nearai");
+  assert.equal(harness.messages[0].invocationId, "invocation-nearai");
+  assert.equal(harness.messages[0].toolName, "web_search");
+  assert.equal(harness.messages[0].toolStatus, "running");
+  assert.equal(harness.messages[0].gateRef, gateRef);
+  assert.equal(harness.messages[0].gateActivity, false);
 });
 
 test("useChatEvents: cleared non-auth gates are not restored by later projections", () => {
@@ -449,10 +555,13 @@ test("useChatEvents: locally resolved approval gate is not restored by stale pro
   assert.equal(harness.pendingGate, null);
   assert.equal(harness.isProcessing, false);
   assert.equal(harness.activeRun, null);
-  assert.deepEqual(harness.messages, []);
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].role, "tool_activity");
+  assert.equal(harness.messages[0].toolName, "shell");
+  assert.equal(harness.messages[0].toolStatus, "running");
 });
 
-test("useChatEvents: locally resumed deny ignores stale projection without clearing run", () => {
+test("useChatEvents: locally resumed deny allows follow-up activity without restoring gate", () => {
   const runId = "run-denied-resumed";
   const gateRef = "gate:approval-denied";
   const harness = createUseChatEventsHarness({
@@ -483,9 +592,9 @@ test("useChatEvents: locally resumed deny ignores stale projection without clear
           },
           {
             capability_activity: {
-              invocation_id: "invocation-denied",
+              invocation_id: "invocation-follow-up",
               turn_run_id: runId,
-              capability_id: "builtin.shell",
+              capability_id: "nearai.web_search",
               status: "running",
             },
           },
@@ -501,7 +610,125 @@ test("useChatEvents: locally resumed deny ignores stale projection without clear
     threadId: "thread-1",
     status: "queued",
   });
-  assert.deepEqual(harness.messages, []);
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, "tool-invocation-follow-up");
+  assert.equal(harness.messages[0].role, "tool_activity");
+  assert.equal(harness.messages[0].toolName, "web_search");
+  assert.equal(harness.messages[0].toolStatus, "running");
+  assert.equal(harness.messages[0].turnRunId, runId);
+});
+
+test("useChatEvents: late started activity cannot downgrade remembered failed tool", () => {
+  const runId = "run-terminal-tool";
+  const invocationId = "invocation-terminal-tool";
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "capability_activity",
+    frame: {
+      activity: {
+        invocation_id: invocationId,
+        turn_run_id: runId,
+        capability_id: "nearai.web_search",
+        status: "failed",
+        error_kind: "authorization",
+      },
+    },
+  });
+  assert.equal(harness.messages[0].toolStatus, "error");
+
+  // A full history refresh can temporarily rebuild messages from the
+  // transcript, which does not include capability_display_preview records for
+  // denied gates. The event handler still must remember terminal activity so a
+  // later stale projection replay cannot recreate the same invocation as RUN.
+  harness.replaceMessages([]);
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            capability_activity: {
+              invocation_id: invocationId,
+              turn_run_id: runId,
+              capability_id: "nearai.web_search",
+              status: "started",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, `tool-${invocationId}`);
+  assert.equal(harness.messages[0].toolName, "web_search");
+  assert.equal(harness.messages[0].toolStatus, "error");
+  assert.equal(harness.messages[0].toolError, "authorization");
+});
+
+test("useChatEvents: projection order annotates replayed terminal activity", () => {
+  const runId = "run-replayed-order";
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "capability_activity",
+    frame: {
+      activity: {
+        invocation_id: "invocation-nearai",
+        turn_run_id: runId,
+        capability_id: "nearai.web_search",
+        status: "failed",
+        error_kind: "authorization",
+      },
+    },
+  });
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            capability_activity: {
+              invocation_id: "invocation-web",
+              turn_run_id: runId,
+              capability_id: "web-access.search",
+              status: "started",
+            },
+          },
+          {
+            capability_activity: {
+              invocation_id: "invocation-install",
+              turn_run_id: runId,
+              capability_id: "builtin.extension_install",
+              status: "started",
+            },
+          },
+          {
+            capability_activity: {
+              invocation_id: "invocation-nearai",
+              turn_run_id: runId,
+              capability_id: "nearai.web_search",
+              status: "started",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  const orderById = new Map(
+    harness.messages.map((message) => [message.id, message.activityOrder]),
+  );
+  assert.equal(orderById.get("tool-invocation-web"), 1);
+  assert.equal(orderById.get("tool-invocation-install"), 2);
+  assert.equal(orderById.get("tool-invocation-nearai"), 3);
+  assert.equal(
+    harness.messages.find((message) => message.id === "tool-invocation-nearai")
+      .toolStatus,
+    "error",
+  );
 });
 
 test("useChatEvents: stale terminal run status does not clear newer run", () => {

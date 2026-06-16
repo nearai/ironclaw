@@ -14,6 +14,11 @@ import {
   recordAcceptedMessageRef,
   removePending,
 } from "./pending-messages.js";
+import {
+  createToolActivityState,
+  failGateToolActivity,
+  resetToolActivityState,
+} from "./tool-activity-state.js";
 
 function useChatSourceForTest() {
   const source = readFileSync(
@@ -34,6 +39,15 @@ function useChatSourceForTest() {
     lines.push(line.replace("export function useChat", "function useChat"));
   }
   return `${lines.join("\n")}\nglobalThis.__testExports = { useChat };`;
+}
+
+function runUseChatSource(context) {
+  Object.assign(context, {
+    createToolActivityState,
+    failGateToolActivity,
+    resetToolActivityState,
+  });
+  vm.runInNewContext(useChatSourceForTest(), context);
 }
 
 function createReactStub({ initialByIndex = new Map(), setCalls = [] } = {}) {
@@ -138,7 +152,7 @@ test("useChat.send: accepted ref reconciles pending message on timeline reload",
     useSSE: () => ({ status: "idle" }),
   };
 
-  vm.runInNewContext(useChatSourceForTest(), context);
+  runUseChatSource(context);
 
   const chat = context.globalThis.__testExports.useChat(threadId);
   await chat.send("check my calendar");
@@ -228,7 +242,7 @@ test("useChat.send: forwards staged attachments to sendMessage in wire shape", a
   const threadId = "thread-1";
   const { context, sentBody } = createSendCaptureContext();
 
-  vm.runInNewContext(useChatSourceForTest(), context);
+  runUseChatSource(context);
 
   const chat = context.globalThis.__testExports.useChat(threadId);
   await chat.send("please review", {
@@ -260,7 +274,7 @@ test("useChat.send: stamps render attachments on the optimistic message", async 
   const threadId = "thread-1";
   const { context, renderedMessages } = createSendCaptureContext();
 
-  vm.runInNewContext(useChatSourceForTest(), context);
+  runUseChatSource(context);
 
   const chat = context.globalThis.__testExports.useChat(threadId);
   await chat.send("look at this", {
@@ -360,7 +374,7 @@ test("useChat.cancelRun clears local state before cancel request resolves", asyn
     useSSE: () => ({ status: "idle" }),
   };
 
-  vm.runInNewContext(useChatSourceForTest(), context);
+  runUseChatSource(context);
 
   const chat = context.globalThis.__testExports.useChat(threadId);
   const cancelPromise = chat.cancelRun("user_requested");
@@ -378,7 +392,7 @@ test("useChat.cancelRun clears local state before cancel request resolves", asyn
   await cancelPromise;
 });
 
-test("useChat.approve deny resumes without locally mutating tool activity", async () => {
+test("useChat.approve deny marks the current gated tool failed before resume", async () => {
   const threadId = "thread-1";
   const runId = "run-1";
   const gateRef = "gate-1";
@@ -404,7 +418,7 @@ test("useChat.approve deny resumes without locally mutating tool activity", asyn
       initialByIndex: new Map([
         [2, { runId, threadId, status: "awaiting_gate" }],
         [4, false],
-        [5, { runId, gateRef, kind: "gate" }],
+        [5, { runId, gateRef, kind: "gate", toolName: "builtin.shell" }],
       ]),
       setCalls: stateUpdates,
     }),
@@ -414,6 +428,8 @@ test("useChat.approve deny resumes without locally mutating tool activity", asyn
     createThreadRequest: async () => {
       throw new Error("createThread should not run");
     },
+    createToolActivityState,
+    failGateToolActivity,
     globalThis: {},
     listConnectableChannels: async () => ({ channels: [] }),
     looksLikeChannelConnectCommand,
@@ -428,6 +444,7 @@ test("useChat.approve deny resumes without locally mutating tool activity", asyn
       resolveRequest = request;
       return { outcome: "resumed", run_id: runId, status: "queued" };
     },
+    resetToolActivityState,
     sendMessage: async () => {
       throw new Error("sendMessage should not run");
     },
@@ -449,7 +466,7 @@ test("useChat.approve deny resumes without locally mutating tool activity", asyn
     useSSE: () => ({ status: "idle" }),
   };
 
-  vm.runInNewContext(useChatSourceForTest(), context);
+  runUseChatSource(context);
 
   const chat = context.globalThis.__testExports.useChat(threadId);
   await chat.approve(null, "deny", "gate");
@@ -461,8 +478,80 @@ test("useChat.approve deny resumes without locally mutating tool activity", asyn
     resolution: "denied",
     always: false,
   });
-  assert.equal(renderedMessages[0].toolStatus, "running");
-  assert.equal(renderedMessages[0].toolError, undefined);
+  assert.equal(renderedMessages.length, 1);
+  assert.equal(renderedMessages[0].toolStatus, "error");
+  assert.equal(renderedMessages[0].toolError, "authorization");
+  assert.equal(renderedMessages[0].gateRef, gateRef);
+  assert.deepEqual(JSON.parse(JSON.stringify(stateUpdates.slice(-3))), [
+    { index: 5, value: null },
+    { index: 4, value: true },
+    { index: 2, value: { runId, threadId, status: "queued" } },
+  ]);
+});
+
+test("useChat.approve deny treats queued response without outcome as resumed", async () => {
+  const threadId = "thread-1";
+  const runId = "run-queued-response";
+  const gateRef = "gate-queued-response";
+  const stateUpdates = [];
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({
+      initialByIndex: new Map([
+        [2, { runId, threadId, status: "awaiting_gate" }],
+        [4, false],
+        [5, { runId, gateRef, kind: "gate", toolName: "nearai.web_search" }],
+      ]),
+      setCalls: stateUpdates,
+    }),
+    addPending,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("createThread should not run");
+    },
+    createToolActivityState,
+    failGateToolActivity,
+    globalThis: {},
+    listConnectableChannels: async () => ({ channels: [] }),
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async () => ({ channels: [] }),
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => ({ run_id: runId, status: "queued" }),
+    resetToolActivityState,
+    sendMessage: async () => {
+      throw new Error("sendMessage should not run");
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: [],
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      setMessages: () => {},
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  await chat.approve(null, "deny", "gate");
+
   assert.deepEqual(JSON.parse(JSON.stringify(stateUpdates.slice(-3))), [
     { index: 5, value: null },
     { index: 4, value: true },
@@ -535,7 +624,7 @@ test("useChat.cancelRun completion does not clear a newer run", async () => {
     useSSE: () => ({ status: "idle" }),
   };
 
-  vm.runInNewContext(useChatSourceForTest(), context);
+  runUseChatSource(context);
 
   const chat = context.globalThis.__testExports.useChat(threadId);
   const cancelPromise = chat.cancelRun("user_requested");
@@ -618,7 +707,7 @@ test("useChat.send: channel connect requests return an action without submitting
     useSSE: () => ({ status: "idle" }),
   };
 
-  vm.runInNewContext(useChatSourceForTest(), context);
+  runUseChatSource(context);
 
   const chat = context.globalThis.__testExports.useChat(null);
   const response = await chat.send("connect my Slack account");
@@ -697,7 +786,7 @@ test("useChat.send: unmatched channel connect requests submit the prompt", async
     useSSE: () => ({ status: "idle" }),
   };
 
-  vm.runInNewContext(useChatSourceForTest(), context);
+  runUseChatSource(context);
 
   const chat = context.globalThis.__testExports.useChat(null);
   const response = await chat.send("connect telegram account");
@@ -765,7 +854,7 @@ test("useChat.send: rejected_busy appends system notice, marks optimistic failed
     useSSE: () => ({ status: "idle" }),
   };
 
-  vm.runInNewContext(useChatSourceForTest(), context);
+  runUseChatSource(context);
 
   const chat = context.globalThis.__testExports.useChat(threadId);
   await chat.send("hello while busy");
@@ -844,7 +933,7 @@ test("useChat.send: rejected_busy without notice still clears isProcessing", asy
     useSSE: () => ({ status: "idle" }),
   };
 
-  vm.runInNewContext(useChatSourceForTest(), context);
+  runUseChatSource(context);
 
   const chat = context.globalThis.__testExports.useChat(threadId);
   await chat.send("hello while busy");
@@ -925,7 +1014,7 @@ test("useChat.send: connectable channel fetch failures submit the prompt", async
     useSSE: () => ({ status: "idle" }),
   };
 
-  vm.runInNewContext(useChatSourceForTest(), context);
+  runUseChatSource(context);
 
   const chat = context.globalThis.__testExports.useChat(null);
   const response = await chat.send("connect my Slack account");

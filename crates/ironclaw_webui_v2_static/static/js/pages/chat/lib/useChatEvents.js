@@ -1,11 +1,14 @@
 import { React } from "../../../lib/html.js";
 import { gateFromEvent } from "./gates.js";
 import {
-  isTerminalToolStatus,
   toolCardFromActivity,
   toolCardFromPreview,
 } from "./history-messages.js";
 import { failureMessageForRunStatus } from "./failureMessages.js";
+import {
+  ensureGateToolActivity,
+  upsertToolActivityMessage,
+} from "./tool-activity-state.js";
 
 // Handler factory for v2 `WebChatV2EventFrame` events.
 //
@@ -37,6 +40,7 @@ export function useChatEvents({
   setActiveRun,
   activeRunRef,
   locallyResolvedGatesRef,
+  toolActivityStateRef,
   onRunCompleted,
 }) {
   // Track which runIds we've already announced completion for so that
@@ -97,7 +101,7 @@ export function useChatEvents({
           const activity = frame.activity;
           if (!activity || !activity.invocation_id) return;
           const card = toolCardFromActivity(activity);
-          upsertToolFromActivity(setMessages, activity.invocation_id, card);
+          upsertToolActivityMessage(setMessages, card, toolActivityStateRef);
           return;
         }
 
@@ -109,7 +113,7 @@ export function useChatEvents({
           const preview = frame.preview;
           if (!preview || !preview.invocation_id) return;
           const card = toolCardFromPreview(preview);
-          upsertToolFromPreview(setMessages, preview.invocation_id, card);
+          upsertToolActivityMessage(setMessages, card, toolActivityStateRef);
           return;
         }
 
@@ -117,6 +121,7 @@ export function useChatEvents({
         case "auth_required": {
           const pending = gateFromEvent(type, frame.prompt);
           if (pending) {
+            ensureGateToolActivity(setMessages, pending, toolActivityStateRef);
             setPendingGate(pending);
             setActiveRun?.({
               runId: pending.runId,
@@ -184,6 +189,7 @@ export function useChatEvents({
             promptRunIdRef,
             activeRunRef,
             locallyResolvedGatesRef,
+            toolActivityStateRef,
           });
           return;
         }
@@ -201,6 +207,7 @@ export function useChatEvents({
       setActiveRun,
       activeRunRef,
       locallyResolvedGatesRef,
+      toolActivityStateRef,
       onRunCompleted,
     ],
   );
@@ -255,6 +262,7 @@ function applyProjectionItems({
   promptRunIdRef,
   activeRunRef,
   locallyResolvedGatesRef,
+  toolActivityStateRef,
 }) {
   // Snapshot the run_id surfaced by the most recent `run_status` item
   // we've seen — either earlier in this same items batch, or carried
@@ -426,14 +434,10 @@ function applyProjectionItems({
     if (item.capability_activity) {
       const activity = item.capability_activity;
       if (activity.invocation_id) {
-        if (
-          isLocallyResolvedRun(locallyResolvedGatesRef, activity.turn_run_id) &&
-          !isTerminalActivityStatus(activity.status)
-        ) {
-          continue;
-        }
         const card = toolCardFromActivity(activity);
-        upsertToolFromActivity(setMessages, activity.invocation_id, card);
+        upsertToolActivityMessage(setMessages, card, toolActivityStateRef, {
+          assignOrder: true,
+        });
       }
     }
 
@@ -573,56 +577,7 @@ function clearLocallyResolvedRun(locallyResolvedGatesRef, runId) {
   }
 }
 
-function isLocallyResolvedRun(locallyResolvedGatesRef, runId) {
-  return Boolean(locallyResolvedStateForRun(locallyResolvedGatesRef, runId));
-}
-
 function isLocallyResolvedGate(locallyResolvedGatesRef, runId, gateRef) {
   if (!runId || !gateRef) return false;
   return Boolean(locallyResolvedGatesRef?.current?.has(`${runId}\n${gateRef}`));
-}
-
-function isTerminalActivityStatus(status) {
-  return status === "completed" || status === "failed" || status === "killed";
-}
-
-function upsertToolFromPreview(setMessages, invocationId, card) {
-  const id = `tool-${invocationId}`;
-  const message = { id, role: "tool_activity", ...card };
-  setMessages((prev) => {
-    const existing = prev.findIndex((m) => m.id === id);
-    if (existing >= 0) {
-      const copy = [...prev];
-      copy[existing] = message;
-      return copy;
-    }
-    return [...prev, message];
-  });
-}
-
-function upsertToolFromActivity(setMessages, invocationId, card) {
-  const id = `tool-${invocationId}`;
-  setMessages((prev) => {
-    const existing = prev.findIndex((m) => m.id === id);
-    if (existing >= 0) {
-      const current = prev[existing];
-      // A late lifecycle frame can carry `running` after the preview
-      // already set `success` / `error`. Don't downgrade terminal
-      // state — but do let the next terminal state through.
-      const nextStatus =
-        isTerminalToolStatus(current.toolStatus) && card.toolStatus === "running"
-          ? current.toolStatus
-          : card.toolStatus;
-      const copy = [...prev];
-      copy[existing] = {
-        ...current,
-        toolStatus: nextStatus,
-        toolError: card.toolError || current.toolError,
-        updatedAt: card.updatedAt || current.updatedAt,
-        turnRunId: card.turnRunId || current.turnRunId || null,
-      };
-      return copy;
-    }
-    return [...prev, { id, role: "tool_activity", ...card }];
-  });
 }

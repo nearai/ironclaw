@@ -228,3 +228,61 @@ test("groupMessages: no reordering when timeline has no assistant reply", () => 
   assert.equal(grouped[1].type, "activity-run");
   assert.deepEqual(grouped[1].activity.map((item) => item.id), ["a", "b"]);
 });
+
+test("groupMessages: activity run uses projection order for tool cards", () => {
+  const grouped = groupMessages([
+    {
+      id: "tool-nearai",
+      role: "tool_activity",
+      toolName: "web_search",
+      activityOrder: 3,
+    },
+    {
+      id: "tool-web",
+      role: "tool_activity",
+      toolName: "search",
+      activityOrder: 1,
+    },
+    {
+      id: "tool-install",
+      role: "tool_activity",
+      toolName: "extension_install",
+      activityOrder: 2,
+    },
+  ]);
+
+  assert.equal(grouped.length, 1);
+  assert.deepEqual(
+    grouped[0].activity.map((item) => item.id),
+    ["tool-web", "tool-install", "tool-nearai"],
+  );
+});
+
+test("groupMessages: activity run falls back to tool update timestamps", () => {
+  const grouped = groupMessages([
+    {
+      id: "tool-nearai",
+      role: "tool_activity",
+      toolName: "web_search",
+      updatedAt: "2026-06-16T09:44:43.599792Z",
+    },
+    {
+      id: "tool-web",
+      role: "tool_activity",
+      toolName: "search",
+      updatedAt: "2026-06-16T09:44:08.580375Z",
+    },
+    {
+      id: "tool-list",
+      role: "tool_activity",
+      toolName: "list_dir",
+      updatedAt: "2026-06-16T09:44:23.277989Z",
+    },
+  ]);
+
+  assert.equal(grouped.length, 1);
+  assert.deepEqual(
+    grouped[0].activity.map((item) => item.id),
+    ["tool-web", "tool-list", "tool-nearai"],
+  );
+});

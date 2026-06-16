@@ -175,7 +175,8 @@ export function toolCardFromPreview(preview) {
   return {
     invocationId: preview.invocation_id,
     callId: preview.invocation_id,
-    toolName: preview.title || preview.capability_id || "tool",
+    capabilityId: preview.capability_id || null,
+    toolName: toolDisplayName(preview.title || preview.capability_id) || "tool",
     toolStatus: toolStatusFromActivityStatus(preview.status),
     toolDetail: preview.subtitle || null,
     toolParameters: preview.input_summary || null,
@@ -209,7 +210,8 @@ export function toolCardFromActivity(activity) {
   return {
     invocationId: activity.invocation_id,
     callId: activity.invocation_id,
-    toolName: activity.capability_id || "tool",
+    capabilityId: activity.capability_id || null,
+    toolName: toolDisplayName(activity.capability_id) || "tool",
     toolStatus: toolStatusFromActivityStatus(activity.status),
     toolDetail: null,
     toolParameters: null,
@@ -227,6 +229,13 @@ export function toolCardFromActivity(activity) {
 
 export function isTerminalToolStatus(status) {
   return status === "success" || status === "error";
+}
+
+export function toolDisplayName(name) {
+  const value = typeof name === "string" ? name.trim() : "";
+  if (!value) return "";
+  const parts = value.split(".");
+  return parts[parts.length - 1] || value;
 }
 
 function toolStatusFromActivityStatus(status) {

@@ -21,6 +21,11 @@ import {
 import { toRenderAttachment, toWireAttachment } from "../lib/attachments.js";
 import { useHistory } from "./useHistory.js";
 import { useSSE } from "./useSSE.js";
+import {
+  createToolActivityState,
+  failGateToolActivity,
+  resetToolActivityState,
+} from "../lib/tool-activity-state.js";
 
 const AUTH_TOKEN_FLOW_TIMEOUT_MS = 30000;
 const AUTH_GATE_CREDENTIAL_STORED_ERROR =
@@ -60,6 +65,14 @@ function threadNeedsSidebarRefresh(threadId) {
 
 function submitResponseResumedTurnGate(response) {
   return response?.continuation?.type === "turn_gate_resume";
+}
+
+function resolveGateOutcome(response) {
+  if (response?.outcome) return response.outcome;
+  const status = String(response?.status || "").toLowerCase();
+  if (status === "queued" || status === "running") return "resumed";
+  if (status === "cancelled" || response?.already_terminal !== undefined) return "cancelled";
+  return null;
 }
 
 function isPendingOAuthGate(gate) {
@@ -119,6 +132,7 @@ export function useChat(threadId) {
   const [activeRun, setActiveRunState] = React.useState(null);
   const activeRunRef = React.useRef(activeRun);
   const locallyResolvedGatesRef = React.useRef(new Map());
+  const toolActivityStateRef = React.useRef(createToolActivityState());
   const setActiveRun = React.useCallback((next) => {
     const value = typeof next === "function" ? next(activeRunRef.current) : next;
     activeRunRef.current = value;
@@ -172,6 +186,7 @@ export function useChat(threadId) {
     setPendingGate(null);
     setActiveRun(null);
     locallyResolvedGatesRef.current.clear();
+    resetToolActivityState(toolActivityStateRef);
     setChannelConnectAction(null);
   }, [threadId]);
 
@@ -246,6 +261,7 @@ export function useChat(threadId) {
     setActiveRun,
     activeRunRef,
     locallyResolvedGatesRef,
+    toolActivityStateRef,
     // Reborn's projection bridge does not yet emit `Text` items for
     // assistant replies, so the SSE stream only delivers `run_status`.
     // On terminal success, refetch the timeline so the assistant
@@ -447,7 +463,8 @@ export function useChat(threadId) {
         always: opts.always,
         credentialRef: opts.credentialRef,
       });
-      const responseResumed = response?.outcome === "resumed";
+      const responseOutcome = resolveGateOutcome(response);
+      const responseResumed = responseOutcome === "resumed";
       const shouldContinueProcessing =
         responseResumed ||
         resolution === "approved" ||
@@ -461,9 +478,12 @@ export function useChat(threadId) {
         if (key) {
           locallyResolvedGatesRef.current.set(key, {
             resolution,
-            outcome: response?.outcome || null,
+            outcome: responseOutcome,
           });
         }
+      }
+      if (resolution === "denied") {
+        failGateToolActivity(setMessages, pendingGate, toolActivityStateRef);
       }
       setPendingGate(null);
       setIsProcessing(shouldContinueProcessing);
