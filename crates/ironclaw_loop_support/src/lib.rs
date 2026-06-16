@@ -1674,8 +1674,7 @@ pub enum HostManagedModelErrorKind {
     /// Caller-side misuse of the host model port (unknown tool, malformed request).
     InvalidRequest,
     /// Provider/model output was structurally invalid for the active loop contract.
-    /// This is model-side bad output, not caller misuse — mapped to Unavailable so
-    /// loops can retry on transient provider anomalies.
+    /// This is model-side bad output, not caller misuse.
     #[serde(alias = "invalid_output")]
     InvalidOutput,
     PolicyDenied,
@@ -2022,7 +2021,7 @@ fn model_gateway_error(error: HostManagedModelError) -> AgentLoopHostError {
 fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {
     match kind {
         HostManagedModelErrorKind::InvalidRequest => AgentLoopHostErrorKind::InvalidInvocation,
-        HostManagedModelErrorKind::InvalidOutput => AgentLoopHostErrorKind::Unavailable,
+        HostManagedModelErrorKind::InvalidOutput => AgentLoopHostErrorKind::InvalidOutput,
         HostManagedModelErrorKind::PolicyDenied => AgentLoopHostErrorKind::PolicyDenied,
         HostManagedModelErrorKind::ConfigurationError => AgentLoopHostErrorKind::Unavailable,
         HostManagedModelErrorKind::BudgetExceeded => AgentLoopHostErrorKind::BudgetExceeded,

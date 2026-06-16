@@ -177,6 +177,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
                                 &state,
                                 surface_version.clone(),
                                 capability_view.clone(),
+                                alter.as_ref(),
                             )
                             .await?;
                             match CheckpointStage.cancel_if_requested(ctx, state).await? {
@@ -244,6 +245,13 @@ async fn apply_model_retry_alteration(
             }
             state.compaction_state.force_compact_on_next_iteration = true;
             return Ok(ModelRetryAction::RetryIteration);
+        }
+        Some(RetryAlteration::RepairInvalidModelOutput) => {
+            if scope != RetryScope::Call {
+                return Err(AgentLoopExecutorError::PlannerContract {
+                    detail: "invalid model output repair retry requires call scope",
+                });
+            }
         }
         Some(RetryAlteration::AdvanceFallback) | None => {}
     }

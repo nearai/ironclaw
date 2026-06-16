@@ -41,7 +41,10 @@ pub(crate) use compaction::{
     ByteCapStrategy, CompactionDecision, CompactionForceStrategy, CompactionStrategy,
     DefaultCompactionStrategy,
 };
-pub(crate) use context::{ContextPlan, ContextStrategy, DefaultContextStrategy};
+pub(crate) use context::{
+    ContextPlan, ContextStrategy, DefaultContextStrategy, INVALID_MODEL_OUTPUT_REPAIR_CONTROL_TEXT,
+    invalid_model_output_repair_control_message,
+};
 pub(crate) use drain::{DefaultInputDrainStrategy, InputDrainStrategy};
 pub(crate) use gate::{
     DefaultGateHandlingStrategy, GateHandlingStrategy, GateKind, GateOutcome, GateSummary,

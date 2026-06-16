@@ -620,6 +620,8 @@ pub enum AgentLoopHostErrorKind {
     /// The request payload itself is well-formed but its content is invalid in
     /// the current host state (e.g. schema id/version mismatch on checkpoint load).
     Invalid,
+    /// The model/provider output was structurally invalid for the active loop contract.
+    InvalidOutput,
     PolicyDenied,
     BudgetExceeded,
     /// The model call would push utilization past the configured pause
@@ -647,6 +649,7 @@ impl AgentLoopHostErrorKind {
             Self::StaleSurface => "stale_surface",
             Self::InvalidInvocation => "invalid_invocation",
             Self::Invalid => "invalid",
+            Self::InvalidOutput => "invalid_output",
             Self::PolicyDenied => "policy_denied",
             Self::BudgetExceeded => "budget_exceeded",
             Self::BudgetApprovalRequired => "budget_approval_required",

@@ -90,6 +90,7 @@ pub(super) fn model_error_class(error: &AgentLoopHostError) -> Option<ModelError
     match error.kind {
         AgentLoopHostErrorKind::Unavailable => Some(ModelErrorClass::Unavailable),
         AgentLoopHostErrorKind::Internal => Some(ModelErrorClass::Internal),
+        AgentLoopHostErrorKind::InvalidOutput => Some(ModelErrorClass::InvalidOutput),
         AgentLoopHostErrorKind::BudgetExceeded => Some(ModelErrorClass::ContextOverflow),
         AgentLoopHostErrorKind::BudgetAccountingFailed => Some(ModelErrorClass::Unavailable),
         // Budget approval requirement is a gate, not a transient model
@@ -212,6 +213,19 @@ mod tests {
         assert_eq!(
             capability_failure_kind(&CapabilityFailureKind::PolicyDenied),
             LoopFailureKind::PolicyDenied
+        );
+    }
+
+    #[test]
+    fn invalid_model_output_is_distinct_from_unavailable() {
+        let error = AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidOutput,
+            "model output was structurally invalid",
+        );
+
+        assert_eq!(
+            model_error_class(&error),
+            Some(ModelErrorClass::InvalidOutput)
         );
     }
 }

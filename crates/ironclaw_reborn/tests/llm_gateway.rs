@@ -357,16 +357,9 @@ async fn gateway_with_tool_surface_calls_complete_with_tools_and_returns_capabil
 
 #[tokio::test]
 async fn gateway_rejects_empty_tool_capable_stop_response_without_text_only_retry() {
-    let provider = Arc::new(ToolAwareProvider::tool_response(ToolCompletionResponse {
-        content: None,
-        tool_calls: Vec::new(),
-        input_tokens: 1,
-        output_tokens: 1,
-        finish_reason: FinishReason::Stop,
-        cache_read_input_tokens: 0,
-        cache_creation_input_tokens: 0,
-        reasoning: None,
-    }));
+    let provider = Arc::new(ToolAwareProvider::tool_response(
+        empty_tool_capable_stop_response(),
+    ));
     let gateway = LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
         provider.clone(),
@@ -2639,6 +2632,19 @@ fn resolved_tool_result_content() -> Option<HostManagedToolResultContent> {
     Some(HostManagedToolResultContent::Resolved {
         safe_summary: ToolResultSafeSummary::new("tool completed").unwrap(),
     })
+}
+
+fn empty_tool_capable_stop_response() -> ToolCompletionResponse {
+    ToolCompletionResponse {
+        content: None,
+        tool_calls: Vec::new(),
+        input_tokens: 1,
+        output_tokens: 1,
+        finish_reason: FinishReason::Stop,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        reasoning: None,
+    }
 }
 
 struct IgnoresModelOverrideProvider {

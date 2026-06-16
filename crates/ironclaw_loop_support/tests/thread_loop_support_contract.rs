@@ -1314,7 +1314,7 @@ async fn model_port_maps_invalid_model_output_to_recoverable_model_error() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidOutput);
     assert_eq!(
         error.safe_summary,
         "model returned a tool call outside the advertised capability surface"

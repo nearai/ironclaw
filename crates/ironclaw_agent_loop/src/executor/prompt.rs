@@ -17,7 +17,9 @@ use crate::state::{
     CheckpointKind, CompactionPromptSnapshot, DeferredCompactionWatermark, IndexedMessageKind,
     LoopExecutionState, MessageIndexEntry,
 };
-use crate::strategies::CompactionDecision;
+use crate::strategies::{
+    CompactionDecision, RetryAlteration, invalid_model_output_repair_control_message,
+};
 
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, HostStage,
@@ -98,7 +100,8 @@ impl BuiltPromptBundle {
         capability_view: LoopModelCapabilityView,
     ) -> Result<Self, AgentLoopExecutorError> {
         let bundle =
-            build_prompt_bundle_for_surface(ctx, state, surface_version, capability_view).await?;
+            build_prompt_bundle_for_surface(ctx, state, surface_version, capability_view, None)
+                .await?;
         refresh_compaction_prompt_from_index(state, &bundle.compaction_message_index);
         Ok(bundle)
     }
@@ -616,11 +619,20 @@ pub(super) async fn build_prompt_bundle_for_surface(
     state: &LoopExecutionState,
     surface_version: CapabilitySurfaceVersion,
     capability_view: LoopModelCapabilityView,
+    retry_alteration: Option<&RetryAlteration>,
 ) -> Result<BuiltPromptBundle, AgentLoopExecutorError> {
     let context_plan = ctx.planner.context().plan_context_request(state).await;
     let mut context_request = context_plan.request;
     context_request.surface_version = Some(surface_version);
     context_request.capability_view = Some(capability_view);
+    if matches!(
+        retry_alteration,
+        Some(RetryAlteration::RepairInvalidModelOutput)
+    ) {
+        context_request
+            .inline_messages
+            .push(invalid_model_output_repair_control_message());
+    }
     let prompt_mode = context_request.mode;
     let rendered_reply_admission_control = context_plan.emitted_admission_control;
     let rendered_repeated_call_warning = context_plan.emitted_repeated_call_warning;

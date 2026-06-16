@@ -210,6 +210,9 @@ fn map_host_error(stage: &'static str, error: AgentLoopHostError) -> AgentLoopDr
         | AgentLoopHostErrorKind::PolicyDenied => AgentLoopDriverError::Failed {
             reason_kind: loop_failure_kind_name(LoopFailureKind::ModelError).to_string(),
         },
+        AgentLoopHostErrorKind::InvalidOutput => AgentLoopDriverError::Failed {
+            reason_kind: loop_failure_kind_name(LoopFailureKind::InvalidModelOutput).to_string(),
+        },
         AgentLoopHostErrorKind::CredentialUnavailable => AgentLoopDriverError::Failed {
             reason_kind: loop_failure_kind_name(LoopFailureKind::ModelError).to_string(),
         },

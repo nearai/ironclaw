@@ -15,7 +15,7 @@ use crate::{
     state::{CheckpointKind, LoopExecutionState},
     strategies::{
         BatchPolicy, CapabilityBatchTurnSummary, CapabilityErrorClass, CapabilityErrorSummary,
-        GateKind, RecoveryOutcome, SanitizedStrategySummary, TurnSummary,
+        GateKind, RecoveryOutcome, RetryAlteration, SanitizedStrategySummary, TurnSummary,
     },
 };
 
@@ -844,6 +844,14 @@ impl CapabilityStage {
                     match CheckpointStage.cancel_if_requested(ctx, state).await? {
                         CancelCheck::Continue(next) => state = *next,
                         CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
+                    }
+                    if matches!(
+                        alter.as_ref(),
+                        Some(RetryAlteration::RepairInvalidModelOutput)
+                    ) {
+                        return Err(AgentLoopExecutorError::PlannerContract {
+                            detail: "invalid model output repair retry requires model scope",
+                        });
                     }
                     honor_retry_alteration(alter.as_ref())?;
                     CheckpointStage

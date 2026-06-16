@@ -23,7 +23,7 @@ use crate::state::{
 };
 use crate::strategies::{
     CapabilityBatchTurnSummary, CapabilityFilter, DefaultCompactionStrategy, GateKind, GateOutcome,
-    StopKind, TurnSummary,
+    INVALID_MODEL_OUTPUT_REPAIR_CONTROL_TEXT, StopKind, TurnSummary,
 };
 use crate::test_support::compaction::{
     active_task_preserving_compaction_index, compaction_metadata,
@@ -2341,6 +2341,76 @@ async fn model_retry_success_clears_recovery_state() {
         ]
     );
     assert_eq!(final_state.compaction_prompt.observed_prompt_tokens, 50);
+}
+
+#[tokio::test]
+async fn model_invalid_output_retry_adds_repair_hint_and_recovers() {
+    let host =
+        MockHost::new(vec![reply_response()]).with_model_errors(vec![AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidOutput,
+            "model output was structurally invalid",
+        )]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(host.model_requests().len(), 2);
+    let prompt_requests = host.prompt_requests();
+    assert_eq!(prompt_requests.len(), 2);
+    assert!(prompt_requests[0].inline_messages.is_empty());
+    assert_eq!(prompt_requests[1].inline_messages.len(), 1);
+    assert_eq!(
+        prompt_requests[1].inline_messages[0].safe_body.as_str(),
+        INVALID_MODEL_OUTPUT_REPAIR_CONTROL_TEXT
+    );
+    assert_eq!(final_staged_state(&host).recovery_state, Default::default());
+}
+
+#[tokio::test]
+async fn repeated_model_invalid_output_fails_as_invalid_model_output() {
+    let host = MockHost::new(Vec::new()).with_model_errors(vec![
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidOutput,
+            "model output was structurally invalid",
+        ),
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidOutput,
+            "model output was structurally invalid",
+        ),
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidOutput,
+            "model output was structurally invalid",
+        ),
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    match exit {
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::InvalidModelOutput);
+        }
+        other => panic!("expected failed invalid-model-output exit, got {other:?}"),
+    }
+    assert_eq!(host.model_requests().len(), 3);
+    let prompt_requests = host.prompt_requests();
+    assert_eq!(prompt_requests.len(), 3);
+    assert!(prompt_requests[0].inline_messages.is_empty());
+    assert!(prompt_requests[1..].iter().all(|request| {
+        request
+            .inline_messages
+            .iter()
+            .any(|message| message.safe_body.as_str() == INVALID_MODEL_OUTPUT_REPAIR_CONTROL_TEXT)
+    }));
 }
 
 #[tokio::test]

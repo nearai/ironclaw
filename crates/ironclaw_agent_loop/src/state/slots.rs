@@ -267,6 +267,7 @@ pub enum RecoveryAttemptClass {
     CapabilityInternal,
     ModelTransient,
     ModelContextOverflow,
+    ModelInvalidOutput,
     ModelUnavailable,
     ModelInternal,
 }
