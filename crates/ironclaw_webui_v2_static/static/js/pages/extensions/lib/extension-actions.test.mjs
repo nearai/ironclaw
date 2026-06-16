@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { primaryExtensionAction, setupReadyForActivation } from "./extension-actions.js";
+import {
+  extensionIsActive,
+  primaryExtensionAction,
+  setupReadyForActivation,
+} from "./extension-actions.js";
 
 const notionRef = { kind: "extension", id: "notion" };
 
@@ -88,6 +92,12 @@ test("primaryExtensionAction hides activation for active extensions", () => {
   );
 });
 
+test("extensionIsActive accepts card payload lifecycle fields", () => {
+  assert.equal(extensionIsActive({ active: true }), true);
+  assert.equal(extensionIsActive({ activationStatus: "ready" }), true);
+  assert.equal(extensionIsActive({ onboardingState: "auth_required" }), false);
+});
+
 test("setupReadyForActivation waits until all setup secrets are provided", () => {
   assert.equal(
     setupReadyForActivation({
@@ -107,6 +117,14 @@ test("setupReadyForActivation waits until all setup secrets are provided", () =>
     setupReadyForActivation({
       secrets: [{ provided: true }],
       fields: [{ name: "workspace" }],
+    }),
+    false,
+  );
+  assert.equal(
+    setupReadyForActivation({
+      extension: { active: true },
+      secrets: [{ provided: true }],
+      fields: [],
     }),
     false,
   );

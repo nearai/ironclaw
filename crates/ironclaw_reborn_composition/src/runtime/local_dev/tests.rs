@@ -451,6 +451,7 @@ mod tests {
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
             None,
             None,
+            None,
         )
         .expect("local-dev capability wiring");
 
@@ -510,6 +511,14 @@ mod tests {
     impl crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionService
         for ConfiguredRuntimeCredentialAccounts
     {
+        async fn select_configured_account_for_binding(
+            &self,
+            _lookup: ironclaw_auth::CredentialAccountSelectionRequest,
+            _runtime_scope: ironclaw_auth::AuthProductScope,
+        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            Err(ironclaw_auth::AuthProductError::CredentialMissing)
+        }
+
         async fn select_unique_configured_runtime_account(
             &self,
             _request: crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest,
@@ -1064,6 +1073,7 @@ mod tests {
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: Some(Arc::clone(&activation_source)),
+            trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_requests: local_runtime.approval_requests.clone(),
@@ -1182,6 +1192,7 @@ mod tests {
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
             Some(skill_context.activation_source),
             None,
+            None,
         )
         .expect("capability wiring");
         let port = wiring
@@ -1266,6 +1277,7 @@ mod tests {
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
+            trajectory_observer: None,
             outbound_preferences_facade: Some(outbound_preferences_facade),
             outbound_delivery_target_set_requires_approval: true,
             approval_requests: local_runtime.approval_requests.clone(),
@@ -1301,14 +1313,33 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(descriptor_ids.contains(&OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID));
         assert!(descriptor_ids.contains(&OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID));
-        let tool_definition_names = port
-            .tool_definitions()
-            .expect("tool definitions")
-            .into_iter()
-            .map(|definition| definition.name)
+        let tool_definitions = port.tool_definitions().expect("tool definitions");
+        let tool_definition_names = tool_definitions
+            .iter()
+            .map(|definition| definition.name.clone())
             .collect::<Vec<_>>();
         assert!(tool_definition_names.contains(&"builtin__outbound_delivery_targets_list".into()));
         assert!(tool_definition_names.contains(&"builtin__outbound_delivery_target_set".into()));
+        let list_tool = tool_definitions
+            .iter()
+            .find(|definition| definition.name == "builtin__outbound_delivery_targets_list")
+            .expect("list tool definition should exist");
+        assert!(
+            list_tool
+                .description
+                .contains("before builtin__trigger_create"),
+            "list tool description should steer delivery requests before trigger creation"
+        );
+        let set_tool = tool_definitions
+            .iter()
+            .find(|definition| definition.name == "builtin__outbound_delivery_target_set")
+            .expect("set tool definition should exist");
+        assert!(
+            set_tool
+                .description
+                .contains("before creating the routine or trigger"),
+            "set tool description should steer delivery requests before trigger creation"
+        );
 
         let malformed_list = port
             .register_provider_tool_call(provider_tool_call_with_name(
@@ -1601,6 +1632,7 @@ mod tests {
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
             None,
             Some(outbound_preferences_facade),
+            None,
         )
         .expect("capability wiring");
         let port = wiring
@@ -1705,6 +1737,7 @@ mod tests {
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
+            trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_requests: local_runtime.approval_requests.clone(),
@@ -1801,6 +1834,7 @@ mod tests {
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
+            trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_requests: local_runtime.approval_requests.clone(),
@@ -2027,6 +2061,7 @@ mod tests {
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
+            trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_requests: local_runtime.approval_requests.clone(),
@@ -2123,6 +2158,7 @@ mod tests {
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
+            trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_requests: local_runtime.approval_requests.clone(),
@@ -2288,6 +2324,7 @@ mod tests {
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
             None,
             None,
+            None,
         )
         .expect("local-dev capability wiring");
         assert_github_capabilities_visible(&wiring, &run_context).await;
@@ -2322,6 +2359,7 @@ mod tests {
             ),
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
             None,
             None,
         )
@@ -2447,6 +2485,7 @@ mod tests {
             ),
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
             None,
             None,
         )
@@ -2699,6 +2738,7 @@ mod tests {
                 content_ref: LoopMessageRef::new("msg:missing-typed-content").expect("content ref"),
                 tool_result_provider_call: None,
                 tool_result_content: None,
+                image_parts: Vec::new(),
             }],
             surface_version: None,
             resolved_model_route: None,

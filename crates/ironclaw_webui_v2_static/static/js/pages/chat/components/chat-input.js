@@ -114,6 +114,9 @@ export function ChatInput({
     if (stagedDraftKeyRef.current !== draftKey) {
       stagedDraftKeyRef.current = draftKey;
       setAttachments(getStagedAttachments(draftKey));
+      // The composer stays mounted across conversation switches, so a stale
+      // staging error would otherwise persist into every other thread.
+      setAttachmentError("");
       return;
     }
     setStagedAttachments(draftKey, attachments);
@@ -335,8 +338,20 @@ export function ChatInput({
         `}
         ${attachmentError &&
         html`
-          <div className="mb-3 rounded-md border border-red-400/25 bg-red-500/10 px-3 py-2 text-xs leading-5 text-red-100">
-            ${attachmentError}
+          <div
+            role="alert"
+            className="mb-3 flex items-start gap-2 rounded-md border border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-3 py-2 text-xs leading-5 text-[var(--v2-danger-text)]"
+          >
+            <span className="min-w-0 flex-1">${attachmentError}</span>
+            <button
+              type="button"
+              onClick=${() => setAttachmentError("")}
+              aria-label=${t("common.dismiss")}
+              title=${t("common.dismiss")}
+              className="-mr-1 -mt-0.5 shrink-0 rounded p-0.5 text-[color-mix(in_srgb,var(--v2-danger-text)_80%,transparent)] transition hover:bg-[color-mix(in_srgb,var(--v2-danger-text)_14%,transparent)] hover:text-[var(--v2-danger-text)]"
+            >
+              <${Icon} name="close" className="h-3.5 w-3.5" strokeWidth=${2} />
+            </button>
           </div>
         `}
 

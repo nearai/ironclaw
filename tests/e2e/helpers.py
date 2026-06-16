@@ -229,6 +229,19 @@ SEL_V2 = {
     "chat_composer":  "[data-testid='chat-composer']",  # message textarea on /chat
     "msg_user":       "[data-testid='msg-user']",       # user message bubble
     "msg_assistant":  "[data-testid='msg-assistant']",  # assistant message bubble
+    # Download chip for an agent-produced workspace file; `{path}` selects one.
+    # Clicking a chip opens the shared attachment preview modal, whose footer
+    # carries the Download action.
+    "project_file_chip": "[data-testid='project-file-chip']",
+    "project_file_chip_for": "[data-testid='project-file-chip'][data-file-path='{path}']",
+    # Inline one-click download icon on a project-file chip; `{path}` scopes it
+    # to the chip's adjacent sibling so each chip's download is addressable.
+    "project_file_download_for": (
+        "[data-testid='project-file-chip'][data-file-path='{path}'] "
+        "+ [data-testid='project-file-download']"
+    ),
+    # Download action inside the shared attachment preview modal.
+    "attachment_download": "[data-testid='attachment-download']",
     "logs_scope_toolbar": "[data-testid='logs-scope-toolbar']",
     "logs_scope_chip": "[data-testid='logs-scope-chip'][data-scope-key='{key}']",
     "logs_entry": "[data-testid='logs-entry']",

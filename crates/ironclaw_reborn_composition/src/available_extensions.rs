@@ -151,7 +151,7 @@ fn onboarding(package_id: &str) -> Option<LifecycleExtensionOnboarding> {
             "Web Access does not need credentials. Activate it to make web search and saved-result retrieval tools available.",
             Some("No credentials are required for Web Access."),
             None,
-            "Install Web Access, then activate it to publish its tools.",
+            "Activate Web Access to publish its tools.",
         )),
         _ => None,
     }
@@ -1547,7 +1547,7 @@ mod tests {
         InMemoryBackend,
     };
     use ironclaw_host_api::{
-        EffectKind, HostPortCatalog, RuntimeCredentialAccountSetup,
+        EffectKind, HostPortCatalog, PermissionMode, RuntimeCredentialAccountSetup,
         RuntimeCredentialRequirementSource,
     };
 
@@ -1657,6 +1657,47 @@ mod tests {
                 "{query} should discover every GSuite package; got {ids:?}"
             );
         }
+    }
+
+    #[test]
+    fn bundled_github_read_only_capabilities_default_allow_without_relaxing_writes() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").unwrap();
+        let github = catalog.resolve(&package_ref).unwrap();
+        let mut allowed_read_only = BTreeSet::new();
+        let mut ask_required = BTreeSet::new();
+        let sensitive_token_backed_reads = BTreeSet::from(["github.search_code"]);
+
+        for capability in &github.package.manifest.capabilities {
+            let requires_explicit_approval = capability.effects.iter().any(|effect| {
+                effect.is_write() || matches!(effect, EffectKind::DispatchCapability)
+            }) || sensitive_token_backed_reads
+                .contains(capability.id.as_str());
+            if requires_explicit_approval {
+                assert_eq!(
+                    capability.default_permission,
+                    PermissionMode::Ask,
+                    "{} should still ask before effectful or broad token-backed GitHub actions",
+                    capability.id
+                );
+                ask_required.insert(capability.id.as_str());
+            } else {
+                assert_eq!(
+                    capability.default_permission,
+                    PermissionMode::Allow,
+                    "{} should not require an extra approval prompt for GitHub reads",
+                    capability.id
+                );
+                allowed_read_only.insert(capability.id.as_str());
+            }
+        }
+
+        assert!(allowed_read_only.contains("github.get_repo"));
+        assert!(allowed_read_only.contains("github.list_branches"));
+        assert!(ask_required.contains("github.search_code"));
+        assert!(ask_required.contains("github.create_issue"));
+        assert!(ask_required.contains("github.handle_webhook"));
     }
 
     #[test]
@@ -1778,6 +1819,12 @@ mod tests {
                 assert_eq!(
                     onboarding.credential_next_step.as_deref(),
                     Some("Activate NEAR AI to publish its MCP tools.")
+                );
+            } else if extension_id == "web-access" {
+                assert_eq!(
+                    onboarding.credential_next_step.as_deref(),
+                    Some("Activate Web Access to publish its tools."),
+                    "web-access configure next step should not repeat install-first copy"
                 );
             } else {
                 assert!(

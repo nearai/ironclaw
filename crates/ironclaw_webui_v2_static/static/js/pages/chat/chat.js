@@ -224,6 +224,7 @@ export function Chat({
             hasMore=${hasMore}
             onLoadMore=${loadMore}
             onRetryMessage=${retryMessage}
+            threadId=${activeThreadId}
             pending=${isProcessing}
           >
             ${recoveryNotice &&

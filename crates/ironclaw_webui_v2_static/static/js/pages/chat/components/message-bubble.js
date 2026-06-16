@@ -5,6 +5,9 @@ import { Avatar } from "./avatar.js";
 import { Icon } from "../../../design-system/icons.js";
 import { useT } from "../../../lib/i18n.js";
 import { toast } from "../../../lib/toast.js";
+import { ProjectFileChips } from "./project-file-chips.js";
+import { AttachmentChip } from "./attachment-chip.js";
+import { AttachmentPreviewModal } from "./attachment-preview.js";
 
 /* User keeps a tinted bubble; assistant is borderless (document-like);
    system / error stay as centered tinted notices. Reasoning ("thinking")
@@ -54,11 +57,13 @@ function ThinkingDisclosure({ content }) {
   `;
 }
 
-function MessageBubbleImpl({ message, onRetry }) {
+function MessageBubbleImpl({ message, onRetry, threadId }) {
   const { role, content, images, attachments, generatedImages, isOptimistic, status, error, toolCalls, timestamp } = message;
   const isUser = role === "user";
   const t = useT();
   const [copied, setCopied] = React.useState(false);
+  // The attachment currently open in the preview modal (null when closed).
+  const [previewAttachment, setPreviewAttachment] = React.useState(null);
   // All hooks must run before the role-based early returns below.
   // A message can change role in place across renders (e.g. an
   // optimistic bubble upgrading, or a streaming role shift), so
@@ -168,17 +173,23 @@ function MessageBubbleImpl({ message, onRetry }) {
 
           ${attachments && attachments.length > 0 && html`
             <div className="mt-2 flex flex-col gap-1.5">
-              ${attachments.map((att, i) => html`
-                <div key=${att.id || i} className="flex items-center gap-2 rounded-md border border-iron-700 bg-iron-900/50 px-3 py-2 text-xs">
-                  ${att.preview_url
-                    ? html`<img src=${att.preview_url} alt=${att.filename || "attachment"} className="h-9 w-9 shrink-0 rounded object-cover" />`
-                    : html`<${Icon} name="file" className="h-3.5 w-3.5 shrink-0 text-signal" />`}
-                  <span className="truncate">${att.filename || "attachment"}</span>
-                  <span className="ml-auto shrink-0 text-iron-200">${att.mime_type}${att.size_label ? " / " + att.size_label : ""}</span>
-                </div>
-              `)}
+              ${attachments.map((att, i) => html`<${AttachmentChip}
+                key=${att.id || i}
+                att=${att}
+                onPreview=${setPreviewAttachment}
+              />`)}
             </div>
+            <${AttachmentPreviewModal}
+              attachment=${previewAttachment}
+              onClose=${() => setPreviewAttachment(null)}
+            />
           `}
+
+          ${role === "assistant" &&
+          html`<${ProjectFileChips}
+            threadId=${threadId}
+            content=${typeof content === "string" ? content : ""}
+          />`}
         </div>
 
         ${(showActions || status === "error" || timeLabel) && html`

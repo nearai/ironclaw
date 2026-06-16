@@ -20,11 +20,11 @@ use ironclaw_loop_support::{
     ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT, CapabilityResolveError, CapabilitySurfaceProfileFilter,
     CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, GuardedSystemInferencePort,
     HostIdentityContextSource, HostInputQueue, HostManagedModelGateway, HostQueueLoopInputPort,
-    HostSkillContextSource, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
-    ModelGatewayBackedSystemInferencePort, RunCancellationFactory, RunCancellationObservationKind,
-    RunStateLoopCancellationPort, SubagentLoopPromptPort, SubagentPromptComposer,
-    ThreadBackedLoopContextPort, ThreadBackedLoopTranscriptPort, ThreadContextWindowCache,
-    TurnStateRunCancellationFactory, active_task_compaction_prompt_id,
+    HostSkillContextSource, LoopAttachmentReadPort, LoopCapabilityInputResolver,
+    LoopCapabilityPortFactory, ModelGatewayBackedSystemInferencePort, RunCancellationFactory,
+    RunCancellationObservationKind, RunStateLoopCancellationPort, SubagentLoopPromptPort,
+    SubagentPromptComposer, ThreadBackedLoopContextPort, ThreadBackedLoopTranscriptPort,
+    ThreadContextWindowCache, TurnStateRunCancellationFactory, active_task_compaction_prompt_id,
     host_managed_loop_compaction_port_with_prompt_id,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
@@ -899,6 +899,7 @@ where
     cancellation_factory: Arc<dyn RunCancellationFactory>,
     config: TextOnlyLoopHostConfig,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
+    attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
     /// Optional hook dispatcher factory. When set, the factory invokes the
     /// closure on every `build_text_only_host*` call to obtain a fresh
     /// `HookDispatcher`, wraps it in `Arc`, and then plumbs it through
@@ -1002,6 +1003,7 @@ where
             cancellation_factory,
             config,
             skill_context_source: None,
+            attachment_read_port: None,
             hook_dispatcher_factory: None,
             hook_dispatcher_builder_factory: None,
             hook_security_audit_sink: None,
@@ -1074,6 +1076,11 @@ where
 
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
         self.skill_context_source = Some(source);
+        self
+    }
+
+    pub fn with_attachment_read_port(mut self, port: Arc<dyn LoopAttachmentReadPort>) -> Self {
+        self.attachment_read_port = Some(port);
         self
     }
 
@@ -1612,6 +1619,7 @@ where
             capabilities: Some(Arc::clone(&capabilities)),
             prompt_authority,
             context_window_cache: Some(context_window_cache),
+            attachment_read_port: self.attachment_read_port.clone(),
         });
         let mut model: Arc<dyn LoopModelPort> = Arc::new(HostManagedLoopModelPort::with_guards(
             run_context.clone(),

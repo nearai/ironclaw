@@ -25,18 +25,19 @@ use ironclaw_product_workflow::{
     AuthInteractionDecision, AuthInteractionService, AutomationListRequest,
     AutomationProductFacade, CodexLoginStart, ExtensionCredentialSetupService,
     ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, InboundAttachmentLander,
-    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
-    LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
-    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
-    LifecyclePackageRef, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
-    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleReadinessBlocker, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
-    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse, LlmActiveSelection,
-    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
-    LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, OperatorLogsService,
-    OperatorServiceLifecycleService, OutboundPreferencesProductFacade, ProductAgentBoundCaller,
-    ProductWorkflowError, RebornAutomationInfo, RebornAutomationRecentRunInfo,
+    InboundAttachmentReader, LifecycleExtensionCredentialRequirement,
+    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
+    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
+    LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductAction,
+    LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
+    LifecycleProductResponse, LifecycleReadinessBlocker, ListPendingApprovalsRequest,
+    ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
+    ListPendingAuthInteractionsResponse, LlmActiveSelection, LlmConfigService,
+    LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
+    LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
+    NearAiWalletLoginResult, OperatorLogsService, OperatorServiceLifecycleService,
+    OutboundPreferencesProductFacade, ProductAgentBoundCaller, ProductWorkflowError,
+    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornChannelConnectAction, RebornChannelConnectStrategy,
     RebornConnectableChannelInfo, RebornDeleteThreadRequest, RebornExtensionOnboardingState,
@@ -457,6 +458,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
             failure: None,
             event_cursor: EventCursor(17),
             product_context: None,
+            auth_resume_disposition: None,
         })
     }
 }
@@ -552,6 +554,7 @@ impl TurnCoordinator for BlockingSubmitCoordinator {
             failure: None,
             event_cursor: EventCursor(29),
             product_context: None,
+            auth_resume_disposition: None,
         })
     }
 }
@@ -859,6 +862,7 @@ impl AutomationProductFacade for RecordingAutomationFacade {
 #[derive(Clone)]
 struct StaticAutomationFacade {
     output: Vec<RebornAutomationInfo>,
+    scheduler_enabled: bool,
     /// Scopes returned by `resolve_run_thread_scope`, keyed by the queried
     /// thread id so tests prove the lookup contract rather than accepting a
     /// cached scope for any request.
@@ -870,9 +874,15 @@ impl StaticAutomationFacade {
     fn new(output: Vec<RebornAutomationInfo>) -> Self {
         Self {
             output,
+            scheduler_enabled: true,
             resolve_scopes: HashMap::new(),
             resolve_calls: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    fn with_scheduler_enabled(mut self, scheduler_enabled: bool) -> Self {
+        self.scheduler_enabled = scheduler_enabled;
+        self
     }
 
     fn with_resolve_scope_for_thread(
@@ -891,6 +901,10 @@ impl StaticAutomationFacade {
 
 #[async_trait]
 impl AutomationProductFacade for StaticAutomationFacade {
+    fn scheduler_enabled(&self) -> bool {
+        self.scheduler_enabled
+    }
+
     async fn list_automations(
         &self,
         _caller: ProductAgentBoundCaller,
@@ -3914,6 +3928,75 @@ async fn hook_auth_gate_denial_uses_auth_interaction_service() {
     assert_eq!(coordinator.cancellation_count(), 0);
 }
 
+/// A minimal auth-interaction stub that returns `Resumed` for every
+/// Deny decision, mirroring the production path where the model is resumed
+/// so it can surface the denial to the user.
+struct DeniedResumedAuthInteractionService;
+
+#[async_trait]
+impl AuthInteractionService for DeniedResumedAuthInteractionService {
+    async fn list_pending(
+        &self,
+        _request: ListPendingAuthInteractionsRequest,
+    ) -> Result<ListPendingAuthInteractionsResponse, ProductWorkflowError> {
+        Ok(ListPendingAuthInteractionsResponse {
+            auth_interactions: vec![],
+        })
+    }
+
+    async fn resolve(
+        &self,
+        request: ResolveAuthInteractionRequest,
+    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
+        let run_id = request.run_id_hint.expect("webui passes run_id");
+        Ok(ResolveAuthInteractionResponse::Resumed(
+            ResumeTurnResponse {
+                run_id,
+                status: TurnStatus::Queued,
+                event_cursor: EventCursor(37),
+            },
+        ))
+    }
+}
+
+#[tokio::test]
+async fn hook_auth_gate_denial_maps_to_reborn_resumed() {
+    // Verifies that a Deny decision (which produces `Resumed` from
+    // `resume_denied_auth`) maps to `RebornResolveGateResponse::Resumed`
+    // through the facade.
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let auth_interactions = Arc::new(DeniedResumedAuthInteractionService);
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_auth_interactions(auth_interactions);
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let response = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "gate-auth-denial-resumed",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": "gate:hook-auth-denial-resumed",
+                "resolution": "denied"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect(
+            "Resumed from auth-interaction service must map to RebornResolveGateResponse::Resumed",
+        );
+
+    assert!(
+        matches!(response, RebornResolveGateResponse::Resumed(_)),
+        "expected Resumed, got: {response:?}"
+    );
+    assert_eq!(coordinator.cancellation_count(), 0);
+}
+
 #[tokio::test]
 async fn missing_run_state_for_auth_gate_still_routes_to_auth_interaction_service() {
     let coordinator = Arc::new(FakeTurnCoordinator::with_run_state_error(
@@ -5639,6 +5722,141 @@ async fn get_timeline_succeeds_for_own_automation_trigger_thread() {
     assert_eq!(response.thread.thread_id, trigger_thread_id);
 }
 
+/// Records the scope and storage key each byte read is issued under so a test
+/// can assert the reader addressed the right project mount AND resolved the
+/// right attachment key.
+struct RecordingAttachmentReader {
+    bytes: Vec<u8>,
+    reads: Mutex<Vec<(ThreadScope, String)>>,
+}
+
+#[async_trait]
+impl InboundAttachmentReader for RecordingAttachmentReader {
+    async fn read(
+        &self,
+        thread_scope: &ThreadScope,
+        storage_key: &str,
+    ) -> Result<Vec<u8>, RebornServicesError> {
+        self.reads
+            .lock()
+            .expect("lock")
+            .push((thread_scope.clone(), storage_key.to_string()));
+        Ok(self.bytes.clone())
+    }
+}
+
+// Regression for the trigger-thread byte-read scope. `read_attachment` shares
+// the timeline's automation-trigger fallback, which resolves the thread under
+// the trigger creator's scope (not the WebUI caller's session scope). The bytes
+// must be read back under that same resolved scope — reading under the caller's
+// session scope would address the wrong project mount and 404.
+#[tokio::test]
+async fn read_attachment_reads_trigger_thread_bytes_under_creator_scope() {
+    let trigger_thread_id = ThreadId::new("thread-trigger-bytes").expect("valid trigger thread id");
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: trigger_thread_scope_for(&caller),
+            thread_id: Some(trigger_thread_id.clone()),
+            created_by_actor_id: "system".to_string(),
+            title: Some("Scheduled run".to_string()),
+            metadata_json: Some(automation_trigger_thread_metadata_json("trigger-bytes")),
+        })
+        .await
+        .expect("trigger thread stored");
+
+    // A landed image attachment on the trigger thread, stored under the
+    // creator's scope.
+    let accepted = thread_service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: trigger_thread_scope_for(&caller),
+            thread_id: trigger_thread_id.clone(),
+            actor_id: "system".to_string(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: Some("trigger-image".to_string()),
+            content: MessageContent::with_attachments(
+                "see image",
+                vec![AttachmentRef {
+                    id: "att-0".to_string(),
+                    kind: AttachmentKind::Image,
+                    mime_type: "image/png".to_string(),
+                    filename: Some("p.png".to_string()),
+                    size_bytes: Some(4),
+                    storage_key: Some("/workspace/attachments/2026-06-14/m-0-p.png".to_string()),
+                    extracted_text: None,
+                }],
+            ),
+        })
+        .await
+        .expect("message with attachment accepted");
+
+    let automation_facade = Arc::new(
+        StaticAutomationFacade::new(vec![RebornAutomationInfo {
+            automation_id: "trigger-bytes".to_string(),
+            name: "Morning briefing".to_string(),
+            source: RebornAutomationSource::Schedule {
+                cron: "0 9 * * *".to_string(),
+                timezone: "UTC".to_string(),
+            },
+            state: RebornAutomationState::Active,
+            next_run_at: None,
+            last_run_at: None,
+            last_status: Some(RebornAutomationRunStatus::Ok),
+            recent_runs: vec![RebornAutomationRecentRunInfo {
+                run_id: Some(automation_run_id()),
+                thread_id: Some(trigger_thread_id.clone()),
+                fire_slot: None,
+                status: RebornAutomationRecentRunStatus::Ok,
+                submitted_at: "2026-06-09T09:00:01Z".parse().expect("submitted_at"),
+                completed_at: Some("2026-06-09T09:00:42Z".parse().expect("completed_at")),
+            }],
+            is_active: true,
+            created_at: None,
+        }])
+        .with_resolve_scope_for_thread(
+            trigger_thread_id.clone(),
+            trigger_run_thread_scope_for(&caller),
+        ),
+    );
+
+    let reader = Arc::new(RecordingAttachmentReader {
+        bytes: vec![1, 2, 3, 4],
+        reads: Mutex::new(Vec::new()),
+    });
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(automation_facade)
+        .with_inbound_attachment_reader(reader.clone());
+
+    let result = services
+        .read_attachment(
+            caller,
+            RebornAttachmentRequest {
+                thread_id: trigger_thread_id.as_str().to_string(),
+                message_id: accepted.message_id.to_string(),
+                attachment_id: "att-0".to_string(),
+            },
+        )
+        .await
+        .expect("owner should be able to read their trigger thread's attachment");
+
+    assert_eq!(result.bytes, vec![1, 2, 3, 4]);
+    assert_eq!(result.mime_type, "image/png");
+
+    // The fix: the read was issued under the trigger creator's scope (not the
+    // caller's session scope) and for the landed attachment's own storage key.
+    let reads = reader.reads.lock().expect("lock");
+    assert_eq!(reads.len(), 1);
+    let (scope, storage_key) = &reads[0];
+    assert_eq!(
+        scope.owner_user_id,
+        Some(UserId::new(TRIGGER_CREATOR_USER_ID).expect("trigger creator user id")),
+    );
+    assert_eq!(storage_key, "/workspace/attachments/2026-06-14/m-0-p.png");
+}
+
 #[tokio::test]
 async fn get_timeline_rejects_other_users_automation_trigger_thread() {
     // A trigger thread owned by alice's automation. Bob tries to read it.
@@ -6559,6 +6777,29 @@ async fn list_automations_returns_empty_list() {
         .expect("list automations");
 
     assert!(listed.automations.is_empty());
+    // Default facade reports the scheduler as running.
+    assert!(listed.scheduler_enabled);
+}
+
+#[tokio::test]
+async fn list_automations_surfaces_disabled_scheduler() {
+    // Regression: when the trigger poller is off, the response must report
+    // scheduler_enabled=false so the browser can warn that listed automations
+    // will not fire. Previously the wire response had no such signal.
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(Arc::new(
+        StaticAutomationFacade::new(Vec::new()).with_scheduler_enabled(false),
+    ));
+
+    let listed = services
+        .list_automations(caller(), WebUiListAutomationsRequest::default())
+        .await
+        .expect("list automations");
+
+    assert!(!listed.scheduler_enabled);
 }
 
 #[tokio::test]

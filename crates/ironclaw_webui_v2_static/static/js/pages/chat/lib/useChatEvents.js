@@ -36,12 +36,15 @@ export function useChatEvents({
   setPendingGate,
   setActiveRun,
   activeRunRef,
-  onRunCompleted,
+  onRunSettled,
 }) {
-  // Track which runIds we've already announced completion for so that
-  // SSE replays (reconnect with `last-event-id`, repeated snapshots)
-  // don't trigger duplicate timeline refetches.
-  const completedRunsRef = React.useRef(new Set());
+  // Track which runIds we've already settled so that SSE replays
+  // (reconnect with `last-event-id`, repeated snapshots) don't trigger
+  // duplicate timeline refetches. A run settles on ANY terminal status,
+  // not only success — every terminal run reloads the timeline so tool
+  // input/output previews are recovered from the durable record even when
+  // the run failed, was cancelled, or needs recovery.
+  const settledRunsRef = React.useRef(new Set());
   // Last `run_status.run_id` we've observed, persisted across event
   // frames. Used by `applyProjectionItems` to correlate an `item.gate`
   // (which doesn't carry `run_id`) with the active run so resolveGate
@@ -146,9 +149,12 @@ export function useChatEvents({
         }
 
         case "cancelled": {
+          const runId =
+            frame.run_state?.run_id || activeRunRef?.current?.runId || null;
           setPendingGate(null);
           setIsProcessing(false);
           setActiveRun?.(null);
+          settleRun(settledRunsRef, onRunSettled, runId, false);
           return;
         }
 
@@ -164,6 +170,7 @@ export function useChatEvents({
             failureCategory: failureCategoryFromRunState(runState),
             failureSummary: null,
           });
+          settleRun(settledRunsRef, onRunSettled, runId, false);
           return;
         }
 
@@ -177,8 +184,8 @@ export function useChatEvents({
             setIsProcessing,
             setPendingGate,
             setActiveRun,
-            onRunCompleted,
-            completedRunsRef,
+            onRunSettled,
+            settledRunsRef,
             latestRunIdRef,
             promptRunIdRef,
             activeRunRef,
@@ -198,9 +205,20 @@ export function useChatEvents({
       setPendingGate,
       setActiveRun,
       activeRunRef,
-      onRunCompleted,
+      onRunSettled,
     ],
   );
+}
+
+// Fire the settle callback exactly once per runId. A run settles on any
+// terminal status; the consumer reloads the timeline so tool input/output
+// previews are recovered from the durable record. Deduped because SSE
+// replays the same terminal projection on every reconnect.
+function settleRun(settledRunsRef, onRunSettled, runId, success) {
+  if (!onRunSettled || !runId || !settledRunsRef?.current) return;
+  if (settledRunsRef.current.has(runId)) return;
+  settledRunsRef.current.add(runId);
+  onRunSettled(runId, { success });
 }
 
 const TERMINAL_RUN_STATUSES = new Set([
@@ -246,8 +264,8 @@ function applyProjectionItems({
   setIsProcessing,
   setPendingGate,
   setActiveRun,
-  onRunCompleted,
-  completedRunsRef,
+  onRunSettled,
+  settledRunsRef,
   latestRunIdRef,
   promptRunIdRef,
   activeRunRef,
@@ -311,21 +329,20 @@ function applyProjectionItems({
         if (runId && promptRunIdRef?.current === runId) {
           promptRunIdRef.current = null;
         }
-        if (
-          SUCCESS_RUN_STATUSES.has(status) &&
-          onRunCompleted &&
-          runId &&
-          !completedRunsRef?.current.has(runId)
-        ) {
-          // Reborn's projection bridge does not currently emit `Text`
-          // items for assistant replies — the reply lives only in the
-          // thread timeline. Trigger a timeline refetch on terminal
-          // success so the assistant message becomes visible. Dedup
-          // by runId because SSE replays the same projection on every
-          // reconnect.
-          completedRunsRef.current.add(runId);
-          onRunCompleted(runId);
-        }
+        // Reborn's projection bridge does not currently emit `Text` items
+        // for assistant replies, nor `capability_display_preview` items in
+        // the projection state — both the assistant reply and the rich tool
+        // input/output cards live only in the thread timeline. Reload the
+        // timeline on EVERY terminal status (not only success) so a failed,
+        // cancelled, or recovery-required run still recovers the tool
+        // previews for the tools that completed before it terminated. The
+        // reload preserves the client-side `err-*` failure bubble.
+        settleRun(
+          settledRunsRef,
+          onRunSettled,
+          runId,
+          SUCCESS_RUN_STATUSES.has(status),
+        );
         if (status === "failed" || status === "recovery_required") {
           appendRunFailureMessage(setMessages, {
             runId,

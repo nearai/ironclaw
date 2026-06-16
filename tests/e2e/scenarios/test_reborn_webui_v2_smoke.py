@@ -81,19 +81,24 @@ async def _stop_process(proc, *, sig=signal.SIGINT, timeout: float = 10) -> None
         await asyncio.wait_for(proc.wait(), timeout=5)
 
 
-def _write_config_toml(path: Path, mock_llm_server: str) -> None:
+def _write_config_toml(
+    path: Path, mock_llm_server: str, profile: str = "local-dev"
+) -> None:
     """Seed a sparse Reborn config that selects the mock LLM via the `openai` provider.
 
     The built-in `openai` provider speaks the OpenAI Chat Completions wire shape
     (`/v1/chat/completions`) that `mock_llm.py` serves. The `base_url` override
     points it at the mock; `api_key_env` names an env var the server fixture sets.
     Secrets stay out of the file — only the env-var NAME is referenced.
+
+    `profile` selects the composition profile (`local-dev` by default;
+    `local-dev-yolo` gives minimal approvals so workspace writes auto-proceed).
     """
     path.write_text(
         f"""api_version = "ironclaw.runtime/v1"
 
 [boot]
-profile = "local-dev"
+profile = "{profile}"
 
 [identity]
 default_owner = "{USER_ID}"

@@ -3725,6 +3725,14 @@ mod tests {
     impl crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionService
         for MissingRuntimeCredentialAccounts
     {
+        async fn select_configured_account_for_binding(
+            &self,
+            _lookup: ironclaw_auth::CredentialAccountSelectionRequest,
+            _runtime_scope: ironclaw_auth::AuthProductScope,
+        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            Err(ironclaw_auth::AuthProductError::CredentialMissing)
+        }
+
         async fn select_unique_configured_runtime_account(
             &self,
             _request: crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest,
@@ -3739,6 +3747,14 @@ mod tests {
     impl crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionService
         for ConfiguredRuntimeCredentialAccounts
     {
+        async fn select_configured_account_for_binding(
+            &self,
+            _lookup: ironclaw_auth::CredentialAccountSelectionRequest,
+            _runtime_scope: ironclaw_auth::AuthProductScope,
+        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            Err(ironclaw_auth::AuthProductError::CredentialMissing)
+        }
+
         async fn select_unique_configured_runtime_account(
             &self,
             _request: crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest,

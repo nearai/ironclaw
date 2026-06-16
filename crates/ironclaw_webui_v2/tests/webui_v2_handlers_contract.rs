@@ -28,15 +28,15 @@ use ironclaw_product_adapters::{
 };
 use ironclaw_product_workflow::{
     LifecyclePackageRef, LifecyclePhase, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult,
-    LlmProbeRequest, LlmProbeResult, LlmProviderView, RebornAutomationInfo,
-    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
-    RebornChannelConnectStrategy, RebornConnectableChannelInfo,
-    RebornConnectableChannelListResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
-    RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
-    RebornExtensionRegistryResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornListAutomationsResponse, RebornListThreadsResponse, RebornOperatorArea,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
+    LlmProbeRequest, LlmProbeResult, LlmProviderView, RebornAttachmentBytes,
+    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationSource, RebornAutomationState,
+    RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
+    RebornConnectableChannelInfo, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornOperatorArea, RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
     RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
     RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
@@ -213,6 +213,8 @@ struct StubServices {
     delete_thread_calls: Mutex<Vec<RebornDeleteThreadRequest>>,
     submit_turn_calls: Mutex<Vec<WebUiSendMessageRequest>>,
     get_timeline_calls: Mutex<Vec<RebornTimelineRequest>>,
+    read_attachment_calls: Mutex<Vec<RebornAttachmentRequest>>,
+    read_attachment_response: Mutex<Option<RebornAttachmentBytes>>,
     stream_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
     cancel_run_calls: Mutex<Vec<WebUiCancelRunRequest>>,
     resolve_gate_calls: Mutex<Vec<WebUiResolveGateRequest>>,
@@ -261,6 +263,12 @@ struct StubServices {
 impl StubServices {
     fn fail_create_thread(&self, error: RebornServicesError) {
         *self.next_create_thread_error.lock().expect("lock") = Some(error);
+    }
+
+    /// Stage the bytes `read_attachment` should return. When unset, the stub
+    /// inherits the trait default (404 not found).
+    fn set_attachment(&self, bytes: RebornAttachmentBytes) {
+        *self.read_attachment_response.lock().expect("lock") = Some(bytes);
     }
 
     fn fail_list_automations(&self, error: RebornServicesError) {
@@ -423,6 +431,28 @@ impl RebornServicesApi for StubServices {
         })
     }
 
+    async fn read_attachment(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornAttachmentRequest,
+    ) -> Result<RebornAttachmentBytes, RebornServicesError> {
+        self.read_attachment_calls
+            .lock()
+            .expect("lock")
+            .push(request);
+        match self.read_attachment_response.lock().expect("lock").clone() {
+            Some(bytes) => Ok(bytes),
+            None => Err(RebornServicesError {
+                code: RebornServicesErrorCode::NotFound,
+                kind: RebornServicesErrorKind::NotFound,
+                status_code: 404,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            }),
+        }
+    }
+
     async fn stream_events(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -528,6 +558,7 @@ impl RebornServicesApi for StubServices {
                 "Daily status",
                 "0 9 * * *",
             )],
+            scheduler_enabled: true,
         })
     }
 
@@ -1328,6 +1359,81 @@ async fn get_timeline_threads_path_into_request() {
     assert_eq!(calls[0].thread_id, "thread-x");
 }
 
+// The attachment-bytes route carries three path segments and returns raw
+// bytes rather than JSON. Per "Test Through the Caller", drive the real router
+// so the Path<(_, _, _)> extractor, the byte response, and the headers are all
+// exercised — a facade-only test would miss the path plumbing and Content-Type.
+#[tokio::test]
+async fn get_attachment_serves_bytes_with_authoritative_content_type() {
+    let services = Arc::new(StubServices::default());
+    services.set_attachment(RebornAttachmentBytes {
+        mime_type: "image/png".to_string(),
+        filename: Some("diagram.png".to_string()),
+        bytes: vec![1, 2, 3, 4],
+    });
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/messages/msg-1/attachments/att-0")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("image/png")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-content-type-options")
+            .and_then(|v| v.to_str().ok()),
+        Some("nosniff")
+    );
+    let body = to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("body bytes");
+    assert_eq!(body.as_ref(), &[1, 2, 3, 4]);
+
+    // The whole (thread, message, attachment) triple reaches the facade — the
+    // attachment id alone is not unique across a thread.
+    let calls = services.read_attachment_calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].thread_id, "thread-x");
+    assert_eq!(calls[0].message_id, "msg-1");
+    assert_eq!(calls[0].attachment_id, "att-0");
+}
+
+#[tokio::test]
+async fn get_attachment_missing_bytes_returns_404() {
+    // The default stub leaves the attachment unset, mirroring an unwired
+    // reader or an unknown attachment.
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/messages/msg-1/attachments/missing")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
 // Regression for the timeline pagination wire plumbing. Per
 // `.claude/rules/testing.md` "Test Through the Caller", a facade-only
 // test on `get_timeline` is not enough — the Query<TimelineQuery>
@@ -1574,6 +1680,9 @@ async fn list_automations_forwards_query_limits_to_facade() {
         body["automations"][0]["recent_runs"][0]["status"],
         "running"
     );
+    // The scheduler status must survive handler serialization onto the wire so
+    // the browser can warn when scheduling is off.
+    assert_eq!(body["scheduler_enabled"], true);
 
     let calls = services
         .list_automations_calls
@@ -1613,6 +1722,59 @@ async fn list_automations_omits_limits_and_forwards_none() {
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].limit, None);
     assert_eq!(calls[0].run_limit, None);
+}
+
+#[tokio::test]
+async fn trace_credits_returns_caller_scoped_unenrolled_zero_state() {
+    // The facade's default `trace_credits` body reads contributor-local
+    // Trace Commons state scoped by the authenticated caller's user id.
+    // A unique per-test user id guarantees a fresh scope so the
+    // unenrolled zero-state is deterministic on any machine.
+    let user_id = format!(
+        "webui-v2-trace-credits-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    );
+    let unique_caller = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        UserId::new(user_id.as_str()).expect("user"),
+        None,
+        None,
+    );
+    let router = webui_v2_router(WebUiV2State::new(
+        Arc::new(StubServices::default()),
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+    ))
+    .layer(axum::Extension(unique_caller))
+    .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/traces/credit")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["enrolled"], false);
+    assert_eq!(body["submissions_total"], 0);
+    assert_eq!(body["submissions_submitted"], 0);
+    assert_eq!(body["pending_credit"], 0.0);
+    assert_eq!(body["final_credit"], 0.0);
+    assert!(
+        body["note"]
+            .as_str()
+            .expect("note")
+            .contains("authoritative ledger is server-side")
+    );
 }
 
 #[tokio::test]

@@ -179,12 +179,14 @@ open = "5"
 # The postgres feature provides ToSql/FromSql for postgres-types (shared by tokio-postgres)
 pgvector = { version = "0.4", features = ["postgres"], optional = true }
 
-# WASM sandbox for untrusted tool execution
-# Pinned to 44.0.2: minimum patch that contains the fix for
-# RUSTSEC-2026-0149 (path_open(TRUNCATE) bypassing FilePerms::WRITE
-# host restriction). 43.x is end-of-life for this advisory.
-wasmtime = { version = "44.0.2", features = ["component-model"] }
-wasmtime-wasi = "44.0.2"  # WASI support for component model
+# WASM sandbox for untrusted tool execution.
+# Floor 44.0.3: minimum patch containing the fix for RUSTSEC-2026-0182
+# (leak in the WASIp1 `fd_renumber` implementation). Also retains the
+# fix for RUSTSEC-2026-0149 (path_open(TRUNCATE) bypassing
+# FilePerms::WRITE), first available in 44.0.2; 43.x is end-of-life for
+# these advisories.
+wasmtime = { version = "44.0.3", features = ["component-model"] }
+wasmtime-wasi = "44.0.3"  # WASI support for component model
 wasmparser = "0.246.2"  # WASM binary parsing for validation
 
 # Cryptography for secrets management

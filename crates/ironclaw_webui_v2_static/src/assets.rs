@@ -54,6 +54,67 @@ mod tests {
     }
 
     #[test]
+    fn project_file_download_chips_are_wired() {
+        // The download UI: message bubble renders chips fed by extracted
+        // workspace paths. Each chip is the shared `AttachmentChip` fed a
+        // descriptor whose `fetch_url` targets the bearer-authenticated v2
+        // `/files/content` endpoint, so clicking opens the same
+        // `AttachmentPreviewModal` (image/pdf/text preview + Download) as a
+        // message attachment.
+        let chips = asset_text("js/pages/chat/components/project-file-chips.js");
+        assert!(chips.contains("extractWorkspaceFilePaths"));
+        assert!(chips.contains("statProjectFile"));
+        assert!(chips.contains("projectFileContentUrl"));
+        assert!(chips.contains("AttachmentChip"));
+        assert!(chips.contains("AttachmentPreviewModal"));
+        // The chip passes the e2e selector hooks through to the shared chip,
+        // including the inline one-click download icon.
+        assert!(chips.contains("project-file-chip"));
+        assert!(chips.contains("project-file-download"));
+        assert!(chips.contains("dataPath"));
+
+        let bubble = asset_text("js/pages/chat/components/message-bubble.js");
+        assert!(bubble.contains("ProjectFileChips"));
+        assert!(bubble.contains("threadId"));
+
+        // Both surfaces share the chip + preview implementation, so message
+        // attachments and project files cannot drift. The shared chip renders
+        // the stable e2e selector attributes.
+        let chip = asset_text("js/pages/chat/components/attachment-chip.js");
+        assert!(chip.contains("export function AttachmentChip"));
+        assert!(chip.contains("export function AttachmentThumbnail"));
+        assert!(chip.contains("data-testid=${testId}"));
+        assert!(chip.contains("data-file-path=${dataPath}"));
+        // The inline download icon fetches the bearer-authenticated bytes and
+        // saves them directly (separate from the preview modal's own Download).
+        assert!(chip.contains("data-testid=${downloadTestId}"));
+        assert!(chip.contains("fetchAttachmentBlob"));
+        assert!(chip.contains("saveBlob"));
+        assert!(bubble.contains("AttachmentChip"));
+
+        // The preview modal fetches the blob (bearer-authenticated, via the
+        // shared `fetchAttachmentBlob`) and offers a Download action with a
+        // stable test hook.
+        let preview = asset_text("js/pages/chat/components/attachment-preview.js");
+        assert!(preview.contains("fetchAttachmentBlob"));
+        assert!(preview.contains("data-testid=\"attachment-download\""));
+
+        // The api client exposes a same-origin content URL helper and keeps the
+        // bearer-authenticated blob fetch; it does no DOM (object URLs live in
+        // the preview modal / `download.js`).
+        let api = asset_text("js/lib/api.js");
+        assert!(api.contains("projectFilesBase"));
+        assert!(api.contains("/content"));
+        assert!(api.contains("projectFileContentUrl"));
+        assert!(api.contains("Authorization"));
+        assert!(!api.contains("createObjectURL"));
+
+        // The pure extraction module is served; its test sibling is not.
+        assert!(lookup("js/pages/chat/lib/project-file-paths.js").is_some());
+        assert!(lookup("js/pages/chat/lib/project-file-paths.test.js").is_none());
+    }
+
+    #[test]
     fn chat_auth_gate_assets_submit_manual_token_then_resolve_gate() {
         let auth_card = asset_text("js/pages/chat/components/auth-token-card.js");
         assert!(auth_card.contains("await onSubmit(value);"));
@@ -276,6 +337,72 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_trace_credits_card_assets_are_embedded() {
+        // The compact card is mounted in the sidebar above the conversation
+        // list and reuses the existing trace-credits hook + endpoint.
+        let card = asset_text("js/components/sidebar-trace-credits.js");
+        assert!(card.contains("export function SidebarTraceCredits"));
+        // Reuses the shared hook (and thus the `/api/webchat/v2/traces/credit`
+        // endpoint), not a parallel fetch.
+        assert!(card.contains("useTraceCredits"));
+        // Renders nothing unless enrolled — keeps the sidebar clean.
+        assert!(card.contains("if (!credits || !credits.enrolled) return null;"));
+        // Click-through opens the full Settings -> Trace Commons tab.
+        assert!(card.contains("to=\"/settings/traces\""));
+        assert!(card.contains("traceCommons.cardAccepted"));
+        // Held-for-review count surfaces only when there are holds.
+        assert!(card.contains("manual_review_hold_count"));
+        assert!(card.contains("heldCount > 0"));
+        assert!(card.contains("traceCommons.cardHeld"));
+
+        let sidebar = asset_text("js/components/sidebar.js");
+        assert!(sidebar.contains("SidebarTraceCredits"));
+        // Mounted between the nav and the threads list.
+        assert!(sidebar.contains("<${SidebarTraceCredits} />"));
+
+        // The Settings tab lists held traces (reason + submission id) sourced
+        // from the credits response `holds[]`.
+        let tab = asset_text("js/pages/settings/components/trace-commons-tab.js");
+        assert!(tab.contains("const holds = credits.holds || [];"));
+        assert!(tab.contains("traceCommons.heldTitle"));
+        assert!(tab.contains("traceCommons.heldDescription"));
+        assert!(tab.contains("hold.submission_id"));
+        assert!(tab.contains("hold.reason"));
+        // Per-hold Authorize button wired to the authorize mutation.
+        assert!(tab.contains("authorize.mutate(hold.submission_id)"));
+        assert!(tab.contains("traceCommons.authorize"));
+
+        // Authorize calls the POST endpoint and invalidates the credits query.
+        let settings_api = asset_text("js/pages/settings/lib/settings-api.js");
+        assert!(settings_api.contains("export function authorizeTraceHold"));
+        assert!(settings_api.contains("/authorize"));
+        assert!(settings_api.contains("method: \"POST\""));
+        let trace_hook = asset_text("js/pages/settings/hooks/useTraceCredits.js");
+        assert!(trace_hook.contains("authorizeTraceHold"));
+        assert!(trace_hook.contains("invalidateQueries({ queryKey: [\"trace-credits\"] })"));
+
+        // The hook refetches so the card and Settings tab reflect new
+        // accepted submissions without a manual reload. Polling is infrequent
+        // (300s) and paused while the tab is hidden; a focus refetch keeps the
+        // surface live and staleTime dedupes redundant focus refetches.
+        let hook = asset_text("js/pages/settings/hooks/useTraceCredits.js");
+        assert!(hook.contains("refetchInterval: 300_000"));
+        assert!(hook.contains("refetchIntervalInBackground: false"));
+        assert!(hook.contains("refetchOnWindowFocus: true"));
+        assert!(hook.contains("staleTime: 60_000"));
+
+        // The new i18n keys are present in the eagerly-bundled English pack
+        // (other locales fall back to it if missing, but all 11 carry them).
+        let en = asset_text("js/i18n/en.js");
+        assert!(en.contains("\"traceCommons.cardAccepted\""));
+        assert!(en.contains("\"traceCommons.cardHeld\""));
+        assert!(en.contains("\"traceCommons.heldTitle\""));
+        assert!(en.contains("\"traceCommons.heldDescription\""));
+        assert!(en.contains("\"traceCommons.authorize\""));
+        assert!(en.contains("\"traceCommons.authorizing\""));
+    }
+
+    #[test]
     fn auth_session_assets_use_server_capabilities_for_admin_status() {
         let api = asset_text("js/lib/api.js");
         assert!(api.contains("fetchSession"));
@@ -389,6 +516,40 @@ mod tests {
             extension_card.contains("${onboardingHint}"),
             "extension cards must render the projected onboarding hint"
         );
+    }
+
+    #[test]
+    fn extension_config_modal_hides_activate_for_active_extensions() {
+        let extension_actions = asset_text("js/pages/extensions/lib/extension-actions.js");
+        assert!(extension_actions.contains("export function extensionIsActive"));
+        assert!(extension_actions.contains("state === \"active\" || state === \"ready\""));
+        assert!(
+            extension_actions.contains("setupReadyForActivation({ extension"),
+            "setup readiness must receive lifecycle state, not only setup fields"
+        );
+        assert!(
+            extension_actions.contains("extensionIsActive(extension)"),
+            "active extensions must not be considered ready for another activation"
+        );
+
+        let extension_card = asset_text("js/pages/extensions/components/extension-card.js");
+        assert!(extension_card.contains("activationStatus: ext.activation_status"));
+        assert!(extension_card.contains("onboardingState: ext.onboarding_state"));
+
+        let configure_modal = asset_text("js/pages/extensions/components/configure-modal.js");
+        assert!(configure_modal.contains("const isActive = extensionIsActive(extension);"));
+        assert!(
+            configure_modal.contains("const canActivate = setupReadyForActivation({ extension"),
+            "the modal Activate button must be gated by lifecycle-aware setup readiness"
+        );
+        assert!(configure_modal.contains("extensions.activeConfigured"));
+
+        let regression = source_text("js/pages/extensions/lib/extension-actions.test.mjs");
+        assert!(
+            regression.contains("extensionIsActive accepts card payload lifecycle fields"),
+            "caller-visible card payload lifecycle fields need JS regression coverage"
+        );
+        assert!(regression.contains("extension: { active: true }"));
     }
 
     #[test]

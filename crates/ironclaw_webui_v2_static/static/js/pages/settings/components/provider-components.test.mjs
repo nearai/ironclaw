@@ -387,6 +387,23 @@ test("ProviderManagement groups filtered providers through the render caller", (
   );
 });
 
+test("ProviderManagement shows no ACTIVE group on a clean install (#4857)", () => {
+  // useLlmProviders resolves activeProviderId to null when nothing is
+  // configured; the list must not promote any provider into "ACTIVE".
+  const { rendered, cardProps } = renderProviderManagement({
+    activeProviderId: null,
+    providers: [
+      builtinProvider("nearai", { adapter: "nearai" }),
+      builtinProvider("openai"),
+      builtinProvider("anthropic", { adapter: "anthropic", has_api_key: false }),
+    ],
+  });
+
+  assert.deepEqual(groupLabels(rendered), ["llm.groupReady", "llm.groupSetup"]);
+  assert.ok(!deepValuesAfter(rendered, "data-provider-status=").includes("active"));
+  assert.ok(cardProps.every((props) => props.activeProviderId === null));
+});
+
 test("ProviderManagement hides empty buckets after search filtering", () => {
   const { rendered, cardProps } = renderProviderManagement({
     providers: [builtinProvider("openai")],

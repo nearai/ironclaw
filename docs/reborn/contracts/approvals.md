@@ -275,8 +275,14 @@ This slice intentionally keeps approval resolution narrow:
 - no approval support for actions other than dispatch and one-shot spawn yet
 - persistent approval policies cover dispatch and `Action::SpawnCapability`
   approval interaction decisions at the current Reborn sandbox scope
-  (`tenant_id`, `user_id`, optional `agent_id`, and `project_id` when present,
-  otherwise `thread_id`)
+  (`tenant_id`, `user_id`, optional `agent_id`, and optional `project_id`);
+  `thread_id` never participates in the scope, so an "always allow" granted in
+  one thread applies to all of that user's threads with the same agent (and
+  project, when present) and is channel-agnostic — a WebUI grant is honored for
+  a Slack message resolving to the same `(user, agent)`. Existing local
+  thread-scoped approval-policy files from pre-DB testing are intentionally not
+  migrated or read through a compatibility fallback; wipe local approval state
+  when moving to this scope shape
 - persistent approval is fail-closed by manifest policy: the current default
   only allows durable reuse for capabilities whose manifest
   `default_permission` is `allow`; `ask` and `deny` remain one-shot approval
