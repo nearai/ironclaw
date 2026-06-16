@@ -500,6 +500,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolve_projects_recovery_from_owner_scope_across_thread() {
+        let user = UserId::new("alice").unwrap();
+        let mut thread_a = ResourceScope::local_default(user.clone(), InvocationId::new()).unwrap();
+        thread_a.thread_id = Some(ThreadId::new("thread-a").unwrap());
+        let auth_scope = AuthProductScope::new(thread_a.clone(), AuthSurface::Api);
+
+        let auth = Arc::new(InMemoryAuthProductServices::new());
+        let account = auth
+            .create_account(new_credential_account(
+                auth_scope.clone(),
+                CredentialAccountStatus::Configured,
+            ))
+            .await
+            .unwrap();
+        let account_service = Arc::new(ThreadSensitiveRecoveryService {
+            account: account.clone(),
+            recovery_scope: std::sync::Mutex::new(None),
+        });
+        let resolver =
+            GoogleCredentialResolver::new(account_service.clone(), account_service.clone());
+
+        let mut thread_b = ResourceScope::local_default(user, InvocationId::new()).unwrap();
+        thread_b.thread_id = Some(ThreadId::new("thread-b").unwrap());
+
+        let error = resolver
+            .resolve(&thread_b, &ExtensionId::new("third-party").unwrap(), &[])
+            .await
+            .unwrap_err();
+
+        let GoogleCredentialError::Recovery(recovery) = error else {
+            panic!("expected recovery error");
+        };
+        assert_eq!(recovery.kind(), CredentialRecoveryKind::Configured);
+        assert_eq!(
+            recovery.selected_account().map(|account| account.id),
+            Some(account.id)
+        );
+
+        let recorded_scope = account_service
+            .recovery_scope
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("recovery scope recorded");
+        assert_eq!(
+            recorded_scope,
+            AuthProductScope::credential_owner(&thread_b, AuthSurface::Api)
+        );
+        assert!(
+            recorded_scope.resource.thread_id.is_none(),
+            "recovery scope must be owner-scoped"
+        );
+    }
+
+    #[tokio::test]
     async fn resolve_returns_missing_access_secret_when_account_has_no_access_secret() {
         let scope =
             ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
@@ -992,6 +1047,11 @@ mod tests {
         selected: CredentialAccountProjection,
     }
 
+    struct ThreadSensitiveRecoveryService {
+        account: CredentialAccount,
+        recovery_scope: std::sync::Mutex<Option<AuthProductScope>>,
+    }
+
     fn recovery_projection_for_account(
         account: &CredentialAccount,
     ) -> CredentialRecoveryProjection {
@@ -1097,6 +1157,97 @@ mod tests {
             _request: CredentialRecoveryRequest,
         ) -> Result<CredentialRecoveryProjection, AuthProductError> {
             Ok(recovery_projection_for_account(&self.account))
+        }
+
+        async fn select_configured_account(
+            &self,
+            _request: CredentialAccountChoiceRequest,
+        ) -> Result<CredentialAccountProjection, AuthProductError> {
+            unreachable!("Google credential resolver tests use unique selection")
+        }
+
+        async fn refresh_account(
+            &self,
+            _request: CredentialRefreshRequest,
+        ) -> Result<CredentialRefreshReport, AuthProductError> {
+            unreachable!("Google credential resolver tests do not refresh accounts")
+        }
+    }
+
+    #[async_trait]
+    impl CredentialAccountRecordSource for ThreadSensitiveRecoveryService {
+        async fn accounts_for_owner(
+            &self,
+            scope: &AuthProductScope,
+        ) -> Result<Vec<CredentialAccount>, AuthProductError> {
+            let owner = CredentialAccountOwnerScope::from_scope(scope);
+            Ok(owner
+                .matches(&self.account)
+                .then(|| self.account.clone())
+                .into_iter()
+                .collect())
+        }
+    }
+
+    #[async_trait]
+    impl CredentialAccountService for ThreadSensitiveRecoveryService {
+        async fn create_account(
+            &self,
+            _request: NewCredentialAccount,
+        ) -> Result<CredentialAccount, AuthProductError> {
+            Ok(self.account.clone())
+        }
+
+        async fn get_account(
+            &self,
+            request: CredentialAccountLookupRequest,
+        ) -> Result<Option<CredentialAccount>, AuthProductError> {
+            Ok((request.account_id == self.account.id).then(|| self.account.clone()))
+        }
+
+        async fn list_accounts(
+            &self,
+            _request: CredentialAccountListRequest,
+        ) -> Result<CredentialAccountListPage, AuthProductError> {
+            Ok(CredentialAccountListPage {
+                accounts: vec![self.account.projection()],
+                next_cursor: None,
+            })
+        }
+
+        async fn update_status(
+            &self,
+            _scope: &AuthProductScope,
+            _account_id: CredentialAccountId,
+            _status: CredentialAccountStatus,
+        ) -> Result<CredentialAccount, AuthProductError> {
+            Ok(self.account.clone())
+        }
+
+        async fn select_unique_configured_account(
+            &self,
+            _request: CredentialAccountSelectionRequest,
+        ) -> Result<CredentialAccountProjection, AuthProductError> {
+            Ok(self.account.projection())
+        }
+
+        async fn project_credential_recovery(
+            &self,
+            request: CredentialRecoveryRequest,
+        ) -> Result<CredentialRecoveryProjection, AuthProductError> {
+            *self.recovery_scope.lock().unwrap() = Some(request.scope.clone());
+            if request.scope.resource.thread_id.is_none() {
+                Ok(CredentialRecoveryProjection::configured(
+                    google_provider_id().unwrap(),
+                    self.account.projection(),
+                ))
+            } else {
+                Ok(CredentialRecoveryProjection::setup_required(
+                    google_provider_id().unwrap(),
+                    CredentialRecoveryReason::NoAccount,
+                    Vec::new(),
+                ))
+            }
         }
 
         async fn select_configured_account(

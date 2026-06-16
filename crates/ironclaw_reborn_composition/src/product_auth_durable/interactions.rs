@@ -195,7 +195,7 @@ where
                 // successful rotation write.  The new handle is stored first so that
                 // a write failure still leaves the old material reachable.
                 let previous_access_secret = account.access_secret.clone();
-                self.store_manual_secret(pending, access_secret, secret)
+                self.store_manual_secret(&account.scope.resource, access_secret, secret)
                     .await?;
                 update_account_from_request(&mut account, request, Utc::now())?;
                 if let Err(error) = self
@@ -204,14 +204,14 @@ where
                 {
                     // Write failed — clean up the newly stored secret; the old one is
                     // still referenced by the on-disk account record.
-                    self.cleanup_manual_secret(&pending.scope.resource, &account.access_secret)
+                    self.cleanup_manual_secret(&account.scope.resource, &account.access_secret)
                         .await;
                     return Err(error);
                 }
                 // Write succeeded — the new handle is now canonical.  Delete the
                 // previous handle if it differs so we don’t orphan it in SecretStore.
                 if previous_access_secret.as_ref() != account.access_secret.as_ref() {
-                    self.cleanup_manual_secret(&pending.scope.resource, &previous_access_secret)
+                    self.cleanup_manual_secret(&account.scope.resource, &previous_access_secret)
                         .await;
                 }
                 Ok(account)
@@ -226,7 +226,7 @@ where
                 validate_reusable_manual_token_account(&account, pending)?;
                 validate_account_update_target(&account, &request)?;
                 let previous_access_secret = account.access_secret.clone();
-                self.store_manual_secret(pending, access_secret, secret)
+                self.store_manual_secret(&pending.scope.resource, access_secret, secret)
                     .await?;
                 update_account_from_request(&mut account, request, Utc::now())?;
                 if let Err(error) = self
@@ -245,7 +245,7 @@ where
             }
             (None, None) => {
                 validate_new_credential_account(&request)?;
-                self.store_manual_secret(pending, access_secret, secret)
+                self.store_manual_secret(&pending.scope.resource, access_secret, secret)
                     .await?;
                 match self
                     .create_account_with_id(account_id, request.clone(), CasExpectation::Absent)
@@ -279,12 +279,12 @@ where
 
     async fn store_manual_secret(
         &self,
-        pending: &StoredManualTokenInteraction,
+        resource: &ironclaw_host_api::ResourceScope,
         access_secret: ironclaw_host_api::SecretHandle,
         secret: SecretString,
     ) -> Result<(), AuthProductError> {
         self.secret_store
-            .put(pending.scope.resource.clone(), access_secret, secret)
+            .put(resource.clone(), access_secret, secret)
             .await
             .map(|_| ())
             .map_err(|_| AuthProductError::BackendUnavailable)

@@ -301,7 +301,7 @@ async fn binding_does_not_cross_surface_boundary() {
 }
 
 #[tokio::test]
-async fn binding_denies_account_not_visible_to_third_party_requester() {
+async fn binding_selection_enforces_requester_visibility() {
     // The binding path skips the provider-scope gate but still relies on
     // `finalize_selection` to enforce requester authorization: an
     // extension-owned account must not be bound by an unrelated third-party
@@ -374,6 +374,43 @@ async fn runtime_resolution_finds_shared_admin_account_across_thread() {
         .expect("shared-admin account must resolve from a different thread");
 
     assert_eq!(resolved.id, created.id);
+}
+
+#[tokio::test]
+async fn resolver_resolves_shared_admin_account_from_new_thread() {
+    // The resolver must preserve the same cross-thread contract as the
+    // selector: a SharedAdminManaged account explicitly granted to a requester
+    // in one thread remains resolvable from a different thread of the same
+    // owner.
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let requester = ExtensionId::new("gmail").unwrap();
+    let gmail_scope = "https://www.googleapis.com/auth/gmail.readonly";
+    let mut thread_a = owner_auth_scope("alice");
+    thread_a.resource.thread_id = Some(ThreadId::new("thread-a").unwrap());
+    let access_secret = SecretHandle::new("shared-admin-google-access").unwrap();
+    ConfiguredAccount::new(thread_a, "google")
+        .ownership(CredentialOwnership::SharedAdminManaged)
+        .granted_extensions(vec![requester.clone()])
+        .access_secret(Some(access_secret.clone()))
+        .scopes(&[gmail_scope])
+        .create(&accounts)
+        .await;
+    let resolver = resolver_with_accounts(accounts);
+
+    let mut thread_b = owner_auth_scope("alice");
+    thread_b.resource.thread_id = Some(ThreadId::new("thread-b").unwrap());
+    let resolved = resolver
+        .resolve_access_secret(RuntimeCredentialAccountRequest {
+            scope: &thread_b.resource,
+            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+            provider_scopes: &[gmail_scope.to_string()],
+            requester_extension: &requester,
+        })
+        .await
+        .expect("shared-admin account must resolve from a new thread");
+
+    assert_eq!(resolved.handle, access_secret);
 }
 
 #[tokio::test]
