@@ -8,8 +8,8 @@ use ironclaw_approvals::{
 use ironclaw_host_api::{Action, Principal};
 use ironclaw_run_state::ApprovalStatus;
 use ironclaw_turns::{
-    CancelRunRequest, GateRef, ResumeTurnPrecondition, ResumeTurnRequest, SanitizedCancelReason,
-    TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnStatus,
+    GateRef, GateResumeDisposition, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
+    ResumeTurnResponse, TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnStatus,
 };
 
 use super::gate_ref::{approval_reply_binding_ref, approval_source_binding_ref};
@@ -215,7 +215,7 @@ impl DefaultApprovalInteractionService {
                 source_binding_ref: approval_source_binding_ref(&request.gate_ref)?,
                 reply_target_binding_ref: approval_reply_binding_ref(&request.gate_ref)?,
                 idempotency_key: request.idempotency_key,
-                auth_resume_disposition: None,
+                resume_disposition: None,
             })
             .await
             .map_err(map_approval_resume_error)
@@ -315,16 +315,20 @@ impl DefaultApprovalInteractionService {
         }
         let response = self
             .turn_coordinator
-            .cancel_run(CancelRunRequest {
+            .resume_turn(ResumeTurnRequest {
                 scope: request.scope,
                 actor: request.actor,
                 run_id,
-                reason: SanitizedCancelReason::UserRequested,
+                gate_resolution_ref: request.gate_ref.clone(),
+                precondition: ResumeTurnPrecondition::BlockedApprovalGate,
+                source_binding_ref: approval_source_binding_ref(&request.gate_ref)?,
+                reply_target_binding_ref: approval_reply_binding_ref(&request.gate_ref)?,
                 idempotency_key: request.idempotency_key,
+                resume_disposition: Some(GateResumeDisposition::Denied),
             })
             .await
             .map_err(map_approval_resume_error)?;
-        Ok(ResolveApprovalInteractionResponse::Denied(response))
+        Ok(ResolveApprovalInteractionResponse::Resumed(response))
     }
 
     async fn replay_approved_gate(
@@ -343,7 +347,7 @@ impl DefaultApprovalInteractionService {
                 source_binding_ref: approval_source_binding_ref(&request.gate_ref)?,
                 reply_target_binding_ref: approval_reply_binding_ref(&request.gate_ref)?,
                 idempotency_key: request.idempotency_key,
-                auth_resume_disposition: None,
+                resume_disposition: None,
             })
             .await
             .map_err(map_approval_resume_error)?;
@@ -355,18 +359,53 @@ impl DefaultApprovalInteractionService {
         request: ResolveApprovalInteractionRequest,
         run_id: TurnRunId,
     ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
-        let response = self
+        // Idempotent replay: the first Deny already resumed the run with a
+        // denial disposition.  Fetch current state to reflect the outcome
+        // without issuing a new resume or cancel call.
+        let state = self
             .turn_coordinator
-            .cancel_run(CancelRunRequest {
-                scope: request.scope,
-                actor: request.actor,
+            .get_run_state(GetRunStateRequest {
+                scope: request.scope.clone(),
                 run_id,
-                reason: SanitizedCancelReason::UserRequested,
-                idempotency_key: request.idempotency_key,
             })
             .await
             .map_err(map_approval_resume_error)?;
-        Ok(ResolveApprovalInteractionResponse::Denied(response))
+        if state.status == TurnStatus::Cancelled {
+            // The run was cancelled before or instead of being denial-resumed —
+            // return a Resumed response reflecting the disposition we carried,
+            // or fall through; the simplest safe answer is StaleGate because
+            // we have no CancelRunResponse to return for the Resumed variant.
+            // Mirror auth: a Cancelled run in the replay-denied arm means
+            // something cancelled it before our first Deny could resume it.
+            return Err(approval_rejected(
+                ApprovalInteractionRejectionKind::StaleGate,
+            ));
+        }
+        if state.status.is_terminal() {
+            // Run is in some other terminal state (Completed, Failed, etc.)
+            // A replay-denied cannot be applied to a finished run.
+            return Err(approval_rejected(
+                ApprovalInteractionRejectionKind::StaleGate,
+            ));
+        }
+        if state.resume_disposition.is_some() {
+            // Run is non-terminal and carries our denial marker — the first
+            // Deny successfully resumed it with a denial disposition.
+            // Replay that outcome idempotently.
+            return Ok(ResolveApprovalInteractionResponse::Resumed(
+                ResumeTurnResponse {
+                    run_id,
+                    status: state.status,
+                    event_cursor: state.event_cursor,
+                },
+            ));
+        }
+        // Run is non-terminal but no denial marker — the record was denied via
+        // the approval store, but the run was not yet denial-resumed by us.
+        // Treat as stale; the gate cannot be safely replayed here.
+        Err(approval_rejected(
+            ApprovalInteractionRejectionKind::StaleGate,
+        ))
     }
 }
 

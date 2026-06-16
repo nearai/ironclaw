@@ -1182,8 +1182,8 @@ async fn dispatch_auth_resolution(
 
 fn run_id_from_approval_resolution(response: ResolveApprovalInteractionResponse) -> TurnRunId {
     match response {
-        ResolveApprovalInteractionResponse::Approved(response) => response.run_id,
-        ResolveApprovalInteractionResponse::Denied(response) => response.run_id,
+        ResolveApprovalInteractionResponse::Approved(response)
+        | ResolveApprovalInteractionResponse::Resumed(response) => response.run_id,
     }
 }
 

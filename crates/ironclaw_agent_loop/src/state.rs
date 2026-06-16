@@ -112,6 +112,11 @@ pub struct PendingApprovalResume {
     pub provider_replay: Option<ProviderToolCallReplay>,
     pub input: serde_json::Value,
     pub estimate: ResourceEstimate,
+    /// Set when the user denied this approval gate. The loop surfaces a
+    /// model-visible failure for the parked call instead of re-dispatching.
+    /// Mirrors `PendingAuthResume::disposition`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<ironclaw_turns::GateResumeDisposition>,
 }
 
 impl PendingApprovalResume {
@@ -148,9 +153,9 @@ impl PendingApprovalResume {
 /// case `resume_token` and `replay` are unused.
 ///
 /// Field-name note: `PendingAuthResume::disposition` is intentionally kept
-/// short because the enclosing type already scopes it to auth-resume context.
+/// short because the enclosing type already scopes it to gate-resume context.
 /// Turn-layer structs that carry a similar field from a wider scope use the
-/// qualified name `auth_resume_disposition` to avoid ambiguity.
+/// qualified name `resume_disposition` to avoid ambiguity.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingAuthResume {
     pub gate_ref: LoopGateRef,
@@ -179,7 +184,7 @@ pub struct PendingAuthResume {
     /// Set when the user denied this auth gate. The loop surfaces a
     /// model-visible failure for the parked call instead of re-dispatching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub disposition: Option<ironclaw_turns::AuthResumeDisposition>,
+    pub disposition: Option<ironclaw_turns::GateResumeDisposition>,
 }
 
 impl LoopExecutionState {
@@ -275,7 +280,7 @@ pub enum CheckpointPayloadError {
 mod tests {
     use ironclaw_host_api::{CapabilityId, TenantId, ThreadId};
     use ironclaw_turns::{
-        AgentLoopDriverDescriptor, AuthResumeDisposition, RunProfileId, RunProfileVersion, TurnId,
+        AgentLoopDriverDescriptor, GateResumeDisposition, RunProfileId, RunProfileVersion, TurnId,
         TurnRunId, TurnScope,
         run_profile::{
             CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy, CheckpointSchemaId,
@@ -760,7 +765,7 @@ mod tests {
             resume_token: None,
             prior_approval: None,
             replay: None,
-            disposition: Some(AuthResumeDisposition::Denied),
+            disposition: Some(GateResumeDisposition::Denied),
         });
         let payload = encode_payload(&state);
         let restored =
@@ -771,7 +776,7 @@ mod tests {
                 .pending_auth_resume
                 .as_ref()
                 .and_then(|r| r.disposition.as_ref()),
-            Some(&AuthResumeDisposition::Denied),
+            Some(&GateResumeDisposition::Denied),
             "PendingAuthResume with Denied disposition must survive checkpoint encode/decode"
         );
         assert_eq!(
@@ -960,6 +965,75 @@ mod tests {
         assert!(
             legacy_pending.disposition.is_none(),
             "disposition absent from checkpoint payload must decode to None"
+        );
+    }
+
+    #[test]
+    fn pending_approval_resume_denied_disposition_round_trips_through_checkpoint_payload() {
+        // Mirror of `pending_auth_resume_denied_disposition_round_trips_through_checkpoint_payload`.
+        // The `Some(Denied)` disposition stamped on `pending_approval_resume` before the
+        // capability stage must survive the checkpoint encode/decode cycle so that a
+        // resumed run still sees the approval denial.
+        use ironclaw_host_api::{ApprovalRequestId, CorrelationId, ResourceEstimate};
+        use ironclaw_turns::run_profile::CapabilityResumeToken;
+
+        let context = test_run_context();
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        let resume_token =
+            CapabilityResumeToken::new("00000000-0000-0000-0000-000000000099").expect("valid");
+        state.pending_approval_resume = Some(super::PendingApprovalResume {
+            gate_ref: LoopGateRef::new("gate:approval-denied-test").expect("valid gate ref"),
+            capability_id: CapabilityId::new("extensions.install").expect("valid cap id"),
+            approval_request_id: ApprovalRequestId::new(),
+            resume_token,
+            correlation_id: CorrelationId::new(),
+            surface_version: CapabilitySurfaceVersion::new("surface-v1")
+                .expect("valid surface version"),
+            input_ref: CapabilityInputRef::new("input:approval-denied").expect("valid input ref"),
+            effective_capability_ids: vec![],
+            provider_replay: None,
+            input: serde_json::json!({"extension_id": "slack"}),
+            estimate: ResourceEstimate::default(),
+            disposition: Some(GateResumeDisposition::Denied),
+        });
+        let payload = encode_payload(&state);
+        let restored =
+            LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::BeforeBlock)
+                .expect("decode checkpoint payload");
+        assert_eq!(
+            restored
+                .pending_approval_resume
+                .as_ref()
+                .and_then(|r| r.disposition.as_ref()),
+            Some(&GateResumeDisposition::Denied),
+            "PendingApprovalResume with Denied disposition must survive checkpoint encode/decode"
+        );
+        assert_eq!(
+            restored.pending_approval_resume, state.pending_approval_resume,
+            "entire PendingApprovalResume must round-trip without loss when disposition is Some(Denied)"
+        );
+
+        // Compat: strip the `disposition` field to simulate a checkpoint written
+        // before the field was added. Decoding must yield `None`, not an error.
+        let mut value: serde_json::Value = serde_json::from_slice(&payload).expect("parse");
+        value
+            .as_object_mut()
+            .expect("state is object")
+            .get_mut("pending_approval_resume")
+            .expect("pending_approval_resume present")
+            .as_object_mut()
+            .expect("pending_approval_resume is object")
+            .remove("disposition");
+        let stripped = serde_json::to_vec(&value).expect("re-encode");
+        let from_legacy =
+            LoopExecutionState::from_checkpoint_payload(&stripped, CheckpointKind::BeforeBlock)
+                .expect("decode legacy checkpoint without disposition field");
+        assert!(
+            from_legacy
+                .pending_approval_resume
+                .as_ref()
+                .is_some_and(|r| r.disposition.is_none()),
+            "disposition absent from legacy checkpoint must decode to None"
         );
     }
 }

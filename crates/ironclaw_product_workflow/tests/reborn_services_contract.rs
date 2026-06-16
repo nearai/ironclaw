@@ -458,7 +458,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
             failure: None,
             event_cursor: EventCursor(17),
             product_context: None,
-            auth_resume_disposition: None,
+            resume_disposition: None,
         })
     }
 }
@@ -554,7 +554,7 @@ impl TurnCoordinator for BlockingSubmitCoordinator {
             failure: None,
             event_cursor: EventCursor(29),
             product_context: None,
-            auth_resume_disposition: None,
+            resume_disposition: None,
         })
     }
 }
@@ -600,12 +600,10 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
                 })
             }
             ApprovalInteractionDecision::Deny => {
-                ResolveApprovalInteractionResponse::Denied(CancelRunResponse {
+                ResolveApprovalInteractionResponse::Resumed(ResumeTurnResponse {
                     run_id,
-                    status: TurnStatus::Cancelled,
+                    status: TurnStatus::Queued,
                     event_cursor: EventCursor(23),
-                    already_terminal: false,
-                    actor: None,
                 })
             }
         })
@@ -3809,7 +3807,7 @@ async fn approval_gate_denial_uses_approval_interaction_service_and_returns_canc
         .await
         .expect("approval gate denial succeeds");
 
-    assert!(matches!(response, RebornResolveGateResponse::Cancelled(_)));
+    assert!(matches!(response, RebornResolveGateResponse::Resumed(_)));
     assert_eq!(approval_interactions.resolution_count(), 1);
     assert_eq!(coordinator.cancellation_count(), 0);
     assert_eq!(

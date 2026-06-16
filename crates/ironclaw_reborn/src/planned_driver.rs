@@ -156,15 +156,23 @@ impl AgentLoopDriver for PlannedDriver {
             }
         };
 
-        // A run resumed from a user-denied auth gate carries the denial
-        // disposition in the resume request. Stamp it onto the parked auth-resume
-        // so the executor surfaces a model-visible denial and continues instead
-        // of re-dispatching the capability (which would re-block on the still-
-        // missing credential — the infinite auth/deny loop this fixes).
-        if let Some(disposition) = request.auth_resume_disposition.clone()
-            && let Some(pending) = initial.pending_auth_resume.as_mut()
-        {
-            pending.disposition = Some(disposition);
+        // A run resumed from a user-denied gate carries the denial disposition
+        // in the resume request. Stamp it onto whichever parked resume is
+        // present so the executor surfaces a model-visible denial and continues
+        // instead of re-dispatching the capability (which would re-block on the
+        // still-missing credential/approval — the infinite deny loop this fixes).
+        //
+        // A run is blocked on exactly one gate at a time, so at most one of
+        // pending_auth_resume / pending_approval_resume will be set; stamping
+        // both is safe and avoids requiring a per-gate precondition field on
+        // AgentLoopDriverResumeRequest.
+        if let Some(disposition) = request.resume_disposition.clone() {
+            if let Some(pending) = initial.pending_auth_resume.as_mut() {
+                pending.disposition = Some(disposition.clone());
+            }
+            if let Some(pending) = initial.pending_approval_resume.as_mut() {
+                pending.disposition = Some(disposition);
+            }
         }
 
         self.executor
@@ -539,7 +547,7 @@ mod tests {
                     run_id: context.run_id,
                     checkpoint_id: TurnCheckpointId::new(),
                     resolved_run_profile: context.resolved_run_profile.clone(),
-                    auth_resume_disposition: None,
+                    resume_disposition: None,
                 },
                 &host,
             )
@@ -577,7 +585,7 @@ mod tests {
                     run_id: context.run_id,
                     checkpoint_id,
                     resolved_run_profile: context.resolved_run_profile.clone(),
-                    auth_resume_disposition: None,
+                    resume_disposition: None,
                 },
                 &host,
             )
@@ -612,7 +620,7 @@ mod tests {
                     run_id: context.run_id,
                     checkpoint_id: TurnCheckpointId::new(),
                     resolved_run_profile,
-                    auth_resume_disposition: None,
+                    resume_disposition: None,
                 },
                 &host,
             )
@@ -654,7 +662,7 @@ mod tests {
                     run_id: context.run_id,
                     checkpoint_id,
                     resolved_run_profile: context.resolved_run_profile.clone(),
-                    auth_resume_disposition: None,
+                    resume_disposition: None,
                 },
                 &host,
             )
@@ -706,7 +714,7 @@ mod tests {
                     run_id: context.run_id,
                     checkpoint_id,
                     resolved_run_profile: context.resolved_run_profile.clone(),
-                    auth_resume_disposition: None,
+                    resume_disposition: None,
                 },
                 &host,
             )
@@ -745,7 +753,7 @@ mod tests {
                     run_id: context.run_id,
                     checkpoint_id,
                     resolved_run_profile: context.resolved_run_profile.clone(),
-                    auth_resume_disposition: None,
+                    resume_disposition: None,
                 },
                 &host,
             )
@@ -1036,7 +1044,7 @@ mod tests {
         state
     }
 
-    /// Verifies that the `resume` method stamps `AuthResumeDisposition::Denied`
+    /// Verifies that the `resume` method stamps `GateResumeDisposition::Denied`
     /// onto `pending_auth_resume` when the run context carries a denial, then
     /// passes the modified state to the executor.
     ///
@@ -1050,7 +1058,7 @@ mod tests {
     /// not the injection snippet in isolation.
     #[tokio::test]
     async fn resume_with_auth_deny_disposition_stamps_denial_onto_pending_auth_resume() {
-        use ironclaw_turns::AuthResumeDisposition;
+        use ironclaw_turns::GateResumeDisposition;
 
         let registry = build_loop_family_registry().expect("registry");
         let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
@@ -1058,7 +1066,7 @@ mod tests {
         // Build a run context (no disposition on context — disposition travels
         // via the resume request, not the host context).
         let context = run_context_for_driver(&driver);
-        let disposition = Some(AuthResumeDisposition::Denied);
+        let disposition = Some(GateResumeDisposition::Denied);
 
         // Stage a checkpoint payload whose execution state has a parked auth
         // resume (disposition: None — as it would be when written at block time).
@@ -1087,7 +1095,7 @@ mod tests {
                     run_id: context.run_id,
                     checkpoint_id,
                     resolved_run_profile: context.resolved_run_profile.clone(),
-                    auth_resume_disposition: disposition,
+                    resume_disposition: disposition,
                 },
                 &host,
             )
@@ -1100,7 +1108,7 @@ mod tests {
             result.expect("resume should produce a terminal loop exit")
         {
             panic!(
-                "resume with AuthResumeDisposition::Denied must not re-block on auth; \
+                "resume with GateResumeDisposition::Denied must not re-block on auth; \
                  the executor must surface a model-visible denial and continue"
             );
         }
@@ -1113,7 +1121,7 @@ mod tests {
     #[test]
     fn auth_deny_disposition_is_stamped_onto_pending_auth_resume_before_execution() {
         use ironclaw_agent_loop::state::LoopExecutionState;
-        use ironclaw_turns::AuthResumeDisposition;
+        use ironclaw_turns::GateResumeDisposition;
         use ironclaw_turns::run_profile::LoopCheckpointKind;
 
         let registry = build_loop_family_registry().expect("registry");
@@ -1121,8 +1129,8 @@ mod tests {
 
         // Disposition now travels via the resume request, not the host context.
         let context = run_context_for_driver(&driver);
-        let request_disposition: Option<AuthResumeDisposition> =
-            Some(AuthResumeDisposition::Denied);
+        let request_disposition: Option<GateResumeDisposition> =
+            Some(GateResumeDisposition::Denied);
 
         let staged_state = state_with_pending_auth_resume(&context);
         // Confirm the state starts with no disposition (precondition).
@@ -1157,7 +1165,7 @@ mod tests {
             .disposition
             .expect("disposition must be Some after injection");
         assert!(
-            matches!(disposition, AuthResumeDisposition::Denied),
+            matches!(disposition, GateResumeDisposition::Denied),
             "disposition must be Denied after injection, got {disposition:?}"
         );
     }
@@ -1167,7 +1175,7 @@ mod tests {
     #[test]
     fn auth_deny_disposition_injection_is_noop_when_disposition_is_none() {
         use ironclaw_agent_loop::state::LoopExecutionState;
-        use ironclaw_turns::AuthResumeDisposition;
+        use ironclaw_turns::GateResumeDisposition;
         use ironclaw_turns::run_profile::LoopCheckpointKind;
 
         let registry = build_loop_family_registry().expect("registry");
@@ -1175,7 +1183,7 @@ mod tests {
 
         let context = run_context_for_driver(&driver);
         // Disposition now travels via the resume request, not the host context.
-        let request_disposition: Option<AuthResumeDisposition> = None;
+        let request_disposition: Option<GateResumeDisposition> = None;
 
         let staged_state = state_with_pending_auth_resume(&context);
         let payload_bytes = serde_json::to_vec(&staged_state).expect("serialize checkpoint state");
@@ -1199,7 +1207,153 @@ mod tests {
                 .expect("pending_auth_resume must survive round-trip")
                 .disposition
                 .is_none(),
-            "disposition must remain None when request auth_resume_disposition is None"
+            "disposition must remain None when request resume_disposition is None"
+        );
+    }
+
+    // ---- approval-deny disposition injection tests -----------------------------
+
+    /// Helper: build a `LoopExecutionState` with a parked `pending_approval_resume`
+    /// so we can assert the injection path stamps the disposition onto it.
+    fn state_with_pending_approval_resume(
+        context: &LoopRunContext,
+    ) -> ironclaw_agent_loop::state::LoopExecutionState {
+        use ironclaw_agent_loop::state::PendingApprovalResume;
+        use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId, ResourceEstimate};
+        use ironclaw_turns::LoopGateRef;
+        use ironclaw_turns::run_profile::{
+            CapabilityInputRef, CapabilityResumeToken, CapabilitySurfaceVersion,
+        };
+
+        let mut state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(context);
+        state.pending_approval_resume = Some(PendingApprovalResume {
+            gate_ref: LoopGateRef::new("gate:test-approval-deny").expect("valid gate ref"),
+            capability_id: CapabilityId::new("test.capability").expect("valid capability id"),
+            approval_request_id: ApprovalRequestId::new(),
+            resume_token: CapabilityResumeToken::new("00000000-0000-0000-0000-000000000001")
+                .expect("valid resume token"),
+            correlation_id: CorrelationId::new(),
+            surface_version: CapabilitySurfaceVersion::new("surface:v1")
+                .expect("valid surface version"),
+            input_ref: CapabilityInputRef::new("input:test-approval-deny")
+                .expect("valid input ref"),
+            effective_capability_ids: Vec::new(),
+            provider_replay: None,
+            input: serde_json::Value::Null,
+            estimate: ResourceEstimate::default(),
+            disposition: None,
+        });
+        state
+    }
+
+    /// Unit-level smoke test: confirm that the disposition injection in `resume`
+    /// stamps `Some(Denied)` onto `pending_approval_resume.disposition` (and NOT
+    /// onto `pending_auth_resume`, which is absent) before passing the state to
+    /// the executor.
+    #[test]
+    fn approval_deny_disposition_is_stamped_onto_pending_approval_resume_before_execution() {
+        use ironclaw_agent_loop::state::LoopExecutionState;
+        use ironclaw_turns::GateResumeDisposition;
+        use ironclaw_turns::run_profile::LoopCheckpointKind;
+
+        let registry = build_loop_family_registry().expect("registry");
+        let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
+
+        let context = run_context_for_driver(&driver);
+        let request_disposition: Option<GateResumeDisposition> =
+            Some(GateResumeDisposition::Denied);
+
+        let staged_state = state_with_pending_approval_resume(&context);
+        // Confirm preconditions: approval resume has no disposition; auth resume absent.
+        assert!(
+            staged_state
+                .pending_approval_resume
+                .as_ref()
+                .expect("pending_approval_resume must be set")
+                .disposition
+                .is_none(),
+            "staged pending_approval_resume must start with disposition: None"
+        );
+        assert!(
+            staged_state.pending_auth_resume.is_none(),
+            "pending_auth_resume must be absent in this fixture"
+        );
+
+        // Apply the same injection logic as the production `resume` path.
+        let payload_bytes = serde_json::to_vec(&staged_state).expect("serialize checkpoint state");
+        let checkpoint_kind = resumable_checkpoint_kind_from_host(LoopCheckpointKind::BeforeModel)
+            .expect("BeforeModel is resumable");
+        let mut loaded_state =
+            LoopExecutionState::from_checkpoint_payload(&payload_bytes, checkpoint_kind)
+                .expect("decode checkpoint state");
+
+        if let Some(disposition) = request_disposition.clone() {
+            if let Some(pending) = loaded_state.pending_auth_resume.as_mut() {
+                pending.disposition = Some(disposition.clone());
+            }
+            if let Some(pending) = loaded_state.pending_approval_resume.as_mut() {
+                pending.disposition = Some(disposition);
+            }
+        }
+
+        // Assert the disposition was stamped onto the approval resume.
+        let disposition = loaded_state
+            .pending_approval_resume
+            .expect("pending_approval_resume must survive round-trip")
+            .disposition
+            .expect("disposition must be Some after injection");
+        assert!(
+            matches!(disposition, GateResumeDisposition::Denied),
+            "disposition must be Denied after injection, got {disposition:?}"
+        );
+        // Auth resume must remain absent — the stamping must not create it.
+        assert!(
+            loaded_state.pending_auth_resume.is_none(),
+            "pending_auth_resume must remain absent when only approval resume is present"
+        );
+    }
+
+    /// Confirm that the injection is a no-op for `pending_approval_resume` when
+    /// the resume request carries no disposition — do not regress the normal
+    /// (non-deny) approval resume path.
+    #[test]
+    fn approval_deny_disposition_injection_is_noop_when_disposition_is_none() {
+        use ironclaw_agent_loop::state::LoopExecutionState;
+        use ironclaw_turns::GateResumeDisposition;
+        use ironclaw_turns::run_profile::LoopCheckpointKind;
+
+        let registry = build_loop_family_registry().expect("registry");
+        let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
+
+        let context = run_context_for_driver(&driver);
+        let request_disposition: Option<GateResumeDisposition> = None;
+
+        let staged_state = state_with_pending_approval_resume(&context);
+        let payload_bytes = serde_json::to_vec(&staged_state).expect("serialize checkpoint state");
+        let checkpoint_kind = resumable_checkpoint_kind_from_host(LoopCheckpointKind::BeforeModel)
+            .expect("BeforeModel is resumable");
+        let mut loaded_state =
+            LoopExecutionState::from_checkpoint_payload(&payload_bytes, checkpoint_kind)
+                .expect("decode checkpoint state");
+
+        // Apply injection (disposition is None — the outer `if let Some` guard fires false).
+        if let Some(disposition) = request_disposition.clone() {
+            if let Some(pending) = loaded_state.pending_auth_resume.as_mut() {
+                pending.disposition = Some(disposition.clone());
+            }
+            if let Some(pending) = loaded_state.pending_approval_resume.as_mut() {
+                pending.disposition = Some(disposition);
+            }
+        }
+
+        // Disposition must remain None — no-op.
+        assert!(
+            loaded_state
+                .pending_approval_resume
+                .expect("pending_approval_resume must survive round-trip")
+                .disposition
+                .is_none(),
+            "disposition must remain None when request resume_disposition is None"
         );
     }
 }

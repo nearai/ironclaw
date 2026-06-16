@@ -6,7 +6,7 @@ use ironclaw_auth::{
     CredentialAccountId, CredentialSelectionInput,
 };
 use ironclaw_turns::{
-    AuthResumeDisposition, CancelRunRequest, CancelRunResponse, GateRef, GetRunStateRequest,
+    CancelRunRequest, CancelRunResponse, GateRef, GateResumeDisposition, GetRunStateRequest,
     ResumeTurnPrecondition, ResumeTurnRequest, ResumeTurnResponse, SanitizedCancelReason,
     TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnStatus,
 };
@@ -177,7 +177,7 @@ impl DefaultAuthInteractionService {
                 source_binding_ref: state.source_binding_ref,
                 reply_target_binding_ref: state.reply_target_binding_ref,
                 idempotency_key: request.idempotency_key,
-                auth_resume_disposition: None,
+                resume_disposition: None,
             })
             .await
             .map_err(map_auth_resume_error)?;
@@ -275,7 +275,7 @@ impl DefaultAuthInteractionService {
                 source_binding_ref: state.source_binding_ref,
                 reply_target_binding_ref: state.reply_target_binding_ref,
                 idempotency_key: request.idempotency_key,
-                auth_resume_disposition: Some(AuthResumeDisposition::Denied),
+                resume_disposition: Some(GateResumeDisposition::Denied),
             })
             .await
             .map_err(map_auth_resume_error)?;
@@ -437,7 +437,7 @@ impl AuthInteractionService for DefaultAuthInteractionService {
                     // RecoveryRequired).  A Deny cannot be applied to a
                     // finished run — this is a stale interaction.
                     Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth))
-                } else if state.auth_resume_disposition.is_some() {
+                } else if state.resume_disposition.is_some() {
                     // Run is non-terminal and carries our deny marker — the first
                     // Deny successfully resumed it with a denial disposition.
                     // Replay that outcome idempotently.
@@ -450,9 +450,9 @@ impl AuthInteractionService for DefaultAuthInteractionService {
                     ))
                 } else {
                     // The flow was Canceled but this run was NOT deny-resumed by us
-                    // (no auth_resume_disposition marker).  The flow reached
-                    // Canceled via some other path — treat as stale; the gate
-                    // cannot be resolved as a deny here.
+                    // (no resume_disposition marker).  The flow reached Canceled
+                    // via some other path — treat as stale; the gate cannot be
+                    // resolved as a deny here.
                     Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth))
                 }
             }

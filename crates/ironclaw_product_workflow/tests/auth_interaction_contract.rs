@@ -21,11 +21,11 @@ use ironclaw_product_workflow::{
     ProductWorkflowError, ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, AuthResumeDisposition, CancelRunRequest, CancelRunResponse, EventCursor,
-    GateRef, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef, ResumeTurnPrecondition,
-    ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnId,
-    TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
+    GateResumeDisposition, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef,
+    ResumeTurnPrecondition, ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
+    TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 
 #[derive(Default)]
@@ -234,7 +234,7 @@ struct RecordingTurnCoordinator {
     gate_ref: Mutex<Option<GateRef>>,
     resumes: Mutex<Vec<ResumeTurnRequest>>,
     cancellations: Mutex<Vec<CancelRunRequest>>,
-    auth_resume_disposition: Mutex<Option<AuthResumeDisposition>>,
+    resume_disposition: Mutex<Option<GateResumeDisposition>>,
     get_run_state_error: Mutex<Option<TurnError>>,
 }
 
@@ -246,7 +246,7 @@ impl RecordingTurnCoordinator {
             gate_ref: Mutex::new(Some(gate_ref)),
             resumes: Mutex::new(Vec::new()),
             cancellations: Mutex::new(Vec::new()),
-            auth_resume_disposition: Mutex::new(None),
+            resume_disposition: Mutex::new(None),
             get_run_state_error: Mutex::new(None),
         }
     }
@@ -263,8 +263,8 @@ impl RecordingTurnCoordinator {
         *self.status.lock().expect("lock") = status;
     }
 
-    fn set_auth_resume_disposition(&self, disposition: Option<AuthResumeDisposition>) {
-        *self.auth_resume_disposition.lock().expect("lock") = disposition;
+    fn set_resume_disposition(&self, disposition: Option<GateResumeDisposition>) {
+        *self.resume_disposition.lock().expect("lock") = disposition;
     }
 
     fn set_get_run_state_error(&self, error: TurnError) {
@@ -333,7 +333,7 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             failure: None,
             event_cursor: EventCursor(47),
             product_context: None,
-            auth_resume_disposition: self.auth_resume_disposition.lock().expect("lock").clone(),
+            resume_disposition: self.resume_disposition.lock().expect("lock").clone(),
         })
     }
 }
@@ -816,8 +816,8 @@ async fn denied_auth_on_parked_gate_cancels_flow_and_resumes_with_denial_disposi
         ResumeTurnPrecondition::BlockedAuthGate
     );
     assert!(matches!(
-        resumes[0].auth_resume_disposition,
-        Some(AuthResumeDisposition::Denied)
+        resumes[0].resume_disposition,
+        Some(GateResumeDisposition::Denied)
     ));
     assert!(coordinator.cancellations().is_empty());
 }
@@ -975,7 +975,7 @@ async fn duplicate_denied_auth_on_already_resumed_run_is_idempotent() {
     // The first Deny set this marker on the run when it resumed with a denial
     // disposition.  Without it the service cannot distinguish "we denied it"
     // from "some other path cancelled the flow".
-    coordinator.set_auth_resume_disposition(Some(AuthResumeDisposition::Denied));
+    coordinator.set_resume_disposition(Some(GateResumeDisposition::Denied));
 
     let response = service
         .resolve(ResolveAuthInteractionRequest {
@@ -1006,7 +1006,7 @@ async fn duplicate_denied_auth_on_already_resumed_run_is_idempotent() {
 #[tokio::test]
 async fn deny_on_canceled_flow_without_deny_marker_returns_stale_auth() {
     // Scenario: NotParkedOnGate + Deny, flow=Canceled, run is non-terminal,
-    // BUT auth_resume_disposition is None — the flow was canceled by some other
+    // BUT resume_disposition is None — the flow was canceled by some other
     // path (not by our deny).  The service must NOT fabricate a Resumed
     // response, and must NOT issue a cancel_run call.  It should return StaleAuth.
     let actor = TurnActor::new(UserId::new("alice").unwrap());
@@ -1023,12 +1023,12 @@ async fn deny_on_canceled_flow_without_deny_marker_returns_stale_auth() {
         setup_challenge(),
     );
     // The run is non-terminal (e.g. still Queued from some other resumption
-    // path), and the coordinator returns auth_resume_disposition=None — no
+    // path), and the coordinator returns resume_disposition=None — no
     // deny marker was stamped by us.
     let (service, _flow_manager, coordinator) =
         service_parts(flow.clone(), vec![flow], actor.clone(), gate_ref.clone());
     coordinator.set_status(TurnStatus::Queued);
-    // auth_resume_disposition deliberately left as None (the default): this
+    // resume_disposition deliberately left as None (the default): this
     // simulates a flow canceled by a path other than our Deny.
 
     let error = service

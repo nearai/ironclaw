@@ -37,6 +37,22 @@ pub(crate) struct CapabilityStage;
 
 const MAX_SAFE_SUMMARY_BYTES: usize = 512;
 
+/// Outcome of [`CapabilityStage::short_circuit_denied_resume`].
+///
+/// The helper processes the denied call(s) from a gate denial (auth or approval)
+/// and returns either:
+/// - `TurnDone` — all visible calls belonged to the denied capability; the turn
+///   is already completed and the caller should propagate the step directly.
+/// - `Remaining` — one or more calls are for unrelated capabilities and should
+///   proceed through the normal batch dispatch path.
+enum DeniedResumeOutcome {
+    TurnDone(TurnCompletedStep),
+    Remaining {
+        state: Box<LoopExecutionState>,
+        visible_calls: Vec<CapabilityCallCandidate>,
+    },
+}
+
 pub(super) struct CapabilityInput {
     pub(super) state: LoopExecutionState,
     pub(super) surface: VisibleCapabilitySurface,
@@ -124,7 +140,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         if let Some(pending) = state.pending_auth_resume.as_ref().filter(|p| {
             matches!(
                 p.disposition.as_ref(),
-                Some(ironclaw_turns::AuthResumeDisposition::Denied)
+                Some(ironclaw_turns::GateResumeDisposition::Denied)
             )
         }) {
             let denied_cap_id = pending.capability_id.clone();
@@ -133,57 +149,68 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             // auth_denied_calls is empty — preventing a stale Denied disposition
             // from leaking into the fall-through batch.
             state.pending_auth_resume = None;
-            let (auth_denied_calls, remaining_calls): (Vec<_>, Vec<_>) = visible_calls
-                .into_iter()
-                .partition(|call| call.capability_id == denied_cap_id);
-
-            for call in auth_denied_calls {
-                push_call_signature_once(&mut state, &mut signatures, &call)?;
-                let failure = ironclaw_turns::run_profile::CapabilityFailure {
-                    error_kind: CapabilityFailureKind::Authorization,
-                    // Intentionally empty: model-visible text comes from
-                    // `model_visible_capability_failure_observation` and the
-                    // planner summary from `from_trusted_static` below.
-                    safe_summary: String::new(),
-                    detail: None,
-                };
-                state
-                    .recent_failure_kinds
-                    .push(capability_failure_kind(&failure.error_kind));
-                let model_observation =
-                    Some(model_visible_capability_failure_observation(&failure));
-                let summary = CapabilityErrorSummary {
-                    class: capability_error_class(&failure.error_kind),
-                    safe_summary: SanitizedStrategySummary::from_trusted_static(
-                        "auth gate denied by user",
-                    ),
-                    diagnostic_ref: None,
-                };
-                match self
-                    .handle_capability_error(
-                        ctx,
-                        state,
-                        call,
-                        summary,
-                        model_observation,
-                        &mut capability_batch,
-                    )
-                    .await?
-                {
-                    BatchStep::Continue(next) => state = *next,
-                    BatchStep::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
+            match self
+                .short_circuit_denied_resume(
+                    ctx,
+                    state,
+                    &mut signatures,
+                    &mut capability_batch,
+                    result_refs_start,
+                    denied_cap_id,
+                    "auth gate denied by user",
+                    visible_calls,
+                )
+                .await?
+            {
+                DeniedResumeOutcome::TurnDone(step) => return Ok(step),
+                DeniedResumeOutcome::Remaining {
+                    state: next,
+                    visible_calls: remaining,
+                } => {
+                    state = *next;
+                    visible_calls = remaining;
                 }
             }
+        }
 
-            if remaining_calls.is_empty() {
-                return self
-                    .completed_turn(ctx, state, result_refs_start, capability_batch)
-                    .await;
+        // A run resumed from a user-DENIED approval gate must not re-dispatch
+        // the parked capability (re-dispatch → re-block → infinite loop).
+        // Mirror the auth-gate pattern above: surface a model-visible
+        // Authorization failure for only the denied call, let other parallel
+        // calls in the same batch proceed normally.
+        if let Some(pending) = state.pending_approval_resume.as_ref().filter(|p| {
+            matches!(
+                p.disposition.as_ref(),
+                Some(ironclaw_turns::GateResumeDisposition::Denied)
+            )
+        }) {
+            let denied_cap_id = pending.capability_id.clone();
+            // Clear the slot unconditionally — even if the partition yields no
+            // matching calls, a stale Denied disposition must not bleed into the
+            // fall-through batch.
+            state.pending_approval_resume = None;
+            match self
+                .short_circuit_denied_resume(
+                    ctx,
+                    state,
+                    &mut signatures,
+                    &mut capability_batch,
+                    result_refs_start,
+                    denied_cap_id,
+                    "approval gate denied by user",
+                    visible_calls,
+                )
+                .await?
+            {
+                DeniedResumeOutcome::TurnDone(step) => return Ok(step),
+                DeniedResumeOutcome::Remaining {
+                    state: next,
+                    visible_calls: remaining,
+                } => {
+                    state = *next;
+                    visible_calls = remaining;
+                }
             }
-
-            // Continue with only the non-denied calls; policy is computed below
-            // from this reduced set so batch sizing and progress events are accurate.
-            visible_calls = remaining_calls;
         }
 
         // Compute batch policy from the final set of calls that will actually
@@ -983,6 +1010,93 @@ impl CapabilityStage {
             checked.state,
             Some(checked.checkpoint_id),
         )?))
+    }
+
+    /// Shared denied-resume short-circuit for both auth and approval gates.
+    ///
+    /// Partitions `visible_calls` by `denied_cap_id`.  For every call that
+    /// matches the denied capability, synthesises a model-visible
+    /// `Authorization` failure (retry `Forbidden`) via `handle_capability_error`
+    /// and uses `planner_summary` as the planner-visible strategy summary
+    /// (must pass `validate_loop_safe_summary`).  Calls for unrelated
+    /// capabilities are returned as `DeniedResumeOutcome::Remaining` so the
+    /// caller can dispatch them through the normal batch path.
+    ///
+    /// # Callers
+    ///
+    /// - Auth-gate denial: `state.pending_auth_resume = None` before calling;
+    ///   `planner_summary = "auth gate denied by user"`.
+    /// - Approval-gate denial: `state.pending_approval_resume = None` before
+    ///   calling; `planner_summary = "approval gate denied by user"`.
+    ///
+    /// Both summaries are compile-time `&'static str` and are validated by
+    /// `SanitizedStrategySummary::from_trusted_static` at the call site.
+    #[allow(clippy::too_many_arguments)]
+    async fn short_circuit_denied_resume(
+        &self,
+        ctx: StageContext<'_>,
+        mut state: LoopExecutionState,
+        signatures: &mut HashSet<crate::state::CapabilityCallSignature>,
+        capability_batch: &mut CapabilityBatchTurnSummary,
+        result_refs_start: usize,
+        denied_cap_id: ironclaw_host_api::CapabilityId,
+        planner_summary: &'static str,
+        visible_calls: Vec<CapabilityCallCandidate>,
+    ) -> Result<DeniedResumeOutcome, AgentLoopExecutorError> {
+        let (denied_calls, remaining_calls): (Vec<_>, Vec<_>) = visible_calls
+            .into_iter()
+            .partition(|call| call.capability_id == denied_cap_id);
+
+        for call in denied_calls {
+            push_call_signature_once(&mut state, signatures, &call)?;
+            let failure = ironclaw_turns::run_profile::CapabilityFailure {
+                error_kind: CapabilityFailureKind::Authorization,
+                // Intentionally empty: model-visible text comes from
+                // `model_visible_capability_failure_observation` and the
+                // planner summary from `from_trusted_static` below.
+                safe_summary: String::new(),
+                detail: None,
+            };
+            state
+                .recent_failure_kinds
+                .push(capability_failure_kind(&failure.error_kind));
+            let model_observation = Some(model_visible_capability_failure_observation(&failure));
+            let summary = CapabilityErrorSummary {
+                class: capability_error_class(&failure.error_kind),
+                safe_summary: SanitizedStrategySummary::from_trusted_static(planner_summary),
+                diagnostic_ref: None,
+            };
+            match self
+                .handle_capability_error(
+                    ctx,
+                    state,
+                    call,
+                    summary,
+                    model_observation,
+                    capability_batch,
+                )
+                .await?
+            {
+                BatchStep::Continue(next) => state = *next,
+                BatchStep::Exit(exit) => {
+                    return Ok(DeniedResumeOutcome::TurnDone(TurnCompletedStep::Exit(exit)));
+                }
+            }
+        }
+
+        if remaining_calls.is_empty() {
+            let done = self
+                .completed_turn(ctx, state, result_refs_start, capability_batch.clone())
+                .await?;
+            return Ok(DeniedResumeOutcome::TurnDone(done));
+        }
+
+        // Continue with only the non-denied calls; batch policy is recomputed
+        // from this reduced set so sizing and progress events are accurate.
+        Ok(DeniedResumeOutcome::Remaining {
+            state: Box::new(state),
+            visible_calls: remaining_calls,
+        })
     }
 }
 

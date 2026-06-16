@@ -440,7 +440,7 @@ fn turn_run_state_actor_is_serde_backward_compatible() {
         failure: None,
         event_cursor: EventCursor(1),
         product_context: None,
-        auth_resume_disposition: None,
+        resume_disposition: None,
     };
 
     let legacy_wire = serde_json::to_value(&state).unwrap();
@@ -491,7 +491,7 @@ fn turn_checkpoint_public_status_does_not_expose_checkpoint_payload() {
         failure: None,
         event_cursor: EventCursor(1),
         product_context: None,
-        auth_resume_disposition: None,
+        resume_disposition: None,
     };
     let event = TurnLifecycleEvent {
         cursor: EventCursor(2),
@@ -736,12 +736,13 @@ async fn put_test_state(
 }
 
 #[test]
-fn turn_persistence_snapshot_legacy_run_defaults_auth_resume_disposition_to_none() {
+fn turn_persistence_snapshot_legacy_run_defaults_resume_disposition_to_none() {
     // Simulate a legacy TurnPersistenceSnapshot JSON where TurnRunRecord objects were
-    // persisted before auth_resume_disposition was added. Deserializing such a snapshot
-    // must succeed and the field must default to None (via #[serde(default)]).
+    // persisted before resume_disposition (stored under "auth_resume_disposition") was
+    // added. Deserializing such a snapshot must succeed and the field must default to
+    // None (via #[serde(default)]).
     //
-    // Because auth_resume_disposition uses skip_serializing_if = "Option::is_none",
+    // Because resume_disposition uses skip_serializing_if = "Option::is_none",
     // serializing a record with None naturally produces JSON without the key —
     // which is exactly what a legacy snapshot looks like.
     let run_id = TurnRunId::new();
@@ -841,10 +842,11 @@ fn turn_persistence_snapshot_legacy_run_defaults_auth_resume_disposition_to_none
         subagent_depth: 0,
         spawn_tree_root_run_id: None,
         product_context: None,
-        auth_resume_disposition: None,
+        resume_disposition: None,
     };
 
-    // Serialize the snapshot — auth_resume_disposition must be absent in the output.
+    // Serialize the snapshot — auth_resume_disposition (the wire key) must be absent
+    // in the output when resume_disposition is None.
     let snapshot = TurnPersistenceSnapshot {
         runs: vec![record],
         ..TurnPersistenceSnapshot::default()
@@ -872,8 +874,8 @@ fn turn_persistence_snapshot_legacy_run_defaults_auth_resume_disposition_to_none
         "snapshot must contain exactly one run"
     );
     assert_eq!(
-        deserialized.runs[0].auth_resume_disposition, None,
-        "auth_resume_disposition must default to None when absent in legacy snapshot"
+        deserialized.runs[0].resume_disposition, None,
+        "resume_disposition must default to None when absent in legacy snapshot"
     );
 }
 

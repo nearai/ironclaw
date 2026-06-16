@@ -3320,11 +3320,9 @@ impl RebornServices {
             .await
             .map_err(|error| map_adapter_error(error.into()))?;
         match response {
-            ResolveApprovalInteractionResponse::Approved(response) => {
+            ResolveApprovalInteractionResponse::Approved(response)
+            | ResolveApprovalInteractionResponse::Resumed(response) => {
                 Ok(RebornResolveGateResponse::Resumed(response.into()))
-            }
-            ResolveApprovalInteractionResponse::Denied(response) => {
-                Ok(RebornResolveGateResponse::Cancelled(response.into()))
             }
         }
     }
@@ -3447,7 +3445,7 @@ impl RebornServices {
                             &binding_id,
                         )?,
                         idempotency_key: client_action_id,
-                        auth_resume_disposition: None,
+                        resume_disposition: None,
                     })
                     .await
                     .map_err(map_turn_error)?;

@@ -2299,7 +2299,7 @@ async fn turn_runner_blocks_on_approval_then_coordinator_resume_completes_same_r
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("resume-approval-once").unwrap(),
-            auth_resume_disposition: None,
+            resume_disposition: None,
         })
         .await
         .unwrap();
@@ -7748,7 +7748,7 @@ impl HostFixture {
             failure: None,
             event_cursor: EventCursor(1),
             product_context: None,
-            auth_resume_disposition: None,
+            resume_disposition: None,
         };
         let claimed = ClaimedTurnRun {
             state,

@@ -18,8 +18,8 @@ use ironclaw_turns::{
 
 use crate::state::{
     CapabilityCallSignature, CheckpointKind, DeferredCompactionWatermark, IndexedMessageKind,
-    LoopExecutionState, MessageIndexEntry, PendingAuthResume, RepeatedCallWarningPhase,
-    RepeatedCallWarningState,
+    LoopExecutionState, MessageIndexEntry, PendingApprovalResume, PendingAuthResume,
+    RepeatedCallWarningPhase, RepeatedCallWarningState,
 };
 use crate::strategies::{
     CapabilityBatchTurnSummary, CapabilityFilter, DefaultCompactionStrategy, GateKind, GateOutcome,
@@ -5578,7 +5578,7 @@ async fn capability_stage_denied_auth_resume_surfaces_authorization_failure_and_
         resume_token: None,
         prior_approval: None,
         replay: None,
-        disposition: Some(ironclaw_turns::AuthResumeDisposition::Denied),
+        disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
     });
 
     // Use provider_calls_response so provider_replay is set, enabling the
@@ -5713,7 +5713,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
         resume_token: None,
         prior_approval: None,
         replay: None,
-        disposition: Some(ironclaw_turns::AuthResumeDisposition::Denied),
+        disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
     });
 
     // Build a batch with two calls:
@@ -5948,7 +5948,7 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
         resume_token: None,
         prior_approval: None,
         replay: None,
-        disposition: Some(ironclaw_turns::AuthResumeDisposition::Denied),
+        disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
     });
 
     // Three calls: X (denied), Y (unrelated), Z (unrelated).
@@ -6119,5 +6119,329 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
     assert!(
         final_state.result_refs.contains(&z_result_ref),
         "final_state.result_refs must contain Z's completed result ref"
+    );
+}
+
+// ── Approval-gate denial tests ────────────────────────────────────────────────
+//
+// These mirror the auth-gate denial tests above for the approval path.
+// The shared `short_circuit_denied_resume` helper must behave identically
+// regardless of which gate kind triggered the denial.
+
+/// Caller-level regression test for the approval-deny short-circuit in
+/// `CapabilityStage::process`.
+///
+/// When a run resumes from a user-DENIED approval gate (i.e.
+/// `pending_approval_resume` is set and `disposition = Some(Denied)`), the
+/// executor must NOT re-dispatch the parked capability (re-dispatch → re-block
+/// → infinite loop). It must:
+///
+/// 1. Return `TurnCompletedStep::Continue` (loop proceeds, not Blocked/Exit).
+/// 2. Clear `pending_approval_resume` so the next iteration prompts the model
+///    normally.
+/// 3. Append a model-visible Authorization failure observation with
+///    `status = Error` and `same_call_retry = Forbidden`.
+/// 4. Issue zero batch-invoke calls to the capability host.
+#[tokio::test]
+async fn capability_stage_denied_approval_resume_surfaces_authorization_failure_and_continues() {
+    let host = MockHost::new(Vec::new());
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.pending_approval_resume = Some(PendingApprovalResume {
+        gate_ref: LoopGateRef::new("gate:approval-deny-test").expect("valid"),
+        capability_id: capability_id(),
+        approval_request_id: ApprovalRequestId::new(),
+        resume_token: CapabilityResumeToken::new("00000000-0000-0000-0000-000000000042")
+            .expect("valid"),
+        correlation_id: ironclaw_host_api::CorrelationId::new(),
+        surface_version: surface_version(),
+        input_ref: CapabilityInputRef::new("input:approval-deny-test").expect("valid"),
+        effective_capability_ids: vec![capability_id()],
+        provider_replay: None,
+        input: serde_json::json!({"extension_id": "slack"}),
+        estimate: ironclaw_host_api::ResourceEstimate::default(),
+        disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
+    });
+
+    // Use provider_calls_response so provider_replay is set, which enables the
+    // model-visible observation to be written to appended_result_refs.
+    let calls = match provider_calls_response().output {
+        ParentLoopOutput::CapabilityCalls(calls) => calls,
+        ParentLoopOutput::AssistantReply(_) => panic!("expected provider calls fixture"),
+    };
+
+    let step = CapabilityStage
+        .process(
+            ctx,
+            CapabilityInput {
+                state,
+                surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+                    &host,
+                    VisibleCapabilityRequest,
+                )
+                .await
+                .expect("visible surface"),
+                calls,
+            },
+        )
+        .await
+        .expect("capability stage");
+
+    // 1. Must return Continue — loop proceeds, not Blocked/Exit.
+    let final_state = match step {
+        TurnCompletedStep::Continue { state, .. } => state,
+        TurnCompletedStep::Exit(exit) => {
+            panic!("expected Continue after denied approval resume, got Exit: {exit:?}")
+        }
+    };
+
+    // 2. pending_approval_resume must be cleared after the denied-resume path.
+    assert!(
+        final_state.pending_approval_resume.is_none(),
+        "pending_approval_resume must be cleared after surfacing the deny failure"
+    );
+
+    // 3. Zero batch invocations: the short-circuit fired before invoke_capability_batch.
+    assert!(
+        host.batch_invocations().is_empty(),
+        "denied approval resume must not dispatch any capability batch invocations"
+    );
+
+    // 4. One model-visible observation appended with Authorization error + Forbidden retry.
+    let appended = host.appended_result_refs();
+    assert_eq!(
+        appended.len(),
+        1,
+        "exactly one model-visible result ref must be appended for the deny failure"
+    );
+    let observation = appended[0]
+        .model_observation
+        .as_ref()
+        .expect("model_observation must be Some for an Authorization failure");
+    assert_eq!(
+        observation.status,
+        ToolObservationStatus::Error,
+        "observation status must be Error"
+    );
+    assert_eq!(
+        observation.summary, "Capability failed with authorization.",
+        "observation summary must describe the authorization failure"
+    );
+    let recovery = observation
+        .recovery
+        .as_ref()
+        .expect("recovery must be present");
+    assert_eq!(
+        recovery.same_call_retry,
+        SameCallRetryConstraint::Forbidden,
+        "Authorization failure must map to Forbidden retry constraint (model must not retry)"
+    );
+}
+
+/// When a resumed run carries `pending_approval_resume` with
+/// `disposition = Some(Denied)` and the parallel batch contains BOTH the
+/// denied capability (X = `capability_id()`) AND an unrelated capability
+/// (Y = `other_capability_id()`), only X must receive an Authorization
+/// failure. Y must be dispatched normally and its outcome must appear in
+/// the result refs. The loop must continue, and `pending_approval_resume`
+/// must be cleared.
+#[tokio::test]
+async fn capability_stage_denied_approval_resume_only_fails_matching_call_remaining_dispatched() {
+    let y_result_ref = LoopResultRef::new("result:approval-y-outcome").expect("valid");
+
+    let host = MockHost::new(Vec::new())
+        .with_extra_capability_descriptors(vec![
+            ironclaw_turns::run_profile::CapabilityDescriptorView {
+                capability_id: other_capability_id(),
+                provider: None,
+                runtime: ironclaw_host_api::RuntimeKind::FirstParty,
+                safe_name: "demo_list".to_string(),
+                safe_description: "demo list capability".to_string(),
+                concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::SafeForParallel,
+                parameters_schema: serde_json::json!({"type":"object","properties":{}}),
+            },
+        ])
+        .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+                result_ref: y_result_ref.clone(),
+                safe_summary: "list done".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                terminate_hint: false,
+                byte_len: 0,
+            })],
+            stopped_on_suspension: false,
+        }]);
+
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+
+    // Seed pending_approval_resume for capability X = capability_id(), Denied.
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.pending_approval_resume = Some(PendingApprovalResume {
+        gate_ref: LoopGateRef::new("gate:approval-deny-multi").expect("valid"),
+        capability_id: capability_id(),
+        approval_request_id: ApprovalRequestId::new(),
+        resume_token: CapabilityResumeToken::new("00000000-0000-0000-0000-000000000043")
+            .expect("valid"),
+        correlation_id: ironclaw_host_api::CorrelationId::new(),
+        surface_version: surface_version(),
+        input_ref: CapabilityInputRef::new("input:approval-deny-x").expect("valid"),
+        effective_capability_ids: vec![capability_id()],
+        provider_replay: None,
+        input: serde_json::json!({"extension_id": "slack"}),
+        estimate: ironclaw_host_api::ResourceEstimate::default(),
+        disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
+    });
+
+    // Build a batch with two calls:
+    //   call X: capability_id() ("demo.echo")  — matches denied pending_approval_resume
+    //   call Y: other_capability_id() ("demo.list") — unrelated, must proceed normally
+    let calls = vec![
+        // call X — denied
+        ironclaw_turns::run_profile::CapabilityCallCandidate {
+            surface_version: surface_version(),
+            capability_id: capability_id(),
+            input_ref: CapabilityInputRef::new("input:x-approval-denied").expect("valid"),
+            effective_capability_ids: vec![capability_id()],
+            provider_replay: Some(ironclaw_turns::run_profile::ProviderToolCallReplay {
+                provider_id: "test-provider".to_string(),
+                provider_model_id: "test-model".to_string(),
+                provider_turn_id: "turn_1".to_string(),
+                provider_call_id: "call_x".to_string(),
+                provider_tool_name: "demo__echo".to_string(),
+                arguments: serde_json::json!({"message": "x"}),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            }),
+        },
+        // call Y — unrelated, must dispatch normally
+        ironclaw_turns::run_profile::CapabilityCallCandidate {
+            surface_version: surface_version(),
+            capability_id: other_capability_id(),
+            input_ref: CapabilityInputRef::new("input:y-approval-unrelated").expect("valid"),
+            effective_capability_ids: vec![other_capability_id()],
+            provider_replay: None,
+        },
+    ];
+
+    let step = CapabilityStage
+        .process(
+            ctx,
+            CapabilityInput {
+                state,
+                surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+                    &host,
+                    VisibleCapabilityRequest,
+                )
+                .await
+                .expect("visible surface"),
+                calls,
+            },
+        )
+        .await
+        .expect("capability stage");
+
+    // 1. Must return Continue — the loop must proceed, not exit.
+    let final_state = match step {
+        TurnCompletedStep::Continue { state, .. } => state,
+        TurnCompletedStep::Exit(exit) => {
+            panic!("expected Continue after partial approval-deny, got Exit: {exit:?}")
+        }
+    };
+
+    // 2. pending_approval_resume must be cleared — the denial was consumed.
+    assert!(
+        final_state.pending_approval_resume.is_none(),
+        "pending_approval_resume must be cleared after the denied call was surfaced"
+    );
+
+    // 3. Exactly one batch invocation containing only call Y (not X).
+    let batches = host.batch_invocations();
+    assert_eq!(
+        batches.len(),
+        1,
+        "exactly one batch invocation must occur for the remaining (non-denied) call Y"
+    );
+    let batch_ids: Vec<_> = batches[0]
+        .invocations
+        .iter()
+        .map(|inv| &inv.capability_id)
+        .collect();
+    assert!(
+        batch_ids.iter().all(|id| **id == other_capability_id()),
+        "the batch must contain only call Y (other_capability_id), not call X"
+    );
+    assert_eq!(
+        batch_ids.len(),
+        1,
+        "batch must contain exactly one invocation (call Y)"
+    );
+
+    // 4. Two result refs appended total:
+    //    - one Authorization failure observation for X
+    //    - one Completed result for Y
+    let appended = host.appended_result_refs();
+    assert_eq!(
+        appended.len(),
+        2,
+        "expected two appended result refs: one Authorization failure for X, one Completed for Y"
+    );
+
+    // The Authorization failure for X must carry a model-visible observation.
+    let failure_entry = appended
+        .iter()
+        .find(|r| r.model_observation.is_some())
+        .expect("one appended result ref must be the Authorization failure for X");
+    let obs = failure_entry.model_observation.as_ref().unwrap();
+    assert_eq!(
+        obs.status,
+        ToolObservationStatus::Error,
+        "X failure observation status must be Error"
+    );
+    assert_eq!(
+        obs.summary, "Capability failed with authorization.",
+        "X failure observation summary must describe the authorization failure"
+    );
+    let recovery = obs
+        .recovery
+        .as_ref()
+        .expect("recovery must be present for X");
+    assert_eq!(
+        recovery.same_call_retry,
+        SameCallRetryConstraint::Forbidden,
+        "X failure must map to Forbidden retry"
+    );
+
+    // The Completed result for Y must be present.
+    let y_completed = appended
+        .iter()
+        .find(|r| r.result_ref == y_result_ref)
+        .expect("Y's completed result ref must be appended");
+    assert!(
+        y_completed.model_observation.is_none()
+            || y_completed
+                .model_observation
+                .as_ref()
+                .is_some_and(|o| o.status != ToolObservationStatus::Error),
+        "Y's result must not be an Authorization failure"
+    );
+
+    // 5. final_state.result_refs must carry BOTH refs.
+    assert!(
+        final_state.result_refs.contains(&failure_entry.result_ref),
+        "final_state.result_refs must contain the Authorization failure ref for X"
+    );
+    assert!(
+        final_state.result_refs.contains(&y_result_ref),
+        "final_state.result_refs must contain Y's completed result ref"
     );
 }

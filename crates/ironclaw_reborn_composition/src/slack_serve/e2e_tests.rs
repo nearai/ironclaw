@@ -1862,7 +1862,7 @@ fn turn_state(
         failure: None,
         event_cursor: EventCursor::default(),
         product_context: None,
-        auth_resume_disposition: None,
+        resume_disposition: None,
     }
 }
 

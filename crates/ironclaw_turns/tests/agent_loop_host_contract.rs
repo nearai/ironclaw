@@ -2150,7 +2150,7 @@ async fn loop_prompt_bundle_public_serialization_hides_raw_content() {
         failure: None,
         event_cursor: EventCursor(0),
         product_context: None,
-        auth_resume_disposition: None,
+        resume_disposition: None,
     };
     let public_json = serde_json::to_string(&(bundle, host.milestones(), status)).unwrap();
     assert!(public_json.contains("prompt_bundle_built"));
@@ -3811,7 +3811,7 @@ async fn turn_run_state_product_context_defaults_to_none_when_missing_from_json(
         failure: None,
         event_cursor: EventCursor(0),
         product_context: None,
-        auth_resume_disposition: None,
+        resume_disposition: None,
     };
 
     // Serialize without the product_context field (simulate old wire).
@@ -3846,10 +3846,11 @@ async fn turn_run_state_product_context_defaults_to_none_when_missing_from_json(
 }
 
 #[tokio::test]
-async fn turn_run_state_auth_resume_disposition_defaults_to_none_when_missing_from_json() {
-    // Guard the #[serde(default)] backward-compat contract for auth_resume_disposition:
+async fn turn_run_state_resume_disposition_defaults_to_none_when_missing_from_json() {
+    // Guard the #[serde(default)] backward-compat contract for resume_disposition
+    // (serialized under the legacy key "auth_resume_disposition"):
     // old persisted TurnRunState payloads that pre-date the field must deserialize
-    // cleanly with auth_resume_disposition == None.
+    // cleanly with resume_disposition == None.
     let context = claimed_run_context().await;
     let state = TurnRunState {
         scope: context.scope.clone(),
@@ -3870,7 +3871,7 @@ async fn turn_run_state_auth_resume_disposition_defaults_to_none_when_missing_fr
         failure: None,
         event_cursor: EventCursor(0),
         product_context: None,
-        auth_resume_disposition: None,
+        resume_disposition: None,
     };
 
     // Serialize, remove the auth_resume_disposition key (simulates a legacy checkpoint
@@ -3883,8 +3884,8 @@ async fn turn_run_state_auth_resume_disposition_defaults_to_none_when_missing_fr
         .remove("auth_resume_disposition");
     let decoded: TurnRunState = serde_json::from_value(json).unwrap();
     assert!(
-        decoded.auth_resume_disposition.is_none(),
-        "auth_resume_disposition must default to None when absent from legacy JSON"
+        decoded.resume_disposition.is_none(),
+        "resume_disposition must default to None when absent from legacy JSON"
     );
 }
 
