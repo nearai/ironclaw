@@ -178,6 +178,19 @@ export function useProviderLogin({ onSuccess } = {}) {
   const [codexError, setCodexError] = React.useState("");
   const [codexCode, setCodexCode] = React.useState(null);
 
+  // Monotonic id for the in-flight NEAR AI sign-in attempt. A system-browser /
+  // loopback OAuth can't tell us the user closed the window, so the backend only
+  // gives up on its own timeout (minutes). Bumping this id lets the user cancel:
+  // the late resolve of an abandoned attempt sees a stale id and becomes a no-op,
+  // so it can't flip busy/error/active out from under a fresh attempt.
+  const nearaiAttemptRef = React.useRef(0);
+
+  const cancelNearai = React.useCallback(() => {
+    nearaiAttemptRef.current += 1;
+    setNearaiBusy(false);
+    setNearaiError("");
+  }, []);
+
   // Clear every login flow's feedback before starting a new attempt. The
   // status surface renders the NEAR AI and Codex errors (plus the Codex device
   // code) together, and the three NEAR AI methods share one error slot, so a
@@ -210,21 +223,30 @@ export function useProviderLogin({ onSuccess } = {}) {
       // probe. Gated behind `isDesktopRuntime()`, so web takes the popup +
       // local-dev-guard + hosted-SSO path below.
       if (isDesktopRuntime()) {
+        const attemptId = (nearaiAttemptRef.current += 1);
+        const isCurrent = () => nearaiAttemptRef.current === attemptId;
         setNearaiBusy(true);
         try {
           await tauriInvoke("nearai_connect_loopback", { provider });
+          if (!isCurrent()) return;
           await restartDesktopSidecar();
+          if (!isCurrent()) return;
           const outcome = await pollUntilActive("nearai", NEARAI_POLL_DEADLINE_MS, null);
+          if (!isCurrent()) return;
           if (outcome === "active") {
             await finishActive();
             return;
           }
           setNearaiError(t("onboarding.nearaiTimeout"));
         } catch (err) {
+          if (!isCurrent()) return;
           const message = String(err?.message || err || "");
           setNearaiError(message || t("onboarding.nearaiFailed"));
         } finally {
-          setNearaiBusy(false);
+          // Only the still-current attempt owns the busy flag; a cancelled
+          // attempt's late resolve must not re-clear (or it could clobber a
+          // fresh attempt's spinner).
+          if (isCurrent()) setNearaiBusy(false);
         }
         return;
       }
@@ -248,14 +270,21 @@ export function useProviderLogin({ onSuccess } = {}) {
       } catch (_e) {
         // Ignore: some engines disallow setting opener; navigation still works.
       }
+      const attemptId = (nearaiAttemptRef.current += 1);
+      const isCurrent = () => nearaiAttemptRef.current === attemptId;
       setNearaiBusy(true);
       try {
         const { auth_url: authUrl } = await startNearaiLogin({
           provider,
           origin: providerLoginOrigin(),
         });
+        if (!isCurrent()) {
+          popup.close();
+          return;
+        }
         popup.location.href = authUrl;
         const outcome = await pollUntilActive("nearai", NEARAI_POLL_DEADLINE_MS, popup);
+        if (!isCurrent()) return;
         if (outcome === "active") {
           await finishActive();
           return;
@@ -270,9 +299,10 @@ export function useProviderLogin({ onSuccess } = {}) {
         );
       } catch (_err) {
         popup.close();
+        if (!isCurrent()) return;
         setNearaiError(t("onboarding.nearaiFailed"));
       } finally {
-        setNearaiBusy(false);
+        if (isCurrent()) setNearaiBusy(false);
       }
     },
     [finishActive, resetLoginFeedback, t]
@@ -387,5 +417,6 @@ export function useProviderLogin({ onSuccess } = {}) {
     startNearai,
     startNearaiWallet,
     startCodex,
+    cancelNearai,
   };
 }

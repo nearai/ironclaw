@@ -266,6 +266,12 @@ export function useChat(threadId) {
     onRunSettled: (_runId, { success }) => {
       if (success) setPendingMessages([]);
       loadHistory(undefined, { preserveClientOnly: true });
+      // Refresh the sidebar thread list once the run has settled. A brand-new
+      // chat's thread is only listed by GET /threads after its first message
+      // projects + a title is derived, which happens after the run completes —
+      // the post-send invalidation fires too early and misses it, so without
+      // this the new chat never appears in Recent until a manual reload.
+      queryClient.invalidateQueries({ queryKey: ["threads"] });
     },
   });
 

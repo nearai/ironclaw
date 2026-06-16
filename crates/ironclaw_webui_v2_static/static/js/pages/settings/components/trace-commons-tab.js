@@ -37,7 +37,7 @@ function StatRow({ label, value, description }) {
 
 export function TraceCommonsTab({ searchQuery = "" }) {
   const t = useT();
-  const { credits, query, authorize } = useTraceCredits();
+  const { credits, query, authorize, unsupported } = useTraceCredits();
 
   if (
     !matchesSearch(searchQuery, [
@@ -67,7 +67,7 @@ export function TraceCommonsTab({ searchQuery = "" }) {
         )}
       </div>
     `;
-  } else if (query.isError) {
+  } else if (query.isError && !unsupported) {
     body = html`
       <div
         className="mt-4 rounded-xl border border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-4 py-3 text-sm text-[var(--v2-danger-text)]"
@@ -75,7 +75,7 @@ export function TraceCommonsTab({ searchQuery = "" }) {
         ${t("traceCommons.loadFailed")}
       </div>
     `;
-  } else if (!credits || (!credits.enrolled && !(credits.submissions_total > 0))) {
+  } else if (unsupported || !credits || (!credits.enrolled && !(credits.submissions_total > 0))) {
     body = html`
       <div
         className="mt-4 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-6 text-center text-sm text-[var(--v2-text-muted)]"
