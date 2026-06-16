@@ -256,14 +256,18 @@ function renderExtensionCardWithInternals(ext) {
 // ---------------------------------------------------------------------------
 
 test("card class keeps grid siblings at natural height", () => {
-  const source = readFileSync(new URL("./extension-card.js", import.meta.url), "utf8");
-  const cardDeclaration = source.match(/const CARD =[\s\S]*?;\n/)?.[0] || "";
+  const rendered = renderExtensionCard({
+    package_ref: { id: "telegram" },
+    kind: "channel",
+    display_name: "Telegram",
+  });
+  const cardClass = rendered.values[0];
 
   assert.ok(
-    cardDeclaration.includes("self-start"),
+    cardClass.includes("self-start"),
     "CARD should align itself to the top of its grid area",
   );
-  assert.ok(!cardDeclaration.includes("h-full"), "CARD must not stretch to grid row height");
+  assert.ok(!cardClass.includes("h-full"), "CARD must not stretch to grid row height");
 });
 
 test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async (t) => {
@@ -462,15 +466,9 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
       assert.notEqual(setupAction, undefined, "Setup action must exist");
       assert.equal(setupAction.label, "Setup");
       setupAction.run();
-      // Use JSON comparison to avoid cross-realm object identity issues from vm.runInNewContext.
-      assert.equal(
-        JSON.stringify(configurePayload),
-        JSON.stringify({
-          packageRef: { id: "telegram" },
-          displayName: "Telegram",
-          onboardingState: "setup_required",
-        }),
-      );
+      assert.deepEqual(configurePayload.packageRef, { id: "telegram" });
+      assert.equal(configurePayload.displayName, "Telegram");
+      assert.equal(configurePayload.onboardingState, "setup_required");
     },
   );
 
@@ -503,15 +501,9 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
       assert.notEqual(reconfigureAction, undefined, "Reconfigure action must exist");
       assert.equal(reconfigureAction.label, "Reconfigure");
       reconfigureAction.run();
-      // Use JSON comparison to avoid cross-realm object identity issues from vm.runInNewContext.
-      assert.equal(
-        JSON.stringify(configurePayload),
-        JSON.stringify({
-          packageRef: { id: "telegram" },
-          displayName: "Telegram",
-          activationStatus: "active",
-        }),
-      );
+      assert.deepEqual(configurePayload.packageRef, { id: "telegram" });
+      assert.equal(configurePayload.displayName, "Telegram");
+      assert.equal(configurePayload.activationStatus, "active");
     },
   );
 });
