@@ -247,7 +247,17 @@ impl SlackFinalReplyDeliveryObserver {
         // scope — the run isn't found there, which would otherwise surface as a
         // spurious "something went wrong" delivery error. Skip cleanly and let
         // the triggered loop own continuation, matching the regular inbound flow.
-        if let Err(error) = self
+        //
+        // The skip only applies to bridged gate/auth resolution payloads. A
+        // normal UserMessage (or other non-resolution payload) must never be
+        // silently dropped here — surface the error instead.
+        let payload_can_bridge_to_foreign_run = matches!(
+            envelope.payload(),
+            ProductInboundPayload::ApprovalResolution(_)
+                | ProductInboundPayload::ScopedApprovalResolution(_)
+                | ProductInboundPayload::AuthResolution(_)
+        );
+        match self
             .services
             .turn_coordinator
             .get_run_state(GetRunStateRequest {
@@ -255,14 +265,20 @@ impl SlackFinalReplyDeliveryObserver {
                 run_id,
             })
             .await
-            && matches!(error.category(), TurnErrorCategory::ScopeNotFound)
         {
-            tracing::debug!(
-                target = "ironclaw::reborn::slack_delivery",
-                %run_id,
-                "skipping live Slack delivery: run is not in this conversation scope (triggered/foreign run); its own delivery loop owns continuation"
-            );
-            return Ok(());
+            Ok(_) => {}
+            Err(error)
+                if payload_can_bridge_to_foreign_run
+                    && matches!(error.category(), TurnErrorCategory::ScopeNotFound) =>
+            {
+                tracing::debug!(
+                    target = "ironclaw::reborn::slack_delivery",
+                    %run_id,
+                    "skipping live Slack delivery: run is not in this conversation scope (triggered/foreign run); its own delivery loop owns continuation"
+                );
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
         }
         let mut delivered_blocked_marker = None;
         let mut working_message = None;
@@ -500,7 +516,13 @@ impl SlackFinalReplyDeliveryObserver {
         actor: TurnActor,
         run_id: TurnRunId,
     ) -> Result<(), SlackFinalReplyDeliveryError> {
-        cancel_auth_blocked_run(self.services.turn_coordinator.as_ref(), scope, actor, run_id).await
+        cancel_auth_blocked_run(
+            self.services.turn_coordinator.as_ref(),
+            scope,
+            actor,
+            run_id,
+        )
+        .await
     }
 
     async fn deliver_run_notification(
@@ -1234,7 +1256,7 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
                         error = %error,
                         "busy-thread hint falling back to generic copy because the conversation binding was not resolved"
                     );
-                    SLACK_BUSY_APPROVAL_MESSAGE.to_string()
+                    SLACK_BUSY_GENERIC_MESSAGE.to_string()
                 }
             };
             if let Err(post_err) = post_slack_message(
@@ -1503,15 +1525,6 @@ fn rejection_hint_for_resolution(
     if !is_resolution {
         return None;
     }
-    // BUG-3 fix: StaleGate must produce a distinct message on the Slack side so it
-    // never falls through to the generic "declined by policy" wording. Match it
-    // before delegating to the shared hint methods.
-    if effective_rejection.kind == ProductRejectionKind::StaleGate {
-        return Some(
-            "This approval request is no longer pending \u{2014} it was already approved or denied.",
-        );
-    }
-
     let hint = match envelope.payload() {
         ProductInboundPayload::AuthResolution(_) => {
             effective_rejection.kind.user_facing_auth_hint()
@@ -4323,7 +4336,7 @@ mod tests {
         );
         let body = std::str::from_utf8(&post_calls[0].body).expect("utf8 body");
         assert!(
-            body.contains(SLACK_BUSY_APPROVAL_MESSAGE),
+            body.contains(SLACK_BUSY_GENERIC_MESSAGE),
             "fallback hint must be the generic busy copy, got: {body}"
         );
     }

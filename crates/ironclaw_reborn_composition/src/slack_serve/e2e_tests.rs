@@ -1368,7 +1368,9 @@ async fn slack_dm_delivers_final_reply_after_auth_completes_outside_slack() {
 
 #[derive(Debug, Clone)]
 enum TurnMode {
-    Complete { assistant_text: String },
+    Complete {
+        assistant_text: String,
+    },
     Running,
     BlockApproval,
     /// Starts as BlockedApproval; the test manually transitions to BlockedAuth
@@ -1710,13 +1712,21 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let run = state.runs.get_mut(&request.run_id).ok_or_else(|| {
-            TurnError::Unavailable {
+        let run = state
+            .runs
+            .get_mut(&request.run_id)
+            .ok_or_else(|| TurnError::Unavailable {
                 reason: "missing run state for cancel_run".into(),
-            }
-        })?;
-        run.status = TurnStatus::Cancelled;
-        run.gate_ref = None;
+            })?;
+        // Preserve idempotent-cancel contract shape: a second cancel of an
+        // already-Cancelled run reports `already_terminal: true` rather than
+        // first-cancel semantics, so the fake doesn't mask caller differences
+        // on the retry path.
+        let already_terminal = matches!(run.status, TurnStatus::Cancelled);
+        if !already_terminal {
+            run.status = TurnStatus::Cancelled;
+            run.gate_ref = None;
+        }
         // Intentionally do NOT clear `blocked_run_id` here.
         // The delivery loop uses `cancel_run` for idempotent teardown (e.g.
         // auth-unavailable auto-deny). The `blocked_run_id` pointer must remain
@@ -1729,7 +1739,7 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             run_id: request.run_id,
             status: TurnStatus::Cancelled,
             event_cursor: EventCursor::default(),
-            already_terminal: false,
+            already_terminal,
             actor: None,
         })
     }

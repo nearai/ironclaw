@@ -483,6 +483,19 @@ fn order_delivered_routes(
     }
     // Bare lookup: most-recently-delivered first.
     live.sort_by_key(|route| std::cmp::Reverse(route.recorded_at));
+    // Fail closed on a recency tie: if the two most-recent routes share an
+    // identical delivery timestamp we cannot pick a winner deterministically,
+    // so treat the bare resolution as ambiguous rather than resolving an
+    // arbitrary gate (approval paths must fail closed).
+    if live
+        .windows(2)
+        .any(|pair| pair[0].recorded_at == pair[1].recorded_at)
+    {
+        debug!(
+            "delivered gate route bare lookup matched routes with identical delivery timestamps — ambiguous"
+        );
+        return Err(());
+    }
     Ok(live)
 }
 
@@ -501,7 +514,7 @@ async fn prune_delivered_route(
         debug!(
             error = %error,
             gate_ref = %route.gate_ref,
-            "best-effort prune of resolved delivered gate route failed"
+            "best-effort prune of resolved delivered gate route failed" // silent-ok: best-effort delivered-route pruning; resolve() remains authoritative
         );
     }
 }
@@ -523,7 +536,7 @@ async fn load_delivered_routes_for_envelope(
     // — no `GateRef::new` wrap — so routes whose stored string fails validation
     // are not silently dropped before the predicate runs.
     gate_kind_filter: fn(&str) -> bool,
-) -> Vec<ironclaw_outbound::DeliveredGateRouteRecord> {
+) -> Result<Vec<ironclaw_outbound::DeliveredGateRouteRecord>, ProductWorkflowError> {
     let conversation_ref = match delivered_route_conversation_ref(envelope) {
         Ok(conversation_ref) => conversation_ref,
         Err(error) => {
@@ -531,7 +544,7 @@ async fn load_delivered_routes_for_envelope(
                 error = %error,
                 "delivered gate route fallback skipped because conversation reference was invalid"
             );
-            return Vec::new();
+            return Ok(Vec::new());
         }
     };
     let conversation_fingerprint = conversation_ref.conversation_fingerprint();
@@ -546,11 +559,9 @@ async fn load_delivered_routes_for_envelope(
     {
         Ok(routes) => routes,
         Err(error) => {
-            debug!(
-                error = %error,
-                "delivered gate route fallback lookup failed"
-            );
-            return Vec::new();
+            return Err(ProductWorkflowError::Transient {
+                reason: format!("failed to load delivered gate routes: {error}"),
+            });
         }
     };
     // Filter: non-expired, tenant+actor match, then either exact-ref match
@@ -599,7 +610,7 @@ async fn load_delivered_routes_for_envelope(
     if live.is_empty() {
         debug!("delivered gate route fallback found no live route for conversation");
     }
-    live
+    Ok(live)
 }
 
 /// Outcome of the shared delivered-route selection step used by both the
@@ -619,6 +630,7 @@ struct SelectedDeliveredRoute {
 /// error, and `Some(Ok(routes))` with the candidates ordered most-recent-first.
 /// The caller walks the candidates, resolving the newest still-live gate and
 /// pruning any already-resolved routes it skips (see [`order_delivered_routes`]).
+// arch-exempt: too_many_args, needs a DeliveredRouteResolutionContext bundle (services + dispatch identity), plan docs/plans/2026-06-10-slack-gate-feedback-and-routing.md Phase C
 #[allow(clippy::too_many_arguments)]
 async fn select_delivered_gate_routes(
     envelope: &ProductInboundEnvelope,
@@ -644,14 +656,18 @@ async fn select_delivered_gate_routes(
             &derived_binding
         }
     };
-    let live = load_delivered_routes_for_envelope(
+    let live = match load_delivered_routes_for_envelope(
         envelope,
         binding,
         delivered_gate_routes,
         expected_gate_ref,
         gate_kind_filter,
     )
-    .await;
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
     let ordered = match order_delivered_routes(live, expected_gate_ref) {
         Ok(ordered) => ordered,
         Err(()) => return Some(Err(ambiguity_error())),
@@ -739,7 +755,19 @@ async fn resolve_via_delivered_approval_route(
                     "delivered approval route stale — pruning and trying next candidate"
                 );
                 prune_delivered_route(delivered_gate_routes, &selected.route).await;
-                last_stale_error = Some(error);
+                // Normalize a skipped `MissingGate` to `StaleGate`: on bare
+                // exhaustion the surfaced error drives the user-facing hint, and
+                // every skipped candidate here is an already-resolved gate. Left
+                // as `MissingGate` it would map to the generic BindingRequired
+                // wording instead of the "no longer pending" stale-gate UX.
+                last_stale_error = Some(match error {
+                    ProductWorkflowError::ApprovalInteractionRejected {
+                        kind: ApprovalInteractionRejectionKind::MissingGate,
+                    } => ProductWorkflowError::ApprovalInteractionRejected {
+                        kind: ApprovalInteractionRejectionKind::StaleGate,
+                    },
+                    error => error,
+                });
                 continue;
             }
             Err(error) => return Some(Err(error)),
@@ -749,17 +777,15 @@ async fn resolve_via_delivered_approval_route(
             Ok(kind) => kind,
             Err(error) => return Some(Err(error)),
         };
-        return Some(
-            interaction_accepted_message_ref("approval", envelope).map(|accepted_message_ref| {
-                DispatchedAction {
-                    ack: ProductInboundAck::Accepted {
-                        accepted_message_ref,
-                        submitted_run_id,
-                    },
-                    dispatch_kind,
-                }
-            }),
-        );
+        return Some(interaction_accepted_message_ref("approval", envelope).map(
+            |accepted_message_ref| DispatchedAction {
+                ack: ProductInboundAck::Accepted {
+                    accepted_message_ref,
+                    submitted_run_id,
+                },
+                dispatch_kind,
+            },
+        ));
     }
     // Every candidate's gate had already resolved. Surface the stale error so the
     // user sees "no longer pending" rather than a generic binding failure.
@@ -859,17 +885,15 @@ async fn resolve_via_delivered_auth_route(
             Ok(kind) => kind,
             Err(error) => return Some(Err(error)),
         };
-        return Some(
-            interaction_accepted_message_ref("auth", envelope).map(|accepted_message_ref| {
-                DispatchedAction {
-                    ack: ProductInboundAck::Accepted {
-                        accepted_message_ref,
-                        submitted_run_id,
-                    },
-                    dispatch_kind,
-                }
-            }),
-        );
+        return Some(interaction_accepted_message_ref("auth", envelope).map(
+            |accepted_message_ref| DispatchedAction {
+                ack: ProductInboundAck::Accepted {
+                    accepted_message_ref,
+                    submitted_run_id,
+                },
+                dispatch_kind,
+            },
+        ));
     }
     Some(Err(last_stale_error.unwrap_or(
         ProductWorkflowError::AuthInteractionRejected {

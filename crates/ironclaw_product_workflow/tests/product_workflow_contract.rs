@@ -324,20 +324,24 @@ impl ApprovalInteractionService for ScopedPendingApprovalInteractionService {
         &self,
         request: ResolveApprovalInteractionRequest,
     ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
-        let run_id = request.run_id_hint.unwrap_or_default();
         // Model staleness via the authoritative resolve path: a gate that is no
         // longer in the pending set has already resolved, so report StaleGate
         // (mirrors DefaultApprovalInteractionService's `_ => StaleGate` arm).
-        let is_pending = self
-            .pending
-            .iter()
-            .any(|(gate_ref, _)| gate_ref == &request.gate_ref);
+        // Take the run_id from the pending map as source-of-truth so the caller's
+        // run_id_hint is verified rather than blindly trusted.
+        let run_id = self.pending.iter().find_map(|(gate_ref, run_id)| {
+            if gate_ref == &request.gate_ref {
+                Some(*run_id)
+            } else {
+                None
+            }
+        });
         self.resolutions.lock().expect("lock").push(request);
-        if !is_pending {
+        let Some(run_id) = run_id else {
             return Err(ProductWorkflowError::ApprovalInteractionRejected {
                 kind: ironclaw_product_workflow::ApprovalInteractionRejectionKind::StaleGate,
             });
-        }
+        };
         Ok(ResolveApprovalInteractionResponse::Approved(
             ResumeTurnResponse {
                 run_id,
@@ -598,7 +602,10 @@ impl ironclaw_outbound::DeliveredGateRouteStore for TwoRecordDeliveredGateRouteS
         _user_id: &ironclaw_host_api::UserId,
         gate_ref: &str,
     ) -> Result<(), String> {
-        self.removed.lock().expect("lock").push(gate_ref.to_string());
+        self.removed
+            .lock()
+            .expect("lock")
+            .push(gate_ref.to_string());
         Ok(())
     }
 
@@ -1631,7 +1638,10 @@ async fn scoped_approval_misses_if_no_route() {
 }
 
 #[tokio::test]
-async fn scoped_approval_delivered_route_store_error_falls_back_to_missing_gate() {
+async fn scoped_approval_delivered_route_store_error_propagates_as_transient() {
+    // Previously this test asserted that a store read failure was swallowed and
+    // produced a MissingGate rejection.  After Fix M the failure is propagated as
+    // Transient (retryable) so the caller knows it was an outage, not a route miss.
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
         Arc::new(FailingRouteStore);
     let approval_service = Arc::new(RecordingApprovalInteractionService::with_pending(Vec::new()));
@@ -1645,12 +1655,15 @@ async fn scoped_approval_delivered_route_store_error_falls_back_to_missing_gate(
 
     let err = workflow
         .accept_inbound(scoped_approval_thread_reply_envelope(
-            "store-error-fallback",
+            "store-error-transient",
         ))
         .await
-        .expect_err("store errors should fall through to missing gate");
+        .expect_err("store read failure must propagate as retryable transient");
 
-    assert_scoped_approval_missing_gate(err);
+    assert!(
+        err.is_retryable(),
+        "store outage must be retryable (Transient), not terminal: {err:?}"
+    );
     assert!(approval_service.resolutions().is_empty());
 }
 
@@ -1863,8 +1876,8 @@ async fn scoped_approval_two_pending_routes_resolves_most_recent() {
     let newer_gate = approval_gate_ref(ApprovalRequestId::new()).expect("gate");
     let older_run = TurnRunId::new();
     let newer_run = TurnRunId::new();
-    let make_record = |gate_ref: &GateRef, run_id, recorded_at| {
-        ironclaw_outbound::DeliveredGateRouteRecord {
+    let make_record =
+        |gate_ref: &GateRef, run_id, recorded_at| ironclaw_outbound::DeliveredGateRouteRecord {
             tenant_id: tenant_id.clone(),
             user_id: user_id.clone(),
             gate_ref: gate_ref.as_str().to_string(),
@@ -1872,8 +1885,7 @@ async fn scoped_approval_two_pending_routes_resolves_most_recent() {
             scope: scope.clone(),
             recorded_at,
             delivered_conversation_fingerprints: vec![fingerprint.clone()],
-        }
-    };
+        };
     let route_store = Arc::new(TwoRecordDeliveredGateRouteStore::new(vec![
         make_record(&older_gate, older_run, Utc::now() - Duration::seconds(60)),
         make_record(&newer_gate, newer_run, Utc::now()),
@@ -1882,7 +1894,10 @@ async fn scoped_approval_two_pending_routes_resolves_most_recent() {
     // the reply lands) reports nothing, forcing the delivered-route fallback.
     let approval_service = Arc::new(ScopedPendingApprovalInteractionService::new(
         route_thread,
-        vec![(older_gate.clone(), older_run), (newer_gate.clone(), newer_run)],
+        vec![
+            (older_gate.clone(), older_run),
+            (newer_gate.clone(), newer_run),
+        ],
     ));
     let workflow = DefaultProductWorkflow::new(
         Arc::new(FakeInboundTurnService::new()),
@@ -1906,6 +1921,11 @@ async fn scoped_approval_two_pending_routes_resolves_most_recent() {
     assert_eq!(
         resolutions[0].gate_ref, newer_gate,
         "recency must pick the most-recently-delivered gate"
+    );
+    assert_eq!(
+        resolutions[0].run_id_hint,
+        Some(newer_run),
+        "run_id_hint must be populated from the delivered route (not unwrap_or_default)"
     );
     assert!(
         route_store.removed().is_empty(),
@@ -1933,8 +1953,8 @@ async fn scoped_approval_one_stale_one_pending_resolves_and_prunes() {
     let pending_gate = approval_gate_ref(ApprovalRequestId::new()).expect("gate");
     let stale_gate = approval_gate_ref(ApprovalRequestId::new()).expect("gate");
     let pending_run = TurnRunId::new();
-    let make_record = |gate_ref: &GateRef, run_id, recorded_at| {
-        ironclaw_outbound::DeliveredGateRouteRecord {
+    let make_record =
+        |gate_ref: &GateRef, run_id, recorded_at| ironclaw_outbound::DeliveredGateRouteRecord {
             tenant_id: tenant_id.clone(),
             user_id: user_id.clone(),
             gate_ref: gate_ref.as_str().to_string(),
@@ -1942,13 +1962,16 @@ async fn scoped_approval_one_stale_one_pending_resolves_and_prunes() {
             scope: scope.clone(),
             recorded_at,
             delivered_conversation_fingerprints: vec![fingerprint.clone()],
-        }
-    };
+        };
     // The stale route is the most recent, so recency tries it first: resolve
     // returns StaleGate → it is pruned → the older still-pending route resolves.
     let route_store = Arc::new(TwoRecordDeliveredGateRouteStore::new(vec![
         make_record(&stale_gate, TurnRunId::new(), Utc::now()),
-        make_record(&pending_gate, pending_run, Utc::now() - Duration::seconds(60)),
+        make_record(
+            &pending_gate,
+            pending_run,
+            Utc::now() - Duration::seconds(60),
+        ),
     ]));
     // Only the pending gate is reported in the triggered run's scope; the stale
     // gate is absent (already resolved). The DM scope reports nothing, forcing
@@ -1989,6 +2012,11 @@ async fn scoped_approval_one_stale_one_pending_resolves_and_prunes() {
     assert_eq!(
         resolutions[1].gate_ref, pending_gate,
         "must end on the still-pending gate"
+    );
+    assert_eq!(
+        resolutions[1].run_id_hint,
+        Some(pending_run),
+        "run_id_hint must be populated from the delivered route (not unwrap_or_default)"
     );
     assert_eq!(
         route_store.removed(),
@@ -2348,6 +2376,194 @@ async fn bare_auth_deny_with_stale_approval_route_selects_auth_route_not_approva
     assert_eq!(
         resolutions[0].gate_ref, auth_gate_ref,
         "auth service must receive the auth gate_ref, not the stale approval gate_ref"
+    );
+}
+
+/// Auth interaction service double that always returns `StaleAuth` on resolve,
+/// regardless of the gate_ref. Used to verify that a `StaleAuth` on the exact-ref
+/// path surfaces directly without triggering a delivered-route fallback.
+#[derive(Default)]
+struct StaleAuthReturningAuthService {
+    resolutions: Mutex<Vec<ResolveAuthInteractionRequest>>,
+}
+
+impl StaleAuthReturningAuthService {
+    fn resolutions(&self) -> Vec<ResolveAuthInteractionRequest> {
+        self.resolutions.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl AuthInteractionService for StaleAuthReturningAuthService {
+    async fn list_pending(
+        &self,
+        _request: ListPendingAuthInteractionsRequest,
+    ) -> Result<ListPendingAuthInteractionsResponse, ProductWorkflowError> {
+        Ok(ListPendingAuthInteractionsResponse {
+            auth_interactions: Vec::new(),
+        })
+    }
+
+    async fn resolve(
+        &self,
+        request: ResolveAuthInteractionRequest,
+    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
+        self.resolutions.lock().expect("lock").push(request);
+        Err(ProductWorkflowError::AuthInteractionRejected {
+            kind: ironclaw_product_workflow::AuthInteractionRejectionKind::StaleAuth,
+        })
+    }
+}
+
+/// Approval interaction service double that always returns `StaleGate` on resolve.
+/// Used to verify that an explicit `approve gate:<ref>` whose gate is stale
+/// returns StaleGate directly, without skipping or falling through to delivered-route
+/// fallback.
+#[derive(Default)]
+struct StaleGateReturningApprovalService {
+    resolutions: Mutex<Vec<ResolveApprovalInteractionRequest>>,
+}
+
+impl StaleGateReturningApprovalService {
+    fn resolutions(&self) -> Vec<ResolveApprovalInteractionRequest> {
+        self.resolutions.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl ApprovalInteractionService for StaleGateReturningApprovalService {
+    async fn list_pending(
+        &self,
+        _request: ListPendingApprovalsRequest,
+    ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
+        Ok(ListPendingApprovalsResponse {
+            approvals: Vec::new(),
+        })
+    }
+
+    async fn resolve(
+        &self,
+        request: ResolveApprovalInteractionRequest,
+    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+        self.resolutions.lock().expect("lock").push(request);
+        Err(ProductWorkflowError::ApprovalInteractionRejected {
+            kind: ironclaw_product_workflow::ApprovalInteractionRejectionKind::StaleGate,
+        })
+    }
+}
+
+/// An exact-ref auth resolution whose `auth_interaction_service.resolve()` returns
+/// `StaleAuth` must surface `StaleAuth` immediately — it must NOT trigger the
+/// delivered-route fallback.  Only `MissingAuth` on the exact-ref path falls
+/// through to delivered-route fallback (see `dispatch_auth_resolution`).
+#[tokio::test]
+async fn auth_resolution_stale_auth_does_not_fall_back_to_delivered_route() {
+    let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
+        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+    let gate_ref = GateRef::new("gate:auth-stale-no-fallback").expect("auth gate ref");
+    // Record a live delivered route for the same gate so that IF the fallback ran
+    // it would resolve successfully — confirming the test would catch a regression.
+    record_conversation_route_for_gate_ref(route_store.as_ref(), gate_ref.as_str(), Utc::now())
+        .await;
+    let auth_service = Arc::new(StaleAuthReturningAuthService::default());
+    let workflow = DefaultProductWorkflow::new(
+        Arc::new(FakeInboundTurnService::new()),
+        Arc::new(FakeIdempotencyLedger::new()),
+        Arc::new(FakeConversationBindingService::new()),
+    )
+    .with_auth_interaction_service(auth_service.clone())
+    .with_delivered_gate_routes(route_store);
+
+    let err = workflow
+        .accept_inbound(auth_thread_reply_envelope(
+            "stale-auth-no-fallback",
+            gate_ref.as_str(),
+        ))
+        .await
+        .expect_err(
+            "StaleAuth on exact-ref path must surface immediately without delivered-route fallback",
+        );
+
+    // StaleAuth must be the final error — not MissingAuth (which would indicate
+    // the fallback ran but missed) and not Accepted (which would mean a regression
+    // where the fallback resolved successfully).
+    assert!(
+        matches!(
+            err,
+            ProductAdapterError::WorkflowRejected {
+                kind: ProductWorkflowRejectionKind::Conflict,
+                ..
+            }
+        ),
+        "StaleAuth must map to Conflict/409, not fall back to delivered route: {err:?}"
+    );
+    // Exactly one resolve call: the direct-path call that returned StaleAuth.
+    // A second call would indicate the delivered-route fallback fired.
+    let resolutions = auth_service.resolutions();
+    assert_eq!(
+        resolutions.len(),
+        1,
+        "auth service must be called exactly once (StaleAuth must not trigger fallback): {resolutions:?}"
+    );
+}
+
+/// An explicit `approve gate:<ref>` whose gate is already resolved (StaleGate)
+/// must return StaleGate directly — without skipping to another candidate or
+/// falling through to the delivered-route fallback. The skip-stale walk is only
+/// for the BARE path (no gate_ref named), not the explicit-ref path.
+#[tokio::test]
+async fn explicit_approval_stale_gate_surfaces_without_fallback() {
+    let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
+        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+    let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
+    // Record a live delivered route for the same gate so that IF the bare-skip
+    // fallback ran it would find it — confirming the test would catch a regression.
+    record_conversation_route_for_gate_ref(route_store.as_ref(), gate_ref.as_str(), Utc::now())
+        .await;
+    let approval_service = Arc::new(StaleGateReturningApprovalService::default());
+    let workflow = DefaultProductWorkflow::new(
+        Arc::new(FakeInboundTurnService::new()),
+        Arc::new(FakeIdempotencyLedger::new()),
+        Arc::new(FakeConversationBindingService::new()),
+    )
+    .with_approval_interaction_service(approval_service.clone())
+    .with_delivered_gate_routes(route_store);
+
+    let err = workflow
+        .accept_inbound(explicit_approval_thread_reply_envelope(
+            "explicit-stale-no-fallback",
+            gate_ref.as_str(),
+        ))
+        .await
+        .expect_err("StaleGate on explicit approve gate:<ref> must surface immediately");
+
+    // StaleGate maps to ProductWorkflowRejectionKind::Conflict (409) via
+    // `ApprovalInteractionRejectionKind::workflow_rejection_kind()`.  The key
+    // invariant is that it does NOT fall through to a different candidate
+    // (which would produce Accepted or a different kind of rejection).
+    assert!(
+        matches!(
+            err,
+            ProductAdapterError::WorkflowRejected {
+                kind: ProductWorkflowRejectionKind::Conflict,
+                status_code: 409,
+                retryable: false,
+                ..
+            }
+        ),
+        "StaleGate must surface as Conflict/409, not fall through to a different candidate: {err:?}"
+    );
+    // Exactly one resolve call: the direct-path call with the named gate_ref.
+    // The explicit-ref path must not skip to another candidate.
+    let resolutions = approval_service.resolutions();
+    assert_eq!(
+        resolutions.len(),
+        1,
+        "approval service must be called exactly once — explicit StaleGate must not skip: {resolutions:?}"
+    );
+    assert_eq!(
+        resolutions[0].gate_ref, gate_ref,
+        "approval service must receive the exact gate_ref from the payload"
     );
 }
 

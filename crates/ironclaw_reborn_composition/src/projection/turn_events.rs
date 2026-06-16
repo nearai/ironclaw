@@ -459,6 +459,7 @@ pub(crate) async fn approval_prompt_context_view(
                 request_id = %request_id,
                 "approval request lookup failed during gate projection"
             );
+            // silent-ok: approval context is best-effort UI enrichment; gate prompts remain actionable without it
             None
         }
     }
