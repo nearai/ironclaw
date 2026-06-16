@@ -949,23 +949,14 @@ fn context_messages_with_summary_replacements(thread: &StoredThread) -> Vec<Cont
                 kind: MessageKind::Summary,
                 tool_result_provider_call: None,
                 content: summary.content.clone(),
+                image_attachments: Vec::new(),
             });
             emitted_summaries.insert(summary.summary_id);
             skip_through = summary.end_sequence;
             continue;
         }
         if let Some(content) = message.content.clone() {
-            context.push(ContextMessage {
-                message_id: Some(message.message_id),
-                summary_id: None,
-                sequence: message.sequence,
-                kind: message.kind,
-                tool_result_provider_call: message.tool_result_provider_call.clone(),
-                content: crate::attachment_context::augment_model_content(
-                    content,
-                    &message.attachments,
-                ),
-            });
+            context.push(ContextMessage::from_transcript_message(message, content));
         }
     }
     context
@@ -985,17 +976,8 @@ fn context_messages_by_id(
         .iter()
         .filter_map(|message_id| {
             let message = visible_messages.get(message_id)?;
-            Some(ContextMessage {
-                message_id: Some(message.message_id),
-                summary_id: None,
-                sequence: message.sequence,
-                kind: message.kind,
-                tool_result_provider_call: message.tool_result_provider_call.clone(),
-                content: crate::attachment_context::augment_model_content(
-                    message.content.clone()?,
-                    &message.attachments,
-                ),
-            })
+            let content = message.content.clone()?;
+            Some(ContextMessage::from_transcript_message(message, content))
         })
         .collect()
 }

@@ -139,6 +139,7 @@ where
                     content_ref: system_ref,
                     tool_result_provider_call: None,
                     tool_result_content: None,
+                    image_parts: Vec::new(),
                 },
                 HostManagedModelMessage {
                     role: HostManagedModelMessageRole::User,
@@ -146,6 +147,7 @@ where
                     content_ref: input_ref,
                     tool_result_provider_call: None,
                     tool_result_content: None,
+                    image_parts: Vec::new(),
                 },
             ],
             surface_version: None,

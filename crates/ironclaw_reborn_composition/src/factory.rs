@@ -1845,31 +1845,134 @@ where
     )))
 }
 
+/// Where a resolved local-dev master key came from, used to name the source in
+/// fail-loud error messages.
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+enum MasterKeySource {
+    File(PathBuf),
+    Env,
+}
+
+/// Validate a resolved master key against the same rules `SecretsCrypto::new`
+/// enforces, mapping a rejection to a `RebornBuildError` that names *where the
+/// key came from* and the offending path/env var.
+///
+/// Without this, a corrupt cached key file or a malformed `SECRETS_MASTER_KEY`
+/// env value surfaces only as the opaque "Invalid master key" raised several
+/// layers deep in `SecretsCrypto::new`, with no pointer to the file the
+/// operator must fix. See `.claude/rules/error-handling.md` (fail loud, name
+/// the operation).
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn validate_resolved_master_key(
+    key: &str,
+    source: &MasterKeySource,
+) -> Result<(), RebornBuildError> {
+    ironclaw_secrets::validate_master_key_material(key.as_bytes()).map_err(|error| {
+        let location = match source {
+            MasterKeySource::File(path) => format!("file {}", path.display()),
+            MasterKeySource::Env => format!(
+                "env var {}",
+                ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV
+            ),
+        };
+        RebornBuildError::InvalidConfig {
+            reason: format!(
+                "local-dev secrets master key from {location} is malformed: {error}; \
+                 it must be at least 32 bytes with at least 8 distinct byte values. \
+                 Remove or replace it and retry."
+            ),
+        }
+    })
+}
+
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn resolve_local_dev_secret_master_key(
     root: &Path,
 ) -> Result<ironclaw_secrets::SecretMaterial, RebornBuildError> {
+    // Fail closed on an explicitly-set-but-unusable master key: only an
+    // *absent* env var is "not configured". A non-Unicode value must not be
+    // silently dropped (via `.ok()`) and fall through to generating a fresh
+    // key, which would encrypt local-dev secrets under an unintended key the
+    // operator never chose.
+    let env_key = match std::env::var(ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "local-dev secrets master key env var {} is set but not valid UTF-8",
+                    ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV
+                ),
+            });
+        }
+    };
+    resolve_local_dev_secret_master_key_with_env(root, env_key)
+}
+
+/// Inner resolver that takes the `SECRETS_MASTER_KEY` env value as a parameter
+/// so the write-before-validate invariant can be exercised through this real
+/// caller in tests without mutating process-global env (which is racy under
+/// `cargo test`'s parallel harness).
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn resolve_local_dev_secret_master_key_with_env(
+    root: &Path,
+    env_key: Option<String>,
+) -> Result<ironclaw_secrets::SecretMaterial, RebornBuildError> {
+    // Fully resolve and VALIDATE an explicitly-set env value UP FRONT, before
+    // the cached file read. Otherwise a rebuild where
+    // `.reborn-local-dev-secrets-master-key` already exists returns the cached
+    // key and silently ignores the operator's bad explicit env config — whether
+    // it is empty OR a malformed non-empty value (e.g. `0000...`). Validating
+    // here means any explicit-but-unusable env key fails closed regardless of
+    // cached state.
+    let env_key = match env_key {
+        Some(value) => {
+            let trimmed = value.trim().to_string();
+            if trimmed.is_empty() {
+                return Err(RebornBuildError::InvalidConfig {
+                    reason: format!(
+                        "local-dev secrets master key env var {} is set but empty",
+                        ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV
+                    ),
+                });
+            }
+            validate_resolved_master_key(&trimmed, &MasterKeySource::Env)?;
+            Some(trimmed)
+        }
+        None => None,
+    };
+
     let key_path = root.join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH);
     match std::fs::read_to_string(&key_path) {
         Ok(existing) => {
-            return Ok(ironclaw_secrets::SecretMaterial::from(
-                existing.trim().to_string(),
-            ));
+            let key = existing.trim().to_string();
+            validate_resolved_master_key(&key, &MasterKeySource::File(key_path.clone()))?;
+            return Ok(ironclaw_secrets::SecretMaterial::from(key));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
             return Err(RebornBuildError::InvalidConfig {
-                reason: format!("local-dev secrets master key could not be read: {error}"),
+                reason: format!(
+                    "local-dev secrets master key at {} could not be read: {error}",
+                    key_path.display()
+                ),
             });
         }
     }
 
-    let key = std::env::var(ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(ironclaw_secrets::keychain::generate_master_key_hex);
-    write_local_dev_secret_master_key(&key_path, &key)?;
-    Ok(ironclaw_secrets::SecretMaterial::from(key))
+    // No cached file. Prefer the explicit (already-validated) env key; otherwise
+    // generate a fresh one.
+    match env_key {
+        Some(key) => {
+            write_local_dev_secret_master_key(&key_path, &key)?;
+            Ok(ironclaw_secrets::SecretMaterial::from(key))
+        }
+        None => {
+            let key = ironclaw_secrets::keychain::generate_master_key_hex();
+            write_local_dev_secret_master_key(&key_path, &key)?;
+            Ok(ironclaw_secrets::SecretMaterial::from(key))
+        }
+    }
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -2299,6 +2402,10 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
             policy.provider.manifest_path,
             None,
             HostTrustAssignment::first_party(),
+            // Sourced from local_dev_capability_policy.toml `[provider]
+            // authority_effects`, which includes `external_write` — required by
+            // builtin.trace_commons.onboard (operator-invite enrollment posts to
+            // an external onboarding server).
             policy.provider.authority_effects,
             None,
         ),
@@ -3697,6 +3804,190 @@ mod tests {
 
         // Runtime ports still absent — no egress was added by the attachment.
         assert!(services.product_auth_provider_runtime_ports().is_none());
+    }
+
+    /// A corrupt local-dev key file must fail loud with a path-naming error,
+    /// not the opaque "Invalid master key" that surfaces when the unvalidated
+    /// material reaches `SecretsCrypto::new` several layers deep. Mirrors the
+    /// real all-zeros key an `[env] SECRETS_MASTER_KEY = "000...0"` cargo
+    /// override writes into the cached key file.
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    #[test]
+    fn resolve_local_dev_secret_master_key_rejects_malformed_file_with_path_context() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let key_path = root.join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH);
+        // 64 zero chars: passes the length floor but has a single distinct
+        // byte, which `SecretsCrypto::new` rejects on the entropy check.
+        std::fs::write(&key_path, "0".repeat(64)).expect("write malformed key");
+
+        let error = resolve_local_dev_secret_master_key(root)
+            .expect_err("malformed local-dev master key must be rejected");
+
+        match error {
+            RebornBuildError::InvalidConfig { reason } => {
+                assert!(
+                    reason.contains(&key_path.display().to_string()),
+                    "error must name the offending key file path, got: {reason}"
+                );
+                assert!(
+                    reason.contains("master key"),
+                    "error must mention the master key, got: {reason}"
+                );
+            }
+            other => panic!("expected InvalidConfig, got {other:?}"),
+        }
+    }
+
+    /// An explicit but malformed `SECRETS_MASTER_KEY` env value (the actual
+    /// root cause of the original report) must fail loud and name the env var.
+    /// Driven through the real caller `resolve_local_dev_secret_master_key`
+    /// (via its env-parameterized inner) so this also guards the
+    /// write-before-validate invariant: a rejected env key must never be
+    /// persisted to the cached `.reborn-local-dev-secrets-master-key` file.
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    #[test]
+    fn resolve_local_dev_secret_master_key_rejects_malformed_env_without_persisting() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let key_path = root.join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH);
+        assert!(
+            !key_path.exists(),
+            "precondition: cached key file must not exist yet"
+        );
+
+        // 64 zero chars: passes the length floor but has a single distinct byte,
+        // so the entropy check rejects it.
+        let error = resolve_local_dev_secret_master_key_with_env(root, Some("0".repeat(64)))
+            .expect_err("malformed env master key must be rejected");
+
+        match error {
+            RebornBuildError::InvalidConfig { reason } => {
+                assert!(
+                    reason.contains(ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV),
+                    "error must name the env var, got: {reason}"
+                );
+                assert!(
+                    reason.contains("master key"),
+                    "error must mention the master key, got: {reason}"
+                );
+            }
+            other => panic!("expected InvalidConfig, got {other:?}"),
+        }
+
+        // Write-before-validate regression guard: the rejected key must NOT have
+        // been persisted to the cached file.
+        assert!(
+            !key_path.exists(),
+            "rejected env master key must not be persisted to {}",
+            key_path.display()
+        );
+    }
+
+    #[test]
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    fn resolve_local_dev_secret_master_key_rejects_set_but_empty_env_without_persisting() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let key_path = root.join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH);
+
+        // A set-but-empty (or whitespace-only) env value is explicit-but-unusable
+        // configuration: it must fail closed, NOT collapse to "absent" and
+        // generate + persist a fresh key the operator never chose.
+        for empty in ["", "   ", "\n\t "] {
+            let error = resolve_local_dev_secret_master_key_with_env(root, Some(empty.to_string()))
+                .expect_err("set-but-empty env master key must be rejected");
+            match error {
+                RebornBuildError::InvalidConfig { reason } => assert!(
+                    reason.contains(ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV),
+                    "error must name the env var, got: {reason}"
+                ),
+                other => panic!("expected InvalidConfig, got {other:?}"),
+            }
+            assert!(
+                !key_path.exists(),
+                "a set-but-empty env master key must not generate/persist a key at {}",
+                key_path.display()
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    fn resolve_local_dev_secret_master_key_rejects_empty_env_even_with_cached_file() {
+        // Regression: the empty-env rejection must run BEFORE the cached-file
+        // read, so an explicitly-set-but-empty SECRETS_MASTER_KEY fails closed
+        // on a rebuild even when `.reborn-local-dev-secrets-master-key` already
+        // exists — it must not be silently ignored in favor of the cached key.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let key_path = root.join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH);
+
+        // Seed a valid cached key first (no env value -> generated + persisted).
+        resolve_local_dev_secret_master_key_with_env(root, None)
+            .expect("seed a valid cached master key");
+        assert!(key_path.exists(), "precondition: cached key file exists");
+        let cached_before = std::fs::read_to_string(&key_path).expect("read cached key");
+
+        let error = resolve_local_dev_secret_master_key_with_env(root, Some("   ".to_string()))
+            .expect_err("empty env must fail closed even with a cached file");
+        match error {
+            RebornBuildError::InvalidConfig { reason } => assert!(
+                reason.contains(ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV),
+                "error must name the env var, got: {reason}"
+            ),
+            other => panic!("expected InvalidConfig, got {other:?}"),
+        }
+        // The cached key is left untouched (not silently returned, not rewritten).
+        assert_eq!(
+            std::fs::read_to_string(&key_path).expect("read cached key"),
+            cached_before,
+            "the cached key must be left unchanged when the env value is rejected"
+        );
+    }
+
+    #[test]
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    fn resolve_local_dev_secret_master_key_rejects_malformed_env_even_with_cached_file() {
+        // A non-empty-but-malformed env value must also fail closed BEFORE the
+        // cached-file read, so `SECRETS_MASTER_KEY=0000...` is not silently
+        // ignored in favor of a valid cached key on a rebuild.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let key_path = root.join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH);
+
+        resolve_local_dev_secret_master_key_with_env(root, None)
+            .expect("seed a valid cached master key");
+        let cached_before = std::fs::read_to_string(&key_path).expect("read cached key");
+
+        // 64 zero chars: passes the length floor but fails the entropy check.
+        let error = resolve_local_dev_secret_master_key_with_env(root, Some("0".repeat(64)))
+            .expect_err("malformed env must fail closed even with a cached file");
+        match error {
+            RebornBuildError::InvalidConfig { reason } => assert!(
+                reason.contains(ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV),
+                "error must name the env var, got: {reason}"
+            ),
+            other => panic!("expected InvalidConfig, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(&key_path).expect("read cached key"),
+            cached_before,
+            "the cached key must be left unchanged when a malformed env value is rejected"
+        );
+    }
+
+    /// A well-formed cached key file passes through unchanged.
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    #[test]
+    fn resolve_local_dev_secret_master_key_accepts_valid_cached_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let valid = ironclaw_secrets::keychain::generate_master_key_hex();
+        std::fs::write(root.join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH), &valid)
+            .expect("write valid key");
+
+        resolve_local_dev_secret_master_key(root).expect("valid cached key must be accepted");
     }
 
     #[tokio::test]

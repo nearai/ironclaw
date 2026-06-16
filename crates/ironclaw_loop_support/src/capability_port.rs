@@ -54,6 +54,37 @@ use self::surface_snapshot::{
 // existing adapter boundary.
 const PROVIDER_TOOL_NAME_DIGEST_BYTES: usize = 32;
 const PROVIDER_TOOL_CALL_INPUT_REF_PREFIX: &str = "input:provider-tool-";
+
+/// Observes a capability invocation's resolved input (arguments) as the host
+/// loop executes it, for trajectory capture by downstream consumers (benchmark
+/// harnesses, debuggers, UI). `call_id` is the capability input ref.
+///
+/// **Input-only.** This layer stages completed outcomes through
+/// [`LoopCapabilityResultWriter`], not through the port, so it does not observe
+/// results: result events belong to whichever result-writer the composition
+/// installs (e.g. reborn's `LocalDevCapabilityIo`), keyed back to `call_id`.
+/// Keeping the substrate observer input-only avoids advertising a result
+/// callback this layer would never fire.
+///
+/// Best-effort and side-effect-free. The callback fires inline on the
+/// per-capability hot path, so an implementation **must never block** (do I/O,
+/// contend on a lock): hand the event to a non-blocking queue and return. A
+/// callback that panics is caught at the call site and the event is dropped —
+/// it cannot unwind or fail the run — but it must not rely on that.
+pub trait CapabilityTrajectoryObserver: std::fmt::Debug + Send + Sync {
+    /// A model tool call resolved to a capability invocation: `capability_id` is
+    /// the resolved capability (e.g. `builtin.shell`), `arguments` the tool-call
+    /// input JSON resolved from the input ref. This fires before schema
+    /// normalization/coercion, so `arguments` is the raw model-emitted input
+    /// (what the trajectory should record), not the post-validation execution
+    /// payload.
+    fn on_capability_input(
+        &self,
+        call_id: &str,
+        capability_id: &str,
+        arguments: &serde_json::Value,
+    );
+}
 const MAX_IN_MEMORY_PROVIDER_TOOL_CALL_EFFECTIVE_CAPABILITY_IDS: usize = 128;
 
 #[async_trait]
@@ -242,6 +273,7 @@ pub struct HostRuntimeLoopCapabilityPortFactory {
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     execution_mounts: MountView,
     capability_execution_mounts: HashMap<CapabilityId, MountView>,
+    trajectory_observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
 }
 
 impl HostRuntimeLoopCapabilityPortFactory {
@@ -260,7 +292,18 @@ impl HostRuntimeLoopCapabilityPortFactory {
             milestone_sink,
             execution_mounts: MountView::default(),
             capability_execution_mounts: HashMap::new(),
+            trajectory_observer: None,
         }
+    }
+
+    /// Attach a [`CapabilityTrajectoryObserver`] that every port built by this
+    /// factory forwards capability inputs to. No-op when unset.
+    pub fn with_trajectory_observer(
+        mut self,
+        observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
+    ) -> Self {
+        self.trajectory_observer = observer;
+        self
     }
 
     pub fn with_execution_mounts(mut self, mounts: MountView) -> Self {
@@ -293,6 +336,7 @@ impl HostRuntimeLoopCapabilityPortFactory {
         )
         .with_execution_mounts(self.execution_mounts.clone())
         .with_capability_execution_mounts(self.capability_execution_mounts.clone())
+        .with_trajectory_observer(self.trajectory_observer.clone())
     }
 }
 
@@ -597,6 +641,7 @@ pub struct HostRuntimeLoopCapabilityPort {
     current_surface_version: Mutex<Option<String>>,
     dispatch_records: Mutex<DispatchRecordStore>,
     provider_tool_call_effective_capability_ids: Mutex<ProviderToolCallEffectiveCapabilityIdStore>,
+    trajectory_observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
 }
 
 /// Lock a poisoned-aware `Mutex` and wrap a poison error as the canonical
@@ -641,7 +686,18 @@ impl HostRuntimeLoopCapabilityPort {
             provider_tool_call_effective_capability_ids: Mutex::new(
                 ProviderToolCallEffectiveCapabilityIdStore::default(),
             ),
+            trajectory_observer: None,
         }
+    }
+
+    /// Attach a [`CapabilityTrajectoryObserver`] notified of each capability's
+    /// resolved input as this port executes it. No-op when unset.
+    pub fn with_trajectory_observer(
+        mut self,
+        observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
+    ) -> Self {
+        self.trajectory_observer = observer;
+        self
     }
 
     pub fn with_execution_mounts(mut self, mounts: MountView) -> Self {
@@ -1279,6 +1335,28 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 .input_resolver
                 .resolve_capability_input(&self.run_context, effective_input_ref)
                 .await?;
+            // Trajectory capture: the resolved input is the model's tool
+            // arguments, and this is the one place they are visible (the provider
+            // tool-call decorator stages them upstream and bypasses the input
+            // resolver hook).
+            if let Some(observer) = &self.trajectory_observer {
+                // Best-effort, inline on the capability hot path: a panicking
+                // observer must never unwind the invocation before dispatch.
+                // (Blocking is the observer's own contract.)
+                let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    observer.on_capability_input(
+                        effective_input_ref.as_str(),
+                        request.capability_id.as_str(),
+                        &input,
+                    );
+                }));
+                if caught.is_err() {
+                    tracing::warn!(
+                        capability_id = request.capability_id.as_str(),
+                        "trajectory observer on_capability_input panicked; dropping event"
+                    );
+                }
+            }
             let input = match prepare_provider_arguments_with_detail(
                 &input,
                 &capability.parameters_schema,
@@ -3510,6 +3588,88 @@ mod tests {
 
         assert!(input_ref.as_str().starts_with("input:provider-tool-"));
         assert_eq!(resolved, serde_json::json!({"message":"hello"}));
+    }
+
+    /// Captures every input callback the port forwards, so tests can drive the
+    /// real `invoke_capability` call site and assert the observer fired.
+    #[derive(Debug, Default)]
+    struct RecordingTrajectoryObserver {
+        inputs: Mutex<Vec<(String, String, serde_json::Value)>>,
+    }
+
+    impl CapabilityTrajectoryObserver for RecordingTrajectoryObserver {
+        fn on_capability_input(
+            &self,
+            call_id: &str,
+            capability_id: &str,
+            arguments: &serde_json::Value,
+        ) {
+            self.inputs.lock().expect("inputs lock").push((
+                call_id.to_string(),
+                capability_id.to_string(),
+                arguments.clone(),
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn invoke_capability_forwards_resolved_input_to_trajectory_observer() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let observer = Arc::new(RecordingTrajectoryObserver::default());
+
+        // Mirror `runtime_capability_port`, but attach the trajectory observer
+        // to the factory via `with_trajectory_observer` so the port forwards the
+        // resolved tool-call input when a capability is invoked.
+        let mut context = execution_context("thread-trajectory-observer-input");
+        let run_context = loop_run_context(&context).await;
+        let loop_driver_extension =
+            loop_driver_execution_extension_id(&run_context).expect("valid extension id");
+        context.grants.grants.push(dispatch_capability_grant(
+            &capability_id,
+            &loop_driver_extension,
+        ));
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+                capability_id.clone(),
+                provider_id.clone(),
+            )])),
+            visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
+                provider_id.clone(),
+                dispatch_trust_decision(),
+            )])),
+            dummy_input_resolver(),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+        )
+        .with_trajectory_observer(Some(
+            observer.clone() as Arc<dyn CapabilityTrajectoryObserver>
+        ))
+        .port_for_run_context(run_context);
+
+        let outcome = invoke_visible_runtime_capability(&port)
+            .await
+            .expect("capability invocation succeeds");
+        assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+
+        let inputs = observer.inputs.lock().expect("inputs lock");
+        assert_eq!(
+            inputs.len(),
+            1,
+            "observer should see exactly one capability input"
+        );
+        let (call_id, observed_capability, arguments) = &inputs[0];
+        assert!(!call_id.is_empty(), "call_id (input ref) should be present");
+        assert_eq!(
+            observed_capability,
+            capability_id.as_str(),
+            "observer should receive the resolved capability id"
+        );
+        assert_eq!(
+            arguments,
+            &serde_json::json!({"message": "hello"}),
+            "observer should receive the resolved tool-call arguments"
+        );
     }
 
     #[tokio::test]

@@ -55,6 +55,7 @@ use crate::auth_prompt::auth_prompt_view_for_blocked_auth;
 use crate::slack_outbound_targets::slack_conversation_id_from_reply_target_binding_ref;
 
 const MAX_SLACK_RUN_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const DEFAULT_TRIGGERED_RUN_DELIVERY_MAX_WAIT: Duration = Duration::from_secs(30 * 60);
 const SLACK_RUN_POLL_JITTER_BUCKETS: u32 = 5;
 const SLACK_API_HOST: &str = "slack.com";
 const SLACK_BOT_TOKEN_HANDLE: &str = "slack_bot_token";
@@ -1770,7 +1771,10 @@ impl TriggeredRunDeliveryDriver {
     ) -> Self {
         Self::with_settings(
             services,
-            SlackFinalReplyDeliverySettings::default(),
+            SlackFinalReplyDeliverySettings {
+                max_wait: DEFAULT_TRIGGERED_RUN_DELIVERY_MAX_WAIT,
+                ..SlackFinalReplyDeliverySettings::default()
+            },
             delivery_store,
             route_store,
             fallback_agent_id,
@@ -3389,6 +3393,34 @@ mod tests {
                 .any(|c| c.path == "/api/chat.postMessage"),
             "no egress expected for denied trigger"
         );
+    }
+
+    #[test]
+    fn triggered_driver_default_wait_budget_is_longer_than_live_slack_reply_wait() {
+        let install = "test-install";
+        let scope = personal_turn_scope();
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::Completed,
+        ));
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let services = make_services(coordinator, thread_service, egress, outbound, install);
+
+        let driver = TriggeredRunDeliveryDriver::new(
+            services,
+            delivery_store,
+            route_store,
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        assert_eq!(
+            driver.settings.max_wait,
+            DEFAULT_TRIGGERED_RUN_DELIVERY_MAX_WAIT
+        );
+        assert!(driver.settings.max_wait > SlackFinalReplyDeliverySettings::default().max_wait);
     }
 
     // --- BlockedAuth / timeout driver tests ------------------------------------
