@@ -181,10 +181,14 @@ fn runtime_kind(runtime: &ExtensionRuntime) -> LifecycleExtensionRuntimeKind {
     }
 }
 
+fn is_host_managed_credential_extension(package_id: &str) -> bool {
+    matches!(package_id, "nearai")
+}
+
 fn credential_requirements(
     package: &AvailableExtensionPackage,
 ) -> Vec<LifecycleExtensionCredentialRequirement> {
-    if package.package_ref.id.as_str() == "nearai" {
+    if is_host_managed_credential_extension(package.package_ref.id.as_str()) {
         return Vec::new();
     }
 
