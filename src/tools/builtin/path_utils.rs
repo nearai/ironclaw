@@ -97,10 +97,16 @@ pub fn validate_path(path_str: &str, base_dir: Option<&Path>) -> Result<PathBuf,
         // all `..` components, so starts_with is reliable.
         let check_path = if resolved.exists() {
             resolved.canonicalize().unwrap_or_else(|_| resolved.clone())
-        } else if std::fs::symlink_metadata(&resolved)
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false)
-        {
+        } else if match std::fs::symlink_metadata(&resolved) {
+            Ok(metadata) => metadata.file_type().is_symlink(),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+            Err(err) => {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "Failed to inspect path metadata for {}: {}",
+                    path_str, err
+                )));
+            }
+        } {
             return Err(ToolError::NotAuthorized(format!(
                 "Path is a dangling symlink: {}",
                 path_str

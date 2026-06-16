@@ -179,6 +179,22 @@ async fn newline_chains_take_max_risk() {
 }
 
 #[tokio::test]
+async fn crlf_chains_take_max_risk() {
+    let tool = shell_tool().await;
+    let cmd = "echo control\r\nrm -rf /tmp/crlf-marker";
+    assert_eq!(risk(&tool, cmd), RiskLevel::High);
+    assert_eq!(approval(&tool, cmd), ApprovalRequirement::Always);
+}
+
+#[tokio::test]
+async fn background_chains_take_max_risk() {
+    let tool = shell_tool().await;
+    let cmd = "echo control & rm -rf /tmp/background-marker";
+    assert_eq!(risk(&tool, cmd), RiskLevel::High);
+    assert_eq!(approval(&tool, cmd), ApprovalRequirement::Always);
+}
+
+#[tokio::test]
 async fn transparent_shell_wrappers_reveal_high_risk_payloads() {
     let tool = shell_tool().await;
     let cmds = [
@@ -222,6 +238,20 @@ async fn env_wrapper_options_with_arguments_are_skipped() {
         r#"env -u PATH sh -c "git reset --hard""#,
         r#"env --unset PATH bash -lc "rm -rf /tmp/env-unset-marker""#,
         r#"env --chdir /tmp sh -c "chmod 777 /tmp/env-chdir-marker""#,
+    ];
+    for cmd in &cmds {
+        assert_eq!(risk(&tool, cmd), RiskLevel::High);
+        assert_eq!(approval(&tool, cmd), ApprovalRequirement::Always);
+    }
+}
+
+#[tokio::test]
+async fn env_split_string_payloads_are_classified() {
+    let tool = shell_tool().await;
+    let cmds = [
+        r#"env -S "bash -c 'rm -rf /tmp/env-split-marker'""#,
+        r#"env --split-string "chmod 777 /tmp/env-split-marker""#,
+        r#"env --split-string="echo control & rm -rf /tmp/env-split-background""#,
     ];
     for cmd in &cmds {
         assert_eq!(risk(&tool, cmd), RiskLevel::High);

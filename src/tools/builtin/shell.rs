@@ -418,17 +418,21 @@ fn shell_script_arg(tokens: &[String], start: usize) -> Option<&str> {
     None
 }
 
-fn delegated_env_command(tokens: &[String]) -> Option<&[String]> {
+fn delegated_env_command(tokens: &[String]) -> Option<Vec<String>> {
     let mut idx = 1;
     while idx < tokens.len() {
         let token = tokens[idx].as_str();
+        if token == "-S" || token == "--split-string" {
+            return tokens.get(idx + 1).map(|script| shell_tokens(script));
+        }
+        if let Some(script) = token.strip_prefix("--split-string=") {
+            return Some(shell_tokens(script));
+        }
         if matches!(
             token,
             "-u" | "--unset"
                 | "-C"
                 | "--chdir"
-                | "-S"
-                | "--split-string"
                 | "--block-signal"
                 | "--default-signal"
                 | "--ignore-signal"
@@ -444,7 +448,7 @@ fn delegated_env_command(tokens: &[String]) -> Option<&[String]> {
             idx += 1;
             continue;
         }
-        return Some(&tokens[idx..]);
+        return Some(tokens[idx..].to_vec());
     }
     None
 }
@@ -487,7 +491,7 @@ fn classify_tokens_for_wrappers(tokens: &[String], depth: usize) -> Option<RiskL
         "env" => delegated_env_command(tokens).and_then(|delegated| {
             let delegated_command = command_basename(&delegated[0]).to_lowercase();
             if matches!(delegated_command.as_str(), "sh" | "bash" | "zsh" | "dash") {
-                classify_tokens_for_wrappers(delegated, depth + 1)
+                classify_tokens_for_wrappers(&delegated, depth + 1)
             } else {
                 Some(classify_command_risk_inner(&delegated.join(" "), depth + 1))
             }
@@ -778,7 +782,7 @@ fn check_sensitive_file_access(cmd: &str) -> Option<String> {
     None
 }
 
-/// Split a command string on shell separators (`&&`, `||`, `|`, `;`, newline).
+/// Split a command string on shell separators (`&&`, `||`, `|`, `&`, `;`, newline).
 ///
 /// Splits on multi-character operators first to avoid fragmenting `&&` into
 /// empty segments (which would happen with single-char `&` splitting).
@@ -791,8 +795,11 @@ fn split_shell_segments(cmd: &str) -> Vec<&str> {
     while i < len {
         let is_double =
             (bytes[i] == b'&' || bytes[i] == b'|') && i + 1 < len && bytes[i + 1] == bytes[i];
-        let is_single =
-            bytes[i] == b'|' || bytes[i] == b';' || bytes[i] == b'\n' || bytes[i] == b'\r';
+        let is_single = bytes[i] == b'&'
+            || bytes[i] == b'|'
+            || bytes[i] == b';'
+            || bytes[i] == b'\n'
+            || bytes[i] == b'\r';
         if is_double {
             segments.push(&cmd[start..i]);
             i += 2;
