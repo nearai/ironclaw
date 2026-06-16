@@ -267,6 +267,87 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
     }
 }
 
+/// Approval interaction service that reports pending gates only for a specific
+/// thread scope (the triggered run's own scope). Queries for any other scope —
+/// e.g. the DM interactive scope where the reply arrives — return empty. This
+/// reproduces the real multiple-triggered-runs case: `list_pending(DM scope)`
+/// is empty (forcing the delivered-route fallback), while each route's own
+/// scope still reports its gate as pending.
+struct ScopedPendingApprovalInteractionService {
+    pending_thread: ThreadId,
+    pending: Vec<(GateRef, TurnRunId)>,
+    resolutions: Mutex<Vec<ResolveApprovalInteractionRequest>>,
+}
+
+impl ScopedPendingApprovalInteractionService {
+    fn new(pending_thread: ThreadId, pending: Vec<(GateRef, TurnRunId)>) -> Self {
+        Self {
+            pending_thread,
+            pending,
+            resolutions: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn resolutions(&self) -> Vec<ResolveApprovalInteractionRequest> {
+        self.resolutions.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl ApprovalInteractionService for ScopedPendingApprovalInteractionService {
+    async fn list_pending(
+        &self,
+        request: ListPendingApprovalsRequest,
+    ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
+        let scope = ApprovalInteractionScope::from_turn(&request.scope, &request.actor);
+        let matches_thread =
+            request.scope.to_resource_scope().thread_id.as_ref() == Some(&self.pending_thread);
+        let approvals = if matches_thread {
+            self.pending
+                .iter()
+                .map(|(gate_ref, run_id)| PendingApprovalInteractionView {
+                    scope: scope.clone(),
+                    run_id: *run_id,
+                    gate_ref: gate_ref.clone(),
+                    approval_request_id: ApprovalRequestId::new(),
+                    summary: "Approval required".to_string(),
+                    action: ironclaw_product_workflow::ApprovalInteractionActionView::Other,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Ok(ListPendingApprovalsResponse { approvals })
+    }
+
+    async fn resolve(
+        &self,
+        request: ResolveApprovalInteractionRequest,
+    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+        let run_id = request.run_id_hint.unwrap_or_default();
+        // Model staleness via the authoritative resolve path: a gate that is no
+        // longer in the pending set has already resolved, so report StaleGate
+        // (mirrors DefaultApprovalInteractionService's `_ => StaleGate` arm).
+        let is_pending = self
+            .pending
+            .iter()
+            .any(|(gate_ref, _)| gate_ref == &request.gate_ref);
+        self.resolutions.lock().expect("lock").push(request);
+        if !is_pending {
+            return Err(ProductWorkflowError::ApprovalInteractionRejected {
+                kind: ironclaw_product_workflow::ApprovalInteractionRejectionKind::StaleGate,
+            });
+        }
+        Ok(ResolveApprovalInteractionResponse::Approved(
+            ResumeTurnResponse {
+                run_id,
+                status: TurnStatus::Queued,
+                event_cursor: EventCursor(21),
+            },
+        ))
+    }
+}
+
 struct RecordingAuthInteractionService {
     gate_ref: GateRef,
     run_id: TurnRunId,
@@ -450,6 +531,7 @@ struct TwoRecordDeliveredGateRouteStore {
             String,
         )>,
     >,
+    removed: std::sync::Mutex<Vec<String>>,
 }
 
 impl TwoRecordDeliveredGateRouteStore {
@@ -457,6 +539,7 @@ impl TwoRecordDeliveredGateRouteStore {
         Self {
             records,
             captured_args: std::sync::Mutex::new(Vec::new()),
+            removed: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -468,6 +551,12 @@ impl TwoRecordDeliveredGateRouteStore {
         String,
     )> {
         self.captured_args.lock().expect("lock").clone()
+    }
+
+    /// Gate refs passed to `remove_delivered_gate_route` — the stale routes
+    /// pruned during disambiguation.
+    fn removed(&self) -> Vec<String> {
+        self.removed.lock().expect("lock").clone()
     }
 }
 
@@ -507,8 +596,9 @@ impl ironclaw_outbound::DeliveredGateRouteStore for TwoRecordDeliveredGateRouteS
         &self,
         _tenant_id: &ironclaw_host_api::TenantId,
         _user_id: &ironclaw_host_api::UserId,
-        _gate_ref: &str,
+        gate_ref: &str,
     ) -> Result<(), String> {
+        self.removed.lock().expect("lock").push(gate_ref.to_string());
         Ok(())
     }
 
@@ -1751,42 +1841,49 @@ async fn explicit_auth_delivered_route_requires_gate_ref_match() {
     assert_eq!(resolutions[0].run_id_hint, None);
 }
 
-/// Two live routes share the same conversation fingerprint. A bare scoped-approval
-/// reply (no gate_ref) must not pick one arbitrarily — it must reject with
-/// `Ambiguous` (409) before any approval-interaction dispatch occurs.
+/// Two live routes share the same conversation fingerprint and BOTH underlying
+/// gates are still pending (the multiple-triggered-runs-into-one-DM case). A
+/// bare scoped-approval reply (no gate_ref) resolves the most-recently-delivered
+/// prompt — recency tiebreak — instead of failing closed. `approve gate:<ref>`
+/// stays available to target a specific gate.
 #[tokio::test]
-async fn scoped_approval_two_live_routes_same_conversation_rejects_ambiguous() {
+async fn scoped_approval_two_pending_routes_resolves_most_recent() {
     let tenant_id = TenantId::new("tenant:install_alpha").expect("tenant");
     let user_id = UserId::new("user:user1").expect("user");
     let fingerprint = delivered_gate_thread_fingerprint();
-    let make_record = |gate_ref: &str| ironclaw_outbound::DeliveredGateRouteRecord {
-        tenant_id: tenant_id.clone(),
-        user_id: user_id.clone(),
-        gate_ref: gate_ref.to_string(),
-        run_id: TurnRunId::new(),
-        scope: TurnScope::new_with_owner(
-            tenant_id.clone(),
-            Some(AgentId::new("agent:delivered-route").expect("agent")),
-            Some(ProjectId::new("project:delivered-route").expect("project")),
-            ThreadId::new("thread:delivered-route-run").expect("thread"),
-            Some(user_id.clone()),
-        ),
-        recorded_at: Utc::now(),
-        delivered_conversation_fingerprints: vec![fingerprint.clone()],
+    let route_thread = ThreadId::new("thread:delivered-route-run").expect("thread");
+    let scope = TurnScope::new_with_owner(
+        tenant_id.clone(),
+        Some(AgentId::new("agent:delivered-route").expect("agent")),
+        Some(ProjectId::new("project:delivered-route").expect("project")),
+        route_thread.clone(),
+        Some(user_id.clone()),
+    );
+    let older_gate = approval_gate_ref(ApprovalRequestId::new()).expect("gate");
+    let newer_gate = approval_gate_ref(ApprovalRequestId::new()).expect("gate");
+    let older_run = TurnRunId::new();
+    let newer_run = TurnRunId::new();
+    let make_record = |gate_ref: &GateRef, run_id, recorded_at| {
+        ironclaw_outbound::DeliveredGateRouteRecord {
+            tenant_id: tenant_id.clone(),
+            user_id: user_id.clone(),
+            gate_ref: gate_ref.as_str().to_string(),
+            run_id,
+            scope: scope.clone(),
+            recorded_at,
+            delivered_conversation_fingerprints: vec![fingerprint.clone()],
+        }
     };
     let route_store = Arc::new(TwoRecordDeliveredGateRouteStore::new(vec![
-        make_record(
-            approval_gate_ref(ApprovalRequestId::new())
-                .expect("gate")
-                .as_str(),
-        ),
-        make_record(
-            approval_gate_ref(ApprovalRequestId::new())
-                .expect("gate")
-                .as_str(),
-        ),
+        make_record(&older_gate, older_run, Utc::now() - Duration::seconds(60)),
+        make_record(&newer_gate, newer_run, Utc::now()),
     ]));
-    let approval_service = Arc::new(RecordingApprovalInteractionService::with_pending(Vec::new()));
+    // Both gates are pending in the triggered run's scope; the DM scope (where
+    // the reply lands) reports nothing, forcing the delivered-route fallback.
+    let approval_service = Arc::new(ScopedPendingApprovalInteractionService::new(
+        route_thread,
+        vec![(older_gate.clone(), older_run), (newer_gate.clone(), newer_run)],
+    ));
     let workflow = DefaultProductWorkflow::new(
         Arc::new(FakeInboundTurnService::new()),
         Arc::new(FakeIdempotencyLedger::new()),
@@ -1795,40 +1892,108 @@ async fn scoped_approval_two_live_routes_same_conversation_rejects_ambiguous() {
     .with_approval_interaction_service(approval_service.clone())
     .with_delivered_gate_routes(route_store.clone());
 
-    let err = workflow
-        .accept_inbound(scoped_approval_thread_reply_envelope(
-            "two-live-routes-ambiguous",
-        ))
+    let ack = workflow
+        .accept_inbound(scoped_approval_thread_reply_envelope("two-pending-recency"))
         .await
-        .expect_err("two live routes must reject as ambiguous");
+        .expect("recency tiebreak must resolve the most-recently-delivered gate");
 
     assert!(
-        matches!(
-            err,
-            ProductAdapterError::WorkflowRejected {
-                kind: ProductWorkflowRejectionKind::Ambiguous,
-                status_code: 409,
-                retryable: false,
-                ..
-            }
-        ),
-        "expected Ambiguous/409 for ambiguous delivered route, got: {err:?}"
+        matches!(ack, ProductInboundAck::Accepted { .. }),
+        "expected Accepted from recency resolution, got: {ack:?}"
+    );
+    let resolutions = approval_service.resolutions();
+    assert_eq!(resolutions.len(), 1, "exactly one gate must be resolved");
+    assert_eq!(
+        resolutions[0].gate_ref, newer_gate,
+        "recency must pick the most-recently-delivered gate"
     );
     assert!(
-        approval_service.resolutions().is_empty(),
-        "approval service must not be consulted on ambiguous route"
+        route_store.removed().is_empty(),
+        "no stale routes to prune when every candidate is still pending"
     );
-    // The binding resolves `ExternalActorRef("test", "user1")` → actor user
-    // `"user:user1"` via FakeConversationBindingService (see fakes.rs actor
-    // derivation: `"user:" + external_actor_ref.id()`).
+}
+
+/// Two live routes share the same conversation fingerprint but only one
+/// underlying gate is still pending — the other already resolved and its route
+/// record lingered. A bare scoped-approval reply must resolve the single
+/// pending gate (no ambiguity) and prune the stale route from the store.
+#[tokio::test]
+async fn scoped_approval_one_stale_one_pending_resolves_and_prunes() {
+    let tenant_id = TenantId::new("tenant:install_alpha").expect("tenant");
+    let user_id = UserId::new("user:user1").expect("user");
+    let fingerprint = delivered_gate_thread_fingerprint();
+    let route_thread = ThreadId::new("thread:delivered-route-run").expect("thread");
+    let scope = TurnScope::new_with_owner(
+        tenant_id.clone(),
+        Some(AgentId::new("agent:delivered-route").expect("agent")),
+        Some(ProjectId::new("project:delivered-route").expect("project")),
+        route_thread.clone(),
+        Some(user_id.clone()),
+    );
+    let pending_gate = approval_gate_ref(ApprovalRequestId::new()).expect("gate");
+    let stale_gate = approval_gate_ref(ApprovalRequestId::new()).expect("gate");
+    let pending_run = TurnRunId::new();
+    let make_record = |gate_ref: &GateRef, run_id, recorded_at| {
+        ironclaw_outbound::DeliveredGateRouteRecord {
+            tenant_id: tenant_id.clone(),
+            user_id: user_id.clone(),
+            gate_ref: gate_ref.as_str().to_string(),
+            run_id,
+            scope: scope.clone(),
+            recorded_at,
+            delivered_conversation_fingerprints: vec![fingerprint.clone()],
+        }
+    };
+    // The stale route is the most recent, so recency tries it first: resolve
+    // returns StaleGate → it is pruned → the older still-pending route resolves.
+    let route_store = Arc::new(TwoRecordDeliveredGateRouteStore::new(vec![
+        make_record(&stale_gate, TurnRunId::new(), Utc::now()),
+        make_record(&pending_gate, pending_run, Utc::now() - Duration::seconds(60)),
+    ]));
+    // Only the pending gate is reported in the triggered run's scope; the stale
+    // gate is absent (already resolved). The DM scope reports nothing, forcing
+    // the delivered-route fallback.
+    let approval_service = Arc::new(ScopedPendingApprovalInteractionService::new(
+        route_thread,
+        vec![(pending_gate.clone(), pending_run)],
+    ));
+    let workflow = DefaultProductWorkflow::new(
+        Arc::new(FakeInboundTurnService::new()),
+        Arc::new(FakeIdempotencyLedger::new()),
+        Arc::new(FakeConversationBindingService::new()),
+    )
+    .with_approval_interaction_service(approval_service.clone())
+    .with_delivered_gate_routes(route_store.clone());
+
+    let ack = workflow
+        .accept_inbound(scoped_approval_thread_reply_envelope("stale-plus-pending"))
+        .await
+        .expect("single pending gate must resolve once stale candidate is dropped");
+
+    assert!(
+        matches!(ack, ProductInboundAck::Accepted { .. }),
+        "expected Accepted, got: {ack:?}"
+    );
+    // The resolver walks most-recent-first: it tries the stale gate (rejected
+    // StaleGate), prunes it, then resolves the still-pending gate.
+    let resolutions = approval_service.resolutions();
     assert_eq!(
-        route_store.captured_args(),
-        vec![(
-            tenant_id,
-            UserId::new("user:user1").expect("actor user"),
-            fingerprint
-        )],
-        "conversation fallback must query by tenant, user, and delivered conversation fingerprint"
+        resolutions.len(),
+        2,
+        "resolver attempts the stale gate then the pending one"
+    );
+    assert_eq!(
+        resolutions[0].gate_ref, stale_gate,
+        "newest (stale) gate is attempted first"
+    );
+    assert_eq!(
+        resolutions[1].gate_ref, pending_gate,
+        "must end on the still-pending gate"
+    );
+    assert_eq!(
+        route_store.removed(),
+        vec![stale_gate.as_str().to_string()],
+        "only the stale route must be pruned from the store"
     );
 }
 

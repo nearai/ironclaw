@@ -724,10 +724,11 @@ async fn explicit_gate_ref_approve_resolves_via_delivered_route() {
 }
 
 /// Bare `approve` in the DM with two live route records for the same conversation
-/// is rejected as ambiguous — the workflow posts a "declined by policy" hint and
-/// does NOT forward any resolve to the approval service.
+/// resolves the most-recently-delivered gate (recency tiebreak) rather than
+/// failing closed. Exactly one resolve is forwarded — for the newest route —
+/// and `approve gate:<ref>` remains available to target a specific gate.
 #[tokio::test]
-async fn bare_approve_with_two_live_routes_fails_closed_ambiguous() {
+async fn bare_approve_with_two_live_routes_resolves_most_recent() {
     let (harness, inner_approvals) = build_harness_for_delivered_route_tests().await;
 
     // Submit a turn to establish the DM binding (no blocked run needed for
@@ -747,7 +748,8 @@ async fn bare_approve_with_two_live_routes_fails_closed_ambiguous() {
             gate_ref: GATE.to_string(),
             run_id: ironclaw_turns::TurnRunId::new(),
             scope: foreign_run_scope(),
-            recorded_at: chrono::Utc::now(),
+            // Older delivery — recency must prefer GATE_B below.
+            recorded_at: chrono::Utc::now() - chrono::Duration::hours(1),
             delivered_conversation_fingerprints: vec![fingerprint.clone()],
         })
         .await
@@ -771,30 +773,30 @@ async fn bare_approve_with_two_live_routes_fails_closed_ambiguous() {
     assert_eq!(approve_response.status(), StatusCode::OK);
     harness.drain().await;
 
-    // No resolve must have been forwarded to the approval service.
-    assert!(
-        inner_approvals.requests().is_empty(),
-        "ambiguous routes must not reach the approval service"
+    // Exactly one resolve is forwarded — for the most-recently-delivered route
+    // (GATE_B) — rather than fanning out or failing closed without consulting the
+    // service.
+    let requests = inner_approvals.requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "recency must forward exactly one resolve, got {}",
+        requests.len()
+    );
+    assert_eq!(
+        requests[0].gate_ref.as_str(),
+        GATE_B,
+        "recency must resolve the most-recently-delivered gate"
     );
 
-    // The user must receive an "ambiguous" hint (approve gate:<ref>) — not silence, not
-    // a "declined by policy" message.  The approval prompt posted by the DM_BLOCK drain
-    // occupies messages[0]; the rejection hint is messages[1].
+    // No ambiguous hint: the only message is the approval prompt posted by the
+    // DM_BLOCK drain. The bare approve resolved cleanly, so nothing else is posted.
     let messages = harness.slack_messages();
     assert_eq!(
         messages.len(),
-        2,
-        "expected approval prompt (DM_BLOCK) + ambiguous hint (DM_APPROVE), got {} message(s)",
+        1,
+        "expected only the DM_BLOCK approval prompt, got {} message(s)",
         messages.len()
-    );
-    // AmbiguousResolution hint: "Multiple requests are pending … approve gate:<ref> …"
-    // The hint uses the literal placeholder `<ref>`, which the approval prompt does not.
-    assert!(
-        messages[1]["text"]
-            .as_str()
-            .is_some_and(|t| t.contains("approve gate:<ref>")),
-        "hint must prompt user to pick one gate ref; got: {:?}",
-        messages[1]["text"]
     );
 }
 

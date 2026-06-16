@@ -1168,32 +1168,38 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
                 );
                 return;
             }
-            // Authorization: verify the conversation has a valid binding before
-            // posting. Skip silently (debug!) when unauthorized.
-            let binding = match self
+            // Derive the scope for the active run state lookup so the hint can be
+            // state-specific (pending gate vs generic busy). When the conversation
+            // has no resolvable binding — e.g. a gate delivered into a fresh DM
+            // that never carried a prior user message — fall back to the generic
+            // busy copy rather than going silent. Posting a generic "I'm waiting
+            // on approval" back to the conversation that just messaged us leaks no
+            // data: it is a reply to the sender's own conversation. The user's
+            // choice here is to never be left without feedback while a gate is open.
+            let hint = match self
                 .services
                 .binding_service
                 .lookup_binding(ResolveBindingRequest::from_envelope(&envelope))
                 .await
             {
-                Ok(b) => b,
+                Ok(binding) => {
+                    busy_hint_from_run_state(
+                        self.services.turn_coordinator.as_ref(),
+                        self.services.approval_requests.as_deref(),
+                        &binding,
+                        active_run_id,
+                    )
+                    .await
+                }
                 Err(error) => {
                     tracing::debug!(
                         target = "ironclaw::reborn::slack_delivery",
                         error = %error,
-                        "skipped busy-thread hint because the originating conversation was not authorized"
+                        "busy-thread hint falling back to generic copy because the conversation binding was not resolved"
                     );
-                    return;
+                    SLACK_BUSY_APPROVAL_MESSAGE.to_string()
                 }
             };
-            // Derive the scope for the active run state lookup.
-            // Falls back to generic copy on any failure — never skips the hint.
-            let hint = busy_hint_from_run_state(
-                self.services.turn_coordinator.as_ref(),
-                &binding,
-                active_run_id,
-            )
-            .await;
             if let Err(post_err) = post_slack_message(
                 self.services.egress.as_ref(),
                 envelope.external_conversation_ref(),
@@ -1543,6 +1549,7 @@ fn busy_hint_user_message_run_id(
 /// Never returns an error — lookup failures degrade to the generic copy.
 async fn busy_hint_from_run_state(
     coordinator: &dyn TurnCoordinator,
+    approval_requests: Option<&dyn ApprovalRequestStore>,
     binding: &ResolvedBinding,
     active_run_id: TurnRunId,
 ) -> String {
@@ -1562,21 +1569,55 @@ async fn busy_hint_from_run_state(
     };
     match coordinator
         .get_run_state(GetRunStateRequest {
-            scope,
+            scope: scope.clone(),
             run_id: active_run_id,
         })
         .await
     {
         Ok(state) => match state.status {
             TurnStatus::BlockedApproval => match state.gate_ref.as_ref() {
-                Some(gate_ref) => format!(
-                    "Ironclaw is waiting on a pending approval before taking new messages \
-                     — reply `approve {ref}` or `deny` to resume.",
-                    ref = gate_ref.as_str()
-                ),
+                // Name both the blocking gate ref AND what it would approve (the
+                // tool/capability), so the user sees exactly what is holding the
+                // conversation and what `approve` would authorize. The blocking
+                // run is in this thread's scope (that is why the thread is busy),
+                // so the approval request resolves under the derived scope.
+                Some(gate_ref) => {
+                    let what = crate::projection::approval_prompt_context_view(
+                        approval_requests,
+                        gate_ref,
+                        &binding.actor_user_id,
+                        &scope,
+                    )
+                    .await
+                    .map(|ctx| ctx.tool_name);
+                    match what {
+                        Some(tool) => format!(
+                            "Ironclaw is waiting on your approval for `{tool}` before taking new \
+                             messages — reply `approve {ref}` to authorize it or `deny {ref}` to \
+                             decline.",
+                            ref = gate_ref.as_str()
+                        ),
+                        None => format!(
+                            "Ironclaw is waiting on a pending approval (`{ref}`) before taking new \
+                             messages — reply `approve {ref}` or `deny {ref}` to respond.",
+                            ref = gate_ref.as_str()
+                        ),
+                    }
+                }
                 None => SLACK_BUSY_APPROVAL_MESSAGE.to_string(),
             },
-            TurnStatus::BlockedAuth => SLACK_BUSY_GENERIC_MESSAGE.to_string(),
+            // Auth gates can't be completed in Slack (credential sharing is a
+            // security risk), but still name the blocking ref so the user can
+            // decline it here and knows what is holding the thread.
+            TurnStatus::BlockedAuth => match state.gate_ref.as_ref() {
+                Some(gate_ref) => format!(
+                    "Ironclaw is waiting on authentication before taking new messages. Reply \
+                     `auth deny {ref}` to decline it here, or complete the connection in the \
+                     Ironclaw web app to resume.",
+                    ref = gate_ref.as_str()
+                ),
+                None => SLACK_BUSY_GENERIC_MESSAGE.to_string(),
+            },
             _ => SLACK_BUSY_GENERIC_MESSAGE.to_string(),
         },
         Err(err) => {
@@ -3874,10 +3915,10 @@ mod tests {
         );
         let body = std::str::from_utf8(&post_calls[0].body).expect("utf8 body");
         assert!(
-            body.contains("still working on a previous message"),
-            "deferred-busy hint for BlockedAuth must use generic wording, got: {body}"
+            body.contains("waiting on authentication") && body.contains("auth deny"),
+            "deferred-busy hint for BlockedAuth must name the blocking auth gate, got: {body}"
         );
-        // Must not contain the old auth-specific wording.
+        // Must not contain the old auth-prompt wording.
         assert!(
             !body.contains("authentication step"),
             "deferred-busy hint for BlockedAuth must not mention 'authentication step', got: {body}"
@@ -3937,7 +3978,7 @@ mod tests {
         );
         let body = std::str::from_utf8(&post_calls[0].body).expect("utf8 body");
         assert!(
-            body.contains("can't complete authentication over Slack"),
+            body.contains(SLACK_AUTH_UNAVAILABLE_MESSAGE),
             "body must contain SLACK_AUTH_UNAVAILABLE_MESSAGE text, got: {body}"
         );
         assert!(
@@ -4032,13 +4073,16 @@ mod tests {
         );
     }
 
-    /// DeferredBusy + UserMessage + unauthorized binding → no post, no panic.
+    /// DeferredBusy + UserMessage + unresolved binding → generic busy hint posted.
     ///
     /// Uses `TestNoopConversationBindingService` (always fails lookup_binding) to
-    /// simulate an unauthorized conversation: the observer must skip the hint post
-    /// silently rather than posting to an arbitrary channel.
+    /// simulate a conversation with no resolvable binding (e.g. a gate delivered
+    /// into a fresh DM). The observer must still post the generic busy copy to the
+    /// originating conversation rather than leaving the user in silence — replying
+    /// a generic "waiting on approval" notice to the sender's own conversation
+    /// leaks no data.
     #[tokio::test]
-    async fn deferred_busy_unauthorized_binding_posts_nothing() {
+    async fn deferred_busy_unresolved_binding_posts_generic_hint() {
         let install = "test-install";
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         egress.allow_credential_handle("slack_bot_token");
@@ -4076,9 +4120,19 @@ mod tests {
         observer.observe_workflow_ack(env, ack).await;
 
         let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "the generic busy hint must be posted even when the binding does not resolve"
+        );
+        let body = std::str::from_utf8(&post_calls[0].body).expect("utf8 body");
         assert!(
-            !calls.iter().any(|c| c.path == "/api/chat.postMessage"),
-            "no chat.postMessage expected when binding authorization fails"
+            body.contains(SLACK_BUSY_APPROVAL_MESSAGE),
+            "fallback hint must be the generic busy copy, got: {body}"
         );
     }
 
@@ -4189,8 +4243,8 @@ mod tests {
         );
         let body = std::str::from_utf8(&post_calls[0].body).expect("utf8 body");
         assert!(
-            body.contains("still working on a previous message"),
-            "RejectedBusy auth hint must use generic wording, got: {body}"
+            body.contains("waiting on authentication") && body.contains("auth deny"),
+            "RejectedBusy auth hint must name the blocking auth gate, got: {body}"
         );
         assert!(
             !body.contains("authentication step"),
@@ -5310,7 +5364,7 @@ mod tests {
         assert!(
             posted
                 .iter()
-                .any(|b| b.contains("can't complete authentication over Slack")),
+                .any(|b| b.contains(SLACK_AUTH_UNAVAILABLE_MESSAGE)),
             "expected the auth-unavailable notice to be posted; got: {posted:?}"
         );
     }

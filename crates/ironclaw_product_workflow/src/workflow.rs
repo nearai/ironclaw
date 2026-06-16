@@ -449,16 +449,59 @@ async fn delivered_route_base_binding(
     }
 }
 
-/// Outcome of a conversation-fingerprint lookup for delivered gate route
-/// fallback.
-enum DeliveredRouteOutcome {
-    /// No live routes matched this conversation + actor.
-    Miss,
-    /// Exactly one live route matched — proceed with it.
-    Single(Box<ironclaw_outbound::DeliveredGateRouteRecord>),
-    /// More than one live route matched — fail closed; user must specify an
-    /// explicit gate ref.
-    Ambiguous,
+/// Orders the live candidate routes for resolution.
+///
+/// - Exact-ref lookup: the named ref is authoritative. 0 or 1 match passes
+///   through unchanged; >1 (unexpected duplicates) → `Err(())`, which the
+///   caller maps to a fail-closed ambiguity error.
+/// - Bare lookup: sort by delivery time, most-recent first. The resolver walks
+///   this order, resolving the newest still-live gate and pruning any
+///   already-resolved routes it skips past (see the resolve loop in
+///   [`resolve_via_delivered_approval_route`]). In a linear DM "approve" means
+///   the last prompt shown; `approve gate:<ref>` overrides.
+///
+/// Staleness is decided by the authoritative `resolve()` outcome, not by a
+/// separate `list_pending` probe: the read model's blocked-run lookup is scope
+/// fragile (it is exactly why the bare DM reply fell through to this fallback),
+/// so probing it here false-negatives live gates. `resolve()` looks the gate up
+/// by request id and returns `MissingGate`/`StaleGate` when it is truly gone.
+fn order_delivered_routes(
+    mut live: Vec<ironclaw_outbound::DeliveredGateRouteRecord>,
+    expected_gate_ref: Option<&str>,
+) -> Result<Vec<ironclaw_outbound::DeliveredGateRouteRecord>, ()> {
+    if expected_gate_ref.is_some() {
+        if live.len() > 1 {
+            debug!(
+                count = live.len(),
+                "delivered gate route exact-ref lookup matched multiple routes — ambiguous"
+            );
+            return Err(());
+        }
+        return Ok(live);
+    }
+    // Bare lookup: most-recently-delivered first.
+    live.sort_by_key(|route| std::cmp::Reverse(route.recorded_at));
+    Ok(live)
+}
+
+/// Best-effort removal of a delivered-route record whose underlying gate already
+/// resolved. Keeps the per-conversation candidate set from accumulating dead
+/// routes that would otherwise linger until the 48h TTL. Errors are swallowed —
+/// pruning must never affect resolution.
+async fn prune_delivered_route(
+    delivered_gate_routes: &dyn ironclaw_outbound::DeliveredGateRouteStore,
+    route: &ironclaw_outbound::DeliveredGateRouteRecord,
+) {
+    if let Err(error) = delivered_gate_routes
+        .remove_delivered_gate_route(&route.tenant_id, &route.user_id, &route.gate_ref)
+        .await
+    {
+        debug!(
+            error = %error,
+            gate_ref = %route.gate_ref,
+            "best-effort prune of resolved delivered gate route failed"
+        );
+    }
 }
 
 async fn load_delivered_routes_for_envelope(
@@ -478,7 +521,7 @@ async fn load_delivered_routes_for_envelope(
     // — no `GateRef::new` wrap — so routes whose stored string fails validation
     // are not silently dropped before the predicate runs.
     gate_kind_filter: fn(&str) -> bool,
-) -> DeliveredRouteOutcome {
+) -> Vec<ironclaw_outbound::DeliveredGateRouteRecord> {
     let conversation_ref = match delivered_route_conversation_ref(envelope) {
         Ok(conversation_ref) => conversation_ref,
         Err(error) => {
@@ -486,7 +529,7 @@ async fn load_delivered_routes_for_envelope(
                 error = %error,
                 "delivered gate route fallback skipped because conversation reference was invalid"
             );
-            return DeliveredRouteOutcome::Miss;
+            return Vec::new();
         }
     };
     let conversation_fingerprint = conversation_ref.conversation_fingerprint();
@@ -505,7 +548,7 @@ async fn load_delivered_routes_for_envelope(
                 error = %error,
                 "delivered gate route fallback lookup failed"
             );
-            return DeliveredRouteOutcome::Miss;
+            return Vec::new();
         }
     };
     // Filter: non-expired, tenant+actor match, then either exact-ref match
@@ -551,23 +594,10 @@ async fn load_delivered_routes_for_envelope(
             true
         })
         .collect();
-    match live.as_slice() {
-        [] => {
-            debug!("delivered gate route fallback found no live route for conversation");
-            DeliveredRouteOutcome::Miss
-        }
-        [_] => match live.into_iter().next() {
-            Some(route) => DeliveredRouteOutcome::Single(Box::new(route)),
-            None => DeliveredRouteOutcome::Miss,
-        },
-        _ => {
-            debug!(
-                count = live.len(),
-                "delivered gate route fallback found multiple live routes — ambiguous"
-            );
-            DeliveredRouteOutcome::Ambiguous
-        }
+    if live.is_empty() {
+        debug!("delivered gate route fallback found no live route for conversation");
     }
+    live
 }
 
 /// Outcome of the shared delivered-route selection step used by both the
@@ -577,15 +607,18 @@ struct SelectedDeliveredRoute {
     actor_user_id: UserId,
 }
 
-/// Resolves the binding and selects a delivered gate route for `envelope`.
+/// Resolves the binding and selects the ordered delivered gate route candidates
+/// for `envelope`.
 ///
 /// Shared by [`resolve_via_delivered_approval_route`] and
-/// [`resolve_via_delivered_auth_route`]. Returns `None` on a route miss
-/// (the caller should fall through to the next strategy), `Some(Err(_))` on an
+/// [`resolve_via_delivered_auth_route`]. Returns `None` on a route miss (the
+/// caller should fall through to the next strategy), `Some(Err(_))` on an
 /// ambiguity (mapped by the caller-supplied `ambiguity_error` fn) or a hard
-/// error, and `Some(Ok(_))` with the selected route and resolved actor when
-/// exactly one live route matched.
-async fn select_delivered_gate_route(
+/// error, and `Some(Ok(routes))` with the candidates ordered most-recent-first.
+/// The caller walks the candidates, resolving the newest still-live gate and
+/// pruning any already-resolved routes it skips (see [`order_delivered_routes`]).
+#[allow(clippy::too_many_arguments)]
+async fn select_delivered_gate_routes(
     envelope: &ProductInboundEnvelope,
     binding_service: &dyn ConversationBindingService,
     delivered_gate_routes: &dyn ironclaw_outbound::DeliveredGateRouteStore,
@@ -593,7 +626,7 @@ async fn select_delivered_gate_route(
     gate_kind_filter: fn(&str) -> bool,
     pre_resolved_binding: Option<&ResolvedBinding>,
     ambiguity_error: impl Fn() -> ProductWorkflowError,
-) -> Option<Result<SelectedDeliveredRoute, ProductWorkflowError>> {
+) -> Option<Result<Vec<SelectedDeliveredRoute>, ProductWorkflowError>> {
     // When the dispatcher already resolved a binding for this envelope (the
     // MissingGate fallback path), reuse it instead of re-deriving one — two
     // independent lookups can diverge if route configuration changes between
@@ -608,23 +641,28 @@ async fn select_delivered_gate_route(
             &derived_binding
         }
     };
-    let route = match load_delivered_routes_for_envelope(
+    let live = load_delivered_routes_for_envelope(
         envelope,
         binding,
         delivered_gate_routes,
         expected_gate_ref,
         gate_kind_filter,
     )
-    .await
-    {
-        DeliveredRouteOutcome::Miss => return None,
-        DeliveredRouteOutcome::Single(route) => *route,
-        DeliveredRouteOutcome::Ambiguous => return Some(Err(ambiguity_error())),
+    .await;
+    let ordered = match order_delivered_routes(live, expected_gate_ref) {
+        Ok(ordered) => ordered,
+        Err(()) => return Some(Err(ambiguity_error())),
     };
-    Some(Ok(SelectedDeliveredRoute {
-        actor_user_id: binding.actor_user_id.clone(),
-        route,
-    }))
+    if ordered.is_empty() {
+        return None;
+    }
+    Some(Ok(ordered
+        .into_iter()
+        .map(|route| SelectedDeliveredRoute {
+            actor_user_id: binding.actor_user_id.clone(),
+            route,
+        })
+        .collect()))
 }
 
 // arch-exempt: too_many_args, needs a DeliveredRouteResolutionContext bundle (services + dispatch identity), plan docs/plans/2026-06-10-slack-gate-feedback-and-routing.md Phase C
@@ -639,7 +677,7 @@ async fn resolve_via_delivered_approval_route(
     expected_gate_ref: Option<&str>,
     pre_resolved_binding: Option<&ResolvedBinding>,
 ) -> Option<Result<DispatchedAction, ProductWorkflowError>> {
-    let selected = match select_delivered_gate_route(
+    let candidates = match select_delivered_gate_routes(
         envelope,
         binding_service,
         delivered_gate_routes,
@@ -657,50 +695,88 @@ async fn resolve_via_delivered_approval_route(
     {
         None => return None,
         Some(Err(error)) => return Some(Err(error)),
-        Some(Ok(selected)) => selected,
+        Some(Ok(candidates)) => candidates,
     };
-    let gate_ref = GateRef::new(selected.route.gate_ref.clone()).map_err(|_| {
-        ProductWorkflowError::ApprovalInteractionRejected {
-            kind: ApprovalInteractionRejectionKind::InvalidGateRef,
-        }
-    });
-    let gate_ref = match gate_ref {
-        Ok(gate_ref) => gate_ref,
-        Err(error) => return Some(Err(error)),
-    };
+    // A bare reply walks candidates most-recent-first, skipping (and pruning)
+    // routes whose gate already resolved until it finds the newest live one. An
+    // exact-ref reply names a single gate, so a stale error must surface as-is
+    // rather than silently resolving a different gate.
+    let skip_stale = expected_gate_ref.is_none();
     let idempotency_key = match approval_resolution_idempotency_key(action_fingerprint) {
         Ok(idempotency_key) => idempotency_key,
         Err(error) => return Some(Err(error)),
     };
-    let response = match approval_interaction_service
-        .resolve(ResolveApprovalInteractionRequest {
-            scope: selected.route.scope,
-            actor: TurnActor::new(selected.actor_user_id),
-            run_id_hint: Some(selected.route.run_id),
-            gate_ref,
-            decision,
-            idempotency_key,
-        })
-        .await
-    {
-        Ok(response) => response,
-        Err(error) => return Some(Err(error)),
-    };
-    let submitted_run_id = run_id_from_approval_resolution(response);
-    let dispatch_kind = match ActionDispatchKind::try_from_payload(envelope.payload()) {
-        Ok(kind) => kind,
-        Err(error) => return Some(Err(error)),
-    };
-    Some(
-        interaction_accepted_message_ref("approval", envelope).map(|accepted_message_ref| {
-            DispatchedAction {
-                ack: ProductInboundAck::Accepted {
-                    accepted_message_ref,
-                    submitted_run_id,
-                },
-                dispatch_kind,
+    let mut last_stale_error = None;
+    for selected in candidates {
+        let gate_ref = match GateRef::new(selected.route.gate_ref.clone()) {
+            Ok(gate_ref) => gate_ref,
+            // A malformed stored gate ref is corrupt data, not a resolved gate —
+            // surface it rather than silently skipping past it.
+            Err(_) => {
+                return Some(Err(ProductWorkflowError::ApprovalInteractionRejected {
+                    kind: ApprovalInteractionRejectionKind::InvalidGateRef,
+                }));
             }
-        }),
+        };
+        let response = match approval_interaction_service
+            .resolve(ResolveApprovalInteractionRequest {
+                scope: selected.route.scope.clone(),
+                actor: TurnActor::new(selected.actor_user_id.clone()),
+                run_id_hint: Some(selected.route.run_id),
+                gate_ref,
+                decision,
+                idempotency_key: idempotency_key.clone(),
+            })
+            .await
+        {
+            Ok(response) => response,
+            Err(error) if skip_stale && is_stale_approval_error(&error) => {
+                debug!(
+                    gate_ref = %selected.route.gate_ref,
+                    "delivered approval route stale — pruning and trying next candidate"
+                );
+                prune_delivered_route(delivered_gate_routes, &selected.route).await;
+                last_stale_error = Some(error);
+                continue;
+            }
+            Err(error) => return Some(Err(error)),
+        };
+        let submitted_run_id = run_id_from_approval_resolution(response);
+        let dispatch_kind = match ActionDispatchKind::try_from_payload(envelope.payload()) {
+            Ok(kind) => kind,
+            Err(error) => return Some(Err(error)),
+        };
+        return Some(
+            interaction_accepted_message_ref("approval", envelope).map(|accepted_message_ref| {
+                DispatchedAction {
+                    ack: ProductInboundAck::Accepted {
+                        accepted_message_ref,
+                        submitted_run_id,
+                    },
+                    dispatch_kind,
+                }
+            }),
+        );
+    }
+    // Every candidate's gate had already resolved. Surface the stale error so the
+    // user sees "no longer pending" rather than a generic binding failure.
+    Some(Err(last_stale_error.unwrap_or(
+        ProductWorkflowError::ApprovalInteractionRejected {
+            kind: ApprovalInteractionRejectionKind::MissingGate,
+        },
+    )))
+}
+
+/// Errors that mean a delivered route's underlying approval gate is gone — the
+/// gate already resolved or no longer exists. On a bare lookup these are
+/// skippable: prune the dead route and try the next (older) candidate.
+fn is_stale_approval_error(error: &ProductWorkflowError) -> bool {
+    matches!(
+        error,
+        ProductWorkflowError::ApprovalInteractionRejected {
+            kind: ApprovalInteractionRejectionKind::MissingGate
+                | ApprovalInteractionRejectionKind::StaleGate,
+        }
     )
 }
 
@@ -716,7 +792,7 @@ async fn resolve_via_delivered_auth_route(
     expected_gate_ref: Option<&str>,
     pre_resolved_binding: Option<&ResolvedBinding>,
 ) -> Option<Result<DispatchedAction, ProductWorkflowError>> {
-    let selected = match select_delivered_gate_route(
+    let candidates = match select_delivered_gate_routes(
         envelope,
         binding_service,
         delivered_gate_routes,
@@ -734,46 +810,77 @@ async fn resolve_via_delivered_auth_route(
     {
         None => return None,
         Some(Err(error)) => return Some(Err(error)),
-        Some(Ok(selected)) => selected,
+        Some(Ok(candidates)) => candidates,
     };
-    let gate_ref = GateRef::new(selected.route.gate_ref.clone()).map_err(|_| {
-        ProductWorkflowError::AuthInteractionRejected {
-            kind: AuthInteractionRejectionKind::InvalidGateRef,
-        }
-    });
-    let gate_ref = match gate_ref {
-        Ok(gate_ref) => gate_ref,
-        Err(error) => return Some(Err(error)),
-    };
+    let skip_stale = expected_gate_ref.is_none();
     let idempotency_key = match auth_resolution_idempotency_key(action_fingerprint) {
         Ok(idempotency_key) => idempotency_key,
         Err(error) => return Some(Err(error)),
     };
-    let response = match auth_interaction_service
-        .resolve(ResolveAuthInteractionRequest {
-            scope: selected.route.scope,
-            actor: TurnActor::new(selected.actor_user_id),
-            run_id_hint: Some(selected.route.run_id),
-            gate_ref,
-            decision,
-            idempotency_key,
-        })
-        .await
-    {
-        Ok(response) => response,
-        Err(error) => return Some(Err(error)),
-    };
-    let submitted_run_id = run_id_from_auth_resolution(response);
-    Some(
-        interaction_accepted_message_ref("auth", envelope).and_then(|accepted_message_ref| {
-            Ok(DispatchedAction {
-                ack: ProductInboundAck::Accepted {
-                    accepted_message_ref,
-                    submitted_run_id,
-                },
-                dispatch_kind: ActionDispatchKind::try_from_payload(envelope.payload())?,
+    let mut last_stale_error = None;
+    for selected in candidates {
+        let gate_ref = match GateRef::new(selected.route.gate_ref.clone()) {
+            Ok(gate_ref) => gate_ref,
+            // A malformed stored gate ref is corrupt data, not a resolved gate.
+            Err(_) => {
+                return Some(Err(ProductWorkflowError::AuthInteractionRejected {
+                    kind: AuthInteractionRejectionKind::InvalidGateRef,
+                }));
+            }
+        };
+        let response = match auth_interaction_service
+            .resolve(ResolveAuthInteractionRequest {
+                scope: selected.route.scope.clone(),
+                actor: TurnActor::new(selected.actor_user_id.clone()),
+                run_id_hint: Some(selected.route.run_id),
+                gate_ref,
+                decision: decision.clone(),
+                idempotency_key: idempotency_key.clone(),
             })
-        }),
+            .await
+        {
+            Ok(response) => response,
+            Err(error) if skip_stale && is_stale_auth_error(&error) => {
+                debug!(
+                    gate_ref = %selected.route.gate_ref,
+                    "delivered auth route stale — pruning and trying next candidate"
+                );
+                prune_delivered_route(delivered_gate_routes, &selected.route).await;
+                last_stale_error = Some(error);
+                continue;
+            }
+            Err(error) => return Some(Err(error)),
+        };
+        let submitted_run_id = run_id_from_auth_resolution(response);
+        return Some(
+            interaction_accepted_message_ref("auth", envelope).and_then(|accepted_message_ref| {
+                Ok(DispatchedAction {
+                    ack: ProductInboundAck::Accepted {
+                        accepted_message_ref,
+                        submitted_run_id,
+                    },
+                    dispatch_kind: ActionDispatchKind::try_from_payload(envelope.payload())?,
+                })
+            }),
+        );
+    }
+    Some(Err(last_stale_error.unwrap_or(
+        ProductWorkflowError::AuthInteractionRejected {
+            kind: AuthInteractionRejectionKind::MissingAuth,
+        },
+    )))
+}
+
+/// Errors that mean a delivered route's underlying auth gate is gone — the
+/// auth request already resolved or no longer exists. On a bare lookup these
+/// are skippable: prune the dead route and try the next (older) candidate.
+fn is_stale_auth_error(error: &ProductWorkflowError) -> bool {
+    matches!(
+        error,
+        ProductWorkflowError::AuthInteractionRejected {
+            kind: AuthInteractionRejectionKind::MissingAuth
+                | AuthInteractionRejectionKind::StaleAuth,
+        }
     )
 }
 
