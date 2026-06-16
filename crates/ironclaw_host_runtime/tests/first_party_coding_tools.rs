@@ -448,6 +448,122 @@ async fn builtin_apply_patch_failure_reports_path_and_match_count() {
 }
 
 #[tokio::test]
+async fn builtin_apply_patch_rejects_empty_old_string() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("main.rs"), "fn main() {}\n").unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/main.rs"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        APPLY_PATCH_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/main.rs",
+            "old_string": "",
+            "new_string": "new();"
+        }),
+        context,
+    )
+    .await;
+
+    assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+}
+
+#[tokio::test]
+async fn builtin_apply_patch_ambiguous_match_reports_floor_count_without_full_scan() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("main.rs"),
+        "old();\nold();\nold();\nold();\n",
+    )
+    .unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/main.rs"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        APPLY_PATCH_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/main.rs",
+            "old_string": "old();",
+            "new_string": "new();"
+        }),
+        context,
+    )
+    .await;
+
+    // The uniqueness scan short-circuits after the second hit, so the count
+    // is reported as a floor — not the exact total of 4.
+    assert_eq!(failure.kind, RuntimeFailureKind::OperationFailed);
+    assert_eq!(
+        failure.message.as_deref(),
+        Some(
+            "apply_patch failed for path workspace main.rs: old_string matched 2 or more times; \
+set replace_all=true or provide a unique old_string"
+        )
+    );
+}
+
+#[tokio::test]
+async fn builtin_apply_patch_replace_all_substitutes_every_occurrence() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("main.rs"), "old();\nkeep();\nold();\n").unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/main.rs"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let value = invoke_with_context(
+        &runtime,
+        APPLY_PATCH_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/main.rs",
+            "old_string": "old();",
+            "new_string": "new();",
+            "replace_all": true
+        }),
+        context,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(value["replacements"], json!(2));
+    let rewritten = std::fs::read_to_string(temp.path().join("main.rs")).unwrap();
+    assert_eq!(rewritten, "new();\nkeep();\nnew();\n");
+}
+
+#[tokio::test]
 async fn builtin_read_file_failure_reports_missing_path() {
     let temp = tempfile::tempdir().unwrap();
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());

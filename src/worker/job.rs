@@ -1060,6 +1060,9 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 reason: s,
             })?;
 
+        // Free per-job file state (history snapshots, read-before-edit entries)
+        self.tools().cleanup_job_file_state(self.job_id).await;
+
         self.log_event(
             "result",
             serde_json::json!({
@@ -1090,6 +1093,9 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 id: self.job_id,
                 reason: s,
             })?;
+
+        // Free per-job file state (history snapshots, read-before-edit entries)
+        self.tools().cleanup_job_file_state(self.job_id).await;
 
         self.log_event(
             "result",
