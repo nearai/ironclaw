@@ -218,7 +218,7 @@ jobs:
     needs: [changes, matrix-config]
     if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && needs.changes.outputs.has_core_code == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
@@ -249,8 +249,10 @@ jobs:
           key: legacy-all-features-${{ matrix.name }}
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Install cargo-component
+        if: matrix.kind == 'integration'
         uses: ./.github/actions/install-cargo-component
       - name: Build WASM artifacts for integration tests
+        if: matrix.kind == 'integration'
         run: |
           ./scripts/build-wasm-extensions.sh --channels
           ./scripts/build-wasm-extensions.sh --first-party

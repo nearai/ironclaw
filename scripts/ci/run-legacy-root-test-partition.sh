@@ -50,7 +50,7 @@ fi
 enabled_feature_csv="$(IFS=,; echo "${enabled_features[*]}")"
 export ENABLED_FEATURES="${enabled_feature_csv}"
 
-mapfile -t integration_tests < <(
+integration_tests_output="$(
   cargo metadata --no-deps --format-version=1 \
     | python3 -c '
 import json
@@ -89,7 +89,15 @@ for package in metadata["packages"]:
 for name in sorted(names):
     print(name)
 '
-)
+)" || {
+  echo "Failed to enumerate legacy root integration tests" >&2
+  exit 1
+}
+
+integration_tests=()
+if [ -n "${integration_tests_output}" ]; then
+  mapfile -t integration_tests <<< "${integration_tests_output}"
+fi
 
 ran_any=false
 for index in "${!integration_tests[@]}"; do
