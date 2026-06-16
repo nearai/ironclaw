@@ -10,6 +10,7 @@ use super::model_visible_output::{
 const MODEL_VISIBLE_HTTP_OUTPUT_OVERHEAD_BYTES: usize = 2 * 1024;
 const MODEL_VISIBLE_HTTP_HEADER_BYTES: usize = 8 * 1024;
 const MODEL_VISIBLE_HTTP_TRUNCATION_ENVELOPE_BYTES: usize = 1024;
+const MAX_MODEL_VISIBLE_BINARY_INLINE_BYTES: usize = 512;
 const MAX_MODEL_VISIBLE_RESPONSE_HEADERS: usize = 32;
 const MAX_MODEL_VISIBLE_RESPONSE_HEADER_NAME_BYTES: usize = 128;
 const MAX_MODEL_VISIBLE_RESPONSE_HEADER_VALUE_BYTES: usize = 1024;
@@ -153,14 +154,20 @@ fn insert_inline_body(
         }
         Err(error) => {
             let body = error.into_bytes();
-            let binary_limit = max_binary_bytes_for_base64_budget(limit);
-            let returned = body.len().min(binary_limit);
-            body_truncated |= returned < body.len();
-            returned_body_bytes = returned;
-            output.insert(
-                "body_base64".to_string(),
-                Value::String(BASE64_STANDARD.encode(&body[..returned])),
-            );
+            if body.len() > MAX_MODEL_VISIBLE_BINARY_INLINE_BYTES {
+                body_truncated = true;
+                returned_body_bytes = 0;
+                output.insert("body_base64_omitted".to_string(), json!(true));
+            } else {
+                let binary_limit = max_binary_bytes_for_base64_budget(limit);
+                let returned = body.len().min(binary_limit);
+                body_truncated |= returned < body.len();
+                returned_body_bytes = returned;
+                output.insert(
+                    "body_base64".to_string(),
+                    Value::String(BASE64_STANDARD.encode(&body[..returned])),
+                );
+            }
         }
     }
 
