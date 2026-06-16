@@ -2,6 +2,7 @@ import { React } from "../../../lib/html.js";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { gatewayStatus } from "../../../lib/api.js";
 import { listConnectableChannels } from "../../../lib/channel-connect.js";
+import { isChannelExtensionKind } from "../lib/extensions-schema.js";
 import {
   fetchExtensions,
   fetchExtensionRegistry,
@@ -17,6 +18,25 @@ import {
 
 const OAUTH_SETUP_REFRESH_MS = 2000;
 const OAUTH_SETUP_TIMEOUT_MS = 10 * 60 * 1000;
+
+function packageId(item) {
+  return item?.package_ref?.id || null;
+}
+
+function displayName(item) {
+  return item?.display_name || packageId(item) || "";
+}
+
+function catalogId(prefix, item, index) {
+  return packageId(item) || `${prefix}:${displayName(item) || "unknown"}:${index}`;
+}
+
+function catalogSort(a, b) {
+  if (a.installed !== b.installed) return a.installed ? -1 : 1;
+  return displayName(a.entry || a.extension).localeCompare(
+    displayName(b.entry || b.extension)
+  );
+}
 
 export function useExtensions() {
   const queryClient = useQueryClient();
@@ -126,18 +146,47 @@ export function useExtensions() {
   const extensions = extensionsQuery.data?.extensions || [];
   const registry = registryQuery.data?.entries || [];
   const connectableChannels = connectableChannelsQuery.data?.channels || [];
+  const extensionById = new Map(
+    extensions
+      .map((extension) => [packageId(extension), extension])
+      .filter(([id]) => Boolean(id))
+  );
+  const registryIds = new Set(registry.map((entry) => packageId(entry)).filter(Boolean));
+  const catalogEntries = [
+    ...registry.map((entry, index) => {
+      const id = packageId(entry);
+      const extension = id ? extensionById.get(id) || null : null;
+      return {
+        id: catalogId("registry", entry, index),
+        installed: Boolean(extension || entry.installed),
+        entry,
+        extension,
+      };
+    }),
+    ...extensions
+      .filter((extension) => {
+        const id = packageId(extension);
+        return !id || !registryIds.has(id);
+      })
+      .map((extension, index) => ({
+        id: catalogId("installed", extension, index),
+        installed: true,
+        entry: null,
+        extension,
+      })),
+  ].sort(catalogSort);
 
-  const channels = extensions.filter((e) => e.kind === "wasm_channel");
+  const isChannel = (entry) => isChannelExtensionKind(entry.kind);
+  const channels = extensions.filter(isChannel);
   const mcpServers = extensions.filter((e) => e.kind === "mcp_server");
-  const tools = extensions.filter((e) => e.kind !== "wasm_channel" && e.kind !== "mcp_server");
+  const tools = extensions.filter((e) => !isChannel(e) && e.kind !== "mcp_server");
 
-  const channelRegistry = registry.filter((e) => (e.kind === "wasm_channel" || e.kind === "channel") && !e.installed);
+  const channelRegistry = registry.filter((e) => isChannel(e) && !e.installed);
   const mcpRegistry = registry.filter((e) => e.kind === "mcp_server" && !e.installed);
   const toolRegistry = registry.filter(
     (e) =>
       e.kind !== "mcp_server" &&
-      e.kind !== "wasm_channel" &&
-      e.kind !== "channel" &&
+      !isChannel(e) &&
       !e.installed
   );
 
@@ -154,6 +203,7 @@ export function useExtensions() {
     mcpRegistry,
     toolRegistry,
     registry,
+    catalogEntries,
     connectableChannels,
     isLoading,
     isBusy,

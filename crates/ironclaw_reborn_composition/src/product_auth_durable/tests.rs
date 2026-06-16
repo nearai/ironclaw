@@ -1326,6 +1326,101 @@ async fn filesystem_manual_token_rotation_removes_previous_secret() {
     );
 }
 
+#[tokio::test]
+async fn filesystem_manual_token_reconnect_updates_bound_account_across_a_different_thread() {
+    // Regression (#4935 defect A, manual-token durable path): a manual-token
+    // reconnect from a different thread/invocation than the account was created
+    // in must UPDATE the bound account at owner granularity. The apply step used
+    // `validate_account_update_target` (full `scope_matches`), so setup accepted
+    // the binding but submit rejected it with CrossScopeDenied and would re-fork.
+    use ironclaw_auth::{
+        CredentialAccountUpdateBinding, ManualTokenSetupRequest, SecretSubmitRequest,
+    };
+
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
+
+    // Account created in thread-a.
+    let mut create_scope = test_scope();
+    create_scope.resource.thread_id = Some(ThreadId::new("thread-a").unwrap());
+    let challenge1 = service
+        .request_secret_input(ManualTokenSetupRequest {
+            scope: create_scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+    let AuthChallenge::ManualTokenRequired {
+        interaction_id: iid1,
+        ..
+    } = challenge1
+    else {
+        panic!("expected ManualTokenRequired");
+    };
+    let account_id = service
+        .submit_manual_token(
+            &create_scope,
+            SecretSubmitRequest {
+                interaction_id: iid1,
+                secret: SecretString::from("token-v1"),
+            },
+        )
+        .await
+        .unwrap()
+        .account_id;
+
+    // Reconnect from thread-b (fresh invocation), binding to the same account.
+    let mut reauth_scope = test_scope();
+    reauth_scope.resource.thread_id = Some(ThreadId::new("thread-b").unwrap());
+    let challenge2 = service
+        .request_secret_input(ManualTokenSetupRequest {
+            scope: reauth_scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: Some(CredentialAccountUpdateBinding {
+                account_id,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: vec![],
+            }),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .expect("reconnect challenge across a different thread");
+    let AuthChallenge::ManualTokenRequired {
+        interaction_id: iid2,
+        ..
+    } = challenge2
+    else {
+        panic!("expected ManualTokenRequired for reconnect");
+    };
+    let result = service
+        .submit_manual_token(
+            &reauth_scope,
+            SecretSubmitRequest {
+                interaction_id: iid2,
+                secret: SecretString::from("token-v2"),
+            },
+        )
+        .await
+        .expect("cross-thread manual-token reconnect must update the bound account, not fork");
+    assert_eq!(result.account_id, account_id);
+
+    // No fork: still exactly one account for the owner.
+    let accounts = service
+        .accounts_for_owner(&create_scope.to_credential_owner())
+        .await
+        .unwrap();
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].id, account_id);
+}
+
 // ─── fix: durable SecretCleanupService purges secrets on Uninstall ───────────
 
 #[tokio::test]
@@ -1839,6 +1934,171 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
             .unwrap()
             .is_some(),
         "v2 refresh handle must be present in SecretStore after re-auth"
+    );
+}
+
+// ─── [tests] OAuth reauth updates the bound account across transient scope diffs
+
+#[tokio::test]
+async fn filesystem_oauth_reauth_updates_bound_account_across_fresh_invocation() {
+    // Defect A, durable callback path: the bound-account update resolves at owner
+    // granularity. When the reconnect flow's scope differs from the account's
+    // creation scope ONLY by transient invocation/thread/mission, the callback
+    // must still update the SAME account. A regression to full `scope_matches`
+    // (in `validate_scoped_update_binding` or `update_bound_oauth_account`) would
+    // reject this with CrossScopeDenied. Owner granularity is tenant/user/agent/
+    // project plus path-segmenting session — all unchanged across the reconnect.
+    use ironclaw_auth::{CredentialAccountUpdateBinding, ProviderCallbackOutcome};
+
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let setup_scope = test_scope();
+    let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
+
+    // ── Step 1: initial flow creates the account under `setup_scope`. ─────────
+    let flow1 = service
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: setup_scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
+                    .unwrap(),
+                expires_at: Utc::now() + Duration::minutes(5),
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: Some(state_hash("state1")),
+            pkce_verifier_hash: Some(pkce_hash("pkce1")),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+    service
+        .claim_oauth_callback(
+            &setup_scope,
+            OAuthCallbackClaimRequest {
+                flow_id: flow1.id,
+                opaque_state_hash: state_hash("state1"),
+                provider: google_provider(),
+                pkce_verifier_hash: pkce_hash("pkce1"),
+            },
+        )
+        .await
+        .unwrap();
+    let access_v1 = SecretHandle::new("oauth-access-v1").unwrap();
+    let completed1 = service
+        .complete_oauth_callback(
+            &setup_scope,
+            OAuthCallbackInput {
+                flow_id: flow1.id,
+                opaque_state_hash: state_hash("state1"),
+                outcome: ProviderCallbackOutcome::Authorized {
+                    exchange: OAuthProviderExchange {
+                        provider: google_provider(),
+                        account_label: account_label(),
+                        authorization_code_hash: code_hash("code1"),
+                        pkce_verifier_hash: pkce_hash("pkce1"),
+                        access_secret: access_v1.clone(),
+                        refresh_secret: None,
+                        scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
+                        account_id: None,
+                    },
+                },
+            },
+        )
+        .await
+        .unwrap();
+    let account_id = completed1
+        .credential_account_id
+        .expect("first OAuth flow must produce a credential account");
+
+    // ── Step 2: reconnect from a DIFFERENT context — fresh invocation plus a
+    // different thread/mission, same owner (tenant/user/agent/project/session).
+    let mut reauth_resource = setup_scope.resource.clone();
+    reauth_resource.invocation_id = InvocationId::new();
+    reauth_resource.thread_id = Some(ThreadId::new("thread-reauth").unwrap());
+    reauth_resource.mission_id = Some(ironclaw_host_api::MissionId::new("mission-reauth").unwrap());
+    let reauth_scope = AuthProductScope::new(reauth_resource, setup_scope.surface);
+
+    let flow2 = service
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: reauth_scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
+                    .unwrap(),
+                expires_at: Utc::now() + Duration::minutes(5),
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: Some(CredentialAccountUpdateBinding {
+                account_id,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: vec![],
+            }),
+            opaque_state_hash: Some(state_hash("state2")),
+            pkce_verifier_hash: Some(pkce_hash("pkce2")),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .expect("cross-invocation reconnect must accept the owner's binding");
+    service
+        .claim_oauth_callback(
+            &reauth_scope,
+            OAuthCallbackClaimRequest {
+                flow_id: flow2.id,
+                opaque_state_hash: state_hash("state2"),
+                provider: google_provider(),
+                pkce_verifier_hash: pkce_hash("pkce2"),
+            },
+        )
+        .await
+        .unwrap();
+    let access_v2 = SecretHandle::new("oauth-access-v2").unwrap();
+    let completed2 = service
+        .complete_oauth_callback(
+            &reauth_scope,
+            OAuthCallbackInput {
+                flow_id: flow2.id,
+                opaque_state_hash: state_hash("state2"),
+                outcome: ProviderCallbackOutcome::Authorized {
+                    exchange: OAuthProviderExchange {
+                        provider: google_provider(),
+                        account_label: account_label(),
+                        authorization_code_hash: code_hash("code2"),
+                        pkce_verifier_hash: pkce_hash("pkce2"),
+                        access_secret: access_v2.clone(),
+                        refresh_secret: None,
+                        scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
+                        account_id: None,
+                    },
+                },
+            },
+        )
+        .await
+        .expect("cross-invocation reconnect callback must update the bound account");
+
+    // The bound account was UPDATED in place across the transient scope diff —
+    // same account id, carrying the re-auth's access secret, and not forked.
+    assert_eq!(
+        completed2.credential_account_id,
+        Some(account_id),
+        "reconnect must complete against the same owner account, not a fork",
+    );
+    let owner_accounts = service.accounts_for_owner(&setup_scope).await.unwrap();
+    assert_eq!(
+        owner_accounts.len(),
+        1,
+        "reconnect must not fork a second account",
+    );
+    assert_eq!(
+        owner_accounts[0].access_secret,
+        Some(access_v2),
+        "the bound account must carry the re-auth access secret",
     );
 }
 

@@ -220,12 +220,22 @@ pub enum RebornSubmitTurnResponse {
         resolved_run_profile_version: u64,
         event_cursor: EventCursor,
     },
-    DeferredBusy {
+    RejectedBusy {
         thread_id: ThreadId,
         accepted_message_ref: AcceptedMessageRef,
-        active_run_id: TurnRunId,
-        status: TurnStatus,
-        event_cursor: EventCursor,
+        /// The run that was blocking at the time of rejection.
+        ///
+        /// `Some` on a fresh `ThreadBusy` rejection (the run is known and
+        /// still queryable). `None` on an idempotent replay where the original
+        /// blocking run may have already terminated and its id cannot be
+        /// recovered from the stored message record.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_run_id: Option<TurnRunId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<TurnStatus>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_cursor: Option<EventCursor>,
+        notice: String,
     },
     AlreadySubmitted {
         thread_id: ThreadId,
@@ -266,6 +276,27 @@ pub struct RebornTimelineResponse {
     /// start of the thread and there is nothing more to load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+}
+
+/// Request the raw bytes of one landed attachment, addressed by the thread and
+/// message that carry it plus the attachment's per-message id. The triple is
+/// required because an attachment id is only unique within its message, not
+/// across a thread. The caller's authority comes from the authenticated session
+/// (the scope is derived server-side), never from these path values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAttachmentRequest {
+    pub thread_id: String,
+    pub message_id: String,
+    pub attachment_id: String,
+}
+
+/// Raw bytes of one landed attachment plus the metadata a browser needs to
+/// render or download it. Returned by [`super::RebornServicesApi::read_attachment`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebornAttachmentBytes {
+    pub mime_type: String,
+    pub filename: Option<String>,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -391,6 +422,16 @@ pub struct RebornListThreadsResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornListAutomationsResponse {
     pub automations: Vec<RebornAutomationInfo>,
+    /// Whether the background trigger poller (scheduler) is running. When
+    /// `false`, listed schedule automations will never actually fire, and the
+    /// browser surfaces a "scheduling is off" notice. Defaults to `true` on the
+    /// wire so an older payload without the field is not misreported as off.
+    #[serde(default = "default_scheduler_enabled")]
+    pub scheduler_enabled: bool,
+}
+
+fn default_scheduler_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

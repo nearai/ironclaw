@@ -417,7 +417,16 @@ Capability follow-ups before launch:
 
 ## 9. Delivery
 
-Trigger delivery is fast-follow.
+Trigger delivery target selection is outside trigger identity and goes through
+the outbound delivery track. Product-facing outbound preference APIs and
+explicit provider-backed target tooling own discovery and approval-gated
+selection. Local-dev Reborn exposes model-visible outbound target
+discovery/selection capabilities that write the caller's final-reply
+preference. When a user asks to send routine or trigger results through a
+delivery product/channel, model-visible trigger surfaces must steer the model to
+discover and select an outbound delivery target before calling
+`trigger_create`; durable selection remains product-owned and trigger records
+still do not embed delivery targets.
 
 - Trigger ingress identity must not include delivery targets.
 - Trigger record identity must not include delivery targets.

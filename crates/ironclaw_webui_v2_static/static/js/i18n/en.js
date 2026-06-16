@@ -190,8 +190,41 @@ registerPack("en", {
   "settings.networking": "Networking",
   "settings.tools": "Tools",
   "settings.skills": "Skills",
+  "settings.traceCommons": "Trace Commons",
   "settings.users": "Users",
   "settings.language": "Language",
+
+  // Settings — Trace Commons credits (read-only)
+  "traceCommons.title": "Trace Commons credits",
+  "traceCommons.description":
+    "Credit earned for contributed redacted traces, scoped to your account.",
+  "traceCommons.emptyState":
+    "Not enrolled — ask your agent to onboard with a Trace Commons invite.",
+  "traceCommons.loadFailed": "Could not load Trace Commons credits.",
+  "traceCommons.enrollment": "Enrollment",
+  "traceCommons.enrolled": "Enrolled",
+  "traceCommons.notEnrolled": "Not enrolled",
+  "traceCommons.pendingCredit": "Pending credit",
+  "traceCommons.pendingCreditDesc": "Earned but not yet finalized",
+  "traceCommons.finalCredit": "Final credit",
+  "traceCommons.finalCreditDesc": "Confirmed credit",
+  "traceCommons.delayedLedger": "Delayed ledger",
+  "traceCommons.delayedLedgerDesc": "Can still change after review",
+  "traceCommons.submissions": "Submissions",
+  "traceCommons.submissionsValue": "{submitted} submitted, {accepted} accepted of {total} total",
+  "traceCommons.cardAccepted": "Accepted {accepted} / {submitted}",
+  "traceCommons.cardHeld": "{count} held for review",
+  "traceCommons.heldTitle": "Held for review",
+  "traceCommons.heldDescription": "Held because of higher privacy risk; review and authorize to submit.",
+  "traceCommons.authorize": "Authorize",
+  "traceCommons.authorizing": "Authorizing…",
+  "traceCommons.lastSubmission": "Last submission",
+  "traceCommons.lastSync": "Last credit sync",
+  "traceCommons.lastSyncDesc": "Local view as of last sync",
+  "traceCommons.never": "never",
+  "traceCommons.recentExplanations": "Recent credit explanations",
+  "traceCommons.note":
+    "Local view as of last sync — the authoritative credit ledger is server-side. Final credit can change after privacy review, replay/eval, duplicate checks, and downstream utility scoring.",
 
   // Settings — toolbar
   "settings.back": "Back",
@@ -416,6 +449,7 @@ registerPack("en", {
   // Settings — channels tab
   "channels.builtIn": "Built-in channels",
   "channels.messaging": "Messaging channels",
+  "channels.availableChannels": "Available channels",
   "channels.mcpServers": "MCP servers",
   "channels.webGateway": "Web Gateway",
   "channels.webGatewayDesc": "Browser-based chat with SSE streaming",
@@ -426,6 +460,7 @@ registerPack("en", {
   "channels.cliDesc": "Terminal interface with TUI or simple REPL",
   "channels.repl": "REPL",
   "channels.replDesc": "Minimal read-eval-print loop for testing",
+  "channels.slack": "Slack",
   "channels.slackDesc": "Tenant app channel for DMs and app mentions",
   "channels.slackDetail": "Tenant Slack app install",
   "channels.statusOn": "on",
@@ -655,6 +690,9 @@ registerPack("en", {
   "automations.filter.paused": "Paused",
   "automations.refresh": "Refresh automations",
   "automations.error.loadFailed": "Unable to load automations",
+  "automations.schedulerOff.title": "Scheduling is turned off",
+  "automations.schedulerOff.description":
+    "These automations are saved but won't run until the scheduler is enabled.",
   "automations.delivery.eyebrow": "Delivery defaults",
   "automations.delivery.title": "Where triggered results are sent",
   "automations.delivery.explainer":
@@ -672,6 +710,8 @@ registerPack("en", {
   "automations.delivery.save": "Save",
   "automations.delivery.clear": "Clear",
   "automations.delivery.saved": "Saved",
+  "automations.delivery.saveFailed":
+    "Couldn't save the delivery target. Please try again.",
   "automations.delivery.footnote":
     "Approval requests sent to your DM are answered by replying {command} in Slack.",
   "automations.delivery.pill.ready": "Ready",
@@ -688,9 +728,10 @@ registerPack("en", {
   "automations.summary.paused": "Paused",
   "automations.summary.pausedDetail": "Schedules not currently expected to run.",
   "automations.summary.running": "Running now",
-  "automations.summary.runningDetail": "Runs currently in progress.",
+  "automations.summary.runningDetail": "Automations with a run in progress.",
   "automations.summary.failures": "Failures",
-  "automations.summary.failuresDetail": "Failed runs in the visible history.",
+  "automations.summary.failuresDetail":
+    "Automations with a failed run in recent history.",
   "automations.summary.nextRun": "Next run",
   "automations.summary.none": "None",
   "automations.summary.nextRunDetail": "Soonest scheduled run in this list.",
@@ -974,6 +1015,7 @@ registerPack("en", {
   "extensions.moreActions": "More actions",
   "extensions.kind.wasm_tool": "WASM Tool",
   "extensions.kind.wasm_channel": "Channel",
+  "extensions.kind.channel": "Channel",
   "extensions.kind.mcp_server": "MCP Server",
   "extensions.kind.first_party": "First-party",
   "extensions.kind.system": "System",
@@ -992,6 +1034,7 @@ registerPack("en", {
   "common.optional": "optional",
   "common.configured": "configured",
   "extensions.autoGenerated": "Auto-generated if left blank",
+  "extensions.activeConfigured": "Extension is active.",
   "extensions.authConfigured": "Authorization is configured.",
   "extensions.authPopup": "Authorize this provider in a browser popup.",
   "extensions.opening": "Opening...",

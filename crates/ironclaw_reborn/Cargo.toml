@@ -12,7 +12,7 @@ publish = false
 
 [features]
 default = []
-root-llm-provider = ["dep:ironclaw_llm"]
+root-llm-provider = ["dep:ironclaw_llm", "dep:base64"]
 libsql-secrets = [
     "dep:ironclaw_secrets",
     "dep:libsql",
@@ -39,6 +39,7 @@ libsql-restart-tests = [
 
 [dependencies]
 async-trait = "0.1"
+base64 = { version = "0.22", optional = true }
 chrono = "0.4"
 futures-util = { version = "0.3", default-features = false }
 ironclaw_agent_loop = { path = "../ironclaw_agent_loop", version = "0.1.0" }
