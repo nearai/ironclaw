@@ -32,6 +32,15 @@ CANNED_RESPONSES = [
     # The renderer must add target=_blank to the rendered anchor.
     (re.compile(r"link test", re.IGNORECASE),
      "See [the pull request](https://example.com/pr/1) for details."),
+    # Reborn v2 download chips: after the agent writes a CSV and a PDF (the
+    # write_file dispatch lives in TOOL_CALL_PATTERNS), it replies referencing
+    # their /workspace paths so the WebUI renders downloadable file chips. Fires
+    # after the tool calls run (match_tool_call dedups the already-run writes).
+    (
+        re.compile(r"produce a downloadable csv and pdf", re.IGNORECASE),
+        "Done — I saved /workspace/report.csv and /workspace/report.pdf. "
+        "Both are ready to download.",
+    ),
     (re.compile(r"\bhello\b|\bhi\b|\bhey\b", re.IGNORECASE), "Hello! How can I help you today?"),
     (re.compile(r"2\s*\+\s*2|two plus two", re.IGNORECASE), "The answer is 4."),
     (
@@ -130,6 +139,33 @@ TOOL_CALL_PATTERNS = [
         ],
     ),
     (re.compile(r"echo (.+)", re.IGNORECASE), "echo", lambda m: {"message": m.group(1)}),
+    # Reborn v2 download chips: one assistant turn writes a CSV and a PDF into
+    # the project workspace. After both results land, match_tool_call dedups
+    # write_file and the conversation falls through to the CANNED_RESPONSES
+    # reply that references the two paths.
+    (
+        re.compile(r"produce a downloadable csv and pdf", re.IGNORECASE),
+        "write_file",
+        lambda _: [
+            {
+                "tool_name": "write_file",
+                "arguments": {
+                    "path": "/workspace/report.csv",
+                    "content": "name,score\nalice,90\nbob,85\n",
+                },
+            },
+            {
+                "tool_name": "write_file",
+                "arguments": {
+                    "path": "/workspace/report.pdf",
+                    "content": (
+                        "%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\n"
+                        "trailer<</Root 1 0 R>>\n%%EOF\n"
+                    ),
+                },
+            },
+        ],
+    ),
     (
         re.compile(
             r"install https://github\.com/Pika-Labs/Pika-Skills/?(?=$|\s)",
@@ -1168,10 +1204,24 @@ def match_response(messages: list[dict]) -> str:
                         "chains to discover DeFi positions and classify them against known protocols."
                     )
 
+    explicit = _explicit_canned_response(content)
+    if explicit is not None:
+        return explicit
+    return DEFAULT_RESPONSE
+
+
+def _explicit_canned_response(content: str) -> str | None:
+    """Return the first ``CANNED_RESPONSES`` match for ``content``, or ``None``
+    when only the default would apply.
+
+    Lets a caller prefer a specific canned reply over a generic fallback
+    (e.g. the post-tool-call summary) without collapsing every unmatched
+    conversation into the default response.
+    """
     for pattern, response in CANNED_RESPONSES:
         if pattern.search(content):
             return response
-    return DEFAULT_RESPONSE
+    return None
 
 
 def _normalize_tool_calls(tool_name: str, value: object) -> list[dict]:
@@ -1971,6 +2021,28 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
                 if not stream:
                     return _text_response(cid, text)
                 return await _stream_text(request, cid, text)
+        # When the latest user message has an explicit canned reply (e.g. the v2
+        # download-chips flow: "produce a downloadable csv and pdf"), return it
+        # once its tool calls have run and `match_tool_call` has dedup'd them,
+        # instead of the generic multi-tool summary below. Only an explicit match
+        # wins — absent one we fall through to the summary.
+        #
+        # Suppress it on a failed/denied run: `CANNED_RESPONSES` triggers are
+        # broad, so a success-style "ready to download" reply must not mask a
+        # tool that was denied or errored — those turns fall through to the
+        # summary so the real outcome stays visible to assertions.
+        tool_run_failed = _tool_results_include_denial(tool_results) or any(
+            "error" in tr.get("content", "").lower() for tr in tool_results
+        )
+        explicit = (
+            None
+            if tool_run_failed
+            else _explicit_canned_response(_last_user_content(messages))
+        )
+        if explicit is not None:
+            if not stream:
+                return _text_response(cid, explicit)
+            return await _stream_text(request, cid, explicit)
         if len(tool_results) == 1:
             tr = tool_results[0]
             text = f"The {tr['name']} tool returned: {tr['content']}"

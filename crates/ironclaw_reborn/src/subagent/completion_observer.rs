@@ -480,6 +480,7 @@ where
                 // termination cannot unblock a parent that is actually
                 // waiting on an unrelated approval/auth/resource gate.
                 precondition: ResumeTurnPrecondition::BlockedDependentRunGate,
+                auth_resume_disposition: None,
             })
             .await
             .map(|_| ())
@@ -1442,7 +1443,7 @@ mod tests {
             ))
         }
 
-        async fn mark_message_deferred_busy(
+        async fn mark_message_rejected_busy(
             &self,
             _scope: &ThreadScope,
             _thread_id: &ThreadId,
@@ -1790,6 +1791,7 @@ mod tests {
             failure: None,
             event_cursor: EventCursor(1),
             product_context: None,
+            auth_resume_disposition: None,
         }
     }
 
@@ -1817,6 +1819,7 @@ mod tests {
             failure: None,
             event_cursor: EventCursor(1),
             product_context: None,
+            auth_resume_disposition: None,
         }
     }
 
@@ -1857,6 +1860,7 @@ mod tests {
             subagent_depth,
             spawn_tree_root_run_id,
             product_context: None,
+            auth_resume_disposition: None,
         }
     }
 
@@ -1896,6 +1900,7 @@ mod tests {
             subagent_depth: 1,
             spawn_tree_root_run_id: None,
             product_context: None,
+            auth_resume_disposition: None,
         }
     }
 
@@ -2378,6 +2383,7 @@ mod tests {
             failure: None,
             event_cursor: EventCursor(1),
             product_context: None,
+            auth_resume_disposition: None,
         };
         let observer = SubagentCompletionObserver::new(
             Arc::new(BoundedSubagentGateResolutionStore::new()),

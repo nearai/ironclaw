@@ -28,7 +28,10 @@ use ironclaw_network::{
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_scripts::{ScriptHostHttpRequest, ScriptRuntimeHttpAdapter};
 use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
-use ironclaw_wasm::{WasmHostHttp, WasmHttpRequest, WasmRuntimeHttpAdapter};
+use ironclaw_wasm::{
+    WasmHostHttp, WasmHttpRequest, WasmRuntimeHttpAdapter, WasmStagedRuntimeCredential,
+    WasmStagedRuntimeCredentials,
+};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -2366,6 +2369,82 @@ async fn mcp_http_client_reuses_staged_credential_for_json_rpc_session() {
         "every MCP session request must receive the staged credential"
     );
     drop(requests);
+}
+
+#[tokio::test]
+async fn wasm_http_adapter_reuses_staged_credential_for_multiple_requests_in_one_invocation() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 0,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let services = test_obligation_services();
+    let scope = sample_scope();
+    let capability_id = CapabilityId::new("google-drive.download_file").unwrap();
+    let handle = SecretHandle::new("google_runtime_token").unwrap();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    stage_secret_sync(
+        &services,
+        &scope,
+        &capability_id,
+        &handle,
+        "sk-staged-wasm-secret",
+    );
+    let service: Arc<dyn RuntimeHttpEgress> = Arc::new(services.host_http_egress(network));
+    let adapter = WasmRuntimeHttpAdapter::new(
+        service,
+        scope,
+        capability_id.clone(),
+        caller_supplied_policy(),
+    )
+    .with_credential_provider(Arc::new(WasmStagedRuntimeCredentials::new(vec![
+        WasmStagedRuntimeCredential::for_any_request(
+            handle,
+            RuntimeCredentialTarget::Header {
+                name: "authorization".to_string(),
+                prefix: Some("Bearer ".to_string()),
+            },
+            true,
+        ),
+    ])));
+
+    for url in [
+        "https://api.example.test/drive/v3/files/doc-id?fields=id,name,mimeType",
+        "https://api.example.test/drive/v3/files/doc-id/export?mimeType=text%2Fplain",
+    ] {
+        adapter
+            .request(WasmHttpRequest {
+                method: "GET".to_string(),
+                url: url.to_string(),
+                headers_json: "{}".to_string(),
+                body: None,
+                timeout_ms: None,
+            })
+            .expect("each Drive request should receive the staged WASM credential");
+    }
+
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        2,
+        "Drive download_file should make metadata and export requests"
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| request
+                .headers
+                .iter()
+                .any(|(name, value)| name == "authorization"
+                    && value == "Bearer sk-staged-wasm-secret")),
+        "each WASM HTTP request in the same invocation must receive the staged credential"
+    );
 }
 
 #[tokio::test]

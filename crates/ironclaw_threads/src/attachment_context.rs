@@ -5,10 +5,15 @@
 //! `<attachments>` block so the model can reason about the files: documents and
 //! audio contribute their extracted text / transcript, and every attachment
 //! contributes its stored project path (`storage_key`) so the agent can
-//! `file_read` it. Image pixels reach the model through a separate multimodal
-//! path; here an image contributes a pointer to its stored file.
+//! `file_read` it. Image pixels reach a vision-capable model through the
+//! multimodal path (the model port reads the bytes back and the gateway sends
+//! them as `ContentPart::ImageUrl`; see `ContextMessage::image_attachments`);
+//! this textual block contributes a pointer to the stored file, which is the
+//! fallback a text-only model relies on.
 
 use ironclaw_common::{AttachmentKind, AttachmentRef};
+
+use crate::contract::ContextImageAttachment;
 
 /// Append a rendered `<attachments>` block to `content` when `attachments` is
 /// non-empty; otherwise return `content` unchanged.
@@ -17,6 +22,29 @@ pub(crate) fn augment_model_content(content: String, attachments: &[AttachmentRe
         Some(block) => format!("{content}\n\n{block}"),
         None => content,
     }
+}
+
+/// The image attachments a vision-capable model could view as multimodal parts:
+/// `kind == Image` with a landed `storage_key`. Only the reference is carried —
+/// the bytes are read later (and only for a vision model), so a text-only model
+/// pays nothing here. The textual pointer from [`augment_model_content`] stays
+/// as the fallback either way.
+pub(crate) fn model_image_attachments(
+    attachments: &[AttachmentRef],
+) -> Vec<ContextImageAttachment> {
+    attachments
+        .iter()
+        .filter(|attachment| attachment.kind == AttachmentKind::Image)
+        .filter_map(|attachment| {
+            attachment
+                .storage_key
+                .as_ref()
+                .map(|storage_key| ContextImageAttachment {
+                    mime_type: attachment.mime_type.clone(),
+                    storage_key: storage_key.clone(),
+                })
+        })
+        .collect()
 }
 
 fn render_attachments_block(attachments: &[AttachmentRef]) -> Option<String> {
@@ -215,5 +243,46 @@ mod tests {
         let out = augment_model_content("x".to_string(), &[att]);
         assert!(out.contains("filename=\"a&quot;&amp;&lt;&gt;.txt\""));
         assert!(out.contains("a &lt; b &amp; c &gt; d"));
+    }
+
+    fn image_ref(id: &str, storage_key: Option<&str>) -> AttachmentRef {
+        AttachmentRef {
+            id: id.to_string(),
+            kind: AttachmentKind::Image,
+            mime_type: "image/png".to_string(),
+            filename: Some("diagram.png".to_string()),
+            size_bytes: Some(4),
+            storage_key: storage_key.map(str::to_string),
+            extracted_text: None,
+        }
+    }
+
+    #[test]
+    fn model_image_attachments_keeps_only_landed_images() {
+        let attachments = vec![
+            image_ref(
+                "img-landed",
+                Some("/workspace/attachments/2026-06-14/m1-0.png"),
+            ),
+            // An image that never landed (no storage_key) has no bytes to read.
+            image_ref("img-unlanded", None),
+            // A non-image landed attachment is not part of the multimodal path.
+            doc_ref(Some("text")),
+        ];
+
+        let images = model_image_attachments(&attachments);
+
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].mime_type, "image/png");
+        assert_eq!(
+            images[0].storage_key,
+            "/workspace/attachments/2026-06-14/m1-0.png"
+        );
+    }
+
+    #[test]
+    fn model_image_attachments_empty_when_no_images() {
+        assert!(model_image_attachments(&[doc_ref(None)]).is_empty());
+        assert!(model_image_attachments(&[]).is_empty());
     }
 }

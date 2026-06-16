@@ -1,18 +1,22 @@
 export const EXTENSIONS_TABS = [
-  { id: "installed", label: "Installed", icon: "bolt" },
+  { id: "registry", label: "Registry", icon: "plus" },
   { id: "channels", label: "Channels", icon: "send" },
   { id: "mcp", label: "MCP Servers", icon: "pulse" },
-  { id: "registry", label: "Registry", icon: "plus" },
 ];
 
 export const KIND_LABELS = {
   wasm_tool: "WASM Tool",
   wasm_channel: "Channel",
+  channel: "Channel",
   mcp_server: "MCP Server",
   first_party: "First-party",
   system: "System",
   channel_relay: "Relay",
 };
+
+export function isChannelExtensionKind(kind) {
+  return kind === "wasm_channel" || kind === "channel";
+}
 
 export const STATE_TONES = {
   active: "success",

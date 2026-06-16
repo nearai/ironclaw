@@ -616,6 +616,158 @@ test("useChat.send: unmatched channel connect requests submit the prompt", async
   assert.equal(response.thread_id, "thread-created");
 });
 
+test("useChat.send: rejected_busy appends system notice, marks optimistic failed, clears isProcessing", async () => {
+  const threadId = "thread-busy";
+  let renderedMessages = [];
+  const stateUpdates = [];
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({ setCalls: stateUpdates }),
+    addPending,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("thread should already exist");
+    },
+    globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("ordinary prompts should not fetch connectable channels");
+    },
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("ordinary prompts should not fetch connectable channels");
+      },
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => ({
+      outcome: "rejected_busy",
+      notice: "Thread is busy, please try again.",
+    }),
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: (_threadId, options) => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  vm.runInNewContext(useChatSourceForTest(), context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  await chat.send("hello while busy");
+
+  // (a) a system message with the notice text is appended
+  const systemMessages = renderedMessages.filter((m) => m.role === "system");
+  assert.equal(systemMessages.length, 1);
+  assert.equal(systemMessages[0].content, "Thread is busy, please try again.");
+  assert.match(systemMessages[0].id, /^system-rejected-/);
+
+  // (b) the optimistic user message is marked failed (not shown as sent)
+  const userMessages = renderedMessages.filter((m) => m.role === "user");
+  assert.equal(userMessages.length, 1);
+  assert.equal(userMessages[0].isOptimistic, false);
+  assert.equal(userMessages[0].status, "error");
+
+  // (c) isProcessing is cleared (index 4 set to false)
+  const isProcessingUpdates = stateUpdates.filter((u) => u.index === 4);
+  const lastIsProcessing = isProcessingUpdates[isProcessingUpdates.length - 1];
+  assert.equal(lastIsProcessing?.value, false);
+});
+
+test("useChat.send: rejected_busy without notice still clears isProcessing", async () => {
+  const threadId = "thread-busy-no-notice";
+  let renderedMessages = [];
+  const stateUpdates = [];
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({ setCalls: stateUpdates }),
+    addPending,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("thread should already exist");
+    },
+    globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("ordinary prompts should not fetch connectable channels");
+    },
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("ordinary prompts should not fetch connectable channels");
+      },
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => ({
+      outcome: "rejected_busy",
+    }),
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: (_threadId, options) => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  vm.runInNewContext(useChatSourceForTest(), context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  await chat.send("hello while busy");
+
+  // no system notice appended when notice is absent
+  const systemMessages = renderedMessages.filter((m) => m.role === "system");
+  assert.equal(systemMessages.length, 0);
+
+  // optimistic user message still marked failed
+  const userMessages = renderedMessages.filter((m) => m.role === "user");
+  assert.equal(userMessages.length, 1);
+  assert.equal(userMessages[0].status, "error");
+
+  // isProcessing is cleared (index 4 set to false)
+  const isProcessingUpdates = stateUpdates.filter((u) => u.index === 4);
+  const lastIsProcessing = isProcessingUpdates[isProcessingUpdates.length - 1];
+  assert.equal(lastIsProcessing?.value, false);
+});
+
 test("useChat.send: connectable channel fetch failures submit the prompt", async () => {
   let createThreadCalled = false;
   let sentContent = null;

@@ -7,6 +7,7 @@ import { useSidebar } from "../hooks/useSidebar.js";
 import { html } from "../lib/html.js";
 import { useT } from "../lib/i18n.js";
 import { toast } from "../lib/toast.js";
+import { deleteThreadErrorMessage } from "../lib/thread-errors.js";
 import { useThreads } from "../pages/chat/hooks/useThreads.js";
 import { Sidebar } from "../components/sidebar.js";
 import { PageHeader } from "../components/page-header.js";
@@ -75,10 +76,10 @@ export function GatewayLayout({ token, profile, isChecking = false, isAdmin, onS
         }
       } catch (error) {
         console.error("Failed to delete thread:", error);
-        toast(error?.message || "Unable to delete thread", { tone: "error" });
+        toast(deleteThreadErrorMessage(error, t), { tone: "error" });
       }
     },
-    [navigate, threadsState]
+    [navigate, threadsState, t]
   );
   if (needsOnboarding && !onboardingExempt) {
     return html`<${Navigate} to="/welcome" replace />`;

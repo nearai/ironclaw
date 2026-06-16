@@ -19,9 +19,11 @@ function useHistorySourceForTest() {
       skippingImport = !line.trimEnd().endsWith(";");
       continue;
     }
-    lines.push(line.replace("export function useHistory", "function useHistory"));
+    lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { useHistory };`;
+  return `${lines.join(
+    "\n",
+  )}\nglobalThis.__testExports = { useHistory, mergePreservingClientOnly };`;
 }
 
 function createReactStub({ setCalls = [] } = {}) {
@@ -53,6 +55,7 @@ test("useHistory records a load error when timeline fetch fails", async () => {
   const setCalls = [];
   const consoleErrors = [];
   const context = {
+    authScope: () => "scope-1",
     console: {
       error: (...args) => consoleErrors.push(args),
     },
@@ -76,4 +79,33 @@ test("useHistory records a load error when timeline fetch fails", async () => {
     "Failed to load conversation history.",
   );
   assert.equal(consoleErrors.length, 1);
+});
+
+test("mergePreservingClientOnly keeps err-* bubbles and lets the timeline win otherwise", () => {
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergePreservingClientOnly } = context.globalThis.__testExports;
+
+  const timeline = [
+    { id: "msg-user-1", role: "user" },
+    { id: "tool-abc", role: "tool_activity", toolParameters: "{}", toolResultPreview: "ok" },
+    { id: "msg-assistant-1", role: "assistant" },
+  ];
+  const current = [
+    { id: "msg-user-1", role: "user" },
+    { id: "tool-abc", role: "tool_activity", toolParameters: null, toolResultPreview: null },
+    { id: "err-run-1", role: "error", content: "run failed" },
+  ];
+
+  const merged = mergePreservingClientOnly(timeline, current);
+
+  // Timeline order is authoritative and the rich tool card replaces the
+  // sparse live one; the client-only err-* bubble is preserved at the end.
+  assert.equal(
+    merged.map((m) => m.id).join(","),
+    "msg-user-1,tool-abc,msg-assistant-1,err-run-1",
+  );
+  const toolCard = merged.find((m) => m.id === "tool-abc");
+  assert.equal(toolCard.toolParameters, "{}");
+  assert.equal(toolCard.toolResultPreview, "ok");
 });

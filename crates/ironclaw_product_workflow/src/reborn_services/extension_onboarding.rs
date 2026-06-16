@@ -490,6 +490,7 @@ mod tests {
                 description: "test extension".to_string(),
                 source: LifecycleExtensionSource::HostBundled,
                 runtime_kind,
+                surface_kinds: Vec::new(),
                 visible_capability_ids: Vec::new(),
                 visible_read_only_capability_ids: Vec::new(),
                 credential_requirements,

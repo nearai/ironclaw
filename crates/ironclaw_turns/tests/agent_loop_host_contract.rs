@@ -2150,6 +2150,7 @@ async fn loop_prompt_bundle_public_serialization_hides_raw_content() {
         failure: None,
         event_cursor: EventCursor(0),
         product_context: None,
+        auth_resume_disposition: None,
     };
     let public_json = serde_json::to_string(&(bundle, host.milestones(), status)).unwrap();
     assert!(public_json.contains("prompt_bundle_built"));
@@ -3810,6 +3811,7 @@ async fn turn_run_state_product_context_defaults_to_none_when_missing_from_json(
         failure: None,
         event_cursor: EventCursor(0),
         product_context: None,
+        auth_resume_disposition: None,
     };
 
     // Serialize without the product_context field (simulate old wire).
@@ -3841,6 +3843,49 @@ async fn turn_run_state_product_context_defaults_to_none_when_missing_from_json(
     );
     let decoded_with: TurnRunState = serde_json::from_value(json_with_ctx).unwrap();
     assert_eq!(decoded_with.product_context, Some(ctx_value));
+}
+
+#[tokio::test]
+async fn turn_run_state_auth_resume_disposition_defaults_to_none_when_missing_from_json() {
+    // Guard the #[serde(default)] backward-compat contract for auth_resume_disposition:
+    // old persisted TurnRunState payloads that pre-date the field must deserialize
+    // cleanly with auth_resume_disposition == None.
+    let context = claimed_run_context().await;
+    let state = TurnRunState {
+        scope: context.scope.clone(),
+        actor: None,
+        turn_id: ironclaw_turns::TurnId::new(),
+        run_id: context.run_id,
+        status: TurnStatus::Queued,
+        accepted_message_ref: AcceptedMessageRef::new("accepted-ard-serde").unwrap(),
+        source_binding_ref: SourceBindingRef::new("source-ard-serde").unwrap(),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-ard-serde").unwrap(),
+        resolved_run_profile_id: context.resolved_run_profile.profile_id.clone(),
+        resolved_run_profile_version: context.resolved_run_profile.profile_version,
+        resolved_model_route: None,
+        received_at: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
+        checkpoint_id: None,
+        gate_ref: None,
+        credential_requirements: Vec::new(),
+        failure: None,
+        event_cursor: EventCursor(0),
+        product_context: None,
+        auth_resume_disposition: None,
+    };
+
+    // Serialize, remove the auth_resume_disposition key (simulates a legacy checkpoint
+    // that was written before the field existed), then deserialize — must succeed with None.
+    let mut json = serde_json::to_value(&state).unwrap();
+    // The field is skip_serializing_if = "Option::is_none", so it may already be absent;
+    // either way, ensure it is absent before decoding.
+    json.as_object_mut()
+        .unwrap()
+        .remove("auth_resume_disposition");
+    let decoded: TurnRunState = serde_json::from_value(json).unwrap();
+    assert!(
+        decoded.auth_resume_disposition.is_none(),
+        "auth_resume_disposition must default to None when absent from legacy JSON"
+    );
 }
 
 // ── Communication runtime context rendering (integration with bundle) ─────────

@@ -178,6 +178,44 @@ export function deleteThread({ threadId } = {}) {
   });
 }
 
+// --- Project filesystem (download / navigation) ---
+
+function projectFilesBase(threadId) {
+  return `${V2_BASE}/threads/${encodeURIComponent(threadId)}/files`;
+}
+
+// List a directory under the thread's project workspace. `path` defaults to the
+// workspace root server-side when omitted.
+export function listProjectFiles({ threadId, path } = {}) {
+  if (!threadId) return Promise.reject(new Error("threadId is required"));
+  const url = new URL(projectFilesBase(threadId), window.location.origin);
+  if (path) url.searchParams.set("path", path);
+  return apiFetch(url.pathname + url.search);
+}
+
+// Metadata for a single project path (used to show a chip's size/icon).
+export function statProjectFile({ threadId, path } = {}) {
+  if (!threadId || !path) {
+    return Promise.reject(new Error("threadId and path are required"));
+  }
+  const url = new URL(`${projectFilesBase(threadId)}/stat`, window.location.origin);
+  url.searchParams.set("path", path);
+  return apiFetch(url.pathname + url.search);
+}
+
+// Same-origin relative URL for a project file's bytes. Feeds the shared
+// `fetchAttachmentBlob` (which attaches the bearer) so project-file chips can
+// reuse the message-attachment preview modal: it carries the same byte-fetch
+// shape as `attachmentUrl(...)`.
+export function projectFileContentUrl({ threadId, path } = {}) {
+  if (!threadId || !path) {
+    throw new Error("projectFileContentUrl requires threadId and path");
+  }
+  const url = new URL(`${projectFilesBase(threadId)}/content`, window.location.origin);
+  url.searchParams.set("path", path);
+  return url.pathname + url.search;
+}
+
 // --- Automations ---
 
 export function listAutomations({ limit, runLimit } = {}) {
@@ -272,6 +310,78 @@ export function fetchTimeline({ threadId, limit, cursor } = {}) {
   if (limit != null) url.searchParams.set("limit", String(limit));
   if (cursor) url.searchParams.set("cursor", cursor);
   return apiFetch(url.pathname + url.search);
+}
+
+// --- Attachments ---
+
+// Path for one landed attachment's bytes. The (thread, message, attachment)
+// triple addresses it: an attachment id is only unique within its message.
+// Fails fast on a missing part rather than building a path with the literal
+// "undefined" — this URL feeds `fetchAttachmentBlob`, which attaches the bearer,
+// so an unintended path must never be requested.
+export function attachmentUrl({ threadId, messageId, attachmentId } = {}) {
+  if (!threadId || !messageId || !attachmentId) {
+    throw new Error("attachmentUrl requires threadId, messageId, and attachmentId");
+  }
+  return (
+    `${V2_BASE}/threads/${encodeURIComponent(threadId)}` +
+    `/messages/${encodeURIComponent(messageId)}` +
+    `/attachments/${encodeURIComponent(attachmentId)}`
+  );
+}
+
+// Fetch an attachment's bytes with the session bearer and return them as a
+// `Blob`. `<img>`/`<audio>`/`<iframe>` cannot send an Authorization header, so
+// (unlike SSE, which uses a `?token=` shim) the bytes are fetched here and the
+// caller picks the CSP-appropriate representation (data URL for images/media,
+// blob URL for PDF frames, text for text). Throws on a non-OK response so the
+// caller can fall back to a placeholder.
+export async function fetchAttachmentBlob(path) {
+  // The bearer is a critical sink: never attach it to an off-origin URL. The
+  // caller always passes a relative same-origin path (`attachmentUrl(...)`);
+  // reject anything that resolves cross-origin before sending the token.
+  const url = new URL(path, window.location.origin);
+  if (url.origin !== window.location.origin) {
+    throw new ApiError("Invalid attachment URL.", {
+      status: 400,
+      statusText: "Bad Request",
+    });
+  }
+  const token = readStoredToken();
+  const headers = new Headers();
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+  const response = await fetch(url.pathname + url.search, {
+    credentials: "same-origin",
+    headers,
+  });
+  if (!response.ok) {
+    const { text, payload } = await parseErrorBody(response);
+    throw new ApiError(
+      describeApiError({ payload, body: text, statusText: response.statusText }),
+      { status: response.status, statusText: response.statusText, body: text, payload },
+    );
+  }
+  return await response.blob();
+}
+
+// Read a `Blob` into a `data:` URL. Used for images and media, whose CSP
+// directives (`img-src`/`media-src 'self' data:`) allow data URLs but not
+// `blob:` — and a data URL needs no `revokeObjectURL` lifecycle.
+export function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error("attachment read failed"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+// Convenience: fetch an attachment's bytes and return a `data:` URL for an
+// `<img>` thumbnail. CSP-safe (`img-src 'self' data:`); never a `blob:` URL.
+export async function fetchAttachmentDataUrl(path) {
+  return blobToDataUrl(await fetchAttachmentBlob(path));
 }
 
 // --- Streaming (SSE) ---
