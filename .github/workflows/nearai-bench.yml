@@ -93,11 +93,14 @@ jobs:
           PR: ${{ github.event.issue.number }}
           REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Pinned reviewed commit on nearai/benchmarks main. Must match
-          # the SHA in the `bench` job's `uses:` below — bump in both
-          # places together. Used here to validate the requested suite
-          # exists at the same SHA we'd actually run against.
-          BENCH_PIN: 67effacd8c8a7f6f43b422e30a1810822b9d6d5f
+          # Ref on nearai/benchmarks used to validate the requested suite
+          # exists. Must match the ref the `bench` job actually runs against
+          # (its `uses:` below) so the pre-dispatch check gives the same
+          # answer as the dispatched workflow. That `uses:` is `@main`, so a
+          # pinned SHA here drifts stale and rejects suites that already exist
+          # on main (e.g. pinchbench26, officeqa, terminal-bench-2). Track
+          # `main` so the two stay in lock-step.
+          BENCH_PIN: main
         run: |
           set -euo pipefail
           # Grammar: /benchmark <suite> [--model <model-id>] [--framework <ironclaw|ironclaw-reborn>]

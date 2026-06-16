@@ -89,6 +89,7 @@ pub(super) fn running_run_state(
         failure: None,
         event_cursor: EventCursor(0),
         product_context: None,
+        auth_resume_disposition: None,
     }
 }
 
@@ -318,6 +319,7 @@ pub(super) fn claimed_run() -> ClaimedTurnRun {
             failure: None,
             event_cursor: EventCursor(0),
             product_context: None,
+            auth_resume_disposition: None,
         },
         resolved_run_profile: profile,
         runner_id: TurnRunnerId::new(),
@@ -575,5 +577,6 @@ fn state_for_mapping(
         failure,
         event_cursor: EventCursor(0),
         product_context: None,
+        auth_resume_disposition: None,
     }
 }

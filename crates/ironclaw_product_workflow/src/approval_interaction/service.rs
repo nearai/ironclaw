@@ -215,6 +215,7 @@ impl DefaultApprovalInteractionService {
                 source_binding_ref: approval_source_binding_ref(&request.gate_ref)?,
                 reply_target_binding_ref: approval_reply_binding_ref(&request.gate_ref)?,
                 idempotency_key: request.idempotency_key,
+                auth_resume_disposition: None,
             })
             .await
             .map_err(map_approval_resume_error)
@@ -342,6 +343,7 @@ impl DefaultApprovalInteractionService {
                 source_binding_ref: approval_source_binding_ref(&request.gate_ref)?,
                 reply_target_binding_ref: approval_reply_binding_ref(&request.gate_ref)?,
                 idempotency_key: request.idempotency_key,
+                auth_resume_disposition: None,
             })
             .await
             .map_err(map_approval_resume_error)?;
