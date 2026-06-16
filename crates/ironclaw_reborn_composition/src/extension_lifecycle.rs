@@ -1,4 +1,7 @@
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use ironclaw_extensions::{
     CapabilityVisibility, ExtensionActivationState, ExtensionError, ExtensionInstallation,
@@ -13,8 +16,9 @@ use ironclaw_host_api::{
     sha256_digest_token,
 };
 use ironclaw_product_workflow::{
-    LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
-    LifecycleProductPayload, LifecycleProductResponse, ProductWorkflowError,
+    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
+    LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload, LifecycleProductResponse,
+    ProductWorkflowError,
 };
 use tokio::sync::Mutex;
 
@@ -177,10 +181,11 @@ impl RebornLocalExtensionManagementPort {
         &self,
         query: &str,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        let installed_phases = self.installed_phases().await?;
         let extensions = self.catalog.search(query);
         let summaries = extensions
             .into_iter()
-            .map(|extension| extension.summary())
+            .map(|extension| search_summary(extension, &installed_phases))
             .collect::<Vec<_>>();
         let count = summaries.len();
         Ok(response_with_payload(
@@ -293,6 +298,24 @@ impl RebornLocalExtensionManagementPort {
             });
         }
         Ok(summaries)
+    }
+
+    async fn installed_phases(
+        &self,
+    ) -> Result<BTreeMap<ExtensionId, LifecyclePhase>, ProductWorkflowError> {
+        Ok(self
+            .installation_store
+            .list_installations()
+            .await
+            .map_err(map_extension_installation_error)?
+            .into_iter()
+            .map(|installation| {
+                (
+                    installation.extension_id().clone(),
+                    phase_for_activation_state(installation.activation_state()),
+                )
+            })
+            .collect())
     }
 
     pub(crate) async fn install(
@@ -1117,6 +1140,24 @@ fn phase_for_activation_state(state: ExtensionActivationState) -> LifecyclePhase
         ExtensionActivationState::Disabled => LifecyclePhase::Disabled,
         ExtensionActivationState::Installed => LifecyclePhase::Installed,
     }
+}
+
+fn search_summary(
+    extension: &AvailableExtensionPackage,
+    installed_phases: &BTreeMap<ExtensionId, LifecyclePhase>,
+) -> LifecycleExtensionSummary {
+    let mut summary = extension.summary();
+    let Some(phase) = installed_phases.get(&extension.package.id).copied() else {
+        return summary;
+    };
+    summary.installation_phase = Some(phase);
+    if matches!(
+        phase,
+        LifecyclePhase::Configured | LifecyclePhase::Activating | LifecyclePhase::Active
+    ) {
+        summary.onboarding = None;
+    }
+    summary
 }
 
 fn map_extension_error(error: ExtensionError) -> ProductWorkflowError {
@@ -2184,6 +2225,30 @@ mod tests {
                     &ironclaw_host_api::CapabilityId::new("github.comment_issue").unwrap()
                 )
                 .is_some()
+        );
+
+        let active_search = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionSearch {
+                    query: "github".to_string(),
+                },
+            )
+            .await
+            .expect("search active extension");
+        let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) =
+            active_search.payload.as_ref()
+        else {
+            panic!("expected extension search payload");
+        };
+        let github = extensions
+            .iter()
+            .find(|extension| extension.package_ref.id.as_str() == "github")
+            .expect("github search result");
+        assert_eq!(github.installation_phase, Some(LifecyclePhase::Active));
+        assert!(
+            github.onboarding.is_none(),
+            "active GitHub search results must not expose stale PAT setup onboarding"
         );
 
         let remove = facade

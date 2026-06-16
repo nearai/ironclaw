@@ -342,6 +342,8 @@ pub struct LifecycleExtensionSummary {
     pub version: String,
     pub description: String,
     pub source: LifecycleExtensionSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installation_phase: Option<LifecyclePhase>,
     pub runtime_kind: LifecycleExtensionRuntimeKind,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub surface_kinds: Vec<LifecycleExtensionSurfaceKind>,

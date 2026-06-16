@@ -323,6 +323,7 @@ mod tests {
                     version: "0.1.0".to_string(),
                     description: "line\rrewrite".to_string(),
                     source: LifecycleExtensionSource::HostBundled,
+                    installation_phase: None,
                     runtime_kind:
                         ironclaw_product_workflow::LifecycleExtensionRuntimeKind::WasmTool,
                     surface_kinds: Vec::new(),

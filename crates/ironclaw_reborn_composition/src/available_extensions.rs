@@ -103,6 +103,7 @@ impl AvailableExtensionPackage {
             version: self.package.manifest.version.clone(),
             description: self.package.manifest.description.clone(),
             source: LifecycleExtensionSource::HostBundled,
+            installation_phase: None,
             runtime_kind: runtime_kind(&self.package.manifest.runtime),
             surface_kinds: self.surface_kinds.clone(),
             visible_capability_ids,
