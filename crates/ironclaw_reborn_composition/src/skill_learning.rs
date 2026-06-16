@@ -3,11 +3,11 @@
 //! Mirrors the trace-capture sink (`trace_capture.rs`): every successful
 //! terminal turn lifecycle event spawns a detached best-effort task that reads
 //! the just-finished run's transcript and, when the run is substantive enough,
-//! distills a reusable `SKILL.md` via the learning model, safety-scans it, and
-//! installs it for the run's owner. The distillation *logic* lives in the
-//! `ironclaw_skill_learning` crate; this file owns the composition seam: the
-//! eligibility gate, the transcript read, the inference adapter, and the scoped
-//! write.
+//! distills a reusable `SKILL.md` via the learning model, safety-scans it,
+//! installs it for the run's owner, and notifies the UI. The distillation
+//! *logic* lives in the `ironclaw_skill_learning` crate; this file owns the
+//! composition seam: the eligibility gate, the transcript read, the inference
+//! adapter, the scoped write, and the learned-skill live notification.
 //!
 //! Skill learning requires a learning LLM provider, so the sink and its adapter
 //! are gated on `root-llm-provider` (the feature that wires `ironclaw_llm`).
@@ -56,7 +56,8 @@ impl TurnEventSink for CompositeTurnEventSink {
 
 #[cfg(feature = "root-llm-provider")]
 pub(crate) use learning::{
-    PortSkillWriter, SkillLearningInferenceAdapter, SkillLearningTurnEventSink, SkillWriter,
+    LiveSkillLearnedNotifier, PortSkillWriter, SkillLearnedNotifier, SkillLearningInferenceAdapter,
+    SkillLearningTurnEventSink, SkillWriter,
 };
 
 #[cfg(feature = "root-llm-provider")]
@@ -73,9 +74,12 @@ mod learning {
     use ironclaw_threads::{
         ContextWindow, LoadContextWindowRequest, MessageKind, SessionThreadService, ThreadScope,
     };
-    use ironclaw_turns::{TurnError, TurnEventKind, TurnEventSink, TurnLifecycleEvent, TurnRunId};
+    use ironclaw_turns::{
+        TurnError, TurnEventKind, TurnEventSink, TurnLifecycleEvent, TurnRunId, TurnScope,
+    };
 
     use crate::lifecycle::RebornLocalSkillManagementPort;
+    use crate::projection::LiveProjectionPublisher;
 
     /// Minimum substance for a completed run to be worth distilling into a
     /// skill, mirroring engine v2's skill-extraction mission gate (>=5 steps and
@@ -89,6 +93,10 @@ mod learning {
     const SKILL_LEARNING_MAX_TOKENS: u32 = 4096;
     /// Low temperature: distillation should be near-deterministic.
     const SKILL_LEARNING_TEMPERATURE: f32 = 0.2;
+
+    /// User-facing note shown on the learned-skill bubble.
+    const LEARNED_SKILL_FEEDBACK: &str =
+        "Learned this skill from the task you just completed — review it under Settings -> Skills.";
 
     /// Injection scanner applied to distilled skill content before install,
     /// mirroring the WebUI facade's `validate_skill_content_safety`.
@@ -147,12 +155,52 @@ mod learning {
         }
     }
 
+    /// Live "learned a new skill" notification seam. Composition implements it
+    /// over the projection publisher; tests use a stub.
+    pub(crate) trait SkillLearnedNotifier: Send + Sync {
+        fn notify(
+            &self,
+            owner: &UserId,
+            scope: &TurnScope,
+            run_id: TurnRunId,
+            skill_name: &str,
+            feedback: &str,
+        );
+    }
+
+    /// [`SkillLearnedNotifier`] over the runtime's live projection publisher —
+    /// emits a `SkillActivation` projection item rendered as a chat bubble.
+    pub(crate) struct LiveSkillLearnedNotifier {
+        publisher: Arc<LiveProjectionPublisher>,
+    }
+
+    impl LiveSkillLearnedNotifier {
+        pub(crate) fn new(publisher: Arc<LiveProjectionPublisher>) -> Self {
+            Self { publisher }
+        }
+    }
+
+    impl SkillLearnedNotifier for LiveSkillLearnedNotifier {
+        fn notify(
+            &self,
+            owner: &UserId,
+            scope: &TurnScope,
+            run_id: TurnRunId,
+            skill_name: &str,
+            feedback: &str,
+        ) {
+            self.publisher
+                .publish_skill_learned(Some(owner), scope, run_id, skill_name, feedback);
+        }
+    }
+
     /// Turn-end sink that distills a reusable skill from successful, substantive
-    /// runs and installs it for the run's owner.
+    /// runs, installs it for the run's owner, and notifies the UI.
     pub(crate) struct SkillLearningTurnEventSink {
         thread_service: Arc<dyn SessionThreadService>,
         inference: Arc<dyn SkillInferencePort>,
         skill_writer: Arc<dyn SkillWriter>,
+        notifier: Arc<dyn SkillLearnedNotifier>,
     }
 
     impl SkillLearningTurnEventSink {
@@ -160,11 +208,13 @@ mod learning {
             thread_service: Arc<dyn SessionThreadService>,
             inference: Arc<dyn SkillInferencePort>,
             skill_writer: Arc<dyn SkillWriter>,
+            notifier: Arc<dyn SkillLearnedNotifier>,
         ) -> Self {
             Self {
                 thread_service,
                 inference,
                 skill_writer,
+                notifier,
             }
         }
     }
@@ -203,9 +253,13 @@ mod learning {
             let run_id = event.run_id;
             let write_tenant = event.scope.tenant_id.clone();
             let write_owner = owner_user_id;
+            // The full turn scope is needed to publish the learned-skill bubble
+            // back to this thread's live stream.
+            let event_scope = event.scope.clone();
             let thread_service = Arc::clone(&self.thread_service);
             let inference = Arc::clone(&self.inference);
             let skill_writer = Arc::clone(&self.skill_writer);
+            let notifier = Arc::clone(&self.notifier);
 
             tokio::spawn(async move {
                 // Read the model-context (replay) view, NOT list_thread_history:
@@ -240,14 +294,24 @@ mod learning {
                 let transcript = format_transcript(&window);
                 match distill_skill(&transcript, inference.as_ref()).await {
                     Ok(DistillOutcome::Skill(skill)) => {
-                        persist_learned_skill(
+                        if let Some(installed_name) = persist_learned_skill(
                             skill_writer.as_ref(),
-                            write_tenant,
-                            write_owner,
+                            &write_tenant,
+                            &write_owner,
                             &skill,
                             run_id,
                         )
-                        .await;
+                        .await
+                        {
+                            // Best-effort live bubble on the run's thread stream.
+                            notifier.notify(
+                                &write_owner,
+                                &event_scope,
+                                run_id,
+                                &installed_name,
+                                LEARNED_SKILL_FEEDBACK,
+                            );
+                        }
                     }
                     Ok(DistillOutcome::Skipped(reason)) => {
                         tracing::debug!(
@@ -266,14 +330,15 @@ mod learning {
     }
 
     /// Safety-scan a distilled skill and, if it passes, install it for the
-    /// run's (tenant, owner) scope. Best-effort: every exit is `debug!`-only.
+    /// run's (tenant, owner) scope. Returns the stored skill name on success.
+    /// Best-effort: every failure exit is `debug!`-only.
     async fn persist_learned_skill(
         writer: &dyn SkillWriter,
-        tenant: TenantId,
-        owner: UserId,
+        tenant: &TenantId,
+        owner: &UserId,
         skill: &DistilledSkill,
         run_id: TurnRunId,
-    ) {
+    ) -> Option<String> {
         // The distilled content becomes trusted prompt text loaded into the
         // next run, so injection-scan it first (High/Critical rejects).
         if let Err(rejection) =
@@ -285,36 +350,42 @@ mod learning {
                 skill = %skill.name,
                 "skill-learning: distilled skill rejected by safety scan; not installed"
             );
-            return;
+            return None;
         }
 
         // Scope from the EVENT: start from the local default then override the
         // tenant with the run's, so the write lands where the WebUI/next run
         // read it (NOT the `default` tenant).
-        let mut scope = match ResourceScope::local_default(owner, InvocationId::new()) {
+        let mut scope = match ResourceScope::local_default(owner.clone(), InvocationId::new()) {
             Ok(scope) => scope,
             Err(error) => {
                 tracing::debug!(%error, run_id = ?run_id, "skill-learning: could not build write scope");
-                return;
+                return None;
             }
         };
-        scope.tenant_id = tenant;
+        scope.tenant_id = tenant.clone();
 
         match writer
             .install_or_update(scope, &skill.name, &skill.skill_md)
             .await
         {
-            Ok(name) => tracing::debug!(
-                run_id = ?run_id,
-                skill = %name,
-                "skill-learning: installed learned skill (live)"
-            ),
-            Err(error) => tracing::debug!(
-                error = %error,
-                run_id = ?run_id,
-                skill = %skill.name,
-                "skill-learning: could not install learned skill"
-            ),
+            Ok(name) => {
+                tracing::debug!(
+                    run_id = ?run_id,
+                    skill = %name,
+                    "skill-learning: installed learned skill (live)"
+                );
+                Some(name)
+            }
+            Err(error) => {
+                tracing::debug!(
+                    error = %error,
+                    run_id = ?run_id,
+                    skill = %skill.name,
+                    "skill-learning: could not install learned skill"
+                );
+                None
+            }
         }
     }
 
@@ -383,7 +454,7 @@ mod learning {
         use super::*;
         use ironclaw_host_api::{AgentId, ThreadId};
         use ironclaw_threads::InMemorySessionThreadService;
-        use ironclaw_turns::{EventCursor, TurnScope, TurnStatus};
+        use ironclaw_turns::{EventCursor, TurnStatus};
 
         struct StubInference;
 
@@ -409,6 +480,20 @@ mod learning {
                 _content: &str,
             ) -> Result<String, String> {
                 Ok("stub".to_string())
+            }
+        }
+
+        struct StubNotifier;
+
+        impl SkillLearnedNotifier for StubNotifier {
+            fn notify(
+                &self,
+                _owner: &UserId,
+                _scope: &TurnScope,
+                _run_id: TurnRunId,
+                _skill_name: &str,
+                _feedback: &str,
+            ) {
             }
         }
 
@@ -444,6 +529,7 @@ mod learning {
                 service,
                 Arc::new(StubInference),
                 Arc::new(StubWriter),
+                Arc::new(StubNotifier),
             );
             // A failed run is the self-improvement loop's concern, not extraction.
             sink.publish(event(TurnEventKind::Failed, Some("alice")))

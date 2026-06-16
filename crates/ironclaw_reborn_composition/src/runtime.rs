@@ -2437,6 +2437,10 @@ pub async fn build_reborn_runtime(
             }
             _ => None,
         };
+    // Clone the live projection publisher for the skill-learning sink before
+    // the milestone-sink builder consumes the original by value.
+    #[cfg(feature = "root-llm-provider")]
+    let skill_learning_publisher = Arc::clone(&live_projection_publisher);
     let milestone_sink = projection_services.with_live_progress_milestone_sink_for_publisher(
         durable_milestone_sink,
         live_projection_publisher,
@@ -2594,11 +2598,17 @@ pub async fn build_reborn_runtime(
             Arc::new(crate::skill_learning::PortSkillWriter::new(Arc::clone(
                 &local_runtime.skill_management,
             )));
+        // Live "learned a skill" bubble on the run's thread stream (reuses the
+        // SkillActivation projection -> existing chat bubble).
+        let skill_learned_notifier: Arc<dyn crate::skill_learning::SkillLearnedNotifier> = Arc::new(
+            crate::skill_learning::LiveSkillLearnedNotifier::new(skill_learning_publisher),
+        );
         turn_event_sinks.push(Arc::new(
             crate::skill_learning::SkillLearningTurnEventSink::new(
                 Arc::clone(&thread_service),
                 inference,
                 skill_writer,
+                skill_learned_notifier,
             ),
         ));
     }
