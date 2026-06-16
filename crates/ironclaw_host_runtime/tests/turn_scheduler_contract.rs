@@ -37,7 +37,9 @@ use ironclaw_turns::{
 };
 use tokio::{sync::Notify, time::timeout};
 use tracing::field::{Field, Visit};
-use tracing_subscriber::{Layer, layer::Context, layer::SubscriberExt, registry::LookupSpan};
+use tracing_subscriber::{
+    Layer, filter::LevelFilter, layer::Context, layer::SubscriberExt, registry::LookupSpan,
+};
 
 #[derive(Default)]
 struct CompletingExecutor {
@@ -958,7 +960,9 @@ async fn production_services_scheduler_and_coordinator_execute_turn_end_to_end()
 #[tokio::test(flavor = "current_thread")]
 async fn scheduler_executor_emits_thread_run_correlated_operator_log() {
     let capture = CorrelatedEventCapture::default();
-    let subscriber = tracing_subscriber::registry().with(capture.layer());
+    let subscriber = tracing_subscriber::registry()
+        .with(LevelFilter::INFO)
+        .with(capture.layer());
     let dispatch = tracing::Dispatch::new(subscriber);
     let _guard = tracing::dispatcher::set_default(&dispatch);
 

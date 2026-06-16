@@ -133,7 +133,9 @@ use ironclaw_turns::{
 };
 use serde_json::{Value, json};
 use tracing::field::{Field, Visit};
-use tracing_subscriber::{Layer, layer::Context, layer::SubscriberExt, registry::LookupSpan};
+use tracing_subscriber::{
+    Layer, filter::LevelFilter, layer::Context, layer::SubscriberExt, registry::LookupSpan,
+};
 
 #[derive(Clone, Debug)]
 struct CapturedEvent {
@@ -1717,7 +1719,9 @@ async fn turn_runner_worker_completes_queued_run_after_turn_store_reopen() {
 #[tokio::test(flavor = "current_thread")]
 async fn turn_runner_worker_emits_thread_run_correlated_operator_log() {
     let capture = CorrelatedEventCapture::default();
-    let subscriber = tracing_subscriber::registry().with(capture.layer());
+    let subscriber = tracing_subscriber::registry()
+        .with(LevelFilter::INFO)
+        .with(capture.layer());
     let dispatch = tracing::Dispatch::new(subscriber);
     let _guard = tracing::dispatcher::set_default(&dispatch);
 

@@ -430,7 +430,7 @@ fn spawn_executor_task(
             let recovery_run_id = claimed.state.run_id;
             let recovery_runner_id = claimed.runner_id;
             let recovery_lease_token = claimed.lease_token;
-            tracing::debug!("turn run started");
+            tracing::info!("turn run started");
             let mut heartbeat_tick = interval(runner_heartbeat_interval);
             heartbeat_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
             let executor_result =
