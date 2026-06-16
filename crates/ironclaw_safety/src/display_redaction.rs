@@ -53,6 +53,7 @@ fn redact_shell_command_for_display(cmd: &str) -> String {
 pub fn sanitize_display_text(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut redact_next_value = false;
+    let mut credential_key_pending_separator = false;
     for token in text.split_inclusive(char::is_whitespace) {
         let trimmed = token.trim_end();
         if trimmed.is_empty() {
@@ -64,6 +65,13 @@ pub fn sanitize_display_text(text: &str) -> String {
             out.push_str(&sanitize_url_for_display(trimmed));
             push_safe_text(&mut out, suffix);
             redact_next_value = false;
+            credential_key_pending_separator = false;
+            continue;
+        }
+        if credential_key_pending_separator && credential_value_separator(trimmed) {
+            push_safe_text(&mut out, token);
+            redact_next_value = !suffix.is_empty();
+            credential_key_pending_separator = false;
             continue;
         }
         let redact_current =
@@ -75,6 +83,8 @@ pub fn sanitize_display_text(text: &str) -> String {
             push_safe_text(&mut out, token);
         }
         redact_next_value = credential_key_expects_value(trimmed) && !suffix.is_empty();
+        credential_key_pending_separator =
+            !redact_current && credential_key_expects_separator(trimmed) && !suffix.is_empty();
     }
     out
 }
@@ -151,18 +161,21 @@ fn redact_secret_url_path_segments(path: &str) -> String {
 }
 
 fn secret_url_path_segment_parts(segment: &str) -> Vec<String> {
-    let mut parts = vec![segment.trim_matches(token_boundary_punctuation).to_string()];
+    let mut parts = secret_url_path_subparts(segment);
     if let Ok(decoded) = urlencoding::decode(segment)
         && decoded.as_ref() != segment
     {
-        parts.extend(
-            decoded
-                .trim_matches(token_boundary_punctuation)
-                .split('/')
-                .map(|part| part.trim_matches(token_boundary_punctuation).to_string()),
-        );
+        parts.extend(secret_url_path_subparts(decoded.as_ref()));
     }
     parts
+}
+
+fn secret_url_path_subparts(segment: &str) -> Vec<String> {
+    segment
+        .trim_matches(token_boundary_punctuation)
+        .split(['/', '\\'])
+        .map(|part| part.trim_matches(token_boundary_punctuation).to_string())
+        .collect()
 }
 
 fn is_secret_url_path_segment_value(segment: &str) -> bool {
@@ -176,6 +189,10 @@ fn is_secret_url_path_segment_label_prefix(segment: &str) -> bool {
         || lower.starts_with("api-key")
         || lower.starts_with("apikey")
         || lower.starts_with("api_key")
+        || lower.starts_with("access-token")
+        || lower.starts_with("access_token")
+        || lower.starts_with("refresh-token")
+        || lower.starts_with("refresh_token")
         || lower.starts_with("password")
         || lower.starts_with("credential")
         || lower.starts_with("bearer")
@@ -196,7 +213,13 @@ fn is_secret_url_path_label(segment: &str) -> bool {
             | "api_key"
             | "api_keys"
             | "access_token"
+            | "access_tokens"
+            | "access-token"
             | "access-tokens"
+            | "refresh_token"
+            | "refresh_tokens"
+            | "refresh-token"
+            | "refresh-tokens"
             | "password"
             | "passwords"
             | "credential"
@@ -276,6 +299,21 @@ fn credential_key_expects_value(token: &str) -> bool {
     )
 }
 
+fn credential_key_expects_separator(token: &str) -> bool {
+    let lower = token
+        .trim_matches(non_credential_boundary_punctuation)
+        .to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "api_key" | "apikey" | "access_token" | "secret" | "password" | "token"
+    )
+}
+
+fn credential_value_separator(token: &str) -> bool {
+    let trimmed = token.trim_matches(non_credential_boundary_punctuation);
+    matches!(trimmed, "=" | ":")
+}
+
 fn non_credential_boundary_punctuation(character: char) -> bool {
     matches!(
         character,
@@ -345,7 +383,7 @@ fn truncate_display_text(text: &str, max_bytes: usize) -> SafeDisplayText {
 
 #[cfg(test)]
 mod tests {
-    use super::shell_command_display_text;
+    use super::{sanitize_display_text, shell_command_display_text};
 
     #[test]
     fn shell_command_display_text_redacts_auth_and_url_query() {
@@ -405,6 +443,20 @@ mod tests {
     }
 
     #[test]
+    fn shell_command_display_text_redacts_value_after_access_and_refresh_token_labels() {
+        let display = shell_command_display_text(
+            "curl https://example.test/oauth/access-token/opaque-access/refresh_token/opaque-refresh?debug=true",
+        );
+
+        assert!(display.text.contains(
+            "https://example.test/oauth/[redacted]/[redacted]/[redacted]/[redacted]?..."
+        ));
+        assert!(!display.text.contains("opaque-access"));
+        assert!(!display.text.contains("opaque-refresh"));
+        assert!(!display.text.contains("debug=true"));
+    }
+
+    #[test]
     fn shell_command_display_text_redacts_percent_encoded_secret_url_path_segments() {
         let display = shell_command_display_text(
             "curl https://example.test/reset/sk%2Dsecret/token%31%32%33?debug=true",
@@ -453,6 +505,28 @@ mod tests {
     }
 
     #[test]
+    fn shell_command_display_text_redacts_encoded_backslash_secret_url_path_separators() {
+        let upper = shell_command_display_text(
+            "curl https://example.test/reset%5Csk-secret/public?debug=true",
+        );
+        let lower = shell_command_display_text(
+            "curl https://example.test/reset%5csk-secret/public?debug=true",
+        );
+
+        for display in [upper, lower] {
+            assert!(
+                display
+                    .text
+                    .contains("https://example.test/[redacted]/public?...")
+            );
+            assert!(!display.text.contains("reset%5Csk-secret"));
+            assert!(!display.text.contains("reset%5csk-secret"));
+            assert!(!display.text.contains("sk-secret"));
+            assert!(!display.text.contains("debug=true"));
+        }
+    }
+
+    #[test]
     fn shell_command_display_text_redacts_value_after_percent_encoded_secret_label() {
         let display = shell_command_display_text(
             "curl https://example.test/reset%2Ftoken/opaque-value?debug=true",
@@ -493,5 +567,19 @@ mod tests {
         assert!(display.text.contains("-H 'Accept: application/json'"));
         assert!(display.text.contains("-H 'Authorization: [redacted]'"));
         assert!(!display.text.contains("sk-secret"));
+    }
+
+    #[test]
+    fn sanitize_display_text_redacts_spaced_credential_key_values() {
+        let sanitized = sanitize_display_text(
+            "token = opaque-token api_key = opaque-api-key password : opaque-password",
+        );
+
+        assert!(sanitized.contains("token = [redacted]"));
+        assert!(sanitized.contains("api_key = [redacted]"));
+        assert!(sanitized.contains("password : [redacted]"));
+        assert!(!sanitized.contains("opaque-token"));
+        assert!(!sanitized.contains("opaque-api-key"));
+        assert!(!sanitized.contains("opaque-password"));
     }
 }
