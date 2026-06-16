@@ -479,7 +479,7 @@ fn oauth_callback_route_result_response(
     match response {
         Ok(response) => Ok(oauth_callback_response(headers, response)),
         Err(error) if wants_oauth_callback_html(headers) => {
-            Ok(oauth_callback_failure_html(&error.body))
+            Ok(oauth_callback_failure_html(error.status, &error.body))
         }
         Err(error) => Err(error),
     }
@@ -581,7 +581,7 @@ fn oauth_callback_completion_html(response: &RebornOAuthCallbackResponse) -> Res
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
 
-fn oauth_callback_failure_html(error: &RebornOAuthCallbackError) -> Response {
+fn oauth_callback_failure_html(status: StatusCode, error: &RebornOAuthCallbackError) -> Response {
     let message = match error.code {
         AuthErrorCode::ProviderDenied => {
             "Authorization failed. No permissions were selected, or authorization was denied. Please retry authorization and select the requested permissions."
@@ -603,7 +603,12 @@ fn oauth_callback_failure_html(error: &RebornOAuthCallbackError) -> Response {
 </body>
 </html>"#
     );
-    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
+    (
+        status,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        html,
+    )
+        .into_response()
 }
 
 pub(super) async fn callback_outcome_from_query(
@@ -932,7 +937,7 @@ mod tests {
         .await
         .expect("google callback renders html failure");
 
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(
             response.headers().get(header::CONTENT_TYPE),
             Some(&"text/html; charset=utf-8".parse().expect("content type"))
