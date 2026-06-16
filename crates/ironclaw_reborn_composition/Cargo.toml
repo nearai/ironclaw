@@ -99,6 +99,7 @@ ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }
 ironclaw_approvals = { path = "../ironclaw_approvals" }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
+ironclaw_blueprint = { path = "../ironclaw_blueprint" }
 ironclaw_conversations = { path = "../ironclaw_conversations" }
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
 ironclaw_event_streams = { path = "../ironclaw_event_streams" }

@@ -6,17 +6,17 @@
 //! `brief_ref` resolves and hashes. The live `apply` / `diff` subcommands land
 //! once the per-domain reconcilers and settings repo exist.
 
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 
 use clap::Args;
-use ironclaw_blueprint::{Blueprint, Lockfile, parse};
+use ironclaw_reborn_composition::{BlueprintValidationSummary, validate_blueprint};
+
+#[cfg(test)]
+use ironclaw_reborn_composition::REPO_LOCAL_BLUEPRINT;
 
 use crate::context::RebornCliContext;
-
-/// Repo-local convention (mirrors `.claude/`): a project carries its blueprint
-/// at `.ironclaw/blueprint.toml`, so `config validate` with no path resolves it
-/// automatically from the current directory.
-const REPO_LOCAL_BLUEPRINT: &str = ".ironclaw/blueprint.toml";
 
 #[derive(Debug, Args)]
 pub(crate) struct ConfigValidateCommand {
@@ -33,103 +33,42 @@ impl ConfigValidateCommand {
     }
 }
 
-/// Outcome of a successful validation — what `execute` prints, factored out so
-/// it can be driven directly in tests.
-#[derive(Debug)]
-pub(crate) struct ValidationSummary {
-    pub file: PathBuf,
-    pub blueprint: Blueprint,
-    pub lockfile: Lockfile,
+trait PrintValidationSummary {
+    fn print(&self);
 }
 
-impl ValidationSummary {
+impl PrintValidationSummary for BlueprintValidationSummary {
     fn print(&self) {
         println!("✓ {} is valid", self.file.display());
-        println!("  api_version: {}", self.blueprint.api_version);
+        println!("  api_version: {}", self.api_version);
 
-        let scope = &self.blueprint.scope;
-        let scope_desc = [
-            scope.tenant.as_ref().map(|v| format!("tenant={v}")),
-            scope.user.as_ref().map(|v| format!("user={v}")),
-            scope.project.as_ref().map(|v| format!("project={v}")),
-            scope.agent.as_ref().map(|v| format!("agent={v}")),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
         println!(
             "  scope: {}",
-            if scope_desc.is_empty() {
+            if self.scope.is_empty() {
                 "system".to_string()
             } else {
-                scope_desc.join(", ")
+                self.scope.join(", ")
             }
         );
 
         println!(
             "  sections: {} extensions, {} skills, {} missions, {} projects",
-            self.blueprint.extensions.len(),
-            self.blueprint.skills.len(),
-            self.blueprint.missions.len(),
-            self.blueprint.projects.len(),
+            self.sections.extensions,
+            self.sections.skills,
+            self.sections.missions,
+            self.sections.projects,
         );
 
-        if self.lockfile.files.is_empty() {
+        if self.files.is_empty() {
             println!("  files: none referenced");
         } else {
-            println!("  files ({}):", self.lockfile.files.len());
-            for file in &self.lockfile.files {
+            println!("  files ({}):", self.files.len());
+            for file in &self.files {
                 // First 12 hex chars are enough for a human-readable digest.
-                println!("    {}  {}", &file.sha256[..12], file.path);
+                let digest = file.sha256.chars().take(12).collect::<String>();
+                println!("    {}  {}", digest, file.path);
             }
         }
-    }
-}
-
-/// Resolve, read, parse, validate, and lock a blueprint. Fail-loud at every
-/// step; the error carries the offending path from the parser.
-pub(crate) fn validate_blueprint(path: Option<&Path>) -> anyhow::Result<ValidationSummary> {
-    let file = resolve_blueprint_path(path)?;
-    let root = file.parent().unwrap_or_else(|| Path::new("."));
-
-    let source = std::fs::read_to_string(&file)
-        .map_err(|e| anyhow::anyhow!("cannot read blueprint {}: {e}", file.display()))?;
-    let blueprint = parse(&source).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let lockfile = blueprint
-        .resolve_lockfile(root)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-    Ok(ValidationSummary {
-        file,
-        blueprint,
-        lockfile,
-    })
-}
-
-/// Turn the optional path argument into a concrete blueprint file:
-///
-/// - a file path is used as-is;
-/// - a directory resolves to `<dir>/.ironclaw/blueprint.toml`;
-/// - no argument resolves to `./.ironclaw/blueprint.toml`.
-fn resolve_blueprint_path(path: Option<&Path>) -> anyhow::Result<PathBuf> {
-    let candidate = match path {
-        Some(p) if p.is_file() => return Ok(p.to_path_buf()),
-        Some(p) if p.is_dir() => p.join(REPO_LOCAL_BLUEPRINT),
-        Some(p) => {
-            // A path was given but does not exist — report it directly rather
-            // than silently falling back to the repo-local default.
-            anyhow::bail!("blueprint path does not exist: {}", p.display());
-        }
-        None => {
-            let cwd = std::env::current_dir()
-                .map_err(|e| anyhow::anyhow!("cannot determine current directory: {e}"))?;
-            cwd.join(REPO_LOCAL_BLUEPRINT)
-        }
-    };
-    if candidate.is_file() {
-        Ok(candidate)
-    } else {
-        anyhow::bail!("no blueprint found at {}", candidate.display())
     }
 }
 
@@ -162,9 +101,9 @@ text_ref = "files/prompt.md"
         write(dir.path(), ".ironclaw/files/prompt.md", "hi");
 
         let summary = validate_blueprint(Some(dir.path())).expect("validates");
-        assert_eq!(summary.blueprint.api_version, "ironclaw.config/v1");
-        assert_eq!(summary.lockfile.files.len(), 1);
-        assert_eq!(summary.lockfile.files[0].path, "files/prompt.md");
+        assert_eq!(summary.api_version, "ironclaw.config/v1");
+        assert_eq!(summary.files.len(), 1);
+        assert_eq!(summary.files[0].path, "files/prompt.md");
     }
 
     #[test]
@@ -174,7 +113,7 @@ text_ref = "files/prompt.md"
         write(dir.path(), "files/prompt.md", "hi");
 
         let summary = validate_blueprint(Some(&file)).expect("validates");
-        assert_eq!(summary.lockfile.files.len(), 1);
+        assert_eq!(summary.files.len(), 1);
     }
 
     #[test]
