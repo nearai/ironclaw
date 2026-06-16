@@ -432,6 +432,11 @@ impl AuthInteractionService for DefaultAuthInteractionService {
                             actor: None,
                         },
                     ))
+                } else if state.status.is_terminal() {
+                    // Run is in a different terminal state (Completed, Failed,
+                    // RecoveryRequired).  A Deny cannot be applied to a
+                    // finished run — this is a stale interaction.
+                    Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth))
                 } else if state.auth_resume_disposition.is_some() {
                     // Run is non-terminal and carries our deny marker — the first
                     // Deny successfully resumed it with a denial disposition.

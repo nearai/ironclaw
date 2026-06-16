@@ -70,12 +70,6 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             denied_calls.push(call);
         }
 
-        let summaries = visible_calls
-            .iter()
-            .map(|call| capability_summary(&surface_index, call))
-            .collect::<Vec<_>>();
-        let policy = ctx.planner.batch().policy(&state, &summaries);
-        let stop_on_first_suspension = matches!(policy, BatchPolicy::Sequential);
         match CheckpointStage.cancel_if_requested(ctx, state).await? {
             CancelCheck::Continue(next) => state = *next,
             CancelCheck::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
@@ -118,65 +112,27 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                 .await;
         }
 
-        // A run resumed from a user-DENIED auth gate must NOT re-dispatch the
-        // parked capability — the credential is still missing, so re-dispatch
-        // would re-check it and re-block (infinite auth/deny loop). Surface a
-        // model-visible authorization failure (retry forbidden) so the model
-        // sees the denial and continues.
+        // A run resumed from a user-DENIED auth gate must not re-dispatch the
+        // parked capability (still-missing credential → re-block → infinite loop).
+        // Surface a model-visible Authorization failure (retry forbidden) for the
+        // denied call and let unrelated calls in the same batch proceed normally.
         //
-        // Only the call matching the denied capability_id must be failed; any
-        // other calls in the same parallel batch are unrelated and must proceed
-        // through normal dispatch. We therefore partition visible_calls BEFORE
-        // sizing capability_batch and emitting CapabilityBatchStarted so that
-        // the invocation count and progress event reflect only the remaining
-        // (non-denied) calls that actually reach invoke_capability_batch. This
-        // keeps the outcomes.len() == invocations.len() invariant intact.
-        //
-        // `capability_batch` carries `invocation_count = 0` (the default) while
-        // denied calls are handled here. This is intentional and safe:
-        //
-        //   • `append_blocked_capability_error_result` only calls
-        //     `capability_batch.record_result(...)` when
-        //     `invocation_count > 0`; with the default batch the guard is
-        //     false, so no batch-level bookkeeping is attempted. The actual
-        //     bookkeeping — result_refs and recent_failure_kinds — goes onto
-        //     `state`, not the batch, and therefore is NOT lost.
-        //
-        //   • All-denied path (remaining_calls empty): `completed_turn` is
-        //     called with an `invocation_count = 0` batch. The stop strategy
-        //     guards both the terminate-hint check and the typed-no-progress
-        //     check behind `invocation_count > 0`, so neither fires on a
-        //     vacuous batch — exactly the correct behaviour for a turn where
-        //     the only "invocations" were short-circuit failures.
-        //
-        //   • Mixed path (remaining_calls non-empty): `capability_batch` is
-        //     replaced by `for_invocation_count(remaining_calls.len())` below.
-        //     Because `record_result` was never called on the default batch
-        //     (the `invocation_count > 0` guard prevented it), the reset does
-        //     not discard any accumulated state — it is a clean slate for the
-        //     batch that will actually reach `invoke_capability_batch`.
-        //
-        // We call `handle_capability_error` directly rather than routing through
-        // `handle_capability_outcome(Failed(Authorization, ...))` because
-        // `capability_failed_summary` builds the prefix
-        // `"capability failed with authorization: "` which contains the
-        // substring `"authorization:"` — a term forbidden by
-        // `validate_loop_safe_summary`. We bypass that construction by using
-        // `SanitizedStrategySummary::from_trusted_static` for the planner
-        // summary while still building the model observation via
-        // `model_visible_capability_failure_observation`, which uses
-        // `error_kind.as_str()` directly and is not subject to that check.
-        if let Some(denied_cap_id) = state
-            .pending_auth_resume
-            .as_ref()
-            .filter(|p| {
-                matches!(
-                    p.disposition.as_ref(),
-                    Some(ironclaw_turns::AuthResumeDisposition::Denied)
-                )
-            })
-            .map(|p| p.capability_id.clone())
-        {
+        // We call `handle_capability_error` directly (not via
+        // `handle_capability_outcome(Failed(Authorization, ...))`) because
+        // `capability_failed_summary` builds a prefix containing `"authorization:"`
+        // which is banned by `validate_loop_safe_summary`.
+        if let Some(pending) = state.pending_auth_resume.as_ref().filter(|p| {
+            matches!(
+                p.disposition.as_ref(),
+                Some(ironclaw_turns::AuthResumeDisposition::Denied)
+            )
+        }) {
+            let denied_cap_id = pending.capability_id.clone();
+            // Take ownership now that we've confirmed the disposition is Denied.
+            // The unconditional take() below also covers the defensive case where
+            // auth_denied_calls is empty — preventing a stale Denied disposition
+            // from leaking into the fall-through batch.
+            state.pending_auth_resume = None;
             let (auth_denied_calls, remaining_calls): (Vec<_>, Vec<_>) = visible_calls
                 .into_iter()
                 .partition(|call| call.capability_id == denied_cap_id);
@@ -185,11 +141,9 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                 push_call_signature_once(&mut state, &mut signatures, &call)?;
                 let failure = ironclaw_turns::run_profile::CapabilityFailure {
                     error_kind: CapabilityFailureKind::Authorization,
-                    // Intentionally empty: the model-visible text comes from
-                    // `model_visible_capability_failure_observation` (via
-                    // `error_kind.as_str()`) and the planner summary from
-                    // `SanitizedStrategySummary::from_trusted_static` below.
-                    // `safe_summary` is unused on this path.
+                    // Intentionally empty: model-visible text comes from
+                    // `model_visible_capability_failure_observation` and the
+                    // planner summary from `from_trusted_static` below.
                     safe_summary: String::new(),
                     detail: None,
                 };
@@ -221,28 +175,25 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                 }
             }
 
-            // Unconditionally consume the pending_auth_resume.
-            //
-            // `handle_capability_error` above only clears the *matching*
-            // pending_auth_resume (the one whose capability_id equals the
-            // denied call's id).  This unconditional clear additionally
-            // consumes the disposition when `auth_denied_calls` was empty —
-            // a defensive measure that prevents a stale Denied disposition
-            // from leaking into the fall-through batch or triggering this
-            // short-circuit again on the next iteration.
-            state.pending_auth_resume = None;
-
             if remaining_calls.is_empty() {
                 return self
                     .completed_turn(ctx, state, result_refs_start, capability_batch)
                     .await;
             }
 
-            // Fall through with only the non-denied calls. Reassign so the
-            // sizing, progress emit, and batch dispatch below operate on the
-            // remaining calls only.
+            // Continue with only the non-denied calls; policy is computed below
+            // from this reduced set so batch sizing and progress events are accurate.
             visible_calls = remaining_calls;
         }
+
+        // Compute batch policy from the final set of calls that will actually
+        // reach invoke_capability_batch (post auth-deny partition if applicable).
+        let summaries = visible_calls
+            .iter()
+            .map(|call| capability_summary(&surface_index, call))
+            .collect::<Vec<_>>();
+        let policy = ctx.planner.batch().policy(&state, &summaries);
+        let stop_on_first_suspension = matches!(policy, BatchPolicy::Sequential);
 
         capability_batch = CapabilityBatchTurnSummary::for_invocation_count(visible_calls.len());
 

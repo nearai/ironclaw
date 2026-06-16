@@ -5537,8 +5537,8 @@ async fn auth_resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
     );
 }
 
-/// Caller-level regression test for the auth-deny short-circuit
-/// (`CapabilityStage::process` — PHASE 2a).
+/// Caller-level regression test for the auth-deny short-circuit in
+/// `CapabilityStage::process`.
 ///
 /// When a run resumes from a user-DENIED auth gate (i.e. `pending_auth_resume`
 /// is set and `disposition = Some(Denied)`), the executor must NOT re-dispatch

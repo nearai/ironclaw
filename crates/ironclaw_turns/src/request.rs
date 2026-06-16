@@ -12,11 +12,11 @@ pub type TurnTimestamp = DateTime<Utc>;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthResumeDisposition {
-    /// User explicitly declined to provide credentials for the auth gate.
-    /// The `reason` slot was always `None`; a raw String reaching the model would bypass the
-    /// loop-safe summary validator. Re-add a typed/validated field when there is a concrete need.
+    /// The user explicitly declined the auth gate. The executor surfaces this to
+    /// the model as an authorization failure rather than re-dispatching the gate.
+    ///
+    /// New variants (e.g. `Deferred`) may be added here as needs arise.
     Denied,
-    // Future variants (Deferred, etc.) can be added here.
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
